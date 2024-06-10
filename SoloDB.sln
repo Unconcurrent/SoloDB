@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.10.34916.146
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{6EC3EE1D-3C4E-46DD-8F32-0CC8E7565705}") = "SoloDB", "SoloDB\SoloDB.fsproj", "{AD8262F4-F835-4F10-ACF8-A7A78488FBB2}"
+EndProject
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Tests", "Tests\Tests.fsproj", "{6345B0D6-909E-4C54-9630-0188C07BEDF4}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{AD8262F4-F835-4F10-ACF8-A7A78488FBB2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AD8262F4-F835-4F10-ACF8-A7A78488FBB2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AD8262F4-F835-4F10-ACF8-A7A78488FBB2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AD8262F4-F835-4F10-ACF8-A7A78488FBB2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6345B0D6-909E-4C54-9630-0188C07BEDF4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6345B0D6-909E-4C54-9630-0188C07BEDF4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6345B0D6-909E-4C54-9630-0188C07BEDF4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6345B0D6-909E-4C54-9630-0188C07BEDF4}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {0737FF8E-CB5D-4744-B047-707B070426BD}
+	EndGlobalSection
+EndGlobal
