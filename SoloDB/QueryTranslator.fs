@@ -14,8 +14,10 @@ type private QueryBuilder = {
     AppendRaw: string -> unit
     AppendVariable: obj -> unit
     AppendJSONAccess: unit -> unit
+    RollBackOne: unit -> unit
     JSONAccess: string
     FavorJSON: bool
+    ForUpdate: bool
 }
 
 let rec stripQuotes (e: Expression) =
@@ -85,9 +87,48 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
 
         visit array qb |> ignore
         qb.AppendJSONAccess()
-        qb.AppendRaw "[#],"
+        if qb.ForUpdate then 
+            qb.RollBackOne()
+            qb.RollBackOne()
+            qb.RollBackOne()
+            qb.AppendRaw "[#]',"
+        else qb.AppendRaw "[#],"
         visit newValue qb |> ignore
         qb.AppendRaw ","
+        m
+    else if m.Method.Name = "Array.SetAt" then
+        let array = m.Arguments[0]
+        let index = m.Arguments[1]
+        let newValue = m.Arguments[2]
+
+
+        visit array qb |> ignore
+        qb.AppendJSONAccess()
+        qb.AppendRaw $"[{index}],"
+        visit newValue qb |> ignore
+        qb.AppendRaw ","
+        m
+    else if m.Method.Name = "Array.RemoveAt" then
+        let array = m.Arguments[0]
+        let index = m.Arguments[1]
+
+
+        visit array qb |> ignore
+        qb.AppendRaw ",jsonb_remove("
+
+        let qb2 = {qb with ForUpdate = false}
+        visit array qb2 |> ignore
+
+        qb.AppendRaw ","
+        qb.AppendRaw $"'$[{index}]'),"
+        m
+    else if m.Method.Name = "op_BarPlusBar" then
+        let a = m.Arguments[0]
+        let b = m.Arguments[1]
+
+
+        visit a qb |> ignore
+        visit b qb |> ignore
         m
     else
         raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
@@ -167,10 +208,16 @@ and private visitMemberAccess (m: MemberExpression) (qb: QueryBuilder) =
         let jsonPath = buildJsonPath m []
         match jsonPath with
         | [] -> ()
-        | [single] -> qb.AppendRaw(sprintf "Value %s '%s'" qb.JSONAccess single) |> ignore
+        | [single] ->
+            if qb.ForUpdate then qb.AppendRaw(sprintf "'$.%s'" single) |> ignore
+            else qb.AppendRaw(sprintf "Value %s '%s'" qb.JSONAccess single) |> ignore
         | paths ->
-            let pathStr = String.concat $" {qb.JSONAccess} " (List.map (sprintf "'%s'") paths)
-            qb.AppendRaw(sprintf "Value %s %s" qb.JSONAccess pathStr) |> ignore
+            if qb.ForUpdate then
+                let pathStr = String.concat $"." (List.map (sprintf "%s") paths)
+                qb.AppendRaw(sprintf "'$.%s'" pathStr) |> ignore
+            else
+                let pathStr = String.concat $" {qb.JSONAccess} " (List.map (sprintf "'%s'") paths)
+                qb.AppendRaw(sprintf "Value %s %s" qb.JSONAccess pathStr) |> ignore
     else if m.Expression = null then
         let value = (m.Member :?> PropertyInfo).GetValue null
         qb.AppendVariable value
@@ -195,9 +242,36 @@ let translate (expression: Expression) (favorJSON: bool) =
         Variables = variables
         AppendVariable = appendVariable
         AppendRaw = appendRaw
-        AppendJSONAccess = fun () -> if favorJSON then appendRaw "->" else appendRaw "->>"
+        AppendJSONAccess = fun () -> if favorJSON then appendRaw " -> " else appendRaw " ->> "
+        RollBackOne = fun () -> sb.Remove(sb.Length - 1, 1) |> ignore
         JSONAccess = if favorJSON then "->" else "->>"
         FavorJSON = favorJSON
+        ForUpdate = false
+    }
+    let e = visit expression builder
+    sb.ToString(), variables
+
+let translateForUpdate (expression: Expression)  =
+    let sb = StringBuilder()
+    let variables = Dictionary<string, obj>()
+
+    let appendVariable (value: obj) =
+        let name = $"VAR{Random.Shared.NextInt64():X}{Random.Shared.NextInt64():X}"
+        sb.Append ("@" + name) |> ignore
+        variables.[name] <- value
+
+    let appendRaw (s: string) = sb.Append s |> ignore
+
+    let builder = {
+        StringBuilder = sb
+        Variables = variables
+        AppendVariable = appendVariable
+        AppendRaw = appendRaw
+        AppendJSONAccess = fun () -> appendRaw "->"
+        RollBackOne = fun () -> sb.Remove(sb.Length - 1, 1) |> ignore
+        JSONAccess =  "->"
+        FavorJSON = true
+        ForUpdate = true
     }
     let e = visit expression builder
     sb.ToString(), variables

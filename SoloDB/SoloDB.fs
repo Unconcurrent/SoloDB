@@ -50,6 +50,12 @@ let private toJson<'T> item =
 let private fromJson<'T> (text: string) =
     System.Text.Json.JsonSerializer.Deserialize<'T> (text, jsonOptions)
 
+let private fromIdJson<'T> (idValueJSON: string) =
+    let element = System.Text.Json.JsonSerializer.Deserialize<JsonElement>(idValueJSON, jsonOptions)
+    let id = element.GetProperty("Id").GetInt64()
+    let value = element.GetProperty("Value").Deserialize<'T>(jsonOptions)
+    id, value
+
 let private createTable<'T> (name: string) (conn: SqliteConnection) =
     use transaction = conn.BeginTransaction()
     try
@@ -113,6 +119,10 @@ type FinalBuilder<'T, 'R>(connection: SqliteConnection, name: string, sql: strin
         let finalSQL, parameters = getQueryParameters()
         connection.Query<string>(finalSQL, parameters) |> Seq.map select |> Seq.toList
 
+    member this.First() =
+        let finalSQL, parameters = getQueryParameters()
+        connection.QueryFirst<string>(finalSQL, parameters) |> select
+
     member this.Execute() =
         let finalSQL, parameters = getQueryParameters()
         connection.Execute(finalSQL, parameters)
@@ -174,26 +184,27 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
         WhereBuilder<'T, 'R>(connection, name, $"SELECT {selectSQL} FROM \"{name}\" ", fromJson<'R>, variables)
 
     member this.Select() =
-        WhereBuilder(connection, name, $"SELECT json(Value) FROM \"{name}\" ", id, Dictionary<string, obj>())
+        WhereBuilder(connection, name, $"SELECT json(Value) FROM \"{name}\" ", fromJson<'T>, Dictionary<string, obj>())
+
+    member this.SelectWithId() =
+        WhereBuilder(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>())
 
     member this.Update(expression: Expression<System.Action<'T>>) =
         let replaceTagSyntax (input: string) : string =
-            let pattern = "'->>(\d+)"
+            let pattern = "' -> (\d+)"
             let replacement = "[$1]'"
             Regex.Replace(input, pattern, replacement)
 
         let replaceTagSyntax2 (input: string) : string =
-            let pattern = "'->>([^,]+?),"
+            let pattern = "' -> ([^,]+?),"
             let replacement = "$1',"
             Regex.Replace(input, pattern, replacement)
 
-        let updateSQL, variables = QueryTranslator.translate expression false
-        let updateSQL = updateSQL.Replace("Value ->> '", "'$.").Replace("Value ->> ", "$.").Replace("' ->> '", ".").Trim ','
-        let updateSQL = replaceTagSyntax updateSQL
-        let updateSQL = replaceTagSyntax2 updateSQL
+        let updateSQL, variables = QueryTranslator.translateForUpdate expression
+        let updateSQL = updateSQL.Trim ','
 
         for key in variables.Keys do
-            variables.[key] <- toJson variables.[key]
+            variables.[key] <- toSQLJson variables.[key]
 
         WhereBuilder(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {updateSQL})", fromJson<int64>, variables)
 
@@ -240,3 +251,14 @@ type System.Object with
 type Array with
     member this.Add(value: obj) =
         failwithf "This is a dummy function for the SQL builder."
+
+    member this.SetAt(index: int, value: obj) =
+        failwithf "This is a dummy function for the SQL builder."
+
+    member this.RemoveAt(index: int) =
+        failwithf "This is a dummy function for the SQL builder."
+
+// This operator allow for multiple operations in the Update method,
+// else it will throw 'Could not convert the following F# Quotation to a LINQ Expression Tree',
+// imagine it as a ';'.
+let (|+|) a b = ()
