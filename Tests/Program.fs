@@ -844,12 +844,23 @@ type SoloDBTesting() =
         let resultName, resultAuth = complexQueryUsers.[0]
         let expectedUsers = randomUsersToInsert |> Array.filter (fun u -> u.Banned = false && u.Auth = true && u.Data.Tags |> Array.contains "tag2") |> Array.toList
         assertEqual resultName (expectedUsers.[0].Username) "The complex condition query returned incorrect number of users."
+
+    [<TestMethod>]
+    member this.EnsureIndex() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.InsertBatch randomUsersToInsert |> ignore
+        let ex = users.EnsureIndex(fun u -> u.Username)
+        let plan = users.Select(fun u -> u.Username, u.Auth).Where(fun u -> u.Username > "AABB" && u.Auth = true).ExplainQueryPlan()
+        if plan.Contains "USING INDEX" |> not then failwithf "Does not use index"
+        printfn "%s" plan
+        ()
     
 
 [<EntryPoint>]
 let main argv =
     let test = SoloDBTesting()
     test.SetDBPath()
-    try test.UpdateLargeNumberOfUsers()
+    try test.EnsureIndex()
     finally test.ClearTemp()
     0

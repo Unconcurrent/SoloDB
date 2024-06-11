@@ -5,6 +5,7 @@ open Dapper
 open System.Linq.Expressions
 open System
 open System.Collections.Generic
+open System.Collections
 open System.Text.Json
 open System.Text
 open System.Text.RegularExpressions
@@ -102,6 +103,14 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
     member this.Execute() =
         let finalSQL, parameters = getQueryParameters()
         connection.Execute(finalSQL, parameters)
+
+    member this.ExplainQueryPlan() =
+        // EXPLAIN QUERY PLAN 
+        let finalSQL, parameters = getQueryParameters()
+        let finalSQL = "EXPLAIN QUERY PLAN " + finalSQL
+        connection.Query<obj>(finalSQL, parameters)
+        |> Seq.map(fun arr -> seq { for i in (arr :?> IEnumerable) do i } |> Seq.last |> Dyn.get "Value")
+        |> String.concat ";\n"
 
 type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, select: 'Q -> 'R, vars: Dictionary<string, obj>) =
     member this.Where(expression: Expression<System.Func<'T, bool>>) =
@@ -215,6 +224,18 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
 
     member this.DeleteById(id: int64) : int =
         this.Delete().WhereId(id).Execute()
+
+    member this.EnsureIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
+        let whereSQL, newVariables = QueryTranslator.translate name expression
+        let whereSQL = whereSQL.Replace($"{name}.Value", "Value") // {name}.Value is not allowed in an index.
+
+        if newVariables.Count > 0 then failwithf "Cannot have variables in index."
+        let expressionStr = expression.ToString().ToCharArray() |> Seq.filter(fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""
+        let indexName = $"{name}_index_{expressionStr}"
+
+        let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON {name}({whereSQL})"
+
+        connection.Execute(indexSQL)
         
 
 and SoloDB(connection: SqliteConnection) =
