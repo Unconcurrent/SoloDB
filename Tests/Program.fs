@@ -6,6 +6,7 @@ open System.Threading
 open System.Threading.Tasks
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open SoloDB
+open QueryTranslator
 open FSharp.Interop.Dynamic
 
 type UserData = {
@@ -755,10 +756,98 @@ type SoloDBTesting() =
         assertEqual (id1 <> id2) true "The insertion of a duplicate user did not create a new ID."
 
 
+    [<TestMethod>]
+    member this.InsertLargeNumberOfUsers() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        let largeBatch = [| for i in 1 .. 100000 -> { Username = $"User{i}"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.UtcNow.AddDays(-i); LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [| $"tag{i}" |] } } |]
+        let ids = users.InsertBatch largeBatch
+        assertEqual (ids.Count) (largeBatch.Length) "Not all users were inserted in the large batch."
+    
+    [<TestMethod>]
+    member this.UpdateNonExistentUser() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        try
+            users.Update(fun u -> u.Banned.Set true).Where(fun u -> u.Username = "NonExistentUser").Execute() |> ignore
+            assertEqual true false "Updating a non-existent user should have failed."
+        with ex -> ()
+    
+    [<TestMethod>]
+    member this.DeleteWhileReading() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.InsertBatch randomUsersToInsert |> ignore
+        let task1 = Task.Run(fun () -> users.Select().OnAll().ToList())
+        let task2 = Task.Run(fun () -> users.Update(fun u -> u.Banned.Set true).Where(fun u -> u.Username = "John").Execute() |> ignore)
+        Task.WaitAll(task1, task2)
+        assertEqual (task1.Status) TaskStatus.RanToCompletion "Reading users should complete successfully even while updating."
+        assertEqual (task2.Status) TaskStatus.RanToCompletion "Updating users should complete successfully even while reading."
+    
+    [<TestMethod>]
+    member this.ConcurrentInserts() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        let insertBatch () =
+            let batch = [| for i in 1 .. 100 -> { Username = $"User{i}"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.UtcNow.AddDays(-i); LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [| $"tag{i}" |] } } |]
+            users.InsertBatch batch |> ignore
+        let tasks = [| for _ in 1 .. 100 -> Task.Run insertBatch |]
+        Task.WaitAll(tasks)
+        let count = users.CountAll()
+        assertEqual (count) 10000L "Concurrent inserts did not result in the correct number of users."
+       
+    [<TestMethod>]
+    member this.UpdateLargeNumberOfUsers() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        let largeBatch = [| for i in 1 .. 1000 -> { Username = $"User{i}"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.UtcNow.AddDays(-i); LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [| $"tag{i}" |] } } |]
+        let ids = users.InsertBatch largeBatch
+        let idMin = ids |> Seq.min
+        let idMax = ids |> Seq.max
+        let updateCount = users.Update(fun u -> u.Banned.Set true).WhereId(fun id -> id >= idMin && id <= idMax).Execute()
+        for id in ids do
+            let userGetById = users.GetById id
+            assertEqual userGetById.Banned true "The updated user in the large batch is different."
+
+    [<TestMethod>]
+    member this.UpdateLargeNumberOfUsers2() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        let largeBatch = [| for i in 1 .. 1000 -> { Username = $"User{i}"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.UtcNow.AddDays(-i); LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [| $"tag{i}" |] } } |]
+        let ids = users.InsertBatch largeBatch
+        let idMin = ids |> Seq.min
+        let idMax = ids |> Seq.max
+        let updateCount = users.Update(fun u -> u.Banned.Set true).Where(fun id u -> id >= idMin && id <= idMax && not u.Banned).Execute()
+        for id in ids do
+            let userGetById = users.GetById id
+            assertEqual userGetById.Banned true "The updated user in the large batch is different."
+    
+    [<TestMethod>]
+    member this.MultiThreadedReads() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.InsertBatch randomUsersToInsert |> ignore
+        let readUsers () = users.Select().OnAll().ToList()
+        let tasks = [| for _ in 1 .. 10 -> (Task.Run readUsers) :> Task |]
+        Task.WaitAll(tasks)
+        for task in tasks do
+            assertEqual (task.Status) TaskStatus.RanToCompletion "Multi-threaded reads did not complete successfully."
+    
+    [<TestMethod>]
+    member this.SelectWithAnyInEachConditions() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.InsertBatch randomUsersToInsert |> ignore
+        let complexQueryUsers = users.Select(fun u -> u.Username, u.Auth).Where(fun u -> u.Banned = false && u.Auth = true && u.Data.Tags.AnyInEach(InnerExpr(fun item -> item = "tag2"))).ToList()
+        let resultName, resultAuth = complexQueryUsers.[0]
+        let expectedUsers = randomUsersToInsert |> Array.filter (fun u -> u.Banned = false && u.Auth = true && u.Data.Tags |> Array.contains "tag2") |> Array.toList
+        assertEqual resultName (expectedUsers.[0].Username) "The complex condition query returned incorrect number of users."
+    
+
 [<EntryPoint>]
 let main argv =
     let test = SoloDBTesting()
     test.SetDBPath()
-    try test.SelectUntypedTest()
+    try test.UpdateLargeNumberOfUsers()
     finally test.ClearTemp()
     0

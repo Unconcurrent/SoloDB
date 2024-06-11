@@ -11,8 +11,20 @@ open System.Text.RegularExpressions
 open System.Threading
 open FSharp.Interop.Dynamic
 open JsonUtils
-open System.Dynamic
+open QueryTranslator
 
+type DisposableMutex(name: string) =
+    let mutex = new Mutex(false, name)
+    do mutex.WaitOne() |> ignore
+
+    interface IDisposable with
+        member this.Dispose() =
+            mutex.ReleaseMutex()
+            mutex.Dispose()
+
+let private lockTable(name: string) =
+    let mutex = new DisposableMutex($"SoloDB-Table-{name}")
+    mutex
 
 let private createTable<'T> (name: string) (conn: SqliteConnection) =
     use transaction = conn.BeginTransaction()
@@ -58,7 +70,7 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         this
 
     member this.OrderByAsc(expression: Expression<System.Func<'T, obj>>) =
-        let orderSelector, _ = QueryTranslator.translate expression
+        let orderSelector, _ = QueryTranslator.translate name expression
         let orderSQL = sprintf "(%s) ASC" orderSelector
 
         orderByList.Add orderSQL
@@ -66,7 +78,7 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         this
 
     member this.OrderByDesc(expression: Expression<System.Func<'T, obj>>) =
-        let orderSelector, _ = QueryTranslator.translate expression
+        let orderSelector, _ = QueryTranslator.translate name expression
         let orderSQL = sprintf "(%s) DESC" orderSelector
 
         orderByList.Add orderSQL
@@ -93,7 +105,16 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
 
 type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, select: 'Q -> 'R, vars: Dictionary<string, obj>) =
     member this.Where(expression: Expression<System.Func<'T, bool>>) =
-        let whereSQL, newVariables = QueryTranslator.translate expression
+        let whereSQL, newVariables = QueryTranslator.translate name expression
+        let sql = sql + sprintf "WHERE %s " whereSQL
+
+        for var in vars do
+            newVariables.Add(var.Key, var.Value)
+
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select)
+
+    member this.Where(expression: Expression<System.Func<sqlId, 'T, bool>>) =
+        let whereSQL, newVariables = QueryTranslator.translate name expression
         let sql = sql + sprintf "WHERE %s " whereSQL
 
         for var in vars do
@@ -103,6 +124,15 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
 
     member this.WhereId(id: int64) =
         FinalBuilder<'T, 'Q, 'R>(connection, name, sql + sprintf "WHERE Id = %i " id, vars, select)
+
+    member this.WhereId(func: Expression<System.Func<sqlId, bool>>) =
+        let whereSQL, newVariables = QueryTranslator.translate name func
+        let sql = sql + sprintf "WHERE %s " whereSQL
+
+        for var in vars do
+            newVariables.Add(var.Key, var.Value)
+
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select)
 
     member this.OnAll() =
         FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select)
@@ -117,6 +147,7 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
         insertInner item null
 
     member this.InsertBatch (items: 'T seq) =
+        use l = lockTable name // If not, there will be multiple transactions started on the same connection when used concurently.
         let transaction = connection.BeginTransaction()
         try
             let ids = List<int64>()
@@ -140,7 +171,7 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
         | Some x -> x
 
     member this.Select<'R>(select: Expression<System.Func<'T, 'R>>) =
-        let selectSQL, variables = QueryTranslator.translate select
+        let selectSQL, variables = QueryTranslator.translate name select
 
         WhereBuilder<'T, string, 'R>(connection, name, $"SELECT {selectSQL} FROM \"{name}\" ", fromJsonOrSQL<'R>, variables)
 
@@ -159,11 +190,11 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
     member this.CountAllLimit(limit: uint64) =        
         FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" LIMIT @limit)", Dictionary<string, obj>([|KeyValuePair("limit", limit :> obj)|]), fromJsonOrSQL<int64>).First()
 
-    member this.CountWhere(func) =
+    member this.CountWhere(func: Expression<System.Func<'T, bool>>) =
         WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>()).Where(func).First()
 
     member this.CountWhere(func: Expression<System.Func<'T, bool>>, limit: uint64) =
-        let whereSQL, variables = QueryTranslator.translate func
+        let whereSQL, variables = QueryTranslator.translate name func
         variables["limit"] <- limit :> obj
 
         FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" WHERE {whereSQL} LIMIT @limit)", variables, fromJsonOrSQL<int64>).First()
@@ -171,7 +202,7 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
     member this.Any(func) = this.CountWhere(func, 1UL) > 0L
 
     member this.Update(expression: Expression<System.Action<'T>>) =
-        let updateSQL, variables = QueryTranslator.translateUpdateMode expression
+        let updateSQL, variables = QueryTranslator.translateUpdateMode name expression
         let updateSQL = updateSQL.Trim ','
 
         WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {updateSQL})", fromJsonOrSQL<int64>, variables)
@@ -189,7 +220,7 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
 and SoloDB(connection: SqliteConnection) =
     member this.GetCollection<'T>() =
         let name = typeof<'T>.Name.Replace("\"", "") // Anti SQL injection
-        use mutex = new Mutex(true, $"SoloDB-Table-{name}") // To prevent a race condition where the next if statment is true for 2 threads.
+        use mutex = lockTable name // To prevent a race condition where the next if statment is true for 2 threads.
 
         if (connection.QueryFirstOrDefault<string>("SELECT Name FROM Types WHERE Name = @name LIMIT 1", {|name = name|}) = null) then 
             createTable<'T> name connection
@@ -221,15 +252,16 @@ let instantiate (path: string) =
 
     new SoloDB(connection)
 
-type System.String with
-    member this.Like(pattern: string) =
-        let regexPattern = 
-            "^" + Regex.Escape(pattern).Replace("\\%", ".*").Replace("\\_", ".") + "$"
-        Regex.IsMatch(this, regexPattern, RegexOptions.IgnoreCase)
+  
 
 type System.Object with
     member this.Set(value: obj) =
         failwithf "This is a dummy function for the SQL builder."
+
+    member this.Like(pattern: string) =
+        let regexPattern = 
+            "^" + Regex.Escape(pattern).Replace("\\%", ".*").Replace("\\_", ".") + "$"
+        Regex.IsMatch(this.ToString(), regexPattern, RegexOptions.IgnoreCase)
 
 type Array with
     member this.Add(value: obj) =
@@ -240,6 +272,12 @@ type Array with
 
     member this.RemoveAt(index: int) =
         failwithf "This is a dummy function for the SQL builder."
+
+    member this.AnyInEach(condition: QueryTranslator.InnerExpr) = 
+        failwithf "This is a dummy function for the SQL builder."
+        bool()
+
+
 
 // This operator allow for multiple operations in the Update method,
 // else it will throw 'Could not convert the following F# Quotation to a LINQ Expression Tree',
