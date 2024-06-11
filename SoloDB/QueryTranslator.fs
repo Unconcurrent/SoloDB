@@ -200,20 +200,34 @@ and private visitConvert (m: UnaryExpression) (qb: QueryBuilder) =
     else failwithf "Convert not yet implemented: %A" m.Type
 
 and private visitBinary (b: BinaryExpression) (qb: QueryBuilder) =
+    let isLeftNull =
+        match b.Left with
+        | :? ConstantExpression as c when c.Value = null -> true
+        | other -> false
+
+    let isRightNull =
+        match b.Right with
+        | :? ConstantExpression as c when c.Value = null -> true
+        | other -> false
+
+    let isAnyNull = isLeftNull || isRightNull
+
+    let left, right = if isLeftNull then (b.Right, b.Left) else (b.Left, b.Right)
+
     qb.AppendRaw("(") |> ignore
-    visit(b.Left) qb |> ignore
+    visit(left) qb |> ignore
     match b.NodeType with
     | ExpressionType.And
     | ExpressionType.AndAlso -> qb.AppendRaw(" AND ")  |> ignore
     | ExpressionType.Or -> qb.AppendRaw(" OR ")  |> ignore
-    | ExpressionType.Equal -> qb.AppendRaw(" = ")  |> ignore
-    | ExpressionType.NotEqual -> qb.AppendRaw(" <> ")  |> ignore
+    | ExpressionType.Equal -> if isAnyNull then qb.AppendRaw(" IS ") else qb.AppendRaw(" = ")  |> ignore
+    | ExpressionType.NotEqual -> if isAnyNull then qb.AppendRaw(" IS NOT ") else  qb.AppendRaw(" <> ")  |> ignore
     | ExpressionType.LessThan -> qb.AppendRaw(" < ")  |> ignore
     | ExpressionType.LessThanOrEqual -> qb.AppendRaw(" <= ")  |> ignore
     | ExpressionType.GreaterThan -> qb.AppendRaw(" > ")  |> ignore
     | ExpressionType.GreaterThanOrEqual -> qb.AppendRaw(" >= ") |> ignore
     | _ -> raise (NotSupportedException(sprintf "The binary operator %O is not supported" b.NodeType))
-    visit(b.Right) qb |> ignore
+    visit(right) qb |> ignore
     qb.AppendRaw(")")  |> ignore
     b
 

@@ -332,7 +332,6 @@ type SoloDBTesting() =
         let users = db.GetCollection<User>()
 
         let ids = users.InsertBatch(randomUsersToInsert)
-        let id = ids[0]
 
         let users = users.SelectUntyped(fun u -> (u?Username, true)).Where(fun u -> u?Username > "A").ToList()
         let usersStr = sprintf "%A" users
@@ -340,10 +339,52 @@ type SoloDBTesting() =
         printfn "%s" usersStr
         assertEqual usersStr expected "SelectUntypedTest failed."
 
+    [<TestMethod>]
+    member this.UntypedCollectionInsertTest() =
+        use db = SoloDB.instantiate dbPath
+        let objs = db.GetUntypedCollection("Statistics")
+
+        let id = objs.InsertBatch [
+            {|Name="Alpha"|}
+            {|Name="Beta"|}
+            {|Type="None"|}
+            {|Type="None"|}
+            {|Type="Int"; Data=10|}
+            {|Type="Int"; Data=12|}
+            {|Type="Int"; Data=(-42)|}
+            {|Type="String"; Data="AAA"|}
+            {|Type="Obj"; Data={|Number=10; Name = "Alice"|}|}
+        ]
+
+        let users = objs.Select().OnAll().ToList()
+
+        assertEqual users.Length 9 "Count unequal."
+
+    [<TestMethod>]
+    member this.UntypedCollectionSelectTest() =
+        use db = SoloDB.instantiate dbPath
+        let objs = db.GetUntypedCollection("Statistics")
+
+        let id = objs.InsertBatch [
+            {|Name="Alpha"|}
+            {|Name="Beta"|}
+            {|Type="None"|}
+            {|Type="None"|}
+            {|Type="Int"; Data=10|}
+            {|Type="Int"; Data=12|}
+            {|Type="Int"; Data=(-42)|}
+            {|Type="String"; Data="AAA"|}
+            {|Type="Obj"; Data={|Number=10; Name = "Alice"|}|}
+        ]
+
+        let users = objs.Select(fun o -> o?Name).OnAll().ToList()
+
+        assertEqual users.Length 2 "Count unequal."
+
 [<EntryPoint>]
 let main argv =
     let test = SoloDBTesting()
     test.SetDBPath()
-    test.SelectUntypedTest()
-    test.ClearTemp()
+    try test.UntypedCollectionSelectTest()
+    finally test.ClearTemp()
     0
