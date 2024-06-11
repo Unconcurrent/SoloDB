@@ -9,6 +9,38 @@ open System.Text.Json
 open JsonUtils
 open Utils
 
+type InnerExpr(expr: Expression<System.Func<obj, bool>>) =
+    member this.Expression = expr
+
+
+type sqlId =
+    private SqlId of int64
+    with
+    static member (+) (SqlId a, SqlId b) = SqlId (a + b)
+    static member (-) (SqlId a, SqlId b) = SqlId (a - b)
+    static member (*) (SqlId a, SqlId b) = SqlId (a * b)
+    static member (/) (SqlId a, SqlId b) = SqlId (a / b)
+    static member (%) (SqlId a, SqlId b) = SqlId (a % b)
+    static member (<<<) (SqlId a, shift) = SqlId (a <<< shift)
+    static member (>>>) (SqlId a, shift) = SqlId (a >>> shift)
+    static member (&&&) (SqlId a, SqlId b) = SqlId (a &&& b)
+    static member (|||) (SqlId a, SqlId b) = SqlId (a ||| b)
+    static member (^^^) (SqlId a, SqlId b) = SqlId (a ^^^ b)
+    static member (~-) (SqlId a) = SqlId (-a)
+    static member (~+) (SqlId a) = SqlId (+a)
+    static member (~~~) (SqlId a) = SqlId (~~~a)
+    static member op_Explicit(SqlId a) = a
+    static member op_Implicit(a: int64) = SqlId a
+    static member op_Implicit(a: sqlId) = a
+
+    override this.ToString() =
+        let (SqlId value) = this
+        value.ToString()
+
+    member this.Value =
+        let (SqlId value) = this
+        value
+
 type private QueryBuilder = 
     {
         StringBuilder: StringBuilder
@@ -17,10 +49,11 @@ type private QueryBuilder =
         AppendVariable: obj -> unit
         RollBack: uint -> unit
         UpdateMode: bool
+        TableNameDot: string
     }
     override this.ToString() = this.StringBuilder.ToString()
 
-    static member New(sb: StringBuilder, variables: Dictionary<string, obj>, updateMode: bool) =
+    static member New(sb: StringBuilder, variables: Dictionary<string, obj>, updateMode: bool, tableName) =
         let appendVariable (value: obj) =
             let name = $"VAR{Random.Shared.NextInt64():X}{Random.Shared.NextInt64():X}"
             match value with
@@ -48,6 +81,7 @@ type private QueryBuilder =
             AppendRaw = appendRaw
             RollBack = fun N -> sb.Remove(sb.Length - (int)N, (int)N) |> ignore
             UpdateMode = updateMode
+            TableNameDot = tableName + "."
         }
 
 let rec stripQuotes (e: Expression) =
@@ -99,7 +133,7 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         visit index qb |> ignore
         qb.AppendRaw "]')"
         m
-    else if m.Method.Name = "String.Like" then
+    else if m.Method.Name = "Object.Like" then
         let string = m.Arguments[0]
         let likeWhat = m.Arguments[1]
 
@@ -144,7 +178,7 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         let index = m.Arguments[1]
 
         visit array qb |> ignore
-        qb.AppendRaw ",jsonb_remove(jsonb_extract(Value,"
+        qb.AppendRaw $",jsonb_remove(jsonb_extract({qb.TableNameDot}Value,"
         visit array qb |> ignore
         qb.AppendRaw "),"
         
@@ -171,6 +205,27 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         else
             qb.AppendRaw $",'$.{property}')"
         m
+    else if m.Method.Name = "Array.AnyInEach" then
+        let array = m.Arguments[0]
+        let whereFuncExpr = (m.Arguments[1] :?> NewExpression)
+        
+        let exprFunc = Expression.Lambda<Func<InnerExpr>>(whereFuncExpr).Compile(true)
+        let expr = exprFunc.Invoke()
+
+        qb.AppendRaw $"EXISTS (SELECT 1 FROM json_each("
+        visit array qb |> ignore
+        qb.AppendRaw ") WHERE "
+        let innerQb = {qb with TableNameDot = "json_each."}
+        visit expr.Expression innerQb |> ignore
+        qb.AppendRaw ")"
+        m
+    else if m.Method.Name = "QuotationToLambdaExpression" then
+        let arg1 = (m.Arguments[0] :?> MethodCallExpression) // SubstHelper
+        let arg2 = arg1.Arguments[0]
+        visit arg2 qb
+    else if m.Method.Name =  "op_Implicit" then
+        let arg1 = (m.Arguments[0])
+        visit arg1 qb
     else
         raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 
@@ -178,7 +233,10 @@ and private visitLambda (m: LambdaExpression) (qb: QueryBuilder) =
     visit(m.Body) qb
 
 and private visitParameter (m: ParameterExpression) (qb: QueryBuilder) =
-    qb.AppendRaw "Value"
+    if m.Type = typeof<sqlId> then
+        qb.AppendRaw $"{qb.TableNameDot}Id"
+    else
+        qb.AppendRaw $"{qb.TableNameDot}Value"
     m
 
 and private visitNot (m: UnaryExpression) (qb: QueryBuilder) =
@@ -261,7 +319,7 @@ and private visitMemberAccess (m: MemberExpression) (qb: QueryBuilder) =
 
     let formatAccess (path) =
         if qb.UpdateMode then sprintf "'$.%s'" path
-        else sprintf "jsonb_extract(Value, '$.%s')" path
+        else sprintf "jsonb_extract(%sValue, '$.%s')" qb.TableNameDot path
     if m.Expression <> null && isRootParameter m then
         let jsonPath = buildJsonPath m []
         match jsonPath with
@@ -279,18 +337,18 @@ and private visitMemberAccess (m: MemberExpression) (qb: QueryBuilder) =
 
     m
 
-let translate (expression: Expression) =
+let translate (tableName: string) (expression: Expression) =
     let sb = StringBuilder()
     let variables = Dictionary<string, obj>()
-    let builder = QueryBuilder.New(sb, variables, false)
+    let builder = QueryBuilder.New(sb, variables, false, tableName)
     
     let e = visit expression builder
     sb.ToString(), variables
 
-let translateUpdateMode (expression: Expression) =
+let translateUpdateMode (tableName: string) (expression: Expression) =
     let sb = StringBuilder()
     let variables = Dictionary<string, obj>()
-    let builder = QueryBuilder.New(sb, variables, true)
+    let builder = QueryBuilder.New(sb, variables, true, tableName)
     
     let e = visit expression builder
     sb.ToString(), variables
