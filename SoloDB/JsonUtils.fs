@@ -49,3 +49,32 @@ let fromIdJson<'T> (idValueJSON: string) =
     let id = element.GetProperty("Id").GetInt64()
     let value = element.GetProperty("Value").Deserialize<'T>(jsonOptions)
     id, value
+
+let rec private tupleToArray (element: JsonElement) =
+    let rec tupleToArrayInner (element: JsonElement) (i: uint) =
+        match element.TryGetProperty $"Item{i}" with
+        | true, item ->
+            fromJsonOrSQL (item.ToString()) :: tupleToArrayInner element (i + 1u)
+        | false, _ -> []
+
+    tupleToArrayInner element 1u
+
+and fromJsonOrSQL (data: string) =
+    match Int64.TryParse data with
+    | true, i -> i :> obj
+    | false, _ ->
+
+    if data.StartsWith "\"" then
+        System.Text.Json.JsonSerializer.Deserialize<string> (data, jsonOptions)
+    else if data.StartsWith "{"  then
+        let o = System.Text.Json.JsonSerializer.Deserialize<JsonElement> (data, jsonOptions)
+        match o.TryGetProperty "Item1" with
+        | true, _ -> // It is a tuple, will convert ot array
+            tupleToArray o
+        | false, _ -> o
+
+    else if data.StartsWith "[" then
+        System.Text.Json.JsonSerializer.Deserialize<obj array> (data, jsonOptions)
+    else
+        data :> obj
+    

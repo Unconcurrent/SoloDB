@@ -9,7 +9,9 @@ open System.Text.Json
 open System.Text
 open System.Text.RegularExpressions
 open System.Threading
+open FSharp.Interop.Dynamic
 open JsonUtils
+open System.Dynamic
 
 
 let private createTable<'T> (name: string) (conn: SqliteConnection) =
@@ -25,7 +27,7 @@ let private createTable<'T> (name: string) (conn: SqliteConnection) =
         transaction.Rollback()
         reraise ()
 
-type FinalBuilder<'T, 'R>(connection: SqliteConnection, name: string, sql: string, variables: Dictionary<string, obj>, select: string -> 'R) =
+type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, variables: Dictionary<string, obj>, select: 'Q -> 'R) =
     let mutable sql = sql
     let mutable limit = 0UL
     let mutable offset = 0UL
@@ -71,19 +73,22 @@ type FinalBuilder<'T, 'R>(connection: SqliteConnection, name: string, sql: strin
 
         this
 
-    member this.ToList() =
+    member this.Enumerate() =
         let finalSQL, parameters = getQueryParameters()
-        connection.Query<string>(finalSQL, parameters) |> Seq.map select |> Seq.toList
+        connection.Query<'Q>(finalSQL, parameters) |> Seq.map select 
+
+    member this.ToList() =
+        this.Enumerate() |> Seq.toList
 
     member this.First() =
         let finalSQL, parameters = getQueryParameters()
-        connection.QueryFirst<string>(finalSQL, parameters) |> select
+        connection.QueryFirst<'Q>(finalSQL, parameters) |> select
 
     member this.Execute() =
         let finalSQL, parameters = getQueryParameters()
         connection.Execute(finalSQL, parameters)
 
-type WhereBuilder<'T, 'R>(connection: SqliteConnection, name: string, sql: string, select: string -> 'R, vars: Dictionary<string, obj>) =
+type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, select: 'Q -> 'R, vars: Dictionary<string, obj>) =
     member this.Where(expression: Expression<System.Func<'T, bool>>) =
         let whereSQL, newVariables = QueryTranslator.translate expression
         let sql = sql + sprintf "WHERE %s " whereSQL
@@ -91,13 +96,13 @@ type WhereBuilder<'T, 'R>(connection: SqliteConnection, name: string, sql: strin
         for var in vars do
             newVariables.Add(var.Key, var.Value)
 
-        FinalBuilder(connection, name, sql, newVariables, select)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select)
 
     member this.WhereId(id: int64) =
-        FinalBuilder(connection, name, sql + sprintf "WHERE Id = %i " id, vars, select)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql + sprintf "WHERE Id = %i " id, vars, select)
 
     member this.OnAll() =
-        FinalBuilder(connection, name, sql, vars, select)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select)
 
 
 type Collection<'T>(connection: SqliteConnection, name: string) =
@@ -131,12 +136,15 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
         | None -> failwithf "There is no element with id %i" id
         | Some x -> x
 
-
+    member this.SelectUntyped(select: Expression<System.Func<obj, obj>>) =
+        let selectSQL, variables = QueryTranslator.translate select
+        
+        WhereBuilder<obj, string, obj>(connection, name, $"SELECT {selectSQL} FROM \"{name}\" ", fromJsonOrSQL, variables)
 
     member this.Select<'R>(select: Expression<System.Func<'T, 'R>>) =
         let selectSQL, variables = QueryTranslator.translate select
 
-        WhereBuilder<'T, 'R>(connection, name, $"SELECT {selectSQL} FROM \"{name}\" ", fromJson<'R>, variables)
+        WhereBuilder<'T, string, 'R>(connection, name, $"SELECT {selectSQL} FROM \"{name}\" ", fromJson<'R>, variables)
 
     member this.Select() =
         WhereBuilder(connection, name, $"SELECT json(Value) FROM \"{name}\" ", fromJson<'T>, Dictionary<string, obj>())
@@ -145,16 +153,6 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
         WhereBuilder(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>())
 
     member this.Update(expression: Expression<System.Action<'T>>) =
-        let replaceTagSyntax (input: string) : string =
-            let pattern = "' -> (\d+)"
-            let replacement = "[$1]'"
-            Regex.Replace(input, pattern, replacement)
-
-        let replaceTagSyntax2 (input: string) : string =
-            let pattern = "' -> ([^,]+?),"
-            let replacement = "$1',"
-            Regex.Replace(input, pattern, replacement)
-
         let updateSQL, variables = QueryTranslator.translateUpdateMode expression
         let updateSQL = updateSQL.Trim ','
 

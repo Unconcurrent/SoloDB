@@ -80,6 +80,8 @@ let rec private visit (exp: Expression) (sb: QueryBuilder) : Expression =
         visitConvert (exp :?> UnaryExpression) sb
     | ExpressionType.New ->
         visitNew (exp :?> NewExpression) sb
+    | ExpressionType.Parameter ->
+        visitParameter (exp :?> ParameterExpression) sb
     | _ ->
         raise (Exception(sprintf "Unhandled expression type: '%O'" exp.NodeType))
 
@@ -154,11 +156,28 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         visit a qb |> ignore
         visit b qb |> ignore
         m
+
+    else if m.Method.Name = "op_Dynamic" then
+        let o = m.Arguments[0]
+        let property = (m.Arguments[1] :?> ConstantExpression).Value
+
+        qb.AppendRaw "jsonb_extract("
+        visit o qb |> ignore
+
+        if isIntegerBased property then
+            qb.AppendRaw $",'$[{property}]')"
+        else
+            qb.AppendRaw $",'$.{property}')"
+        m
     else
         raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 
 and private visitLambda (m: LambdaExpression) (qb: QueryBuilder) =
     visit(m.Body) qb
+
+and private visitParameter (m: ParameterExpression) (qb: QueryBuilder) =
+    qb.AppendRaw "Value"
+    m
 
 and private visitNew (m: NewExpression) (qb: QueryBuilder) =
     let t = m.Type

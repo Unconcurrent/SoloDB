@@ -6,6 +6,7 @@ open System.Threading
 open System.Threading.Tasks
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open SoloDB
+open FSharp.Interop.Dynamic
 
 type UserData = {
     Tags: string array
@@ -325,10 +326,24 @@ type SoloDBTesting() =
 
         assertEqual secondUserMod secondUserModDB "Update(User) failed."
 
+    [<TestMethod>]
+    member this.SelectUntypedTest() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+
+        let ids = users.InsertBatch(randomUsersToInsert)
+        let id = ids[0]
+
+        let users = users.SelectUntyped(fun u -> (u?Username, true)).Where(fun u -> u?Username > "A").ToList()
+        let usersStr = sprintf "%A" users
+        let expected = "[[\"John\"; 1L]; [\"Mihail\"; 1L]; [\"Vanya\"; 1L]; [\"Givany\"; 1L]]"
+        printfn "%s" usersStr
+        assertEqual usersStr expected "SelectUntypedTest failed."
+
 [<EntryPoint>]
 let main argv =
     let test = SoloDBTesting()
     test.SetDBPath()
-    test.QueryTest2()
+    test.SelectUntypedTest()
     test.ClearTemp()
     0
