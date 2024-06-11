@@ -40,8 +40,8 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         let finalSQL = 
             sql 
             + (if orderByList.Count > 0 then sprintf "ORDER BY %s " (orderByList |> String.concat ",") else " ") 
-            + (if limit > 0UL then $"LIMIT {limit} " else " ")
-            + (if offset > 0UL then $"OFFSET {offset} " else " ")
+            + (if limit > 0UL then $"LIMIT {limit} " else if offset > 0UL then "LIMIT -1 " else "")
+            + (if offset > 0UL then $"OFFSET {offset} " else "")
 
         printfn "%s" finalSQL 
 
@@ -145,7 +145,7 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
         WhereBuilder<'T, string, 'R>(connection, name, $"SELECT {selectSQL} FROM \"{name}\" ", fromJsonOrSQL<'R>, variables)
 
     member this.Select() =
-        WhereBuilder(connection, name, $"SELECT json(Value) FROM \"{name}\" ", fromJsonOrSQL<'T>, Dictionary<string, obj>())
+        WhereBuilder<'T, string, 'T>(connection, name, $"SELECT json(Value) FROM \"{name}\" ", fromJsonOrSQL<'T>, Dictionary<string, obj>())
 
     member this.SelectWithId() =
         WhereBuilder(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>())
@@ -174,10 +174,16 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
         let updateSQL, variables = QueryTranslator.translateUpdateMode expression
         let updateSQL = updateSQL.Trim ','
 
-        WhereBuilder(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {updateSQL})", fromJsonOrSQL<int64>, variables)
+        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {updateSQL})", fromJsonOrSQL<int64>, variables)
 
     member this.Update(item: 'T) =
-        WhereBuilder(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Dictionary([|KeyValuePair("item", toSQLJson item :> obj)|]))
+        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Dictionary([|KeyValuePair("item", toSQLJson item :> obj)|]))
+
+    member this.Delete() =
+        WhereBuilder<'T, string, int64>(connection, name, $"DELETE FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>())
+
+    member this.DeleteById(id: int64) : int =
+        this.Delete().WhereId(id).Execute()
         
 
 and SoloDB(connection: SqliteConnection) =

@@ -2,6 +2,7 @@
 
 open System.Text.Json
 open System
+open Utils
 
 type DateTimeOffsetJsonConverter() =
     inherit Serialization.JsonConverter<DateTimeOffset>()
@@ -61,6 +62,13 @@ let rec private tupleToArray (element: JsonElement) =
 
 and fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
     if typeof<'T> <> typeof<obj> then
+        if typeof<'T> = typeof<string> then
+            data :> obj :?> 'T
+        else if isIntegerBased data then
+            data |> int64 :> obj :?> 'T
+        else if isNumber data then
+            data |> float :> obj :?> 'T
+        else
         fromJson<'T> data
     else
 
