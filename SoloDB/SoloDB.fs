@@ -139,11 +139,6 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
         | None -> failwithf "There is no element with id %i" id
         | Some x -> x
 
-    member this.SelectUntyped(select: Expression<System.Func<obj, obj>>) =
-        let selectSQL, variables = QueryTranslator.translate select
-        
-        WhereBuilder<obj, string, obj>(connection, name, $"SELECT {selectSQL} FROM \"{name}\" ", fromJsonOrSQL, variables)
-
     member this.Select<'R>(select: Expression<System.Func<'T, 'R>>) =
         let selectSQL, variables = QueryTranslator.translate select
 
@@ -154,6 +149,26 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
 
     member this.SelectWithId() =
         WhereBuilder(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>())
+
+    member this.Count() =
+        WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>())
+
+    member this.CountAll() =        
+        WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>()).OnAll().First()
+
+    member this.CountAllLimit(limit: uint64) =        
+        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" LIMIT @limit)", Dictionary<string, obj>([|KeyValuePair("limit", limit :> obj)|]), fromJsonOrSQL<int64>).First()
+
+    member this.CountWhere(func) =
+        WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>()).Where(func).First()
+
+    member this.CountWhere(func: Expression<System.Func<'T, bool>>, limit: uint64) =
+        let whereSQL, variables = QueryTranslator.translate func
+        variables["limit"] <- limit :> obj
+
+        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" WHERE {whereSQL} LIMIT @limit)", variables, fromJsonOrSQL<int64>).First()
+
+    member this.Any(func) = this.CountWhere(func, 1UL) > 0L
 
     member this.Update(expression: Expression<System.Action<'T>>) =
         let updateSQL, variables = QueryTranslator.translateUpdateMode expression
