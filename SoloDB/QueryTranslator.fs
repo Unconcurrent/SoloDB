@@ -2,11 +2,12 @@
 
 open System.Text
 open System.Linq.Expressions
-open System.Linq
 open System
 open System.Reflection
 open System.Collections.Generic
-open System.Numerics
+open System.Text.Json
+open JsonUtils
+open Utils
 
 type private QueryBuilder = 
     {
@@ -22,8 +23,21 @@ type private QueryBuilder =
     static member New(sb: StringBuilder, variables: Dictionary<string, obj>, updateMode: bool) =
         let appendVariable (value: obj) =
             let name = $"VAR{Random.Shared.NextInt64():X}{Random.Shared.NextInt64():X}"
-            sb.Append ("@" + name) |> ignore
-            variables.[name] <- value
+            match value with
+            | :? bool as b -> 
+                 sb.Append (sprintf "%i" (if b then 1 else 0)) |> ignore
+            | other ->
+
+            if isIntegerBased value then
+                sb.Append (sprintf "%s" (value.ToString())) |> ignore
+            else
+                
+            let jsonValue, kind = toSQLJsonAndKind value
+            match kind with
+            | JsonValueKind.Object
+            | JsonValueKind.Array -> sb.Append (sprintf "jsonb(@%s)" name) |> ignore
+            | other -> sb.Append (sprintf "@%s" name) |> ignore
+            variables.[name] <- jsonValue
 
         let appendRaw (s: string) = sb.Append s |> ignore
 
@@ -92,7 +106,6 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
     else if m.Method.Name = "Object.Set" then
         let oldValue = m.Arguments[0]
         let newValue = m.Arguments[1]
-        failwith "todo:"
 
         visit oldValue qb |> ignore
         qb.AppendRaw ","
@@ -187,16 +200,7 @@ and private visitBinary (b: BinaryExpression) (qb: QueryBuilder) =
 
 and private visitConstant (c: ConstantExpression) (qb: QueryBuilder) =
     match c.Value with
-    | :? IQueryable as q ->
-        qb.AppendRaw("SELECT * FROM ")
-        qb.AppendRaw(q.ElementType.Name)  |> ignore
     | null -> qb.AppendRaw("NULL")  |> ignore
-
-    | :? uint32
-    | :? uint64
-    | :? int64
-    | :? int32 ->
-        qb.AppendRaw(sprintf "%A" c.Value)
     | _ ->
         qb.AppendVariable(c.Value) |> ignore
     c

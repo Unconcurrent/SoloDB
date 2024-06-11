@@ -6,6 +6,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Utils.fs" />
+    <Compile Include="JsonUtils.fs" />
     <Compile Include="QueryTranslator.fs" />
     <Compile Include="SoloDB.fs" />
   </ItemGroup>
