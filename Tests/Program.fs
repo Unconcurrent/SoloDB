@@ -63,21 +63,22 @@ let randomUsersToInsert = [|
         }
     }
 |]
-let assertEqual<'T> (a: 'T) (b: 'T) (message: string) = Assert.AreEqual(a, b, message) // F# cannot decide the overload.
+let assertEqual<'T> (a: 'T) (b: 'T) (message: string) = Assert.AreEqual(b, a, message) // F# cannot decide the overload, and also switched the order.
 
 [<TestClass>]
 type SoloDBTesting() =
-    let mutable dbPath = "./test.db"
+    let dbDir = "./temp/"
+    let mutable dbPath = "./temp/test.db"
     [<TestInitialize>]
     member this.SetDBPath() =
-        dbPath <- $"./test{Random.Shared.NextInt64()}.db"
+        Directory.CreateDirectory dbDir |> ignore
+        dbPath <- $"./temp/test{Random.Shared.NextInt64()}.db"
 
     [<TestCleanup>]
     member this.ClearTemp() =
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools()
-        let dbPath = dbPath
-        while File.Exists dbPath do // The file is not released instantly.
-            try File.Delete dbPath
+        while Directory.EnumerateFiles dbDir |> Seq.isEmpty |> not do // The file is not released instantly.
+            try Directory.EnumerateFiles dbDir |> Seq.iter File.Delete
             with ex -> Thread.Sleep 150
         
 
@@ -94,8 +95,7 @@ type SoloDBTesting() =
                 Tags = [|"test1234"|]
             }
         }
-    
-    
+        
         use db = SoloDB.instantiate dbPath
         let users = db.GetCollection<User>()
         let id = users.Insert testUser
@@ -143,7 +143,7 @@ type SoloDBTesting() =
         Assert.AreNotEqual(user1, user2, "The inserted user are equal.")
 
     [<TestMethod>]
-    member this.QueryTest() =
+    member this.IncrementalIdsTest() =
         use db = SoloDB.instantiate dbPath
         let users = db.GetCollection<User>()
 
@@ -153,6 +153,13 @@ type SoloDBTesting() =
         for id in ids do
             Assert.IsTrue (id > prevId)
             prevId <- id
+
+    [<TestMethod>]
+    member this.QueryTest1() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+
+        let ids = users.InsertBatch(randomUsersToInsert)
 
         let selectedData = users
                             .Select(fun u -> (u.Username, u.Data.Tags[0]))
@@ -168,6 +175,12 @@ type SoloDBTesting() =
         printfn "%s" expected
         assertEqual selectedDataText expected "The query is wrong."
 
+    [<TestMethod>]
+    member this.QueryTest2() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+
+        users.InsertBatch(randomUsersToInsert) |> ignore
 
         let selectedData = users
                             .Select(fun u -> (u.Data.Tags, u.Auth, true, u.Username))
@@ -183,7 +196,7 @@ type SoloDBTesting() =
         assertEqual selectedDataText expected "The query is wrong."
 
     [<TestMethod>]
-    member this.InsertBatchTest() =
+    member this.InsertBatchSelectTest() =
         use db = SoloDB.instantiate dbPath
         let users = db.GetCollection<User>()
 
@@ -194,6 +207,44 @@ type SoloDBTesting() =
 
         assertEqual getFirstUser.Username "John" "Name unequal."
         assertEqual getSecondUser.Username "Mihail" "Name unequal."
+
+    [<TestMethod>]
+    member this.InsertBatchCountTest() =
+        use db = SoloDB.instantiate dbPath
+        db.GetCollection<User>().InsertBatch(randomUsersToInsert) |> ignore
+        assertEqual (db.GetCollection<User>().Select(fun u -> 1).OnAll().ToList() |> Seq.length) randomUsersToInsert.Length "Length unequal."
+
+    [<TestMethod>]
+    member this.UpdateLambdaAddTest() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+
+        let ids = users.InsertBatch(randomUsersToInsert)
+
+
+        let addTagValue = $"{Random.Shared.NextInt64()}"
+        assertEqual (users.Update(
+                            fun u -> (u.Data.Tags.Add addTagValue)
+                     ).WhereId(ids.[0]).Execute()) 1 "No rows affected."
+
+        let getFirstUser = users.GetById ids.[0]
+        assertEqual getFirstUser.Data.Tags.[1] addTagValue "Value Tags unchanged."
+
+    [<TestMethod>]
+    member this.UpdateLambdaSetAtTest() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+
+        let ids = users.InsertBatch(randomUsersToInsert)
+
+
+        let replaceValue = $"{Random.Shared.NextInt64()}"
+        assertEqual (users.Update(
+                            fun u -> u.Data.Tags.SetAt(0, replaceValue)
+                     ).WhereId(ids.[0]).Execute()) 1 "No rows affected."
+
+        let getFirstUser = users.GetById ids.[0]
+        assertEqual getFirstUser.Data.Tags.[0] replaceValue "Value Tags unchanged."
 
     [<TestMethod>]
     member this.UpdateLambdaAddSetAtTest() =
@@ -218,18 +269,24 @@ type SoloDBTesting() =
         use db = SoloDB.instantiate dbPath
         let users = db.GetCollection<User>()
 
-        let ids = users.InsertBatch(randomUsersToInsert)
+        let id = users.Insert {
+            Username = "John"
+            Auth = true
+            Banned = false
+            FirstSeen = DateTimeOffset.UtcNow.AddYears -15
+            LastSeen = DateTimeOffset.UtcNow.AddMinutes -10
+            Data = {
+                Tags = [|"tag1"; "tag2"; "tag3"|]
+            }
+        }
 
-
-        let replaceValue = $"{Random.Shared.NextInt64()}"
-        let addTagValue = $"{Random.Shared.NextInt64()}"
         assertEqual (users.Update(
-                            fun u -> (u.Data.Tags.Add addTagValue) |+|(u.Data.Tags.RemoveAt 0)
-                     ).WhereId(ids.[0]).Execute()) 1 "No rows affected."
+                            fun u -> (u.Data.Tags.RemoveAt (1))
+                     ).WhereId(id).Execute()) 1 "No rows affected."
 
-        let firstUser = users.GetById ids.[0]
-        assertEqual firstUser.Data.Tags.[0] replaceValue "Value Tags unchanged."
-        assertEqual firstUser.Data.Tags.[1] addTagValue "Value Tags unchanged."
+        let firstUser = users.GetById id
+        assertEqual firstUser.Data.Tags.[0] "tag1" "Value Tags unchanged."
+        assertEqual firstUser.Data.Tags.[1] "tag3" "Value Tags unchanged."
 
     [<TestMethod>]
     member this.UpdateObjTest() =
@@ -252,6 +309,6 @@ type SoloDBTesting() =
 let main argv =
     let test = SoloDBTesting()
     test.SetDBPath()
-    test.UpdateLambdaRemoveAtTest()
+    test.QueryTest2()
     test.ClearTemp()
     0

@@ -8,17 +8,33 @@ open System.Reflection
 open System.Collections.Generic
 open System.Numerics
 
-type private QueryBuilder = {
-    StringBuilder: StringBuilder
-    Variables: Dictionary<string, obj>
-    AppendRaw: string -> unit
-    AppendVariable: obj -> unit
-    AppendJSONAccess: unit -> unit
-    RollBackOne: unit -> unit
-    JSONAccess: string
-    FavorJSON: bool
-    ForUpdate: bool
-}
+type private QueryBuilder = 
+    {
+        StringBuilder: StringBuilder
+        Variables: Dictionary<string, obj>
+        AppendRaw: string -> unit
+        AppendVariable: obj -> unit
+        RollBack: uint -> unit
+        UpdateMode: bool
+    }
+    override this.ToString() = this.StringBuilder.ToString()
+
+    static member New(sb: StringBuilder, variables: Dictionary<string, obj>, updateMode: bool) =
+        let appendVariable (value: obj) =
+            let name = $"VAR{Random.Shared.NextInt64():X}{Random.Shared.NextInt64():X}"
+            sb.Append ("@" + name) |> ignore
+            variables.[name] <- value
+
+        let appendRaw (s: string) = sb.Append s |> ignore
+
+        {
+            StringBuilder = sb
+            Variables = variables
+            AppendVariable = appendVariable
+            AppendRaw = appendRaw
+            RollBack = fun N -> sb.Remove(sb.Length - (int)N, (int)N) |> ignore
+            UpdateMode = updateMode
+        }
 
 let rec stripQuotes (e: Expression) =
     let mutable expr = e
@@ -58,9 +74,12 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         let array = m.Arguments[0]
         let index = m.Arguments[1]
 
+        qb.AppendRaw "jsonb_extract("
         visit array qb |> ignore
-        qb.AppendJSONAccess()
+        
+        qb.AppendRaw ", '$["
         visit index qb |> ignore
+        qb.AppendRaw "]')"
         m
     else if m.Method.Name = "String.Like" then
         let string = m.Arguments[0]
@@ -73,7 +92,7 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
     else if m.Method.Name = "Object.Set" then
         let oldValue = m.Arguments[0]
         let newValue = m.Arguments[1]
-
+        failwith "todo:"
 
         visit oldValue qb |> ignore
         qb.AppendRaw ","
@@ -84,27 +103,22 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         let array = m.Arguments[0]
         let newValue = m.Arguments[1]
 
-
+        // qb.AppendRaw "jsonb_extract("
         visit array qb |> ignore
-        qb.AppendJSONAccess()
-        if qb.ForUpdate then 
-            qb.RollBackOne()
-            qb.RollBackOne()
-            qb.RollBackOne()
-            qb.AppendRaw "[#]',"
-        else qb.AppendRaw "[#],"
+        qb.RollBack 1u
+        qb.AppendRaw "[#]',"
+        
         visit newValue qb |> ignore
         qb.AppendRaw ","
         m
-    else if m.Method.Name = "Array.SetAt" then
+    else if m.Method.Name = "Array.SetAt" then        
         let array = m.Arguments[0]
         let index = m.Arguments[1]
         let newValue = m.Arguments[2]
 
-
         visit array qb |> ignore
-        qb.AppendJSONAccess()
-        qb.AppendRaw $"[{index}],"
+        qb.RollBack 1u
+        qb.AppendRaw $"[{index}]',"
         visit newValue qb |> ignore
         qb.AppendRaw ","
         m
@@ -112,14 +126,11 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         let array = m.Arguments[0]
         let index = m.Arguments[1]
 
-
         visit array qb |> ignore
-        qb.AppendRaw ",jsonb_remove("
-
-        let qb2 = {qb with ForUpdate = false}
-        visit array qb2 |> ignore
-
-        qb.AppendRaw ","
+        qb.AppendRaw ",jsonb_remove(jsonb_extract(Value,"
+        visit array qb |> ignore
+        qb.AppendRaw "),"
+        
         qb.AppendRaw $"'$[{index}]'),"
         m
     else if m.Method.Name = "op_BarPlusBar" then
@@ -185,7 +196,7 @@ and private visitConstant (c: ConstantExpression) (qb: QueryBuilder) =
     | :? uint64
     | :? int64
     | :? int32 ->
-        qb.AppendRaw(sprintf "%A " c.Value)
+        qb.AppendRaw(sprintf "%A" c.Value)
     | _ ->
         qb.AppendVariable(c.Value) |> ignore
     c
@@ -204,20 +215,18 @@ and private visitMemberAccess (m: MemberExpression) (qb: QueryBuilder) =
         | :? MemberExpression as inner -> isRootParameter inner.Expression
         | _ -> false
 
+    let formatAccess (path) =
+        if qb.UpdateMode then sprintf "'$.%s'" path
+        else sprintf "jsonb_extract(Value, '$.%s')" path
     if m.Expression <> null && isRootParameter m then
         let jsonPath = buildJsonPath m []
         match jsonPath with
         | [] -> ()
         | [single] ->
-            if qb.ForUpdate then qb.AppendRaw(sprintf "'$.%s'" single) |> ignore
-            else qb.AppendRaw(sprintf "Value %s '%s'" qb.JSONAccess single) |> ignore
+            qb.AppendRaw(formatAccess single) |> ignore
         | paths ->
-            if qb.ForUpdate then
-                let pathStr = String.concat $"." (List.map (sprintf "%s") paths)
-                qb.AppendRaw(sprintf "'$.%s'" pathStr) |> ignore
-            else
-                let pathStr = String.concat $" {qb.JSONAccess} " (List.map (sprintf "'%s'") paths)
-                qb.AppendRaw(sprintf "Value %s %s" qb.JSONAccess pathStr) |> ignore
+            let pathStr = String.concat $"." (List.map (sprintf "%s") paths)
+            qb.AppendRaw(formatAccess pathStr) |> ignore
     else if m.Expression = null then
         let value = (m.Member :?> PropertyInfo).GetValue null
         qb.AppendVariable value
@@ -226,52 +235,18 @@ and private visitMemberAccess (m: MemberExpression) (qb: QueryBuilder) =
 
     m
 
-let translate (expression: Expression) (favorJSON: bool) =
+let translate (expression: Expression) =
     let sb = StringBuilder()
     let variables = Dictionary<string, obj>()
-
-    let appendVariable (value: obj) =
-        let name = $"VAR{Random.Shared.NextInt64():X}{Random.Shared.NextInt64():X}"
-        sb.Append ("@" + name) |> ignore
-        variables.[name] <- value
-
-    let appendRaw (s: string) = sb.Append s |> ignore
-
-    let builder = {
-        StringBuilder = sb
-        Variables = variables
-        AppendVariable = appendVariable
-        AppendRaw = appendRaw
-        AppendJSONAccess = fun () -> if favorJSON then appendRaw " -> " else appendRaw " ->> "
-        RollBackOne = fun () -> sb.Remove(sb.Length - 1, 1) |> ignore
-        JSONAccess = if favorJSON then "->" else "->>"
-        FavorJSON = favorJSON
-        ForUpdate = false
-    }
+    let builder = QueryBuilder.New(sb, variables, false)
+    
     let e = visit expression builder
     sb.ToString(), variables
 
-let translateForUpdate (expression: Expression)  =
+let translateUpdateMode (expression: Expression) =
     let sb = StringBuilder()
     let variables = Dictionary<string, obj>()
-
-    let appendVariable (value: obj) =
-        let name = $"VAR{Random.Shared.NextInt64():X}{Random.Shared.NextInt64():X}"
-        sb.Append ("@" + name) |> ignore
-        variables.[name] <- value
-
-    let appendRaw (s: string) = sb.Append s |> ignore
-
-    let builder = {
-        StringBuilder = sb
-        Variables = variables
-        AppendVariable = appendVariable
-        AppendRaw = appendRaw
-        AppendJSONAccess = fun () -> appendRaw "->"
-        RollBackOne = fun () -> sb.Remove(sb.Length - 1, 1) |> ignore
-        JSONAccess =  "->"
-        FavorJSON = true
-        ForUpdate = true
-    }
+    let builder = QueryBuilder.New(sb, variables, true)
+    
     let e = visit expression builder
     sb.ToString(), variables
