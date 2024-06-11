@@ -333,9 +333,9 @@ type SoloDBTesting() =
 
         let ids = users.InsertBatch(randomUsersToInsert)
 
-        let users = users.SelectUntyped(fun u -> (u?Username, true)).Where(fun u -> u?Username > "A").ToList()
+        let users = users.Select(fun u -> (u?Username, u?CarType)).Where(fun u -> u?Username > "A").ToList()
         let usersStr = sprintf "%A" users
-        let expected = "[[\"John\"; 1L]; [\"Mihail\"; 1L]; [\"Vanya\"; 1L]; [\"Givany\"; 1L]]"
+        let expected = "[(John, null); (Mihail, null); (Vanya, null); (Givany, null)]"
         printfn "%s" usersStr
         assertEqual usersStr expected "SelectUntypedTest failed."
 
@@ -381,10 +381,267 @@ type SoloDBTesting() =
 
         assertEqual users.Length 2 "Count unequal."
 
+    [<TestMethod>]
+    member this.CountTest() =    
+        let testUser1 = {
+            Username = "Alice"
+            Auth = true
+            Banned = false
+            FirstSeen = DateTimeOffset.MinValue
+            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
+            Data = { Tags = [|"tag1"|] }
+        }
+        
+        let testUser2 = {
+            Username = "Bob"
+            Auth = false
+            Banned = false
+            FirstSeen = DateTimeOffset.MinValue
+            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
+            Data = { Tags = [|"tag2"|] }
+        }
+        
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.Insert testUser1 |> ignore
+        users.Insert testUser2 |> ignore
+        
+        let count = users.CountAll()
+        assertEqual count 2L "The count of users is incorrect."
+
+    [<TestMethod>]
+    member this.AnyTest() =
+        let testUser1 = {
+            Username = "Alice"
+            Auth = true
+            Banned = false
+            FirstSeen = DateTimeOffset.MinValue
+            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
+            Data = { Tags = [|"tag1"|] }
+        }
+        
+        let testUser2 = {
+            Username = "Bob"
+            Auth = false
+            Banned = false
+            FirstSeen = DateTimeOffset.MinValue
+            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
+            Data = { Tags = [|"tag2"|] }
+        }
+        
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.Insert testUser1 |> ignore
+        users.Insert testUser2 |> ignore
+        
+        let anyUser = users.Any(fun u -> u.Auth)
+        assertEqual anyUser true "The any function did not return true when an authenticated user exists."
+
+    [<TestMethod>]
+    member this.CountWithConditionTest() =
+        let testUser1 = {
+            Username = "Alice"
+            Auth = true
+            Banned = false
+            FirstSeen = DateTimeOffset.MinValue
+            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
+            Data = { Tags = [|"tag1"|] }
+        }
+        
+        let testUser2 = {
+            Username = "Bob"
+            Auth = false
+            Banned = false
+            FirstSeen = DateTimeOffset.MinValue
+            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
+            Data = { Tags = [|"tag2"|] }
+        }
+        
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.Insert testUser1 |> ignore
+        users.Insert testUser2 |> ignore
+        
+        let countAuthUsers = users.CountWhere(fun u -> u.Auth)
+        assertEqual countAuthUsers 1L "The count of authenticated users is incorrect."
+
+    [<TestMethod>]
+    member this.CountAllEqual() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        let count = users.CountAll()
+        assertEqual count 0L "The initial count should be zero."
+
+    [<TestMethod>]
+    member this.CountAllAfterInsertEqual() =
+        let testUser = {
+            Username = "Alice"
+            Auth = true
+            Banned = false
+            FirstSeen = DateTimeOffset.MinValue
+            LastSeen = DateTimeOffset.UtcNow
+            Data = { Tags = [|"example"|] }
+        }
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.Insert testUser |> ignore
+        let count = users.CountAll()
+        assertEqual count 1L "The count after one insert should be one."
+
+    [<TestMethod>]
+    member this.CountAllLimitEqual() =
+        let testUsers = [
+            { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
+            { Username = "Bob"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
+        ]
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.InsertBatch testUsers |> ignore
+        let count = users.CountAllLimit(1UL)
+        assertEqual count 1L "The count with limit 1 should be one."
+
+    [<TestMethod>]
+    member this.CountWhereEqual() =
+        let testUser = {
+            Username = "Alice"
+            Auth = true
+            Banned = false
+            FirstSeen = DateTimeOffset.MinValue
+            LastSeen = DateTimeOffset.UtcNow
+            Data = { Tags = [|"example"|] }
+        }
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.Insert testUser |> ignore
+        let count = users.CountWhere(fun u -> u.Username = "Alice")
+        assertEqual count 1L "The count where username is Alice should be one."
+
+    [<TestMethod>]
+    member this.CountWhereWithLimitEqual() =
+        let testUsers = [
+            { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
+            { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
+        ]
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.InsertBatch testUsers |> ignore
+        let count = users.CountWhere((fun u -> u.Username = "Alice"), 1UL)
+        assertEqual count 1L "The count where username is Alice with limit 1 should be one."
+
+    [<TestMethod>]
+    member this.AnyTrue() =
+        let testUser = {
+            Username = "Alice"
+            Auth = true
+            Banned = false
+            FirstSeen = DateTimeOffset.MinValue
+            LastSeen = DateTimeOffset.UtcNow
+            Data = { Tags = [|"example"|] }
+        }
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.Insert testUser |> ignore
+        let exists = users.Any(fun u -> u.Username = "Alice")
+        assertEqual exists true "The Any function should return true for username Alice."
+
+    [<TestMethod>]
+    member this.AnyFalse() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        let exists = users.Any(fun u -> u.Username = "NonExistent")
+        assertEqual exists false "The Any function should return false for a non-existent username."
+
+    [<TestMethod>]
+    member this.CountAllEmpty() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        let count = users.CountAll()
+        assertEqual count 0L "The count should be zero for an empty table."
+
+    [<TestMethod>]
+    member this.CountAllWithMultipleInserts() =
+        let testUsers = [
+            { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
+            { Username = "Bob"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
+        ]
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.InsertBatch testUsers |> ignore
+        let count = users.CountAll()
+        assertEqual count 2L "The count should be two after inserting two users."
+
+    [<TestMethod>]
+    member this.CountWhereMultipleConditions() =
+        let testUsers = [
+            { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
+            { Username = "Bob"; Auth = true; Banned = true; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
+        ]
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.InsertBatch testUsers |> ignore
+        let count = users.CountWhere(fun u -> u.Auth && not u.Banned)
+        assertEqual count 1L "The count should be one where Auth is true and Banned is false."
+
+    [<TestMethod>]
+    member this.CountWithZeroConditionMatch() =
+        let testUsers = [
+            { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
+            { Username = "Bob"; Auth = true; Banned = true; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
+        ]
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.InsertBatch testUsers |> ignore
+        let count = users.CountWhere(fun u -> u.Auth && u.Banned && u.Username = "Charlie")
+        assertEqual count 0L "The count should be zero where no user matches the condition."
+
+    [<TestMethod>]
+    member this.CountWhereMultipleUsersMatch() =
+        let testUsers = [
+            { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
+            { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
+        ]
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.InsertBatch testUsers |> ignore
+        let count = users.CountWhere(fun u -> u.Username = "Alice")
+        assertEqual count 2L "The count should be two where username is Alice."
+
+    [<TestMethod>]
+    member this.AnyWithMultipleConditionsTrue() =
+        let testUsers = [
+            { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
+            { Username = "Bob"; Auth = true; Banned = true; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
+        ]
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.InsertBatch testUsers |> ignore
+        let exists = users.Any(fun u -> u.Auth && not u.Banned)
+        assertEqual exists true "The Any function should return true where Auth is true and Banned is false."
+
+    [<TestMethod>]
+    member this.AnyWithMultipleConditionsFalse() =
+        let testUsers = [
+            { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
+            { Username = "Bob"; Auth = true; Banned = true; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
+        ]
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        users.InsertBatch testUsers |> ignore
+        let exists = users.Any(fun u -> u.Auth && u.Banned && u.Username = "Charlie")
+        assertEqual exists false "The Any function should return false where no user matches the condition."
+
+    [<TestMethod>]
+    member this.CountWhereWithLimitZero() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+        let count = users.CountWhere((fun u -> u.Username = "NonExistent"), 1UL)
+        assertEqual count 0L "The count where username is NonExistent with limit 1 should be zero."
+
+
 [<EntryPoint>]
 let main argv =
     let test = SoloDBTesting()
     test.SetDBPath()
-    try test.UntypedCollectionSelectTest()
+    try test.SelectUntypedTest()
     finally test.ClearTemp()
     0

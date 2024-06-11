@@ -68,6 +68,8 @@ let rec private visit (exp: Expression) (sb: QueryBuilder) : Expression =
     | ExpressionType.GreaterThan
     | ExpressionType.GreaterThanOrEqual ->
         visitBinary (exp :?> BinaryExpression) sb
+    | ExpressionType.Not ->
+        visitNot (exp :?> UnaryExpression) sb
     | ExpressionType.Lambda ->
         visitLambda (exp :?> LambdaExpression) sb
     | ExpressionType.Call ->
@@ -177,6 +179,11 @@ and private visitLambda (m: LambdaExpression) (qb: QueryBuilder) =
 
 and private visitParameter (m: ParameterExpression) (qb: QueryBuilder) =
     qb.AppendRaw "Value"
+    m
+
+and private visitNot (m: UnaryExpression) (qb: QueryBuilder) =
+    qb.AppendRaw "NOT "
+    visit m.Operand qb |> ignore
     m
 
 and private visitNew (m: NewExpression) (qb: QueryBuilder) =
