@@ -75,10 +75,13 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
 
     member this.Enumerate() =
         let finalSQL, parameters = getQueryParameters()
-        connection.Query<'Q>(finalSQL, parameters) |> Seq.map select 
+        connection.Query<'Q>(finalSQL, parameters) 
+            |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
+            |> Seq.map select 
 
     member this.ToList() =
-        this.Enumerate() |> Seq.toList
+        this.Enumerate() 
+        |> Seq.toList
 
     member this.First() =
         let finalSQL, parameters = getQueryParameters()
@@ -129,7 +132,7 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
     member this.TryGetById(id: int64) =
         match connection.QueryFirstOrDefault<string>($"SELECT json(Value) FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
         | null -> None
-        | json -> fromJson<'T> json |> Some
+        | json -> fromJsonOrSQL<'T> json |> Some
 
     member this.GetById(id: int64) =
         match this.TryGetById id with
@@ -144,10 +147,10 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
     member this.Select<'R>(select: Expression<System.Func<'T, 'R>>) =
         let selectSQL, variables = QueryTranslator.translate select
 
-        WhereBuilder<'T, string, 'R>(connection, name, $"SELECT {selectSQL} FROM \"{name}\" ", fromJson<'R>, variables)
+        WhereBuilder<'T, string, 'R>(connection, name, $"SELECT {selectSQL} FROM \"{name}\" ", fromJsonOrSQL<'R>, variables)
 
     member this.Select() =
-        WhereBuilder(connection, name, $"SELECT json(Value) FROM \"{name}\" ", fromJson<'T>, Dictionary<string, obj>())
+        WhereBuilder(connection, name, $"SELECT json(Value) FROM \"{name}\" ", fromJsonOrSQL<'T>, Dictionary<string, obj>())
 
     member this.SelectWithId() =
         WhereBuilder(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>())
@@ -156,21 +159,30 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
         let updateSQL, variables = QueryTranslator.translateUpdateMode expression
         let updateSQL = updateSQL.Trim ','
 
-        WhereBuilder(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {updateSQL})", fromJson<int64>, variables)
+        WhereBuilder(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {updateSQL})", fromJsonOrSQL<int64>, variables)
 
     member this.Update(item: 'T) =
-        WhereBuilder(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJson<int64>, Dictionary([|KeyValuePair("item", toSQLJson item :> obj)|]))
+        WhereBuilder(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Dictionary([|KeyValuePair("item", toSQLJson item :> obj)|]))
         
 
 and SoloDB(connection: SqliteConnection) =
     member this.GetCollection<'T>() =
         let name = typeof<'T>.Name.Replace("\"", "") // Anti SQL injection
-        use mutex = new Mutex(true, name) // To prevent a race condition where the next if statment is true for 2 threads.
+        use mutex = new Mutex(true, $"SoloDB-Table-{name}") // To prevent a race condition where the next if statment is true for 2 threads.
 
         if (connection.QueryFirstOrDefault<string>("SELECT Name FROM Types WHERE Name = @name LIMIT 1", {|name = name|}) = null) then 
             createTable<'T> name connection
 
         Collection<'T>(connection, name)
+
+    member this.GetUntypedCollection(name: string) =
+        let name = name.Replace("\"", "") // Anti SQL injection
+        use mutex = new Mutex(true, $"SoloDB-Table-{name}") // To prevent a race condition where the next if statment is true for 2 threads.
+
+        if (connection.QueryFirstOrDefault<string>("SELECT Name FROM Types WHERE Name = @name LIMIT 1", {|name = name|}) = null) then 
+            createTable<obj> name connection
+
+        Collection<obj>(connection, name)
 
     interface IDisposable with
         member this.Dispose() =

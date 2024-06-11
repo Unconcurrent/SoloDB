@@ -41,7 +41,7 @@ let toSQLJson<'T> item =
     let json, kind = toSQLJsonAndKind item
     json
 
-let fromJson<'T> (text: string) =
+let private fromJson<'T> (text: string) =
     System.Text.Json.JsonSerializer.Deserialize<'T> (text, jsonOptions)
 
 let fromIdJson<'T> (idValueJSON: string) =
@@ -59,22 +59,26 @@ let rec private tupleToArray (element: JsonElement) =
 
     tupleToArrayInner element 1u
 
-and fromJsonOrSQL (data: string) =
+and fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
+    if typeof<'T> <> typeof<obj> then
+        fromJson<'T> data
+    else
+
     match Int64.TryParse data with
-    | true, i -> i :> obj
+    | true, i -> i :> obj :?> 'T
     | false, _ ->
 
     if data.StartsWith "\"" then
-        System.Text.Json.JsonSerializer.Deserialize<string> (data, jsonOptions)
+        System.Text.Json.JsonSerializer.Deserialize<string> (data, jsonOptions) :> obj :?> 'T
     else if data.StartsWith "{"  then
         let o = System.Text.Json.JsonSerializer.Deserialize<JsonElement> (data, jsonOptions)
         match o.TryGetProperty "Item1" with
         | true, _ -> // It is a tuple, will convert ot array
-            tupleToArray o
-        | false, _ -> o
+            tupleToArray o :> obj :?> 'T
+        | false, _ -> o :> obj :?> 'T
 
     else if data.StartsWith "[" then
-        System.Text.Json.JsonSerializer.Deserialize<obj array> (data, jsonOptions)
+        System.Text.Json.JsonSerializer.Deserialize<obj array> (data, jsonOptions) :> obj :?> 'T
     else
-        data :> obj
+        data :> obj :?> 'T
     
