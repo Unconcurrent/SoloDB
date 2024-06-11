@@ -100,7 +100,7 @@ type FinalBuilder<'T, 'R>(connection: SqliteConnection, name: string, sql: strin
         this
 
     member this.OrderByAsc(expression: Expression<System.Func<'T, obj>>) =
-        let orderSelector, _ = QueryTranslator.translate expression false
+        let orderSelector, _ = QueryTranslator.translate expression
         let orderSQL = sprintf "(%s) ASC" orderSelector
 
         orderByList.Add orderSQL
@@ -108,7 +108,7 @@ type FinalBuilder<'T, 'R>(connection: SqliteConnection, name: string, sql: strin
         this
 
     member this.OrderByDesc(expression: Expression<System.Func<'T, obj>>) =
-        let orderSelector, _ = QueryTranslator.translate expression false
+        let orderSelector, _ = QueryTranslator.translate expression
         let orderSQL = sprintf "(%s) DESC" orderSelector
 
         orderByList.Add orderSQL
@@ -129,7 +129,7 @@ type FinalBuilder<'T, 'R>(connection: SqliteConnection, name: string, sql: strin
 
 type WhereBuilder<'T, 'R>(connection: SqliteConnection, name: string, sql: string, select: string -> 'R, vars: Dictionary<string, obj>) =
     member this.Where(expression: Expression<System.Func<'T, bool>>) =
-        let whereSQL, newVariables = QueryTranslator.translate expression false
+        let whereSQL, newVariables = QueryTranslator.translate expression
         let sql = sql + sprintf "WHERE %s " whereSQL
 
         for key in newVariables.Keys do
@@ -161,6 +161,8 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
             let ids = List<int64>()
             for item in items do
                 insertInner item transaction |> ids.Add
+
+            transaction.Commit()
             ids
         with ex ->
             transaction.Rollback()
@@ -179,7 +181,7 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
 
 
     member this.Select<'R>(select: Expression<System.Func<'T, 'R>>) =
-        let selectSQL, variables = QueryTranslator.translate select true
+        let selectSQL, variables = QueryTranslator.translate select
 
         WhereBuilder<'T, 'R>(connection, name, $"SELECT {selectSQL} FROM \"{name}\" ", fromJson<'R>, variables)
 
@@ -200,7 +202,7 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
             let replacement = "$1',"
             Regex.Replace(input, pattern, replacement)
 
-        let updateSQL, variables = QueryTranslator.translateForUpdate expression
+        let updateSQL, variables = QueryTranslator.translateUpdateMode expression
         let updateSQL = updateSQL.Trim ','
 
         for key in variables.Keys do
