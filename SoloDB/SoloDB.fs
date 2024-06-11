@@ -113,7 +113,7 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
 
         FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select)
 
-    member this.Where(expression: Expression<System.Func<sqlId, 'T, bool>>) =
+    member this.Where(expression: Expression<System.Func<SqlId, 'T, bool>>) =
         let whereSQL, newVariables = QueryTranslator.translate name expression
         let sql = sql + sprintf "WHERE %s " whereSQL
 
@@ -125,7 +125,7 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
     member this.WhereId(id: int64) =
         FinalBuilder<'T, 'Q, 'R>(connection, name, sql + sprintf "WHERE Id = %i " id, vars, select)
 
-    member this.WhereId(func: Expression<System.Func<sqlId, bool>>) =
+    member this.WhereId(func: Expression<System.Func<SqlId, bool>>) =
         let whereSQL, newVariables = QueryTranslator.translate name func
         let sql = sql + sprintf "WHERE %s " whereSQL
 

@@ -1,5 +1,7 @@
 ﻿module Tests
 
+#nowarn "3391" // Implicit on SqlId
+
 open System
 open System.IO
 open System.Threading
