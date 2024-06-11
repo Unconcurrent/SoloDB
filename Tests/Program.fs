@@ -63,7 +63,7 @@ let randomUsersToInsert = [|
         }
     }
 |]
-let assertEqual<'T> (a: 'T) (b: 'T) (message: string) = Assert.AreEqual(b, a, message) // F# cannot decide the overload, and also switched the order.
+let assertEqual<'T when 'T : equality> (a: 'T) (b: 'T) (message: string) = Assert.IsTrue((b = a), message) // F# cannot decide the overload, and also switched the order.
 
 [<TestClass>]
 type SoloDBTesting() =
@@ -289,6 +289,29 @@ type SoloDBTesting() =
         assertEqual firstUser.Data.Tags.[1] "tag3" "Value Tags unchanged."
 
     [<TestMethod>]
+    member this.UpdateLambdaReplaceArrayTest() =
+        use db = SoloDB.instantiate dbPath
+        let users = db.GetCollection<User>()
+
+        let id = users.Insert {
+            Username = "John"
+            Auth = true
+            Banned = false
+            FirstSeen = DateTimeOffset.UtcNow.AddYears -15
+            LastSeen = DateTimeOffset.UtcNow.AddMinutes -10
+            Data = {
+                Tags = [|"tag1"; "tag2"; "tag3"|]
+            }
+        }
+
+        let newTags = [|"abc"; "xyz"|]
+
+        assertEqual (users.Update(fun u -> u.Data.Tags.Set newTags).WhereId(id).Execute()) 1 "Execute with no modification."
+
+        let user = users.GetById id
+        assertEqual<string array> user.Data.Tags newTags "Array set failed."
+
+    [<TestMethod>]
     member this.UpdateObjTest() =
         use db = SoloDB.instantiate dbPath
         let users = db.GetCollection<User>()
@@ -301,9 +324,6 @@ type SoloDBTesting() =
         let secondUserModDB = users.GetById ids.[1]
 
         assertEqual secondUserMod secondUserModDB "Update(User) failed."
-
-        let newArray = [|"abc"|] in ()
-        
 
 [<EntryPoint>]
 let main argv =
