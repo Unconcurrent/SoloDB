@@ -13,7 +13,7 @@ type InnerExpr(expr: Expression<System.Func<obj, bool>>) =
     member this.Expression = expr
 
 
-type sqlId =
+type SqlId =
     private SqlId of int64
     with
     static member (+) (SqlId a, SqlId b) = SqlId (a + b)
@@ -31,7 +31,7 @@ type sqlId =
     static member (~~~) (SqlId a) = SqlId (~~~a)
     static member op_Explicit(SqlId a) = a
     static member op_Implicit(a: int64) = SqlId a
-    static member op_Implicit(a: sqlId) = a
+    static member op_Implicit(a: SqlId) = a
 
     override this.ToString() =
         let (SqlId value) = this
@@ -233,7 +233,7 @@ and private visitLambda (m: LambdaExpression) (qb: QueryBuilder) =
     visit(m.Body) qb
 
 and private visitParameter (m: ParameterExpression) (qb: QueryBuilder) =
-    if m.Type = typeof<sqlId> then
+    if m.Type = typeof<SqlId> then
         qb.AppendRaw $"{qb.TableNameDot}Id"
     else
         qb.AppendRaw $"{qb.TableNameDot}Value"
