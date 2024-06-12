@@ -949,6 +949,17 @@ type SoloDBTesting() =
         assertEqual (dbUser.ToString()) (user1.ToString()) "User did not replace in DB."
 
     [<TestMethod>]
+    member this.UserWithIdSelectTheId() =
+        let users = db.GetCollection<UserWithId>()
+        let user1 = randomUsersWithIdToInsert.[0].Clone()
+
+        let ids = users.InsertBatch (randomUsersWithIdToInsert |> Seq.map _.Clone())
+        
+        let selected = users.Select(fun u -> (u.Id, u.Username)).Where(fun u -> u.Id < 3).ToList()
+
+        assertEqual (selected.Length) (2) "The select with SoloDBEntry.Id does not work."
+
+    [<TestMethod>]
     member this.DeleteWithLimit() =
         let users = db.GetCollection<User>()
         users.InsertBatch randomUsersToInsert |> ignore
@@ -963,6 +974,6 @@ type SoloDBTesting() =
 let main argv =
     let test = SoloDBTesting()
     test.Init()
-    try test.DeleteWithLimit()
+    try test.UserWithIdSelectTheId()
     finally test.Cleanup()
     0

@@ -1,5 +1,7 @@
 ﻿module Utils
 
+open System
+
 let isNumber (value: obj) =
     match value with
     | :? sbyte
@@ -25,4 +27,16 @@ let isIntegerBased (value: obj) =
     | :? uint32
     | :? int64
     | :? uint64 -> true
+    | _ -> false
+
+let isIntegerBasedType (t: Type) =
+    match t with
+    | _ when t = typeof<sbyte>  -> true
+    | _ when t = typeof<byte>   -> true
+    | _ when t = typeof<int16>  -> true
+    | _ when t = typeof<uint16> -> true
+    | _ when t = typeof<int32>  -> true
+    | _ when t = typeof<uint32> -> true
+    | _ when t = typeof<int64>  -> true
+    | _ when t = typeof<uint64> -> true
     | _ -> false
