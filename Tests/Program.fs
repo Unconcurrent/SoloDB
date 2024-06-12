@@ -948,11 +948,21 @@ type SoloDBTesting() =
         let dbUser = users.GetById user1.Id
         assertEqual (dbUser.ToString()) (user1.ToString()) "User did not replace in DB."
 
+    [<TestMethod>]
+    member this.DeleteWithLimit() =
+        let users = db.GetCollection<User>()
+        users.InsertBatch randomUsersToInsert |> ignore
+
+        assertEqual (users.Delete().Where(fun u -> true).Limit(2UL).Execute()) 2 "More rows affected than the limit."
+
+        assertEqual (users.CountAll()) (randomUsersToInsert.LongLength - 2L) "The delete with limit does not work."
+        
+
 
 [<EntryPoint>]
 let main argv =
     let test = SoloDBTesting()
     test.Init()
-    try test.UserWithIdReplace()
+    try test.DeleteWithLimit()
     finally test.Cleanup()
     0
