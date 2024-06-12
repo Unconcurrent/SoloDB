@@ -810,6 +810,24 @@ type SoloDBTesting() =
         if plan.Contains "USING INDEX" |> not then failwithf "Does not use index"
         printfn "%s" plan
         ()
+
+    [<TestMethod>]
+    member this.DropIndexIfExists() =        
+        let users = db.GetCollection<User>()
+        users.InsertBatch randomUsersToInsert |> ignore
+        let ex = users.EnsureIndex(fun u -> u.Username)
+        let plan = users.Select(fun u -> u.Username, u.Auth).Where(fun u -> u.Username > "AABB" && u.Auth = true).ExplainQueryPlan()
+        printfn "%s" plan
+
+        if plan.Contains "USING INDEX" |> not then failwithf "Does not use index"
+        
+
+        let ex2 = users.DropIndexIfExists(fun item -> item.Username)
+        let plan = users.Select(fun u -> u.Username, u.Auth).Where(fun u -> u.Username > "AABB" && u.Auth = true).ExplainQueryPlan()
+        printfn "%s" plan
+
+        if plan.Contains "USING INDEX" then failwithf "Did not drop index."
+        ()
     
     [<TestMethod>]
     member this.InitializeCollectionCreatesTable() =
