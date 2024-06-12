@@ -676,7 +676,7 @@ type SoloDBTesting() =
         let users = db.GetCollection<User>()
         let largeBatch = [| for i in 1 .. 100000 -> { Username = $"User{i}"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.UtcNow.AddDays(-i); LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [| $"tag{i}" |] } } |]
         let ids = users.InsertBatch largeBatch
-        assertEqual (ids.Count) (largeBatch.Length) "Not all users were inserted in the large batch."
+        assertEqual (ids.Length) (largeBatch.Length) "Not all users were inserted in the large batch."
     
     [<TestMethod>]
     member this.UpdateNonExistentUser() =        
@@ -977,11 +977,19 @@ type SoloDBTesting() =
 
         assertEqual (db.ListCollectionNames() |> Seq.toList) [nameof(User); nameof(UserWithId); "Abracadabra"] "ListCollectionNames did not list all the names."
 
+    [<TestMethod>]
+    member this.UsernameStringContains() =
+        db.GetCollection<User>().InsertBatch randomUsersToInsert |> ignore
+
+        let allUsersWithAInName = db.GetCollection<User>().Select(fun u -> u.Username).Where(fun u -> u.Username.Contains "a").ToList()
+
+        assertEqual allUsersWithAInName.Length 3 "Could not find all users with 'a' in Username."
+
 
 [<EntryPoint>]
 let main argv =
     let test = SoloDBTesting()
     test.Init()
-    try test.ListCollectionNames()
+    try test.UsernameStringContains()
     finally test.Cleanup()
     0
