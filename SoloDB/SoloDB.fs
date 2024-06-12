@@ -241,6 +241,18 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
         let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON {name}({whereSQL})"
 
         connection.Execute(indexSQL)
+
+    member this.DropIndexIfExists<'R>(expression: Expression<System.Func<'T, 'R>>) =
+        let whereSQL, newVariables = QueryTranslator.translate name expression
+        let whereSQL = whereSQL.Replace($"{name}.Value", "Value") // {name}.Value is not allowed in an index.
+
+        if newVariables.Count > 0 then failwithf "Cannot have variables in index."
+        let expressionStr = whereSQL.ToCharArray() |> Seq.filter(fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""
+        let indexName = $"{name}_index_{expressionStr}"
+
+        let indexSQL = $"DROP INDEX IF EXISTS {indexName}"
+
+        connection.Execute(indexSQL)
         
     override this.Equals(other) = 
         match other with
