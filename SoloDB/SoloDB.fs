@@ -42,7 +42,7 @@ let private createTable (name: string) (conn: SqliteConnection) =
         transaction.Rollback()
         reraise ()
 
-let private existsTable (name: string) (connection: SqliteConnection)  =
+let private existsCollection (name: string) (connection: SqliteConnection)  =
     connection.QueryFirstOrDefault<string>("SELECT Name FROM Types WHERE Name = @name LIMIT 1", {|name = name|}) <> null
 
 let private dropCollection (name: string) (transaction: SqliteTransaction) (connection: SqliteConnection) =
@@ -328,7 +328,7 @@ and SoloDB private (connectionString: string) =
         let connection = connectionPool.GetOrAdd(name, (fun name -> connectionCreator()))
 
         use mutex = lockTable name // To prevent a race condition where the next if statment is true for 2 threads.
-        if not (existsTable name connection) then 
+        if not (existsCollection name connection) then 
             createTable name connection
 
         Collection<'T>(connection, name, connectionString)
@@ -343,17 +343,17 @@ and SoloDB private (connectionString: string) =
         
         this.InitializeCollection<obj>(name)
 
-    member this.ExistTable name =
-        existsTable name dbConnection
+    member this.ExistCollection name =
+        existsCollection name dbConnection
 
-    member this.ExistTable<'T>() =
+    member this.ExistCollection<'T>() =
         let name = this.GetNameFrom<'T>()
-        existsTable name dbConnection
+        existsCollection name dbConnection
 
     member this.DropCollectionIfExists name =
         use mutex = lockTable name
 
-        if existsTable name dbConnection then
+        if existsCollection name dbConnection then
             use transaction = dbConnection.BeginTransaction()
             try
                 dropCollection name transaction dbConnection
@@ -376,6 +376,9 @@ and SoloDB private (connectionString: string) =
     member this.DropCollection name =
         if this.DropCollectionIfExists name = false then
             failwithf "Collection %s does not exists." name
+
+    member this.ListCollectionNames() =
+        dbConnection.Query<string>("SELECT Name FROM Types")
 
     member this.BackupTo(otherDb: SoloDB) =
         use connection = connectionCreator()
