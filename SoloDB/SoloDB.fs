@@ -27,7 +27,7 @@ let private lockTable(name: string) =
     let mutex = new DisposableMutex($"SoloDB-Table-{name}")
     mutex
 
-let private createTable<'T> (name: string) (conn: SqliteConnection) =
+let private createTable (name: string) (conn: SqliteConnection) =
     use transaction = conn.BeginTransaction()
     try
         conn.Execute($"CREATE TABLE \"{name}\" (
@@ -39,6 +39,9 @@ let private createTable<'T> (name: string) (conn: SqliteConnection) =
     with ex ->
         transaction.Rollback()
         reraise ()
+
+let private existsTable (name: string) (connection: SqliteConnection)  =
+    connection.QueryFirstOrDefault<string>("SELECT Name FROM Types WHERE Name = @name LIMIT 1", {|name = name|}) <> null
 
 type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, variables: Dictionary<string, obj>, select: 'Q -> 'R) =
     let mutable sql = sql
@@ -157,7 +160,7 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
 
     member this.InsertBatch (items: 'T seq) =
         use l = lockTable name // If not, there will be multiple transactions started on the same connection when used concurently.
-        let transaction = connection.BeginTransaction()
+        use transaction = connection.BeginTransaction()
         try
             let ids = List<int64>()
             for item in items do
@@ -230,7 +233,7 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
         let whereSQL = whereSQL.Replace($"{name}.Value", "Value") // {name}.Value is not allowed in an index.
 
         if newVariables.Count > 0 then failwithf "Cannot have variables in index."
-        let expressionStr = expression.ToString().ToCharArray() |> Seq.filter(fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""
+        let expressionStr = whereSQL.ToCharArray() |> Seq.filter(fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""
         let indexName = $"{name}_index_{expressionStr}"
 
         let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON {name}({whereSQL})"
@@ -239,31 +242,71 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
         
 
 and SoloDB(connection: SqliteConnection) =
-    member this.GetCollection<'T>() =
-        let name = typeof<'T>.Name.Replace("\"", "") // Anti SQL injection
-        use mutex = lockTable name // To prevent a race condition where the next if statment is true for 2 threads.
+    member private this.FormatName (name: string) =
+        name.Replace("\"", "") // Anti SQL injection
 
-        if (connection.QueryFirstOrDefault<string>("SELECT Name FROM Types WHERE Name = @name LIMIT 1", {|name = name|}) = null) then 
-            createTable<'T> name connection
+    member private this.GetNameFrom<'T>() =
+        typeof<'T>.Name |> this.FormatName
+
+    member private this.InitializeCollection<'T> name =
+        use mutex = lockTable name // To prevent a race condition where the next if statment is true for 2 threads.
+        
+        if not (existsTable name connection) then 
+            createTable name connection
 
         Collection<'T>(connection, name)
 
+    member this.GetCollection<'T>() =
+        let name = this.GetNameFrom<'T>()
+        
+        this.InitializeCollection<'T>(name)
+
     member this.GetUntypedCollection(name: string) =
-        let name = name.Replace("\"", "") // Anti SQL injection
-        use mutex = new Mutex(true, $"SoloDB-Table-{name}") // To prevent a race condition where the next if statment is true for 2 threads.
+        let name = name  |> this.FormatName
+        
+        this.InitializeCollection<obj>(name)
 
-        if (connection.QueryFirstOrDefault<string>("SELECT Name FROM Types WHERE Name = @name LIMIT 1", {|name = name|}) = null) then 
-            createTable<obj> name connection
+    member this.DropCollectionIfExists name =
+        use mutex = lockTable name
 
-        Collection<obj>(connection, name)
+        if existsTable name connection then
+            use transaction = connection.BeginTransaction()
+            try
+                connection.Execute($"DROP TABLE IF EXISTS \"{name}\"", transaction = transaction) |> ignore
+                connection.Execute("DELETE FROM Types Where Name = @name", {|name = name|}, transaction = transaction) |> ignore
+                transaction.Commit()
+                true
+            with ex -> 
+                transaction.Rollback()
+                reraise()
+        else false
+
+    member this.DropCollectionIfExists<'T>() =
+        let name = this.GetNameFrom<'T>()
+        this.DropCollectionIfExists name
+
+    member this.DropCollection<'T>() =
+        if this.DropCollectionIfExists<'T>() = false then
+            let name = this.GetNameFrom<'T>()
+            failwithf "Collection %s does not exists." name
+
+    member this.Dispose() =
+        connection.Close()
+        connection.Dispose()
 
     interface IDisposable with
-        member this.Dispose() =
-            connection.Close()
-            connection.Dispose()
+        member this.Dispose() = this.Dispose()
 
-let instantiate (path: string) =
-    let connection = new SqliteConnection($"Data Source={path}")
+let instantiate (source: string) =
+    let connectionString =
+        if source.StartsWith("memory:", StringComparison.InvariantCultureIgnoreCase) then
+            let memoryName = source.Substring "memory:".Length
+            let memoryName = memoryName.Trim()
+            sprintf "Data Source=%s;Mode=Memory;Cache=Shared" memoryName
+        else 
+            $"Data Source={source}"
+
+    let connection = new SqliteConnection(connectionString)
     connection.Open()
     let version = connection.QueryFirst<string>("SELECT SQLITE_VERSION()")
 
