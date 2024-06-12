@@ -67,7 +67,7 @@ let private insertInner (item: 'T) (connection: SqliteConnection) (transaction: 
 let private insertInnerRaw (item: DbObjectRow) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
     connection.Execute($"INSERT INTO \"{name}\"(Id, Value) VALUES(@id, jsonb(@jsonText))", {|name = name; id = item.Id; jsonText = item.ValueJSON|}, transaction)
 
-type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, variables: Dictionary<string, obj>, select: 'Q -> 'R) =
+type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, variables: Dictionary<string, obj>, select: 'Q -> 'R, postModifySQL: string -> string) =
     let mutable sql = sql
     let mutable limit = 0UL
     let mutable offset = 0UL
@@ -82,6 +82,8 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
             + (if orderByList.Count > 0 then sprintf "ORDER BY %s " (orderByList |> String.concat ",") else " ") 
             + (if limit > 0UL then $"LIMIT {limit} " else if offset > 0UL then "LIMIT -1 " else "")
             + (if offset > 0UL then $"OFFSET {offset} " else "")
+
+        let finalSQL = postModifySQL finalSQL
 
         printfn "%s" finalSQL 
 
@@ -140,7 +142,7 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         |> Seq.map(fun arr -> seq { for i in (arr :?> IEnumerable) do i } |> Seq.last |> Dyn.get "Value")
         |> String.concat ";\n"
 
-type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, select: 'Q -> 'R, vars: Dictionary<string, obj>) =
+type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, select: 'Q -> 'R, vars: Dictionary<string, obj>, postModifySQL: string -> string) =
     member this.Where(expression: Expression<System.Func<'T, bool>>) =
         let whereSQL, newVariables = QueryTranslator.translate name expression
         let sql = sql + sprintf "WHERE %s " whereSQL
@@ -148,7 +150,7 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         for var in vars do
             newVariables.Add(var.Key, var.Value)
 
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select, postModifySQL)
 
     member this.Where(expression: Expression<System.Func<SqlId, 'T, bool>>) =
         let whereSQL, newVariables = QueryTranslator.translate name expression
@@ -157,10 +159,10 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         for var in vars do
             newVariables.Add(var.Key, var.Value)
 
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select, postModifySQL)
 
     member this.WhereId(id: int64) =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql + sprintf "WHERE Id = %i " id, vars, select)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql + sprintf "WHERE Id = %i " id, vars, select, postModifySQL)
 
     member this.WhereId(func: Expression<System.Func<SqlId, bool>>) =
         let whereSQL, newVariables = QueryTranslator.translate name func
@@ -169,10 +171,10 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         for var in vars do
             newVariables.Add(var.Key, var.Value)
 
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select, postModifySQL)
 
     member this.OnAll() =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select, postModifySQL)
 
 type Collection<'T>(connection: SqliteConnection, name: string, connectionString: string) =
     member private this.ConnectionString = connectionString
@@ -209,31 +211,31 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
     member this.Select<'R>(select: Expression<System.Func<'T, 'R>>) =
         let selectSQL, variables = QueryTranslator.translate name select
 
-        WhereBuilder<'T, DbObjectRow, 'R>(connection, name, $"SELECT Id, {selectSQL} as ValueJSON FROM \"{name}\" ", fromDapper<'R>, variables)
+        WhereBuilder<'T, DbObjectRow, 'R>(connection, name, $"SELECT Id, {selectSQL} as ValueJSON FROM \"{name}\" ", fromDapper<'R>, variables, id)
 
     member this.Select() =
-        WhereBuilder<'T, DbObjectRow, 'T>(connection, name, $"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" ", fromDapper<'T>, Dictionary<string, obj>())
+        WhereBuilder<'T, DbObjectRow, 'T>(connection, name, $"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" ", fromDapper<'T>, Dictionary<string, obj>(), id)
 
     member this.SelectWithId() =
-        WhereBuilder(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>())
+        WhereBuilder(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>(), id)
 
     member this.Count() =
-        WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>())
+        WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), id)
 
     member this.CountAll() =        
-        WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>()).OnAll().First()
+        WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), id).OnAll().First()
 
     member this.CountAllLimit(limit: uint64) =        
-        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" LIMIT @limit)", Dictionary<string, obj>([|KeyValuePair("limit", limit :> obj)|]), fromJsonOrSQL<int64>).First()
+        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" LIMIT @limit)", Dictionary<string, obj>([|KeyValuePair("limit", limit :> obj)|]), fromJsonOrSQL<int64>, id).First()
 
     member this.CountWhere(func: Expression<System.Func<'T, bool>>) =
-        WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>()).Where(func).First()
+        WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), id).Where(func).First()
 
     member this.CountWhere(func: Expression<System.Func<'T, bool>>, limit: uint64) =
         let whereSQL, variables = QueryTranslator.translate name func
         variables["limit"] <- limit :> obj
 
-        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" WHERE {whereSQL} LIMIT @limit)", variables, fromJsonOrSQL<int64>).First()
+        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" WHERE {whereSQL} LIMIT @limit)", variables, fromJsonOrSQL<int64>, id).First()
 
     member this.Any(func) = this.CountWhere(func, 1UL) > 0L
 
@@ -241,10 +243,10 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
         let updateSQL, variables = QueryTranslator.translateUpdateMode name expression
         let updateSQL = updateSQL.Trim ','
 
-        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {updateSQL})", fromJsonOrSQL<int64>, variables)
+        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {updateSQL})", fromJsonOrSQL<int64>, variables, id)
 
     member this.Update(item: 'T) =
-        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Dictionary([|KeyValuePair("item", toSQLJson item :> obj)|]))
+        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Dictionary([|KeyValuePair("item", toSQLJson item :> obj)|]), id)
 
     member this.Replace(item: SoloDBEntry) =
         match item :> obj with
@@ -252,7 +254,8 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
         | other -> failwithf "Cannot insert a %s in a %s Collection, but if you want it use a UntypedCollection with the name '%s'." (other.GetType().FullName) (typeof<'T>.FullName) (name)
 
     member this.Delete() =
-        WhereBuilder<'T, string, int64>(connection, name, $"DELETE FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>())
+        // https://stackoverflow.com/questions/1824490/how-do-you-enable-limit-for-delete-in-sqlite
+        WhereBuilder<'T, string, int64>(connection, name, $"DELETE FROM \"{name}\" WHERE Id IN (SELECT Id FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), fun sql -> sql + ")")
 
     member this.DeleteById(id: int64) : int =
         this.Delete().WhereId(id).Execute()
