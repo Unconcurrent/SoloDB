@@ -6,15 +6,12 @@ open System.Linq.Expressions
 open System
 open System.Collections.Generic
 open System.Collections
-open System.Text.Json
-open System.Text
 open System.Text.RegularExpressions
 open System.Threading
 open FSharp.Interop.Dynamic
 open JsonUtils
-open QueryTranslator
 open System.Collections.Concurrent
-open System.Data
+open SoloDbTypes
 
 type private DisposableMutex(name: string) =
     let mutex = new Mutex(false, name)
@@ -24,12 +21,6 @@ type private DisposableMutex(name: string) =
         member this.Dispose() =
             mutex.ReleaseMutex()
             mutex.Dispose()
-
-[<CLIMutable>]
-type private DbObjectRow = {
-    Id: int64
-    ``json(Value)``: string
-}
 
 let private lockTable(name: string) =
     let mutex = new DisposableMutex($"SoloDB-Table-{name}")
@@ -60,10 +51,21 @@ let private dropCollection (name: string) (transaction: SqliteTransaction) (conn
 
 let private insertInner (item: 'T) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
     let json = toJson item
-    connection.QueryFirst<int64>($"INSERT INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|}, transaction)
+    match item :> obj with
+    | :? SoloDBEntry as entry when entry.Id <> 0 -> failwithf "Cannot insert a SoloDBEntry with a non zero Id, maybe you want to Replace()?"
+    | _ ->
+    
+    let id = connection.QueryFirst<int64>($"INSERT INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|}, transaction)
+
+    match item :> obj with
+    | :? SoloDBEntry as entry -> SoloDBEntry.InitId entry id
+    | other -> ()
+    id
+
+
 
 let private insertInnerRaw (item: DbObjectRow) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
-    connection.Execute($"INSERT INTO \"{name}\"(Id, Value) VALUES(@id, jsonb(@jsonText))", {|name = name; id = item.Id; jsonText = item.``json(Value)``|}, transaction)
+    connection.Execute($"INSERT INTO \"{name}\"(Id, Value) VALUES(@id, jsonb(@jsonText))", {|name = name; id = item.Id; jsonText = item.ValueJSON|}, transaction)
 
 type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, variables: Dictionary<string, obj>, select: 'Q -> 'R) =
     let mutable sql = sql
@@ -116,6 +118,7 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         connection.Query<'Q>(finalSQL, parameters) 
             |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
             |> Seq.map select 
+            |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
 
     member this.ToList() =
         this.Enumerate() 
@@ -194,9 +197,9 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
             reraise()
 
     member this.TryGetById(id: int64) =
-        match connection.QueryFirstOrDefault<string>($"SELECT json(Value) FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
-        | null -> None
-        | json -> fromJsonOrSQL<'T> json |> Some
+        match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
+        | json when Object.ReferenceEquals(json, null) -> None
+        | json -> fromDapper<'T> json |> Some
 
     member this.GetById(id: int64) =
         match this.TryGetById id with
@@ -206,10 +209,10 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
     member this.Select<'R>(select: Expression<System.Func<'T, 'R>>) =
         let selectSQL, variables = QueryTranslator.translate name select
 
-        WhereBuilder<'T, string, 'R>(connection, name, $"SELECT {selectSQL} FROM \"{name}\" ", fromJsonOrSQL<'R>, variables)
+        WhereBuilder<'T, DbObjectRow, 'R>(connection, name, $"SELECT Id, {selectSQL} as ValueJSON FROM \"{name}\" ", fromDapper<'R>, variables)
 
     member this.Select() =
-        WhereBuilder<'T, string, 'T>(connection, name, $"SELECT json(Value) FROM \"{name}\" ", fromJsonOrSQL<'T>, Dictionary<string, obj>())
+        WhereBuilder<'T, DbObjectRow, 'T>(connection, name, $"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" ", fromDapper<'T>, Dictionary<string, obj>())
 
     member this.SelectWithId() =
         WhereBuilder(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>())
@@ -242,6 +245,11 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
 
     member this.Update(item: 'T) =
         WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Dictionary([|KeyValuePair("item", toSQLJson item :> obj)|]))
+
+    member this.Replace(item: SoloDBEntry) =
+        match item :> obj with
+        | :? 'T as value -> this.Update(value).WhereId(item.Id).Execute() |> ignore
+        | other -> failwithf "Cannot insert a %s in a %s Collection, but if you want it use a UntypedCollection with the name '%s'." (other.GetType().FullName) (typeof<'T>.FullName) (name)
 
     member this.Delete() =
         WhereBuilder<'T, string, int64>(connection, name, $"DELETE FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>())
@@ -387,7 +395,7 @@ and SoloDB private (connectionString: string) =
 
             for name in names do
                 createTableInner name otherConnection otherTransaction 
-                let rows = connection.Query<DbObjectRow>(sprintf "SELECT Id, json(Value) FROM \"%s\"" name, buffered = false, commandTimeout = Nullable<int>())
+                let rows = connection.Query<DbObjectRow>(sprintf "SELECT Id, json(Value) as ValueJSON FROM \"%s\"" name, buffered = false, commandTimeout = Nullable<int>())
                 for row in rows do
                     let rowsAffected = insertInnerRaw row otherConnection otherTransaction name
                     if rowsAffected <> 1 then failwithf "No rows affected in insert."
@@ -443,7 +451,7 @@ type Array with
     member this.RemoveAt(index: int) =
         failwithf "This is a dummy function for the SQL builder."
 
-    member this.AnyInEach(condition: QueryTranslator.InnerExpr) = 
+    member this.AnyInEach(condition: InnerExpr) = 
         failwithf "This is a dummy function for the SQL builder."
         bool()
 

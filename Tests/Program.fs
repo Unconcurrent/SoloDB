@@ -1,6 +1,7 @@
 ﻿module Tests
 
 open TypesOld
+open TypesOld
 
 #nowarn "3391" // Implicit on SqlId
 
@@ -10,13 +11,10 @@ open System.Threading
 open System.Threading.Tasks
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open SoloDB
-open QueryTranslator
+open SoloDbTypes
 open Types
 
 open FSharp.Interop.Dynamic
-
-
-
 
 let assertEqual<'T when 'T : equality> (a: 'T) (b: 'T) (message: string) = // F# cannot decide the overload.
     if a <> b then failwithf "Assert failed, got %A, expected %A: %s" a b message
@@ -908,11 +906,53 @@ type SoloDBTesting() =
             assertEqual (backup.GetUntypedCollection("Data2").Count().Where(fun x -> x?abc <> "xyz" && x?abc <> "1010").First()) 0L "Backup data mismatch."
         finally running <- false
 
+    [<TestMethod>]
+    member this.ReplaceDocumentBySet() =
+        let user = db.GetCollection<User>()
+        let id = user.Insert randomUsersToInsert.[0]
+        let userToUpdate = randomUsersToInsert.[1]
+        assertEqual (user.Update(fun u -> u.Set userToUpdate).WhereId(id).Execute()) 1 "Did not update."
+        let dbUser = user.GetById id
+        assertEqual dbUser userToUpdate "Did not update."
+
+    [<TestMethod>]
+    member this.ReplaceDocument() =
+        let user = db.GetCollection<User>()
+        let id = user.Insert randomUsersToInsert.[0]
+        let userToUpdate = randomUsersToInsert.[1]
+        assertEqual (user.Update(userToUpdate).WhereId(id).Execute()) 1 "Did not update."
+        let dbUser = user.GetById id
+        assertEqual dbUser userToUpdate "Did not update."
+
+    [<TestMethod>]
+    member this.UserWithIdInsert() =
+        let users = db.GetCollection<UserWithId>()
+        let user1 = randomUsersWithIdToInsert.[0].Clone()
+
+        users.Insert user1 |> ignore
+        Assert.AreNotEqual(user1.Id, 0L, "User id = 0, did not init its id.")
+
+    [<TestMethod>]
+    member this.UserWithIdReplace() =
+        let users = db.GetCollection<UserWithId>()
+        let user1 = randomUsersWithIdToInsert.[0].Clone()
+
+        users.Insert user1 |> ignore
+        Assert.AreNotEqual(user1.Id, 0L, "User id = 0, did not init its id.")
+
+        user1.Username <- "FSJFHDJI"
+        user1.Banned <- true
+
+        users.Replace(user1)
+
+        let dbUser = users.GetById user1.Id
+        assertEqual (dbUser.ToString()) (user1.ToString()) "User did not replace in DB."
+
 
 [<EntryPoint>]
 let main argv =
     let test = SoloDBTesting()
     test.Init()
-    try test.BackupDBWhileWriting()
+    try test.UserWithIdReplace()
     finally test.Cleanup()
     0
