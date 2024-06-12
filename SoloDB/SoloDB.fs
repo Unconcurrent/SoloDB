@@ -13,8 +13,9 @@ open System.Threading
 open FSharp.Interop.Dynamic
 open JsonUtils
 open QueryTranslator
+open System.Collections.Concurrent
 
-type DisposableMutex(name: string) =
+type private DisposableMutex(name: string) =
     let mutex = new Mutex(false, name)
     do mutex.WaitOne() |> ignore
 
@@ -149,24 +150,25 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
     member this.OnAll() =
         FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select)
 
-type Collection<'T>(connection: SqliteConnection, name: string) =
-    let insertInner (item: 'T) (transaction: SqliteTransaction) =
-        let json = toSQLJson item
+type Collection<'T>(connection: SqliteConnection, name: string, connectionString: string) =
+    let insertInner (item: 'T) (connection: SqliteConnection) (transaction: SqliteTransaction) =
+        let json = toJson item
         connection.QueryFirst<int64>($"INSERT INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|}, transaction)
 
-    member private this.Connection = connection
+    member private this.ConnectionString = connectionString
     member this.Name = name
 
     member this.Insert (item: 'T) =
-        insertInner item null
+        insertInner item connection null
 
     member this.InsertBatch (items: 'T seq) =
-        use l = lockTable name // If not, there will be multiple transactions started on the same connection when used concurently.
+        use l = lockTable name  // If not, there will be multiple transactions started on the same connection when used concurently,
+                                // and it is faster than creating new connections.
         use transaction = connection.BeginTransaction()
         try
             let ids = List<int64>()
             for item in items do
-                insertInner item transaction |> ids.Add
+                insertInner item connection transaction |> ids.Add
 
             transaction.Commit()
             ids
@@ -264,9 +266,29 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
 
     interface IEquatable<Collection<'T>> with
         member this.Equals (other) =
-            this.Connection.ConnectionString = other.Connection.ConnectionString && this.Name = other.Name
+            this.ConnectionString = other.ConnectionString && this.Name = other.Name
 
-and SoloDB(connection: SqliteConnection) =
+and SoloDB private (connectionString: string) = 
+    let mutable disposed = false
+    let connectionCreator () =
+        if disposed then failwithf "SoloDB was disposed."
+
+        let connection = new SqliteConnection(connectionString)
+        connection.Open()
+        connection
+
+    let connectionPool = ConcurrentDictionary<string, SqliteConnection>()
+    let dbConnection = connectionCreator()
+    do dbConnection.Execute(
+        "PRAGMA journal_mode=wal;
+        CREATE TABLE IF NOT EXISTS Types (Id INTEGER NOT NULL PRIMARY KEY UNIQUE, Name TEXT NOT NULL) STRICT;
+        CREATE INDEX IF NOT EXISTS TypeNameIndex ON Types(Name);
+        ") |> ignore
+
+    member this.ConnectionString = connectionString
+    member this.GetDBConnection() = dbConnection
+    member this.GetNewConnection() = connectionCreator()
+
     member private this.FormatName (name: string) =
         name.Replace("\"", "") // Anti SQL injection
 
@@ -274,12 +296,13 @@ and SoloDB(connection: SqliteConnection) =
         typeof<'T>.Name |> this.FormatName
 
     member private this.InitializeCollection<'T> name =
+        let connection = connectionPool.GetOrAdd(name, (fun name -> connectionCreator()))
+
         use mutex = lockTable name // To prevent a race condition where the next if statment is true for 2 threads.
-        
         if not (existsTable name connection) then 
             createTable name connection
 
-        Collection<'T>(connection, name)
+        Collection<'T>(connection, name, connectionString)
 
     member this.GetCollection<'T>() =
         let name = this.GetNameFrom<'T>()
@@ -292,20 +315,20 @@ and SoloDB(connection: SqliteConnection) =
         this.InitializeCollection<obj>(name)
 
     member this.ExistTable name =
-        existsTable name connection
+        existsTable name dbConnection
 
     member this.ExistTable<'T>() =
         let name = this.GetNameFrom<'T>()
-        existsTable name connection
+        existsTable name dbConnection
 
     member this.DropCollectionIfExists name =
         use mutex = lockTable name
 
-        if existsTable name connection then
-            use transaction = connection.BeginTransaction()
+        if existsTable name dbConnection then
+            use transaction = dbConnection.BeginTransaction()
             try
-                connection.Execute($"DROP TABLE IF EXISTS \"{name}\"", transaction = transaction) |> ignore
-                connection.Execute("DELETE FROM Types Where Name = @name", {|name = name|}, transaction = transaction) |> ignore
+                dbConnection.Execute($"DROP TABLE IF EXISTS \"{name}\"", transaction = transaction) |> ignore
+                dbConnection.Execute("DELETE FROM Types Where Name = @name", {|name = name|}, transaction = transaction) |> ignore
                 transaction.Commit()
                 true
             with ex -> 
@@ -322,33 +345,33 @@ and SoloDB(connection: SqliteConnection) =
             let name = this.GetNameFrom<'T>()
             failwithf "Collection %s does not exists." name
 
+    member this.BackupTo(otherDb: SoloDB) =
+        use connection = connectionCreator()
+        use otherConnection = otherDb.GetDBConnection()
+        connection.BackupDatabase otherConnection
+
     member this.Dispose() =
-        connection.Close()
-        connection.Dispose()
+        disposed <- true
+        for connections in connectionPool.Values do
+            connections.Dispose()
+        connectionPool.Clear()
+        dbConnection.Dispose()
 
     interface IDisposable with
         member this.Dispose() = this.Dispose()
 
-let instantiate (source: string) =
-    let connectionString =
-        if source.StartsWith("memory:", StringComparison.InvariantCultureIgnoreCase) then
-            let memoryName = source.Substring "memory:".Length
-            let memoryName = memoryName.Trim()
-            sprintf "Data Source=%s;Mode=Memory;Cache=Shared" memoryName
-        else 
-            $"Data Source={source}"
+    static member Instantiate (source: string) =
+        let connectionString =
+            if source.StartsWith("memory:", StringComparison.InvariantCultureIgnoreCase) then
+                let memoryName = source.Substring "memory:".Length
+                let memoryName = memoryName.Trim()
+                sprintf "Data Source=%s;Mode=Memory;Cache=Shared" memoryName
+            else 
+                $"Data Source={source}"
 
-    let connection = new SqliteConnection(connectionString)
-    connection.Open()
-    let version = connection.QueryFirst<string>("SELECT SQLITE_VERSION()")
+        new SoloDB(connectionString)
 
-    connection.Execute(
-        "CREATE TABLE IF NOT EXISTS Types (Id INTEGER NOT NULL PRIMARY KEY UNIQUE, Name TEXT NOT NULL) STRICT;
-        CREATE INDEX IF NOT EXISTS TypeNameIndex ON Types(Name);") |> ignore
-
-    new SoloDB(connection)
-
-  
+let instantiate = SoloDB.Instantiate
 
 type System.Object with
     member this.Set(value: obj) =
@@ -372,8 +395,6 @@ type Array with
     member this.AnyInEach(condition: QueryTranslator.InnerExpr) = 
         failwithf "This is a dummy function for the SQL builder."
         bool()
-
-
 
 // This operator allow for multiple operations in the Update method,
 // else it will throw 'Could not convert the following F# Quotation to a LINQ Expression Tree',
