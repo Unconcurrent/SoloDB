@@ -29,6 +29,9 @@ let jsonOptions =
     o.Converters.Add (BooleanJsonConverter())
     o
 
+let toJson<'T> o =
+    System.Text.Json.JsonSerializer.Serialize<'T>(o, jsonOptions)
+
 let toSQLJsonAndKind<'T> item =
     let element = System.Text.Json.JsonSerializer.SerializeToElement<'T>(item, jsonOptions)
     let text = element.ToString()
@@ -83,10 +86,11 @@ and fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
         match o.TryGetProperty "Item1" with
         | true, _ -> // It is a tuple, will convert ot array
             tupleToArray o :> obj :?> 'T
-        | false, _ -> o :> obj :?> 'T
+        | false, _ -> System.Text.Json.JsonSerializer.Deserialize<'T> (data, jsonOptions)
 
     else if data.StartsWith "[" then
-        System.Text.Json.JsonSerializer.Deserialize<obj array> (data, jsonOptions) :> obj :?> 'T
+        let o = System.Text.Json.JsonSerializer.Deserialize<JsonElement> (data, jsonOptions)
+        o.EnumerateArray() |> Seq.map(fun e -> e.ToString()) |> Seq.map fromJsonOrSQL<obj> |> Seq.toList :> obj :?> 'T
     else
         data :> obj :?> 'T
     

@@ -1,5 +1,7 @@
 ﻿module Tests
 
+open TypesOld
+
 #nowarn "3391" // Implicit on SqlId
 
 open System
@@ -19,12 +21,12 @@ open FSharp.Interop.Dynamic
 let assertEqual<'T when 'T : equality> (a: 'T) (b: 'T) (message: string) = Assert.IsTrue((a = b), message) // F# cannot decide the overload.
 
 [<TestClass>]
-type SoloDBTesting() =
-    let dbSource = "memory:Test1"        
+type SoloDBTesting() =         
     let mutable db: SoloDB = Unchecked.defaultof<SoloDB>
 
     [<TestInitialize>]
     member this.Init() =
+        let dbSource = $"memory:Test{Random.Shared.NextInt64()}"
         db <- SoloDB.instantiate dbSource
 
     [<TestCleanup>]
@@ -827,10 +829,42 @@ type SoloDBTesting() =
         for user in newUsers do
             Assert.IsNotNull(user, "OldUser to User desealization failed.")
 
+    [<TestMethod>]
+    member this.BackupDB() =        
+        let ids = db.GetCollection<User>().InsertBatch randomUsersToInsert
+        let ids = db.GetCollection<User>().InsertBatch randomUsersToInsert
+        let ids = db.GetCollection<User>().InsertBatch randomUsersToInsert
+        let ids = db.GetCollection<User>().InsertBatch randomUsersToInsert
+
+        let randomData: obj list = [
+            "test";
+            1L;
+            2L;
+            ["A" :> obj; "B"; "C"; 99L]
+        ]
+
+        db.GetUntypedCollection("RandomData").InsertBatch randomData |> ignore
+
+        use backup = SoloDB.instantiate "memory:backup1"
+        db.BackupTo backup
+
+        db.DropCollectionIfExists "RandomData" |> ignore
+        db.Dispose()
+
+        let backupRandomData = backup.GetUntypedCollection "RandomData"
+        let backupRandomDataValues = backupRandomData.Select().OnAll().ToList()
+        let backupRandomDataValuesString = sprintf "%A" backupRandomDataValues
+        let randomDataString = sprintf "%A" randomData
+
+        assertEqual backupRandomDataValuesString randomDataString "Backup incomplete, not equal."
+
+        let usersCount = backup.GetCollection<User>().CountAll()
+        assertEqual usersCount (randomUsersToInsert.LongLength * 4L) "Backup incomplete, not everything."
+
 [<EntryPoint>]
 let main argv =
     let test = SoloDBTesting()
     test.Init()
-    try test.EnsureOldUserToNewUserDeserialization()
+    try test.BackupDB()
     finally test.Cleanup()
     0
