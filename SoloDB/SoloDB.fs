@@ -14,6 +14,7 @@ open FSharp.Interop.Dynamic
 open JsonUtils
 open QueryTranslator
 open System.Collections.Concurrent
+open System.Data
 
 type private DisposableMutex(name: string) =
     let mutex = new Mutex(false, name)
@@ -24,18 +25,27 @@ type private DisposableMutex(name: string) =
             mutex.ReleaseMutex()
             mutex.Dispose()
 
+[<CLIMutable>]
+type private DbObjectRow = {
+    Id: int64
+    ``json(Value)``: string
+}
+
 let private lockTable(name: string) =
     let mutex = new DisposableMutex($"SoloDB-Table-{name}")
     mutex
 
-let private createTable (name: string) (conn: SqliteConnection) =
-    use transaction = conn.BeginTransaction()
-    try
-        conn.Execute($"CREATE TABLE \"{name}\" (
+let private createTableInner (name: string) (conn: SqliteConnection) (transaction: SqliteTransaction) =
+    conn.Execute($"CREATE TABLE \"{name}\" (
     	    Id INTEGER NOT NULL PRIMARY KEY UNIQUE,
     	    Value JSONB NOT NULL
         );", {|name = name|}, transaction) |> ignore
-        conn.Execute("INSERT INTO Types(Name) VALUES (@name)", {|name = name|}, transaction) |> ignore
+    conn.Execute("INSERT INTO Types(Name) VALUES (@name)", {|name = name|}, transaction) |> ignore
+
+let private createTable (name: string) (conn: SqliteConnection) =
+    use transaction = conn.BeginTransaction()
+    try
+        createTableInner name conn transaction
         transaction.Commit()
     with ex ->
         transaction.Rollback()
@@ -43,6 +53,17 @@ let private createTable (name: string) (conn: SqliteConnection) =
 
 let private existsTable (name: string) (connection: SqliteConnection)  =
     connection.QueryFirstOrDefault<string>("SELECT Name FROM Types WHERE Name = @name LIMIT 1", {|name = name|}) <> null
+
+let private dropCollection (name: string) (transaction: SqliteTransaction) (connection: SqliteConnection) =
+    connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name, transaction = transaction) |> ignore
+    connection.Execute("DELETE FROM Types Where Name = @name", {|name = name|}, transaction = transaction) |> ignore
+
+let private insertInner (item: 'T) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
+    let json = toJson item
+    connection.QueryFirst<int64>($"INSERT INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|}, transaction)
+
+let private insertInnerRaw (item: DbObjectRow) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
+    connection.Execute($"INSERT INTO \"{name}\"(Id, Value) VALUES(@id, jsonb(@jsonText))", {|name = name; id = item.Id; jsonText = item.``json(Value)``|}, transaction)
 
 type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, variables: Dictionary<string, obj>, select: 'Q -> 'R) =
     let mutable sql = sql
@@ -151,15 +172,11 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select)
 
 type Collection<'T>(connection: SqliteConnection, name: string, connectionString: string) =
-    let insertInner (item: 'T) (connection: SqliteConnection) (transaction: SqliteTransaction) =
-        let json = toJson item
-        connection.QueryFirst<int64>($"INSERT INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|}, transaction)
-
     member private this.ConnectionString = connectionString
     member this.Name = name
 
     member this.Insert (item: 'T) =
-        insertInner item connection null
+        insertInner item connection null name
 
     member this.InsertBatch (items: 'T seq) =
         use l = lockTable name  // If not, there will be multiple transactions started on the same connection when used concurently,
@@ -168,7 +185,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
         try
             let ids = List<int64>()
             for item in items do
-                insertInner item connection transaction |> ids.Add
+                insertInner item connection transaction name |> ids.Add
 
             transaction.Commit()
             ids
@@ -270,6 +287,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
 
 and SoloDB private (connectionString: string) = 
     let mutable disposed = false
+
     let connectionCreator () =
         if disposed then failwithf "SoloDB was disposed."
 
@@ -327,8 +345,7 @@ and SoloDB private (connectionString: string) =
         if existsTable name dbConnection then
             use transaction = dbConnection.BeginTransaction()
             try
-                dbConnection.Execute($"DROP TABLE IF EXISTS \"{name}\"", transaction = transaction) |> ignore
-                dbConnection.Execute("DELETE FROM Types Where Name = @name", {|name = name|}, transaction = transaction) |> ignore
+                dropCollection name transaction dbConnection
                 transaction.Commit()
                 true
             with ex -> 
@@ -345,10 +362,44 @@ and SoloDB private (connectionString: string) =
             let name = this.GetNameFrom<'T>()
             failwithf "Collection %s does not exists." name
 
+    member this.DropCollection name =
+        if this.DropCollectionIfExists name = false then
+            failwithf "Collection %s does not exists." name
+
     member this.BackupTo(otherDb: SoloDB) =
         use connection = connectionCreator()
-        use otherConnection = otherDb.GetDBConnection()
+        use otherConnection = otherDb.GetNewConnection()
         connection.BackupDatabase otherConnection
+
+    member this.BackupTransactionally(otherDb: SoloDB) =
+        use connection = connectionCreator()
+        use otherConnection = otherDb.GetNewConnection()
+
+        connection.Execute("BEGIN IMMEDIATE") |> ignore // Get a write lock
+                
+        let names = connection.Query<string>("SELECT Name FROM Types") |> Seq.toList
+        printfn "Tables count: %i" names.Length
+
+        use otherTransaction = otherConnection.BeginTransaction()
+        try
+            let otherNames = otherConnection.Query<string>("SELECT Name FROM Types")
+            for otherName in otherNames do dropCollection otherName otherTransaction otherConnection 
+
+            for name in names do
+                createTableInner name otherConnection otherTransaction 
+                let rows = connection.Query<DbObjectRow>(sprintf "SELECT Id, json(Value) FROM \"%s\"" name, buffered = false, commandTimeout = Nullable<int>())
+                for row in rows do
+                    let rowsAffected = insertInnerRaw row otherConnection otherTransaction name
+                    if rowsAffected <> 1 then failwithf "No rows affected in insert."
+
+
+            otherTransaction.Commit()
+        with ex -> 
+            otherTransaction.Rollback() 
+            reraise()
+
+
+        connection.Execute("ROLLBACK") |> ignore
 
     member this.Dispose() =
         disposed <- true

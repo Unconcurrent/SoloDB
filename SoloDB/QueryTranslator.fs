@@ -95,6 +95,7 @@ let rec private visit (exp: Expression) (sb: QueryBuilder) : Expression =
     | ExpressionType.And
     | ExpressionType.AndAlso
     | ExpressionType.Or
+    | ExpressionType.OrElse
     | ExpressionType.Equal
     | ExpressionType.NotEqual
     | ExpressionType.LessThan
@@ -284,6 +285,7 @@ and private visitBinary (b: BinaryExpression) (qb: QueryBuilder) =
     match b.NodeType with
     | ExpressionType.And
     | ExpressionType.AndAlso -> qb.AppendRaw(" AND ")  |> ignore
+    | ExpressionType.OrElse
     | ExpressionType.Or -> qb.AppendRaw(" OR ")  |> ignore
     | ExpressionType.Equal -> if isAnyNull then qb.AppendRaw(" IS ") else qb.AppendRaw(" = ")  |> ignore
     | ExpressionType.NotEqual -> if isAnyNull then qb.AppendRaw(" IS NOT ") else  qb.AppendRaw(" <> ")  |> ignore

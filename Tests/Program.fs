@@ -830,7 +830,7 @@ type SoloDBTesting() =
             Assert.IsNotNull(user, "OldUser to User desealization failed.")
 
     [<TestMethod>]
-    member this.BackupDB() =        
+    member this.BackupDBFullLock() =
         let ids = db.GetCollection<User>().InsertBatch randomUsersToInsert
         let ids = db.GetCollection<User>().InsertBatch randomUsersToInsert
         let ids = db.GetCollection<User>().InsertBatch randomUsersToInsert
@@ -848,7 +848,7 @@ type SoloDBTesting() =
         use backup = SoloDB.instantiate "memory:backup1"
         db.BackupTo backup
 
-        db.DropCollectionIfExists "RandomData" |> ignore
+        db.DropCollection "RandomData" |> ignore
         db.Dispose()
 
         let backupRandomData = backup.GetUntypedCollection "RandomData"
@@ -861,10 +861,56 @@ type SoloDBTesting() =
         let usersCount = backup.GetCollection<User>().CountAll()
         assertEqual usersCount (randomUsersToInsert.LongLength * 4L) "Backup incomplete, not everything."
 
+    [<TestMethod>]
+    member this.BackupDBWhileWriting() =
+        let mutable running = true
+        let mutable count = 1
+        Thread(fun () -> 
+                        try
+                            while running do 
+                                db.GetUntypedCollection("Data").Insert {|abc = "xyz"|} |> ignore
+                                printfn "[%s] Insert 1 INTO Data #%i" (DateTime.Now.ToShortTimeString()) count
+                                count <- count + 1
+                                Thread.Sleep 10
+                        with
+                        | :? ObjectDisposedException as oex -> ()
+                            
+                            ).Start()
+
+        Thread(fun () -> 
+                        try
+                            while running do 
+                                let len = db.GetUntypedCollection("Data").Select().OnAll().Enumerate() |> Seq.length
+                                printfn "[%s] READ FROM Data = %i #%i" (DateTime.Now.ToShortTimeString()) len count
+                                count <- count + 1
+                                Thread.Sleep 10
+                        with
+                        | :? ObjectDisposedException as oex -> ()      
+                              ).Start()
+
+
+        try            
+            Thread.Sleep 250
+            for i in 1..10 do db.GetUntypedCollection("Data").Insert {|abc = "1010"|} |> ignore
+
+            use backup = SoloDB.instantiate "memory:backup2"
+            printfn "[%s] Start backup." (DateTime.Now.ToShortTimeString())
+            let countBeforeBackup = count
+            db.BackupTransactionally backup
+            running <- false
+
+            let backupCount = backup.GetUntypedCollection("Data").Count().Where(fun x -> x?abc = "1010").First() |> int
+            printfn "Backup count: %i" backupCount
+            if backupCount <> 10 then failwithf "Backup count mismatch."
+
+            if backup.GetUntypedCollection("Data2").Count().Where(fun x -> x?abc <> "xyz" && x?abc <> "1010").First() <> 0L then failwithf "Backup data mismatch."
+        finally running <- false
+
+
 [<EntryPoint>]
 let main argv =
     let test = SoloDBTesting()
     test.Init()
-    try test.BackupDB()
+    try test.BackupDBWhileWriting()
     finally test.Cleanup()
     0
