@@ -811,6 +811,46 @@ type SoloDBTesting() =
         printfn "%s" plan
         ()
     
+    [<TestMethod>]
+    member this.InitializeCollectionCreatesTable() =
+        db.GetCollection<User>() |> ignore
+        Assert.IsTrue(db.ExistTable<User>(), "Table for User was not created")
+
+    [<TestMethod>]
+    member this.GetCollectionReturnsConsistentInstance() =
+        let collection1 = db.GetCollection<User>()
+        let collection2 = db.GetCollection<User>()
+        Assert.IsTrue((collection1 = collection2), "GetCollection should return the same instance")
+
+    [<TestMethod>]
+    member this.DropCollectionIfExistsWorksCorrectly() =
+        db.GetCollection<User>()  |> ignore
+        let result = db.DropCollectionIfExists<User>()
+        Assert.IsTrue(result && not (db.ExistTable<User>()), "DropCollectionIfExists failed to drop the table")
+
+    [<TestMethod>]
+    member this.DropCollectionThatDoesNotExistReturnsFalse() =
+        let result = db.DropCollectionIfExists "NonExistent"
+        Assert.IsFalse(result, "DropCollectionIfExists should return false for non-existent tables")
+
+    [<TestMethod>]
+    member this.GetUntypedCollectionInitializesCorrectly() =
+        let collection = db.GetUntypedCollection "Dynamic"
+        Assert.IsNotNull(collection, "GetUntypedCollection failed to initialize a collection")
+
+    [<TestMethod>]
+    member this.DropNonExistentCollectionThrows() =
+        Assert.ThrowsException<exn>((fun () -> db.DropCollection<User>()), "Expected exception was not thrown for dropping non-existent collection")
+
+    [<TestMethod>]
+    member this.LockHandlingDuringCollectionInitialization() =
+        let initAction = async {
+            db.DropCollectionIfExists<User>() |> ignore
+            let _ = db.GetCollection<User>() in ()
+        }
+        let tasks = [| for _ in 1 .. 5 -> Async.StartAsTask initAction :> Task |]
+        Task.WaitAll(tasks)
+        Assert.IsTrue(db.ExistTable<User>(), "Lock handling during collection initialization failed")
 
 [<EntryPoint>]
 let main argv =
