@@ -234,6 +234,8 @@ and private visitNew (m: NewExpression) (qb: QueryBuilder) =
 and private visitConvert (m: UnaryExpression) (qb: QueryBuilder) =
     if m.Type = typeof<obj> || m.Operand.Type = typeof<obj> then
         visit(m.Operand) qb
+    else if isIntegerBasedType m.Type then // ignore cast like (int64)1
+        visit(m.Operand) qb
     else failwithf "Convert not yet implemented: %A" m.Type
 
 and private visitBinary (b: BinaryExpression) (qb: QueryBuilder) =
@@ -293,7 +295,10 @@ and private visitMemberAccess (m: MemberExpression) (qb: QueryBuilder) =
     let formatAccess (path) =
         if qb.UpdateMode then sprintf "'$.%s'" path
         else sprintf "jsonb_extract(%sValue, '$.%s')" qb.TableNameDot path
-    if m.Expression <> null && isRootParameter m then
+
+    if m.Member.DeclaringType = typeof<SoloDBEntry> && m.Member.Name = "Id" then
+        qb.AppendRaw $"{qb.TableNameDot}Id" |> ignore
+    else if m.Expression <> null && isRootParameter m then
         let jsonPath = buildJsonPath m []
         match jsonPath with
         | [] -> ()
