@@ -676,7 +676,7 @@ type SoloDBTesting() =
         let users = db.GetCollection<User>()
         let largeBatch = [| for i in 1 .. 100000 -> { Username = $"User{i}"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.UtcNow.AddDays(-i); LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [| $"tag{i}" |] } } |]
         let ids = users.InsertBatch largeBatch
-        assertEqual (ids.Length) (largeBatch.Length) "Not all users were inserted in the large batch."
+        assertEqual (ids.Count) (largeBatch.Length) "Not all users were inserted in the large batch."
     
     [<TestMethod>]
     member this.UpdateNonExistentUser() =        
