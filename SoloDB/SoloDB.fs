@@ -149,11 +149,13 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
     member this.OnAll() =
         FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select)
 
-
 type Collection<'T>(connection: SqliteConnection, name: string) =
     let insertInner (item: 'T) (transaction: SqliteTransaction) =
         let json = toSQLJson item
         connection.QueryFirst<int64>($"INSERT INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|}, transaction)
+
+    member private this.Connection = connection
+    member this.Name = name
 
     member this.Insert (item: 'T) =
         insertInner item null
@@ -240,6 +242,17 @@ type Collection<'T>(connection: SqliteConnection, name: string) =
 
         connection.Execute(indexSQL)
         
+    override this.Equals(other) = 
+        match other with
+        | :? Collection<'T> as other ->
+            (this :> IEquatable<Collection<'T>>).Equals other
+        | other -> false
+
+    override this.GetHashCode() = hash (this)
+
+    interface IEquatable<Collection<'T>> with
+        member this.Equals (other) =
+            this.Connection.ConnectionString = other.Connection.ConnectionString && this.Name = other.Name
 
 and SoloDB(connection: SqliteConnection) =
     member private this.FormatName (name: string) =
@@ -265,6 +278,13 @@ and SoloDB(connection: SqliteConnection) =
         let name = name  |> this.FormatName
         
         this.InitializeCollection<obj>(name)
+
+    member this.ExistTable name =
+        existsTable name connection
+
+    member this.ExistTable<'T>() =
+        let name = this.GetNameFrom<'T>()
+        existsTable name connection
 
     member this.DropCollectionIfExists name =
         use mutex = lockTable name
