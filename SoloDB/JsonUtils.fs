@@ -3,6 +3,7 @@
 open System.Text.Json
 open System
 open Utils
+open SoloDbTypes
 
 type DateTimeOffsetJsonConverter() =
     inherit Serialization.JsonConverter<DateTimeOffset>()
@@ -29,7 +30,7 @@ let jsonOptions =
     o.Converters.Add (BooleanJsonConverter())
     o
 
-let toJson<'T> o =
+let toJson<'T> o = 
     System.Text.Json.JsonSerializer.Serialize<'T>(o, jsonOptions)
 
 let toSQLJsonAndKind<'T> item =
@@ -64,6 +65,9 @@ let rec private tupleToArray (element: JsonElement) =
     tupleToArrayInner element 1u
 
 and fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
+    if data = null then null :> obj :?> 'T
+    else
+
     if typeof<'T> <> typeof<obj> then
         if typeof<'T> = typeof<string> then
             data :> obj :?> 'T
@@ -72,7 +76,7 @@ and fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
         else if isNumber data then
             data |> float :> obj :?> 'T
         else
-        fromJson<'T> data
+            fromJson<'T> data
     else
 
     match Int64.TryParse data with
@@ -93,4 +97,18 @@ and fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
         o.EnumerateArray() |> Seq.map(fun e -> e.ToString()) |> Seq.map fromJsonOrSQL<obj> |> Seq.toList :> obj :?> 'T
     else
         data :> obj :?> 'T
-    
+
+
+let fromDapper<'R when 'R :> obj> (input: obj) : 'R =
+    match input with
+    | :? DbObjectRow as row ->
+        let mutable obj = fromJsonOrSQL<'R>(row.ValueJSON)
+        match obj :> obj with
+        | :? SoloDBEntry as entry ->
+            SoloDBEntry.InitId entry row.Id
+        | other -> ()
+
+        obj
+    | :? string as input ->
+        fromJsonOrSQL<'R>(input :> obj :?> string)
+    | other -> failwithf "Input is not DbObjectRow or json string."

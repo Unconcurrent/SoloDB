@@ -8,38 +8,7 @@ open System.Collections.Generic
 open System.Text.Json
 open JsonUtils
 open Utils
-
-type InnerExpr(expr: Expression<System.Func<obj, bool>>) =
-    member this.Expression = expr
-
-
-type SqlId =
-    private SqlId of int64
-    with
-    static member (+) (SqlId a, SqlId b) = SqlId (a + b)
-    static member (-) (SqlId a, SqlId b) = SqlId (a - b)
-    static member (*) (SqlId a, SqlId b) = SqlId (a * b)
-    static member (/) (SqlId a, SqlId b) = SqlId (a / b)
-    static member (%) (SqlId a, SqlId b) = SqlId (a % b)
-    static member (<<<) (SqlId a, shift) = SqlId (a <<< shift)
-    static member (>>>) (SqlId a, shift) = SqlId (a >>> shift)
-    static member (&&&) (SqlId a, SqlId b) = SqlId (a &&& b)
-    static member (|||) (SqlId a, SqlId b) = SqlId (a ||| b)
-    static member (^^^) (SqlId a, SqlId b) = SqlId (a ^^^ b)
-    static member (~-) (SqlId a) = SqlId (-a)
-    static member (~+) (SqlId a) = SqlId (+a)
-    static member (~~~) (SqlId a) = SqlId (~~~a)
-    static member op_Explicit(SqlId a) = a
-    static member op_Implicit(a: int64) = SqlId a
-    static member op_Implicit(a: SqlId) = a
-
-    override this.ToString() =
-        let (SqlId value) = this
-        value.ToString()
-
-    member this.Value =
-        let (SqlId value) = this
-        value
+open SoloDbTypes
 
 type private QueryBuilder = 
     {
@@ -236,6 +205,8 @@ and private visitLambda (m: LambdaExpression) (qb: QueryBuilder) =
 and private visitParameter (m: ParameterExpression) (qb: QueryBuilder) =
     if m.Type = typeof<SqlId> then
         qb.AppendRaw $"{qb.TableNameDot}Id"
+    else if qb.UpdateMode then
+        qb.AppendRaw $"'$'"
     else
         qb.AppendRaw $"{qb.TableNameDot}Value"
     m
