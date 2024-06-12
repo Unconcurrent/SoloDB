@@ -2,6 +2,7 @@
 
 open TypesOld
 open TypesOld
+open TypesOld
 
 #nowarn "3391" // Implicit on SqlId
 
@@ -782,7 +783,7 @@ type SoloDBTesting() =
     [<TestMethod>]
     member this.InitializeCollectionCreatesTable() =
         db.GetCollection<User>() |> ignore
-        Assert.IsTrue(db.ExistTable<User>(), "Table for User was not created")
+        Assert.IsTrue(db.ExistCollection<User>(), "Table for User was not created")
 
     [<TestMethod>]
     member this.GetCollectionReturnsConsistentInstance() =
@@ -794,7 +795,7 @@ type SoloDBTesting() =
     member this.DropCollectionIfExistsWorksCorrectly() =
         db.GetCollection<User>()  |> ignore
         let result = db.DropCollectionIfExists<User>()
-        Assert.IsTrue(result && not (db.ExistTable<User>()), "DropCollectionIfExists failed to drop the table")
+        Assert.IsTrue(result && not (db.ExistCollection<User>()), "DropCollectionIfExists failed to drop the table")
 
     [<TestMethod>]
     member this.DropCollectionThatDoesNotExistReturnsFalse() =
@@ -818,7 +819,7 @@ type SoloDBTesting() =
         }
         let tasks = [| for _ in 1 .. 5 -> Async.StartAsTask initAction :> Task |]
         Task.WaitAll(tasks)
-        Assert.IsTrue(db.ExistTable<User>(), "Lock handling during collection initialization failed")
+        Assert.IsTrue(db.ExistCollection<User>(), "Lock handling during collection initialization failed")
 
     [<TestMethod>]
     member this.EnsureOldUserToNewUserDeserialization() =
@@ -850,7 +851,7 @@ type SoloDBTesting() =
         db.DropCollection "RandomData" |> ignore
         db.Dispose()
 
-        assertEqual (backup.ExistTable "RandomData") true "Backup incomplete: not equal."
+        assertEqual (backup.ExistCollection "RandomData") true "Backup incomplete: not equal."
         let backupRandomData = backup.GetUntypedCollection "RandomData"
         let backupRandomDataValues = backupRandomData.Select().OnAll().ToList()
         let backupRandomDataValuesString = sprintf "%A" backupRandomDataValues
@@ -968,12 +969,19 @@ type SoloDBTesting() =
 
         assertEqual (users.CountAll()) (randomUsersToInsert.LongLength - 2L) "The delete with limit does not work."
         
+    [<TestMethod>]
+    member this.ListCollectionNames() =
+        db.GetCollection<User>() |> ignore
+        db.GetCollection<UserWithId>() |> ignore
+        db.GetUntypedCollection "Abracadabra" |> ignore
+
+        assertEqual (db.ListCollectionNames() |> Seq.toList) [nameof(User); nameof(UserWithId); "Abracadabra"] "ListCollectionNames did not list all the names."
 
 
 [<EntryPoint>]
 let main argv =
     let test = SoloDBTesting()
     test.Init()
-    try test.UserWithIdSelectTheId()
+    try test.ListCollectionNames()
     finally test.Cleanup()
     0
