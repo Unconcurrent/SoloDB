@@ -188,10 +188,9 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
                                 // and it is faster than creating new connections.
         use transaction = connection.BeginTransaction()
         try
-            let mutable ids: int64 list = []
+            let ids = List<int64>()
             for item in items do
-                let newId = insertInner item connection transaction name
-                ids <- ids @ [newId]
+                insertInner item connection transaction name |> ids.Add
 
             transaction.Commit()
             ids
