@@ -18,7 +18,8 @@ open FSharp.Interop.Dynamic
 
 
 
-let assertEqual<'T when 'T : equality> (a: 'T) (b: 'T) (message: string) = Assert.IsTrue((a = b), message) // F# cannot decide the overload.
+let assertEqual<'T when 'T : equality> (a: 'T) (b: 'T) (message: string) = // F# cannot decide the overload.
+    if a <> b then failwithf "Assert failed, got %A, expected %A: %s" a b message
 
 [<TestClass>]
 type SoloDBTesting() =         
@@ -851,15 +852,16 @@ type SoloDBTesting() =
         db.DropCollection "RandomData" |> ignore
         db.Dispose()
 
+        assertEqual (backup.ExistTable "RandomData") true "Backup incomplete: not equal."
         let backupRandomData = backup.GetUntypedCollection "RandomData"
         let backupRandomDataValues = backupRandomData.Select().OnAll().ToList()
         let backupRandomDataValuesString = sprintf "%A" backupRandomDataValues
         let randomDataString = sprintf "%A" randomData
 
-        assertEqual backupRandomDataValuesString randomDataString "Backup incomplete, not equal."
+        assertEqual backupRandomDataValuesString randomDataString "Backup incomplete: not equal."
 
         let usersCount = backup.GetCollection<User>().CountAll()
-        assertEqual usersCount (randomUsersToInsert.LongLength * 4L) "Backup incomplete, not everything."
+        assertEqual usersCount (randomUsersToInsert.LongLength * 4L) "Backup incomplete: not everything."
 
     [<TestMethod>]
     member this.BackupDBWhileWriting() =
@@ -890,7 +892,7 @@ type SoloDBTesting() =
 
 
         try            
-            Thread.Sleep 250
+            Thread.Sleep 100
             for i in 1..10 do db.GetUntypedCollection("Data").Insert {|abc = "1010"|} |> ignore
 
             use backup = SoloDB.instantiate "memory:backup2"
@@ -901,9 +903,9 @@ type SoloDBTesting() =
 
             let backupCount = backup.GetUntypedCollection("Data").Count().Where(fun x -> x?abc = "1010").First() |> int
             printfn "Backup count: %i" backupCount
-            if backupCount <> 10 then failwithf "Backup count mismatch."
+            assertEqual backupCount 10 "Backup count mismatch."
 
-            if backup.GetUntypedCollection("Data2").Count().Where(fun x -> x?abc <> "xyz" && x?abc <> "1010").First() <> 0L then failwithf "Backup data mismatch."
+            assertEqual (backup.GetUntypedCollection("Data2").Count().Where(fun x -> x?abc <> "xyz" && x?abc <> "1010").First()) 0L "Backup data mismatch."
         finally running <- false
 
 
