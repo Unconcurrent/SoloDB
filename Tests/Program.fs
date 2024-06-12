@@ -9,64 +9,13 @@ open System.Threading.Tasks
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open SoloDB
 open QueryTranslator
+open Types
+
 open FSharp.Interop.Dynamic
 
-type UserData = {
-    Tags: string array
-}
 
-[<CLIMutable>]
-type User = {
-    Username: string
-    Auth: bool
-    Banned: bool
-    FirstSeen: DateTimeOffset
-    LastSeen: DateTimeOffset
-    Data: UserData
-}
 
-let randomUsersToInsert = [|
-    {
-        Username = "John"
-        Auth = true
-        Banned = false
-        FirstSeen = DateTimeOffset.UtcNow.AddYears -15 |> _.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
-        LastSeen = DateTimeOffset.UtcNow.AddMinutes -10 |> _.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
-        Data = {
-            Tags = [|"tag1-A"|]
-        }
-    };
-    {
-        Username = "Mihail"
-        Auth = true
-        Banned = false
-        FirstSeen = DateTimeOffset.UtcNow.AddYears -10
-        LastSeen = DateTimeOffset.UtcNow.AddMinutes -8
-        Data = {
-            Tags = [|"tag2"|]
-        }
-    };
-    {
-        Username = "Vanya"
-        Auth = true
-        Banned = true
-        FirstSeen = DateTimeOffset.UtcNow.AddYears -10
-        LastSeen = DateTimeOffset.UtcNow.AddMinutes -5
-        Data = {
-            Tags = [|"tag1-B"|]
-        }
-    };
-    {
-        Username = "Givany"
-        Auth = false
-        Banned = false
-        FirstSeen = DateTimeOffset.UtcNow.AddYears -10
-        LastSeen = DateTimeOffset.UtcNow.AddMinutes -2
-        Data = {
-            Tags = [|"tag1-C"|]
-        }
-    }
-|]
+
 let assertEqual<'T when 'T : equality> (a: 'T) (b: 'T) (message: string) = Assert.IsTrue((a = b), message) // F# cannot decide the overload.
 
 [<TestClass>]
@@ -870,10 +819,18 @@ type SoloDBTesting() =
         Task.WaitAll(tasks)
         Assert.IsTrue(db.ExistTable<User>(), "Lock handling during collection initialization failed")
 
+    [<TestMethod>]
+    member this.EnsureOldUserToNewUserDeserialization() =
+        db.GetCollection<TypesOld.User>().InsertBatch TypesOld.randomOldUsersToInsert |> ignore
+        let newUsers = db.GetCollection<User>().Select().OnAll().ToList()
+        printfn "%A" newUsers
+        for user in newUsers do
+            Assert.IsNotNull(user, "OldUser to User desealization failed.")
+
 [<EntryPoint>]
 let main argv =
     let test = SoloDBTesting()
     test.Init()
-    try test.EnsureIndex()
+    try test.EnsureOldUserToNewUserDeserialization()
     finally test.Cleanup()
     0
