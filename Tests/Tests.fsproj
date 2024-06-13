@@ -6,8 +6,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="TestsUtils.fs" />
     <Compile Include="TypesOld.fs" />
     <Compile Include="Types.fs" />
+    <Compile Include="StandardTests.fs" />
+    <Compile Include="TransactionalTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

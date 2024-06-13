@@ -194,11 +194,20 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         let arg2 = arg1.Arguments[0]
         visit arg2 qb
     else if m.Method.Name =  "op_Implicit" then
-        let arg1 = (m.Arguments[0])
+        let arg1 = m.Arguments[0]
         visit arg1 qb
     else if m.Method.Name = "Contains" then
-        let text = (m.Object)
-        let what = (m.Arguments[0])
+        let text = m.Object
+        let what = m.Arguments[0]
+        qb.AppendRaw "instr("
+        visit text qb |> ignore
+        qb.AppendRaw ","
+        visit what qb |> ignore
+        qb.AppendRaw ") > 0"
+        m
+    else if m.Method.Name = "Object.Contains" then
+        let text = m.Arguments[0]
+        let what = m.Arguments[1]
         qb.AppendRaw "instr("
         visit text qb |> ignore
         qb.AppendRaw ","
