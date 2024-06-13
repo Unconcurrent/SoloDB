@@ -5,13 +5,15 @@ open System
 open Utils
 open SoloDbTypes
 open System.Text.Json.Serialization.Metadata
+open System.Text.Json.Nodes
 
+(*
 let private entryTypes = 
     AppDomain.CurrentDomain.GetAssemblies() 
     |> Seq.collect (fun s -> s.GetTypes()) 
     |> Seq.filter (fun t -> typeof<SoloDBEntry>.IsAssignableFrom t && t.IsClass && not t.IsAbstract) 
     |> Seq.map (fun t -> (typeToName t, t)) 
-    |> dict
+    |> dict*)
 
 type private DateTimeOffsetJsonConverter() =
     inherit Serialization.JsonConverter<DateTimeOffset>()
@@ -35,7 +37,7 @@ type private TypeJsonConverter() =
     inherit Serialization.JsonConverter<Type>()
 
     override this.Read(reader, typeToConvert: Type, options: JsonSerializerOptions) : Type =
-        entryTypes[reader.GetString()]
+        reader.GetString() |> nameToType
 
     override this.Write(writer: Utf8JsonWriter, value: Type, options) : unit =
         writer.WriteStringValue (value |> typeToName)
@@ -48,33 +50,38 @@ let private jsonOptions =
     o.Converters.Add (TypeJsonConverter())
     o
 
+let private arrayToTuple<'T> l =
+    let tupleBaseTypes = Microsoft.FSharp.Reflection.FSharpType.GetTupleElements typeof<'T>
+    let castedObj = tupleBaseTypes |> Array.zip l |> Array.map(fun (e, t) -> TypeCaster.CastObject e t)
+    Microsoft.FSharp.Reflection.FSharpValue.MakeTuple (castedObj, typeof<'T>) :?> 'T
+
 
 let toJson<'T> o = 
-    System.Text.Json.JsonSerializer.Serialize<'T>(o, jsonOptions)
+    let element = System.Text.Json.JsonSerializer.SerializeToNode(o, jsonOptions)
+    let t = o.GetType()
+    if element.GetValueKind() = JsonValueKind.Object then
+        let typeStr = t |> typeToName
+        element.["$type"] <- typeStr
+    element.ToJsonString()
 
 let toSQLJsonAndKind<'T> item =
-    let element = System.Text.Json.JsonSerializer.SerializeToElement<'T>(item, jsonOptions)
+    let element = System.Text.Json.JsonSerializer.SerializeToNode(item, jsonOptions)
+    let t = item.GetType()
+    if element.GetValueKind() = JsonValueKind.Object then
+        let typeStr = t |> typeToName
+        element.["$type"] <- JsonObject.op_Implicit typeStr
     let text = element.ToString()
-    match element.ValueKind with
+    match element.GetValueKind() with
     | JsonValueKind.Object
     | JsonValueKind.Array ->
-        (sprintf "%s" text), element.ValueKind
-    | other -> (text.Trim '"'), element.ValueKind
+        text, element.GetValueKind()
+    | other -> (text.Trim '"'), other
 
 let toSQLJson<'T> item =
     let json, kind = toSQLJsonAndKind item
     json
 
-let private fromJson<'T> (text: string) =
-    System.Text.Json.JsonSerializer.Deserialize<'T> (text, jsonOptions)
-
-let fromIdJson<'T> (idValueJSON: string) =
-    let element = System.Text.Json.JsonSerializer.Deserialize<JsonElement>(idValueJSON, jsonOptions)
-    let id = element.GetProperty("Id").GetInt64()
-    let value = element.GetProperty("Value").Deserialize<'T>(jsonOptions)
-    id, value
-
-let rec private tupleToArray (element: JsonElement) =
+let rec private tupleToList (element: JsonElement) =
     let rec tupleToArrayInner (element: JsonElement) (i: uint) =
         match element.TryGetProperty $"Item{i}" with
         | true, item ->
@@ -82,6 +89,37 @@ let rec private tupleToArray (element: JsonElement) =
         | false, _ -> []
 
     tupleToArrayInner element 1u
+
+and private fromJson<'T> (text: string) =
+    let hasProperty (element: JsonElement) (prop: string) =
+        match element.TryGetProperty(prop) with
+        | true, _ -> true
+        | false, _ -> false
+
+    let element = System.Text.Json.JsonSerializer.Deserialize<JsonElement> (text, jsonOptions)
+
+    if element.ValueKind = JsonValueKind.Object && hasProperty element "$type" then
+        match element.TryGetProperty("$type") with
+        | true, typeProp ->
+            let elementTypeStr = typeProp.GetString()
+            let elementType = elementTypeStr |> nameToType
+            element.Deserialize (elementType, jsonOptions) :?> 'T
+        | false, _ -> failwithf "Impossible."
+
+    else if text.StartsWith "[" then
+        element.EnumerateArray() |> Seq.map(fun e -> e.ToString()) |> Seq.map fromJsonOrSQL<obj> |> Seq.toList :> obj :?> 'T
+    else if text.StartsWith "{" then
+        match element.TryGetProperty "Item1" with
+        | true, _ -> // It is a tuple, will convert ot array
+            let arguments = tupleToList element |> List.toArray
+            if arguments |> Array.exists(fun e -> e.GetType().IsAssignableTo typeof<SoloDBEntry>) then
+                arguments |> arrayToTuple<'T>
+            else element.Deserialize<'T> (jsonOptions)
+        | false, _ -> element.Deserialize<'T> (jsonOptions)
+    else
+        element.Deserialize<'T> (jsonOptions)
+
+    
 
 and fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
     if data = null then null :> obj :?> 'T
@@ -108,8 +146,8 @@ and fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
         let o = System.Text.Json.JsonSerializer.Deserialize<JsonElement> (data, jsonOptions)
         match o.TryGetProperty "Item1" with
         | true, _ -> // It is a tuple, will convert ot array
-            tupleToArray o :> obj :?> 'T
-        | false, _ -> System.Text.Json.JsonSerializer.Deserialize<'T> (data, jsonOptions)
+            tupleToList o :> obj :?> 'T
+        | false, _ -> fromJson<'T> data
 
     else if data.StartsWith "[" then
         let o = System.Text.Json.JsonSerializer.Deserialize<JsonElement> (data, jsonOptions)
@@ -118,17 +156,19 @@ and fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
         data :> obj :?> 'T
 
 
+let fromIdJson<'T> (idValueJSON: string) =
+    let element = System.Text.Json.JsonSerializer.Deserialize<JsonElement>(idValueJSON, jsonOptions)
+    let id = element.GetProperty("Id").GetInt64()
+    let value = fromJson<'T>(element.GetProperty("Value").ToString())
+    id, value
+
 let fromDapper<'R when 'R :> obj> (input: obj) : 'R =
     match input with
     | :? DbObjectRow as row ->
-        match entryTypes.TryGetValue(row.Type) with 
-        | true, t -> System.Text.Json.JsonSerializer.Deserialize(row.ValueJSON, t, jsonOptions) :?> 'R
-        | false, _ ->
-
         let mutable obj = fromJsonOrSQL<'R> (row.ValueJSON)
         match obj :> obj with
         | :? SoloDBEntry as entry ->
-            SoloDBEntry.InitId entry row.Id row.Type
+            SoloDBEntry.InitId entry row.Id
         | other -> ()
 
         obj

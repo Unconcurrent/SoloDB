@@ -35,6 +35,7 @@ type PolymorphicTests() =
         animals.Insert (Tiger()) |> ignore
         
         let animalsNotCat = animals.Select(fun c -> (c.Id, c, c.GetType())).Where(fun a -> a.GetType() <> typeof<Cat>).ToList()
+        let animalsNotCatType = animalsNotCat |> Seq.map(fun (id, a, t) -> a) |> Seq.map _.GetType() |> Seq.toList
         assertEqual (animalsNotCat.Length) 2 "Did not select all the non cats."
 
     [<TestMethod>]

@@ -216,7 +216,10 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         m
     else if m.Method.Name = "GetType" && m.Object.NodeType = ExpressionType.Parameter then
         let o = m.Object
-        qb.AppendRaw $"{qb.TableNameDot}Type" |> ignore
+        qb.AppendRaw "jsonb_extract("
+        visit o qb |> ignore
+
+        qb.AppendRaw $",'$.$type')"
         m
     else if m.Method.Name = "TypeOf" && m.Type = typeof<Type> then
         let t = m.Method.Invoke (null, Array.empty) :?> Type

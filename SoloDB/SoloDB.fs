@@ -30,7 +30,6 @@ let private lockTable(name: string) =
 let private createTableInner (name: string) (conn: SqliteConnection) (transaction: SqliteTransaction) =
     conn.Execute($"CREATE TABLE \"{name}\" (
     	    Id INTEGER NOT NULL PRIMARY KEY UNIQUE,
-            Type TEXT NOT NULL,
     	    Value JSONB NOT NULL
         );", {|name = name|}, transaction) |> ignore
     conn.Execute("INSERT INTO Collections(Name) VALUES (@name)", {|name = name|}, transaction) |> ignore
@@ -44,22 +43,21 @@ let private dropCollection (name: string) (transaction: SqliteTransaction) (conn
 
 let private insertInner (item: 'T) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
     let json = toJson item
-    let typeTxt = item.GetType() |> typeToName
 
     // I know, its ugly.
     match item :> obj with
     | :? SoloDBEntry as entry when entry.Id <> 0 -> failwithf "Cannot insert a SoloDBEntry with a non zero Id, maybe you want to Replace()?"
     | _ ->
     
-    let id = connection.QueryFirst<int64>($"INSERT INTO \"{name}\"(Type, Value) VALUES(@typeTxt, jsonb(@jsonText)) RETURNING Id;", {|name = name; typeTxt = typeTxt; jsonText = json|}, transaction)
+    let id = connection.QueryFirst<int64>($"INSERT INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|}, transaction)
 
     match item :> obj with
-    | :? SoloDBEntry as entry -> SoloDBEntry.InitId entry id typeTxt
+    | :? SoloDBEntry as entry -> SoloDBEntry.InitId entry id
     | other -> ()
     id
 
 let private insertInnerRaw (item: DbObjectRow) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
-    connection.Execute($"INSERT INTO \"{name}\"(Id, Type, Value) VALUES(@id, @typeTxt, jsonb(@jsonText))", {|name = name; id = item.Id; typeTxt = item.Type; jsonText = item.ValueJSON|}, transaction)
+    connection.Execute($"INSERT INTO \"{name}\"(Id, Value) VALUES(@id, jsonb(@jsonText))", {|name = name; id = item.Id; jsonText = item.ValueJSON|}, transaction)
 
 type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, variables: Dictionary<string, obj>, select: 'Q -> 'R, postModifySQL: string -> string) =
     let mutable sql = sql
@@ -202,7 +200,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
             reraise()
 
     member this.TryGetById(id: int64) =
-        match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, Type, json(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
+        match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
         | json when Object.ReferenceEquals(json, null) -> None
         | json -> fromDapper<'T> json |> Some
 
@@ -214,12 +212,10 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
     member this.Select<'R>(select: Expression<System.Func<'T, 'R>>) =
         let selectSQL, variables = QueryTranslator.translate name select
 
-
-
-        WhereBuilder<'T, DbObjectRow, 'R>(connection, name, $"SELECT Id, Type, {selectSQL} as ValueJSON FROM \"{name}\" ", fromDapperSelection<'R>, variables, id)
+        WhereBuilder<'T, DbObjectRow, 'R>(connection, name, $"SELECT Id, {selectSQL} as ValueJSON FROM \"{name}\" ", fromDapper<'R>, variables, id)
 
     member this.Select() =
-        WhereBuilder<'T, DbObjectRow, 'T>(connection, name, $"SELECT Id, Type, json(Value) as ValueJSON FROM \"{name}\" ", fromDapper<'T>, Dictionary<string, obj>(), id)
+        WhereBuilder<'T, DbObjectRow, 'T>(connection, name, $"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" ", fromDapper<'T>, Dictionary<string, obj>(), id)
 
     member this.SelectWithId() =
         WhereBuilder(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>(), id)
@@ -421,7 +417,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
 
             for name in names do
                 createTableInner name otherConnection otherTransaction 
-                let rows = connection.Query<DbObjectRow>(sprintf "SELECT Id, Type, json(Value) as ValueJSON FROM \"%s\"" name, buffered = false, commandTimeout = Nullable<int>())
+                let rows = connection.Query<DbObjectRow>(sprintf "SELECT Id, json(Value) as ValueJSON FROM \"%s\"" name, buffered = false, commandTimeout = Nullable<int>())
                 for row in rows do
                     let rowsAffected = insertInnerRaw row otherConnection otherTransaction name
                     if rowsAffected <> 1 then failwithf "No rows affected in insert."
@@ -482,7 +478,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
         dbConnection.Execute(
                             "PRAGMA journal_mode=wal;
                             CREATE TABLE IF NOT EXISTS Collections (Name TEXT NOT NULL) STRICT;
-                            CREATE INDEX IF NOT EXISTS TypeNameIndex ON Collections(Name);
+                            CREATE INDEX IF NOT EXISTS CollectionsNameIndex ON Collections(Name);
                             ") |> ignore
 
         new SoloDB(connectionCreator, dbConnection, connectionString, false)
