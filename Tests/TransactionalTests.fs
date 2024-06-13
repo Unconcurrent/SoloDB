@@ -3,11 +3,7 @@
 #nowarn "3391" // Implicit on SqlId
 
 open System
-open System.IO
-open System.Threading
-open System.Threading.Tasks
 open Microsoft.VisualStudio.TestTools.UnitTesting
-open FSharp.Interop.Dynamic
 open SoloDB
 open SoloDbTypes
 open Types

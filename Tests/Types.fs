@@ -70,6 +70,36 @@ type UserWithId() =
 
         userId
 
+[<AbstractClass>]
+type Animal() =
+    inherit SoloDbTypes.SoloDBEntry()
+
+    member val Size: float = 1 with get, set
+    member val Tammed: bool = false with get, set
+
+    override this.ToString() =
+        let sb = StringBuilder()
+        sb.AppendLine("{") |> ignore
+        sb.AppendLine(sprintf "  \"Size\": \"%f\"," this.Size) |> ignore
+        sb.AppendLine(sprintf "  \"Tammed\": %b," this.Tammed) |> ignore
+        sb.Append("}") |> ignore
+        sb.ToString()
+
+type Cat() =
+    inherit Animal()
+
+    member val TailSize: float = 1 with get, set
+
+type Tiger() =
+    inherit Cat()
+
+    member val TailSize: float = 2 with get, set
+
+type Dog() =
+    inherit Animal()
+
+    member val Bark: string = "Hau" with get, set
+
 
 let randomUsersToInsert = [|
     {
