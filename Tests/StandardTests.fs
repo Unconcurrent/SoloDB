@@ -310,6 +310,26 @@ type SoloDBStandardTesting() =
         assertEqual users.Length 2 "Count unequal."
 
     [<TestMethod>]
+    member this.LimitZeroTest() =        
+        let objs = db.GetUntypedCollection("Statistics")
+
+        let id = objs.InsertBatch [
+            {|Name="Alpha"|}
+            {|Name="Beta"|}
+            {|Type="None"|}
+            {|Type="None"|}
+            {|Type="Int"; Data=10|}
+            {|Type="Int"; Data=12|}
+            {|Type="Int"; Data=(-42)|}
+            {|Type="String"; Data="AAA"|}
+            {|Type="Obj"; Data={|Number=10; Name = "Alice"|}|}
+        ]
+
+        let users = objs.Select(fun o -> o?Name).OnAll().Limit(0UL).ToList()
+
+        assertEqual users.Length 0 "Limit 0 does not return 0 elements."
+
+    [<TestMethod>]
     member this.CountTest() =    
         let testUser1 = {
             Username = "Alice"

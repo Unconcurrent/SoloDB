@@ -61,7 +61,7 @@ let private insertInnerRaw (item: DbObjectRow) (connection: SqliteConnection) (t
 
 type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, variables: Dictionary<string, obj>, select: 'Q -> 'R, postModifySQL: string -> string) =
     let mutable sql = sql
-    let mutable limit = 0UL
+    let mutable limit: uint64 Option = None
     let mutable offset = 0UL
     let orderByList = List<string>()
 
@@ -72,7 +72,7 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         let finalSQL = 
             sql 
             + (if orderByList.Count > 0 then sprintf "ORDER BY %s " (orderByList |> String.concat ",") else " ") 
-            + (if limit > 0UL then $"LIMIT {limit} " else if offset > 0UL then "LIMIT -1 " else "")
+            + (if limit.IsSome then $"LIMIT {limit.Value} " else if offset > 0UL then "LIMIT -1 " else "")
             + (if offset > 0UL then $"OFFSET {offset} " else "")
 
         let finalSQL = postModifySQL finalSQL
@@ -81,9 +81,7 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
 
         finalSQL, parameters
 
-    member this.Limit(count: uint64) =
-        if count = 0UL then failwithf "Cannot LIMIT 0"
-
+    member this.Limit(?count: uint64) =
         limit <- count  
         this
 
@@ -258,6 +256,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
 
     member this.Delete() =
         // https://stackoverflow.com/questions/1824490/how-do-you-enable-limit-for-delete-in-sqlite
+        // By default, SQLite does not support LIMIT in a DELETE statement, but there is this workaround.
         WhereBuilder<'T, string, int64>(connection, name, $"DELETE FROM \"{name}\" WHERE Id IN (SELECT Id FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), fun sql -> sql + ")")
 
     member this.DeleteById(id: int64) : int =
