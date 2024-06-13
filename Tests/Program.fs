@@ -1,13 +1,10 @@
 ﻿module Tests
 
-open StandardTests
-open TransactionalTests
-
 
 [<EntryPoint>]
 let main argv =
-    let test = SoloDBStandardTesting()
+    let test = PolymorphicTests.PolymorphicTests()
     test.Init()
-    try test.AnyFalse()
+    try test.SelectType()
     finally test.Cleanup()
     0

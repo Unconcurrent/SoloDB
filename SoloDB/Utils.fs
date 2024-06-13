@@ -40,3 +40,5 @@ let isIntegerBasedType (t: Type) =
     | _ when t = typeof<int64>  -> true
     | _ when t = typeof<uint64> -> true
     | _ -> false
+
+let typeToName (t: Type) = t.FullName

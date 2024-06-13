@@ -4,8 +4,16 @@ open System.Text.Json
 open System
 open Utils
 open SoloDbTypes
+open System.Text.Json.Serialization.Metadata
 
-type DateTimeOffsetJsonConverter() =
+let private entryTypes = 
+    AppDomain.CurrentDomain.GetAssemblies() 
+    |> Seq.collect (fun s -> s.GetTypes()) 
+    |> Seq.filter (fun t -> typeof<SoloDBEntry>.IsAssignableFrom t && t.IsClass && not t.IsAbstract) 
+    |> Seq.map (fun t -> (typeToName t, t)) 
+    |> dict
+
+type private DateTimeOffsetJsonConverter() =
     inherit Serialization.JsonConverter<DateTimeOffset>()
 
     override this.Read(reader, typeToConvert: Type, options: JsonSerializerOptions) : DateTimeOffset =
@@ -14,7 +22,7 @@ type DateTimeOffsetJsonConverter() =
     override this.Write(writer: Utf8JsonWriter, dateTimeValue: DateTimeOffset, options) : unit =
         writer.WriteNumberValue (dateTimeValue.ToUnixTimeMilliseconds())
 
-type BooleanJsonConverter() =
+type private BooleanJsonConverter() =
     inherit Serialization.JsonConverter<bool>()
 
     override this.Read(reader, typeToConvert: Type, options: JsonSerializerOptions) : bool =
@@ -23,12 +31,23 @@ type BooleanJsonConverter() =
     override this.Write(writer: Utf8JsonWriter, booleanValue: bool, options) : unit =
         if booleanValue then writer.WriteNumberValue 1UL else writer.WriteNumberValue 0UL
 
+type private TypeJsonConverter() =
+    inherit Serialization.JsonConverter<Type>()
 
-let jsonOptions = 
+    override this.Read(reader, typeToConvert: Type, options: JsonSerializerOptions) : Type =
+        entryTypes[reader.GetString()]
+
+    override this.Write(writer: Utf8JsonWriter, value: Type, options) : unit =
+        writer.WriteStringValue (value |> typeToName)
+
+
+let private jsonOptions = 
     let o = JsonSerializerOptions()
     o.Converters.Add (DateTimeOffsetJsonConverter())
     o.Converters.Add (BooleanJsonConverter())
+    o.Converters.Add (TypeJsonConverter())
     o
+
 
 let toJson<'T> o = 
     System.Text.Json.JsonSerializer.Serialize<'T>(o, jsonOptions)
@@ -102,13 +121,17 @@ and fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
 let fromDapper<'R when 'R :> obj> (input: obj) : 'R =
     match input with
     | :? DbObjectRow as row ->
-        let mutable obj = fromJsonOrSQL<'R>(row.ValueJSON)
+        match entryTypes.TryGetValue(row.Type) with 
+        | true, t -> System.Text.Json.JsonSerializer.Deserialize(row.ValueJSON, t, jsonOptions) :?> 'R
+        | false, _ ->
+
+        let mutable obj = fromJsonOrSQL<'R> (row.ValueJSON)
         match obj :> obj with
         | :? SoloDBEntry as entry ->
-            SoloDBEntry.InitId entry row.Id
+            SoloDBEntry.InitId entry row.Id row.Type
         | other -> ()
 
         obj
     | :? string as input ->
-        fromJsonOrSQL<'R>(input :> obj :?> string)
+        fromJsonOrSQL<'R> (input :> obj :?> string)
     | other -> failwithf "Input is not DbObjectRow or json string."

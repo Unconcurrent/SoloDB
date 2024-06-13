@@ -53,11 +53,11 @@ type private QueryBuilder =
             TableNameDot = tableName + "."
         }
 
-let rec stripQuotes (e: Expression) =
-    let mutable expr = e
-    while expr.NodeType = ExpressionType.Quote do
-        expr <- (expr :?> UnaryExpression).Operand
-    expr
+let rec private isRootParameter (expr: Expression) : bool =
+    match expr with
+    | :? ParameterExpression -> true
+    | :? MemberExpression as inner -> isRootParameter inner.Expression
+    | _ -> false
 
 let rec private visit (exp: Expression) (sb: QueryBuilder) : Expression =
     match exp.NodeType with
@@ -214,6 +214,15 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         visit what qb |> ignore
         qb.AppendRaw ") > 0"
         m
+    else if m.Method.Name = "GetType" && m.Object.NodeType = ExpressionType.Parameter then
+        let o = m.Object
+        qb.AppendRaw $"{qb.TableNameDot}Type" |> ignore
+        m
+    else if m.Method.Name = "TypeOf" && m.Type = typeof<Type> then
+        let t = m.Method.Invoke (null, Array.empty) :?> Type
+        let name = t |> typeToName
+        qb.AppendVariable (name)
+        m
     else
         raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 
@@ -303,12 +312,6 @@ and private visitMemberAccess (m: MemberExpression) (qb: QueryBuilder) =
             let currentField = inner.Member.Name
             buildJsonPath inner.Expression (currentField :: accum)
         | _ -> accum
-
-    let rec isRootParameter (expr: Expression) : bool =
-        match expr with
-        | :? ParameterExpression -> true
-        | :? MemberExpression as inner -> isRootParameter inner.Expression
-        | _ -> false
 
     let formatAccess (path) =
         if qb.UpdateMode then sprintf "'$.%s'" path
