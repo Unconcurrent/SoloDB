@@ -43,7 +43,11 @@ let isIntegerBasedType (t: Type) =
     | _ when t = typeof<uint64> -> true
     | _ -> false
 
-let typeToName (t: Type) = t.FullName
+let typeToName (t: Type) = 
+    let fullname = t.FullName
+    if fullname.Length > 0 && Char.IsAsciiLetter fullname.[0] // To not insert auto generated classes.
+    then Some fullname
+    else None
 
 let private nameToTypeCache = ConcurrentDictionary<string, Type>()
 

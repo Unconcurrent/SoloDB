@@ -40,7 +40,7 @@ type private TypeJsonConverter() =
         reader.GetString() |> nameToType
 
     override this.Write(writer: Utf8JsonWriter, value: Type, options) : unit =
-        writer.WriteStringValue (value |> typeToName)
+        writer.WriteStringValue (value.FullName)
 
 
 let private jsonOptions = 
@@ -60,16 +60,18 @@ let toJson<'T> o =
     let element = System.Text.Json.JsonSerializer.SerializeToNode(o, jsonOptions)
     let t = o.GetType()
     if element.GetValueKind() = JsonValueKind.Object then
-        let typeStr = t |> typeToName
-        element.["$type"] <- typeStr
+        match t |> typeToName with
+        | Some typeStr -> element.["$type"] <- typeStr
+        | None -> ()
     element.ToJsonString()
 
 let toSQLJsonAndKind<'T> item =
     let element = System.Text.Json.JsonSerializer.SerializeToNode(item, jsonOptions)
     let t = item.GetType()
     if element.GetValueKind() = JsonValueKind.Object then
-        let typeStr = t |> typeToName
-        element.["$type"] <- JsonObject.op_Implicit typeStr
+        match t |> typeToName with
+        | Some typeStr -> element.["$type"] <- JsonObject.op_Implicit typeStr
+        | None -> ()
     let text = element.ToString()
     match element.GetValueKind() with
     | JsonValueKind.Object
@@ -103,7 +105,8 @@ and private fromJson<'T> (text: string) =
         | true, typeProp ->
             let elementTypeStr = typeProp.GetString()
             let elementType = elementTypeStr |> nameToType
-            element.Deserialize (elementType, jsonOptions) :?> 'T
+            try element.Deserialize (elementType, jsonOptions) :?> 'T
+            with ex -> element.Deserialize<'T> (jsonOptions)
         | false, _ -> failwithf "Impossible."
 
     else if text.StartsWith "[" then

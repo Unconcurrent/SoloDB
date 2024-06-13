@@ -316,7 +316,9 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
     member private this.GetNameFrom<'T>() =
         typeof<'T>.Name |> this.FormatName
 
-    member private this.InitializeCollection<'T> name =        
+    member private this.InitializeCollection<'T> name =     
+        if disposed then raise (ObjectDisposedException(nameof(SoloDB)))
+
         let connection = 
             if inTransaction then dbConnection
             else connectionPool.GetOrAdd(name, (fun name -> connectionCreator()))
