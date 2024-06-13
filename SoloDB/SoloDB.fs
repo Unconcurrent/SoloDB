@@ -33,15 +33,6 @@ let private createTableInner (name: string) (conn: SqliteConnection) (transactio
         );", {|name = name|}, transaction) |> ignore
     conn.Execute("INSERT INTO Types(Name) VALUES (@name)", {|name = name|}, transaction) |> ignore
 
-let private createTable (name: string) (conn: SqliteConnection) =
-    use transaction = conn.BeginTransaction()
-    try
-        createTableInner name conn transaction
-        transaction.Commit()
-    with ex ->
-        transaction.Rollback()
-        reraise ()
-
 let private existsCollection (name: string) (connection: SqliteConnection)  =
     connection.QueryFirstOrDefault<string>("SELECT Name FROM Types WHERE Name = @name LIMIT 1", {|name = name|}) <> null
 
@@ -176,9 +167,10 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
     member this.OnAll() =
         FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select, postModifySQL)
 
-type Collection<'T>(connection: SqliteConnection, name: string, connectionString: string) =
+type Collection<'T>(connection: SqliteConnection, name: string, connectionString: string, inTransaction: bool) =
     member private this.ConnectionString = connectionString
     member this.Name = name
+    member this.InTransaction = inTransaction
 
     member this.Insert (item: 'T) =
         insertInner item connection null name
@@ -186,6 +178,14 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
     member this.InsertBatch (items: 'T seq) =
         use l = lockTable name  // If not, there will be multiple transactions started on the same connection when used concurently,
                                 // and it is faster than creating new connections.
+
+        if inTransaction then
+            let ids = List<int64>()
+            for item in items do
+                insertInner item connection null name |> ids.Add
+            ids
+        else
+
         use transaction = connection.BeginTransaction()
         try
             let ids = List<int64>()
@@ -238,6 +238,8 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
         FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" WHERE {whereSQL} LIMIT @limit)", variables, fromJsonOrSQL<int64>, id).First()
 
     member this.Any(func) = this.CountWhere(func, 1UL) > 0L
+
+    member this.Any() = this.CountWhere((fun u -> true), 1UL) > 0L
 
     member this.Update(expression: Expression<System.Action<'T>>) =
         let updateSQL, variables = QueryTranslator.translateUpdateMode name expression
@@ -296,23 +298,12 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
         member this.Equals (other) =
             this.ConnectionString = other.ConnectionString && this.Name = other.Name
 
-and SoloDB private (connectionString: string) = 
+and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: SqliteConnection, connectionString: string, transaction: bool) = 
     let mutable disposed = false
-
-    let connectionCreator () =
-        if disposed then failwithf "SoloDB was disposed."
-
-        let connection = new SqliteConnection(connectionString)
-        connection.Open()
-        connection
-
+    let inTransaction = transaction
     let connectionPool = ConcurrentDictionary<string, SqliteConnection>()
-    let dbConnection = connectionCreator()
-    do dbConnection.Execute(
-        "PRAGMA journal_mode=wal;
-        CREATE TABLE IF NOT EXISTS Types (Id INTEGER NOT NULL PRIMARY KEY UNIQUE, Name TEXT NOT NULL) STRICT;
-        CREATE INDEX IF NOT EXISTS TypeNameIndex ON Types(Name);
-        ") |> ignore
+
+    let connectionCreator() = connectionCreator disposed
 
     member this.ConnectionString = connectionString
     member this.GetDBConnection() = dbConnection
@@ -324,14 +315,25 @@ and SoloDB private (connectionString: string) =
     member private this.GetNameFrom<'T>() =
         typeof<'T>.Name |> this.FormatName
 
-    member private this.InitializeCollection<'T> name =
-        let connection = connectionPool.GetOrAdd(name, (fun name -> connectionCreator()))
+    member private this.InitializeCollection<'T> name =        
+        let connection = 
+            if inTransaction then dbConnection
+            else connectionPool.GetOrAdd(name, (fun name -> connectionCreator()))
 
         use mutex = lockTable name // To prevent a race condition where the next if statment is true for 2 threads.
         if not (existsCollection name connection) then 
-            createTable name connection
+            if inTransaction then
+                createTableInner name connection null
+            else
+                use transaction = connection.BeginTransaction()
+                try
+                    createTableInner name connection transaction
+                    transaction.Commit()
+                with ex ->
+                    transaction.Rollback()
+                    reraise ()
 
-        Collection<'T>(connection, name, connectionString)
+        Collection<'T>(connection, name, connectionString, inTransaction)
 
     member this.GetCollection<'T>() =
         let name = this.GetNameFrom<'T>()
@@ -352,6 +354,13 @@ and SoloDB private (connectionString: string) =
 
     member this.DropCollectionIfExists name =
         use mutex = lockTable name
+
+        if inTransaction then
+            if existsCollection name dbConnection then 
+                dropCollection name null dbConnection
+                true
+            else false
+        else
 
         if existsCollection name dbConnection then
             use transaction = dbConnection.BeginTransaction()
@@ -381,11 +390,17 @@ and SoloDB private (connectionString: string) =
         dbConnection.Query<string>("SELECT Name FROM Types")
 
     member this.BackupTo(otherDb: SoloDB) =
+        if transaction then failwithf "Cannot backup in a transaction."
+
         use connection = connectionCreator()
         use otherConnection = otherDb.GetNewConnection()
         connection.BackupDatabase otherConnection
 
-    member this.BackupTransactionally(otherDb: SoloDB) =
+    member this.BackupCollections(otherDb: SoloDB) =
+        if transaction then failwithf "Cannot backup in a transaction."
+
+        printfn "A warning from BackupCollections: This will backup only the collections managed by SoloDB, without any custom added tables."
+
         use connection = connectionCreator()
         use otherConnection = otherDb.GetNewConnection()
 
@@ -415,6 +430,23 @@ and SoloDB private (connectionString: string) =
 
         connection.Execute("ROLLBACK") |> ignore
 
+    member this.Transactionally<'R>(func: Func<SoloDB, 'R>) =
+        use newConnection = connectionCreator()
+
+        let innerConnectionCreator disposed = failwithf "This should not be called."
+
+        newConnection.Execute("BEGIN;") |> ignore
+
+        use transactionalDb = new SoloDB(innerConnectionCreator, newConnection, connectionString, true)
+
+        try
+            let ret = func.Invoke transactionalDb
+            newConnection.Execute "COMMIT;" |> ignore
+            ret
+        with ex -> 
+            newConnection.Execute "ROLLBACK;" |> ignore
+            reraise()
+
     member this.Dispose() =
         disposed <- true
         for connections in connectionPool.Values do
@@ -434,7 +466,21 @@ and SoloDB private (connectionString: string) =
             else 
                 $"Data Source={source}"
 
-        new SoloDB(connectionString)
+        let connectionCreator disposed =
+            if disposed then failwithf "SoloDB was disposed."
+
+            let connection = new SqliteConnection(connectionString)
+            connection.Open()
+            connection
+    
+        let dbConnection = connectionCreator false
+        dbConnection.Execute(
+                            "PRAGMA journal_mode=wal;
+                            CREATE TABLE IF NOT EXISTS Types (Id INTEGER NOT NULL PRIMARY KEY UNIQUE, Name TEXT NOT NULL) STRICT;
+                            CREATE INDEX IF NOT EXISTS TypeNameIndex ON Types(Name);
+                            ") |> ignore
+
+        new SoloDB(connectionCreator, dbConnection, connectionString, false)
 
 let instantiate = SoloDB.Instantiate
 
@@ -446,6 +492,9 @@ type System.Object with
         let regexPattern = 
             "^" + Regex.Escape(pattern).Replace("\\%", ".*").Replace("\\_", ".") + "$"
         Regex.IsMatch(this.ToString(), regexPattern, RegexOptions.IgnoreCase)
+
+    member this.Contains(pattern: string) =
+        failwithf "This is a dummy function for the SQL builder."
 
 type Array with
     member this.Add(value: obj) =
