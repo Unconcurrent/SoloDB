@@ -8,7 +8,7 @@ open System.Collections.Generic
 open System.Text.Json
 open JsonUtils
 open Utils
-open SoloDbTypes
+open SoloDBTypes
 
 type private QueryBuilder = 
     {

@@ -3,9 +3,10 @@
 open System.Text.Json
 open System
 open Utils
-open SoloDbTypes
+open SoloDBTypes
 open System.Text.Json.Serialization.Metadata
 open System.Text.Json.Nodes
+open System.Globalization
 
 (*
 let private entryTypes = 
@@ -63,21 +64,28 @@ let toJson<'T> o =
         match t |> typeToName with
         | Some typeStr -> element.["$type"] <- typeStr
         | None -> ()
-    element.ToJsonString()
+    element.ToJsonString().Replace("\\u002B", "+") // "Security"
 
-let toSQLJsonAndKind<'T> item =
+let toSQLJsonAndKind<'T> item =    
     let element = System.Text.Json.JsonSerializer.SerializeToNode(item, jsonOptions)
     let t = item.GetType()
+    if isNumber item then (item, element.GetValueKind())
+    else if item.GetType() = typeof<DateTimeOffset> then
+        (item :> obj :?> DateTimeOffset |> _.ToUnixTimeMilliseconds() :> obj, element.GetValueKind())
+    else
+
     if element.GetValueKind() = JsonValueKind.Object then
         match t |> typeToName with
         | Some typeStr -> element.["$type"] <- JsonObject.op_Implicit typeStr
         | None -> ()
-    let text = element.ToString()
+    let text = element.ToJsonString().Replace("\\u002B", "+")
     match element.GetValueKind() with
     | JsonValueKind.Object
     | JsonValueKind.Array ->
-        text, element.GetValueKind()
-    | other -> (text.Trim '"'), other
+        text :> obj, element.GetValueKind()
+    | other -> 
+        let text = text.Trim '"'        
+        text, other
 
 let toSQLJson<'T> item =
     let json, kind = toSQLJsonAndKind item
@@ -113,7 +121,7 @@ and private fromJson<'T> (text: string) =
         element.EnumerateArray() |> Seq.map(fun e -> e.ToString()) |> Seq.map fromJsonOrSQL<obj> |> Seq.toList :> obj :?> 'T
     else if text.StartsWith "{" then
         match element.TryGetProperty "Item1" with
-        | true, _ -> // It is a tuple, will convert ot array
+        | true, _ -> // It is a tuple, will convert to array
             let arguments = tupleToList element |> List.toArray
             if arguments |> Array.exists(fun e -> e.GetType().IsAssignableTo typeof<SoloDBEntry>) then
                 arguments |> arrayToTuple<'T>
@@ -148,7 +156,7 @@ and fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
     else if data.StartsWith "{"  then
         let o = System.Text.Json.JsonSerializer.Deserialize<JsonElement> (data, jsonOptions)
         match o.TryGetProperty "Item1" with
-        | true, _ -> // It is a tuple, will convert ot array
+        | true, _ -> // It is a tuple, will convert to array
             tupleToList o :> obj :?> 'T
         | false, _ -> fromJson<'T> data
 

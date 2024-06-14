@@ -1,5 +1,7 @@
 ﻿module StandardTests
 
+open JsonUtils
+
 #nowarn "3391" // Implicit on SqlId
 
 open System
@@ -9,7 +11,7 @@ open System.Threading.Tasks
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open FSharp.Interop.Dynamic
 open SoloDB
-open SoloDbTypes
+open SoloDBTypes
 open Types
 open TestUtils
 
@@ -252,7 +254,7 @@ type SoloDBStandardTesting() =
 
         let secondUser = users.GetById ids.[1]
         let secondUserMod = {secondUser with LastSeen = DateTimeOffset.Now.Date |> DateTimeOffset}
-        let update2 = users.Update(secondUserMod).WhereId(ids.[1]).Execute()
+        let update2 = users.Replace(secondUserMod).WhereId(ids.[1]).Execute()
         let secondUserModDB = users.GetById ids.[1]
 
         assertEqual secondUserMod secondUserModDB "Update(User) failed."
@@ -589,7 +591,7 @@ type SoloDBStandardTesting() =
         let testUser = randomUsersToInsert.[0]
         let id = users.Insert testUser
         let updatedUser = { testUser with Username = "UpdatedName" }
-        users.Update(updatedUser).WhereId(id).Execute() |> ignore
+        users.Replace(updatedUser).WhereId(id).Execute() |> ignore
         let userGetById = users.GetById id
         assertEqual userGetById updatedUser "The updated user is different."
     
@@ -935,7 +937,7 @@ type SoloDBStandardTesting() =
         let user = db.GetCollection<User>()
         let id = user.Insert randomUsersToInsert.[0]
         let userToUpdate = randomUsersToInsert.[1]
-        assertEqual (user.Update(userToUpdate).WhereId(id).Execute()) 1 "Did not update."
+        assertEqual (user.Replace(userToUpdate).WhereId(id).Execute()) 1 "Did not update."
         let dbUser = user.GetById id
         assertEqual dbUser userToUpdate "Did not update."
 
@@ -958,7 +960,7 @@ type SoloDBStandardTesting() =
         user1.Username <- "FSJFHDJI"
         user1.Banned <- true
 
-        users.Replace(user1)
+        users.Update(user1)
 
         let dbUser = users.GetById user1.Id
         assertEqual (dbUser.ToString()) (user1.ToString()) "User did not replace in DB."
@@ -1008,3 +1010,22 @@ type SoloDBStandardTesting() =
 
         let exists = db.GetUntypedCollection("FHSAIFHIFUD").Any()
         assertEqual exists false "The Any function should return false for a empty collection."
+
+    [<TestMethod>]
+    member this.UpdateSet() =
+        let users = db.GetCollection<User>()
+        users.InsertBatch randomUsersToInsert |> ignore
+        let first = users.TryFirst(fun u -> true).Value
+        let dateTimeNow = DateTimeOffset.Now
+        assertEqual (users.Update(fun u -> u.LastSeen.Set dateTimeNow).OnAll().Execute()  |> int) randomUsersToInsert.Length "Update (Set) did not work."
+        let allUsers = users.Select().OnAll().ToList()
+        assertEqual allUsers.Length randomUsersToInsert.Length "Update (Set) did not work."
+
+    [<TestMethod>]
+    member this.ToSQLJsonAndKindTest() =
+        let now = DateTimeOffset.Now
+        assertEqual (toSQLJson now) (now.ToUnixTimeMilliseconds()) "ToSQLJsonAndKindTest: Datetimeoffset"
+        assertEqual (toSQLJson "Hello") ("Hello") "ToSQLJsonAndKindTest: string"
+        assertEqual (toSQLJson 1) (1) "ToSQLJsonAndKindTest: string"
+        assertEqual (toSQLJson [1L]) ("[1]") "ToSQLJsonAndKindTest: string"
+        assertEqual (toSQLJson {|hello = "test"|}) ("{\"hello\":\"test\"}") "ToSQLJsonAndKindTest: string"

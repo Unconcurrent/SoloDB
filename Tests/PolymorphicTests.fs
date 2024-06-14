@@ -5,7 +5,7 @@
 open System
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open SoloDB
-open SoloDbTypes
+open SoloDBTypes
 open Types
 open TestUtils
 

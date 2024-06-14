@@ -1,7 +1,6 @@
-﻿module SoloDbTypes
+﻿module SoloDBTypes
 
 open System.Linq.Expressions
-open System
 open System.Text.Json.Serialization
 
 type InnerExpr(expr: Expression<System.Func<obj, bool>>) =

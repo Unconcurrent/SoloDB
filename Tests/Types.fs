@@ -19,7 +19,7 @@ type User = {
 }
 
 type UserWithId() =
-    inherit SoloDbTypes.SoloDBEntry()
+    inherit SoloDBTypes.SoloDBEntry()
 
     member val Username: string = "" with get, set
     member val Auth: bool = false with get, set
@@ -72,7 +72,7 @@ type UserWithId() =
 
 [<AbstractClass>]
 type Animal() =
-    inherit SoloDbTypes.SoloDBEntry()
+    inherit SoloDBTypes.SoloDBEntry()
 
     member val Size: float = 1 with get, set
     member val Tammed: bool = false with get, set
