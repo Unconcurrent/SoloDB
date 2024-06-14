@@ -5,7 +5,7 @@
 open System
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open SoloDB
-open SoloDbTypes
+open SoloDBTypes
 open Types
 open TestUtils
 
@@ -274,7 +274,7 @@ type SoloDBTransactionalTesting() =
             fun db ->
                 let users = db.GetCollection<User>()                
                 let id = users.Insert testUser                
-                users.Update(updatedUser).WhereId(id).Execute() |> ignore     
+                users.Replace(updatedUser).WhereId(id).Execute() |> ignore     
                 id
         )
 

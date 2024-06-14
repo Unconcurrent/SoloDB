@@ -11,8 +11,7 @@ open System.Threading
 open FSharp.Interop.Dynamic
 open JsonUtils
 open System.Collections.Concurrent
-open SoloDbTypes
-open Utils
+open SoloDBTypes
 
 type private DisposableMutex(name: string) =
     let mutex = new Mutex(false, name)
@@ -46,7 +45,7 @@ let private insertInner (item: 'T) (connection: SqliteConnection) (transaction: 
 
     // I know, its ugly.
     match item :> obj with
-    | :? SoloDBEntry as entry when entry.Id <> 0 -> failwithf "Cannot insert a SoloDBEntry with a non zero Id, maybe you want to Replace()?"
+    | :? SoloDBEntry as entry when entry.Id <> 0 -> failwithf "Cannot insert a SoloDBEntry with a non zero Id, maybe you want to Update()?"
     | _ ->
     
     let id = connection.QueryFirst<int64>($"INSERT INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|}, transaction)
@@ -218,6 +217,9 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
     member this.SelectWithId() =
         WhereBuilder(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>(), id)
 
+    member this.TryFirst(func: Expression<System.Func<'T, bool>>) =
+        this.Select().Where(func).Enumerate() |> Seq.tryHead
+
     member this.Count() =
         WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), id)
 
@@ -246,12 +248,12 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
 
         WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {updateSQL})", fromJsonOrSQL<int64>, variables, id)
 
-    member this.Update(item: 'T) =
+    member this.Replace(item: 'T) =
         WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Dictionary([|KeyValuePair("item", toSQLJson item :> obj)|]), id)
 
-    member this.Replace(item: SoloDBEntry) =
+    member this.Update(item: SoloDBEntry) =
         match item :> obj with
-        | :? 'T as value -> this.Update(value).WhereId(item.Id).Execute() |> ignore
+        | :? 'T as value -> this.Replace(value).WhereId(item.Id).Execute() |> ignore
         | other -> failwithf "Cannot insert a %s in a %s Collection, but if you want it use a UntypedCollection with the name '%s'." (other.GetType().FullName) (typeof<'T>.FullName) (name)
 
     member this.Delete() =
@@ -484,7 +486,65 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
 
         new SoloDB(connectionCreator, dbConnection, connectionString, false)
 
+    // The pipe operators.
+    // If you want to use Expression<System.Func<'T, bool>> fluently, 
+    // by just defining a normal function (fun (...) -> ...) you need to use a static member
+    // with C# like arguments.
+
+    static member collection<'T> (db: SoloDB) = db.GetCollection<'T>()
+    static member collectionUntyped name (db: SoloDB) = db.GetUntypedCollection name
+
+    static member drop<'T> (db: SoloDB) = db.DropCollection<'T>()
+    static member dropByName name (db: SoloDB) = db.DropCollection name
+
+    static member tryDrop<'T> (db: SoloDB) = db.DropCollectionIfExists<'T>()
+    static member tryDropByName name (db: SoloDB) = db.DropCollectionIfExists name
+
+    static member transactionally func (db: SoloDB) = db.Transactionally func
+
+    static member ensureIndex<'T, 'R> (func: Expression<System.Func<'T, 'R>>) (collection: Collection<'T>) = collection.EnsureIndex func
+    static member tryDropIndex<'T, 'R> (func: Expression<System.Func<'T, 'R>>) (collection: Collection<'T>) = collection.DropIndexIfExists func
+
+    static member countWhere<'T> (func: Expression<System.Func<'T, bool>>) = fun  (collection: Collection<'T>) -> collection.CountWhere func
+    static member count<'T> (collection: Collection<'T>) = collection.Count()
+    static member countAll<'T> (collection: Collection<'T>) = collection.CountAll()
+    static member countAllLimit<'T> (limit: uint64) (collection: Collection<'T>) = collection.CountAllLimit limit
+
+    static member insert<'T> (item: 'T) (collection: Collection<'T>) = collection.Insert item
+    static member insertBatch<'T> (items: 'T seq) (collection: Collection<'T>) = collection.InsertBatch items
+
+    static member updateF<'T> (func: Expression<Action<'T>>) = fun (collection: Collection<'T>) -> collection.Update func
+    static member update<'T> (item: SoloDBEntry) (collection: Collection<'T>) = collection.Update item
+    static member replace<'T> (item: 'T) (collection: Collection<'T>) = collection.Replace item
+
+    static member delete<'T> (collection: Collection<'T>) = collection.Delete()
+    static member deleteById<'T> id (collection: Collection<'T>) = collection.DeleteById id
+
+    static member select<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> collection.Select func
+    static member all<'T> (collection: Collection<'T>) = collection.Select()
+
+    static member where (func: Expression<System.Func<'a, bool>>) = fun (builder: WhereBuilder<'a, 'b, 'c>) -> builder.Where func
+    static member whereId (func: int64) (builder: WhereBuilder<'a, 'b, 'c>) = builder.WhereId func
+
+    static member limit (count: uint64) (builder: FinalBuilder<'a, 'b, 'c>) = builder.Limit count
+    static member offset (count: uint64) (builder: FinalBuilder<'a, 'b, 'c>) = builder.Offset count
+
+    static member orderAsc (func: Expression<System.Func<'a, obj>>) = fun (builder: FinalBuilder<'a, 'b, 'c>) -> builder.OrderByAsc func
+    static member orderDesc (func: Expression<System.Func<'a, obj>>) = fun (builder: FinalBuilder<'a, 'b, 'c>) -> builder.OrderByDesc func
+
+    static member exec (builder: FinalBuilder<'a, 'b, 'c>) = builder.Execute()
+    static member toSeq (builder: FinalBuilder<'a, 'b, 'c>) = builder.Enumerate()
+    static member toList (builder: FinalBuilder<'a, 'b, 'c>) = builder.ToList()
+
+    static member explain (builder: FinalBuilder<'a, 'b, 'c>) = builder.ExplainQueryPlan()
+
+    static member getById (id: int64) (collection: Collection<'T>) = collection.GetById id
+    static member tryGetById (id: int64) (collection: Collection<'T>) = collection.TryGetById id
+
+    static member tryFirst<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> func |> collection.TryFirst
+
 let instantiate = SoloDB.Instantiate
+
 
 type System.Object with
     member this.Set(value: obj) =
