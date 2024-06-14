@@ -31,14 +31,14 @@ let private createTableInner (name: string) (conn: SqliteConnection) (transactio
     	    Id INTEGER NOT NULL PRIMARY KEY UNIQUE,
     	    Value JSONB NOT NULL
         );", {|name = name|}, transaction) |> ignore
-    conn.Execute("INSERT INTO Collections(Name) VALUES (@name)", {|name = name|}, transaction) |> ignore
+    conn.Execute("INSERT INTO SoloDBCollections(Name) VALUES (@name)", {|name = name|}, transaction) |> ignore
 
 let private existsCollection (name: string) (connection: SqliteConnection)  =
-    connection.QueryFirstOrDefault<string>("SELECT Name FROM Collections WHERE Name = @name LIMIT 1", {|name = name|}) <> null
+    connection.QueryFirstOrDefault<string>("SELECT Name FROM SoloDBCollections WHERE Name = @name LIMIT 1", {|name = name|}) <> null
 
 let private dropCollection (name: string) (transaction: SqliteTransaction) (connection: SqliteConnection) =
     connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name, transaction = transaction) |> ignore
-    connection.Execute("DELETE FROM Collections Where Name = @name", {|name = name|}, transaction = transaction) |> ignore
+    connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}, transaction = transaction) |> ignore
 
 let private insertInner (item: 'T) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
     let json = toJson item
@@ -391,7 +391,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
             failwithf "Collection %s does not exists." name
 
     member this.ListCollectionNames() =
-        dbConnection.Query<string>("SELECT Name FROM Collections")
+        dbConnection.Query<string>("SELECT Name FROM SoloDBCollections")
 
     member this.BackupTo(otherDb: SoloDB) =
         if transaction then failwithf "Cannot backup in a transaction."
@@ -410,12 +410,12 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
 
         connection.Execute("BEGIN IMMEDIATE") |> ignore // Get a write lock
                 
-        let names = connection.Query<string>("SELECT Name FROM Collections") |> Seq.toList
+        let names = connection.Query<string>("SELECT Name FROM SoloDBCollections") |> Seq.toList
         printfn "Tables count: %i" names.Length
 
         use otherTransaction = otherConnection.BeginTransaction()
         try
-            let otherNames = otherConnection.Query<string>("SELECT Name FROM Collections")
+            let otherNames = otherConnection.Query<string>("SELECT Name FROM SoloDBCollections")
             for otherName in otherNames do dropCollection otherName otherTransaction otherConnection 
 
             for name in names do
@@ -480,8 +480,8 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
         let dbConnection = connectionCreator false
         dbConnection.Execute(
                             "PRAGMA journal_mode=wal;
-                            CREATE TABLE IF NOT EXISTS Collections (Name TEXT NOT NULL) STRICT;
-                            CREATE INDEX IF NOT EXISTS CollectionsNameIndex ON Collections(Name);
+                            CREATE TABLE IF NOT EXISTS SoloDBCollections (Name TEXT NOT NULL) STRICT;
+                            CREATE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDB(Name);
                             ") |> ignore
 
         new SoloDB(connectionCreator, dbConnection, connectionString, false)
