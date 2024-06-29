@@ -6,8 +6,9 @@ open System.Text.Json.Serialization
 type InnerExpr(expr: Expression<System.Func<obj, bool>>) =
     member this.Expression = expr
 
+[<Struct>]
 type SqlId =
-    private SqlId of int64
+    SqlId of int64
     with
     static member (+) (SqlId a, SqlId b) = SqlId (a + b)
     static member (-) (SqlId a, SqlId b) = SqlId (a - b)
@@ -39,13 +40,3 @@ type DbObjectRow = {
     Id: int64
     ValueJSON: string
 }
-
-[<AbstractClass>]
-type SoloDBEntry() =
-    let mutable id = 0L
-    [<JsonIgnore>]
-    member this.Id with get() = id and private set value = id <- value
-
-    static member InitId (entry: SoloDBEntry) (value: int64) =
-        if entry.Id <> 0 then failwithf "Cannot set id, only init."
-        entry.Id <- value

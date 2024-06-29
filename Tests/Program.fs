@@ -3,8 +3,8 @@
 
 [<EntryPoint>]
 let main argv =
-    let test = PolymorphicTests.PolymorphicTests()
+    let test = JsonTests.JsonTests()
     test.Init()
-    try test.SelectType()
+    try test.JsonSerializeDeserialize()
     finally test.Cleanup()
     0
