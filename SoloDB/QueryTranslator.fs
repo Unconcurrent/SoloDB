@@ -6,7 +6,7 @@ open System
 open System.Reflection
 open System.Collections.Generic
 open System.Text.Json
-open JsonUtils
+open JsonFunctions
 open Utils
 open SoloDBTypes
 
@@ -223,7 +223,7 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         m
     else if m.Method.Name = "TypeOf" && m.Type = typeof<Type> then
         let t = m.Method.Invoke (null, Array.empty) :?> Type
-        let name = t |> typeToName
+        let name = match t |> typeToName with Some x -> x | None -> ""
         qb.AppendVariable (name)
         m
     else if m.Method.Name = "NewSqlId" then

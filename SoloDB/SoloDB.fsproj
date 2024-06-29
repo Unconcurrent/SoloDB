@@ -7,9 +7,9 @@
 
   <ItemGroup>
     <Compile Include="Types.fs" />
-    <Compile Include="JsonSerializator.fs" />
     <Compile Include="Utils.fs" />
-    <Compile Include="JsonUtils.fs" />
+    <Compile Include="JsonSerializator.fs" />
+    <Compile Include="JsonFunctions.fs" />
     <Compile Include="QueryTranslator.fs" />
     <Compile Include="SoloDB.fs" />
   </ItemGroup>

@@ -9,7 +9,7 @@ open System.Collections
 open System.Text.RegularExpressions
 open System.Threading
 open FSharp.Interop.Dynamic
-open JsonUtils
+open JsonFunctions
 open System.Collections.Concurrent
 open SoloDBTypes
 open Dynamitey
@@ -41,12 +41,10 @@ let private dropCollection (name: string) (transaction: SqliteTransaction) (conn
     connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name, transaction = transaction) |> ignore
     connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}, transaction = transaction) |> ignore
 
-let private hasIdType = ConcurrentDictionary<Type, bool>()
+let private insertInner (typed: bool) (item: 'T) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
+    let json = if typed then toTypedJson item else toJson item
 
-let private insertInner (item: 'T) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
-    let json = toJson item
-
-    let existsId = hasIdType.GetOrAdd(typeof<'T>, fun t -> t.GetProperties() |> Array.exists(fun p -> p.Name = "Id" && p.PropertyType = typeof<SqlId>))
+    let existsId = hasIdType typeof<'T>
 
     if existsId && SqlId(0) <> item?Id then 
         failwithf "Cannot insert a item with a non zero Id, maybe you meant Update?"
@@ -172,12 +170,12 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
     member private this.ConnectionString = connectionString
     member this.Name = name
     member this.InTransaction = inTransaction
-    member this.IsAbstract = typeof<'T>.IsAbstract
+    member this.IncludeType = typeof<'T>.IsAbstract
 
     member this.Insert (item: 'T) =
         use l = lockTable name // To not interfere with the batch one.
 
-        insertInner item connection null name
+        insertInner this.IncludeType item connection null name
 
     member this.InsertBatch (items: 'T seq) =
         use l = lockTable name  // If not, there will be multiple transactions started on the same connection when used concurently,
@@ -186,7 +184,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
         if inTransaction then
             let ids = List<int64>()
             for item in items do
-                insertInner item connection null name |> ids.Add
+                insertInner this.IncludeType item connection null name |> ids.Add
             ids
         else
 
@@ -194,7 +192,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
         try
             let ids = List<int64>()
             for item in items do
-                insertInner item connection transaction name |> ids.Add
+                insertInner this.IncludeType item connection transaction name |> ids.Add
 
             transaction.Commit()
             ids
@@ -257,7 +255,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
         WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {updateSQL})", fromJsonOrSQL<int64>, variables, id)
 
     member this.Replace(item: 'T) =
-        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Dictionary([|KeyValuePair("item", toSQLJson item |> fst)|]), id)
+        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Dictionary([|KeyValuePair("item", (if this.IncludeType then toTypedJson item else toJson item) |> box)|]), id)
 
     member this.Update(item: 'T) =
         match item :> obj with

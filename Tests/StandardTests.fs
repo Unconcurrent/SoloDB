@@ -1,6 +1,6 @@
 ﻿module StandardTests
 
-open JsonUtils
+open JsonFunctions
 
 #nowarn "3391" // Implicit on SqlId
 
