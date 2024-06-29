@@ -1,12 +1,21 @@
-﻿module JsonUtils
+﻿module JsonFunctions
 
 open System
+open System.Collections.Concurrent
 open Utils
 open SoloDBTypes
 open JsonSerializator
+open FSharp.Interop.Dynamic
+
+let private hasIdTypeCache = ConcurrentDictionary<Type, bool>()
+let hasIdType (t: Type) = hasIdTypeCache.GetOrAdd(t, fun t -> t.GetProperties() |> Array.exists(fun p -> p.Name = "Id" && p.PropertyType = typeof<SqlId>))
 
 let toJson<'T> o = 
     let element = JsonValue.Serialize o
+    element.ToJsonString()
+
+let toTypedJson<'T> o = 
+    let element = JsonValue.SerializeWithType o
     element.ToJsonString()
 
 let toSQLJson<'T> (item: obj) = 
@@ -29,8 +38,7 @@ let toSQLJson<'T> (item: obj) =
 
 let private fromJson<'T> (text: string) =
     let json = JsonValue.Parse text
-    json.ToObject<'T>()
-    
+    json.ToObject<'T>()    
 
 let rec fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
     if data = null then null :> obj :?> 'T
@@ -64,7 +72,8 @@ let fromDapper<'R when 'R :> obj> (input: obj) : 'R =
     match input with
     | :? DbObjectRow as row ->
         let mutable obj = fromJsonOrSQL<'R> (row.ValueJSON)
-
+        if hasIdType typeof<'R> then
+            obj?Id <- SqlId(row.Id)
         obj
     | :? string as input ->
         fromJsonOrSQL<'R> (input :> obj :?> string)

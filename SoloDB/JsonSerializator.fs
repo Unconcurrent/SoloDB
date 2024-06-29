@@ -6,6 +6,7 @@ open System.Collections
 open System.Reflection
 open Dynamitey
 open System.Dynamic
+open Utils
 
 let inline isNullableType (typ: Type) =
     typ.IsGenericType && typ.GetGenericTypeDefinition() = typedefof<Nullable<_>>
@@ -140,6 +141,13 @@ type JsonValue =
                     dict.Add(prop.Name, serializedValue)
             Object dict
 
+    static member SerializeWithType (value: obj) =
+        let json = JsonValue.Serialize value
+        match json, value.GetType() |> typeToName with
+        | Object _, Some t -> json["$type"] <- t
+        | other -> ()
+        json
+
     static member DeserializeDynamic (json: JsonValue) : obj =
         let toDecimal (input: string) =
             match Decimal.TryParse input with
@@ -178,7 +186,7 @@ type JsonValue =
         deserialize json
 
     static member Deserialize (targetType: Type) (json: JsonValue) : obj =
-        let createInstance () =
+        let createInstance (targetType: Type) =
             Activator.CreateInstance(targetType, BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic, null, [||], null)
 
         let isCollectionType typ =
@@ -189,8 +197,9 @@ type JsonValue =
             | _, JsonValue.Null -> null
             | t, JsonValue.Boolean b when t = typeof<bool> -> b
             | t, JsonValue.String s when t = typeof<string> -> s
+            | t, JsonValue.String s when t = typeof<Type> -> s |> nameToType |> box
             | t, JsonValue.Number n when t = typeof<float32> -> float32 n
-            | t, JsonValue.Number n when t = typeof<float> -> n
+            | t, JsonValue.Number n when t = typeof<float> -> float n
             | t, JsonValue.Number n when t = typeof<bool> -> if n = Decimal.Zero then false else true
             | t, JsonValue.Number n when t = typeof<int8> -> int8 n
             | t, JsonValue.Number n when t = typeof<int16> -> int16 n
@@ -229,7 +238,15 @@ type JsonValue =
             | _ -> failwith "Expected JSON array for tuple deserialization."
 
         let deserializeObject (targetType: Type) (jsonObj: JsonValue) =
-            let instance = createInstance ()
+            let targetType =
+                let typeProp = match jsonObj.TryGetProperty "$type" with true, x -> x.ToObject<string>() |> nameToType | false, _ -> null
+                match targetType.IsSealed, typeProp with
+                | true, _ -> targetType
+                | _, null -> targetType
+                | false, (jsonType) when (jsonType).IsAssignableTo targetType -> jsonType
+                | _ -> targetType
+
+            let instance = createInstance targetType
             match jsonObj with
             | JsonValue.Object properties ->
                 let propertiesInfo = targetType.GetProperties()
@@ -249,7 +266,7 @@ type JsonValue =
         else
         match json with
         | JsonValue.Null -> null
-        | JsonValue.String _ | JsonValue.Boolean _ | JsonValue.Number _ when targetType.IsPrimitive || targetType = typeof<string> || targetType = typeof<DateTimeOffset> || targetType = typeof<SoloDBTypes.SqlId> ->
+        | JsonValue.String _ | JsonValue.Boolean _ | JsonValue.Number _ when targetType.IsPrimitive || targetType = typeof<string> || targetType = typeof<DateTimeOffset> || targetType = typeof<SoloDBTypes.SqlId> || targetType = typeof<Type> ->
             deserializePrimitive targetType json
         | JsonValue.List _ when typeof<System.Runtime.CompilerServices.ITuple>.IsAssignableFrom targetType ->
             deserializeTuple targetType json
@@ -263,7 +280,7 @@ type JsonValue =
     member this.ToObject (targetType: Type) =
         JsonValue.Deserialize targetType this
 
-    member this.ToObject<'T>() =
+    member this.ToObject<'T>() : 'T =
         JsonValue.Deserialize typeof<'T> this :?> 'T
 
     member this.SetProperty(name: string, value: JsonValue) =
@@ -274,7 +291,7 @@ type JsonValue =
             list.[index] <- value
         | other -> failwithf "Cannot index %s" (other.ToString())
 
-    member this.TryGetProperty(name: string) =
+    member this.TryGetProperty(name: string) : bool * JsonValue =
         match this with
         | Object o -> o.TryGetValue(name)
         | List list -> 
