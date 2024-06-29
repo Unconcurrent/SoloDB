@@ -12,6 +12,7 @@
     <Compile Include="StandardTests.fs" />
     <Compile Include="TransactionalTests.fs" />
     <Compile Include="PolymorphicTests.fs" />
+    <Compile Include="JsonTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

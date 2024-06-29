@@ -267,9 +267,11 @@ type SoloDBStandardTesting() =
 
         let users = users.Select(fun u -> (u?Username, u?CarType)).Where(fun u -> u?Username > "A").ToList()
         let usersStr = sprintf "%A" users
-        let expected = "[(John, null); (Mihail, null); (Vanya, null); (Givany, null)]"
         printfn "%s" usersStr
-        assertEqual usersStr expected "SelectUntypedTest failed."
+        assertEqual users.[0] ("John", null) "SelectUntypedTest failed."
+        assertEqual users.[1] ("Mihail", null) "SelectUntypedTest failed."
+        assertEqual users.[2] ("Vanya", null) "SelectUntypedTest failed."
+        assertEqual users.[3] ("Givany", null) "SelectUntypedTest failed."
 
     [<TestMethod>]
     member this.UntypedCollectionInsertTest() =        
@@ -856,7 +858,7 @@ type SoloDBStandardTesting() =
             "test";
             1L;
             2L;
-            ["A" :> obj; "B"; "C"; 99L]
+            seq { "A" :> obj; "B"; "C"; 99L }
         ]
 
         db.GetUntypedCollection("RandomData").InsertBatch randomData |> ignore
@@ -972,7 +974,7 @@ type SoloDBStandardTesting() =
 
         let ids = users.InsertBatch (randomUsersWithIdToInsert |> Seq.map _.Clone())
         
-        let selected = users.Select(fun u -> (u.Id, u.Username)).Where(fun u -> u.Id < 3).ToList()
+        let selected = users.Select(fun u -> (u.Id, u.Username)).Where(fun u -> u.Id < SqlId(3)).ToList()
 
         assertEqual (selected.Length) (2) "The select with SoloDBEntry.Id does not work."
 
@@ -1024,8 +1026,8 @@ type SoloDBStandardTesting() =
     [<TestMethod>]
     member this.ToSQLJsonAndKindTest() =
         let now = DateTimeOffset.Now
-        assertEqual (toSQLJson now) (now.ToUnixTimeMilliseconds()) "ToSQLJsonAndKindTest: Datetimeoffset"
-        assertEqual (toSQLJson "Hello") ("Hello") "ToSQLJsonAndKindTest: string"
-        assertEqual (toSQLJson 1) (1) "ToSQLJsonAndKindTest: string"
-        assertEqual (toSQLJson [1L]) ("[1]") "ToSQLJsonAndKindTest: string"
-        assertEqual (toSQLJson {|hello = "test"|}) ("{\"hello\":\"test\"}") "ToSQLJsonAndKindTest: string"
+        assertEqual (toSQLJson now) (now.ToUnixTimeMilliseconds(), false) "ToSQLJsonAndKindTest: Datetimeoffset"
+        assertEqual (toSQLJson "Hello") ("Hello", false) "ToSQLJsonAndKindTest: string"
+        assertEqual (toSQLJson 1) (1, false) "ToSQLJsonAndKindTest: string"
+        assertEqual (toSQLJson [1L]) ("[1]", true) "ToSQLJsonAndKindTest: string"
+        assertEqual (toSQLJson {|hello = "test"|}) ("{\"hello\": \"test\"}", true) "ToSQLJsonAndKindTest: string"

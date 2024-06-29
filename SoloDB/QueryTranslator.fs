@@ -34,11 +34,11 @@ type private QueryBuilder =
                 sb.Append (sprintf "%s" (value.ToString())) |> ignore
             else
                 
-            let jsonValue, kind = toSQLJsonAndKind value
-            match kind with
-            | JsonValueKind.Object
-            | JsonValueKind.Array -> sb.Append (sprintf "jsonb(@%s)" name) |> ignore
-            | other -> sb.Append (sprintf "@%s" name) |> ignore
+            let jsonValue, kind = toSQLJson value
+            if kind then 
+                sb.Append (sprintf "jsonb(@%s)" name) |> ignore
+            else 
+                sb.Append (sprintf "@%s" name) |> ignore
             variables.[name] <- jsonValue
 
         let appendRaw (s: string) = sb.Append s |> ignore
@@ -163,7 +163,7 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         visit b qb |> ignore
         m
 
-    else if m.Method.Name = "op_Dynamic" then
+    else if m.Method.Name = "op_Dynamic" then // todo: add C# version of dynamic.
         let o = m.Arguments[0]
         let property = (m.Arguments[1] :?> ConstantExpression).Value
 
@@ -193,7 +193,7 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         let arg1 = (m.Arguments[0] :?> MethodCallExpression) // SubstHelper
         let arg2 = arg1.Arguments[0]
         visit arg2 qb
-    else if m.Method.Name =  "op_Implicit" then
+    else if m.Method.Name = "op_Implicit" then
         let arg1 = m.Arguments[0]
         visit arg1 qb
     else if m.Method.Name = "Contains" then
@@ -226,6 +226,9 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         let name = t |> typeToName
         qb.AppendVariable (name)
         m
+    else if m.Method.Name = "NewSqlId" then
+        let arg1 = m.Arguments[0]
+        visit arg1 qb
     else
         raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 
@@ -250,9 +253,8 @@ and private visitNew (m: NewExpression) (qb: QueryBuilder) =
     let t = m.Type
 
     if t.FullName.StartsWith "System.Tuple" then
-        qb.AppendRaw "json_object("
+        qb.AppendRaw "json_array("
         for i, arg in m.Arguments |> Seq.indexed do
-            qb.AppendRaw $"'Item{i + 1}',"
             visit(arg) qb |> ignore
             if m.Arguments.IndexOf arg <> m.Arguments.Count - 1 then
                 qb.AppendRaw ","
@@ -320,7 +322,7 @@ and private visitMemberAccess (m: MemberExpression) (qb: QueryBuilder) =
         if qb.UpdateMode then sprintf "'$.%s'" path
         else sprintf "jsonb_extract(%sValue, '$.%s')" qb.TableNameDot path
 
-    if m.Member.DeclaringType = typeof<SoloDBEntry> && m.Member.Name = "Id" then
+    if m.Type = typeof<SqlId> && m.Member.Name = "Id" then
         qb.AppendRaw $"{qb.TableNameDot}Id" |> ignore
     else if m.Expression <> null && isRootParameter m then
         let jsonPath = buildJsonPath m []

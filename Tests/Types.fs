@@ -2,6 +2,7 @@
 
 open System
 open System.Text
+open SoloDBTypes
 
 [<CLIMutable>]
 type UserData = {
@@ -19,8 +20,7 @@ type User = {
 }
 
 type UserWithId() =
-    inherit SoloDBTypes.SoloDBEntry()
-
+    member val Id: SqlId = SqlId(0) with get, set
     member val Username: string = "" with get, set
     member val Auth: bool = false with get, set
     member val Banned: bool = false with get, set
@@ -30,7 +30,7 @@ type UserWithId() =
 
     member this.Clone() =
         let cloned = UserWithId()
-        UserWithId.InitId cloned this.Id
+
         cloned.Username <- this.Username
         cloned.Auth <- this.Auth
         cloned.Banned <- this.Banned
@@ -59,7 +59,6 @@ type UserWithId() =
 
     static member FromUser id user =
         let userId = UserWithId()
-        UserWithId.InitId userId id
 
         userId.Username <- user.Username
         userId.Auth <- user.Auth
@@ -72,7 +71,7 @@ type UserWithId() =
 
 [<AbstractClass>]
 type Animal() =
-    inherit SoloDBTypes.SoloDBEntry()
+    member val Id: SqlId = SqlId(0) with get, set
 
     member val Size: float = 1 with get, set
     member val Tammed: bool = false with get, set

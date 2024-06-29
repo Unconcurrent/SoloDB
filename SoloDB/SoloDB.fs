@@ -12,6 +12,7 @@ open FSharp.Interop.Dynamic
 open JsonUtils
 open System.Collections.Concurrent
 open SoloDBTypes
+open Dynamitey
 
 type private DisposableMutex(name: string) =
     let mutex = new Mutex(false, name)
@@ -40,19 +41,21 @@ let private dropCollection (name: string) (transaction: SqliteTransaction) (conn
     connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name, transaction = transaction) |> ignore
     connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}, transaction = transaction) |> ignore
 
+let private hasIdType = ConcurrentDictionary<Type, bool>()
+
 let private insertInner (item: 'T) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
     let json = toJson item
 
-    // I know, its ugly.
-    match item :> obj with
-    | :? SoloDBEntry as entry when entry.Id <> 0 -> failwithf "Cannot insert a SoloDBEntry with a non zero Id, maybe you want to Update()?"
-    | _ ->
-    
+    let existsId = hasIdType.GetOrAdd(typeof<'T>, fun t -> t.GetProperties() |> Array.exists(fun p -> p.Name = "Id" && p.PropertyType = typeof<SqlId>))
+
+    if existsId && SqlId(0) <> item?Id then 
+        failwithf "Cannot insert a item with a non zero Id, maybe you meant Update?"
+
     let id = connection.QueryFirst<int64>($"INSERT INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|}, transaction)
 
-    match item :> obj with
-    | :? SoloDBEntry as entry -> SoloDBEntry.InitId entry id
-    | other -> ()
+    if existsId then 
+        item?Id <- SqlId(id)
+
     id
 
 let private insertInnerRaw (item: DbObjectRow) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
@@ -150,8 +153,8 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
 
         FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select, postModifySQL)
 
-    member this.WhereId(id: int64) =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql + sprintf "WHERE Id = %i " id, vars, select, postModifySQL)
+    member this.WhereId(id: SqlId) =
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql + sprintf "WHERE Id = %i " id.Value, vars, select, postModifySQL)
 
     member this.WhereId(func: Expression<System.Func<SqlId, bool>>) =
         let whereSQL, newVariables = QueryTranslator.translate name func
@@ -169,8 +172,11 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
     member private this.ConnectionString = connectionString
     member this.Name = name
     member this.InTransaction = inTransaction
+    member this.IsAbstract = typeof<'T>.IsAbstract
 
     member this.Insert (item: 'T) =
+        use l = lockTable name // To not interfere with the batch one.
+
         insertInner item connection null name
 
     member this.InsertBatch (items: 'T seq) =
@@ -196,14 +202,14 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
             transaction.Rollback()
             reraise()
 
-    member this.TryGetById(id: int64) =
-        match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
+    member this.TryGetById(id: SqlId) =
+        match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id.Value|}) with
         | json when Object.ReferenceEquals(json, null) -> None
         | json -> fromDapper<'T> json |> Some
 
-    member this.GetById(id: int64) =
+    member this.GetById(id: SqlId) =
         match this.TryGetById id with
-        | None -> failwithf "There is no element with id %i" id
+        | None -> failwithf "There is no element with id %i" id.Value
         | Some x -> x
 
     member this.Select<'R>(select: Expression<System.Func<'T, 'R>>) =
@@ -226,7 +232,9 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
     member this.CountAll() =        
         WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), id).OnAll().First()
 
-    member this.CountAllLimit(limit: uint64) =        
+    member this.CountAllLimit(limit: uint64) =
+        // https://stackoverflow.com/questions/1824490/how-do-you-enable-limit-for-delete-in-sqlite
+        // By default, SQLite does not support LIMIT in a COUNT statement, but there is this workaround.
         FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" LIMIT @limit)", Dictionary<string, obj>([|KeyValuePair("limit", limit :> obj)|]), fromJsonOrSQL<int64>, id).First()
 
     member this.CountWhere(func: Expression<System.Func<'T, bool>>) =
@@ -249,11 +257,11 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
         WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {updateSQL})", fromJsonOrSQL<int64>, variables, id)
 
     member this.Replace(item: 'T) =
-        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Dictionary([|KeyValuePair("item", toSQLJson item :> obj)|]), id)
+        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Dictionary([|KeyValuePair("item", toSQLJson item |> fst)|]), id)
 
-    member this.Update(item: SoloDBEntry) =
+    member this.Update(item: 'T) =
         match item :> obj with
-        | :? 'T as value -> this.Replace(value).WhereId(item.Id).Execute() |> ignore
+        | :? 'T as value -> this.Replace(value).WhereId(Dynamic.InvokeConvert(item?Id, typeof<SqlId>, false) :?> SqlId).Execute() |> ignore
         | other -> failwithf "Cannot insert a %s in a %s Collection, but if you want it use a UntypedCollection with the name '%s'." (other.GetType().FullName) (typeof<'T>.FullName) (name)
 
     member this.Delete() =
@@ -522,7 +530,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
     static member insertBatch<'T> (items: 'T seq) (collection: Collection<'T>) = collection.InsertBatch items
 
     static member updateF<'T> (func: Expression<Action<'T>>) = fun (collection: Collection<'T>) -> collection.Update func
-    static member update<'T> (item: SoloDBEntry) (collection: Collection<'T>) = collection.Update item
+    // static member update<'T> (item: 'T) (collection: Collection<'T>) = collection.Update item
     static member replace<'T> (item: 'T) (collection: Collection<'T>) = collection.Replace item
 
     static member delete<'T> (collection: Collection<'T>) = collection.Delete()
