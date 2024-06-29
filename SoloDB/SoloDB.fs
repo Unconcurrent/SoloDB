@@ -484,6 +484,14 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
                             CREATE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDB(Name);
                             ") |> ignore
 
+        let existsOldName = dbConnection.QueryFirstOrDefault<string>("SELECT name FROM sqlite_master WHERE type='table' AND name='Collections';")
+        if existsOldName <> null then
+            use transaction = dbConnection.BeginTransaction()
+            try
+                dbConnection.Execute("INSERT INTO SoloDBCollections (Name) SELECT Name FROM Collections; DROP TABLE Collections;", transaction = transaction) |> ignore
+                transaction.Commit()
+            with ex -> transaction.Rollback()
+
         new SoloDB(connectionCreator, dbConnection, connectionString, false)
 
     // The pipe operators.
@@ -521,9 +529,10 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
     static member deleteById<'T> id (collection: Collection<'T>) = collection.DeleteById id
 
     static member select<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> collection.Select func
+    static member select<'T> () = fun (collection: Collection<'T>) -> collection.Select()
     static member all<'T> (collection: Collection<'T>) = collection.Select()
 
-    static member where (func: Expression<System.Func<'a, bool>>) = fun (builder: WhereBuilder<'a, 'b, 'c>) -> builder.Where func
+    static member where<'a, 'b, 'c> (func: Expression<System.Func<'a, bool>>) = fun (builder: WhereBuilder<'a, 'b, 'c>) -> builder.Where func
     static member whereId (func: int64) (builder: WhereBuilder<'a, 'b, 'c>) = builder.WhereId func
 
     static member limit (count: uint64) (builder: FinalBuilder<'a, 'b, 'c>) = builder.Limit count
@@ -542,6 +551,8 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
     static member tryGetById (id: int64) (collection: Collection<'T>) = collection.TryGetById id
 
     static member tryFirst<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> func |> collection.TryFirst
+
+    static member any<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> func |> collection.Any
 
 let instantiate = SoloDB.Instantiate
 
