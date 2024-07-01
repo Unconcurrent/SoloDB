@@ -539,9 +539,9 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
     static member delete<'T> (collection: Collection<'T>) = collection.Delete()
     static member deleteById<'T> id (collection: Collection<'T>) = collection.DeleteById id
 
-    static member select<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> collection.Select func
+    static member select<'T, 'R> (func: Expression<System.Func<'T, 'R>>) = fun (collection: Collection<'T>) -> collection.Select func
     static member select<'T> () = fun (collection: Collection<'T>) -> collection.Select()
-    static member all<'T> (collection: Collection<'T>) = collection.Select()
+    static member selectUnique<'T, 'R> (func: Expression<System.Func<'T, 'R>>) = fun (collection: Collection<'T>) -> collection.SelectUnique func
 
     static member where<'a, 'b, 'c> (func: Expression<System.Func<'a, bool>>) = fun (builder: WhereBuilder<'a, 'b, 'c>) -> builder.Where func
     static member whereId (func: int64) (builder: WhereBuilder<'a, 'b, 'c>) = builder.WhereId func
