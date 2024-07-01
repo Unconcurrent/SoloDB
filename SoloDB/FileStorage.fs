@@ -5,6 +5,7 @@ open System.IO
 open Microsoft.Data.Sqlite
 open Dapper
 open SoloDBTypes
+open System.Collections.Generic
 
 let chunkSize = 
     1L // MB
@@ -21,46 +22,53 @@ let private lockFileId (db: SqliteConnection) (id: SqlId) =
     let mutex = new DisposableMutex($"SoloDB-{db.ConnectionString.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-FileId-{id.Value}")
     mutex
 
+let fillDirectoryMetadata (db: SqliteConnection) (directory: DirectoryHeader) =
+    let allMetadata = db.Query<Metadata>("SELECT Key, Value FROM DirectoryMetadata WHERE DirectoryId = @DirectoryId", {|DirectoryId = directory.Id|}) |> Seq.toList
+    let dict = Dictionary<string, string>()
+
+    for meta in allMetadata do
+        dict[meta.Key] <- meta.Value
+
+    {directory with Metadata = dict}
+
+let private tryGetDir (db: SqliteConnection) (path: string) =
+    let dir = db.QueryFirstOrDefault<DirectoryHeader>("SELECT * FROM DirectoryHeader WHERE FullPath = @Path", {|Path = path|})
+    if Object.ReferenceEquals(dir, null) then
+        None
+    else 
+        dir |> fillDirectoryMetadata db |> Some
+
 let private getOrCreateDir (db: SqliteConnection) (path: string) =
     use l = lockPath db path
 
+    match tryGetDir db path with
+    | Some d -> d
+    | None ->
+
+
     let names = path.Split ('/', StringSplitOptions.RemoveEmptyEntries) |> Array.toList
     let root = db.QueryFirst<DirectoryHeader>("SELECT * FROM DirectoryHeader WHERE Name = @RootName", {|RootName = ""|})
-    let root = {root with ParentId = Nullable()}
 
-    let rec innerLoop (prev: DirectoryHeader) (namesRem: string list) = 
-        match namesRem with
+
+    let rec innerLoop (prev: DirectoryHeader) (remNames: string list) (prevName: string list) = 
+        match remNames with
         | [] -> prev
         | head :: tail ->
             match db.QueryFirstOrDefault<DirectoryHeader>("SELECT * FROM DirectoryHeader WHERE Name = @Name AND ParentId = @ParentId", {|Name = head; ParentId = prev.Id|}) with
             | dir when Object.ReferenceEquals(dir, null) -> 
+                let sep = "/"
                 let newDir = {|
                     Name = head
                     ParentId = prev.Id
+                    FullPath = $"/{(prevName @ [head] |> String.concat sep)}"
                 |}
-                let result = db.Execute("INSERT INTO DirectoryHeader(Name, ParentId) VALUES(@Name, @ParentId)", newDir)
-                innerLoop prev (head :: tail) // todo: Check if prev should be newDir.
-            | dir -> innerLoop dir tail 
+                let result = db.Execute("INSERT INTO DirectoryHeader(Name, ParentId, FullPath) VALUES(@Name, @ParentId, @FullPath)", newDir)
+                innerLoop prev (head :: tail) prevName
+            | dir -> innerLoop dir tail (prevName @ [head])
     
-    innerLoop root names
+    innerLoop root names [] |> fillDirectoryMetadata db
 
-let private getDir (db: SqliteConnection) (path: string) =
-    use l = lockPath db path
 
-    let names = path.Split ('/', StringSplitOptions.RemoveEmptyEntries) |> Array.toList
-    let root = db.QueryFirst<DirectoryHeader>("SELECT * FROM DirectoryHeader WHERE Name = @RootName", {|RootName = ""|})
-    let root = {root with ParentId = Nullable()}
-
-    let rec innerLoop (prev: DirectoryHeader) (namesRem: string list) =
-        match namesRem with
-        | [] -> prev |> Some
-        | head :: tail ->
-            match db.QueryFirstOrDefault<DirectoryHeader>("SELECT * FROM DirectoryHeader WHERE Name = @Name AND ParentId = @ParentId", {|Name = head; ParentId = prev.Id|}) with
-            | dir when Object.ReferenceEquals(dir, null) ->
-                None
-            | dir -> innerLoop dir tail 
-        
-    innerLoop root names
     
 let private tryGetChunkData (db: SqliteConnection) (fileId: SqlId) (chunkNumber: int64) transaction =
     let sql = "SELECT Data FROM FileChunk WHERE FileId = @FileId AND Number = @ChunkNumber"
@@ -171,11 +179,7 @@ type DbFileStream(db: SqliteConnection, fileId: SqlId) =
             position 
         and set(value) = 
             checkDisposed()
-            use l = lockFileId db fileId
-
-            if value < 0L || value > this.Length then
-                raise (ArgumentOutOfRangeException(nameof(this.Position), "Position is out of range."))
-            position <- value
+            this.Seek(value, SeekOrigin.Begin) |> ignore
 
     override _.Flush() = 
         checkDisposed()
@@ -187,27 +191,37 @@ type DbFileStream(db: SqliteConnection, fileId: SqlId) =
         if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
         if buffer.Length - offset < count then raise (ArgumentException("Invalid offset and length."))
 
-
+        let position = position
         let count = int64 count
 
         let chunkNumber = position / int64 chunkSize
         let chunkOffset = position % int64 chunkSize
 
-        let bytesToRead = min count (chunkSize - chunkOffset) |> min (this.Length - position)
+        let len = this.Length
+        let bytesToRead = min count (chunkSize - chunkOffset) |> min (len - position)
 
         if bytesToRead = 0 then
             0
         else
 
-        use l = lockFileId db fileId
-
         match tryGetChunkData db fileId chunkNumber null with
-        | None -> 0
+        | None -> 
+            let maxChunkNumber = (min (position + count) len) / int64 chunkSize
+            if maxChunkNumber > chunkNumber then // Try to load the other chunk if the file was sparsely allocated.
+                let offsetToNextChunk = chunkSize - chunkOffset
+
+                let bytesToRead = int (min (len - position) count) - int offsetToNextChunk
+                buffer.AsSpan(offset, int offsetToNextChunk).Fill(0uy)
+
+                this.Position <- position + offsetToNextChunk
+                this.Read(buffer, offset + int offsetToNextChunk, bytesToRead) + int offsetToNextChunk
+            else
+            0
         | Some chunkData ->
 
         Array.Copy(chunkData, chunkOffset, buffer, offset, bytesToRead)
         
-        position <- position + bytesToRead
+        this.Position <- position + bytesToRead
 
         int bytesToRead
         
@@ -218,30 +232,33 @@ type DbFileStream(db: SqliteConnection, fileId: SqlId) =
         if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
         if buffer.Length - offset < count then raise (ArgumentException("Invalid offset and length."))
 
-        use l = lockFileId db fileId
-
+        let position = position
         let count = int64 count
         let mutable remainingBytes = 0L
         let mutable bytesToWrite = 0L
 
-        let chunkNumber = position / int64 chunkSize
-        let chunkOffset = position % int64 chunkSize
+        try
+            use l = lockFileId db fileId
 
-        let tryGetChunkDataResult = tryGetChunkData db fileId chunkNumber null
-        let existingChunk = match tryGetChunkDataResult with Some data -> data | None -> Array.zeroCreate (int chunkSize)
+            let chunkNumber = position / int64 chunkSize
+            let chunkOffset = position % int64 chunkSize
 
-        let spaceInChunk = chunkSize - chunkOffset
-        bytesToWrite <- min count spaceInChunk
+            let tryGetChunkDataResult = tryGetChunkData db fileId chunkNumber null
+            let existingChunk = match tryGetChunkDataResult with Some data -> data | None -> Array.zeroCreate (int chunkSize)
 
-        Array.Copy(buffer, offset, existingChunk, chunkOffset, bytesToWrite)
+            let spaceInChunk = chunkSize - chunkOffset
+            bytesToWrite <- min count spaceInChunk
 
-        writeChunkData db fileId chunkNumber existingChunk null
+            Array.Copy(buffer, offset, existingChunk, chunkOffset, bytesToWrite)
 
-        position <- position + int64 bytesToWrite
-        if position > this.Length then
-            updateLenById db fileId position null            
+            writeChunkData db fileId chunkNumber existingChunk null
 
-        remainingBytes <- count - bytesToWrite
+            this.Position <- position + int64 bytesToWrite
+            if this.Position > this.Length then
+                updateLenById db fileId this.Position null            
+
+            remainingBytes <- count - bytesToWrite
+        finally ()
 
         if remainingBytes > 0 then
             this.Write(buffer, offset + int bytesToWrite, int remainingBytes)
@@ -277,7 +294,7 @@ let getPathAndName (path: string) =
     let name = match normalizedCompletePath |> Array.tryLast with Some x -> x | None -> ""
     dirPath, name
 
-let private createFileAtTransactionally (db: SqliteConnection) (path: string) (transaction) =
+let createFileAt (db: SqliteConnection) (path: string) =
     let dirPath, name = getPathAndName path
     let directory = getOrCreateDir db dirPath
     let newFile = {|
@@ -287,13 +304,9 @@ let private createFileAtTransactionally (db: SqliteConnection) (path: string) (t
         Created = DateTimeOffset.Now
         Modified = DateTimeOffset.Now
     |}
-    let result = db.QueryFirst<FileHeader>("INSERT INTO FileHeader(Name, DirectoryId, Length, Created, Modified) VALUES (@Name, @DirectoryId, @Length, @Created, @Modified) RETURNING *", newFile, transaction)
+    let result = db.QueryFirst<FileHeader>("INSERT INTO FileHeader(Name, DirectoryId, Length, Created, Modified) VALUES (@Name, @DirectoryId, @Length, @Created, @Modified) RETURNING *", newFile)
 
     result
-
-
-let createFileAt (db: SqliteConnection) (path: string) =
-    createFileAtTransactionally db path null
 
 
 let tryCreateFileAt (db: SqliteConnection) (path: string) =
@@ -315,31 +328,72 @@ let tryCreateFileAt (db: SqliteConnection) (path: string) =
 
 let listDirectoriesAt (db: SqliteConnection) (path: string) =
     let dirPath = getPathAndName path |> combinePath
-    match getDir db dirPath with
+    match tryGetDir db dirPath with
     | None -> Seq.empty
     | Some dir ->
     let childres = listDirectoryChildren db dir null
     childres
 
 
-let getFileAt (db: SqliteConnection) (path: string) =
+let private metadataFiller (header: FileHeader) (metadata: Metadata) =
+    let header = {header with Metadata = (if Object.ReferenceEquals(header.Metadata, null) then Dictionary<string, string>() :> IDictionary<string, string> else header.Metadata)}
+    if not (Object.ReferenceEquals(metadata, null)) then 
+        header.Metadata[metadata.Key] <- metadata.Value
+    header
+
+let tryGetFile (connection: SqliteConnection) (fileId: SqlId) =
+    let query = """
+        SELECT fh.*, fm.Key, fm.Value
+        FROM FileHeader fh
+        LEFT JOIN FileMetadata fm ON fh.Id = fm.FileId
+        WHERE fh.Id = @FileId;
+        """
+    
+    connection.Query<FileHeader, Metadata, FileHeader>(
+        query, 
+        metadataFiller,
+        {| FileId = fileId |},
+        splitOn = "Key"
+    )
+    |> Seq.tryHead
+
+let tryGetFileAt (db: SqliteConnection) (path: string) =
     let dirPath, name = getPathAndName path
-    match getDir db dirPath with
+    match tryGetDir db dirPath with
     | None -> None
     | Some dir -> 
+    db.Query<FileHeader, Metadata, FileHeader>(
+        """
+        SELECT fh.*, fm.Key, fm.Value
+        FROM FileHeader fh
+        LEFT JOIN FileMetadata fm ON fh.Id = fm.FileId
+        WHERE fh.DirectoryId = @DirectoryId AND fh.Name = @Name;
+        """, 
+        metadataFiller,
+        {|DirectoryId = dir.Id; Name = name|},
+        splitOn = "Key"
+    )
+    |> Seq.tryHead
+
+let getOrCreateFileAt (db: SqliteConnection) (path: string) =
+    use l = lockPath db path
+
+    let dirPath, name = getPathAndName path
+    let dir = getOrCreateDir db dirPath 
+
     match db.QueryFirstOrDefault<FileHeader>("SELECT * FROM FileHeader WHERE DirectoryId = @DirectoryId AND Name = @Name", {|DirectoryId = dir.Id; Name = name|}) with
-    | file when Object.ReferenceEquals(file, null) -> None
-    | file -> file |> Some
+    | file when Object.ReferenceEquals(file, null) -> createFileAt db path
+    | file -> file
 
 
 let getDirectoryAt (db: SqliteConnection) (path: string) =
     let dirPath = getPathAndName path |> combinePath
-    getDir db dirPath
+    tryGetDir db dirPath
 
 
 let deleteDirectoryAt (db: SqliteConnection) (path: string) =
     let dirPath = getPathAndName path |> combinePath
-    match getDir db dirPath with
+    match tryGetDir db dirPath with
     | None -> false
     | Some dir ->
     try
@@ -356,7 +410,7 @@ let getOrCreateDirectoryAt (db: SqliteConnection) (path: string) =
 
 let listFilesAt (db: SqliteConnection) (path: string) : FileHeader seq = 
     let dirPath = getPathAndName path |> combinePath
-    match getDir db dirPath with 
+    match tryGetDir db dirPath with 
     | None -> Seq.empty
     | Some dir ->
     listDirectoryFiles db dir null
@@ -365,7 +419,7 @@ let openFile (db: SqliteConnection) (file: FileHeader) =
     new DbFileStream(db, file.Id)
 
 let openOrCreateFile (db: SqliteConnection) (path: string) =
-    let file = getFileAt db path
+    let file = tryGetFileAt db path
     let file = match file with
                 | Some x -> x 
                 | None -> createFileAt db path
@@ -381,6 +435,11 @@ let getFilePath db (file: FileHeader) =
     let directoryPath = getDirectoryPath db directory
     [|directoryPath; file.Name|] |> combinePathArr
 
+let setMetadata (db: SqliteConnection) (file: FileHeader) (key: string) (value: string) =
+    db.Execute("INSERT INTO FileMetadata(FileId, Key, Value) VALUES(@FileId, @Key, @Value)", {|FileId = file.Id; Key = key; Value = value|}) |> ignore
+
+let deleteMetadata (db: SqliteConnection) (file: FileHeader) (key: string) =
+    db.Execute("DELETE FROM FileMetadata WHERE FileId = @FileId AND Key = @Key", {|FileId = file.Id; Key = key|}) |> ignore
 
 type FileSystem(db: SqliteConnection) =
     member this.Upload(path, stream: Stream) =
@@ -395,19 +454,54 @@ type FileSystem(db: SqliteConnection) =
     }
 
     member this.Download(path, stream: Stream) =
-        let fileHeader = match getFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found for download", path))
+        let fileHeader = match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found for download", path))
         use fileStream = openFile db fileHeader
         fileStream.CopyTo stream
 
     member this.DownloadAsync(path, stream: Stream) = task {
-        let fileHeader = match getFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found for download", path))
+        let fileHeader = match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found for download", path))
         use fileStream = openFile db fileHeader
         do! fileStream.CopyToAsync stream
     }
 
     member this.GetAt path =
-        match getFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found for download", path))
+        match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found for download", path))
 
     member this.TryGetAt path =
-        getFileAt db path
+        tryGetFileAt db path
+
+    member this.GetOrCreateAt path =
+        getOrCreateFileAt db path
+
+    member this.WriteAt(path, offset, data, ?createIfInexistent: bool) =
+        let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
+        let file = if createIfInexistent then this.GetOrCreateAt path else this.GetAt path
+
+        use fileStream = openFile db file
+        fileStream.Position <- offset
+        fileStream.Write(data, 0, data.Length)
+        ()
+
+    member this.ReadAt(path, offset, len) =
+        let file = this.GetAt path
+        let array = Array.zeroCreate<byte> len
+
+        use fileStream = openFile db file
+        fileStream.Position <- offset
+        fileStream.ReadExactly(array, 0, len)
+        array
+
+    member this.SetMetadata(file, key, value) =
+        setMetadata db file key value
+
+    member this.SetMetadata(path, key, value) =
+        let file = this.GetAt path
+        setMetadata db file key value
+
+    member this.DeleteMetadata(file, key) =
+        deleteMetadata db file key
+
+    member this.DeleteMetadata(path, key) =
+        let file = this.GetAt path
+        deleteMetadata db file key
 

@@ -495,12 +495,14 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
         dbConnection.Execute("
                             CREATE TABLE IF NOT EXISTS DirectoryHeader (
                                 Id INTEGER PRIMARY KEY,
-                                Name TEXT NOT NULL CHECK ((Name != \"\" OR ParentId == NULL) AND Name != \".\" AND Name != \"..\"),
+                                Name TEXT NOT NULL CHECK ((Name != \"\" OR ParentId == NULL) AND (Name != \".\") AND (Name != \"..\") AND NOT Name GLOB \"*/*\"),
+                                FullPath TEXT NOT NULL CHECK (FullPath != \"\" AND NOT FullPath GLOB \"*/./*\" AND NOT FullPath GLOB \"*/../*\"),
                                 ParentId INTEGER,
                                 Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
                                 Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
                                 FOREIGN KEY (ParentId) REFERENCES DirectoryHeader(Id) ON DELETE CASCADE,
-                                UNIQUE(ParentId, Name)
+                                UNIQUE(ParentId, Name),
+                                UNIQUE(FullPath)
                             ) STRICT;
 
                             CREATE TABLE IF NOT EXISTS FileHeader (
@@ -541,6 +543,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
                             ) STRICT;
 
                             CREATE INDEX IF NOT EXISTS SoloDBDirectoryHeaderNameAndParentIdIndex ON DirectoryHeader(Name, ParentId);
+                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBDirectoryHeaderFullPathIndex ON DirectoryHeader(FullPath);
                             CREATE INDEX IF NOT EXISTS SoloDBFileHeaderNameAndDirectoryIdIndex ON FileHeader(Name, DirectoryId);
                             CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileChunkFileIdAndNumberIndex ON FileChunk(FileId, Number);
 
@@ -551,11 +554,13 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
 
         use t = dbConnection.BeginTransaction(false)
         try
-            let rootDir = dbConnection.QueryFirstOrDefault<Nullable<int64>>("SELECT Id FROM DirectoryHeader WHERE ParentId = NULL AND Name = \"\"")
-            if not rootDir.HasValue then
-                dbConnection.Execute("INSERT INTO DirectoryHeader(Name, ParentId) VALUES (\"\", NULL);", transaction = t) |> ignore
+            let rootDir = dbConnection.Query<int64>("SELECT Id FROM DirectoryHeader WHERE ParentId = NULL AND Name = \"\"") |> Seq.tryHead
+            if rootDir.IsNone then
+                dbConnection.Execute("INSERT INTO DirectoryHeader(Name, ParentId, FullPath) VALUES (\"\", NULL, \"/\");", transaction = t) |> ignore
             t.Commit()
-        with e -> t.Rollback()
+        with e -> 
+            t.Rollback()
+            reraise()
         
         new SoloDB(connectionCreator, dbConnection, connectionString, false)
 

@@ -4,6 +4,7 @@ open System.Linq.Expressions
 open System
 open System.Threading
 open Dapper
+open System.Collections.Generic
 
 type internal DisposableMutex(name: string) =
     let mutex = new Mutex(false, name)
@@ -72,6 +73,13 @@ type DbObjectRow = {
     ValueJSON: string
 }
 
+
+[<CLIMutable>]
+type Metadata = {
+    Key: string
+    Value: string
+}
+
 [<CLIMutable>]
 type FileHeader = {
     Id: SqlId
@@ -80,15 +88,18 @@ type FileHeader = {
     Length: int64
     Created: DateTimeOffset
     Modified: DateTimeOffset
+    Metadata: IDictionary<string, string>
 }
 
 [<CLIMutable>]
 type DirectoryHeader = {
     Id: SqlId
     Name: string
+    FullPath: string
     ParentId: Nullable<SqlId>
     Created: DateTimeOffset
     Modified: DateTimeOffset
+    Metadata: IDictionary<string, string>
 }
 
 [<CLIMutable>]
@@ -96,26 +107,4 @@ type private FileChunk = {
     Id: SqlId
     Number: int64
     Data: byte array
-}
-
-
-(*
-    todo:   I am thinking that the metadata better should exists in the 
-            FileHeader itself to not hit the database for each file for the headers...
-*)
-
-[<CLIMutable>]
-type FileMetadata = {
-    Id: SqlId
-    FileId: SqlId
-    Key: string
-    Value: string
-}
-
-[<CLIMutable>]
-type DirectoryMetadata = {
-    Id: SqlId
-    DirectoryId: SqlId
-    Key: string
-    Value: string
 }
