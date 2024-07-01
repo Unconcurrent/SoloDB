@@ -98,3 +98,23 @@ type FileSystemTests() =
 
         assertEqual file3.Metadata.["Tags"] "One" "Metadata not set."
         assertEqual file3.Metadata.Count 1 "Metadata not deleted."
+
+    [<TestMethod>]
+    member this.DirMetadata() =
+        let path = "/alpha"
+        let dir = fs.GetOrCreateDirAt path
+        use ms = new MemoryStream(testFileBytes)
+
+        fs.SetDirectoryMetadata(dir, "Owner", "John")
+        fs.SetDirectoryMetadata(dir, "Tags", "One")
+
+        let dir2 = fs.GetDirAt path
+
+        assertEqual dir2.Metadata.["Owner"] "John" "Metadata not set."
+
+        fs.DeleteDirectoryMetadata(dir, "Owner")
+
+        let dir3 = fs.GetDirAt path
+
+        assertEqual dir3.Metadata.["Tags"] "One" "Metadata not set."
+        assertEqual dir3.Metadata.Count 1 "Metadata not deleted."
