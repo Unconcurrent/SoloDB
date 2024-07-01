@@ -13,12 +13,16 @@ let chunkSize =
 let private combinePath (a, b) = (a, b) |> Path.Combine |> _.Replace('\\', '/')
 let private combinePathArr arr = arr |> Path.Combine |> _.Replace('\\', '/')
 
-let private lockDirPath (db: SqliteConnection) (path: string) =
+let private lockPath (db: SqliteConnection) (path: string) =
     let mutex = new DisposableMutex($"SoloDB-{db.ConnectionString.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-Path-{path.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}")
     mutex
 
+let private lockFileId (db: SqliteConnection) (id: SqlId) =
+    let mutex = new DisposableMutex($"SoloDB-{db.ConnectionString.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-FileId-{id.Value}")
+    mutex
+
 let private getOrCreateDir (db: SqliteConnection) (path: string) =
-    use l = lockDirPath db path
+    use l = lockPath db path
 
     let names = path.Split ('/', StringSplitOptions.RemoveEmptyEntries) |> Array.toList
     let root = db.QueryFirst<DirectoryHeader>("SELECT * FROM DirectoryHeader WHERE Name = @RootName", {|RootName = ""|})
@@ -41,7 +45,7 @@ let private getOrCreateDir (db: SqliteConnection) (path: string) =
     innerLoop root names
 
 let private getDir (db: SqliteConnection) (path: string) =
-    use l = lockDirPath db path
+    use l = lockPath db path
 
     let names = path.Split ('/', StringSplitOptions.RemoveEmptyEntries) |> Array.toList
     let root = db.QueryFirst<DirectoryHeader>("SELECT * FROM DirectoryHeader WHERE Name = @RootName", {|RootName = ""|})
@@ -58,18 +62,18 @@ let private getDir (db: SqliteConnection) (path: string) =
         
     innerLoop root names
     
-let private tryGetChunkData (db: SqliteConnection) fileId chunkNumber transaction =
+let private tryGetChunkData (db: SqliteConnection) (fileId: SqlId) (chunkNumber: int64) transaction =
     let sql = "SELECT Data FROM FileChunk WHERE FileId = @FileId AND Number = @ChunkNumber"
     match db.QueryFirstOrDefault<byte array>(sql, {| FileId = fileId; ChunkNumber = chunkNumber |}, transaction) with
     | data when Object.ReferenceEquals(data, null) -> None
     | data -> data |> Some
 
-let private writeChunkData (db: SqliteConnection) fileId chunkNumber data transaction =
+let private writeChunkData (db: SqliteConnection) (fileId: SqlId) (chunkNumber: int64) (data: byte array) transaction =
     let result = db.Execute("INSERT OR REPLACE INTO FileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data)", {|FileId = fileId; Number = chunkNumber; Data = data|}, transaction)
     if result <> 1 then failwithf "writeChunkData failed."
 
 let private updateLenById (db: SqliteConnection) (fileId: SqlId) (len: int64) transaction =
-    let result = db.Execute ("UPDATE FileHeader SET Length = @Length WHERE Id = @Id", {|Id = fileId.Value|}, transaction)
+    let result = db.Execute ("UPDATE FileHeader SET Length = @Length WHERE Id = @Id", {|Id = fileId.Value; Length=len|}, transaction)
     if result <> 1 then failwithf "updateLen failed."
 
 let private updateLen (db: SqliteConnection) (file: FileHeader) (len: int64) transaction =
@@ -110,7 +114,7 @@ let getDirectoryPath (db: SqliteConnection) (dir: DirectoryHeader) =
 
 
 let private deleteFile (db: SqliteConnection) (file: FileHeader) (transaction) =
-    let result = db.Execute(@"DELETE FROM FileHeader WHERE rowid = @FileId",
+    let result = db.Execute(@"DELETE FROM FileHeader WHERE Id = @FileId",
                 {| FileId = file.Id; |},
                 transaction = transaction)
 
@@ -161,72 +165,96 @@ type DbFileStream(db: SqliteConnection, fileId: SqlId) =
         checkDisposed()
         getFileLengthById db fileId null
 
-    override _.Position 
+    override this.Position 
         with get() = 
             checkDisposed()
             position 
         and set(value) = 
             checkDisposed()
+            use l = lockFileId db fileId
+
+            if value < 0L || value > this.Length then
+                raise (ArgumentOutOfRangeException(nameof(this.Position), "Position is out of range."))
             position <- value
 
     override _.Flush() = 
         checkDisposed()
 
-    override _.Read(buffer: byte[], offset: int, count: int) : int =
+    override this.Read(buffer: byte[], offset: int, count: int) : int =
         checkDisposed()
-        let mutable bytesRead = 0L
-        let mutable bufferOffset = int64 offset
+        if buffer = null then raise (ArgumentNullException(nameof buffer))
+        if offset < 0 then raise (ArgumentOutOfRangeException(nameof offset))
+        if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
+        if buffer.Length - offset < count then raise (ArgumentException("Invalid offset and length."))
+
+
         let count = int64 count
 
-        while bytesRead < count do
-            let chunkNumber = position / chunkSize
-            let chunkOffset = position % chunkSize
-            let sizeToRead = Math.Min(int64 count - bytesRead, chunkSize - chunkOffset)
+        let chunkNumber = position / int64 chunkSize
+        let chunkOffset = position % int64 chunkSize
 
-            let chunk = tryGetChunkData db fileId chunkNumber null
-            match chunk with
-            | Some data ->
-                Array.Copy(data, int chunkOffset, buffer, bufferOffset, int sizeToRead)
-                bytesRead <- bytesRead + sizeToRead
-                bufferOffset <- bufferOffset + sizeToRead
-                position <- position + sizeToRead
-            | None ->
-                // End of file reached or no data in chunk
-                ()
+        let bytesToRead = min count (chunkSize - chunkOffset) |> min (this.Length - position)
 
-        int bytesRead
+        if bytesToRead = 0 then
+            0
+        else
 
-    override _.Write(buffer: byte[], offset: int, count: int) =
-        checkDisposed()
-        let mutable bytesWritten = 0L
-        let mutable bufferOffset = int64 offset
+        use l = lockFileId db fileId
+
+        match tryGetChunkData db fileId chunkNumber null with
+        | None -> 0
+        | Some chunkData ->
+
+        Array.Copy(chunkData, chunkOffset, buffer, offset, bytesToRead)
+        
+        position <- position + bytesToRead
+
+        int bytesToRead
+        
+
+    override this.Write(buffer: byte[], offset: int, count: int) =
+        if buffer = null then raise (ArgumentNullException(nameof buffer))
+        if offset < 0 then raise (ArgumentOutOfRangeException(nameof offset))
+        if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
+        if buffer.Length - offset < count then raise (ArgumentException("Invalid offset and length."))
+
+        use l = lockFileId db fileId
+
         let count = int64 count
+        let mutable remainingBytes = 0L
+        let mutable bytesToWrite = 0L
 
-        while bytesWritten < count do
-            let chunkNumber = position / chunkSize
-            let chunkOffset = position % chunkSize
-            let sizeToWrite = Math.Min(count - bytesWritten, chunkSize - chunkOffset)
+        let chunkNumber = position / int64 chunkSize
+        let chunkOffset = position % int64 chunkSize
 
-            let existingChunk = tryGetChunkData db fileId chunkNumber null
-            let chunkData = Array.zeroCreate<byte> (int chunkSize)
-            match existingChunk with
-            | Some data -> Array.Copy(data, chunkData, data.Length)
-            | None -> ()
+        let tryGetChunkDataResult = tryGetChunkData db fileId chunkNumber null
+        let existingChunk = match tryGetChunkDataResult with Some data -> data | None -> Array.zeroCreate (int chunkSize)
 
-            Array.Copy(buffer, bufferOffset, chunkData, int chunkOffset, int sizeToWrite)
-            writeChunkData db fileId chunkNumber chunkData null
-            bytesWritten <- bytesWritten + sizeToWrite
-            bufferOffset <- bufferOffset + sizeToWrite
-            position <- position + sizeToWrite
+        let spaceInChunk = chunkSize - chunkOffset
+        bytesToWrite <- min count spaceInChunk
 
-            updateLenById db fileId (position) null
+        Array.Copy(buffer, offset, existingChunk, chunkOffset, bytesToWrite)
+
+        writeChunkData db fileId chunkNumber existingChunk null
+
+        position <- position + int64 bytesToWrite
+        if position > this.Length then
+            updateLenById db fileId position null            
+
+        remainingBytes <- count - bytesToWrite
+
+        if remainingBytes > 0 then
+            this.Write(buffer, offset + int bytesToWrite, int remainingBytes)
+
 
     override _.SetLength(value: int64) =
         checkDisposed()
+        use l = lockFileId db fileId
         downsetFileLength db fileId value null
 
     override this.Seek(offset: int64, origin: SeekOrigin) =
         checkDisposed()
+        use l = lockFileId db fileId
         match origin with
         | SeekOrigin.Begin -> position <- offset
         | SeekOrigin.Current -> position <- position + offset
@@ -299,7 +327,7 @@ let getFileAt (db: SqliteConnection) (path: string) =
     match getDir db dirPath with
     | None -> None
     | Some dir -> 
-    match db.QueryFirstOrDefault<FileHeader>("SELECT * WHERE DirectoryId = @DirectoryId AND Name = @Name", {|DirectoryId = dir.Id; Name = name|}) with
+    match db.QueryFirstOrDefault<FileHeader>("SELECT * FROM FileHeader WHERE DirectoryId = @DirectoryId AND Name = @Name", {|DirectoryId = dir.Id; Name = name|}) with
     | file when Object.ReferenceEquals(file, null) -> None
     | file -> file |> Some
 
@@ -333,10 +361,7 @@ let listFilesAt (db: SqliteConnection) (path: string) : FileHeader seq =
     | Some dir ->
     listDirectoryFiles db dir null
 
-let openReadFile (db: SqliteConnection) (file: FileHeader) =
-    new DbFileStream(db, file.Id)
-
-let openWriteFile (db: SqliteConnection) (file: FileHeader) =
+let openFile (db: SqliteConnection) (file: FileHeader) =
     new DbFileStream(db, file.Id)
 
 let openOrCreateFile (db: SqliteConnection) (path: string) =
@@ -369,4 +394,20 @@ type FileSystem(db: SqliteConnection) =
         file.SetLength file.Position
     }
 
+    member this.Download(path, stream: Stream) =
+        let fileHeader = match getFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found for download", path))
+        use fileStream = openFile db fileHeader
+        fileStream.CopyTo stream
+
+    member this.DownloadAsync(path, stream: Stream) = task {
+        let fileHeader = match getFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found for download", path))
+        use fileStream = openFile db fileHeader
+        do! fileStream.CopyToAsync stream
+    }
+
+    member this.GetAt path =
+        match getFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found for download", path))
+
+    member this.TryGetAt path =
+        getFileAt db path
 
