@@ -533,7 +533,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
     static member insertBatch<'T> (items: 'T seq) (collection: Collection<'T>) = collection.InsertBatch items
 
     static member updateF<'T> (func: Expression<Action<'T>>) = fun (collection: Collection<'T>) -> collection.Update func
-    // static member update<'T> (item: 'T) (collection: Collection<'T>) = collection.Update item
+    static member update<'T> (item: 'T) (collection: Collection<'T>) = collection.Update item
     static member replace<'T> (item: 'T) (collection: Collection<'T>) = collection.Replace item
 
     static member delete<'T> (collection: Collection<'T>) = collection.Delete()
