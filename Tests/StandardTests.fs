@@ -93,7 +93,7 @@ type SoloDBStandardTesting() =
 
         let ids = users.InsertBatch(randomUsersToInsert)
 
-        let mutable prevId = 0L
+        let mutable prevId = SqlId 0L
         for id in ids do
             Assert.IsTrue (id > prevId)
             prevId <- id
