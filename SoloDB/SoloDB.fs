@@ -7,24 +7,15 @@ open System
 open System.Collections.Generic
 open System.Collections
 open System.Text.RegularExpressions
-open System.Threading
 open FSharp.Interop.Dynamic
 open JsonFunctions
 open System.Collections.Concurrent
 open SoloDBTypes
 open Dynamitey
+open System.IO
 
-type private DisposableMutex(name: string) =
-    let mutex = new Mutex(false, name)
-    do mutex.WaitOne() |> ignore
-
-    interface IDisposable with
-        member this.Dispose() =
-            mutex.ReleaseMutex()
-            mutex.Dispose()
-
-let private lockTable(name: string) =
-    let mutex = new DisposableMutex($"SoloDB-Table-{name}")
+let private lockTable (connectionStr: string) (name: string) =
+    let mutex = new DisposableMutex($"SoloDB-{connectionStr.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-Table-{name}")
     mutex
 
 let private createTableInner (name: string) (conn: SqliteConnection) (transaction: SqliteTransaction) =
@@ -173,13 +164,13 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
     member this.IncludeType = typeof<'T>.IsAbstract
 
     member this.Insert (item: 'T) =
-        use l = lockTable name // To not interfere with the batch one.
+        use l = lockTable connectionString name // To not interfere with the batch one.
 
         insertInner this.IncludeType item connection null name
 
     member this.InsertBatch (items: 'T seq) =
-        use l = lockTable name  // If not, there will be multiple transactions started on the same connection when used concurently,
-                                // and it is faster than creating new connections.
+        use l = lockTable connectionString name  // If not, there will be multiple transactions started on the same connection when used concurently,
+                                                 // and it is faster than creating new connections.
 
         if inTransaction then
             let ids = List<SqlId>()
@@ -319,7 +310,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
     let connectionCreator() = connectionCreator disposed
 
     member this.ConnectionString = connectionString
-    member this.GetDBConnection() = dbConnection
+    member this.DBConnection = dbConnection
     member this.GetNewConnection() = connectionCreator()
 
     member private this.FormatName (name: string) =
@@ -335,7 +326,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
             if inTransaction then dbConnection
             else connectionPool.GetOrAdd(name, (fun name -> connectionCreator()))
 
-        use mutex = lockTable name // To prevent a race condition where the next if statment is true for 2 threads.
+        use mutex = lockTable connectionString name // To prevent a race condition where the next if statment is true for 2 threads.
         if not (existsCollection name connection) then 
             if inTransaction then
                 createTableInner name connection null
@@ -368,7 +359,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
         existsCollection name dbConnection
 
     member this.DropCollectionIfExists name =
-        use mutex = lockTable name
+        use mutex = lockTable connectionString name
 
         if inTransaction then
             if existsCollection name dbConnection then 
@@ -479,6 +470,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
                 let memoryName = memoryName.Trim()
                 sprintf "Data Source=%s;Mode=Memory;Cache=Shared" memoryName
             else 
+                let source = Path.GetFullPath source
                 $"Data Source={source}"
 
         let connectionCreator disposed =
@@ -486,23 +478,75 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
 
             let connection = new SqliteConnection(connectionString)
             connection.Open()
+
+            connection.CreateFunction("UNIXTIMESTAMP", Func<int64>(fun () -> DateTimeOffset.Now.ToUnixTimeMilliseconds()), false)
+
             connection
     
         let dbConnection = connectionCreator false
-        dbConnection.Execute(
-                            "PRAGMA journal_mode=wal;
+        dbConnection.Execute("
+                            BEGIN;
+                            PRAGMA journal_mode=wal;
                             CREATE TABLE IF NOT EXISTS SoloDBCollections (Name TEXT NOT NULL) STRICT;
                             CREATE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDB(Name);
+
+                            CREATE TABLE IF NOT EXISTS DirectoryHeader (
+                                Id INTEGER PRIMARY KEY,
+                                Name TEXT NOT NULL CHECK ((Name != \"\" OR ParentId == NULL) AND Name != \".\" AND Name != \"..\"),
+                                ParentId INTEGER,
+                                Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
+                                Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
+                                FOREIGN KEY (ParentId) REFERENCES DirectoryHeader(rowid) ON DELETE CASCADE,
+                                UNIQUE(ParentId, Name)
+                            ) STRICT;
+
+                            CREATE TABLE IF NOT EXISTS FileHeader (
+                                Id INTEGER PRIMARY KEY,
+                                Name TEXT NOT NULL CHECK (Name != \"\" AND Name != \".\" AND Name != \"..\"),
+                                DirectoryId INTEGER NOT NULL,
+                                Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
+                                Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
+                                Length INTEGER NOT NULL DEFAULT 0,
+                                FOREIGN KEY (DirectoryId) REFERENCES DirectoryHeader(Id) ON DELETE CASCADE,
+                                UNIQUE(DirectoryId, Name)
+                            ) STRICT;
+
+                            CREATE TABLE IF NOT EXISTS FileChunk (
+                                FileId INTEGER NOT NULL,
+                                Number INTEGER NOT NULL,
+                                Data BLOB NOT NULL,
+                                FOREIGN KEY (FileId) REFERENCES FileHeader(Id) ON DELETE CASCADE,
+                                UNIQUE(FileId, Number) ON CONFLICT REPLACE
+                            ) STRICT;
+
+                            CREATE TABLE IF NOT EXISTS FileMetadata (
+                                Id INTEGER PRIMARY KEY,
+                                FileId INTEGER NOT NULL,
+                                Key TEXT NOT NULL,
+                                Value TEXT NOT NULL,
+                                UNIQUE(FileId, Key) ON CONFLICT REPLACE,
+                                FOREIGN KEY (FileId) REFERENCES FileHeader(Id) ON DELETE CASCADE,
+                            ) STRICT;
+
+                            CREATE TABLE IF NOT EXISTS DirectoryMetadata (
+                                Id INTEGER PRIMARY KEY,
+                                DirectoryId INTEGER NOT NULL,
+                                Key TEXT NOT NULL,
+                                Value TEXT NOT NULL,
+                                UNIQUE(DirectoryId, Key) ON CONFLICT REPLACE,
+                                FOREIGN KEY (DirectoryId) REFERENCES DirectoryHeader(Id) ON DELETE CASCADE
+                            ) STRICT;
+
+                            CREATE INDEX IF NOT EXISTS SoloDBDirectoryHeaderNameAndParentIdIndex ON DirectoryHeader(Name, ParentId);
+                            CREATE INDEX IF NOT EXISTS SoloDBFileHeaderNameAndDirectoryIdIndex ON FileHeader(Name, DirectoryId);
+                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileChunkFileIdAndNumberIndex ON FileChunk(FileId, Number);
+
+                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileMetadataFileIdAndKey ON FileMetadata(FileId, Key);
+                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBDirectoryMetadataDirectoryIdAndKey ON DirectoryMetadata(DirectoryId, Key);
+
+                            COMMIT;
                             ") |> ignore
-
-        let existsOldName = dbConnection.QueryFirstOrDefault<string>("SELECT name FROM sqlite_master WHERE type='table' AND name='Collections';")
-        if existsOldName <> null then
-            use transaction = dbConnection.BeginTransaction()
-            try
-                dbConnection.Execute("INSERT INTO SoloDBCollections (Name) SELECT Name FROM Collections; DROP TABLE Collections;", transaction = transaction) |> ignore
-                transaction.Commit()
-            with ex -> transaction.Rollback()
-
+                                    
         new SoloDB(connectionCreator, dbConnection, connectionString, false)
 
     // The pipe operators.
