@@ -435,11 +435,18 @@ let getFilePath db (file: FileHeader) =
     let directoryPath = getDirectoryPath db directory
     [|directoryPath; file.Name|] |> combinePathArr
 
-let setMetadata (db: SqliteConnection) (file: FileHeader) (key: string) (value: string) =
+let setFileMetadata (db: SqliteConnection) (file: FileHeader) (key: string) (value: string) =
     db.Execute("INSERT INTO FileMetadata(FileId, Key, Value) VALUES(@FileId, @Key, @Value)", {|FileId = file.Id; Key = key; Value = value|}) |> ignore
 
-let deleteMetadata (db: SqliteConnection) (file: FileHeader) (key: string) =
+let deleteFileMetadata (db: SqliteConnection) (file: FileHeader) (key: string) =
     db.Execute("DELETE FROM FileMetadata WHERE FileId = @FileId AND Key = @Key", {|FileId = file.Id; Key = key|}) |> ignore
+
+
+let setDirMetadata (db: SqliteConnection) (dir: DirectoryHeader) (key: string) (value: string) =
+    db.Execute("INSERT INTO DirectoryMetadata(DirectoryId, Key, Value) VALUES(@DirectoryId, @Key, @Value)", {|DirectoryId = dir.Id; Key = key; Value = value|}) |> ignore
+
+let deleteDirMetadata (db: SqliteConnection) (dir: DirectoryHeader) (key: string) =
+    db.Execute("DELETE FROM DirectoryMetadata WHERE DirectoryId = @DirectoryId AND Key = @Key", {|DirectoryId = dir.Id; Key = key|}) |> ignore
 
 type FileSystem(db: SqliteConnection) =
     member this.Upload(path, stream: Stream) =
@@ -454,24 +461,33 @@ type FileSystem(db: SqliteConnection) =
     }
 
     member this.Download(path, stream: Stream) =
-        let fileHeader = match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found for download", path))
+        let fileHeader = match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
         use fileStream = openFile db fileHeader
         fileStream.CopyTo stream
 
     member this.DownloadAsync(path, stream: Stream) = task {
-        let fileHeader = match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found for download", path))
+        let fileHeader = match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
         use fileStream = openFile db fileHeader
         do! fileStream.CopyToAsync stream
     }
 
     member this.GetAt path =
-        match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found for download", path))
+        match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
 
     member this.TryGetAt path =
         tryGetFileAt db path
 
     member this.GetOrCreateAt path =
         getOrCreateFileAt db path
+
+    member this.GetDirAt path =
+        match tryGetDir db path with | Some f -> f | None -> raise (DirectoryNotFoundException("Directory not found at: " + path))
+
+    member this.TryDirGetAt path =
+        tryGetDir db path
+
+    member this.GetOrCreateDirAt path =
+        getOrCreateDirectoryAt db path
 
     member this.WriteAt(path, offset, data, ?createIfInexistent: bool) =
         let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
@@ -492,16 +508,30 @@ type FileSystem(db: SqliteConnection) =
         array
 
     member this.SetMetadata(file, key, value) =
-        setMetadata db file key value
+        setFileMetadata db file key value
 
     member this.SetMetadata(path, key, value) =
         let file = this.GetAt path
-        setMetadata db file key value
+        setFileMetadata db file key value
 
     member this.DeleteMetadata(file, key) =
-        deleteMetadata db file key
+        deleteFileMetadata db file key
 
     member this.DeleteMetadata(path, key) =
         let file = this.GetAt path
-        deleteMetadata db file key
+        deleteFileMetadata db file key
 
+
+    member this.SetDirectoryMetadata(dir, key, value) =
+        setDirMetadata db dir key value
+
+    member this.SetDirectoryMetadata(path, key, value) =
+        let dir = this.GetDirAt path
+        setDirMetadata db dir key value
+
+    member this.DeleteDirectoryMetadata(dir, key) =
+        deleteDirMetadata db dir key
+
+    member this.DeleteDirectoryMetadata(path, key) =
+        let dir = this.GetDirAt path
+        deleteDirMetadata db dir key
