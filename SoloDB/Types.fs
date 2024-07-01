@@ -46,7 +46,7 @@ type SqlId =
         let (SqlId value) = this
         value
 
-type AccountTypeHandler() =
+type internal AccountTypeHandler() =
     inherit SqlMapper.TypeHandler<SqlId>()
     override __.Parse(value) =
         value :?> int64 |> SqlId
@@ -55,7 +55,16 @@ type AccountTypeHandler() =
         p.DbType <- Data.DbType.Int64
         p.Value <- value.Value
 
-SqlMapper.AddTypeHandler(typeof<SqlId>, AccountTypeHandler())
+type internal DateTimeMapper() =
+    inherit SqlMapper.TypeHandler<DateTimeOffset>()
+
+    override this.Parse(o) =
+        DateTimeOffset.FromUnixTimeMilliseconds (o :?> int64)
+
+    override this.SetValue (para, value) =
+        para.Value <- value.ToUnixTimeMilliseconds()
+        ()
+
 
 [<CLIMutable>]
 type DbObjectRow = {

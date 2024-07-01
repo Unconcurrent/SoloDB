@@ -13,6 +13,7 @@ open System.Collections.Concurrent
 open SoloDBTypes
 open Dynamitey
 open System.IO
+open FileStorage
 
 let private lockTable (connectionStr: string) (name: string) =
     let mutex = new DisposableMutex($"SoloDB-{connectionStr.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-Table-{name}")
@@ -309,12 +310,13 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
 
     let connectionCreator() = connectionCreator disposed
 
-    member this.ConnectionString = connectionString
     member this.DBConnection = dbConnection
-    member this.GetNewConnection() = connectionCreator()
+    member this.FileSystem = FileSystem(connectionCreator())
+
+    member private this.GetNewConnection() = connectionCreator()
 
     member private this.FormatName (name: string) =
-        name.Replace("\"", "") // Anti SQL injection
+        name.Replace("\"", "").Replace(" ", "") // Anti SQL injection
 
     member private this.GetNameFrom<'T>() =
         typeof<'T>.Name |> this.FormatName
@@ -485,18 +487,19 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
     
         let dbConnection = connectionCreator false
         dbConnection.Execute("
-                            BEGIN;
                             PRAGMA journal_mode=wal;
                             CREATE TABLE IF NOT EXISTS SoloDBCollections (Name TEXT NOT NULL) STRICT;
                             CREATE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDB(Name);
+                            ") |> ignore
 
+        dbConnection.Execute("
                             CREATE TABLE IF NOT EXISTS DirectoryHeader (
                                 Id INTEGER PRIMARY KEY,
                                 Name TEXT NOT NULL CHECK ((Name != \"\" OR ParentId == NULL) AND Name != \".\" AND Name != \"..\"),
                                 ParentId INTEGER,
                                 Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
                                 Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
-                                FOREIGN KEY (ParentId) REFERENCES DirectoryHeader(rowid) ON DELETE CASCADE,
+                                FOREIGN KEY (ParentId) REFERENCES DirectoryHeader(Id) ON DELETE CASCADE,
                                 UNIQUE(ParentId, Name)
                             ) STRICT;
 
@@ -525,7 +528,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
                                 Key TEXT NOT NULL,
                                 Value TEXT NOT NULL,
                                 UNIQUE(FileId, Key) ON CONFLICT REPLACE,
-                                FOREIGN KEY (FileId) REFERENCES FileHeader(Id) ON DELETE CASCADE,
+                                FOREIGN KEY (FileId) REFERENCES FileHeader(Id) ON DELETE CASCADE
                             ) STRICT;
 
                             CREATE TABLE IF NOT EXISTS DirectoryMetadata (
@@ -544,9 +547,16 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
                             CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileMetadataFileIdAndKey ON FileMetadata(FileId, Key);
                             CREATE UNIQUE INDEX IF NOT EXISTS SoloDBDirectoryMetadataDirectoryIdAndKey ON DirectoryMetadata(DirectoryId, Key);
 
-                            COMMIT;
-                            ") |> ignore
-                                    
+                            ")|> ignore
+
+        use t = dbConnection.BeginTransaction(false)
+        try
+            let rootDir = dbConnection.QueryFirstOrDefault<Nullable<int64>>("SELECT Id FROM DirectoryHeader WHERE ParentId = NULL AND Name = \"\"")
+            if not rootDir.HasValue then
+                dbConnection.Execute("INSERT INTO DirectoryHeader(Name, ParentId) VALUES (\"\", NULL);", transaction = t) |> ignore
+            t.Commit()
+        with e -> t.Rollback()
+        
         new SoloDB(connectionCreator, dbConnection, connectionString, false)
 
     // The pipe operators.
@@ -642,3 +652,9 @@ type Array with
 // else it will throw 'Could not convert the following F# Quotation to a LINQ Expression Tree',
 // imagine it as a ';'.
 let (|+|) a b = ()
+
+
+// Dapper mapping.
+SqlMapper.AddTypeHandler(typeof<SqlId>, AccountTypeHandler())
+SqlMapper.RemoveTypeMap(typeof<DateTimeOffset>)
+SqlMapper.AddTypeHandler<DateTimeOffset> (DateTimeMapper())
