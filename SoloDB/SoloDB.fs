@@ -182,7 +182,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
                                 // and it is faster than creating new connections.
 
         if inTransaction then
-            let ids = List<int64>()
+            let ids = List<SqlId>()
             for item in items do
                 insertInner this.IncludeType item connection null name |> ids.Add
             ids
@@ -190,7 +190,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
 
         use transaction = connection.BeginTransaction()
         try
-            let ids = List<int64>()
+            let ids = List<SqlId>()
             for item in items do
                 insertInner this.IncludeType item connection transaction name |> ids.Add
 

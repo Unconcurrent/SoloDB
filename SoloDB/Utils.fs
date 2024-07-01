@@ -3,6 +3,7 @@
 open System
 open System.Collections.Concurrent
 open System.Reflection
+open SoloDBTypes
 
 let isNumber (value: obj) =
     match value with
@@ -14,21 +15,10 @@ let isNumber (value: obj) =
     | :? uint32
     | :? int64
     | :? uint64
+    | :? SqlId
     | :? float32
     | :? float
     | :? decimal -> true
-    | _ -> false
-
-let isIntegerBased (value: obj) =
-    match value with
-    | :? sbyte
-    | :? byte
-    | :? int16
-    | :? uint16
-    | :? int32
-    | :? uint32
-    | :? int64
-    | :? uint64 -> true
     | _ -> false
 
 let isIntegerBasedType (t: Type) =
@@ -41,7 +31,13 @@ let isIntegerBasedType (t: Type) =
     | _ when t = typeof<uint32> -> true
     | _ when t = typeof<int64>  -> true
     | _ when t = typeof<uint64> -> true
+    | _ when t = typeof<SqlId> -> true
     | _ -> false
+
+let isIntegerBased (value: obj) =
+    value.GetType() |> isIntegerBasedType
+
+
 
 let typeToName (t: Type) = 
     let fullname = t.FullName
