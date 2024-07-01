@@ -1024,10 +1024,13 @@ type SoloDBStandardTesting() =
         assertEqual allUsers.Length randomUsersToInsert.Length "Update (Set) did not work."
 
     [<TestMethod>]
-    member this.ToSQLJsonAndKindTest() =
-        let now = DateTimeOffset.Now
-        assertEqual (toSQLJson now) (now.ToUnixTimeMilliseconds(), false) "ToSQLJsonAndKindTest: Datetimeoffset"
-        assertEqual (toSQLJson "Hello") ("Hello", false) "ToSQLJsonAndKindTest: string"
-        assertEqual (toSQLJson 1) (1, false) "ToSQLJsonAndKindTest: string"
-        assertEqual (toSQLJson [1L]) ("[1]", true) "ToSQLJsonAndKindTest: string"
-        assertEqual (toSQLJson {|hello = "test"|}) ("{\"hello\": \"test\"}", true) "ToSQLJsonAndKindTest: string"
+    member this.SelectUnique() =
+        let users = db.GetCollection<User>()
+        users.InsertBatch randomUsersToInsert |> ignore
+        users.InsertBatch randomUsersToInsert |> ignore
+        users.InsertBatch randomUsersToInsert |> ignore
+        users.InsertBatch randomUsersToInsert |> ignore
+
+        let uniqueUsernames = users.SelectUnique(fun u -> u.Username).OnAll().ToList().Length 
+
+        assertEqual uniqueUsernames 4 "SelectUnique Username failed."

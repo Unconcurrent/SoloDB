@@ -53,11 +53,39 @@ type private QueryBuilder =
             TableNameDot = tableName + "."
         }
 
+let private evaluateExpr<'O> e =
+    let exprFunc = Expression.Lambda<Func<'O>>(e).Compile(true)
+    exprFunc.Invoke()
+
 let rec private isRootParameter (expr: Expression) : bool =
     match expr with
     | :? ParameterExpression -> true
     | :? MemberExpression as inner -> isRootParameter inner.Expression
     | _ -> false
+
+let rec private tryRootConstant (expr: Expression) : ConstantExpression option =
+    match expr with
+    | :? ConstantExpression as e -> Some e
+    | :? MemberExpression as inner -> tryRootConstant inner.Expression
+    | _ -> None
+
+let rec isFullyImplemented (expr: Expression) : bool =
+    match expr with
+    | :? ParameterExpression -> false
+    | :? BinaryExpression as binExpr ->
+        isFullyImplemented binExpr.Left && isFullyImplemented binExpr.Right
+    | :? UnaryExpression as unaryExpr ->
+        isFullyImplemented unaryExpr.Operand
+    | :? MethodCallExpression as methodCallExpr ->
+        methodCallExpr.Arguments |> Seq.forall isFullyImplemented && isFullyImplemented methodCallExpr.Object
+    | :? MemberExpression as memberExpr ->
+        isFullyImplemented memberExpr.Expression
+    | :? ConstantExpression -> true
+    | :? InvocationExpression as invocationExpr ->
+        invocationExpr.Arguments |> Seq.forall isFullyImplemented && isFullyImplemented invocationExpr.Expression
+    | :? LambdaExpression as lambdaExpr ->
+        lambdaExpr.Body |> isFullyImplemented
+    | _ -> true
 
 let rec private visit (exp: Expression) (sb: QueryBuilder) : Expression =
     match exp.NodeType with
@@ -229,6 +257,10 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
     else if m.Method.Name = "NewSqlId" then
         let arg1 = m.Arguments[0]
         visit arg1 qb
+    else if isFullyImplemented m then
+        let value = evaluateExpr m
+        qb.AppendVariable value
+        m
     else
         raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 
@@ -332,14 +364,18 @@ and private visitMemberAccess (m: MemberExpression) (qb: QueryBuilder) =
             qb.AppendRaw(formatAccess single) |> ignore
         | paths ->
             let pathStr = String.concat $"." (List.map (sprintf "%s") paths)
-            qb.AppendRaw(formatAccess pathStr) |> ignore
+            qb.AppendRaw(formatAccess pathStr) |> ignore            
     else if m.Expression = null then
         let value = (m.Member :?> PropertyInfo).GetValue null
         qb.AppendVariable value
+    else if isFullyImplemented m then
+        let value = evaluateExpr m
+        qb.AppendVariable value        
     else
         raise (NotSupportedException(sprintf "The member access '%O' is not supported" m.Member.Name))
 
     m
+            
 
 let translate (tableName: string) (expression: Expression) =
     let sb = StringBuilder()
