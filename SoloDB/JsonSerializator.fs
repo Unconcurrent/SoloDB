@@ -92,6 +92,11 @@ type JsonValue =
             match value with
             | :? bool as b -> Boolean b
 
+            | :? uint8 as i -> Number (decimal i)
+            | :? uint16 as i -> Number (decimal i)
+            | :? uint32 as i -> Number (decimal i)
+            | :? uint64 as i -> Number (decimal i)
+
             | :? int8 as i -> Number (decimal i)
             | :? int16 as i -> Number (decimal i)
             | :? int32 as i -> Number (decimal i)
@@ -105,7 +110,7 @@ type JsonValue =
 
             | :? DateTimeOffset as date -> date.ToUnixTimeMilliseconds() |> decimal |> Number
             | :? string as s -> String s            
-            | _ -> failwith "Unsupported primitive type"
+            | _ -> failwithf "Unsupported primitive type: %A" (value.GetType())
     
         let serializeCollection (collection: IEnumerable) =
             let items = System.Collections.Generic.List<JsonValue>()
@@ -190,7 +195,7 @@ type JsonValue =
             Activator.CreateInstance(targetType, BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic, null, [||], null)
 
         let isCollectionType typ =
-            typeof<ICollection<_>>.IsAssignableFrom(typ)
+            typeof<IList<_>>.IsAssignableFrom(typ) || typ.IsArray
 
         let deserializePrimitive (targetType: Type) (value: JsonValue) : obj =
             match targetType, value with
@@ -201,10 +206,17 @@ type JsonValue =
             | t, JsonValue.Number n when t = typeof<float32> -> float32 n
             | t, JsonValue.Number n when t = typeof<float> -> float n
             | t, JsonValue.Number n when t = typeof<bool> -> if n = Decimal.Zero then false else true
+
             | t, JsonValue.Number n when t = typeof<int8> -> int8 n
             | t, JsonValue.Number n when t = typeof<int16> -> int16 n
             | t, JsonValue.Number n when t = typeof<int32> -> int32 n
             | t, JsonValue.Number n when t = typeof<int64> -> int64 n
+
+            | t, JsonValue.Number n when t = typeof<uint8> -> uint8 n
+            | t, JsonValue.Number n when t = typeof<uint16> -> uint16 n
+            | t, JsonValue.Number n when t = typeof<uint32> -> uint32 n
+            | t, JsonValue.Number n when t = typeof<uint64> -> uint64 n
+
             | t, JsonValue.Number n when t = typeof<decimal> -> int64 n
             | t, JsonValue.Number n when t = typeof<SoloDBTypes.SqlId> -> (SoloDBTypes.SqlId)(int64 n) |> box
             | t, JsonValue.Number n when t = typeof<DateTimeOffset> -> n |> int64 |> DateTimeOffset.FromUnixTimeMilliseconds |> box

@@ -215,6 +215,11 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
 
         WhereBuilder<'T, DbObjectRow, 'R>(connection, name, $"SELECT Id, {selectSQL} as ValueJSON FROM \"{name}\" ", fromDapper<'R>, variables, id)
 
+    member this.SelectUnique<'R>(select: Expression<System.Func<'T, 'R>>) =
+        let selectSQL, variables = QueryTranslator.translate name select
+
+        WhereBuilder<'T, 'R, 'R>(connection, name, $"SELECT DISTINCT {selectSQL} FROM \"{name}\" ", fromDapper<'R>, variables, id)
+
     member this.Select() =
         WhereBuilder<'T, DbObjectRow, 'T>(connection, name, $"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" ", fromDapper<'T>, Dictionary<string, obj>(), id)
 

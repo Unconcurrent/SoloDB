@@ -5,7 +5,7 @@
 open System
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open SoloDB
-open SoloDBTypes
+open JsonFunctions
 open Types
 open TestUtils
 
@@ -44,3 +44,19 @@ type JsonTests() =
         let eq = (user1 = user2)
         Assert.IsTrue(eq)
         ()
+
+    [<TestMethod>]
+    member this.JsonUints() =
+        db.GetCollection<uint8 array>().Insert [|65uy; 66uy; 67uy|] |> ignore
+        db.GetCollection<uint16 array>().Insert [|65us; 66us; 67us|] |> ignore
+        db.GetCollection<uint32 array>().Insert [|65u; 66u; 67u|] |> ignore
+        db.GetCollection<uint64 array>().Insert [|65uL; 66uL; 67uL|] |> ignore
+
+    [<TestMethod>]
+    member this.ToSQLJsonAndKindTest() =
+        let now = DateTimeOffset.Now
+        assertEqual (toSQLJson now) (now.ToUnixTimeMilliseconds(), false) "ToSQLJsonAndKindTest: Datetimeoffset"
+        assertEqual (toSQLJson "Hello") ("Hello", false) "ToSQLJsonAndKindTest: string"
+        assertEqual (toSQLJson 1) (1, false) "ToSQLJsonAndKindTest: string"
+        assertEqual (toSQLJson [1L]) ("[1]", true) "ToSQLJsonAndKindTest: string"
+        assertEqual (toSQLJson {|hello = "test"|}) ("{\"hello\": \"test\"}", true) "ToSQLJsonAndKindTest: string"
