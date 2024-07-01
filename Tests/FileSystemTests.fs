@@ -13,7 +13,7 @@ open FileStorage
 let testFileBytes = "Hello this is some random data." |> Encoding.UTF8.GetBytes
 
 [<TestClass>]
-type JsonTests() =
+type FileSystemTests() =
     let mutable db: SoloDB = Unchecked.defaultof<SoloDB>
     let mutable fs: FileSystem = Unchecked.defaultof<FileSystem>
     
@@ -59,9 +59,42 @@ type JsonTests() =
 
     [<TestMethod>]
     member this.FileTryGetAtSome() =
-        let path = "/abc.txt"
+        let path = "/a/b/c/d/e/f/g/h/i/a/b/c/d/e/f/g/h/i/a/b/c/d/e/f/g/h/i/a/b/c/d/e/f/g/h/i/a/b/c/d/e/f/g/h/i/a/b/c/d/e/f/g/h/i/abc.txt"
         use ms = new MemoryStream(testFileBytes)
         fs.Upload(path, ms)
 
         assertEqual (fs.TryGetAt path).IsSome true "Expected None."
 
+    [<TestMethod>]
+    member this.FileReadWriteSparse() =
+        let path = "/abc.txt"
+        fs.WriteAt(path, FileStorage.chunkSize + 1L, testFileBytes)
+
+        let bytes = fs.ReadAt(path, 0, FileStorage.chunkSize + 5L |> int)
+
+        assertEqual bytes.LongLength (FileStorage.chunkSize + 5L) "Did not read as much as requested."
+
+        let endOfArray = bytes[int FileStorage.chunkSize + 1..]
+        let startOfData = testFileBytes[..3]
+
+        assertEqual endOfArray startOfData "Sparse Write and Read failed."
+
+    [<TestMethod>]
+    member this.FileMetadata() =
+        let path = "/xyz.txt"
+        let file = fs.GetOrCreateAt path
+        use ms = new MemoryStream(testFileBytes)
+        fs.Upload(path, ms)
+        fs.SetMetadata(file, "Owner", "John")
+        fs.SetMetadata(file, "Tags", "One")
+
+        let file2 = fs.GetAt path
+
+        assertEqual file2.Metadata.["Owner"] "John" "Metadata not set."
+
+        fs.DeleteMetadata(file, "Owner")
+
+        let file3 = fs.GetAt path
+
+        assertEqual file3.Metadata.["Tags"] "One" "Metadata not set."
+        assertEqual file3.Metadata.Count 1 "Metadata not deleted."
