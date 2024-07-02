@@ -4,6 +4,9 @@ open System
 open System.Collections.Concurrent
 open System.Reflection
 open SoloDBTypes
+open System.Security.Cryptography
+open System.IO
+open System.Text
 
 let isNumber (value: obj) =
     match value with
@@ -70,3 +73,11 @@ type TypeCaster =
     
     static member private CastHelper<'T> (obj: obj) : 'T =
         obj :?> 'T
+
+let shaHash (o: obj) = 
+    match o with
+    | :? (byte array) as bytes -> 
+        SHA1.HashData(bytes)
+    | :? string as str -> 
+        SHA1.HashData(str |> Encoding.UTF8.GetBytes)
+    | other -> raise (InvalidDataException(sprintf "Cannot hash object of type: %A" (other.GetType())))

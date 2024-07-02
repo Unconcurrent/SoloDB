@@ -482,6 +482,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
             connection.Open()
 
             connection.CreateFunction("UNIXTIMESTAMP", Func<int64>(fun () -> DateTimeOffset.Now.ToUnixTimeMilliseconds()), false)
+            connection.CreateFunction("SHA_HASH", Func<byte array, obj>(fun o -> Utils.shaHash o), true)
 
             connection
     
@@ -512,6 +513,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
                                 Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
                                 Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
                                 Length INTEGER NOT NULL DEFAULT 0,
+                                Hash BLOB NOT NULL DEFAULT (SHA_HASH('')),
                                 FOREIGN KEY (DirectoryId) REFERENCES DirectoryHeader(Id) ON DELETE CASCADE,
                                 UNIQUE(DirectoryId, Name)
                             ) STRICT;

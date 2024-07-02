@@ -6,6 +6,8 @@ open Microsoft.Data.Sqlite
 open Dapper
 open SoloDBTypes
 open System.Collections.Generic
+open SoloDBTypes
+open System.Security.Cryptography
 
 let chunkSize = 
     1L // MB
@@ -156,6 +158,28 @@ let private getFileById (db: SqliteConnection) (fileId: SqlId) (transaction) =
     db.QueryFirst<FileHeader>(@"SELECT * FROM FileHeader WHERE Id = @FileId",
                    {| FileId = fileId |}, transaction)
 
+let private getStoredChunks (db: SqliteConnection) (fileId: SqlId) =
+    db.Query<FileChunk>("SELECT * FROM FileChunk WHERE FileId = @FileId ORDER BY Number ASC", {|FileId = fileId|})
+
+
+let private emptyChunk = Array.zeroCreate<byte> (int chunkSize)
+let private getAllChunks (db: SqliteConnection) (fileId: SqlId) = seq {
+    let mutable previousNumber = -1L // Chunks start from 0.
+    for chunk in getStoredChunks db fileId do
+        while chunk.Number - 1L > previousNumber do
+            yield {Id = SqlId -1L; FileId = fileId; Number = previousNumber + 1L; Data = emptyChunk}
+            previousNumber <- previousNumber + 1L
+
+        yield chunk
+        previousNumber <- chunk.Number
+}
+
+let private updateHashById (db: SqliteConnection) (fileId: SqlId) (hash: byte array) =
+    db.Execute("UPDATE FileHeader 
+    SET Hash = @Hash
+    WHERE Id = @FileId", {|Hash = hash; FileId = fileId|})
+    |> ignore
+
 [<Sealed>]
 type DbFileStream(db: SqliteConnection, fileId: SqlId) =
     inherit Stream()
@@ -164,6 +188,27 @@ type DbFileStream(db: SqliteConnection, fileId: SqlId) =
     let mutable disposed = false
 
     let checkDisposed() = if disposed then raise (ObjectDisposedException(nameof(DbFileStream)))
+
+    member private this.UpdateHash() =
+        use sha1 = SHA1.Create()
+        let allChunks = getAllChunks db fileId
+        let len = this.Length
+
+        allChunks 
+        |> Seq.map (fun b -> 
+            let currentChunkDataOffset = b.Number * chunkSize
+            if currentChunkDataOffset + chunkSize <= len then 
+                ValueTuple<byte array, int, int>(b.Data, 0, b.Data.Length) 
+            else 
+                let blockReadCount = int (len - currentChunkDataOffset) // Calculate how many bytes should actually be read to not exceed the file length
+                ValueTuple<byte array, int, int>(b.Data, 0, blockReadCount)) // Trim the chunk data to match the file's actual length
+        |> Seq.iter (fun struct (data, start, len) -> sha1.TransformBlock (data, start, len, null, 0) |> ignore)
+
+        sha1.TransformFinalBlock([||], 0, 0) |> ignore
+
+        let hash = sha1.Hash
+        updateHashById db fileId hash
+
 
     override _.CanRead = true
     override _.CanSeek = true
@@ -181,8 +226,9 @@ type DbFileStream(db: SqliteConnection, fileId: SqlId) =
             checkDisposed()
             this.Seek(value, SeekOrigin.Begin) |> ignore
 
-    override _.Flush() = 
+    override this.Flush() =         
         checkDisposed()
+        this.UpdateHash()
 
     override this.Read(buffer: byte[], offset: int, count: int) : int =
         checkDisposed()
@@ -283,6 +329,8 @@ type DbFileStream(db: SqliteConnection, fileId: SqlId) =
 
 
     override this.Dispose(disposing) =
+        if not disposed then 
+            this.Flush()
         disposed <- true
         ()
 

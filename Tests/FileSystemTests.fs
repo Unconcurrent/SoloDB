@@ -9,6 +9,7 @@ open JsonFunctions
 open Types
 open TestUtils
 open FileStorage
+open System.Security.Cryptography
 
 let testFileBytes = "Hello this is some random data." |> Encoding.UTF8.GetBytes
 
@@ -147,3 +148,37 @@ type FileSystemTests() =
         fileStream.ReadExactly readArray
 
         assertEqual (readArray.SequenceEqual testFileBytes) true "Write then Read not equal."
+
+    [<TestMethod>]
+    member this.FileHash() =
+        let path = "/alpha/binary.file"
+        use fileStream = fs.OpenOrCreateAt path
+        fileStream.Write testFileBytes
+        fileStream.Flush()
+
+        let dataHash = SHA1.HashData testFileBytes
+        let header = fs.GetAt path
+        assertEqual dataHash header.Hash "Hash unequal."
+
+    [<TestMethod>]
+    member this.FileHashBig() =
+        let path = "/alpha/binary.file"
+        let testFileBytes = Array.zeroCreate<byte> (FileStorage.chunkSize * 10L |> int)
+
+        use fileStream = fs.OpenOrCreateAt path
+        fileStream.Write testFileBytes
+        fileStream.Flush()
+
+        let dataHash = SHA1.HashData testFileBytes
+        let header = fs.GetAt path
+        assertEqual dataHash header.Hash "Hash unequal."
+
+    [<TestMethod>]
+    member this.FileHashSparse() =
+        let path = "/alpha/binary.file"
+
+        fs.WriteAt(path, chunkSize * 10L, testFileBytes)
+
+        let dataHash = SHA1.HashData ([|Array.zeroCreate<byte>(int chunkSize * 10); testFileBytes|] |> Array.concat)
+        let header = fs.GetAt path
+        assertEqual dataHash header.Hash "Hash unequal."
