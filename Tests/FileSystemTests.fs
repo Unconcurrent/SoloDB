@@ -209,3 +209,20 @@ type FileSystemTests() =
         | :? FileNotFoundException as fnf ->
             assertEqual fnf.FileName inexistentHashStr "Different hash."
             ()
+
+    [<TestMethod>]
+    member this.FileDelete() =
+        let path = "/abc.txt"
+        use ms = new MemoryStream(testFileBytes)
+        fs.Upload(path, ms)
+
+        assertTrue (fs.DeleteFileAt path) 
+        assertTrue ((fs.DeleteFileAt path) = false)
+
+    [<TestMethod>]
+    member this.DirectoryDelete() =
+        let path = "/abc/xyz"
+        let dir = fs.GetOrCreateDirAt path
+
+        assertTrue (fs.DeleteDirAt path) 
+        assertTrue ((fs.DeleteDirAt path) = false)

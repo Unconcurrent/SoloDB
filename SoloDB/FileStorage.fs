@@ -491,7 +491,6 @@ let setDirMetadata (db: SqliteConnection) (dir: DirectoryHeader) (key: string) (
 let deleteDirMetadata (db: SqliteConnection) (dir: DirectoryHeader) (key: string) =
     db.Execute("DELETE FROM DirectoryMetadata WHERE DirectoryId = @DirectoryId AND Key = @Key", {|DirectoryId = dir.Id; Key = key|}) |> ignore
    
-
 type FileSystem(db: SqliteConnection) =
     member this.Upload(path, stream: Stream) =
         use file = openOrCreateFile db path
@@ -603,3 +602,19 @@ type FileSystem(db: SqliteConnection) =
         match this.TryGetFileByHash hash with
         | None -> raise (FileNotFoundException("No file with such hash.", Utils.hashBytesToStr hash))
         | Some f -> f
+
+    member this.Delete(file) =
+        deleteFile db file null
+
+    member this.Delete(dir) =
+        deleteDirectory db dir null
+
+    member this.DeleteFileAt(path) =
+        match this.TryGetAt path with
+        | None -> false
+        | Some file ->
+        this.Delete file
+        true
+
+    member this.DeleteDirAt(path) =
+        deleteDirectoryAt db path
