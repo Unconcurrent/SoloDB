@@ -88,6 +88,7 @@ type FileHeader = {
     Length: int64
     Created: DateTimeOffset
     Modified: DateTimeOffset
+    Hash: byte array
     Metadata: IDictionary<string, string>
 }
 
@@ -103,8 +104,9 @@ type DirectoryHeader = {
 }
 
 [<CLIMutable>]
-type private FileChunk = {
+type internal FileChunk = {
     Id: SqlId
+    FileId: SqlId
     Number: int64
     Data: byte array
 }
