@@ -118,3 +118,32 @@ type FileSystemTests() =
 
         assertEqual dir3.Metadata.["Tags"] "One" "Metadata not set."
         assertEqual dir3.Metadata.Count 1 "Metadata not deleted."
+
+    [<TestMethod>]
+    member this.FileOpenWriteRead() =
+        let path = "/alpha/binary.file"
+
+        use fileStream = fs.OpenOrCreateAt path
+        fileStream.Write testFileBytes
+        fileStream.Position <- 0
+        let readArray = Span<byte>(Array.zeroCreate<byte> testFileBytes.Length)
+
+        fileStream.ReadExactly readArray
+
+        assertEqual (readArray.SequenceEqual testFileBytes) true "Write then Read not equal."
+
+    [<TestMethod>]
+    member this.FileOpenWriteReadMultipleChunks() =
+        let path = "/alpha/binary.file"
+        let testFileBytes = Array.zeroCreate<byte> (FileStorage.chunkSize * 10L |> int)
+
+        Random.Shared.NextBytes testFileBytes
+
+        use fileStream = fs.OpenOrCreateAt path
+        fileStream.Write testFileBytes
+        fileStream.Position <- 0
+        let readArray = Span<byte>(Array.zeroCreate<byte> testFileBytes.Length)
+
+        fileStream.ReadExactly readArray
+
+        assertEqual (readArray.SequenceEqual testFileBytes) true "Write then Read not equal."
