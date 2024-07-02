@@ -489,6 +489,22 @@ type FileSystem(db: SqliteConnection) =
     member this.GetOrCreateDirAt path =
         getOrCreateDirectoryAt db path
 
+    member this.Open file =
+        openFile db file
+
+    member this.OpenAt path =
+        let file = this.GetAt path
+        openFile db file
+
+    member this.TryOpenAt path =
+        match this.TryGetAt path with
+        | None -> None
+        | Some file ->
+        openFile db file |> Some
+
+    member this.OpenOrCreateAt path =
+        openOrCreateFile db path
+
     member this.WriteAt(path, offset, data, ?createIfInexistent: bool) =
         let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
         let file = if createIfInexistent then this.GetOrCreateAt path else this.GetAt path
