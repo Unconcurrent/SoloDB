@@ -551,7 +551,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
                             CREATE INDEX IF NOT EXISTS SoloDBFileHeaderNameAndDirectoryIdIndex ON FileHeader(Name, DirectoryId);
                             CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileChunkFileIdAndNumberIndex ON FileChunk(FileId, Number);
                             CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileMetadataFileIdAndKey ON FileMetadata(FileId, Key);
-                            CREATE INDEX IF NOT EXISTS SoloDBFileHashIndex ON FileMetadata(Hash);
+                            CREATE INDEX IF NOT EXISTS SoloDBFileHashIndex ON FileHeader(Hash);
 
                             ")|> ignore
 

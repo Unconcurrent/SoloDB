@@ -10,6 +10,8 @@ open Types
 open TestUtils
 open FileStorage
 open System.Security.Cryptography
+open Utils
+open System.Globalization
 
 let testFileBytes = "Hello this is some random data." |> Encoding.UTF8.GetBytes
 
@@ -182,3 +184,28 @@ type FileSystemTests() =
         let dataHash = SHA1.HashData ([|Array.zeroCreate<byte>(int chunkSize * 10); testFileBytes|] |> Array.concat)
         let header = fs.GetAt path
         assertEqual dataHash header.Hash "Hash unequal."
+
+    [<TestMethod>]
+    member this.GetFileByHash() =
+        let path = "/alpha/binary.file"
+        do
+            use fileStream = fs.OpenOrCreateAt path
+            fileStream.Write testFileBytes
+
+
+        let header = fs.GetAt path
+        let header2 = fs.GetFileByHash header.Hash
+        assertEqual header.Name header2.Name "Incorrect file header."
+        assertEqual header.Length header2.Length "Incorrect file header."
+        assertEqual header.Hash header2.Hash "Incorrect file header."
+        assertEqual header.DirectoryId header2.DirectoryId "Incorrect file header."
+
+        let inexistentHash = shaHash "ABCBSH"
+        let inexistentHashStr = Convert.ToHexString inexistentHash |> _.ToLower(CultureInfo.InvariantCulture)
+        try
+            let inexistentHeader = fs.GetFileByHash inexistentHash 
+            failwithf "Got inexistent file from hash."
+        with
+        | :? FileNotFoundException as fnf ->
+            assertEqual fnf.FileName inexistentHashStr "Different hash."
+            ()

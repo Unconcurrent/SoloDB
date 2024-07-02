@@ -389,39 +389,34 @@ let private metadataFiller (header: FileHeader) (metadata: Metadata) =
         header.Metadata[metadata.Key] <- metadata.Value
     header
 
-let tryGetFile (connection: SqliteConnection) (fileId: SqlId) =
-    let query = """
-        SELECT fh.*, fm.Key, fm.Value
-        FROM FileHeader fh
-        LEFT JOIN FileMetadata fm ON fh.Id = fm.FileId
-        WHERE fh.Id = @FileId;
-        """
+let private tryGetFileWhere (connection: SqliteConnection) (where: string) (parameters) =
+    let query = sprintf """
+                SELECT fh.*, fm.Key, fm.Value
+                FROM FileHeader fh
+                LEFT JOIN FileMetadata fm ON fh.Id = fm.FileId
+                WHERE %s;
+                """ where
     
     connection.Query<FileHeader, Metadata, FileHeader>(
         query, 
         metadataFiller,
-        {| FileId = fileId |},
+        parameters,
         splitOn = "Key"
     )
     |> Seq.tryHead
+
+let tryGetFile (connection: SqliteConnection) (fileId: SqlId) =
+    tryGetFileWhere connection "fh.Id = @FileId" {| FileId = fileId |}
 
 let tryGetFileAt (db: SqliteConnection) (path: string) =
     let dirPath, name = getPathAndName path
     match tryGetDir db dirPath with
     | None -> None
     | Some dir -> 
-    db.Query<FileHeader, Metadata, FileHeader>(
-        """
-        SELECT fh.*, fm.Key, fm.Value
-        FROM FileHeader fh
-        LEFT JOIN FileMetadata fm ON fh.Id = fm.FileId
-        WHERE fh.DirectoryId = @DirectoryId AND fh.Name = @Name;
-        """, 
-        metadataFiller,
-        {|DirectoryId = dir.Id; Name = name|},
-        splitOn = "Key"
-    )
-    |> Seq.tryHead
+    tryGetFileWhere db "fh.DirectoryId = @DirectoryId AND fh.Name = @Name" {|DirectoryId = dir.Id; Name = name|}
+
+let tryGetFileByHash (db: SqliteConnection) (hash: byte array) =
+    tryGetFileWhere db "fh.Hash = @Hash" {|Hash = hash|}
 
 let getOrCreateFileAt (db: SqliteConnection) (path: string) =
     use l = lockPath db path
@@ -495,6 +490,7 @@ let setDirMetadata (db: SqliteConnection) (dir: DirectoryHeader) (key: string) (
 
 let deleteDirMetadata (db: SqliteConnection) (dir: DirectoryHeader) (key: string) =
     db.Execute("DELETE FROM DirectoryMetadata WHERE DirectoryId = @DirectoryId AND Key = @Key", {|DirectoryId = dir.Id; Key = key|}) |> ignore
+   
 
 type FileSystem(db: SqliteConnection) =
     member this.Upload(path, stream: Stream) =
@@ -599,3 +595,11 @@ type FileSystem(db: SqliteConnection) =
     member this.DeleteDirectoryMetadata(path, key) =
         let dir = this.GetDirAt path
         deleteDirMetadata db dir key
+
+    member this.TryGetFileByHash(hash) =
+        tryGetFileByHash db hash
+
+    member this.GetFileByHash(hash) =
+        match this.TryGetFileByHash hash with
+        | None -> raise (FileNotFoundException("No file with such hash.", Utils.hashBytesToStr hash))
+        | Some f -> f
