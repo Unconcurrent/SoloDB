@@ -60,3 +60,17 @@ type JsonTests() =
         assertEqual (toSQLJson 1) (1, false) "ToSQLJsonAndKindTest: string"
         assertEqual (toSQLJson [1L]) ("[1]", true) "ToSQLJsonAndKindTest: string"
         assertEqual (toSQLJson {|hello = "test"|}) ("{\"hello\": \"test\"}", true) "ToSQLJsonAndKindTest: string"
+
+    [<TestMethod>]
+    member this.JsonDates() =
+        let dateTimeOffset = DateTimeOffset.FromUnixTimeMilliseconds 43757783
+        let dateTime = DateTime.Now.ToBinary() |> DateTime.FromBinary
+        let dateOnly = DateOnly.FromDateTime dateTime
+        let timeSpan = DateTime.Now.TimeOfDay.TotalMilliseconds |> int64 (* To the DB storage precision. *) |> float |> TimeSpan.FromMilliseconds
+        let timeOnly = timeSpan |> TimeOnly.FromTimeSpan
+
+        assertEqual (toJson dateTimeOffset |> fromJsonOrSQL) (dateTimeOffset) "DateTimeOffset failed."
+        assertEqual (toJson dateTime |> fromJsonOrSQL) (dateTime) "DateTime failed."
+        assertEqual (toJson dateOnly |> fromJsonOrSQL) (dateOnly) "DateOnly failed."
+        assertEqual (toJson timeSpan |> fromJsonOrSQL) (timeSpan) "TimeSpan failed."
+        assertEqual (toJson timeOnly |> fromJsonOrSQL) (timeOnly) "TimeOnly failed."
