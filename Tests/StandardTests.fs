@@ -776,8 +776,26 @@ type SoloDBStandardTesting() =
         users.InsertBatch randomUsersToInsert |> ignore
         let ex = users.EnsureIndex(fun u -> u.Username)
         let plan = users.Select(fun u -> u.Username, u.Auth).Where(fun u -> u.Username > "AABB" && u.Auth = true).ExplainQueryPlan()
-        if plan.Contains "USING INDEX" |> not then failwithf "Does not use index"
         printfn "%s" plan
+        if plan.Contains "USING INDEX" |> not then failwithf "Does not use index"        
+        ()
+
+    [<TestMethod>]
+    member this.EnsureIndexTuple() =        
+        let users = db.GetCollection<User>()
+        users.InsertBatch randomUsersToInsert |> ignore
+        let ex = Assert.ThrowsException<exn>(fun () -> users.EnsureIndex(fun u -> (u.Username, u.Auth)) |> ignore)
+
+        users.EnsureIndex(fun u -> u.Username) |> ignore
+        users.EnsureIndex(fun u -> u.Auth) |> ignore
+
+        let plan = users.Select(fun u -> u.Username, u.Auth).Where(fun u -> u.Username > "AABB").ExplainQueryPlan()
+        printfn "%s" plan
+        if plan.Contains "USING INDEX" |> not then failwithf "Does not use index"
+
+        let plan = users.Select(fun u -> u.Username, u.Auth).Where(fun u -> u.Auth = true).ExplainQueryPlan()
+        printfn "%s" plan
+        if plan.Contains "USING INDEX" |> not then failwithf "Does not use index"
         ()
 
     [<TestMethod>]
