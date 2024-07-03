@@ -8,6 +8,7 @@ open SoloDB
 open SoloDBTypes
 open Types
 open TestUtils
+open SoloDBExtensions
 
 [<TestClass>]
 type SoloDBTransactionalTesting() =
@@ -16,7 +17,7 @@ type SoloDBTransactionalTesting() =
     [<TestInitialize>]
     member this.Init() =
         let dbSource = $"memory:Test{Random.Shared.NextInt64()}"
-        db <- SoloDB.instantiate dbSource
+        db <- SoloDB.Instantiate dbSource
     
     [<TestCleanup>]
     member this.Cleanup() =

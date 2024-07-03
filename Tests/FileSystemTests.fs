@@ -23,7 +23,7 @@ type FileSystemTests() =
     [<TestInitialize>]
     member this.Init() =
         let dbSource = $"memory:Test{Random.Shared.NextInt64()}"
-        db <- SoloDB.instantiate dbSource
+        db <- SoloDB.Instantiate dbSource
         fs <- db.FileSystem
     
     [<TestCleanup>]

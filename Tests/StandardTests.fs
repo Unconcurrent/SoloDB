@@ -14,7 +14,7 @@ open SoloDB
 open SoloDBTypes
 open Types
 open TestUtils
-
+open SoloDBExtensions
 
 [<TestClass>]
 type SoloDBStandardTesting() =         
@@ -23,7 +23,7 @@ type SoloDBStandardTesting() =
     [<TestInitialize>]
     member this.Init() =
         let dbSource = $"memory:Test{Random.Shared.NextInt64()}"
-        db <- SoloDB.instantiate dbSource
+        db <- SoloDB.Instantiate dbSource
 
     [<TestCleanup>]
     member this.Cleanup() =
@@ -753,10 +753,12 @@ type SoloDBStandardTesting() =
     member this.MultiThreadedReads() =        
         let users = db.GetCollection<User>()
         users.InsertBatch randomUsersToInsert |> ignore
+        users.InsertBatch randomUsersToInsert |> ignore
+
         let readUsers () = 
             users.Select().OnAll().ToList()
 
-        let tasks = [| for _ in 1 .. 10 -> (Task.Run readUsers) :> Task |]
+        let tasks = [| for _ in 1 .. 100 -> (Task.Run readUsers) :> Task |]
         Task.WaitAll(tasks)
         for task in tasks do
             assertEqual (task.Status) TaskStatus.RanToCompletion "Multi-threaded reads did not complete successfully."
@@ -881,7 +883,7 @@ type SoloDBStandardTesting() =
 
         db.GetUntypedCollection("RandomData").InsertBatch randomData |> ignore
 
-        use backup = SoloDB.instantiate "memory:backup1"
+        use backup = SoloDB.Instantiate "memory:backup1"
         db.BackupTo backup
 
         db.DropCollection "RandomData" |> ignore
@@ -930,7 +932,7 @@ type SoloDBStandardTesting() =
             Thread.Sleep 100
             for i in 1..10 do db.GetUntypedCollection("Data").Insert {|abc = "1010"|} |> ignore
 
-            use backup = SoloDB.instantiate "memory:backup2"
+            use backup = SoloDB.Instantiate "memory:backup2"
             printfn "[%s] Start backup." (DateTime.Now.ToShortTimeString())
             let countBeforeBackup = count
             db.BackupCollections backup
