@@ -480,7 +480,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
     member this.BackupVacuumTo(location: string) =
         match this.DataLocation with
-        | Memory _ -> failwithf "Cannot vaccuum backuo from or to memory."
+        | Memory _ -> failwithf "Cannot vaccuum backup from or to memory."
         | other ->
 
         let location = Path.GetFullPath location

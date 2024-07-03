@@ -1,6 +1,4 @@
-﻿module StandardTests
-
-open JsonFunctions
+﻿module StandardTests2
 
 #nowarn "3391" // Implicit on SqlId
 
@@ -17,7 +15,7 @@ open TestUtils
 open SoloDBExtensions
 
 [<TestClass>]
-type SoloDBStandardTesting() =         
+type SoloDBStandard2Testing() =         
     let mutable db: SoloDB = Unchecked.defaultof<SoloDB>
 
     [<TestInitialize>]
@@ -30,453 +28,6 @@ type SoloDBStandardTesting() =
         db.Dispose()
 
     [<TestMethod>]
-    member this.InsertAndGetByIdEqual() =    
-        let testUser = {
-            Username = "Bob"
-            Auth = true
-            Banned = false
-            FirstSeen = DateTimeOffset.MinValue
-            // The DB stores only the miliseconds, but the DateTimeOffset can have more precision.
-            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
-            Data = {
-                Tags = [|"test1234"|]
-            }
-        }
-        
-        
-        let users = db.GetCollection<User>()
-        let id = users.Insert testUser
-        let userGetById = users.GetById id
-        printfn "%A" testUser
-        printfn "%A" userGetById
-        assertEqual userGetById testUser "The inserted user is different."
-
-    [<TestMethod>]
-    member this.InsertAndGetByIdUnequal() =    
-        let user1 = {
-            Username = "John"
-            Auth = true
-            Banned = false
-            FirstSeen = DateTimeOffset.MinValue
-            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
-            Data = {
-                Tags = [|"tag1"|]
-            }
-        }
-
-        let user2 = {
-            Username = "James"
-            Auth = true
-            Banned = true
-            FirstSeen = DateTimeOffset.MinValue
-            LastSeen = DateTimeOffset.Parse("10/10/2020")
-            Data = {
-                Tags = [||]
-            }
-        }
-                
-        let users = db.GetCollection<User>()
-
-        let id1 = users.Insert user1
-        let id2 = users.Insert user2
-
-        let user1 = users.GetById id1
-        let user2 = users.GetById id2
-
-        printfn "%A" user1
-        printfn "%A" user2
-        Assert.AreNotEqual(user1, user2, "The inserted user are equal.")
-
-    [<TestMethod>]
-    member this.IncrementalIdsTest() =        
-        let users = db.GetCollection<User>()
-
-        let ids = users.InsertBatch(randomUsersToInsert)
-
-        let mutable prevId = SqlId 0L
-        for id in ids do
-            Assert.IsTrue (id > prevId)
-            prevId <- id
-
-    [<TestMethod>]
-    member this.QueryTest1() =        
-        let users = db.GetCollection<User>()
-
-        let ids = users.InsertBatch(randomUsersToInsert)
-
-        let selectedData = users
-                            .Select(fun u -> (u.Username, u.Data.Tags[0]))
-                            .Where(fun u -> u.Data.Tags[0].Like "tag1%")
-                            .OrderByDesc(fun u -> u.Username)
-                            .ToList()
-
-        let selectedDataText = sprintf "%A" selectedData
-        let expected = "[(\"Vanya\", \"tag1-B\"); (\"John\", \"tag1-A\"); (\"Givany\", \"tag1-C\")]" 
-        printfn "%s" selectedDataText
-        printfn "%s" expected
-        assertEqual selectedDataText expected "The query is wrong."
-
-    [<TestMethod>]
-    member this.QueryTest2() =        
-        let users = db.GetCollection<User>()
-
-        users.InsertBatch(randomUsersToInsert) |> ignore
-
-        let selectedData = users
-                            .Select(fun u -> (u.Data.Tags, u.Auth, true, u.Username))
-                            .Where(fun u -> u.Data.Tags[0].Like "tag2%")
-                            .OrderByDesc(fun u -> u.LastSeen)
-                            .Limit(3UL)
-                            .ToList()
-
-        let selectedDataText = sprintf "%A" selectedData
-        let expected = "[([|\"tag2\"|], true, true, \"Mihail\")]"
-        printfn "%s" selectedDataText
-        printfn "%s" expected
-        assertEqual selectedDataText expected "The query is wrong."
-
-    [<TestMethod>]
-    member this.InsertBatchSelectTest() =        
-        let users = db.GetCollection<User>()
-
-        users.InsertBatch(randomUsersToInsert) |> ignore
-
-        let id1, getFirstUser = users.SelectWithId().OnAll().Limit(1UL).Offset(0UL).First()
-        let id2, getSecondUser = users.SelectWithId().OnAll().Limit(1UL).Offset(1UL).First()
-
-        assertEqual getFirstUser.Username "John" "Name unequal."
-        assertEqual getSecondUser.Username "Mihail" "Name unequal."
-
-    [<TestMethod>]
-    member this.InsertBatchCountTest() =        
-        db.GetCollection<User>().InsertBatch(randomUsersToInsert) |> ignore
-        assertEqual (db.GetCollection<User>().Select(fun u -> 1).OnAll().ToList() |> Seq.length) randomUsersToInsert.Length "Length unequal."
-
-    [<TestMethod>]
-    member this.UpdateLambdaAddTest() =        
-        let users = db.GetCollection<User>()
-
-        let ids = users.InsertBatch(randomUsersToInsert)
-
-
-        let addTagValue = $"{Random.Shared.NextInt64()}"
-        assertEqual (users.Update(
-                            fun u -> (u.Data.Tags.Add addTagValue)
-                     ).WhereId(ids.[0]).Execute()) 1 "No rows affected."
-
-        let getFirstUser = users.GetById ids.[0]
-        assertEqual getFirstUser.Data.Tags.[1] addTagValue "Value Tags unchanged."
-
-    [<TestMethod>]
-    member this.UpdateLambdaSetAtTest() =        
-        let users = db.GetCollection<User>()
-
-        let ids = users.InsertBatch(randomUsersToInsert)
-
-
-        let replaceValue = $"{Random.Shared.NextInt64()}"
-        assertEqual (users.Update(
-                            fun u -> u.Data.Tags.SetAt(0, replaceValue)
-                     ).WhereId(ids.[0]).Execute()) 1 "No rows affected."
-
-        let getFirstUser = users.GetById ids.[0]
-        assertEqual getFirstUser.Data.Tags.[0] replaceValue "Value Tags unchanged."
-
-    [<TestMethod>]
-    member this.UpdateLambdaAddSetAtTest() =        
-        let users = db.GetCollection<User>()
-
-        let ids = users.InsertBatch(randomUsersToInsert)
-
-
-        let replaceValue = $"{Random.Shared.NextInt64()}"
-        let addTagValue = $"{Random.Shared.NextInt64()}"
-        assertEqual (users.Update(
-                            fun u -> (u.Data.Tags.Add addTagValue) |+| (u.Data.Tags.SetAt(0, replaceValue))
-                     ).WhereId(ids.[0]).Execute()) 1 "No rows affected."
-
-        let getFirstUser = users.GetById ids.[0]
-        assertEqual getFirstUser.Data.Tags.[0] replaceValue "Value Tags unchanged."
-        assertEqual getFirstUser.Data.Tags.[1] addTagValue "Value Tags unchanged."
-
-    [<TestMethod>]
-    member this.UpdateLambdaRemoveAtTest() =        
-        let users = db.GetCollection<User>()
-
-        let id = users.Insert {
-            Username = "John"
-            Auth = true
-            Banned = false
-            FirstSeen = DateTimeOffset.UtcNow.AddYears -15
-            LastSeen = DateTimeOffset.UtcNow.AddMinutes -10
-            Data = {
-                Tags = [|"tag1"; "tag2"; "tag3"|]
-            }
-        }
-
-        assertEqual (users.Update(
-                            fun u -> (u.Data.Tags.RemoveAt (1))
-                     ).WhereId(id).Execute()) 1 "No rows affected."
-
-        let firstUser = users.GetById id
-        assertEqual firstUser.Data.Tags.[0] "tag1" "Value Tags unchanged."
-        assertEqual firstUser.Data.Tags.[1] "tag3" "Value Tags unchanged."
-
-    [<TestMethod>]
-    member this.UpdateLambdaReplaceArrayTest() =        
-        let users = db.GetCollection<User>()
-
-        let id = users.Insert {
-            Username = "John"
-            Auth = true
-            Banned = false
-            FirstSeen = DateTimeOffset.UtcNow.AddYears -15
-            LastSeen = DateTimeOffset.UtcNow.AddMinutes -10
-            Data = {
-                Tags = [|"tag1"; "tag2"; "tag3"|]
-            }
-        }
-
-        let newTags = [|"abc"; "xyz"|]
-
-        assertEqual (users.Update(fun u -> u.Data.Tags.Set newTags).WhereId(id).Execute()) 1 "Execute with no modification."
-
-        let user = users.GetById id
-        assertEqual<string array> user.Data.Tags newTags "Array set failed."
-
-    [<TestMethod>]
-    member this.UpdateObjTest() =        
-        let users = db.GetCollection<User>()
-
-        let ids = users.InsertBatch(randomUsersToInsert)
-
-        let secondUser = users.GetById ids.[1]
-        let secondUserMod = {secondUser with LastSeen = DateTimeOffset.Now.Date |> DateTimeOffset}
-        let update2 = users.Replace(secondUserMod).WhereId(ids.[1]).Execute()
-        let secondUserModDB = users.GetById ids.[1]
-
-        assertEqual secondUserMod secondUserModDB "Update(User) failed."
-
-    [<TestMethod>]
-    member this.SelectUntypedTest() =        
-        let users = db.GetCollection<User>()
-
-        let ids = users.InsertBatch(randomUsersToInsert)
-
-        let users = users.Select(fun u -> (u?Username, u?CarType)).Where(fun u -> u?Username > "A").ToList()
-        let usersStr = sprintf "%A" users
-        printfn "%s" usersStr
-        assertEqual users.[0] ("John", null) "SelectUntypedTest failed."
-        assertEqual users.[1] ("Mihail", null) "SelectUntypedTest failed."
-        assertEqual users.[2] ("Vanya", null) "SelectUntypedTest failed."
-        assertEqual users.[3] ("Givany", null) "SelectUntypedTest failed."
-
-    [<TestMethod>]
-    member this.UntypedCollectionInsertTest() =        
-        let objs = db.GetUntypedCollection("Statistics")
-
-        let id = objs.InsertBatch [
-            {|Name="Alpha"|}
-            {|Name="Beta"|}
-            {|Type="None"|}
-            {|Type="None"|}
-            {|Type="Int"; Data=10|}
-            {|Type="Int"; Data=12|}
-            {|Type="Int"; Data=(-42)|}
-            {|Type="String"; Data="AAA"|}
-            {|Type="Obj"; Data={|Number=10; Name = "Alice"|}|}
-        ]
-
-        let users = objs.Select().OnAll().ToList()
-
-        assertEqual users.Length 9 "Count unequal."
-
-    [<TestMethod>]
-    member this.UntypedCollectionSelectTest() =        
-        let objs = db.GetUntypedCollection("Statistics")
-
-        let id = objs.InsertBatch [
-            {|Name="Alpha"|}
-            {|Name="Beta"|}
-            {|Type="None"|}
-            {|Type="None"|}
-            {|Type="Int"; Data=10|}
-            {|Type="Int"; Data=12|}
-            {|Type="Int"; Data=(-42)|}
-            {|Type="String"; Data="AAA"|}
-            {|Type="Obj"; Data={|Number=10; Name = "Alice"|}|}
-        ]
-
-        let users = objs.Select(fun o -> o?Name).OnAll().ToList()
-
-        assertEqual users.Length 2 "Count unequal."
-
-    [<TestMethod>]
-    member this.LimitZeroTest() =        
-        let objs = db.GetUntypedCollection("Statistics")
-
-        let id = objs.InsertBatch [
-            {|Name="Alpha"|}
-            {|Name="Beta"|}
-            {|Type="None"|}
-            {|Type="None"|}
-            {|Type="Int"; Data=10|}
-            {|Type="Int"; Data=12|}
-            {|Type="Int"; Data=(-42)|}
-            {|Type="String"; Data="AAA"|}
-            {|Type="Obj"; Data={|Number=10; Name = "Alice"|}|}
-        ]
-
-        let users = objs.Select(fun o -> o?Name).OnAll().Limit(0UL).ToList()
-
-        assertEqual users.Length 0 "Limit 0 does not return 0 elements."
-
-    [<TestMethod>]
-    member this.CountTest() =    
-        let testUser1 = {
-            Username = "Alice"
-            Auth = true
-            Banned = false
-            FirstSeen = DateTimeOffset.MinValue
-            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
-            Data = { Tags = [|"tag1"|] }
-        }
-        
-        let testUser2 = {
-            Username = "Bob"
-            Auth = false
-            Banned = false
-            FirstSeen = DateTimeOffset.MinValue
-            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
-            Data = { Tags = [|"tag2"|] }
-        }
-                
-        let users = db.GetCollection<User>()
-        users.Insert testUser1 |> ignore
-        users.Insert testUser2 |> ignore
-        
-        let count = users.CountAll()
-        assertEqual count 2L "The count of users is incorrect."
-
-    [<TestMethod>]
-    member this.AnyTest() =
-        let testUser1 = {
-            Username = "Alice"
-            Auth = true
-            Banned = false
-            FirstSeen = DateTimeOffset.MinValue
-            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
-            Data = { Tags = [|"tag1"|] }
-        }
-        
-        let testUser2 = {
-            Username = "Bob"
-            Auth = false
-            Banned = false
-            FirstSeen = DateTimeOffset.MinValue
-            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
-            Data = { Tags = [|"tag2"|] }
-        }
-        
-        
-        let users = db.GetCollection<User>()
-        users.Insert testUser1 |> ignore
-        users.Insert testUser2 |> ignore
-        
-        let anyUser = users.Any(fun u -> u.Auth)
-        assertEqual anyUser true "The any function did not return true when an authenticated user exists."
-
-    [<TestMethod>]
-    member this.CountWithConditionTest() =
-        let testUser1 = {
-            Username = "Alice"
-            Auth = true
-            Banned = false
-            FirstSeen = DateTimeOffset.MinValue
-            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
-            Data = { Tags = [|"tag1"|] }
-        }
-        
-        let testUser2 = {
-            Username = "Bob"
-            Auth = false
-            Banned = false
-            FirstSeen = DateTimeOffset.MinValue
-            LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() |> DateTimeOffset.FromUnixTimeMilliseconds
-            Data = { Tags = [|"tag2"|] }
-        }        
-        
-        let users = db.GetCollection<User>()
-        users.Insert testUser1 |> ignore
-        users.Insert testUser2 |> ignore
-        
-        let countAuthUsers = users.CountWhere(fun u -> u.Auth)
-        assertEqual countAuthUsers 1L "The count of authenticated users is incorrect."
-
-    [<TestMethod>]
-    member this.CountAllEqual() =
-        
-        let users = db.GetCollection<User>()
-        let count = users.CountAll()
-        assertEqual count 0L "The initial count should be zero."
-
-    [<TestMethod>]
-    member this.CountAllAfterInsertEqual() =
-        let testUser = {
-            Username = "Alice"
-            Auth = true
-            Banned = false
-            FirstSeen = DateTimeOffset.MinValue
-            LastSeen = DateTimeOffset.UtcNow
-            Data = { Tags = [|"example"|] }
-        }
-        
-        let users = db.GetCollection<User>()
-        users.Insert testUser |> ignore
-        let count = users.CountAll()
-        assertEqual count 1L "The count after one insert should be one."
-
-    [<TestMethod>]
-    member this.CountAllLimitEqual() =
-        let testUsers = [
-            { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
-            { Username = "Bob"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
-        ]
-        
-        let users = db.GetCollection<User>()
-        users.InsertBatch testUsers |> ignore
-        let count = users.CountAllLimit(1UL)
-        assertEqual count 1L "The count with limit 1 should be one."
-
-    [<TestMethod>]
-    member this.CountWhereEqual() =
-        let testUser = {
-            Username = "Alice"
-            Auth = true
-            Banned = false
-            FirstSeen = DateTimeOffset.MinValue
-            LastSeen = DateTimeOffset.UtcNow
-            Data = { Tags = [|"example"|] }
-        }
-        
-        let users = db.GetCollection<User>()
-        users.Insert testUser |> ignore
-        let count = users.CountWhere(fun u -> u.Username = "Alice")
-        assertEqual count 1L "The count where username is Alice should be one."
-
-    [<TestMethod>]
-    member this.CountWhereWithLimitEqual() =
-        let testUsers = [
-            { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
-            { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
-        ]
-        
-        let users = db.GetCollection<User>()
-        users.InsertBatch testUsers |> ignore
-        let count = users.CountWhere((fun u -> u.Username = "Alice"), 1UL)
-        assertEqual count 1L "The count where username is Alice with limit 1 should be one."
-
-    [<TestMethod>]
     member this.AnyTrue() =
         let testUser = {
             Username = "Alice"
@@ -486,7 +37,7 @@ type SoloDBStandardTesting() =
             LastSeen = DateTimeOffset.UtcNow
             Data = { Tags = [|"example"|] }
         }
-        
+    
         let users = db.GetCollection<User>()
         users.Insert testUser |> ignore
         let exists = users.Any(fun u -> u.Username = "Alice")
@@ -510,7 +61,7 @@ type SoloDBStandardTesting() =
             { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
             { Username = "Bob"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
         ]
-        
+    
         let users = db.GetCollection<User>()
         users.InsertBatch testUsers |> ignore
         let count = users.CountAll()
@@ -525,7 +76,7 @@ type SoloDBStandardTesting() =
             { Username = "Mark3"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example5"|] } }
             { Username = "Bob"; Auth = true; Banned = true; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
         ]
-        
+    
         let users = db.GetCollection<User>()
         users.InsertBatch testUsers |> ignore
         let count = users.CountWhere(fun u -> u.Auth && not u.Banned)
@@ -537,7 +88,7 @@ type SoloDBStandardTesting() =
             { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
             { Username = "Bob"; Auth = true; Banned = true; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
         ]
-        
+    
         let users = db.GetCollection<User>()
         users.InsertBatch testUsers |> ignore
         let count = users.CountWhere(fun u -> u.Auth && u.Banned && u.Username = "Charlie")
@@ -549,7 +100,7 @@ type SoloDBStandardTesting() =
             { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
             { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
         ]
-        
+    
         let users = db.GetCollection<User>()
         users.InsertBatch testUsers |> ignore
         let count = users.CountWhere(fun u -> u.Username = "Alice")
@@ -561,7 +112,7 @@ type SoloDBStandardTesting() =
             { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
             { Username = "Bob"; Auth = true; Banned = true; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
         ]
-        
+    
         let users = db.GetCollection<User>()
         users.InsertBatch testUsers |> ignore
         let exists = users.Any(fun u -> u.Auth && not u.Banned)
@@ -573,7 +124,7 @@ type SoloDBStandardTesting() =
             { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
             { Username = "Bob"; Auth = true; Banned = true; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example2"|] } }
         ]
-        
+    
         let users = db.GetCollection<User>()
         users.InsertBatch testUsers |> ignore
         let exists = users.Any(fun u -> u.Auth && u.Banned && u.Username = "Charlie")
@@ -584,7 +135,7 @@ type SoloDBStandardTesting() =
         let users = db.GetCollection<User>()
         let count = users.CountWhere((fun u -> u.Username = "NonExistent"), 1UL)
         assertEqual count 0L "The count where username is NonExistent with limit 1 should be zero."
-            
+        
     [<TestMethod>]
     member this.UpdateUser() =        
         let users = db.GetCollection<User>()
@@ -594,7 +145,7 @@ type SoloDBStandardTesting() =
         users.Replace(updatedUser).WhereId(id).Execute() |> ignore
         let userGetById = users.GetById id
         assertEqual userGetById updatedUser "The updated user is different."
-    
+
     [<TestMethod>]
     member this.DeleteUser() =        
         let users = db.GetCollection<User>()
@@ -603,28 +154,28 @@ type SoloDBStandardTesting() =
         assertEqual (users.DeleteById id) 1 "No row deleted."
         let userGetById = users.TryGetById id
         assertEqual userGetById None "The user should be deleted."
-    
+
     [<TestMethod>]
     member this.CountUsers() =        
         let users = db.GetCollection<User>()
         users.InsertBatch randomUsersToInsert |> ignore
         let count = users.CountAll()
         assertEqual count (int64 randomUsersToInsert.Length) "The count of users is incorrect."
-    
+
     [<TestMethod>]
     member this.LimitUsers() =        
         let users = db.GetCollection<User>()
         users.InsertBatch randomUsersToInsert |> ignore
         let limitedUsers = users.Select().OnAll().Limit(2UL).ToList()
         assertEqual (limitedUsers.Length) 2 "The limit query returned incorrect number of users."
-    
+
     [<TestMethod>]
     member this.OffsetUsers() =        
         let users = db.GetCollection<User>()
         users.InsertBatch randomUsersToInsert |> ignore
         let offsetUsers = users.Select().OnAll().Offset(2UL).ToList()
         assertEqual (offsetUsers.Length) (randomUsersToInsert.Length - 2) "The offset query returned incorrect number of users."
-    
+
     [<TestMethod>]
     member this.OrderByAscUsers() =        
         let users = db.GetCollection<User>()
@@ -632,7 +183,7 @@ type SoloDBStandardTesting() =
         let orderedUsers = users.Select(fun u -> u.Username).OnAll().OrderByAsc(fun u -> u.Username).ToList()
         let sortedUsernames = randomUsersToInsert |> Array.map (fun u -> u.Username) |> Array.sort
         assertEqual (orderedUsers) (Array.toList sortedUsernames) "The ascending order query returned incorrect order of users."
-    
+
     [<TestMethod>]
     member this.OrderByDescUsers() =        
         let users = db.GetCollection<User>()
@@ -640,7 +191,7 @@ type SoloDBStandardTesting() =
         let orderedUsers = users.Select(fun u -> u.Username).OnAll().OrderByDesc(fun u -> u.Username).ToList()
         let sortedUsernames = randomUsersToInsert |> Array.map (fun u -> u.Username) |> Array.sortDescending
         assertEqual (orderedUsers) (Array.toList sortedUsernames) "The descending order query returned incorrect order of users."
-        
+    
     [<TestMethod>]
     member this.CountWhereUsers() =        
         let users = db.GetCollection<User>()
@@ -648,7 +199,7 @@ type SoloDBStandardTesting() =
         let countAuthUsers = users.CountWhere(fun u -> u.Auth)
         let expectedCount = randomUsersToInsert |> Array.filter (fun u -> u.Auth) |> Array.length |> int64
         assertEqual countAuthUsers expectedCount "The count where query returned incorrect count."
-    
+
     [<TestMethod>]
     member this.AnyUsers() =        
         let users = db.GetCollection<User>()
@@ -656,7 +207,7 @@ type SoloDBStandardTesting() =
         let anyBannedUsers = users.Any(fun u -> u.Banned)
         let expectedAny = randomUsersToInsert |> Array.exists (fun u -> u.Banned)
         assertEqual anyBannedUsers expectedAny "The any query returned incorrect result."
-    
+
     [<TestMethod>]
     member this.UpdateWhere() =        
         let users = db.GetCollection<User>()
@@ -664,20 +215,20 @@ type SoloDBStandardTesting() =
         users.Update(fun u -> u.Banned.Set true).Where(fun u -> u.Username = "John").Execute() |> ignore
         let bannedJohn = users.Select().Where(fun u -> u.Username = "John").First()
         assertEqual bannedJohn.Banned true "The update where query did not update the correct user."
-    
+
     [<TestMethod>]
     member this.SelectWithId() =        
         let users = db.GetCollection<User>()
         users.InsertBatch randomUsersToInsert |> ignore
         let usersWithId = users.SelectWithId().OnAll().ToList()
         assertEqual (usersWithId.Length) (randomUsersToInsert.Length) "The select with Id query returned incorrect number of users."
-    
+
     [<TestMethod>]
     member this.GetNonExistentUser() =        
         let users = db.GetCollection<User>()
         let user = users.TryGetById 99999L
         assertEqual user None "The query for a non-existent user returned a result."
-    
+
     [<TestMethod>]
     member this.InsertDuplicateUser() =        
         let users = db.GetCollection<User>()
@@ -693,7 +244,7 @@ type SoloDBStandardTesting() =
         let largeBatch = [| for i in 1 .. 100000 -> { Username = $"User{i}"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.UtcNow.AddDays(-i); LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [| $"tag{i}" |] } } |]
         let ids = users.InsertBatch largeBatch
         assertEqual (ids.Count) (largeBatch.Length) "Not all users were inserted in the large batch."
-    
+
     [<TestMethod>]
     member this.UpdateNonExistentUser() =        
         let users = db.GetCollection<User>()
@@ -701,7 +252,7 @@ type SoloDBStandardTesting() =
             users.Update(fun u -> u.Banned.Set true).Where(fun u -> u.Username = "NonExistentUser").Execute() |> ignore
             assertEqual true false "Updating a non-existent user should have failed."
         with ex -> ()
-    
+
     [<TestMethod>]
     member this.DeleteWhileReading() =        
         let users = db.GetCollection<User>()
@@ -711,7 +262,7 @@ type SoloDBStandardTesting() =
         Task.WaitAll(task1, task2)
         assertEqual (task1.Status) TaskStatus.RanToCompletion "Reading users should complete successfully even while updating."
         assertEqual (task2.Status) TaskStatus.RanToCompletion "Updating users should complete successfully even while reading."
-    
+
     [<TestMethod>]
     member this.ConcurrentInserts() =        
         let users = db.GetCollection<User>()
@@ -722,7 +273,7 @@ type SoloDBStandardTesting() =
         Task.WaitAll(tasks)
         let count = users.CountAll()
         assertEqual (count) 10000L "Concurrent inserts did not result in the correct number of users."
-       
+   
     [<TestMethod>]
     member this.UpdateLargeNumberOfUsers() =        
         let users = db.GetCollection<User>()
@@ -746,7 +297,7 @@ type SoloDBStandardTesting() =
         for id in ids do
             let userGetById = users.GetById id
             assertEqual userGetById.Banned true "The updated user in the large batch is different."
-    
+
     [<TestMethod>]
     member this.MultiThreadedReads() =        
         let users = db.GetCollection<User>()
@@ -760,7 +311,7 @@ type SoloDBStandardTesting() =
         Task.WaitAll(tasks)
         for task in tasks do
             assertEqual (task.Status) TaskStatus.RanToCompletion "Multi-threaded reads did not complete successfully."
-    
+
     [<TestMethod>]
     member this.SelectWithAnyInEachConditions() =        
         let users = db.GetCollection<User>()
@@ -807,7 +358,7 @@ type SoloDBStandardTesting() =
         printfn "%s" plan
 
         if plan.Contains "USING INDEX" |> not then failwithf "Does not use index"
-        
+    
 
         let ex2 = users.DropIndexIfExists(fun item -> item.Username)
         let plan = users.Select(fun u -> u.Username, u.Auth).Where(fun u -> u.Username > "AABB" && u.Auth = true).ExplainQueryPlan()
@@ -815,7 +366,7 @@ type SoloDBStandardTesting() =
 
         if plan.Contains "USING INDEX" then failwithf "Did not drop index."
         ()
-    
+
     [<TestMethod>]
     member this.InitializeCollectionCreatesTable() =
         db.GetCollection<User>() |> ignore
@@ -899,20 +450,13 @@ type SoloDBStandardTesting() =
         assertEqual usersCount (randomUsersToInsert.LongLength * 4L) "Backup incomplete: not everything."
 
     [<TestMethod>]
-    member this.BackupVacuumFromMemoryToDiskFail() =
-        for i in 1..10 do db.GetUntypedCollection("Data").Insert {|abc = "1010"|} |> ignore
-
-        let ex = Assert.ThrowsException<exn>(fun () -> let rez = db.BackupVacuumTo "./temp/temp.db" in ())
-        assertEqual ex.Message "Cannot vaccuum backup from or to memory." "Not correct exception."
-
-    [<TestMethod>]
     member this.BackupVacuumFromAndToDisk() =
         db.Dispose()
         if File.Exists "./temp/temp_from.db" then File.Delete "./temp/temp_from.db"
         db <- SoloDB.Instantiate "./temp/temp_from.db"
 
         for i in 1..10 do db.GetUntypedCollection("Data").Insert {|abc = "1010"|} |> ignore
-            
+        
         try
             printfn "[%s] Start backup." (DateTime.Now.ToShortTimeString())
 
@@ -990,7 +534,7 @@ type SoloDBStandardTesting() =
         let user1 = randomUsersWithIdToInsert.[0].Clone()
 
         let ids = users.InsertBatch (randomUsersWithIdToInsert |> Seq.map _.Clone())
-        
+    
         let selected = users.Select(fun u -> (u.Id, u.Username)).Where(fun u -> u.Id < SqlId(3)).ToList()
 
         assertEqual (selected.Length) (2) "The select with SoloDBEntry.Id does not work."
@@ -1003,7 +547,7 @@ type SoloDBStandardTesting() =
         assertEqual (users.Delete().Where(fun u -> true).Limit(2UL).Execute()) 2 "More rows affected than the limit."
 
         assertEqual (users.CountAll()) (randomUsersToInsert.LongLength - 2L) "The delete with limit does not work."
-        
+    
     [<TestMethod>]
     member this.ListCollectionNames() =
         db.GetCollection<User>() |> ignore
@@ -1063,3 +607,20 @@ type SoloDBStandardTesting() =
 
         let allDatesOlder = dates.Select().Where(fun d -> d <= (DateOnly.FromDateTime DateTime.Now)).ToList()
         assertEqual allDatesOlder.Length 5 "Incorrect count."
+
+
+    [<TestMethod>]
+    member this.BackupVacuum() =
+        for i in 1..10 do 
+            db.GetUntypedCollection("Data").Insert {|abc = "1010"|} |> ignore
+
+        let ex = Assert.ThrowsException<exn>(fun () -> let rez = db.BackupVacuumTo "./temp/temp.db" in ())
+        assertEqual ex.Message "Cannot vaccuum backuo from or to memory."
+
+    [<TestMethod>]
+    member this.BackupVacuum2() =
+        for i in 1..10 do 
+            db.GetUntypedCollection("Data").Insert {|abc = "5435"; asd=4|} |> ignore
+
+        let ex = Assert.ThrowsException<exn>(fun () -> let rez = db.BackupVacuumTo "./temp/temp2.db" in ())
+        assertEqual ex.Message "Cannot vaccuum backup from or to memory." 
