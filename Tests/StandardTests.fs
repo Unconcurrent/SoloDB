@@ -1052,3 +1052,15 @@ type SoloDBStandardTesting() =
         let uniqueUsernames = users.SelectUnique(fun u -> u.Username).OnAll().ToList().Length 
 
         assertEqual uniqueUsernames 4 "SelectUnique Username failed."
+
+    [<TestMethod>]
+    member this.StructCast() =
+        let dates = db.GetCollection<DateOnly>()
+        dates.Insert (DateOnly.FromDateTime DateTime.Now) |> ignore
+        dates.Insert (DateOnly.FromDateTime DateTime.Now) |> ignore
+        dates.Insert (DateOnly.FromDateTime DateTime.Now) |> ignore
+        dates.Insert (DateOnly.FromDateTime DateTime.Now) |> ignore
+        dates.Insert (DateOnly.FromDateTime DateTime.Now) |> ignore
+
+        let allDatesOlder = dates.Select().Where(fun d -> d <= (DateOnly.FromDateTime DateTime.Now)).ToList()
+        assertEqual allDatesOlder.Length 5 "Incorrect count."
