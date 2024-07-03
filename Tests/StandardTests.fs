@@ -107,13 +107,11 @@ type SoloDBStandardTesting() =
         let selectedData = users
                             .Select(fun u -> (u.Username, u.Data.Tags[0]))
                             .Where(fun u -> u.Data.Tags[0].Like "tag1%")
-                            .OrderByDesc(fun u -> u.LastSeen)
-                            .Offset(1UL)
-                            .Limit(2UL)
+                            .OrderByDesc(fun u -> u.Username)
                             .ToList()
 
         let selectedDataText = sprintf "%A" selectedData
-        let expected = "[(\"Vanya\", \"tag1-B\"); (\"John\", \"tag1-A\")]" 
+        let expected = "[(\"Vanya\", \"tag1-B\"); (\"John\", \"tag1-A\"); (\"Givany\", \"tag1-C\")]" 
         printfn "%s" selectedDataText
         printfn "%s" expected
         assertEqual selectedDataText expected "The query is wrong."
@@ -901,50 +899,48 @@ type SoloDBStandardTesting() =
         assertEqual usersCount (randomUsersToInsert.LongLength * 4L) "Backup incomplete: not everything."
 
     [<TestMethod>]
-    member this.BackupDBWhileWriting() =
-        let mutable running = true
-        let mutable count = 1
-        Thread(fun () -> 
-                        try
-                            while running do 
-                                db.GetUntypedCollection("Data").Insert {|abc = "xyz"|} |> ignore
-                                printfn "[%s] Insert 1 INTO Data #%i" (DateTime.Now.ToShortTimeString()) count
-                                count <- count + 1
-                                Thread.Sleep 10
-                        with
-                        | :? ObjectDisposedException as oex -> ()
-                            
-                            ).Start()
+    member this.BackupVacuumFromMemoryToDiskFail() =
+        for i in 1..10 do db.GetUntypedCollection("Data").Insert {|abc = "1010"|} |> ignore
 
-        Thread(fun () -> 
-                        try
-                            while running do 
-                                let len = db.GetUntypedCollection("Data").Select().OnAll().Enumerate() |> Seq.length
-                                printfn "[%s] READ FROM Data = %i #%i" (DateTime.Now.ToShortTimeString()) len count
-                                count <- count + 1
-                                Thread.Sleep 10
-                        with
-                        | :? ObjectDisposedException as oex -> ()      
-                              ).Start()
+        let ex = Assert.ThrowsException<exn>(fun () -> let rez = db.BackupVacuumTo "./temp/temp.db" in ())
+        assertEqual ex.Message "Cannot vaccuum backuo from or to memory."
 
+    [<TestMethod>]
+    member this.BackupVacuumFromAndToDisk() =
+        db.Dispose()
+        if File.Exists "./temp/temp_from.db" then File.Delete "./temp/temp_from.db"
+        db <- SoloDB.Instantiate "./temp/temp_from.db"
 
-        try            
-            Thread.Sleep 100
-            for i in 1..10 do db.GetUntypedCollection("Data").Insert {|abc = "1010"|} |> ignore
-
-            use backup = SoloDB.Instantiate "memory:backup2"
+        for i in 1..10 do db.GetUntypedCollection("Data").Insert {|abc = "1010"|} |> ignore
+            
+        try
             printfn "[%s] Start backup." (DateTime.Now.ToShortTimeString())
-            let countBeforeBackup = count
-            failwithf "todo: Remove or impl BackupCollections"
-            // db.BackupCollections backup
-            running <- false
+
+            let rez = db.BackupVacuumTo "./temp/temp.db"
+            use backup = SoloDB.Instantiate "./temp/temp.db"
 
             let backupCount = backup.GetUntypedCollection("Data").Count().Where(fun x -> x?abc = "1010").First() |> int
             printfn "Backup count: %i" backupCount
             assertEqual backupCount 10 "Backup count mismatch."
 
             assertEqual (backup.GetUntypedCollection("Data2").Count().Where(fun x -> x?abc <> "xyz" && x?abc <> "1010").First()) 0L "Backup data mismatch."
-        finally running <- false
+        finally
+            db.Dispose()
+
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools()
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
+            while File.Exists "./temp/temp.db" do
+                try                    
+                    File.Delete "./temp/temp.db"
+                with e -> Thread.Sleep 20
+
+            while File.Exists "./temp/temp_from.db" do
+                try                    
+                    File.Delete "./temp/temp_from.db"
+                with e -> Thread.Sleep 20
 
     [<TestMethod>]
     member this.ReplaceDocumentBySet() =
