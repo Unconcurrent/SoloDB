@@ -11,9 +11,9 @@
     <Compile Include="JsonSerializator.fs" />
     <Compile Include="JsonFunctions.fs" />
     <Compile Include="QueryTranslator.fs" />
+    <Compile Include="Connections.fs" />
     <Compile Include="FileStorage.fs" />
     <Compile Include="Extensions.fs" />
-    <Compile Include="Connections.fs" />
     <Compile Include="SoloDB.fs" />
   </ItemGroup>
 

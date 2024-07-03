@@ -935,7 +935,8 @@ type SoloDBStandardTesting() =
             use backup = SoloDB.Instantiate "memory:backup2"
             printfn "[%s] Start backup." (DateTime.Now.ToShortTimeString())
             let countBeforeBackup = count
-            db.BackupCollections backup
+            failwithf "todo: Remove or impl BackupCollections"
+            // db.BackupCollections backup
             running <- false
 
             let backupCount = backup.GetUntypedCollection("Data").Count().Where(fun x -> x?abc = "1010").First() |> int
