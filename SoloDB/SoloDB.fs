@@ -13,6 +13,8 @@ open SoloDBTypes
 open Dynamitey
 open System.IO
 open FileStorage
+open Connections
+open System.Transactions
 
 module internal Helper =
     let internal lockTable (connectionStr: string) (name: string) =
@@ -51,12 +53,17 @@ module internal Helper =
     let internal insertInnerRaw (item: DbObjectRow) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
         connection.Execute($"INSERT INTO \"{name}\"(Id, Value) VALUES(@id, jsonb(@jsonText))", {|name = name; id = item.Id; jsonText = item.ValueJSON|}, transaction)
 
+    let internal formatName (name: string) =
+        name.Replace("\"", "").Replace(" ", "") // Anti SQL injection
 
-type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, variables: Dictionary<string, obj>, select: 'Q -> 'R, postModifySQL: string -> string) =
-    let mutable sql = sql
-    let mutable limit: uint64 Option = None
-    let mutable offset = 0UL
-    let orderByList = List<string>()
+    let internal getNameFrom<'T>() =
+        typeof<'T>.Name |> formatName
+
+type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string, variables: Dictionary<string, obj>, select: 'Q -> 'R, postModifySQL: string -> string, limit: uint64 option, ?offset: uint64, ?orderByList) =
+    let sql = sql
+    let limit: uint64 Option = limit
+    let offset = match offset with Some x -> x | None -> 0UL
+    let orderByList: string list = match orderByList with | Some x -> x | None -> []
 
     let getQueryParameters() =
         let variables = seq {for key in variables.Keys do KeyValuePair<string, obj>(key, variables.[key])} |> Seq.toList
@@ -64,7 +71,7 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
 
         let finalSQL = 
             sql 
-            + (if orderByList.Count > 0 then sprintf "ORDER BY %s " (orderByList |> String.concat ",") else " ") 
+            + (if orderByList.Length > 0 then sprintf "ORDER BY %s " (orderByList |> String.concat ",") else " ") 
             + (if limit.IsSome then $"LIMIT {limit.Value} " else if offset > 0UL then "LIMIT -1 " else "")
             + (if offset > 0UL then $"OFFSET {offset} " else "")
 
@@ -75,61 +82,67 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         finalSQL, parameters
 
     member this.Limit(?count: uint64) =
-        limit <- count  
-        this
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, variables, select, postModifySQL, count, offset)
 
     member this.Offset(index: uint64) =
-        offset <- index  
-        this
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, variables, select, postModifySQL, limit, index)
 
     member this.OrderByAsc(expression: Expression<System.Func<'T, obj>>) =
         let orderSelector, _ = QueryTranslator.translate name expression
         let orderSQL = sprintf "(%s) ASC" orderSelector
 
-        orderByList.Add orderSQL
-
-        this
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, variables, select, postModifySQL, limit, offset, orderByList @ [orderSQL])
 
     member this.OrderByDesc(expression: Expression<System.Func<'T, obj>>) =
         let orderSelector, _ = QueryTranslator.translate name expression
         let orderSQL = sprintf "(%s) DESC" orderSelector
 
-        orderByList.Add orderSQL
-
-        this
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, variables, select, postModifySQL, limit, offset, orderByList @ [orderSQL])
 
     member this.Enumerate() =
         let finalSQL, parameters = getQueryParameters()
-        try
-            connection.Query<'Q>(finalSQL, parameters) 
-                |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
-                |> Seq.map select 
-                |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
-        with ex -> 
-            let ex = ex // For breakpoint.
-            reraise()
 
-    member this.ToList() =
-        this.Enumerate() 
-        |> Seq.toList
+        seq {
+            use connection = connection.Get()
+            try            
+                for item in connection.Query<'Q>(finalSQL, parameters) 
+                            |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
+                            |> Seq.map select 
+                            |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
+                            do
+                    yield item
 
-    member this.First() =
+            with ex -> 
+                let ex = ex // For breakpoint.
+                raise ex
+        }
+       
+
+    member this.First() =        
         let finalSQL, parameters = getQueryParameters()
+        use connection = connection.Get()
         connection.QueryFirst<'Q>(finalSQL, parameters) |> select
 
     member this.Execute() =
         let finalSQL, parameters = getQueryParameters()
+        use connection = connection.Get()
         connection.Execute(finalSQL, parameters)
 
     member this.ExplainQueryPlan() =
         // EXPLAIN QUERY PLAN 
         let finalSQL, parameters = getQueryParameters()
         let finalSQL = "EXPLAIN QUERY PLAN " + finalSQL
+
+        use connection = connection.Get()
         connection.Query<obj>(finalSQL, parameters)
         |> Seq.map(fun arr -> seq { for i in (arr :?> IEnumerable) do i } |> Seq.last |> Dyn.get "Value")
         |> String.concat ";\n"
 
-type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, select: 'Q -> 'R, vars: Dictionary<string, obj>, postModifySQL: string -> string) =
+    member this.ToList() =
+        this.Enumerate() 
+        |> Seq.toList
+
+type WhereBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string, select: 'Q -> 'R, vars: Dictionary<string, obj>, postModifySQL: string -> string) =
     member this.Where(expression: Expression<System.Func<'T, bool>>) =
         let whereSQL, newVariables = QueryTranslator.translate name expression
         let sql = sql + sprintf "WHERE %s " whereSQL
@@ -137,7 +150,7 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         for var in vars do
             newVariables.Add(var.Key, var.Value)
 
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select, postModifySQL)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select, postModifySQL, None)
 
     member this.Where(expression: Expression<System.Func<SqlId, 'T, bool>>) =
         let whereSQL, newVariables = QueryTranslator.translate name expression
@@ -146,10 +159,10 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         for var in vars do
             newVariables.Add(var.Key, var.Value)
 
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select, postModifySQL)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select, postModifySQL, None)
 
     member this.WhereId(id: SqlId) =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql + sprintf "WHERE Id = %i " id.Value, vars, select, postModifySQL)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql + sprintf "WHERE Id = %i " id.Value, vars, select, postModifySQL, None)
 
     member this.WhereId(func: Expression<System.Func<SqlId, bool>>) =
         let whereSQL, newVariables = QueryTranslator.translate name func
@@ -158,32 +171,36 @@ type WhereBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
         for var in vars do
             newVariables.Add(var.Key, var.Value)
 
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select, postModifySQL)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select, postModifySQL, None)
 
     member this.OnAll() =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select, postModifySQL)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select, postModifySQL, None)
 
-type Collection<'T>(connection: SqliteConnection, name: string, connectionString: string, inTransaction: bool) =
+type Collection<'T>(connection: Connection, name: string, connectionString: string) =
     member private this.ConnectionString = connectionString
     member this.Name = name
-    member this.InTransaction = inTransaction
+    member this.InTransaction = match connection with | Transactional _ -> true | Pooled _ -> false
     member this.IncludeType = typeof<'T>.IsAbstract
 
     member this.Insert (item: 'T) =
-        use l = Helper.lockTable connectionString name // To not interfere with the batch one.
+        // use l = Helper.lockTable connectionString name // To not interfere with the batch one.
+        use connection = connection.Get()
 
         Helper.insertInner this.IncludeType item connection null name
 
     member this.InsertBatch (items: 'T seq) =
-        use l = Helper.lockTable connectionString name  // If not, there will be multiple transactions started on the same connection when used concurently,
+        //use l = Helper.lockTable connectionString name  // If not, there will be multiple transactions started on the same connection when used concurently,
                                                  // and it is faster than creating new connections.
 
-        if inTransaction then
+        if this.InTransaction then
+            use connection = connection.Get()
             let ids = List<SqlId>()
             for item in items do
                 Helper.insertInner this.IncludeType item connection null name |> ids.Add
             ids
         else
+
+        use connection = connection.Get()
 
         use transaction = connection.BeginTransaction()
         try
@@ -198,6 +215,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
             reraise()
 
     member this.TryGetById(id: SqlId) =
+        use connection = connection.Get()
         match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id.Value|}) with
         | json when Object.ReferenceEquals(json, null) -> None
         | json -> fromDapper<'T> json |> Some
@@ -235,7 +253,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
     member this.CountAllLimit(limit: uint64) =
         // https://stackoverflow.com/questions/1824490/how-do-you-enable-limit-for-delete-in-sqlite
         // By default, SQLite does not support LIMIT in a COUNT statement, but there is this workaround.
-        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" LIMIT @limit)", Dictionary<string, obj>([|KeyValuePair("limit", limit :> obj)|]), fromJsonOrSQL<int64>, id).First()
+        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" LIMIT @limit)", Dictionary<string, obj>([|KeyValuePair("limit", limit :> obj)|]), fromJsonOrSQL<int64>, id, None).First()
 
     member this.CountWhere(func: Expression<System.Func<'T, bool>>) =
         WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), id).Where(func).First()
@@ -244,7 +262,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
         let whereSQL, variables = QueryTranslator.translate name func
         variables["limit"] <- limit :> obj
 
-        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" WHERE {whereSQL} LIMIT @limit)", variables, fromJsonOrSQL<int64>, id).First()
+        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" WHERE {whereSQL} LIMIT @limit)", variables, fromJsonOrSQL<int64>, id, None).First()
 
     member this.Any(func) = this.CountWhere(func, 1UL) > 0L
 
@@ -297,6 +315,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
 
         let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON {name}{whereSQL}"
 
+        use connection = connection.Get()
         connection.Execute(indexSQL)
 
     member this.DropIndexIfExists<'R>(expression: Expression<System.Func<'T, 'R>>) =
@@ -304,6 +323,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
 
         let indexSQL = $"DROP INDEX IF EXISTS {indexName}"
 
+        use connection = connection.Get()
         connection.Execute(indexSQL)
         
     override this.Equals(other) = 
@@ -318,7 +338,59 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
         member this.Equals (other) =
             this.ConnectionString = other.ConnectionString && this.Name = other.Name
 
-and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: SqliteConnection, connectionString: string, transaction: bool) = 
+type TransactionalSoloDB internal (connection: TransactionalConnection) =
+    let connectionString = connection.ConnectionString
+
+    member private this.InitializeCollection<'T> name =
+        use mutex = Helper.lockTable connectionString name // To prevent a race condition where the next if statment is true for 2 threads.
+        if not (Helper.existsCollection name connection) then 
+            Helper.createTableInner name connection null
+
+        Collection<'T>(Transactional connection, name, connectionString)
+
+    member this.GetCollection<'T>() =
+        let name = Helper.getNameFrom<'T>()
+        
+        this.InitializeCollection<'T>(name)
+
+    member this.GetUntypedCollection(name: string) =
+        let name = name |> Helper.formatName
+        
+        this.InitializeCollection<obj>(name)
+
+    member this.ExistCollection name =
+        Helper.existsCollection name connection
+
+    member this.ExistCollection<'T>() =
+        let name = Helper.getNameFrom<'T>()
+        Helper.existsCollection name connection
+
+    member this.DropCollectionIfExists name =
+        use mutex = Helper.lockTable connectionString name
+
+        if Helper.existsCollection name connection then
+            Helper.dropCollection name null connection
+            true
+        else false
+
+    member this.DropCollectionIfExists<'T>() =
+        let name = Helper.getNameFrom<'T>()
+        this.DropCollectionIfExists name
+
+    member this.DropCollection<'T>() =
+        if this.DropCollectionIfExists<'T>() = false then
+            let name = Helper.getNameFrom<'T>()
+            failwithf "Collection %s does not exists." name
+
+    member this.DropCollection name =
+        if this.DropCollectionIfExists name = false then
+            failwithf "Collection %s does not exists." name
+
+    member this.ListCollectionNames() =
+        connection.Query<string>("SELECT Name FROM SoloDBCollections")
+
+
+type SoloDB private (connectionManager: ConnectionManager, connectionString: string) = 
     static do
         // Dapper mapping.
         SqlMapper.AddTypeHandler(typeof<SqlId>, AccountTypeHandler())
@@ -326,70 +398,51 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
         SqlMapper.AddTypeHandler<DateTimeOffset> (DateTimeMapper())
 
     let mutable disposed = false
-    let inTransaction = transaction
-    let connectionPool = ConcurrentDictionary<string, SqliteConnection>()
 
-    let connectionCreator() = connectionCreator disposed
+    member this.FileSystem = FileSystem(connectionManager)
 
-    member this.DBConnection = dbConnection
-    member this.FileSystem = FileSystem(connectionCreator())
-
-    member private this.GetNewConnection() = connectionCreator()
-
-    member private this.FormatName (name: string) =
-        name.Replace("\"", "").Replace(" ", "") // Anti SQL injection
-
-    member private this.GetNameFrom<'T>() =
-        typeof<'T>.Name |> this.FormatName
-
+    member private this.GetNewConnection() = connectionManager.Borrow()
+        
     member private this.InitializeCollection<'T> name =     
         if disposed then raise (ObjectDisposedException(nameof(SoloDB)))
 
-        let connection = 
-            if inTransaction then dbConnection
-            else connectionPool.GetOrAdd(name, (fun name -> connectionCreator()))
+        use connection = connectionManager.Borrow()
 
         use mutex = Helper.lockTable connectionString name // To prevent a race condition where the next if statment is true for 2 threads.
         if not (Helper.existsCollection name connection) then 
-            if inTransaction then
-                Helper.createTableInner name connection null
-            else
-                use transaction = connection.BeginTransaction()
-                try
-                    Helper.createTableInner name connection transaction
-                    transaction.Commit()
-                with ex ->
-                    transaction.Rollback()
-                    reraise ()
+            use transaction = connection.BeginTransaction()
+            try
+                Helper.createTableInner name connection transaction
+                transaction.Commit()
+            with ex ->
+                transaction.Rollback()
+                reraise ()
 
-        Collection<'T>(connection, name, connectionString, inTransaction)
+        Collection<'T>(Pooled connectionManager, name, connectionString)
 
     member this.GetCollection<'T>() =
-        let name = this.GetNameFrom<'T>()
+        let name = Helper.getNameFrom<'T>()
         
         this.InitializeCollection<'T>(name)
 
     member this.GetUntypedCollection(name: string) =
-        let name = name  |> this.FormatName
+        let name = name |> Helper.formatName
         
         this.InitializeCollection<obj>(name)
 
     member this.ExistCollection name =
+        use dbConnection = connectionManager.Borrow()
         Helper.existsCollection name dbConnection
 
     member this.ExistCollection<'T>() =
-        let name = this.GetNameFrom<'T>()
+        let name = Helper.getNameFrom<'T>()
+        use dbConnection = connectionManager.Borrow()
         Helper.existsCollection name dbConnection
 
     member this.DropCollectionIfExists name =
         use mutex = Helper.lockTable connectionString name
 
-        if inTransaction then
-            if Helper.existsCollection name dbConnection then 
-                Helper.dropCollection name null dbConnection
-                true
-            else false
-        else
+        use dbConnection = connectionManager.Borrow()
 
         if Helper.existsCollection name dbConnection then
             use transaction = dbConnection.BeginTransaction()
@@ -403,12 +456,12 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
         else false
 
     member this.DropCollectionIfExists<'T>() =
-        let name = this.GetNameFrom<'T>()
+        let name = Helper.getNameFrom<'T>()
         this.DropCollectionIfExists name
 
     member this.DropCollection<'T>() =
         if this.DropCollectionIfExists<'T>() = false then
-            let name = this.GetNameFrom<'T>()
+            let name = Helper.getNameFrom<'T>()
             failwithf "Collection %s does not exists." name
 
     member this.DropCollection name =
@@ -416,72 +469,35 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
             failwithf "Collection %s does not exists." name
 
     member this.ListCollectionNames() =
+        use dbConnection = connectionManager.Borrow()
         dbConnection.Query<string>("SELECT Name FROM SoloDBCollections")
 
     member this.BackupTo(otherDb: SoloDB) =
-        if transaction then failwithf "Cannot backup in a transaction."
-
-        use connection = connectionCreator()
+        use dbConnection = connectionManager.Borrow()
         use otherConnection = otherDb.GetNewConnection()
-        connection.BackupDatabase otherConnection
+        dbConnection.BackupDatabase otherConnection
 
-    member this.BackupCollections(otherDb: SoloDB) =
-        if transaction then failwithf "Cannot backup in a transaction."
-
-        printfn "A warning from BackupCollections: This will backup only the collections managed by SoloDB, without any custom added tables."
-
-        use connection = connectionCreator()
-        use otherConnection = otherDb.GetNewConnection()
-
-        connection.Execute("BEGIN IMMEDIATE") |> ignore // Get a write lock
-                
-        let names = connection.Query<string>("SELECT Name FROM SoloDBCollections") |> Seq.toList
-        printfn "Tables count: %i" names.Length
-
-        use otherTransaction = otherConnection.BeginTransaction()
+    member this.Transactionally<'R>(func: Func<TransactionalSoloDB, 'R>) : 'R =        
+        use connectionForTransaction = connectionManager.CreateForTransaction()
         try
-            let otherNames = otherConnection.Query<string>("SELECT Name FROM SoloDBCollections")
-            for otherName in otherNames do Helper.dropCollection otherName otherTransaction otherConnection 
+            connectionForTransaction.Open()
+            connectionForTransaction.Execute("BEGIN;") |> ignore
 
-            for name in names do
-                Helper.createTableInner name otherConnection otherTransaction 
-                let rows = connection.Query<DbObjectRow>(sprintf "SELECT Id, json(Value) as ValueJSON FROM \"%s\"" name, buffered = false, commandTimeout = Nullable<int>())
-                for row in rows do
-                    let rowsAffected = Helper.insertInnerRaw row otherConnection otherTransaction name
-                    if rowsAffected <> 1 then failwithf "No rows affected in insert."
+            let transactionalDb = new TransactionalSoloDB(connectionForTransaction)
+            
 
-
-            otherTransaction.Commit()
-        with ex -> 
-            otherTransaction.Rollback() 
-            reraise()
-
-
-        connection.Execute("ROLLBACK") |> ignore
-
-    member this.Transactionally<'R>(func: Func<SoloDB, 'R>) =
-        use newConnection = connectionCreator()
-
-        let innerConnectionCreator disposed = failwithf "This should not be called."
-
-        newConnection.Execute("BEGIN;") |> ignore
-
-        use transactionalDb = new SoloDB(innerConnectionCreator, newConnection, connectionString, true)
-
-        try
-            let ret = func.Invoke transactionalDb
-            newConnection.Execute "COMMIT;" |> ignore
-            ret
-        with ex -> 
-            newConnection.Execute "ROLLBACK;" |> ignore
-            reraise()
+            try
+                let ret = func.Invoke transactionalDb
+                connectionForTransaction.Execute "COMMIT;" |> ignore
+                ret
+            with ex -> 
+                connectionForTransaction.Execute "ROLLBACK;" |> ignore
+                reraise()
+        finally connectionForTransaction.DisposeReal(true)
 
     member this.Dispose() =
         disposed <- true
-        for connections in connectionPool.Values do
-            connections.Dispose()
-        connectionPool.Clear()
-        dbConnection.Dispose()
+        (connectionManager :> IDisposable).Dispose()
 
     interface IDisposable with
         member this.Dispose() = this.Dispose()
@@ -496,18 +512,14 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
                 let source = Path.GetFullPath source
                 $"Data Source={source}"
 
-        let connectionCreator disposed =
-            if disposed then failwithf "SoloDB was disposed."
-
-            let connection = new SqliteConnection(connectionString)
-            connection.Open()
-
+        let setup (connection: SqliteConnection) =
             connection.CreateFunction("UNIXTIMESTAMP", Func<int64>(fun () -> DateTimeOffset.Now.ToUnixTimeMilliseconds()), false)
             connection.CreateFunction("SHA_HASH", Func<byte array, obj>(fun o -> Utils.shaHash o), true)
 
-            connection
-    
-        let dbConnection = connectionCreator false
+        let manager = new ConnectionManager(connectionString, setup)
+
+        use dbConnection = manager.Borrow()
+
         dbConnection.Execute("
                             PRAGMA journal_mode=wal;
                             CREATE TABLE IF NOT EXISTS SoloDBCollections (Name TEXT NOT NULL) STRICT;
@@ -586,7 +598,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
             t.Rollback()
             reraise()
         
-        new SoloDB(connectionCreator, dbConnection, connectionString, false)
+        new SoloDB(manager, connectionString)
 
     // The pipe operators.
     // If you want to use Expression<System.Func<'T, bool>> fluently, 

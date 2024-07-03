@@ -8,6 +8,7 @@ open SoloDBTypes
 open System.Collections.Generic
 open SoloDBTypes
 open System.Security.Cryptography
+open Connections
 
 let chunkSize = 
     1L // MB
@@ -491,67 +492,82 @@ let setDirMetadata (db: SqliteConnection) (dir: DirectoryHeader) (key: string) (
 let deleteDirMetadata (db: SqliteConnection) (dir: DirectoryHeader) (key: string) =
     db.Execute("DELETE FROM DirectoryMetadata WHERE DirectoryId = @DirectoryId AND Key = @Key", {|DirectoryId = dir.Id; Key = key|}) |> ignore
    
-type FileSystem(db: SqliteConnection) =
+type FileSystem(manager: ConnectionManager) =
     member this.Upload(path, stream: Stream) =
+        use db = manager.Borrow()
         use file = openOrCreateFile db path
         stream.CopyTo file
         file.SetLength file.Position
 
     member this.UploadAsync(path, stream: Stream) = task {
+        use db = manager.Borrow()
         use file = openOrCreateFile db path
         do! stream.CopyToAsync file
         file.SetLength file.Position
     }
 
     member this.Download(path, stream: Stream) =
+        use db = manager.Borrow()
         let fileHeader = match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
         use fileStream = openFile db fileHeader
         fileStream.CopyTo stream
 
     member this.DownloadAsync(path, stream: Stream) = task {
+        use db = manager.Borrow()
         let fileHeader = match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
         use fileStream = openFile db fileHeader
         do! fileStream.CopyToAsync stream
     }
 
     member this.GetAt path =
+        use db = manager.Borrow()
         match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
 
     member this.TryGetAt path =
+        use db = manager.Borrow()
         tryGetFileAt db path
 
     member this.GetOrCreateAt path =
+        use db = manager.Borrow()
         getOrCreateFileAt db path
 
     member this.GetDirAt path =
+        use db = manager.Borrow()
         match tryGetDir db path with | Some f -> f | None -> raise (DirectoryNotFoundException("Directory not found at: " + path))
 
     member this.TryDirGetAt path =
+        use db = manager.Borrow()
         tryGetDir db path
 
     member this.GetOrCreateDirAt path =
+        use db = manager.Borrow()
         getOrCreateDirectoryAt db path
 
     member this.Open file =
+        use db = manager.Borrow()
         openFile db file
 
     member this.OpenAt path =
+        use db = manager.Borrow()
         let file = this.GetAt path
         openFile db file
 
     member this.TryOpenAt path =
+        use db = manager.Borrow()
         match this.TryGetAt path with
         | None -> None
         | Some file ->
         openFile db file |> Some
 
     member this.OpenOrCreateAt path =
+        use db = manager.Borrow()        
         openOrCreateFile db path
 
     member this.WriteAt(path, offset, data, ?createIfInexistent: bool) =
         let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
         let file = if createIfInexistent then this.GetOrCreateAt path else this.GetAt path
 
+        use db = manager.Borrow()
         use fileStream = openFile db file
         fileStream.Position <- offset
         fileStream.Write(data, 0, data.Length)
@@ -561,41 +577,51 @@ type FileSystem(db: SqliteConnection) =
         let file = this.GetAt path
         let array = Array.zeroCreate<byte> len
 
+        use db = manager.Borrow()
         use fileStream = openFile db file
         fileStream.Position <- offset
         fileStream.ReadExactly(array, 0, len)
         array
 
     member this.SetMetadata(file, key, value) =
+        use db = manager.Borrow()
         setFileMetadata db file key value
 
     member this.SetMetadata(path, key, value) =
         let file = this.GetAt path
+        use db = manager.Borrow()
         setFileMetadata db file key value
 
     member this.DeleteMetadata(file, key) =
+        use db = manager.Borrow()
         deleteFileMetadata db file key
 
     member this.DeleteMetadata(path, key) =
         let file = this.GetAt path
+        use db = manager.Borrow()
         deleteFileMetadata db file key
 
 
     member this.SetDirectoryMetadata(dir, key, value) =
+        use db = manager.Borrow()
         setDirMetadata db dir key value
 
     member this.SetDirectoryMetadata(path, key, value) =
         let dir = this.GetDirAt path
+        use db = manager.Borrow()
         setDirMetadata db dir key value
 
     member this.DeleteDirectoryMetadata(dir, key) =
+        use db = manager.Borrow()
         deleteDirMetadata db dir key
 
     member this.DeleteDirectoryMetadata(path, key) =
         let dir = this.GetDirAt path
+        use db = manager.Borrow()
         deleteDirMetadata db dir key
 
     member this.TryGetFileByHash(hash) =
+        use db = manager.Borrow()
         tryGetFileByHash db hash
 
     member this.GetFileByHash(hash) =
@@ -604,9 +630,11 @@ type FileSystem(db: SqliteConnection) =
         | Some f -> f
 
     member this.Delete(file) =
+        use db = manager.Borrow()
         deleteFile db file null
 
     member this.Delete(dir) =
+        use db = manager.Borrow()
         deleteDirectory db dir null
 
     member this.DeleteFileAt(path) =
@@ -617,4 +645,5 @@ type FileSystem(db: SqliteConnection) =
         true
 
     member this.DeleteDirAt(path) =
+        use db = manager.Borrow()
         deleteDirectoryAt db path
