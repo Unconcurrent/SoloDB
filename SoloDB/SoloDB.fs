@@ -183,15 +183,11 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.IncludeType = typeof<'T>.IsAbstract
 
     member this.Insert (item: 'T) =
-        // use l = Helper.lockTable connectionString name // To not interfere with the batch one.
         use connection = connection.Get()
 
         Helper.insertInner this.IncludeType item connection null name
 
     member this.InsertBatch (items: 'T seq) =
-        //use l = Helper.lockTable connectionString name  // If not, there will be multiple transactions started on the same connection when used concurently,
-                                                 // and it is faster than creating new connections.
-
         if this.InTransaction then
             use connection = connection.Get()
             let ids = List<SqlId>()
@@ -389,8 +385,11 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
     member this.ListCollectionNames() =
         connection.Query<string>("SELECT Name FROM SoloDBCollections")
 
+type internal SoloDBLocation =
+| File of string
+| Memory of string
 
-type SoloDB private (connectionManager: ConnectionManager, connectionString: string) = 
+type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation) = 
     static do
         // Dapper mapping.
         SqlMapper.AddTypeHandler(typeof<SqlId>, AccountTypeHandler())
@@ -399,6 +398,8 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
     let mutable disposed = false
 
+    member this.ConnectionString = connectionString
+    member internal this.DataLocation = location
     member this.FileSystem = FileSystem(connectionManager)
 
     member private this.GetNewConnection() = connectionManager.Borrow()
@@ -477,6 +478,17 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         use otherConnection = otherDb.GetNewConnection()
         dbConnection.BackupDatabase otherConnection
 
+    member this.BackupVacuumTo(location: string) =
+        match this.DataLocation with
+        | Memory _ -> failwithf "Cannot vaccuum backuo from or to memory."
+        | other ->
+
+        let location = Path.GetFullPath location
+        if File.Exists location then File.Delete location
+
+        use dbConnection = connectionManager.Borrow()
+        dbConnection.Execute($"VACUUM INTO '{location}'")
+
     member this.Transactionally<'R>(func: Func<TransactionalSoloDB, 'R>) : 'R =        
         use connectionForTransaction = connectionManager.CreateForTransaction()
         try
@@ -502,15 +514,15 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     interface IDisposable with
         member this.Dispose() = this.Dispose()
 
-    static member Instantiate (source: string) =
-        let connectionString =
+    static member Instantiate (source: string) =        
+        let connectionString, location =
             if source.StartsWith("memory:", StringComparison.InvariantCultureIgnoreCase) then
                 let memoryName = source.Substring "memory:".Length
                 let memoryName = memoryName.Trim()
-                sprintf "Data Source=%s;Mode=Memory;Cache=Shared" memoryName
+                sprintf "Data Source=%s;Mode=Memory;Cache=Shared" memoryName, Memory memoryName
             else 
                 let source = Path.GetFullPath source
-                $"Data Source={source}"
+                $"Data Source={source}", File source
 
         let setup (connection: SqliteConnection) =
             connection.CreateFunction("UNIXTIMESTAMP", Func<int64>(fun () -> DateTimeOffset.Now.ToUnixTimeMilliseconds()), false)
@@ -598,7 +610,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             t.Rollback()
             reraise()
         
-        new SoloDB(manager, connectionString)
+        new SoloDB(manager, connectionString, location)
 
     // The pipe operators.
     // If you want to use Expression<System.Func<'T, bool>> fluently, 
