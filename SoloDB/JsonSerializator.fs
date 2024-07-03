@@ -7,6 +7,8 @@ open System.Reflection
 open Dynamitey
 open System.Dynamic
 open Utils
+open System.Text
+open System.Globalization
 
 let inline isNullableType (typ: Type) =
     typ.IsGenericType && typ.GetGenericTypeDefinition() = typedefof<Nullable<_>>
@@ -111,7 +113,7 @@ type JsonValue =
             | :? DateTimeOffset as date -> date.ToUnixTimeMilliseconds() |> decimal |> Number
             | :? DateTime as date -> date.ToBinary() |> decimal |> Number
             | :? DateOnly as date -> date.DayNumber |> decimal |> Number
-            | :? TimeOnly as time -> time.ToTimeSpan().TotalMilliseconds |> int64 (* Convert to int64 because SQLite only stores 32 bit precision floats*) |> decimal |> Number
+            | :? TimeOnly as time -> time.ToTimeSpan().TotalMilliseconds |> int64 (* Convert to int64 because SQLite only stores 32 bit precision floats in JSON. *) |> decimal |> Number
             | :? TimeSpan as span -> span .TotalMilliseconds |> int64 |> decimal |> Number
 
             | :? string as s -> String s        
@@ -365,16 +367,41 @@ type JsonValue =
 
 
     member this.ToJsonString() =
-        let rec jsonize value =
+        let rec jsonize value (sb: StringBuilder) =
             match value with
-            | Null -> "null"
-            | Boolean b -> if b then "true" else "false"
-            | String s -> sprintf "\"%s\"" s
-            | Number n -> if Decimal.IsInteger n then sprintf "%s" (Int128.CreateSaturating(n).ToString()) else sprintf "%f" n
-            | List arr -> arr |> Seq.map jsonize |> String.concat ", " |> sprintf "[%s]"
-            | Object obj -> obj |> Seq.map (fun kvp -> (kvp.Key, kvp.Value)) |> Seq.map (fun (k, v) -> sprintf "\"%s\": %s" k (jsonize v)) |> String.concat ", " |> sprintf "{%s}"
+            | Null -> sb.Append "null" |> ignore
+            | Boolean b -> sb.Append (if b then "true" else "false") |> ignore
+            | String s -> 
+                sb.Append '"' |> ignore
+                sb.Append s |> ignore
+                sb.Append '"' |> ignore
+            | Number n -> 
+                if Decimal.IsInteger n then 
+                    sb.Append (Int128.CreateSaturating(n).ToString(CultureInfo.InvariantCulture)) |> ignore
+                else 
+                    sb.Append (sprintf "%f" n) |> ignore
+            | List arr ->
+                sb.Append '[' |> ignore
+                let items = arr.Count
+                for i, item in arr |> Seq.indexed do
+                    jsonize item sb
+                    if i < items - 1 then sb.Append ", " |> ignore
+                sb.Append ']' |> ignore
 
-        jsonize this
+            | Object obj ->
+                sb.Append '{' |> ignore
+                let items = obj.Count
+                for i, kvp in obj |> Seq.indexed do
+                    sb.Append '"' |> ignore
+                    sb.Append kvp.Key |> ignore
+                    sb.Append '"' |> ignore
+                    sb.Append ": " |> ignore
+                    jsonize kvp.Value sb
+                    if i < items - 1 then sb.Append ", " |> ignore
+                sb.Append '}' |> ignore
+        let sb = new StringBuilder()
+        jsonize this sb
+        sb.ToString()
 
 
     member this.Eq (other: obj) =
@@ -429,3 +456,5 @@ type JsonValue =
 
         let tokens = tokenize jsonString
         parse tokens
+
+    override this.ToString() = this.ToJsonString()

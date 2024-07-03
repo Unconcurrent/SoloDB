@@ -7,7 +7,7 @@ open System.Diagnostics
 
 type TestResult =
     | Passed of string * int64
-    | Failed of string * string
+    | Failed of string * exn
 
 type TestRunner() =
     static member private PrintWithColor(colorCode: string, text: string) =
@@ -39,7 +39,7 @@ type TestRunner() =
                         TestRunner.PrintWithColor("32", sprintf "Test %s passed in %d ms." method.Name stopwatch.ElapsedMilliseconds)
                     with
                     | :? Exception as ex ->
-                        results.Add(Failed(method.Name, ex.Message))
+                        results.Add(Failed(method.Name, ex))
                         TestRunner.PrintWithColor("31", sprintf "Test %s failed: %s" method.Name ex.Message)
 
                     TestRunner.PrintWithColor("36", sprintf "Cleaning up tests in %s..." testClass.Name)
@@ -66,7 +66,7 @@ type TestRunner() =
         // Summary of results
         allResults |> Seq.iter (function
             | Passed(name, time) -> ()
-            | Failed(name, message) -> TestRunner.PrintWithColor("31", sprintf "%s failed: %s" name message))
+            | Failed(name, ex) -> TestRunner.PrintWithColor("31", sprintf "%s failed: %s" name (ex.ToString())))
 
         let passed = allResults |> Seq.filter (function Passed _ -> true | _ -> false) |> Seq.length
         let failed = allResults |> Seq.filter (function Failed _ -> true | _ -> false) |> Seq.length
