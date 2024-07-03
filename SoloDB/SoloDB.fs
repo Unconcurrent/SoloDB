@@ -41,10 +41,10 @@ let private insertInner (typed: bool) (item: 'T) (connection: SqliteConnection) 
     if existsId && SqlId(0) <> item?Id then 
         failwithf "Cannot insert a item with a non zero Id, maybe you meant Update?"
 
-    let id = connection.QueryFirst<int64>($"INSERT INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|}, transaction)
+    let id = connection.QueryFirst<SqlId>($"INSERT INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|}, transaction)
 
     if existsId then 
-        item?Id <- SqlId(id)
+        item?Id <- id
 
     id
 
@@ -264,7 +264,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
         // By default, SQLite does not support LIMIT in a DELETE statement, but there is this workaround.
         WhereBuilder<'T, string, int64>(connection, name, $"DELETE FROM \"{name}\" WHERE Id IN (SELECT Id FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), fun sql -> sql + ")")
 
-    member this.DeleteById(id: int64) : int =
+    member this.DeleteById(id: SqlId) : int =
         this.Delete().WhereId(id).Execute()
 
     member this.EnsureIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
