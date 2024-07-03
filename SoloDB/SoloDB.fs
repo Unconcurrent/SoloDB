@@ -59,21 +59,24 @@ module internal Helper =
     let internal getNameFrom<'T>() =
         typeof<'T>.Name |> formatName
 
-type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string, variables: Dictionary<string, obj>, select: 'Q -> 'R, postModifySQL: string -> string, limit: uint64 option, ?offset: uint64, ?orderByList) =
-    let sql = sql
-    let limit: uint64 Option = limit
-    let offset = match offset with Some x -> x | None -> 0UL
-    let orderByList: string list = match orderByList with | Some x -> x | None -> []
+[<Struct>]
+type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string, variablesP: Dictionary<string, obj>, select: 'Q -> 'R, postModifySQL: string -> string, limitP: uint64 option, ?offsetP: uint64, ?orderByListP: string list) =
+    member private this.SQLText = sqlP
+    member private this.SQLLimit: uint64 Option = limitP
+    member private this.SQLOffset = match offsetP with Some x -> x | None -> 0UL
+    member private this.OrderByList: string list = match orderByListP with | Some x -> x | None -> []
+    member private this.Variables = variablesP
 
-    let getQueryParameters() =
+    member private this.getQueryParameters() =
+        let variables = this.Variables
         let variables = seq {for key in variables.Keys do KeyValuePair<string, obj>(key, variables.[key])} |> Seq.toList
         let parameters = new DynamicParameters(variables)
 
         let finalSQL = 
-            sql 
-            + (if orderByList.Length > 0 then sprintf "ORDER BY %s " (orderByList |> String.concat ",") else " ") 
-            + (if limit.IsSome then $"LIMIT {limit.Value} " else if offset > 0UL then "LIMIT -1 " else "")
-            + (if offset > 0UL then $"OFFSET {offset} " else "")
+            this.SQLText 
+            + (if this.OrderByList.Length > 0 then sprintf "ORDER BY %s " (this.OrderByList |> String.concat ",") else " ") 
+            + (if this.SQLLimit.IsSome then $"LIMIT {this.SQLLimit.Value} " else if this.SQLOffset > 0UL then "LIMIT -1 " else "")
+            + (if this.SQLOffset > 0UL then $"OFFSET {this.SQLOffset} " else "")
 
         let finalSQL = postModifySQL finalSQL
 
@@ -82,25 +85,27 @@ type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string,
         finalSQL, parameters
 
     member this.Limit(?count: uint64) =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, variables, select, postModifySQL, count, offset)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, this.SQLText, this.Variables, select, postModifySQL, count, this.SQLOffset)
 
     member this.Offset(index: uint64) =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, variables, select, postModifySQL, limit, index)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, this.SQLText, this.Variables, select, postModifySQL, this.SQLLimit, index)
 
     member this.OrderByAsc(expression: Expression<System.Func<'T, obj>>) =
         let orderSelector, _ = QueryTranslator.translate name expression
         let orderSQL = sprintf "(%s) ASC" orderSelector
 
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, variables, select, postModifySQL, limit, offset, orderByList @ [orderSQL])
+        FinalBuilder<'T, 'Q, 'R>(connection, name, this.SQLText, this.Variables, select, postModifySQL, this.SQLLimit, this.SQLOffset, this.OrderByList @ [orderSQL])
 
     member this.OrderByDesc(expression: Expression<System.Func<'T, obj>>) =
         let orderSelector, _ = QueryTranslator.translate name expression
         let orderSQL = sprintf "(%s) DESC" orderSelector
 
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, variables, select, postModifySQL, limit, offset, orderByList @ [orderSQL])
+        FinalBuilder<'T, 'Q, 'R>(connection, name, this.SQLText, this.Variables, select, postModifySQL, this.SQLLimit, this.SQLOffset, this.OrderByList @ [orderSQL])
 
     member this.Enumerate() =
-        let finalSQL, parameters = getQueryParameters()
+        let finalSQL, parameters = this.getQueryParameters()
+        let connection = connection // Cannot access 'this.' in the following builder, because it is a struct.
+        let select = select
 
         seq {
             use connection = connection.Get()
@@ -119,18 +124,18 @@ type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string,
        
 
     member this.First() =        
-        let finalSQL, parameters = getQueryParameters()
+        let finalSQL, parameters = this.getQueryParameters()
         use connection = connection.Get()
         connection.QueryFirst<'Q>(finalSQL, parameters) |> select
 
     member this.Execute() =
-        let finalSQL, parameters = getQueryParameters()
+        let finalSQL, parameters = this.getQueryParameters()
         use connection = connection.Get()
         connection.Execute(finalSQL, parameters)
 
     member this.ExplainQueryPlan() =
         // EXPLAIN QUERY PLAN 
-        let finalSQL, parameters = getQueryParameters()
+        let finalSQL, parameters = this.getQueryParameters()
         let finalSQL = "EXPLAIN QUERY PLAN " + finalSQL
 
         use connection = connection.Get()
@@ -142,6 +147,7 @@ type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string,
         this.Enumerate() 
         |> Seq.toList
 
+[<Struct>]
 type WhereBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string, select: 'Q -> 'R, vars: Dictionary<string, obj>, postModifySQL: string -> string) =
     member this.Where(expression: Expression<System.Func<'T, bool>>) =
         let whereSQL, newVariables = QueryTranslator.translate name expression
@@ -385,9 +391,10 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
     member this.ListCollectionNames() =
         connection.Query<string>("SELECT Name FROM SoloDBCollections")
 
+[<Struct>]
 type internal SoloDBLocation =
-| File of string
-| Memory of string
+| File of filePath: string
+| Memory of name: string
 
 type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation) = 
     static do
