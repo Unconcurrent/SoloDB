@@ -19,6 +19,7 @@ type private QueryBuilder =
         RollBack: uint -> unit
         UpdateMode: bool
         TableNameDot: string
+        JsonExtractSelfValue: bool
     }
     override this.ToString() = this.StringBuilder.ToString()
 
@@ -51,6 +52,7 @@ type private QueryBuilder =
             RollBack = fun N -> sb.Remove(sb.Length - (int)N, (int)N) |> ignore
             UpdateMode = updateMode
             TableNameDot = tableName + "."
+            JsonExtractSelfValue = true
         }
 
 let private evaluateExpr<'O> e =
@@ -235,7 +237,7 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
         qb.AppendRaw $"EXISTS (SELECT 1 FROM json_each("
         visit array qb |> ignore
         qb.AppendRaw ") WHERE "
-        let innerQb = {qb with TableNameDot = "json_each."}
+        let innerQb = {qb with TableNameDot = "json_each."; JsonExtractSelfValue = false}
         visit expr.Expression innerQb |> ignore
         qb.AppendRaw ")"
         m
@@ -295,7 +297,10 @@ and private visitParameter (m: ParameterExpression) (qb: QueryBuilder) =
     else if qb.UpdateMode then
         qb.AppendRaw $"'$'"
     else
-        qb.AppendRaw $"{qb.TableNameDot}Value"
+        if qb.JsonExtractSelfValue then
+            qb.AppendRaw $"jsonb_extract({qb.TableNameDot}Value, '$')"
+        else
+            qb.AppendRaw $"{qb.TableNameDot}Value"
     m
 
 and private visitNot (m: UnaryExpression) (qb: QueryBuilder) =

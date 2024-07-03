@@ -200,7 +200,11 @@ type JsonValue =
 
     static member Deserialize (targetType: Type) (json: JsonValue) : obj =
         let createInstance (targetType: Type) =
-            Activator.CreateInstance(targetType, BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic, null, [||], null)
+            let constr = targetType.GetConstructor(BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic, [||])
+            if constr <> null then
+                constr.Invoke([||])
+            else
+                System.Runtime.Serialization.FormatterServices.GetSafeUninitializedObject(targetType)            
 
         let isCollectionType typ =
             typeof<IList<_>>.IsAssignableFrom(typ) || typ.IsArray

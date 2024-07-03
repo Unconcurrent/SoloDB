@@ -22,8 +22,6 @@ let toSQLJson<'T> (item: obj) =
     match item with
     | :? string as s -> s :> obj, false
 
-    | :? DateTimeOffset as d -> d.ToUnixTimeMilliseconds() :> obj, false
-    | :? DateTime as d -> d.ToFileTime() :> obj, false
     | :? Type as t -> t.FullName :> obj, false
 
     | :? int8 as x -> x :> obj, false
@@ -34,7 +32,16 @@ let toSQLJson<'T> (item: obj) =
     | :? float32 as x -> x :> obj, false
     | :? float as x -> x :> obj, false
 
-    | other -> toJson other, true
+    | other ->
+
+    let element = JsonValue.Serialize item
+    match element with
+    | Boolean b -> b :> obj, false
+    | Null -> null, false
+    | Number _
+    | String _
+        -> element.ToObject(), false
+    | other -> other.ToJsonString(), true    
 
 let private fromJson<'T> (text: string) =
     let json = JsonValue.Parse text
