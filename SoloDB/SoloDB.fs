@@ -267,25 +267,35 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
     member this.DeleteById(id: SqlId) : int =
         this.Delete().WhereId(id).Execute()
 
-    member this.EnsureIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
-        let whereSQL, newVariables = QueryTranslator.translate name expression
+    member private this.GetIndexWhereAndName(expression: Expression<System.Func<'T, 'R>>)  =
+        let whereSQL, variables = QueryTranslator.translate name expression
         let whereSQL = whereSQL.Replace($"{name}.Value", "Value") // {name}.Value is not allowed in an index.
+        if variables.Count > 0 then failwithf "Cannot have variables in index."
+        let expressionBody = expression.Body
 
-        if newVariables.Count > 0 then failwithf "Cannot have variables in index."
+        if QueryTranslator.isAnyConstant expressionBody then failwithf "Cannot index an outside expression."
+
+        let whereSQL =
+            match expressionBody with
+            | :? NewExpression as ne when ne.Type.IsAssignableTo(typeof<System.Runtime.CompilerServices.ITuple>)
+                -> failwithf "Cannot index an tuple expression, please use multiple indexes." 
+            | :? MemberExpression as me ->                
+                $"({whereSQL})"
+            | other -> failwithf "Cannot index an expression with type: %A" (other.GetType())
+
         let expressionStr = whereSQL.ToCharArray() |> Seq.filter(fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""
         let indexName = $"{name}_index_{expressionStr}"
+        indexName, whereSQL
 
-        let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON {name}({whereSQL})"
+    member this.EnsureIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
+        let indexName, whereSQL = this.GetIndexWhereAndName expression
+
+        let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON {name}{whereSQL}"
 
         connection.Execute(indexSQL)
 
     member this.DropIndexIfExists<'R>(expression: Expression<System.Func<'T, 'R>>) =
-        let whereSQL, newVariables = QueryTranslator.translate name expression
-        let whereSQL = whereSQL.Replace($"{name}.Value", "Value") // {name}.Value is not allowed in an index.
-
-        if newVariables.Count > 0 then failwithf "Cannot have variables in index."
-        let expressionStr = whereSQL.ToCharArray() |> Seq.filter(fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""
-        let indexName = $"{name}_index_{expressionStr}"
+        let indexName, whereSQL = this.GetIndexWhereAndName expression
 
         let indexSQL = $"DROP INDEX IF EXISTS {indexName}"
 

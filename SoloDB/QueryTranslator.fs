@@ -69,22 +69,44 @@ let rec private tryRootConstant (expr: Expression) : ConstantExpression option =
     | :? MemberExpression as inner -> tryRootConstant inner.Expression
     | _ -> None
 
-let rec isFullyImplemented (expr: Expression) : bool =
+let rec isFullyConstant (expr: Expression) : bool =
     match expr with
     | :? ParameterExpression -> false
     | :? BinaryExpression as binExpr ->
-        isFullyImplemented binExpr.Left && isFullyImplemented binExpr.Right
+        isFullyConstant binExpr.Left && isFullyConstant binExpr.Right
     | :? UnaryExpression as unaryExpr ->
-        isFullyImplemented unaryExpr.Operand
+        isFullyConstant unaryExpr.Operand
     | :? MethodCallExpression as methodCallExpr ->
-        methodCallExpr.Arguments |> Seq.forall isFullyImplemented && isFullyImplemented methodCallExpr.Object
+        methodCallExpr.Arguments |> Seq.forall isFullyConstant && isFullyConstant methodCallExpr.Object
     | :? MemberExpression as memberExpr ->
-        isFullyImplemented memberExpr.Expression
+        isFullyConstant memberExpr.Expression
     | :? ConstantExpression -> true
     | :? InvocationExpression as invocationExpr ->
-        invocationExpr.Arguments |> Seq.forall isFullyImplemented && isFullyImplemented invocationExpr.Expression
+        invocationExpr.Arguments |> Seq.forall isFullyConstant && isFullyConstant invocationExpr.Expression
     | :? LambdaExpression as lambdaExpr ->
-        lambdaExpr.Body |> isFullyImplemented
+        lambdaExpr.Body |> isFullyConstant
+    | :? NewExpression as ne when ne.Type.IsAssignableTo(typeof<System.Runtime.CompilerServices.ITuple>) ->
+        ne.Arguments |> Seq.forall isFullyConstant
+    | _ -> true
+
+let rec isAnyConstant (expr: Expression) : bool =
+    match expr with
+    | :? ParameterExpression -> false
+    | :? BinaryExpression as binExpr ->
+        isAnyConstant binExpr.Left || isAnyConstant binExpr.Right
+    | :? UnaryExpression as unaryExpr ->
+        isAnyConstant unaryExpr.Operand
+    | :? MethodCallExpression as methodCallExpr ->
+        methodCallExpr.Arguments |> Seq.exists isAnyConstant || isAnyConstant methodCallExpr.Object
+    | :? MemberExpression as memberExpr ->
+        isAnyConstant memberExpr.Expression
+    | :? ConstantExpression -> true
+    | :? InvocationExpression as invocationExpr ->
+        invocationExpr.Arguments |> Seq.exists isAnyConstant || isAnyConstant invocationExpr.Expression
+    | :? LambdaExpression as lambdaExpr ->
+        lambdaExpr.Body |> isAnyConstant
+    | :? NewExpression as ne when ne.Type.IsAssignableTo(typeof<System.Runtime.CompilerServices.ITuple>) ->
+        ne.Arguments |> Seq.exists isAnyConstant
     | _ -> true
 
 let rec private visit (exp: Expression) (sb: QueryBuilder) : Expression =
@@ -257,7 +279,7 @@ and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
     else if m.Method.Name = "NewSqlId" then
         let arg1 = m.Arguments[0]
         visit arg1 qb
-    else if isFullyImplemented m then
+    else if isFullyConstant m then
         let value = evaluateExpr m
         qb.AppendVariable value
         m
@@ -368,7 +390,7 @@ and private visitMemberAccess (m: MemberExpression) (qb: QueryBuilder) =
     else if m.Expression = null then
         let value = (m.Member :?> PropertyInfo).GetValue null
         qb.AppendVariable value
-    else if isFullyImplemented m then
+    else if isFullyConstant m then
         let value = evaluateExpr m
         qb.AppendVariable value        
     else
