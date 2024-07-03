@@ -506,7 +506,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
         dbConnection.Execute("
                             CREATE TABLE IF NOT EXISTS DirectoryHeader (
                                 Id INTEGER PRIMARY KEY,
-                                Name TEXT NOT NULL CHECK ((Name != \"\" OR ParentId == NULL) AND (Name != \".\") AND (Name != \"..\") AND NOT Name GLOB \"*/*\"),
+                                Name TEXT NOT NULL CHECK ((length(Name) != 0 OR ParentId IS NULL) AND (Name != \".\") AND (Name != \"..\") AND NOT Name GLOB \"*/*\"),
                                 FullPath TEXT NOT NULL CHECK (FullPath != \"\" AND NOT FullPath GLOB \"*/./*\" AND NOT FullPath GLOB \"*/../*\"),
                                 ParentId INTEGER,
                                 Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
@@ -518,7 +518,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
 
                             CREATE TABLE IF NOT EXISTS FileHeader (
                                 Id INTEGER PRIMARY KEY,
-                                Name TEXT NOT NULL CHECK (Name != \"\" AND Name != \".\" AND Name != \"..\"),
+                                Name TEXT NOT NULL CHECK (length(Name) != 0 AND Name != \".\" AND Name != \"..\"),
                                 DirectoryId INTEGER NOT NULL,
                                 Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
                                 Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
@@ -567,7 +567,7 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
 
         use t = dbConnection.BeginTransaction(false)
         try
-            let rootDir = dbConnection.Query<int64>("SELECT Id FROM DirectoryHeader WHERE ParentId = NULL AND Name = \"\"") |> Seq.tryHead
+            let rootDir = dbConnection.Query<SqlId>("SELECT Id FROM DirectoryHeader WHERE ParentId IS NULL AND length(Name) = 0") |> Seq.tryHead
             if rootDir.IsNone then
                 dbConnection.Execute("INSERT INTO DirectoryHeader(Name, ParentId, FullPath) VALUES (\"\", NULL, \"/\");", transaction = t) |> ignore
             t.Commit()

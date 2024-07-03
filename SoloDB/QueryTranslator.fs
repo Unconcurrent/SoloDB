@@ -54,7 +54,7 @@ type private QueryBuilder =
         }
 
 let private evaluateExpr<'O> e =
-    let exprFunc = Expression.Lambda<Func<'O>>(e).Compile(true)
+    let exprFunc = Expression.Lambda<Func<'O>>(UnaryExpression.Convert(e, typeof<'O>)).Compile(true)
     exprFunc.Invoke()
 
 let rec private isRootParameter (expr: Expression) : bool =
