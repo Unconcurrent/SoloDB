@@ -908,6 +908,9 @@ type SoloDBStandardTesting() =
     [<TestMethod>]
     member this.BackupVacuumFromAndToDisk() =
         db.Dispose()
+
+        Directory.CreateDirectory "./temp/" |> ignore
+
         if File.Exists "./temp/temp_from.db" then File.Delete "./temp/temp_from.db"
         db <- SoloDB.Instantiate "./temp/temp_from.db"
 
