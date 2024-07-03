@@ -88,7 +88,7 @@ type JsonValue =
     | Object of IDictionary<string, JsonValue>
 
     static member Serialize (value: obj) =
-        let serializePrimitive (value: obj) =
+        let trySerializePrimitive (value: obj) =
             match value with
             | :? bool as b -> Boolean b
 
@@ -109,8 +109,14 @@ type JsonValue =
             | :? SoloDBTypes.SqlId as i -> Number (decimal i.Value)
 
             | :? DateTimeOffset as date -> date.ToUnixTimeMilliseconds() |> decimal |> Number
-            | :? string as s -> String s            
-            | _ -> failwithf "Unsupported primitive type: %A" (value.GetType())
+            | :? DateTime as date -> date.ToBinary() |> decimal |> Number
+            | :? DateOnly as date -> date.DayNumber |> decimal |> Number
+            | :? TimeOnly as time -> time.ToTimeSpan().TotalMilliseconds |> int64 (* Convert to int64 because SQLite only stores 32 bit precision floats*) |> decimal |> Number
+            | :? TimeSpan as span -> span .TotalMilliseconds |> int64 |> decimal |> Number
+
+            | :? string as s -> String s        
+            
+            | _ -> Null
     
         let serializeCollection (collection: IEnumerable) =
             let items = System.Collections.Generic.List<JsonValue>()
@@ -130,21 +136,22 @@ type JsonValue =
 
         if obj.ReferenceEquals(value, null) then
             Null
-        elif valueType.IsPrimitive || valueType = typeof<string> || valueType = typeof<decimal> || valueType = typeof<DateTimeOffset> || valueType = typeof<SoloDBTypes.SqlId> then
-            serializePrimitive value
-        elif typeof<IDictionary>.IsAssignableFrom(valueType) then
-            serializeDictionary (value :?> IDictionary)
-        elif typeof<IEnumerable>.IsAssignableFrom(valueType) then
-            serializeCollection (value :?> IEnumerable)
-        else
-            let props = valueType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-            let dict = new Dictionary<string, JsonValue>(StringComparer.OrdinalIgnoreCase)
-            for prop in props do
-                if prop.CanRead then
-                    let propValue = prop.GetValue(value)
-                    let serializedValue = JsonValue.Serialize propValue
-                    dict.Add(prop.Name, serializedValue)
-            Object dict
+        else match trySerializePrimitive value with
+                | Null ->
+                    if typeof<IDictionary>.IsAssignableFrom(valueType) then
+                        serializeDictionary (value :?> IDictionary)
+                    elif typeof<IEnumerable>.IsAssignableFrom(valueType) then
+                        serializeCollection (value :?> IEnumerable)
+                    else
+                        let props = valueType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+                        let dict = new Dictionary<string, JsonValue>(StringComparer.OrdinalIgnoreCase)
+                        for prop in props do
+                            if prop.CanRead then
+                                let propValue = prop.GetValue(value)
+                                let serializedValue = JsonValue.Serialize propValue
+                                dict.Add(prop.Name, serializedValue)
+                        Object dict
+                | value -> value
 
     static member SerializeWithType (value: obj) =
         let json = JsonValue.Serialize value
@@ -174,11 +181,12 @@ type JsonValue =
             match json with
             | JsonValue.Null -> null
             | JsonValue.String s -> 
-                match toInt64 s, toDecimal s, toBoolean s with
-                | Some x, _, _ -> x |> box
-                | _, Some x, _ -> x
-                | _, _, Some b -> b
-                | _ -> s
+                match toInt64 s with
+                | Some x -> x |> box
+                | None ->
+                match toDecimal s with
+                | Some x -> x
+                | None -> s
             | JsonValue.Number n -> if Decimal.IsInteger n && abs n < decimal Int64.MaxValue then Int64.CreateSaturating n else n
             | JsonValue.Boolean b -> b
             | JsonValue.List lst ->
@@ -197,9 +205,8 @@ type JsonValue =
         let isCollectionType typ =
             typeof<IList<_>>.IsAssignableFrom(typ) || typ.IsArray
 
-        let deserializePrimitive (targetType: Type) (value: JsonValue) : obj =
+        let tryDeserializePrimitive (targetType: Type) (value: JsonValue) : obj =
             match targetType, value with
-            | _, JsonValue.Null -> null
             | t, JsonValue.Boolean b when t = typeof<bool> -> b
             | t, JsonValue.String s when t = typeof<string> -> s
             | t, JsonValue.String s when t = typeof<Type> -> s |> nameToType |> box
@@ -219,8 +226,14 @@ type JsonValue =
 
             | t, JsonValue.Number n when t = typeof<decimal> -> int64 n
             | t, JsonValue.Number n when t = typeof<SoloDBTypes.SqlId> -> (SoloDBTypes.SqlId)(int64 n) |> box
+
             | t, JsonValue.Number n when t = typeof<DateTimeOffset> -> n |> int64 |> DateTimeOffset.FromUnixTimeMilliseconds |> box
-            | _ -> failwithf "Type mismatch or unsupported type for deserialization: %A" targetType
+            | t, JsonValue.Number n when t = typeof<DateTime> -> n |> int64 |> DateTime.FromBinary |> box
+            | t, JsonValue.Number n when t = typeof<DateOnly> -> n |> int |> DateOnly.FromDayNumber |> box
+            | t, JsonValue.Number n when t = typeof<TimeOnly> -> n |> float |> TimeSpan.FromMilliseconds |> TimeOnly.FromTimeSpan |> box
+            | t, JsonValue.Number n when t = typeof<TimeSpan> -> n |> float |> TimeSpan.FromMilliseconds |> box
+
+            | _ -> null
 
         let deserializeList (targetType: Type) (value: JsonValue) =
             match value with
@@ -278,15 +291,18 @@ type JsonValue =
         else
         match json with
         | JsonValue.Null -> null
-        | JsonValue.String _ | JsonValue.Boolean _ | JsonValue.Number _ when targetType.IsPrimitive || targetType = typeof<string> || targetType = typeof<DateTimeOffset> || targetType = typeof<SoloDBTypes.SqlId> || targetType = typeof<Type> ->
-            deserializePrimitive targetType json
-        | JsonValue.List _ when typeof<System.Runtime.CompilerServices.ITuple>.IsAssignableFrom targetType ->
-            deserializeTuple targetType json
-        | JsonValue.List _ when isCollectionType targetType ->
-            deserializeList targetType json
-        | JsonValue.Object _ when targetType.IsClass ->
-            deserializeObject targetType json
-        | _ -> failwithf "JSON value cannot be deserialized into type %A" targetType
+        | json ->
+            match tryDeserializePrimitive targetType json with
+            | null ->
+                match json with
+                | JsonValue.List _ when typeof<System.Runtime.CompilerServices.ITuple>.IsAssignableFrom targetType ->
+                    deserializeTuple targetType json
+                | JsonValue.List _ when isCollectionType targetType ->
+                    deserializeList targetType json
+                | JsonValue.Object _ when targetType.IsClass ->
+                    deserializeObject targetType json
+                | _ -> failwithf "JSON value cannot be deserialized into type %A" targetType
+            | primitive -> primitive
 
 
     member this.ToObject (targetType: Type) =
