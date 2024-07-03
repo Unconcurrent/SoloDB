@@ -1,4 +1,4 @@
-﻿module SoloDB
+﻿namespace SoloDB
 
 open Microsoft.Data.Sqlite
 open Dapper
@@ -6,7 +6,6 @@ open System.Linq.Expressions
 open System
 open System.Collections.Generic
 open System.Collections
-open System.Text.RegularExpressions
 open FSharp.Interop.Dynamic
 open JsonFunctions
 open System.Collections.Concurrent
@@ -15,41 +14,43 @@ open Dynamitey
 open System.IO
 open FileStorage
 
-let private lockTable (connectionStr: string) (name: string) =
-    let mutex = new DisposableMutex($"SoloDB-{connectionStr.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-Table-{name}")
-    mutex
+module internal Helper =
+    let internal lockTable (connectionStr: string) (name: string) =
+        let mutex = new DisposableMutex($"SoloDB-{connectionStr.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-Table-{name}")
+        mutex
 
-let private createTableInner (name: string) (conn: SqliteConnection) (transaction: SqliteTransaction) =
-    conn.Execute($"CREATE TABLE \"{name}\" (
-    	    Id INTEGER NOT NULL PRIMARY KEY UNIQUE,
-    	    Value JSONB NOT NULL
-        );", {|name = name|}, transaction) |> ignore
-    conn.Execute("INSERT INTO SoloDBCollections(Name) VALUES (@name)", {|name = name|}, transaction) |> ignore
+    let internal createTableInner (name: string) (conn: SqliteConnection) (transaction: SqliteTransaction) =
+        conn.Execute($"CREATE TABLE \"{name}\" (
+    	        Id INTEGER NOT NULL PRIMARY KEY UNIQUE,
+    	        Value JSONB NOT NULL
+            );", {|name = name|}, transaction) |> ignore
+        conn.Execute("INSERT INTO SoloDBCollections(Name) VALUES (@name)", {|name = name|}, transaction) |> ignore
 
-let private existsCollection (name: string) (connection: SqliteConnection)  =
-    connection.QueryFirstOrDefault<string>("SELECT Name FROM SoloDBCollections WHERE Name = @name LIMIT 1", {|name = name|}) <> null
+    let internal existsCollection (name: string) (connection: SqliteConnection)  =
+        connection.QueryFirstOrDefault<string>("SELECT Name FROM SoloDBCollections WHERE Name = @name LIMIT 1", {|name = name|}) <> null
 
-let private dropCollection (name: string) (transaction: SqliteTransaction) (connection: SqliteConnection) =
-    connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name, transaction = transaction) |> ignore
-    connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}, transaction = transaction) |> ignore
+    let internal dropCollection (name: string) (transaction: SqliteTransaction) (connection: SqliteConnection) =
+        connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name, transaction = transaction) |> ignore
+        connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}, transaction = transaction) |> ignore
 
-let private insertInner (typed: bool) (item: 'T) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
-    let json = if typed then toTypedJson item else toJson item
+    let internal insertInner (typed: bool) (item: 'T) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
+        let json = if typed then toTypedJson item else toJson item
 
-    let existsId = hasIdType typeof<'T>
+        let existsId = hasIdType typeof<'T>
 
-    if existsId && SqlId(0) <> item?Id then 
-        failwithf "Cannot insert a item with a non zero Id, maybe you meant Update?"
+        if existsId && SqlId(0) <> item?Id then 
+            failwithf "Cannot insert a item with a non zero Id, maybe you meant Update?"
 
-    let id = connection.QueryFirst<SqlId>($"INSERT INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|}, transaction)
+        let id = connection.QueryFirst<SqlId>($"INSERT INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|}, transaction)
 
-    if existsId then 
-        item?Id <- id
+        if existsId then 
+            item?Id <- id
 
-    id
+        id
 
-let private insertInnerRaw (item: DbObjectRow) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
-    connection.Execute($"INSERT INTO \"{name}\"(Id, Value) VALUES(@id, jsonb(@jsonText))", {|name = name; id = item.Id; jsonText = item.ValueJSON|}, transaction)
+    let internal insertInnerRaw (item: DbObjectRow) (connection: SqliteConnection) (transaction: SqliteTransaction) (name: string) =
+        connection.Execute($"INSERT INTO \"{name}\"(Id, Value) VALUES(@id, jsonb(@jsonText))", {|name = name; id = item.Id; jsonText = item.ValueJSON|}, transaction)
+
 
 type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: string, variables: Dictionary<string, obj>, select: 'Q -> 'R, postModifySQL: string -> string) =
     let mutable sql = sql
@@ -99,10 +100,14 @@ type FinalBuilder<'T, 'Q, 'R>(connection: SqliteConnection, name: string, sql: s
 
     member this.Enumerate() =
         let finalSQL, parameters = getQueryParameters()
-        connection.Query<'Q>(finalSQL, parameters) 
-            |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
-            |> Seq.map select 
-            |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
+        try
+            connection.Query<'Q>(finalSQL, parameters) 
+                |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
+                |> Seq.map select 
+                |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
+        with ex -> 
+            let ex = ex // For breakpoint.
+            reraise()
 
     member this.ToList() =
         this.Enumerate() 
@@ -165,18 +170,18 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
     member this.IncludeType = typeof<'T>.IsAbstract
 
     member this.Insert (item: 'T) =
-        use l = lockTable connectionString name // To not interfere with the batch one.
+        use l = Helper.lockTable connectionString name // To not interfere with the batch one.
 
-        insertInner this.IncludeType item connection null name
+        Helper.insertInner this.IncludeType item connection null name
 
     member this.InsertBatch (items: 'T seq) =
-        use l = lockTable connectionString name  // If not, there will be multiple transactions started on the same connection when used concurently,
+        use l = Helper.lockTable connectionString name  // If not, there will be multiple transactions started on the same connection when used concurently,
                                                  // and it is faster than creating new connections.
 
         if inTransaction then
             let ids = List<SqlId>()
             for item in items do
-                insertInner this.IncludeType item connection null name |> ids.Add
+                Helper.insertInner this.IncludeType item connection null name |> ids.Add
             ids
         else
 
@@ -184,7 +189,7 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
         try
             let ids = List<SqlId>()
             for item in items do
-                insertInner this.IncludeType item connection transaction name |> ids.Add
+                Helper.insertInner this.IncludeType item connection transaction name |> ids.Add
 
             transaction.Commit()
             ids
@@ -314,6 +319,12 @@ type Collection<'T>(connection: SqliteConnection, name: string, connectionString
             this.ConnectionString = other.ConnectionString && this.Name = other.Name
 
 and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: SqliteConnection, connectionString: string, transaction: bool) = 
+    static do
+        // Dapper mapping.
+        SqlMapper.AddTypeHandler(typeof<SqlId>, AccountTypeHandler())
+        SqlMapper.RemoveTypeMap(typeof<DateTimeOffset>)
+        SqlMapper.AddTypeHandler<DateTimeOffset> (DateTimeMapper())
+
     let mutable disposed = false
     let inTransaction = transaction
     let connectionPool = ConcurrentDictionary<string, SqliteConnection>()
@@ -338,14 +349,14 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
             if inTransaction then dbConnection
             else connectionPool.GetOrAdd(name, (fun name -> connectionCreator()))
 
-        use mutex = lockTable connectionString name // To prevent a race condition where the next if statment is true for 2 threads.
-        if not (existsCollection name connection) then 
+        use mutex = Helper.lockTable connectionString name // To prevent a race condition where the next if statment is true for 2 threads.
+        if not (Helper.existsCollection name connection) then 
             if inTransaction then
-                createTableInner name connection null
+                Helper.createTableInner name connection null
             else
                 use transaction = connection.BeginTransaction()
                 try
-                    createTableInner name connection transaction
+                    Helper.createTableInner name connection transaction
                     transaction.Commit()
                 with ex ->
                     transaction.Rollback()
@@ -364,26 +375,26 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
         this.InitializeCollection<obj>(name)
 
     member this.ExistCollection name =
-        existsCollection name dbConnection
+        Helper.existsCollection name dbConnection
 
     member this.ExistCollection<'T>() =
         let name = this.GetNameFrom<'T>()
-        existsCollection name dbConnection
+        Helper.existsCollection name dbConnection
 
     member this.DropCollectionIfExists name =
-        use mutex = lockTable connectionString name
+        use mutex = Helper.lockTable connectionString name
 
         if inTransaction then
-            if existsCollection name dbConnection then 
-                dropCollection name null dbConnection
+            if Helper.existsCollection name dbConnection then 
+                Helper.dropCollection name null dbConnection
                 true
             else false
         else
 
-        if existsCollection name dbConnection then
+        if Helper.existsCollection name dbConnection then
             use transaction = dbConnection.BeginTransaction()
             try
-                dropCollection name transaction dbConnection
+                Helper.dropCollection name transaction dbConnection
                 transaction.Commit()
                 true
             with ex -> 
@@ -430,13 +441,13 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
         use otherTransaction = otherConnection.BeginTransaction()
         try
             let otherNames = otherConnection.Query<string>("SELECT Name FROM SoloDBCollections")
-            for otherName in otherNames do dropCollection otherName otherTransaction otherConnection 
+            for otherName in otherNames do Helper.dropCollection otherName otherTransaction otherConnection 
 
             for name in names do
-                createTableInner name otherConnection otherTransaction 
+                Helper.createTableInner name otherConnection otherTransaction 
                 let rows = connection.Query<DbObjectRow>(sprintf "SELECT Id, json(Value) as ValueJSON FROM \"%s\"" name, buffered = false, commandTimeout = Nullable<int>())
                 for row in rows do
-                    let rowsAffected = insertInnerRaw row otherConnection otherTransaction name
+                    let rowsAffected = Helper.insertInnerRaw row otherConnection otherTransaction name
                     if rowsAffected <> 1 then failwithf "No rows affected in insert."
 
 
@@ -636,43 +647,3 @@ and SoloDB private (connectionCreator: bool -> SqliteConnection, dbConnection: S
     static member tryFirst<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> func |> collection.TryFirst
 
     static member any<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> func |> collection.Any
-
-let instantiate = SoloDB.Instantiate
-
-
-type System.Object with
-    member this.Set(value: obj) =
-        failwithf "This is a dummy function for the SQL builder."
-
-    member this.Like(pattern: string) =
-        let regexPattern = 
-            "^" + Regex.Escape(pattern).Replace("\\%", ".*").Replace("\\_", ".") + "$"
-        Regex.IsMatch(this.ToString(), regexPattern, RegexOptions.IgnoreCase)
-
-    member this.Contains(pattern: string) =
-        failwithf "This is a dummy function for the SQL builder."
-
-type Array with
-    member this.Add(value: obj) =
-        failwithf "This is a dummy function for the SQL builder."
-
-    member this.SetAt(index: int, value: obj) =
-        failwithf "This is a dummy function for the SQL builder."
-
-    member this.RemoveAt(index: int) =
-        failwithf "This is a dummy function for the SQL builder."
-
-    member this.AnyInEach(condition: InnerExpr) = 
-        failwithf "This is a dummy function for the SQL builder."
-        bool()
-
-// This operator allow for multiple operations in the Update method,
-// else it will throw 'Could not convert the following F# Quotation to a LINQ Expression Tree',
-// imagine it as a ';'.
-let (|+|) a b = ()
-
-
-// Dapper mapping.
-SqlMapper.AddTypeHandler(typeof<SqlId>, AccountTypeHandler())
-SqlMapper.RemoveTypeMap(typeof<DateTimeOffset>)
-SqlMapper.AddTypeHandler<DateTimeOffset> (DateTimeMapper())
