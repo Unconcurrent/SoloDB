@@ -228,7 +228,7 @@ type JsonValue =
             | t, JsonValue.Number n when t = typeof<uint32> -> uint32 n
             | t, JsonValue.Number n when t = typeof<uint64> -> uint64 n
 
-            | t, JsonValue.Number n when t = typeof<decimal> -> int64 n
+            | t, JsonValue.Number n when t = typeof<decimal> -> decimal n
             | t, JsonValue.Number n when t = typeof<SoloDBTypes.SqlId> -> (SoloDBTypes.SqlId)(int64 n) |> box
 
             | t, JsonValue.Number n when t = typeof<DateTimeOffset> -> n |> int64 |> DateTimeOffset.FromUnixTimeMilliseconds |> box
