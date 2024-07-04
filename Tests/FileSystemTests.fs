@@ -4,13 +4,15 @@ open System
 open System.Text
 open System.IO
 open Microsoft.VisualStudio.TestTools.UnitTesting
-open SoloDB
-open JsonFunctions
+open SoloDatabase
+open SoloDatabase.Types
+open SoloDatabase.Extensions
+open SoloDatabase.JsonFunctions
+open SoloDatabase.FileStorage
+open SoloDatabase.Utils
 open Types
 open TestUtils
-open FileStorage
 open System.Security.Cryptography
-open Utils
 open System.Globalization
 
 let testFileBytes = "Hello this is some random data." |> Encoding.UTF8.GetBytes

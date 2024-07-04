@@ -2,7 +2,7 @@
 
 open System
 open System.Text
-open SoloDBTypes
+open SoloDatabase.Types
 
 [<CLIMutable>]
 type UserData = {

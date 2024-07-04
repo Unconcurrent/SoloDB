@@ -4,11 +4,12 @@
 
 open System
 open Microsoft.VisualStudio.TestTools.UnitTesting
-open SoloDB
-open SoloDBTypes
+open SoloDatabase
+open SoloDatabase.Types
+open SoloDatabase.Extensions
+open SoloDatabase.JsonFunctions
 open Types
 open TestUtils
-open SoloDBExtensions
 
 [<TestClass>]
 type SoloDBTransactionalTesting() =

@@ -1,4 +1,4 @@
-﻿namespace SoloDB
+﻿namespace SoloDatabase
 
 open Microsoft.Data.Sqlite
 open Dapper
@@ -9,7 +9,7 @@ open System.Collections
 open FSharp.Interop.Dynamic
 open JsonFunctions
 open System.Collections.Concurrent
-open SoloDBTypes
+open SoloDatabase.Types
 open Dynamitey
 open System.IO
 open FileStorage
