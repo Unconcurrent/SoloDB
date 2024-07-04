@@ -428,4 +428,5 @@ type SoloDBTransactionalTesting() =
                 let id2 = users.Insert testUser
                 assertEqual (id1 <> id2) true "The insertion of a duplicate user did not create a new ID."
                 id1, id2
-        )
+        ) |> ignore
+        ()

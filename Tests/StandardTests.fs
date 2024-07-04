@@ -849,6 +849,7 @@ type SoloDBStandardTesting() =
     [<TestMethod>]
     member this.DropNonExistentCollectionThrows() =
         Assert.ThrowsException<exn>((fun () -> db.DropCollection<User>()), "Expected exception was not thrown for dropping non-existent collection")
+        |> ignore
 
     [<TestMethod>]
     member this.LockHandlingDuringCollectionInitialization() =
