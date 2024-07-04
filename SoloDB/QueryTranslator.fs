@@ -155,7 +155,7 @@ module QueryTranslator =
             visit index qb |> ignore
             qb.AppendRaw "]')"
             m
-        else if m.Method.Name = "Object.Like" then
+        else if m.Method.Name = "Object.Like" || m.Method.Name = "Like" then
             let string = m.Arguments[0]
             let likeWhat = m.Arguments[1]
 
@@ -163,7 +163,7 @@ module QueryTranslator =
             qb.AppendRaw " LIKE "
             visit likeWhat qb |> ignore
             m
-        else if m.Method.Name = "Object.Set" then
+        else if m.Method.Name = "Object.Set"|| m.Method.Name = "Set" then
             let oldValue = m.Arguments[0]
             let newValue = m.Arguments[1]
 
@@ -172,7 +172,7 @@ module QueryTranslator =
             visit newValue qb |> ignore
             qb.AppendRaw ","
             m
-        else if m.Method.Name = "Array.Add" then
+        else if m.Method.Name = "Array.Add" || m.Method.Name = "Add" then
             let array = m.Arguments[0]
             let newValue = m.Arguments[1]
 
@@ -184,7 +184,7 @@ module QueryTranslator =
             visit newValue qb |> ignore
             qb.AppendRaw ","
             m
-        else if m.Method.Name = "Array.SetAt" then        
+        else if m.Method.Name = "Array.SetAt" || m.Method.Name = "SetAt" then        
             let array = m.Arguments[0]
             let index = m.Arguments[1]
             let newValue = m.Arguments[2]
@@ -195,7 +195,7 @@ module QueryTranslator =
             visit newValue qb |> ignore
             qb.AppendRaw ","
             m
-        else if m.Method.Name = "Array.RemoveAt" then
+        else if m.Method.Name = "Array.RemoveAt" || m.Method.Name = "RemoveAt" then
             let array = m.Arguments[0]
             let index = m.Arguments[1]
 
@@ -227,7 +227,7 @@ module QueryTranslator =
             else
                 qb.AppendRaw $",'$.{property}')"
             m
-        else if m.Method.Name = "Array.AnyInEach" then
+        else if m.Method.Name = "Array.AnyInEach" || m.Method.Name = "AnyInEach" then
             let array = m.Arguments[0]
             let whereFuncExpr = (m.Arguments[1] :?> NewExpression)
         
