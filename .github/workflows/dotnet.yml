@@ -1,4 +1,4 @@
-name: .NET Build, Test and Artifact Download
+name: Combined Workflow for .NET Build, Artifact Upload
 
 on:
   push:
@@ -7,21 +7,7 @@ on:
     branches: [ "master" ]
 
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Download a Build Artifact
-      uses: actions/download-artifact@v4.1.7
-      with:
-        # Name of the artifact to download. If unspecified, all artifacts for the run are downloaded.
-        #name: # optional
-        # Destination path. Supports basic tilde expansion. Defaults to $GITHUB_WORKSPACE
-        #path: # optional
-        # A glob pattern matching the artifacts that should be downloaded. Ignored if name is specified.
-        pattern: "*"
-        
   build:
-    needs: prepare
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -29,9 +15,22 @@ jobs:
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 8.0.x
+    - name: Cache dependencies
+      uses: actions/cache@v4.0.2
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
     - name: Restore dependencies
       run: dotnet restore
     - name: Build
-      run: dotnet build --no-restore
+      run: dotnet build --no-restore -c Release -o ./build_output
     - name: Test
-      run: dotnet test --no-build --verbosity normal
+      run: dotnet test --no-build --verbosity normal -o ./build_output
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: net-build-output
+        path: ./build_output/**
+        retention-days: 5  # Specify how long to keep the artifact, defaults to 90 days
