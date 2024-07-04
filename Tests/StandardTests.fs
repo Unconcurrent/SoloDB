@@ -1,6 +1,6 @@
 ﻿module StandardTests
 
-open JsonFunctions
+
 
 #nowarn "3391" // Implicit on SqlId
 
@@ -10,11 +10,13 @@ open System.Threading
 open System.Threading.Tasks
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open FSharp.Interop.Dynamic
-open SoloDB
-open SoloDBTypes
+open SoloDatabase
+open SoloDatabase.Types
+open SoloDatabase.Extensions
+open SoloDatabase.JsonFunctions
 open Types
 open TestUtils
-open SoloDBExtensions
+
 
 [<TestClass>]
 type SoloDBStandardTesting() =         

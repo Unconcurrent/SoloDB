@@ -1,4 +1,4 @@
-﻿module SoloDBTypes
+﻿namespace SoloDatabase.Types
 
 open System.Linq.Expressions
 open System
