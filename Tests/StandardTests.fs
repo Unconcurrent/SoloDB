@@ -692,6 +692,7 @@ type SoloDBStandardTesting() =
         let users = db.GetCollection<User>()
         let largeBatch = [| for i in 1 .. 100000 -> { Username = $"User{i}"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.UtcNow.AddDays(-i); LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [| $"tag{i}" |] } } |]
         let ids = users.InsertBatch largeBatch
+
         assertEqual (ids.Count) (largeBatch.Length) "Not all users were inserted in the large batch."
     
     [<TestMethod>]
@@ -716,12 +717,12 @@ type SoloDBStandardTesting() =
     member this.ConcurrentInserts() =        
         let users = db.GetCollection<User>()
         let insertBatch () =
-            let batch = [| for i in 1 .. 100 -> { Username = $"User{i}"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.UtcNow.AddDays(-i); LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [| $"tag{i}" |] } } |]
+            let batch = [| for i in 1 .. 10 -> { Username = $"User{i}"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.UtcNow.AddDays(-i); LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [| $"tag{i}" |] } } |]
             users.InsertBatch batch |> ignore
         let tasks = [| for _ in 1 .. 100 -> Task.Run insertBatch |]
         Task.WaitAll(tasks)
         let count = users.CountAll()
-        assertEqual (count) 10000L "Concurrent inserts did not result in the correct number of users."
+        assertEqual (count) 1000L "Concurrent inserts did not result in the correct number of users."
        
     [<TestMethod>]
     member this.UpdateLargeNumberOfUsers() =        

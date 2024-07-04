@@ -121,3 +121,11 @@ let private byteArrayToHexViaLookup32Unsafe (bytes: byte[]) =
 
 let hashBytesToStr (hash: byte array) =
     byteArrayToHexViaLookup32Unsafe hash
+
+
+let mutable debug =
+    #if DEBUG
+    true
+    #else
+    false
+    #endif
