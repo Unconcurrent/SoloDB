@@ -29,6 +29,10 @@ type TestRunner() =
             for method in meths do
                 if method.GetCustomAttributes(typeof<TestMethodAttribute>, true).Length > 0 && filter method then
                     stopwatch.Restart()
+                    if method.ReturnType <> typeof<Void> then
+                        failwithf "Non void return for %s." method.Name
+                        ()
+
                     try
                         TestRunner.PrintWithColor("33", sprintf "Starting test %s..." method.Name)
 
