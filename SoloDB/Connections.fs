@@ -16,6 +16,7 @@ type TransactionalConnection(connectionStr: string) =
         // Noop
         ()
 
+
 type PooledConnection(connectionStr: string, manager: ConnectionManager) =
     inherit SqliteConnection(connectionStr)
 
@@ -30,15 +31,17 @@ and ConnectionManager(connectionStr: string, setup: SqliteConnection -> unit) =
     let pool = ConcurrentStack<PooledConnection>()
 
     member internal this.TakeBack(pooledConn: PooledConnection) =
-        try
-            pooledConn.Execute("ROLLBACK;") |> ignore
-            failwithf "A transaction was not ended, before returning to the pool."
-        with 
-        | :? Microsoft.Data.Sqlite.SqliteException as e ->
-            // As expected.
-            ()
-        | other -> 
-            reraise()
+        if Utils.debug then
+            try
+                pooledConn.Execute("ROLLBACK;") |> ignore
+                failwithf "A transaction was not ended, before returning to the pool."
+            with 
+            | :? Microsoft.Data.Sqlite.SqliteException as e ->
+                // As expected.
+                ()
+            | other -> 
+                reraise()
+
         pool.Push pooledConn
 
     member this.Borrow() =

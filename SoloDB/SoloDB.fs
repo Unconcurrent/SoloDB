@@ -514,6 +514,10 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 reraise()
         finally connectionForTransaction.DisposeReal(true)
 
+    member this.Analyze() =
+        use dbConnection = connectionManager.Borrow()
+        dbConnection.Execute "PRAGMA optimize;"
+
     member this.Dispose() =
         disposed <- true
         (connectionManager :> IDisposable).Dispose()
@@ -607,15 +611,19 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
                             ")|> ignore
 
-        use t = dbConnection.BeginTransaction(false)
-        try
-            let rootDir = dbConnection.Query<SqlId>("SELECT Id FROM DirectoryHeader WHERE ParentId IS NULL AND length(Name) = 0") |> Seq.tryHead
-            if rootDir.IsNone then
-                dbConnection.Execute("INSERT INTO DirectoryHeader(Name, ParentId, FullPath) VALUES (\"\", NULL, \"/\");", transaction = t) |> ignore
-            t.Commit()
-        with e -> 
-            t.Rollback()
-            reraise()
+        
+        do
+            use t = dbConnection.BeginTransaction(false)
+            try
+                let rootDir = dbConnection.Query<SqlId>("SELECT Id FROM DirectoryHeader WHERE ParentId IS NULL AND length(Name) = 0") |> Seq.tryHead
+                if rootDir.IsNone then
+                    dbConnection.Execute("INSERT INTO DirectoryHeader(Name, ParentId, FullPath) VALUES (\"\", NULL, \"/\");", transaction = t) |> ignore
+                t.Commit()
+            with e -> 
+                t.Rollback()
+                reraise()
+
+        let rez = dbConnection.Execute("PRAGMA optimize;")
         
         new SoloDB(manager, connectionString, location)
 

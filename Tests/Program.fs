@@ -4,6 +4,7 @@ open System
 open System.Reflection
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open System.Diagnostics
+open System.Text.RegularExpressions
 
 type TestResult =
     | Passed of string * int64
@@ -13,7 +14,7 @@ type TestRunner() =
     static member private PrintWithColor(colorCode: string, text: string) =
         printfn "\x1b[%sm%s\x1b[0m" colorCode text
 
-    static member private RunTestMethods(testClass: Type) =
+    static member private RunTestMethods(testClass: Type) (filter) =
         let testInstance = Activator.CreateInstance(testClass)
         let meths = testClass.GetMethods()
         let stopwatch = Stopwatch()
@@ -26,7 +27,7 @@ type TestRunner() =
             TestRunner.PrintWithColor("36", sprintf "Initializing tests in %s..." testClass.Name)
 
             for method in meths do
-                if method.GetCustomAttributes(typeof<TestMethodAttribute>, true).Length > 0 then
+                if method.GetCustomAttributes(typeof<TestMethodAttribute>, true).Length > 0 && filter method then
                     stopwatch.Restart()
                     try
                         TestRunner.PrintWithColor("33", sprintf "Starting test %s..." method.Name)
@@ -51,15 +52,13 @@ type TestRunner() =
 
         results
 
-    static member RunTests(assembly: Assembly) =
-        let types = assembly.GetTypes()
+    static member RunTests(tests: Type array) (filter) =
         let allResults = System.Collections.Generic.List<TestResult>()
         let stopwatch = Stopwatch.StartNew()
 
         TestRunner.PrintWithColor("35", "Starting test run...")
-        for testClass in types do
-            if testClass.GetCustomAttributes(typeof<TestClassAttribute>, true).Length > 0 then
-                allResults.AddRange(TestRunner.RunTestMethods(testClass))
+        for testClass in tests do
+            allResults.AddRange(TestRunner.RunTestMethods(testClass)(filter))
         stopwatch.Stop()
 
 
@@ -72,8 +71,28 @@ type TestRunner() =
         let failed = allResults |> Seq.filter (function Failed _ -> true | _ -> false) |> Seq.length
         TestRunner.PrintWithColor("35", $"Test summary: {passed} passed, {failed} failed in {stopwatch.Elapsed}")
 
+    static member GetTests(assembly: Assembly) =
+        /// Convert a glob pattern to a regular expression pattern.
+        let globToRegex (globPattern: string) =
+            let escapedPattern = Regex.Escape(globPattern)
+            let patternWithStars = escapedPattern.Replace("\\*", ".*")
+            let finalPattern = patternWithStars.Replace("\\?", ".")
+            "^" + finalPattern + "$"
+        
+        /// Check if a text matches the converted glob pattern.
+        let isMatch (text: string) (globPattern: string) =
+            let regexPattern = globToRegex globPattern
+            let regex = new Regex(regexPattern)
+            regex.IsMatch(text)
+
+        let testTypes = assembly.GetTypes() |> Array.filter(fun t -> t.GetCustomAttributes(typeof<TestClassAttribute>, true).Length > 0)
+
+        {|
+            Run = fun (testsFilterStr) ->
+                TestRunner.RunTests testTypes (fun t -> isMatch t.Name testsFilterStr)
+        |}
 
 [<EntryPoint>]
 let main argv =
-    TestRunner.RunTests(Assembly.GetExecutingAssembly())
+    TestRunner.GetTests(Assembly.GetExecutingAssembly()).Run "*"
     0
