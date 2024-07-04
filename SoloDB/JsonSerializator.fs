@@ -1,4 +1,9 @@
 ﻿namespace SoloDatabase
+
+// FormatterServices.GetSafeUninitializedObject for 
+// types without a no parameter constructor.
+#nowarm "FS0044" 
+
 module JsonSerializator =
     open System
     open System.Collections.Generic
@@ -206,7 +211,7 @@ module JsonSerializator =
                 let constr = targetType.GetConstructor(BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic, [||])
                 if constr <> null then
                     constr.Invoke([||])
-                else
+                else                
                     System.Runtime.Serialization.FormatterServices.GetSafeUninitializedObject(targetType)            
 
             let isCollectionType typ =

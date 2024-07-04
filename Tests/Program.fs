@@ -42,16 +42,14 @@ type TestRunner() =
                         stopwatch.Stop()
                         results.Add(Passed(method.Name, stopwatch.ElapsedMilliseconds))
                         TestRunner.PrintWithColor("32", sprintf "Test %s passed in %d ms." method.Name stopwatch.ElapsedMilliseconds)
-                    with
-                    | :? Exception as ex ->
+                    with ex ->
                         results.Add(Failed(method.Name, ex))
                         TestRunner.PrintWithColor("31", sprintf "Test %s failed: %s" method.Name ex.Message)
 
                     TestRunner.PrintWithColor("36", sprintf "Cleaning up tests in %s..." testClass.Name)
                     classCleanupMethod.Invoke(testInstance, [| |]) |> ignore
 
-        with
-        | :? Exception as ex ->
+        with ex ->
             TestRunner.PrintWithColor("31", sprintf "Error during class initialization/cleanup: %s" ex.Message)
 
         results
