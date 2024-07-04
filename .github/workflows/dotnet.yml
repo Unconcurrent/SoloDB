@@ -15,16 +15,23 @@ jobs:
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 8.0.x
-    - name: Cache dependencies
+
+    - name: Cache NuGet packages and dotnet tools
       uses: actions/cache@v4.0.2
       with:
-        path: ~/.nuget/packages
-        key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json') }}
+        path: |
+          ~/.nuget/packages
+          ~/.config/dotnet-tools.json
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json') }}-${{ hashFiles('**/*.csproj') }}
         restore-keys: |
+          ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json') }}-
           ${{ runner.os }}-nuget-
+
     - name: Restore dependencies
       run: dotnet restore
+
     - name: Build
       run: dotnet build --no-restore -c Release
+
     - name: Test
       run: dotnet test --no-build --verbosity normal
