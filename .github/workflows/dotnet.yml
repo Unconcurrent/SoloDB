@@ -1,0 +1,37 @@
+name: .NET Build, Test and Artifact Download
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download a Build Artifact
+      uses: actions/download-artifact@v4.1.7
+      with:
+        # Name of the artifact to download. If unspecified, all artifacts for the run are downloaded.
+        #name: # optional
+        # Destination path. Supports basic tilde expansion. Defaults to $GITHUB_WORKSPACE
+        #path: # optional
+        # A glob pattern matching the artifacts that should be downloaded. Ignored if name is specified.
+        pattern: "*"
+        
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+    - name: Restore dependencies
+      run: dotnet restore
+    - name: Build
+      run: dotnet build --no-restore
+    - name: Test
+      run: dotnet test --no-build --verbosity normal
