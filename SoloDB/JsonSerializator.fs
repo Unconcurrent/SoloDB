@@ -63,7 +63,7 @@ module JsonSerializator =
                     while i < input.Length && (isDigit input.[i] || input.[i] = '.' || input.[i] = 'e' || input.[i] = '+') do
                         sb.Append(input.[i]) |> ignore
                         i <- i + 1
-                    tokenize' i (tokens @ [NumberToken (Decimal.Parse(sb.ToString()))])
+                    tokenize' i (tokens @ [NumberToken (Decimal.Parse(sb.ToString(), CultureInfo.InvariantCulture))])
                 | c when isInitialIdentifierChar c ->
                     let sb = System.Text.StringBuilder()
                     let mutable i = index
@@ -165,12 +165,12 @@ module JsonSerializator =
 
         static member DeserializeDynamic (json: JsonValue) : obj =
             let toDecimal (input: string) =
-                match Decimal.TryParse input with
+                match Decimal.TryParse (input, CultureInfo.InvariantCulture) with
                 | true, dec -> Some dec
                 | _ -> None
 
             let toInt64 (input: string) =
-                match Int64.TryParse input with
+                match Int64.TryParse (input, CultureInfo.InvariantCulture) with
                 | true, i64 -> Some i64
                 | _ -> None
 
@@ -322,7 +322,7 @@ module JsonSerializator =
             match this with
             | Object o -> o.[name] <- value
             | List list -> 
-                let index = Int32.Parse name
+                let index = Int32.Parse(name, CultureInfo.InvariantCulture)
                 list.[index] <- value
             | other -> failwithf "Cannot index %s" (other.ToString())
 
@@ -330,7 +330,7 @@ module JsonSerializator =
             match this with
             | Object o -> o.TryGetValue(name)
             | List list -> 
-                let index = Int32.Parse name
+                let index = Int32.Parse (name, CultureInfo.InvariantCulture)
                 true, list.[index]
             | other -> failwithf "Cannot index %s" (other.ToString())
 
