@@ -16,6 +16,7 @@ open FileStorage
 open Connections
 open System.Runtime.CompilerServices
 open System.Reflection
+open System.Text
 
 module internal Helper =
     let internal lockTable (connectionStr: string) (name: string) =
@@ -271,11 +272,19 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
 
     member this.Any() = this.CountWhere((fun u -> true), 1UL) > 0L
 
-    member this.Update(expression: Expression<System.Action<'T>>) =
-        let updateSQL, variables = QueryTranslator.translateUpdateMode name expression
-        let updateSQL = updateSQL.Trim ','
+    member this.Update([<ParamArray>] expressions: Expression<System.Action<'T>> array) =
+        let variables = Dictionary<string, obj>()
+        let fullUpdateSQL = StringBuilder()
+        for expression in expressions do
+            let updateSQL, variablesToAdd = QueryTranslator.translateUpdateMode name expression
+            fullUpdateSQL.Append updateSQL |> ignore
+            for kvp in variablesToAdd do
+                variables.Add(kvp.Key, kvp.Value)
 
-        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {updateSQL})", fromJsonOrSQL<int64>, variables, id)
+        fullUpdateSQL.Remove(fullUpdateSQL.Length - 1, 1) |> ignore // Remove the ',' at the end.
+        let fullUpdateSQL = fullUpdateSQL.ToString()
+
+        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {fullUpdateSQL})", fromJsonOrSQL<int64>, variables, id)
 
     member this.Replace(item: 'T) =
         WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Dictionary([|KeyValuePair("item", (if this.IncludeType then toTypedJson item else toJson item) |> box)|]), id)
@@ -665,7 +674,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     static member insert<'T> (item: 'T) (collection: Collection<'T>) = collection.Insert item
     static member insertBatch<'T> (items: 'T seq) (collection: Collection<'T>) = collection.InsertBatch items
 
-    static member updateF<'T> (func: Expression<Action<'T>>) = fun (collection: Collection<'T>) -> collection.Update func
+    static member updateF<'T> (func: Expression<Action<'T>> array) = fun (collection: Collection<'T>) -> collection.Update func
     static member update<'T> (item: 'T) (collection: Collection<'T>) = collection.Update item
     static member replace<'T> (item: 'T) (collection: Collection<'T>) = collection.Replace item
 

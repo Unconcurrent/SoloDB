@@ -15,8 +15,6 @@ type internal DisposableMutex(name: string) =
             mutex.ReleaseMutex()
             mutex.Dispose()
 
-type InnerExpr(expr: Expression<System.Func<obj, bool>>) =
-    member this.Expression = expr
 
 [<Struct>]
 type SqlId =

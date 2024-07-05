@@ -100,5 +100,5 @@ type TestRunner() =
 
 [<EntryPoint>]
 let main argv =
-    TestRunner.GetTests(Assembly.GetExecutingAssembly()).Run "*"
+    TestRunner.GetTests(Assembly.GetExecutingAssembly()).Run "UpdateLambdaAddSetAtTest"
     0

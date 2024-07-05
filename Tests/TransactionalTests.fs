@@ -6,7 +6,6 @@ open System
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open SoloDatabase
 open SoloDatabase.Types
-open SoloDatabase.Extensions
 open SoloDatabase.JsonFunctions
 open Types
 open TestUtils
@@ -47,7 +46,7 @@ type SoloDBTransactionalTesting() =
                 let complexQueryUsers = 
                     users
                         .Select(fun u -> u.Username, u.Auth)
-                        .Where(fun u -> u.Banned = false && u.Auth = true && u.Data.Tags.AnyInEach(InnerExpr(fun item -> item.Contains "tag2")))
+                        .Where(fun u -> u.Banned = false && u.Auth = true && u.Data.Tags.AnyInEach((fun item -> item.Contains "tag2")))
                         .OrderByAsc(fun u -> u.LastSeen)
                         .Limit(2UL)
                         .ToList()

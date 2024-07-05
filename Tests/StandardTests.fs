@@ -11,8 +11,8 @@ open System.Threading.Tasks
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open FSharp.Interop.Dynamic
 open SoloDatabase
+open SoloDatabase
 open SoloDatabase.Types
-open SoloDatabase.Extensions
 open SoloDatabase.JsonFunctions
 open Types
 open TestUtils
@@ -163,7 +163,7 @@ type SoloDBStandardTesting() =
 
         let addTagValue = $"{Random.Shared.NextInt64()}"
         assertEqual (users.Update(
-                            fun u -> (u.Data.Tags.Add addTagValue)
+                            fun u -> (u.Data.Tags.AddToEnd addTagValue)
                      ).WhereId(ids.[0]).Execute()) 1 "No rows affected."
 
         let getFirstUser = users.GetById ids.[0]
@@ -194,7 +194,7 @@ type SoloDBStandardTesting() =
         let replaceValue = $"{Random.Shared.NextInt64()}"
         let addTagValue = $"{Random.Shared.NextInt64()}"
         assertEqual (users.Update(
-                            fun u -> (u.Data.Tags.Add addTagValue) |+| (u.Data.Tags.SetAt(0, replaceValue))
+                            (fun u -> (u.Data.Tags.AddToEnd addTagValue)), (fun u -> u.Data.Tags.SetAt(0, replaceValue))
                      ).WhereId(ids.[0]).Execute()) 1 "No rows affected."
 
         let getFirstUser = users.GetById ids.[0]
@@ -768,7 +768,7 @@ type SoloDBStandardTesting() =
     member this.SelectWithAnyInEachConditions() =        
         let users = db.GetCollection<User>()
         users.InsertBatch randomUsersToInsert |> ignore
-        let complexQueryUsers = users.Select(fun u -> u.Username, u.Auth).Where(fun u -> u.Banned = false && u.Auth = true && u.Data.Tags.AnyInEach(InnerExpr(fun item -> item = "tag2"))).ToList()
+        let complexQueryUsers = users.Select(fun u -> u.Username, u.Auth).Where(fun u -> u.Banned = false && u.Auth = true && u.Data.Tags.AnyInEach((fun item -> item = "tag2"))).ToList()
         let resultName, resultAuth = complexQueryUsers.[0]
         let expectedUsers = randomUsersToInsert |> Array.filter (fun u -> u.Banned = false && u.Auth = true && u.Data.Tags |> Array.contains "tag2") |> Array.toList
         assertEqual resultName (expectedUsers.[0].Username) "The complex condition query returned incorrect number of users."
@@ -1070,3 +1070,17 @@ type SoloDBStandardTesting() =
 
         let allDatesOlder = dates.Select().Where(fun d -> d <= (DateOnly.FromDateTime DateTime.Now)).ToList()
         assertEqual allDatesOlder.Length 5 "Incorrect count."
+
+    [<TestMethod>]
+    member this.Length() =
+        let strings = db.GetCollection<string>()
+        strings.Insert "A" |> ignore
+        strings.Insert "AA" |> ignore
+        strings.Insert "AAA" |> ignore
+        strings.Insert "AAAA" |> ignore
+        strings.Insert "AAAAA" |> ignore
+        strings.Insert "AAAAAA" |> ignore
+        strings.Insert "AAAAAAB" |> ignore
+
+        let stringsLen = strings.Select(fun s -> s.Length).Where(fun s -> s.Length > 3).ToList()
+        assertEqual stringsLen.Length 4 "Incorrect string.Len."
