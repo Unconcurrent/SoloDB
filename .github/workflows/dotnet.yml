@@ -3,18 +3,21 @@ name: Build and Test
 on:
   push:
     branches: [ "master" ]
+    paths-ignore:
+      - '**.md' # Ignore changes to markdown files for triggering the build
   pull_request:
     branches: [ "master" ]
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    if: github.actor == 'Unconcurrent' || github.actor == 'sologub'
+    runs-on: ubuntu-latest # self-hosted
     steps:
     - uses: actions/checkout@v4
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: 8.0.x
+        dotnet-version: '8.0.x'
 
     - name: Cache NuGet packages and dotnet tools
       uses: actions/cache@v4.0.2
