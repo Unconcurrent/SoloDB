@@ -27,16 +27,20 @@ type TestRunner() =
             TestRunner.PrintWithColor("36", sprintf "Initializing tests in %s..." testClass.Name)
 
             for method in meths do
-                if method.GetCustomAttributes(typeof<TestMethodAttribute>, true).Length > 0 && filter method then
-                    stopwatch.Restart()
+                if method.GetCustomAttributes(typeof<TestMethodAttribute>, true).Length > 0 && filter method then                    
+                    
                     if method.ReturnType <> typeof<Void> then
                         failwithf "Non void return for %s." method.Name
                         ()
 
+                    classInitializeMethod.Invoke(testInstance, [||]) |> ignore
+
+                    stopwatch.Restart()
+
                     try
                         TestRunner.PrintWithColor("33", sprintf "Starting test %s..." method.Name)
 
-                        classInitializeMethod.Invoke(testInstance, [||]) |> ignore
+                        
                         method.Invoke(testInstance, [||]) |> ignore                        
 
                         stopwatch.Stop()

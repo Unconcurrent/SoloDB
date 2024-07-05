@@ -62,23 +62,7 @@ module Utils =
                                             else AppDomain.CurrentDomain.GetAssemblies() 
                                                     |> Seq.collect(fun a -> a.GetTypes()) 
                                                     |> Seq.find(fun t -> t.FullName = typeName)
-                                            )
-    
-    type internal TypeCaster =
-        static member CastObject (obj: obj) (t: Type) : obj =
-            let objType = obj.GetType()
-            if objType = t then
-                obj
-            else if objType = typeof<string> && t = typeof<Type> then
-                obj :?> string |> nameToType :> obj
-            else
-                let castHelper = typeof<TypeCaster>.GetMethod("CastHelper", BindingFlags.Static ||| BindingFlags.NonPublic)
-                let genericCastHelper = castHelper.MakeGenericMethod(t)
-                genericCastHelper.Invoke(null, [| obj |])
-    
-        static member private CastHelper<'T> (obj: obj) : 'T =
-            obj :?> 'T
-
+                                            )    
     let shaHash (o: obj) = 
         match o with
         | :? (byte array) as bytes -> 

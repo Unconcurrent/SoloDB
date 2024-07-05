@@ -14,7 +14,8 @@ open Dynamitey
 open System.IO
 open FileStorage
 open Connections
-open System.Transactions
+open System.Runtime.CompilerServices
+open System.Reflection
 
 module internal Helper =
     let internal lockTable (connectionStr: string) (name: string) =
@@ -402,6 +403,16 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         SqlMapper.AddTypeHandler(typeof<SqlId>, AccountTypeHandler())
         SqlMapper.RemoveTypeMap(typeof<DateTimeOffset>)
         SqlMapper.AddTypeHandler<DateTimeOffset> (DateTimeMapper())
+
+        let assembly = Assembly.GetExecutingAssembly()
+        assembly.GetTypes()
+        |> Seq.collect(fun t -> t.GetMethods (BindingFlags.DeclaredOnly |||
+                                            BindingFlags.NonPublic |||
+                                            BindingFlags.Public |||
+                                            BindingFlags.Instance |||
+                                            BindingFlags.Static))
+        |> Seq.filter (fun m -> not m.IsAbstract && not m.ContainsGenericParameters)
+        |> Seq.iter (fun m -> RuntimeHelpers.PrepareMethod m.MethodHandle)
 
     let mutable disposed = false
 
