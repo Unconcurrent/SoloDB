@@ -1,7 +1,7 @@
 ﻿namespace SoloDatabase
 
 // FormatterServices.GetSafeUninitializedObject for 
-// types without a no parameter constructor.
+// types without a parameterless constructor.
 #nowarn "0044"
 
 module JsonSerializator =

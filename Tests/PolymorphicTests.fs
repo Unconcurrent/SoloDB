@@ -6,7 +6,6 @@ open System
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open SoloDatabase
 open SoloDatabase.Types
-open SoloDatabase.Extensions
 open SoloDatabase.JsonFunctions
 open Types
 open TestUtils

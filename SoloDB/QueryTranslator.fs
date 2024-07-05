@@ -5,6 +5,7 @@ module QueryTranslator =
     open System
     open System.Reflection
     open System.Collections.Generic
+    open Microsoft.FSharp.Linq.RuntimeHelpers
     open System.Text.Json
     open JsonFunctions
     open Utils
@@ -111,7 +112,7 @@ module QueryTranslator =
             ne.Arguments |> Seq.exists isAnyConstant
         | _ -> true
 
-    let rec private visit (exp: Expression) (sb: QueryBuilder) : Expression =
+    let rec private visit (exp: Expression) (sb: QueryBuilder) : unit =
         match exp.NodeType with
         | ExpressionType.And
         | ExpressionType.AndAlso
@@ -154,16 +155,16 @@ module QueryTranslator =
             qb.AppendRaw ", '$["
             visit index qb |> ignore
             qb.AppendRaw "]')"
-            m
-        else if m.Method.Name = "Object.Like" || m.Method.Name = "Like" then
+            
+        else if m.Method.Name = "Like" then
             let string = m.Arguments[0]
             let likeWhat = m.Arguments[1]
 
             visit string qb |> ignore
             qb.AppendRaw " LIKE "
             visit likeWhat qb |> ignore
-            m
-        else if m.Method.Name = "Object.Set"|| m.Method.Name = "Set" then
+            
+        else if m.Method.Name = "Set" then
             let oldValue = m.Arguments[0]
             let newValue = m.Arguments[1]
 
@@ -171,8 +172,8 @@ module QueryTranslator =
             qb.AppendRaw ","
             visit newValue qb |> ignore
             qb.AppendRaw ","
-            m
-        else if m.Method.Name = "Array.Add" || m.Method.Name = "Add" then
+            
+        else if m.Method.Name = "AddToEnd" || m.Method.Name = "Add" then
             let array = m.Arguments[0]
             let newValue = m.Arguments[1]
 
@@ -183,8 +184,8 @@ module QueryTranslator =
         
             visit newValue qb |> ignore
             qb.AppendRaw ","
-            m
-        else if m.Method.Name = "Array.SetAt" || m.Method.Name = "SetAt" then        
+            
+        else if m.Method.Name = "SetAt" then        
             let array = m.Arguments[0]
             let index = m.Arguments[1]
             let newValue = m.Arguments[2]
@@ -194,8 +195,8 @@ module QueryTranslator =
             qb.AppendRaw $"[{index}]',"
             visit newValue qb |> ignore
             qb.AppendRaw ","
-            m
-        else if m.Method.Name = "Array.RemoveAt" || m.Method.Name = "RemoveAt" then
+            
+        else if m.Method.Name = "RemoveAt" then
             let array = m.Arguments[0]
             let index = m.Arguments[1]
 
@@ -205,15 +206,14 @@ module QueryTranslator =
             qb.AppendRaw "),"
         
             qb.AppendRaw $"'$[{index}]'),"
-            m
+            
         else if m.Method.Name = "op_BarPlusBar" then
             let a = m.Arguments[0]
             let b = m.Arguments[1]
 
 
             visit a qb |> ignore
-            visit b qb |> ignore
-            m
+            visit b qb |> ignore            
 
         else if m.Method.Name = "op_Dynamic" then // todo: add C# version of dynamic.
             let o = m.Arguments[0]
@@ -226,21 +226,20 @@ module QueryTranslator =
                 qb.AppendRaw $",'$[{property}]')"
             else
                 qb.AppendRaw $",'$.{property}')"
-            m
-        else if m.Method.Name = "Array.AnyInEach" || m.Method.Name = "AnyInEach" then
+            
+        else if m.Method.Name = "AnyInEach" then            
             let array = m.Arguments[0]
-            let whereFuncExpr = (m.Arguments[1] :?> NewExpression)
-        
-            let exprFunc = Expression.Lambda<Func<InnerExpr>>(whereFuncExpr).Compile(true)
+            let whereFuncExpr = m.Arguments[1]
+            let exprFunc = Expression.Lambda<Func<Expression>>(whereFuncExpr).Compile(true)
             let expr = exprFunc.Invoke()
 
             qb.AppendRaw $"EXISTS (SELECT 1 FROM json_each("
             visit array qb |> ignore
             qb.AppendRaw ") WHERE "
             let innerQb = {qb with TableNameDot = "json_each."; JsonExtractSelfValue = false}
-            visit expr.Expression innerQb |> ignore
+            visit expr innerQb |> ignore
             qb.AppendRaw ")"
-            m
+            
         else if m.Method.Name = "QuotationToLambdaExpression" then
             let arg1 = (m.Arguments[0] :?> MethodCallExpression) // SubstHelper
             let arg2 = arg1.Arguments[0]
@@ -248,7 +247,7 @@ module QueryTranslator =
         else if m.Method.Name = "op_Implicit" then
             let arg1 = m.Arguments[0]
             visit arg1 qb
-        else if m.Method.Name = "Contains" then
+        else if m.Method.Name = "Contains" && m.Object.Type = typeof<string> then
             let text = m.Object
             let what = m.Arguments[0]
             qb.AppendRaw "instr("
@@ -256,35 +255,26 @@ module QueryTranslator =
             qb.AppendRaw ","
             visit what qb |> ignore
             qb.AppendRaw ") > 0"
-            m
-        else if m.Method.Name = "Object.Contains" then
-            let text = m.Arguments[0]
-            let what = m.Arguments[1]
-            qb.AppendRaw "instr("
-            visit text qb |> ignore
-            qb.AppendRaw ","
-            visit what qb |> ignore
-            qb.AppendRaw ") > 0"
-            m
+            
         else if m.Method.Name = "GetType" && m.Object.NodeType = ExpressionType.Parameter then
             let o = m.Object
             qb.AppendRaw "jsonb_extract("
             visit o qb |> ignore
 
             qb.AppendRaw $",'$.$type')"
-            m
+            
         else if m.Method.Name = "TypeOf" && m.Type = typeof<Type> then
             let t = m.Method.Invoke (null, Array.empty) :?> Type
             let name = match t |> typeToName with Some x -> x | None -> ""
             qb.AppendVariable (name)
-            m
+            
         else if m.Method.Name = "NewSqlId" then
             let arg1 = m.Arguments[0]
             visit arg1 qb
         else if isFullyConstant m then
             let value = evaluateExpr m
             qb.AppendVariable value
-            m
+            
         else
             raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 
@@ -301,12 +291,11 @@ module QueryTranslator =
                 qb.AppendRaw $"jsonb_extract({qb.TableNameDot}Value, '$')"
             else
                 qb.AppendRaw $"{qb.TableNameDot}Value"
-        m
+        
 
     and private visitNot (m: UnaryExpression) (qb: QueryBuilder) =
         qb.AppendRaw "NOT "
-        visit m.Operand qb |> ignore
-        m
+        visit m.Operand qb |> ignore        
 
     and private visitNew (m: NewExpression) (qb: QueryBuilder) =
         let t = m.Type
@@ -317,8 +306,7 @@ module QueryTranslator =
                 visit(arg) qb |> ignore
                 if m.Arguments.IndexOf arg <> m.Arguments.Count - 1 then
                     qb.AppendRaw ","
-            qb.AppendRaw ")"
-            m
+            qb.AppendRaw ")"            
         else
             failwithf "Cannot construct new in SQL query %A" t
 
@@ -359,15 +347,13 @@ module QueryTranslator =
         | ExpressionType.GreaterThanOrEqual -> qb.AppendRaw(" >= ") |> ignore
         | _ -> raise (NotSupportedException(sprintf "The binary operator %O is not supported" b.NodeType))
         visit(right) qb |> ignore
-        qb.AppendRaw(")")  |> ignore
-        b
+        qb.AppendRaw(")")  |> ignore        
 
     and private visitConstant (c: ConstantExpression) (qb: QueryBuilder) =
         match c.Value with
         | null -> qb.AppendRaw("NULL")  |> ignore
         | _ ->
-            qb.AppendVariable(c.Value) |> ignore
-        c
+            qb.AppendVariable(c.Value) |> ignore        
 
     and private visitMemberAccess (m: MemberExpression) (qb: QueryBuilder) =
         let rec buildJsonPath (expr: Expression) (accum: string list) : string list =
@@ -381,7 +367,12 @@ module QueryTranslator =
             if qb.UpdateMode then sprintf "'$.%s'" path
             else sprintf "jsonb_extract(%sValue, '$.%s')" qb.TableNameDot path
 
-        if m.Type = typeof<SqlId> && m.Member.Name = "Id" then
+
+        if m.Member.Name = "Length" && (m.Expression.Type = typeof<string> || m.Expression.Type= typeof<byte array>) then
+            qb.AppendRaw "length("
+            visit m.Expression qb
+            qb.AppendRaw ")"
+        else if m.Type = typeof<SqlId> && m.Member.Name = "Id" then
             qb.AppendRaw $"{qb.TableNameDot}Id" |> ignore
         else if m.Expression <> null && isRootParameter m then
             let jsonPath = buildJsonPath m []
@@ -400,8 +391,6 @@ module QueryTranslator =
             qb.AppendVariable value        
         else
             raise (NotSupportedException(sprintf "The member access '%O' is not supported" m.Member.Name))
-
-        m
             
 
     let translate (tableName: string) (expression: Expression) =
