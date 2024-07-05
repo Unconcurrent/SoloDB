@@ -1,4 +1,4 @@
-name: Build and Test
+name: Build, Test and Upload
 
 on:
   push:
@@ -38,3 +38,9 @@ jobs:
 
     - name: Test
       run: dotnet test --no-build --verbosity normal -c Release
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-artifacts
+        path: ./SoloDB/SoloDB/bin/Release/net8.0/*
