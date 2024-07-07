@@ -300,7 +300,7 @@ module QueryTranslator =
     and private visitNew (m: NewExpression) (qb: QueryBuilder) =
         let t = m.Type
 
-        if t.FullName.StartsWith "System.Tuple" then
+        if typeof<System.Runtime.CompilerServices.ITuple>.IsAssignableFrom t then
             qb.AppendRaw "json_array("
             for i, arg in m.Arguments |> Seq.indexed do
                 visit(arg) qb |> ignore

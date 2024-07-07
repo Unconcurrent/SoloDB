@@ -30,7 +30,7 @@ module Connections =
         let pool = ConcurrentStack<PooledConnection>()
 
         member internal this.TakeBack(pooledConn: PooledConnection) =
-            if Utils.debug then
+            if Utils.debugTransactions then
                 try
                     pooledConn.Execute("ROLLBACK;") |> ignore
                     failwithf "A transaction was not ended, before returning to the pool."

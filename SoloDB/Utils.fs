@@ -114,3 +114,5 @@ module Utils =
         #else
         false
         #endif
+
+    let debugTransactions = false
