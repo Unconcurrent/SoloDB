@@ -11,6 +11,24 @@ module QueryTranslator =
     open Utils
     open SoloDatabase.Types
 
+    type private MemberAccess = 
+        {
+        Expression: Expression
+        MemberName: string
+        InputType: Type
+        ReturnType: Type
+        OriginalExpression: MemberExpression option
+        }
+
+        static member From(expr: MemberExpression) =
+            {
+                Expression = expr.Expression
+                MemberName = expr.Member.Name
+                InputType = expr.Expression.Type
+                ReturnType = expr.Type
+                OriginalExpression = expr |> Some
+            }
+
     type private QueryBuilder = 
         {
             StringBuilder: StringBuilder
@@ -88,11 +106,14 @@ module QueryTranslator =
             invocationExpr.Arguments |> Seq.forall isFullyConstant && isFullyConstant invocationExpr.Expression
         | :? LambdaExpression as lambdaExpr ->
             lambdaExpr.Body |> isFullyConstant
-        | :? NewExpression as ne when ne.Type.IsAssignableTo(typeof<System.Runtime.CompilerServices.ITuple>) ->
+        | :? NewExpression as ne ->
             ne.Arguments |> Seq.forall isFullyConstant
         | :? NewArrayExpression as na ->
             na.Expressions |> Seq.forall isFullyConstant
-        | _ -> true
+        | :? MemberInitExpression as mi ->
+            mi.Bindings |> Seq.map(fun b -> b :?> MemberAssignment) |> Seq.map(fun b -> b.Expression) |> Seq.append [|mi.NewExpression|] |> Seq.forall isFullyConstant
+        | null -> true
+        | _ -> false
 
     let rec isAnyConstant (expr: Expression) : bool =
         match expr with
@@ -116,7 +137,12 @@ module QueryTranslator =
             na.Expressions |> Seq.exists isFullyConstant
         | _ -> true
 
-    let rec private visit (exp: Expression) (sb: QueryBuilder) : unit =
+    let rec private visit (exp: Expression) (qb: QueryBuilder) : unit =
+        if isFullyConstant exp && exp.NodeType <> ExpressionType.Lambda then
+            let value = evaluateExpr exp
+            qb.AppendVariable value
+        else
+
         match exp.NodeType with
         | ExpressionType.And
         | ExpressionType.AndAlso
@@ -134,32 +160,29 @@ module QueryTranslator =
         | ExpressionType.Multiply
         | ExpressionType.Divide
         | ExpressionType.Modulo ->
-            visitBinary (exp :?> BinaryExpression) sb
+            visitBinary (exp :?> BinaryExpression) qb
         | ExpressionType.Not ->
-            visitNot (exp :?> UnaryExpression) sb
+            visitNot (exp :?> UnaryExpression) qb
         | ExpressionType.Lambda ->
-            visitLambda (exp :?> LambdaExpression) sb
+            visitLambda (exp :?> LambdaExpression) qb
         | ExpressionType.Call ->
-            visitMethodCall (exp :?> MethodCallExpression) sb
+            visitMethodCall (exp :?> MethodCallExpression) qb
         | ExpressionType.Constant ->
-            visitConstant (exp :?> ConstantExpression) sb
+            visitConstant (exp :?> ConstantExpression) qb
         | ExpressionType.MemberAccess ->
-            visitMemberAccess (exp :?> MemberExpression) sb
+            visitMemberAccess (exp :?> MemberExpression |> MemberAccess.From) qb
         | ExpressionType.Convert ->
-            visitConvert (exp :?> UnaryExpression) sb
+            visitConvert (exp :?> UnaryExpression) qb
         | ExpressionType.New ->
-            visitNew (exp :?> NewExpression) sb
+            visitNew (exp :?> NewExpression) qb
         | ExpressionType.Parameter ->
-            visitParameter (exp :?> ParameterExpression) sb
+            visitParameter (exp :?> ParameterExpression) qb
+        | ExpressionType.ArrayIndex ->
+            visitParameter (exp :?> ParameterExpression) qb
         | _ ->
             raise (Exception(sprintf "Unhandled expression type: '%O'" exp.NodeType))
 
-    and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
-        if isFullyConstant m then
-            let value = evaluateExpr m
-            qb.AppendVariable value
-        else
-
+    and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =        
         match m.Method.Name with
         | "GetArray" ->
             let array = m.Arguments.[0]
@@ -213,15 +236,39 @@ module QueryTranslator =
             qb.AppendRaw "),"
             qb.AppendRaw $"'$[{index}]'),"
         
-        | "op_Dynamic" -> // todo: add C# version of dynamic.
+        | "op_Dynamic" ->
             let o = m.Arguments.[0]
             let property = (m.Arguments.[1] :?> ConstantExpression).Value
-            qb.AppendRaw "jsonb_extract("
+
+            match property with
+            | :? string as property ->
+                let memberAccess = {
+                    Expression = o
+                    MemberName = property
+                    InputType = m.Type
+                    ReturnType = typeof<obj>
+                    OriginalExpression = None
+                }
+                visitMemberAccess memberAccess qb
+
+            | :? int as index ->
+                let memberAccess = {
+                    Expression = o
+                    MemberName = $"[{index}]"
+                    InputType = m.Type
+                    ReturnType = typeof<obj>
+                    OriginalExpression = None
+                }
+                visitMemberAccess memberAccess qb
+
+            | other -> failwithf "Unable to translate property access."
+
+            (*qb.AppendRaw "jsonb_extract("
             visit o qb |> ignore
             if isIntegerBased property then
                 qb.AppendRaw $",'$[{property}]')"
             else
-                qb.AppendRaw $",'$.{property}')"
+                qb.AppendRaw $",'$.{property}')"*)
         
         | "AnyInEach" ->
             let array = m.Arguments.[0]
@@ -268,6 +315,34 @@ module QueryTranslator =
             let arg1 = m.Arguments.[0]
             visit arg1 qb
         
+        | "Dyn" ->
+            let o = m.Arguments.[0]
+            let property = (m.Arguments.[1] :?> ConstantExpression).Value
+
+            match property with
+            | :? string as property ->
+                let memberAccess = {
+                    Expression = o
+                    MemberName = property
+                    InputType = m.Type
+                    ReturnType = typeof<obj>
+                    OriginalExpression = None
+                }
+                visitMemberAccess memberAccess qb
+
+            | :? int as index ->
+                let memberAccess = {
+                    Expression = o
+                    MemberName = $"[{index}]"
+                    InputType = m.Type
+                    ReturnType = typeof<obj>
+                    OriginalExpression = None
+                }
+                visitMemberAccess memberAccess qb
+
+            | other -> failwithf "Unable to translate property access."
+
+
         | "Concat" when m.Type = typeof<string> ->            
             let len = m.Arguments.Count
 
@@ -310,6 +385,7 @@ module QueryTranslator =
 
             let likeMeth = Expression.Call(typeof<SoloDatabase.Extensions>.GetMethod(nameof(SoloDatabase.Extensions.Like)), m.Object, Expression.Call(typeof<String>.GetMethod("Concat", [|typeof<string>; typeof<string>|]), Expression.Constant("%"), arg))
             visit likeMeth qb
+
 
         | _ -> 
             raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
@@ -402,7 +478,7 @@ module QueryTranslator =
         | _ ->
             qb.AppendVariable(c.Value) |> ignore        
 
-    and private visitMemberAccess (m: MemberExpression) (qb: QueryBuilder) =
+    and private visitMemberAccess (m: MemberAccess) (qb: QueryBuilder) =
         let rec buildJsonPath (expr: Expression) (accum: string list) : string list =
             match expr with
             | :? MemberExpression as inner ->
@@ -410,19 +486,20 @@ module QueryTranslator =
                 buildJsonPath inner.Expression (currentField :: accum)
             | _ -> accum
 
-        let formatAccess (path) =
+        let formatAccess (path: string) =
+            let path = path.Replace(".[", "[") // Replace array access.
             if qb.UpdateMode then sprintf "'$.%s'" path
             else sprintf "jsonb_extract(%sValue, '$.%s')" qb.TableNameDot path
 
 
-        if m.Member.Name = "Length" && (m.Expression.Type = typeof<string> || m.Expression.Type= typeof<byte array>) then
+        if m.MemberName = "Length" && (m.InputType = typeof<string> || m.InputType = typeof<byte array>) then
             qb.AppendRaw "length("
             visit m.Expression qb
             qb.AppendRaw ")"
-        else if m.Type = typeof<SqlId> && m.Member.Name = "Id" then
+        else if m.ReturnType = typeof<SqlId> && m.MemberName = "Id" then
             qb.AppendRaw $"{qb.TableNameDot}Id" |> ignore
-        else if m.Expression <> null && isRootParameter m then
-            let jsonPath = buildJsonPath m []
+        else if m.Expression <> null && isRootParameter m.Expression then
+            let jsonPath = buildJsonPath m.Expression [m.MemberName]
             match jsonPath with
             | [] -> ()
             | [single] ->
@@ -430,7 +507,11 @@ module QueryTranslator =
             | paths ->
                 let pathStr = String.concat $"." (List.map (sprintf "%s") paths)
                 qb.AppendRaw(formatAccess pathStr) |> ignore            
-        else if m.Expression = null then
+        else 
+        match m.OriginalExpression with
+        | None -> failwithf "Unable to parse the member access."
+        | Some m ->
+        if m.Expression = null then
             let value = (m.Member :?> PropertyInfo).GetValue null
             qb.AppendVariable value
         else if isFullyConstant m then

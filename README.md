@@ -4,6 +4,8 @@ SoloDB is a light, fast and robust SQL and NoSQL .NET database built on top of S
 
 ## Features
 
+Imagine the power of MongoDB and SQL combined.
+
 - [SQLite](https://sqlite.org/) at the core.
 - Serverless, it is a .NET library.
 - Simple API, see the [below](#usage).
@@ -14,9 +16,9 @@ SoloDB is a light, fast and robust SQL and NoSQL .NET database built on top of S
 - [Reliable](https://sqlite.org/hirely.html) with a [WAL log file](https://www.sqlite.org/wal.html).
 - Support for [indexes](https://www.sqlite.org/expridx.html) for fast search.
 - LINQ-like queries.
-- Direct SQL support.
+- [Direct SQL support](#direct-sqlite-access-using-dapper).
 - [Open source](./LICENSE.txt).
-- Pretty well tested: 130+ of mostly integration tests.
+- Pretty well tested: 160+ of mostly integration tests.
 
 ## Usage
 
@@ -69,9 +71,20 @@ db.WithTransaction(tx => {
 db.CollectionExists<long>() // False.
 ```
 
-### Backup and Optimization
+### Direct SQLite access using Dapper
 
-#### Backing Up the Database
+```csharp
+using var pooledConnection = db.Connection.Borrow();
+pooledConnection.Execute(
+"CREATE TABLE Users (\r\n    Id INTEGER PRIMARY KEY,\r\n    Name TEXT,\r\n    Age INTEGER\r\n)");
+
+// Create a new user
+var insertSql = "INSERT INTO Users (Name, Age) VALUES (@Name, @Age) RETURNING Id;";
+userId = pooledConnection.QuerySingle<long>(insertSql, new { Name = "John Doe", Age = 30 });
+Assert.IsTrue(userId > 0, "Failed to insert new user.");
+```
+
+### Backing Up the Database
 
 You can create a backup of the database using the [`BackupTo`](https://www.sqlite.org/backup.html) or [`VacuumTo`](https://www.sqlite.org/lang_vacuum.html#vacuuminto) methods.
 
@@ -80,7 +93,7 @@ db.BackupTo(otherDb);
 db.VacuumTo("path/to/backup.db");
 ```
 
-#### Optimizing the Database
+### Optimizing the Database
 
 Run the [`Optimize`](https://www.sqlite.org/pragma.html#pragma_optimize) method to optimize the database.
 
@@ -92,6 +105,44 @@ db.Optimize();
 
 Here is an example of how to use SoloDB to manage a collection of documents in C#:
 
+```csharp
+using SoloDatabase;
+using SoloDatabase.Types;
+
+public class MyType
+{
+    public SqlId Id { get; set; }
+    public string Name { get; set; }
+    public string Data { get; set; }
+}
+
+
+let db = SoloDB.Instantiate("./mydatabase.db")
+var collection = db.GetCollection<MyType>();
+
+// Insert a document
+var docId = collection.Insert(new MyType { Id = 0, Name = "Document 1", Data = "Some data" });
+
+// Or
+
+var data = new MyType { Id = 0, Name = "Document 1", Data = "Some data" };
+collection.Insert(data);
+Console.WriteLine("{0}", data.Id); // 2
+
+// Query all documents into a C# list
+var documents = collection.Select().OnAll().ToList();
+
+// Query the Data property, where Name starts with 'Document'
+var documentsData = collection.Select(d => d.Data).Where(d => d.Name.StartsWith("Document")).ToList();
+
+data.Data = "Updated data";
+
+// Update a document
+collection.Update(data);
+
+// Delete a document
+var count = collection.DeleteById(data.Id); // 1
+```
 
 And in F#:
 
@@ -123,5 +174,5 @@ let data = {data with  Data = "Updated data"}
 collection.Update(data)
         
 // Delete a document
-collection.DeleteById(data.Id)
+let count = collection.DeleteById(data.Id) // 1
 ```
