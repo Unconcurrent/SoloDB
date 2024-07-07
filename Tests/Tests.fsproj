@@ -964,6 +964,7 @@
     <Compile Include="TestsUtils.fs" />
     <Compile Include="TypesOld.fs" />
     <Compile Include="Types.fs" />
+    <Compile Include="CSharpProxyTests.fs" />
     <Compile Include="StandardTests.fs" />
     <Compile Include="TransactionalTests.fs" />
     <Compile Include="PolymorphicTests.fs" />
@@ -981,6 +982,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\CSharpTests\CSharpTests.csproj" />
     <ProjectReference Include="..\SoloDB\SoloDB.fsproj" />
   </ItemGroup>
 

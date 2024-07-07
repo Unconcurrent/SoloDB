@@ -7,6 +7,7 @@ open System.Diagnostics
 open System.Text.RegularExpressions
 open SoloDatabase
 open SoloDatabase.Operators
+open CSharpTests
 
 type TestResult =
     | Passed of string * int64
@@ -79,7 +80,7 @@ type TestRunner() =
         let failed = allResults |> Seq.filter (function Failed _ -> true | _ -> false) |> Seq.length
         TestRunner.PrintWithColor("35", $"Test summary: {passed} passed, {failed} failed in {stopwatch.Elapsed}")
 
-    static member GetTests(assembly: Assembly) =
+    static member GetTests(assemblies: Assembly array) =
         /// Convert a glob pattern to a regular expression pattern.
         let globToRegex (globPattern: string) =
             let escapedPattern = Regex.Escape(globPattern)
@@ -93,7 +94,7 @@ type TestRunner() =
             let regex = new Regex(regexPattern)
             regex.IsMatch(text)
 
-        let testTypes = assembly.GetTypes() |> Array.filter(fun t -> t.GetCustomAttributes(typeof<TestClassAttribute>, true).Length > 0)
+        let testTypes = assemblies |> Seq.collect _.GetTypes() |> Seq.filter(fun t -> t.GetCustomAttributes(typeof<TestClassAttribute>, true).Length > 0) |> Seq.toArray
 
         {|
             Run = fun (testsFilterStr) ->
@@ -102,5 +103,5 @@ type TestRunner() =
 
 [<EntryPoint>]
 let main argv =
-    TestRunner.GetTests(Assembly.GetExecutingAssembly()).Run "*"
+    TestRunner.GetTests([|Assembly.GetExecutingAssembly()|]).Run "StructCast"
     0

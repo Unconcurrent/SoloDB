@@ -11,7 +11,7 @@ open System.Threading.Tasks
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open FSharp.Interop.Dynamic
 open SoloDatabase
-open SoloDatabase
+open Dapper
 open SoloDatabase.Types
 open SoloDatabase.JsonFunctions
 open Types
@@ -1187,3 +1187,12 @@ type SoloDBStandardTesting() =
 
         let query1 = numbers.Select(fun n -> n % 10L).Where(fun n -> n % 5L = 0L).ToList()
         assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n % 5L = 0L) |> List.map(fun n -> n % 10L)) "Not correct query."
+
+    [<TestMethod>]
+    member this.FailedToCloseTransactionFail() =        
+        let ex = Assert.ThrowsException(fun () -> 
+            use conn = db.Connection.Borrow()
+            let tr = conn.BeginTransaction()
+            ()
+        )
+        assertEqual ex.Message "The transaction must be finished before you return the connection to the pool." "Wrong exception."

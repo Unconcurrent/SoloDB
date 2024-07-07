@@ -30,16 +30,12 @@ module Connections =
         let pool = ConcurrentStack<PooledConnection>()
 
         member internal this.TakeBack(pooledConn: PooledConnection) =
-            if Utils.debugTransactions then
-                try
-                    pooledConn.Execute("ROLLBACK;") |> ignore
-                    failwithf "A transaction was not ended, before returning to the pool."
-                with 
-                | :? Microsoft.Data.Sqlite.SqliteException as e ->
-                    // As expected.
-                    ()
-                | other -> 
-                    reraise()
+            // SQLite does not support nested transactions, therefore we can use it to check if the user forgot to 
+            // end the transaction before returning it to the pool.
+            try pooledConn.Execute("BEGIN; ROLLBACK;") |> ignore
+            with 
+            | :? SqliteException as se when se.SqliteErrorCode = 1 && se.SqliteExtendedErrorCode = 1 ->
+                failwithf "The transaction must be finished before you return the connection to the pool."
 
             pool.Push pooledConn
 
