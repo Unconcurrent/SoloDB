@@ -974,6 +974,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="altcover" Version="8.8.74" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.10.0" />
     <PackageReference Include="MSTest.TestAdapter" Version="3.4.3" />
     <PackageReference Include="MSTest.TestFramework" Version="3.4.3" />
