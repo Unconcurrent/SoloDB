@@ -1084,3 +1084,106 @@ type SoloDBStandardTesting() =
 
         let stringsLen = strings.Select(fun s -> s.Length).Where(fun s -> s.Length > 3).ToList()
         assertEqual stringsLen.Length 4 "Incorrect string.Len."
+
+    [<TestMethod>]
+    member this.StartsWith() =
+        let strings = db.GetCollection<string>()
+        strings.Insert "ABC" |> ignore
+        strings.Insert "ABC12" |> ignore
+        strings.Insert "ABC13" |> ignore
+        strings.Insert "ADC14" |> ignore
+        strings.Insert "CBA1" |> ignore
+        strings.Insert "CBA2" |> ignore
+        strings.Insert "CBA3" |> ignore
+
+        let query = strings.Select(fun s -> s).Where(fun s -> s.StartsWith "ABC").ToList()
+        assertTrue (query.Length = 3)
+
+        let query2 = strings.Select(fun s -> s).Where(fun s -> s.StartsWith 'A').ToList()
+        assertTrue (query2.Length = 4)
+
+        let query3 = strings.Select(fun s -> s).Where(fun s -> s.StartsWith 'C').ToList()
+        assertTrue (query3.Length = 3)
+
+    [<TestMethod>]
+    member this.EndsWith() =
+        let strings = db.GetCollection<string>()
+        strings.Insert "ABC" |> ignore
+        strings.Insert "2ABC" |> ignore
+        strings.Insert "3ABC" |> ignore
+        strings.Insert "4ADC" |> ignore
+        strings.Insert "1CBA" |> ignore
+        strings.Insert "2CBA" |> ignore
+        strings.Insert "3CBA" |> ignore
+
+        let query = strings.Select(fun s -> s).Where(fun s -> s.EndsWith "ABC").ToList()
+        assertTrue (query.Length = 3)
+
+        let query2 = strings.Select(fun s -> s).Where(fun s -> s.EndsWith 'C').ToList()
+        assertTrue (query2.Length = 4)
+
+        let query3 = strings.Select(fun s -> s).Where(fun s -> s.EndsWith 'A').ToList()
+        assertTrue (query3.Length = 3)
+
+    [<TestMethod>]
+    member this.StringConcat() =
+        let strings = db.GetCollection<string>()
+        strings.Insert "ABC" |> ignore
+        strings.Insert "2ABC" |> ignore
+        strings.Insert "3ABC" |> ignore
+        strings.Insert "4ADC" |> ignore
+        strings.Insert "1CBA" |> ignore
+        strings.Insert "2CBA" |> ignore
+        strings.Insert "3CBA" |> ignore
+        let query = strings.Count().Where(fun s -> s + "1" = "ABC1").First()
+        assertTrue (query = 1L)
+
+    [<TestMethod>]
+    member this.Addition() =
+        let numbers = db.GetCollection<int64>()
+        numbers.InsertBatch [|-100..100|] |> ignore
+
+        let query1 = numbers.Select(fun n -> n + 10L).Where(fun n -> n + 50L <= 0L).ToList()
+        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n + 50L <= 0L) |> List.map(fun n -> n + 10L)) "Not correct query."
+
+
+    [<TestMethod>]
+    member this.Subtraction() =
+        let numbers = db.GetCollection<int64>()
+        numbers.InsertBatch [|-100..100|] |> ignore
+
+        let query1 = numbers.Select(fun n -> n - 10L).Where(fun n -> n - 50L <= 0L).ToList()
+        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n - 50L <= 0L) |> List.map(fun n -> n - 10L)) "Not correct query."
+
+    [<TestMethod>]
+    member this.Multiplication() =
+        let numbers = db.GetCollection<int64>()
+        numbers.InsertBatch [|-100..100|] |> ignore
+
+        let query1 = numbers.Select(fun n -> n * 10L).Where(fun n -> n * 50L <= 0L).ToList()
+        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n * 50L <= 0L) |> List.map(fun n -> n * 10L)) "Not correct query."
+
+    [<TestMethod>]
+    member this.DivisionAndModulus() =
+        let numbers = db.GetCollection<int64>()
+        numbers.InsertBatch [|-100..100|] |> ignore
+
+        let query1 = numbers.Select(fun n -> n / 10L).Where(fun n -> n % 5L = 0L).ToList()
+        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n % 5L = 0L) |> List.map(fun n -> n / 10L)) "Not correct query."
+
+
+    [<TestMethod>]
+    member this.Division() =
+        let numbers = db.GetCollection<int64>()
+        numbers.InsertBatch [|-100..100|] |> ignore
+
+        let query1 = numbers.Select(fun n -> n / 10L).Where(fun n -> n / 2L <= 0L).ToList()
+        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n / 2L <= 0L) |> List.map(fun n -> n / 10L)) "Not correct query."
+
+    [<TestMethod>]
+    member this.Modulus() =
+        let numbers = db.GetCollection<int64>()
+        numbers.InsertBatch [|-100..100|] |> ignore
+
+        let query1 = numbers.Select(fun n -> n % 10L).Where(fun n -> n % 5L = 0L).ToList()
+        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n % 5L = 0L) |> List.map(fun n -> n % 10L)) "Not correct query."

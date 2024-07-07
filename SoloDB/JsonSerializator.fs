@@ -15,6 +15,7 @@ module JsonSerializator =
     open SoloDatabase.Utils
     open System.Text
     open System.Globalization
+    open System.Runtime.CompilerServices
 
     let inline isNullableType (typ: Type) =
         typ.IsGenericType && typ.GetGenericTypeDefinition() = typedefof<Nullable<_>>
@@ -35,7 +36,7 @@ module JsonSerializator =
         | Colon
         | StringToken of string
         | NumberToken of decimal
-        | BoolenToken of bool
+        | BooleanToken of bool
         | EndOfInput
 
     let tokenize (input: string) : Token seq =
@@ -79,11 +80,11 @@ module JsonSerializator =
                 | c when isDigit c ->
                     let sb = System.Text.StringBuilder()
                     let mutable i = index
-                    while i < input.Length && (isDigit input.[i] || input.[i] = '.' || input.[i] = 'e' || input.[i] = '+') do
+                    while i < input.Length && (isDigit input.[i] || input.[i] = '.' || input.[i] = 'e' || input.[i] = 'E' || input.[i] = '+') do
                         sb.Append(input.[i]) |> ignore
                         i <- i + 1
                     index <- i
-                    NumberToken (Decimal.Parse(sb.ToString(), CultureInfo.InvariantCulture))
+                    NumberToken (Decimal.Parse(sb.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture))
                 | c when isInitialIdentifierChar c ->
                     let sb = System.Text.StringBuilder()
                     let mutable i = index
@@ -95,9 +96,9 @@ module JsonSerializator =
                     match txt with
                     | "null"
                     | "NULL" -> NullToken
-                    | "true" -> BoolenToken(true)
-                    | "false" -> BoolenToken(false)
-                    | other -> StringToken(txt)
+                    | "true" -> BooleanToken(true)
+                    | "false" -> BooleanToken(false)
+                    | other -> StringToken other
                 | c when Char.IsWhiteSpace(c) ->
                     index <- index + 1
                 | _ -> failwith "Invalid JSON format"
@@ -440,60 +441,70 @@ module JsonSerializator =
         static member Parse (jsonString: string) =
             let parse (tokens: Token seq) : JsonValue =
                 let next(tokens: IEnumerator<Token>) =
+                    RuntimeHelpers.EnsureSufficientExecutionStack()
                     if tokens.MoveNext() then
-                        tokens.Current, tokens
-                    else EndOfInput, tokens
-
-                let rec parseTokens (tokens: IEnumerator<Token>) =
-                    let current, rest = next tokens
+                        tokens.Current
+                    else EndOfInput
+            
+                let rec parseTokensOr (tokens: IEnumerator<Token>) f =
+                    let current = next tokens
                     match current with
                     | OpenBrace ->
-                        let obj, remainingTokens = parseObject rest
-                        Object obj, remainingTokens
+                        let obj = parseObject tokens
+                        Object obj |> Some
                     | OpenBracket ->
-                        let list, remainingTokens = parseArray rest
-                        List list, remainingTokens
+                        let list = parseArray tokens
+                        List list |> Some
                     | StringToken str ->
-                        String str, rest
+                        String str |> Some
                     | NumberToken num ->
-                        Number num, rest
-                    | BoolenToken b ->
-                        JsonValue.Boolean b, rest
+                        Number num |> Some
+                    | BooleanToken b ->
+                        JsonValue.Boolean b |> Some
                     | NullToken ->
-                        Null, rest
-                    | _ -> failwith "Unexpected token during parsing"
-        
+                        Null |> Some
+                    | other -> f other
+
+                and parseTokens (tokens: IEnumerator<Token>) =
+                    parseTokensOr tokens (fun t -> failwithf "Malformed JSON at: %A" t) |> _.Value
+                    
                 and parseObject tokens =
                     let dict = new Dictionary<string, JsonValue>(StringComparer.OrdinalIgnoreCase)
                     let rec parseMembers tokens =
-                        let current, rest = next tokens
+                        let current = next tokens
                         match current with
-                        | CloseBrace -> dict, rest
+                        | CloseBrace -> dict
                         | StringToken key ->
-                            let colon, valueTokens = next tokens
+                            let colon = next tokens
                             if colon <> Colon then failwithf "Malformed json."
-
-                            let value, postValueTokens = parseTokens valueTokens
+            
+                            let value = parseTokens tokens
                             dict.Add(key, value)
-                            parseMembers postValueTokens
-                        | Comma -> parseMembers rest
+                            parseMembers tokens
+                        | Comma -> parseMembers tokens
                         | _ -> failwith "Invalid object syntax"
                     parseMembers tokens
-        
+                    
                 and parseArray tokens =
                     let items = new List<JsonValue>()
                     let rec parseElements tokens =
-                        let item, remainingTokens = parseTokens tokens
+                        let item = parseTokensOr tokens (fun t -> match t with CloseBracket -> None | other -> failwithf "Invalid list token: %A" other)
+                        match item with
+                        | None -> items
+                        | Some item ->
                         items.Add(item)
-
-                        let current, rest = next remainingTokens
+            
+                        let current = next tokens
                         match current with
-                        | CloseBracket -> items, rest
-                        | Comma -> parseElements rest
+                        | CloseBracket -> items
+                        | Comma -> parseElements tokens
                         | _ -> failwithf "Malformed json."
                     parseElements tokens
-        
-                tokens.GetEnumerator() |> parseTokens |> fst
+                    
+                let enumerator = tokens.GetEnumerator()
+                let jsonObj = parseTokens enumerator
+
+                jsonObj
 
             let tokens = tokenize jsonString
             parse tokens

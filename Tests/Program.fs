@@ -100,5 +100,5 @@ type TestRunner() =
 
 [<EntryPoint>]
 let main argv =
-    TestRunner.GetTests(Assembly.GetExecutingAssembly()).Run "SelectType"
+    TestRunner.GetTests(Assembly.GetExecutingAssembly()).Run "JsonParsing"
     0

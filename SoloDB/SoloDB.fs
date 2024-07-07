@@ -662,6 +662,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     static member tryDropByName name (db: SoloDB) = db.DropCollectionIfExists name
 
     static member transactionally func (db: SoloDB) = db.Transactionally func
+    static member optimize (db: SoloDB) = db.Optimize()
 
     static member ensureIndex<'T, 'R> (func: Expression<System.Func<'T, 'R>>) (collection: Collection<'T>) = collection.EnsureIndex func
     static member tryDropIndex<'T, 'R> (func: Expression<System.Func<'T, 'R>>) (collection: Collection<'T>) = collection.DropIndexIfExists func
