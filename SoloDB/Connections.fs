@@ -5,7 +5,7 @@ module Connections =
     open System
     open System.Collections.Concurrent
 
-    type TransactionalConnection(connectionStr: string) =
+    type TransactionalConnection internal (connectionStr: string) =
         inherit SqliteConnection(connectionStr)
 
         member internal this.DisposeReal(disposing) =
@@ -16,7 +16,7 @@ module Connections =
             ()
 
 
-    type PooledConnection(connectionStr: string, manager: ConnectionManager) =
+    type PooledConnection internal (connectionStr: string, manager: ConnectionManager) =
         inherit SqliteConnection(connectionStr)
 
         member internal this.DisposeReal(disposing) =
@@ -25,7 +25,7 @@ module Connections =
         override this.Dispose(disposing) =
             manager.TakeBack this
 
-    and ConnectionManager(connectionStr: string, setup: SqliteConnection -> unit) =
+    and ConnectionManager internal (connectionStr: string, setup: SqliteConnection -> unit) =
         let all = ConcurrentStack<PooledConnection>()
         let pool = ConcurrentStack<PooledConnection>()
 

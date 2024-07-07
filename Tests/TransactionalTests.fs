@@ -28,7 +28,7 @@ type SoloDBTransactionalTesting() =
         db.GetCollection<User>().InsertBatch randomUsersToInsert |> ignore
 
         Assert.ThrowsException<exn>(fun () ->
-            db.Transactionally(
+            db.WithTransaction(
                 fun db -> 
                     db.DropCollection<User>()
                     printfn "Now will fail."
@@ -39,7 +39,7 @@ type SoloDBTransactionalTesting() =
 
     [<TestMethod>]
     member this.TransactionQuery() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db -> 
                 let users = db.GetCollection<User>()
                 users.InsertBatch randomUsersToInsert |> ignore
@@ -65,7 +65,7 @@ type SoloDBTransactionalTesting() =
 
     [<TestMethod>]
     member this.TransactionCountWhereWithLimitEqual() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let testUsers = [
                     { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
@@ -83,7 +83,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionAnyTrue() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let testUser = {
                     Username = "Alice"
@@ -106,7 +106,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionAnyFalse() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 users.InsertBatch randomUsersToInsert |> ignore
@@ -121,7 +121,7 @@ type SoloDBTransactionalTesting() =
     [<TestMethod>]
     member this.TransactionRollBackAnyFalse() =
         Assert.ThrowsException(fun () ->
-            db.Transactionally(
+            db.WithTransaction(
                 fun db ->
                     let users = db.GetCollection<User>()
                     users.InsertBatch randomUsersToInsert |> ignore
@@ -138,7 +138,7 @@ type SoloDBTransactionalTesting() =
     member this.TransactionCountAllEmpty() =
         let users = db.GetCollection<User>()
 
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 let count = users.CountAll()
@@ -152,7 +152,7 @@ type SoloDBTransactionalTesting() =
     [<TestMethod>]
     member this.TransactionCountAllWithMultipleInserts() =
         let users = db.GetCollection<User>()
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let testUsers = [
                     { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
@@ -170,7 +170,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionCountWhereMultipleConditions() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let testUsers = [
                     { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
@@ -192,7 +192,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionCountWithZeroConditionMatch() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let testUsers = [
                     { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
@@ -207,7 +207,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionCountWhereMultipleUsersMatch() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let testUsers = [
                     { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
@@ -226,7 +226,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionAnyWithMultipleConditionsTrue() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let testUsers = [
                     { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
@@ -241,7 +241,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionAnyWithMultipleConditionsFalse() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let testUsers = [
                     { Username = "Alice"; Auth = true; Banned = false; FirstSeen = DateTimeOffset.MinValue; LastSeen = DateTimeOffset.UtcNow; Data = { Tags = [|"example"|] } }
@@ -260,7 +260,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionCountWhereWithLimitZero() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 let count = users.CountWhere((fun u -> u.Username = "NonExistent"), 1UL)
@@ -271,7 +271,7 @@ type SoloDBTransactionalTesting() =
     member this.TransactionUpdateUser() =
         let testUser = randomUsersToInsert.[0]
         let updatedUser = { testUser with Username = "UpdatedName" }
-        let id = db.Transactionally(
+        let id = db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()                
                 let id = users.Insert testUser                
@@ -284,7 +284,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionDeleteUser() =
-        let id = db.Transactionally(
+        let id = db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 let testUser = randomUsersToInsert.[0]
@@ -298,7 +298,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionCountUsers() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 users.InsertBatch randomUsersToInsert |> ignore
@@ -309,7 +309,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionLimitUsers() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 users.InsertBatch randomUsersToInsert |> ignore
@@ -323,7 +323,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionOffsetUsers() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 users.InsertBatch randomUsersToInsert |> ignore                
@@ -334,7 +334,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionOrderByAscUsers() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 users.InsertBatch randomUsersToInsert |> ignore
@@ -345,7 +345,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionCountWhereUsers() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 users.InsertBatch randomUsersToInsert |> ignore
@@ -361,7 +361,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionAnyUsers() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 users.InsertBatch randomUsersToInsert |> ignore
@@ -377,7 +377,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionUpdateWhere() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 users.InsertBatch randomUsersToInsert |> ignore
@@ -392,7 +392,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionSelectWithId() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 users.InsertBatch randomUsersToInsert |> ignore
@@ -406,7 +406,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionGetNonExistentUser() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 let user = users.TryGetById 99999L
@@ -419,7 +419,7 @@ type SoloDBTransactionalTesting() =
     
     [<TestMethod>]
     member this.TransactionInsertDuplicateUser() =
-        db.Transactionally(
+        db.WithTransaction(
             fun db ->
                 let users = db.GetCollection<User>()
                 let testUser = randomUsersToInsert.[0]

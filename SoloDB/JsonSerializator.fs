@@ -106,9 +106,6 @@ module JsonSerializator =
             EndOfInput
         }
 
-        
-
-
     type JsonValue =
         | Null
         | Boolean of bool

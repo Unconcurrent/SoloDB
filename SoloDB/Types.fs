@@ -5,15 +5,23 @@ open System
 open System.Threading
 open Dapper
 open System.Collections.Generic
+open System.Runtime.CompilerServices
 
-type internal DisposableMutex(name: string) =
-    let mutex = new Mutex(false, name)
-    do mutex.WaitOne() |> ignore
+[<IsByRefLike; Struct>]
+type internal DisposableMutex =
+    val mutex: Mutex
+
+    internal new(name: string) =
+        let mutex = new Mutex(false, name)
+        mutex.WaitOne() |> ignore
+
+        { mutex = mutex }
+
 
     interface IDisposable with
         member this.Dispose() =
-            mutex.ReleaseMutex()
-            mutex.Dispose()
+            this.mutex.ReleaseMutex()
+            this.mutex.Dispose()
 
 
 [<Struct>]
@@ -79,7 +87,7 @@ type Metadata = {
 }
 
 [<CLIMutable>]
-type FileHeader = {
+type SoloDBFileHeader = {
     Id: SqlId
     Name: string
     DirectoryId: SqlId
@@ -91,7 +99,7 @@ type FileHeader = {
 }
 
 [<CLIMutable>]
-type DirectoryHeader = {
+type SoloDBDirectoryHeader = {
     Id: SqlId
     Name: string
     FullPath: string
@@ -102,7 +110,7 @@ type DirectoryHeader = {
 }
 
 [<CLIMutable>]
-type internal FileChunk = {
+type internal SoloDBFileChunk = {
     Id: SqlId
     FileId: SqlId
     Number: int64

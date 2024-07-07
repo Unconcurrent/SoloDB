@@ -354,7 +354,6 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
     let connectionString = connection.ConnectionString
 
     member private this.InitializeCollection<'T> name =
-        use mutex = Helper.lockTable connectionString name // To prevent a race condition where the next if statment is true for 2 threads.
         if not (Helper.existsCollection name connection) then 
             Helper.createTableInner name connection null
 
@@ -425,6 +424,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
     let mutable disposed = false
 
+    member this.Connection = connectionManager
     member this.ConnectionString = connectionString
     member internal this.DataLocation = location
     member this.FileSystem = FileSystem(connectionManager)
@@ -458,11 +458,11 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         
         this.InitializeCollection<obj>(name)
 
-    member this.ExistCollection name =
+    member this.CollectionExists name =
         use dbConnection = connectionManager.Borrow()
         Helper.existsCollection name dbConnection
 
-    member this.ExistCollection<'T>() =
+    member this.CollectionExists<'T>() =
         let name = Helper.getNameFrom<'T>()
         use dbConnection = connectionManager.Borrow()
         Helper.existsCollection name dbConnection
@@ -505,7 +505,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         use otherConnection = otherDb.GetNewConnection()
         dbConnection.BackupDatabase otherConnection
 
-    member this.BackupVacuumTo(location: string) =
+    member this.VacuumTo(location: string) =
         match this.DataLocation with
         | Memory _ -> failwithf "Cannot vaccuum backup from or to memory."
         | other ->
@@ -516,7 +516,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         use dbConnection = connectionManager.Borrow()
         dbConnection.Execute($"VACUUM INTO '{location}'")
 
-    member this.Transactionally<'R>(func: Func<TransactionalSoloDB, 'R>) : 'R =        
+    member this.WithTransaction<'R>(func: Func<TransactionalSoloDB, 'R>) : 'R =        
         use connectionForTransaction = connectionManager.CreateForTransaction()
         try
             connectionForTransaction.Open()
@@ -570,19 +570,19 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                             ") |> ignore
 
         dbConnection.Execute("
-                            CREATE TABLE IF NOT EXISTS DirectoryHeader (
+                            CREATE TABLE IF NOT EXISTS SoloDBDirectoryHeader (
                                 Id INTEGER PRIMARY KEY,
                                 Name TEXT NOT NULL CHECK ((length(Name) != 0 OR ParentId IS NULL) AND (Name != \".\") AND (Name != \"..\") AND NOT Name GLOB \"*/*\"),
                                 FullPath TEXT NOT NULL CHECK (FullPath != \"\" AND NOT FullPath GLOB \"*/./*\" AND NOT FullPath GLOB \"*/../*\"),
                                 ParentId INTEGER,
                                 Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
                                 Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
-                                FOREIGN KEY (ParentId) REFERENCES DirectoryHeader(Id) ON DELETE CASCADE,
+                                FOREIGN KEY (ParentId) REFERENCES SoloDBDirectoryHeader(Id) ON DELETE CASCADE,
                                 UNIQUE(ParentId, Name),
                                 UNIQUE(FullPath)
                             ) STRICT;
 
-                            CREATE TABLE IF NOT EXISTS FileHeader (
+                            CREATE TABLE IF NOT EXISTS SoloDBFileHeader (
                                 Id INTEGER PRIMARY KEY,
                                 Name TEXT NOT NULL CHECK (length(Name) != 0 AND Name != \".\" AND Name != \"..\"),
                                 DirectoryId INTEGER NOT NULL,
@@ -590,44 +590,44 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                                 Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
                                 Length INTEGER NOT NULL DEFAULT 0,
                                 Hash BLOB NOT NULL DEFAULT (SHA_HASH('')),
-                                FOREIGN KEY (DirectoryId) REFERENCES DirectoryHeader(Id) ON DELETE CASCADE,
+                                FOREIGN KEY (DirectoryId) REFERENCES SoloDBDirectoryHeader(Id) ON DELETE CASCADE,
                                 UNIQUE(DirectoryId, Name)
                             ) STRICT;
 
-                            CREATE TABLE IF NOT EXISTS FileChunk (
+                            CREATE TABLE IF NOT EXISTS SoloDBFileChunk (
                                 FileId INTEGER NOT NULL,
                                 Number INTEGER NOT NULL,
                                 Data BLOB NOT NULL,
-                                FOREIGN KEY (FileId) REFERENCES FileHeader(Id) ON DELETE CASCADE,
+                                FOREIGN KEY (FileId) REFERENCES SoloDBFileHeader(Id) ON DELETE CASCADE,
                                 UNIQUE(FileId, Number) ON CONFLICT REPLACE
                             ) STRICT;
 
-                            CREATE TABLE IF NOT EXISTS FileMetadata (
+                            CREATE TABLE IF NOT EXISTS SoloDBFileMetadata (
                                 Id INTEGER PRIMARY KEY,
                                 FileId INTEGER NOT NULL,
                                 Key TEXT NOT NULL,
                                 Value TEXT NOT NULL,
                                 UNIQUE(FileId, Key) ON CONFLICT REPLACE,
-                                FOREIGN KEY (FileId) REFERENCES FileHeader(Id) ON DELETE CASCADE
+                                FOREIGN KEY (FileId) REFERENCES SoloDBFileHeader(Id) ON DELETE CASCADE
                             ) STRICT;
 
-                            CREATE TABLE IF NOT EXISTS DirectoryMetadata (
+                            CREATE TABLE IF NOT EXISTS SoloDBDirectoryMetadata (
                                 Id INTEGER PRIMARY KEY,
                                 DirectoryId INTEGER NOT NULL,
                                 Key TEXT NOT NULL,
                                 Value TEXT NOT NULL,
                                 UNIQUE(DirectoryId, Key) ON CONFLICT REPLACE,
-                                FOREIGN KEY (DirectoryId) REFERENCES DirectoryHeader(Id) ON DELETE CASCADE
+                                FOREIGN KEY (DirectoryId) REFERENCES SoloDBDirectoryHeader(Id) ON DELETE CASCADE
                             ) STRICT;
 
-                            CREATE INDEX IF NOT EXISTS SoloDBDirectoryHeaderNameAndParentIdIndex ON DirectoryHeader(Name, ParentId);
-                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBDirectoryHeaderFullPathIndex ON DirectoryHeader(FullPath);
-                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBDirectoryMetadataDirectoryIdAndKey ON DirectoryMetadata(DirectoryId, Key);
+                            CREATE INDEX IF NOT EXISTS SoloDBSoloDBDirectoryHeaderNameAndParentIdIndex ON SoloDBDirectoryHeader(Name, ParentId);
+                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBDirectoryHeaderFullPathIndex ON SoloDBDirectoryHeader(FullPath);
+                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBDirectoryMetadataDirectoryIdAndKey ON SoloDBDirectoryMetadata(DirectoryId, Key);
 
-                            CREATE INDEX IF NOT EXISTS SoloDBFileHeaderNameAndDirectoryIdIndex ON FileHeader(Name, DirectoryId);
-                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileChunkFileIdAndNumberIndex ON FileChunk(FileId, Number);
-                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileMetadataFileIdAndKey ON FileMetadata(FileId, Key);
-                            CREATE INDEX IF NOT EXISTS SoloDBFileHashIndex ON FileHeader(Hash);
+                            CREATE INDEX IF NOT EXISTS SoloDBSoloDBFileHeaderNameAndDirectoryIdIndex ON SoloDBFileHeader(Name, DirectoryId);
+                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBFileChunkFileIdAndNumberIndex ON SoloDBFileChunk(FileId, Number);
+                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBFileMetadataFileIdAndKey ON SoloDBFileMetadata(FileId, Key);
+                            CREATE INDEX IF NOT EXISTS SoloDBFileHashIndex ON SoloDBFileHeader(Hash);
 
                             ")|> ignore
 
@@ -635,9 +635,9 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         do
             use t = dbConnection.BeginTransaction(false)
             try
-                let rootDir = dbConnection.Query<SqlId>("SELECT Id FROM DirectoryHeader WHERE ParentId IS NULL AND length(Name) = 0") |> Seq.tryHead
+                let rootDir = dbConnection.Query<SqlId>("SELECT Id FROM SoloDBDirectoryHeader WHERE ParentId IS NULL AND length(Name) = 0") |> Seq.tryHead
                 if rootDir.IsNone then
-                    dbConnection.Execute("INSERT INTO DirectoryHeader(Name, ParentId, FullPath) VALUES (\"\", NULL, \"/\");", transaction = t) |> ignore
+                    dbConnection.Execute("INSERT INTO SoloDBDirectoryHeader(Name, ParentId, FullPath) VALUES (\"\", NULL, \"/\");", transaction = t) |> ignore
                 t.Commit()
             with e -> 
                 t.Rollback()
@@ -661,7 +661,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     static member tryDrop<'T> (db: SoloDB) = db.DropCollectionIfExists<'T>()
     static member tryDropByName name (db: SoloDB) = db.DropCollectionIfExists name
 
-    static member transactionally func (db: SoloDB) = db.Transactionally func
+    static member withTransaction func (db: SoloDB) = db.WithTransaction func
     static member optimize (db: SoloDB) = db.Optimize()
 
     static member ensureIndex<'T, 'R> (func: Expression<System.Func<'T, 'R>>) (collection: Collection<'T>) = collection.EnsureIndex func

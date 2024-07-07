@@ -1,80 +1,88 @@
 # SoloDB
 
-todo: Add all examples to tests.
-
-## Overview
-
-**SoloDB** is a document database built on top of SQLite using the JSONB data type. It leverages the robustness and simplicity of SQLite to provide an efficient and lightweight database solution for handling JSON documents.
+SoloDB is a light, fast and robust SQL and NoSQL .NET database built on top of SQLite using the JSONB data type.
 
 ## Features
 
-- **SQLite at the core**: Utilizes SQLite's reliability and robustness, using one of its build-in types - **JSONB**.
-- **Easy to use API**: It provides an easy to use API for SQL and non SQL users.
-- **File Storage**: Includes a file system functionality for storing and managing big files and directories.
+- [SQLite](https://sqlite.org/) at the core.
+- Serverless, it is a .NET library.
+- Simple API, see the [below](#usage).
+- Thread safe using a connection pool.
+- [ACID](https://www.sqlite.org/transactional.html) with [full transaction support](#transactions).
+- [File System](./Tests/FileSystemTests.fs) for large files storage.
+- Single data file storage on SQLite.
+- [Reliable](https://sqlite.org/hirely.html) with a [WAL log file](https://www.sqlite.org/wal.html).
+- Support for [indexes](https://www.sqlite.org/expridx.html) for fast search.
+- LINQ-like queries.
+- Direct SQL support.
+- [Open source](./LICENSE.txt).
+- Pretty well tested: 130+ of mostly integration tests.
 
 ## Usage
 
 ### Initializing the Database
 
-To initialize the database, use the Instantiate method with a source string. The source string can specify either a file path or an in-memory database.
+You can specify either a file path or an in-memory database.
 
 ```csharp
 var onDiskDB = SoloDB.Instantiate("path/to/database.db");
 var inMemoryDB = SoloDB.Instantiate("memory:database-name");
 ```
+
 ### Working with Collections
 
 #### Creating and Accessing Collections
 
-To create or access a collection, use the `GetCollection` or `GetUntypedCollection` methods.
-
 ```csharp
-var myCollection = db.GetCollection<MyType>();
-var untypedCollection = db.GetUntypedCollection("collectionName");
+var myCollection = db.GetCollection<User>();
+var untypedCollection = db.GetUntypedCollection("User");
 ```
 
 #### Checking Collection Existence
 
-You can check if a collection exists using the `ExistCollection` method.
-
 ```csharp
-var exists = db.ExistCollection<MyType>();
+var exists = db.CollectionExists<User>();
 ```
 
 #### Dropping Collections
 
-To drop a collection, use the `DropCollection` or `DropCollectionIfExists` methods.
 
-```scharp
-db.DropCollection<MyType>();
+```csharp
+db.DropCollection<User>();
+db.DropCollectionIfExists<User>();
+db.DropCollection("User");
+db.DropCollectionIfExists("User");
 ```
 
 ### Transactions
 
-SoloDB supports transactional operations. Use the `Transactionally` method to execute a function within a transaction.
+Use the `WithTransaction` method to execute a function within a transaction.
 
 ```csharp
-db.Transactionally(txDb => {
-    var collection = txDb.GetCollection<MyType>();
-    // Perform operations within the transaction
+db.WithTransaction(tx => {
+    var collection = tx.GetCollection<long>();
+    // Perform operations within the transaction.
+    collection.Insert(420);    
     throw null; // Simulate a fail.
 });
+...
+db.CollectionExists<long>() // False.
 ```
 
 ### Backup and Optimization
 
 #### Backing Up the Database
 
-You can create a backup of the database using the `BackupTo` or `BackupVacuumTo` methods.
+You can create a backup of the database using the [`BackupTo`](https://www.sqlite.org/backup.html) or [`VacuumTo`](https://www.sqlite.org/lang_vacuum.html#vacuuminto) methods.
 
 ```csharp
 db.BackupTo(otherDb);
-db.BackupVacuumTo("path/to/backup.db");
+db.VacuumTo("path/to/backup.db");
 ```
 
 #### Optimizing the Database
 
-Run the `Optimize` method to optimize the database.
+Run the [`Optimize`](https://www.sqlite.org/pragma.html#pragma_optimize) method to optimize the database.
 
 ```csharp
 db.Optimize();
@@ -82,7 +90,10 @@ db.Optimize();
 
 ### Example Usage
 
-Here is an example of how to use SoloDB to manage a collection of documents:
+Here is an example of how to use SoloDB to manage a collection of documents in C#:
+
+
+And in F#:
 
 ```fsharp
 [<CLIMutable>]
@@ -90,27 +101,27 @@ type MyType = { Id: SqlId; Name: string; Data: string }
 
 let db = SoloDB.Instantiate("./mydatabase.db")
 let collection = db.GetCollection<MyType>()
-
+        
 // Insert a document
 let docId = collection.Insert({ Id = SqlId(0); Name = "Document 1"; Data = "Some data" })
-
+        
 // Or
-
+        
 let data = { Id = SqlId(0); Name = "Document 1"; Data = "Some data" }
-collection.Insert(data)
+collection.Insert(data) |> ignore
 printfn "%A" data.Id // 2
-
-// Query documents
-let documents = collection.Select().ToList()
-
-// Query specific properties of documents, where Name start with 'Document'
-let documentsData = collection.Select(fun d -> d.Data).Where(fun d -> d.Name.StartWith "Document").ToList()
-
+        
+// Query all documents into a F# list
+let documents = collection.Select().OnAll().ToList()
+        
+// Query the Data property, where Name starts with 'Document'
+let documentsData = collection.Select(fun d -> d.Data).Where(fun d -> d.Name.StartsWith "Document").ToList()
+        
 let data = {data with  Data = "Updated data"}
-
+        
 // Update a document
 collection.Update(data)
-
+        
 // Delete a document
 collection.DeleteById(data.Id)
 ```
