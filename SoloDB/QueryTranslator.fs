@@ -90,6 +90,8 @@ module QueryTranslator =
             lambdaExpr.Body |> isFullyConstant
         | :? NewExpression as ne when ne.Type.IsAssignableTo(typeof<System.Runtime.CompilerServices.ITuple>) ->
             ne.Arguments |> Seq.forall isFullyConstant
+        | :? NewArrayExpression as na ->
+            na.Expressions |> Seq.forall isFullyConstant
         | _ -> true
 
     let rec isAnyConstant (expr: Expression) : bool =
@@ -110,6 +112,8 @@ module QueryTranslator =
             lambdaExpr.Body |> isAnyConstant
         | :? NewExpression as ne when ne.Type.IsAssignableTo(typeof<System.Runtime.CompilerServices.ITuple>) ->
             ne.Arguments |> Seq.exists isAnyConstant
+        | :? NewArrayExpression as na ->
+            na.Expressions |> Seq.exists isFullyConstant
         | _ -> true
 
     let rec private visit (exp: Expression) (sb: QueryBuilder) : unit =
@@ -123,7 +127,13 @@ module QueryTranslator =
         | ExpressionType.LessThan
         | ExpressionType.LessThanOrEqual
         | ExpressionType.GreaterThan
-        | ExpressionType.GreaterThanOrEqual ->
+        | ExpressionType.GreaterThanOrEqual 
+
+        | ExpressionType.Add
+        | ExpressionType.Subtract
+        | ExpressionType.Multiply
+        | ExpressionType.Divide
+        | ExpressionType.Modulo ->
             visitBinary (exp :?> BinaryExpression) sb
         | ExpressionType.Not ->
             visitNot (exp :?> UnaryExpression) sb
@@ -145,137 +155,169 @@ module QueryTranslator =
             raise (Exception(sprintf "Unhandled expression type: '%O'" exp.NodeType))
 
     and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =
-        if m.Method.Name = "GetArray" then
-            let array = m.Arguments[0]
-            let index = m.Arguments[1]
+        if isFullyConstant m then
+            let value = evaluateExpr m
+            qb.AppendVariable value
+        else
 
+        match m.Method.Name with
+        | "GetArray" ->
+            let array = m.Arguments.[0]
+            let index = m.Arguments.[1]
             qb.AppendRaw "jsonb_extract("
             visit array qb |> ignore
-        
             qb.AppendRaw ", '$["
             visit index qb |> ignore
             qb.AppendRaw "]')"
             
-        else if m.Method.Name = "Like" then
-            let string = m.Arguments[0]
-            let likeWhat = m.Arguments[1]
-
+        | "Like" ->
+            let string = m.Arguments.[0]
+            let likeWhat = m.Arguments.[1]
             visit string qb |> ignore
             qb.AppendRaw " LIKE "
             visit likeWhat qb |> ignore
             
-        else if m.Method.Name = "Set" then
-            let oldValue = m.Arguments[0]
-            let newValue = m.Arguments[1]
-
+        | "Set" ->
+            let oldValue = m.Arguments.[0]
+            let newValue = m.Arguments.[1]
             visit oldValue qb |> ignore
             qb.AppendRaw ","
             visit newValue qb |> ignore
             qb.AppendRaw ","
-            
-        else if m.Method.Name = "AddToEnd" || m.Method.Name = "Add" then
-            let array = m.Arguments[0]
-            let newValue = m.Arguments[1]
-
-            // qb.AppendRaw "jsonb_extract("
+        
+        | name when name = "AddToEnd" || name = "Add" ->
+            let array = m.Arguments.[0]
+            let newValue = m.Arguments.[1]
             visit array qb |> ignore
             qb.RollBack 1u
             qb.AppendRaw "[#]',"
-        
             visit newValue qb |> ignore
             qb.AppendRaw ","
-            
-        else if m.Method.Name = "SetAt" then        
-            let array = m.Arguments[0]
-            let index = m.Arguments[1]
-            let newValue = m.Arguments[2]
-
+        
+        | "SetAt" ->
+            let array = m.Arguments.[0]
+            let index = m.Arguments.[1]
+            let newValue = m.Arguments.[2]
             visit array qb |> ignore
             qb.RollBack 1u
             qb.AppendRaw $"[{index}]',"
             visit newValue qb |> ignore
             qb.AppendRaw ","
-            
-        else if m.Method.Name = "RemoveAt" then
-            let array = m.Arguments[0]
-            let index = m.Arguments[1]
-
+        
+        | "RemoveAt" ->
+            let array = m.Arguments.[0]
+            let index = m.Arguments.[1]
             visit array qb |> ignore
             qb.AppendRaw $",jsonb_remove(jsonb_extract({qb.TableNameDot}Value,"
             visit array qb |> ignore
             qb.AppendRaw "),"
-        
             qb.AppendRaw $"'$[{index}]'),"
-            
-        else if m.Method.Name = "op_BarPlusBar" then
-            let a = m.Arguments[0]
-            let b = m.Arguments[1]
-
-
+        
+        | "op_BarPlusBar" ->
+            let a = m.Arguments.[0]
+            let b = m.Arguments.[1]
             visit a qb |> ignore
-            visit b qb |> ignore            
-
-        else if m.Method.Name = "op_Dynamic" then // todo: add C# version of dynamic.
-            let o = m.Arguments[0]
-            let property = (m.Arguments[1] :?> ConstantExpression).Value
-
+            visit b qb |> ignore
+        
+        | "op_Dynamic" -> // todo: add C# version of dynamic.
+            let o = m.Arguments.[0]
+            let property = (m.Arguments.[1] :?> ConstantExpression).Value
             qb.AppendRaw "jsonb_extract("
             visit o qb |> ignore
-
             if isIntegerBased property then
                 qb.AppendRaw $",'$[{property}]')"
             else
                 qb.AppendRaw $",'$.{property}')"
-            
-        else if m.Method.Name = "AnyInEach" then            
-            let array = m.Arguments[0]
-            let whereFuncExpr = m.Arguments[1]
+        
+        | "AnyInEach" ->
+            let array = m.Arguments.[0]
+            let whereFuncExpr = m.Arguments.[1]
             let exprFunc = Expression.Lambda<Func<Expression>>(whereFuncExpr).Compile(true)
             let expr = exprFunc.Invoke()
-
             qb.AppendRaw $"EXISTS (SELECT 1 FROM json_each("
             visit array qb |> ignore
             qb.AppendRaw ") WHERE "
             let innerQb = {qb with TableNameDot = "json_each."; JsonExtractSelfValue = false}
             visit expr innerQb |> ignore
             qb.AppendRaw ")"
-            
-        else if m.Method.Name = "QuotationToLambdaExpression" then
-            let arg1 = (m.Arguments[0] :?> MethodCallExpression) // SubstHelper
-            let arg2 = arg1.Arguments[0]
+        
+        | "QuotationToLambdaExpression" ->
+            let arg1 = (m.Arguments.[0] :?> MethodCallExpression)
+            let arg2 = arg1.Arguments.[0]
             visit arg2 qb
-        else if m.Method.Name = "op_Implicit" then
-            let arg1 = m.Arguments[0]
+        
+        | "op_Implicit" ->
+            let arg1 = m.Arguments.[0]
             visit arg1 qb
-        else if m.Method.Name = "Contains" && m.Object.Type = typeof<string> then
+        
+        | "Contains" when m.Object.Type = typeof<string> ->
             let text = m.Object
-            let what = m.Arguments[0]
+            let what = m.Arguments.[0]
             qb.AppendRaw "instr("
             visit text qb |> ignore
             qb.AppendRaw ","
             visit what qb |> ignore
             qb.AppendRaw ") > 0"
-            
-        else if m.Method.Name = "GetType" && m.Object.NodeType = ExpressionType.Parameter then
+        
+        | "GetType" when m.Object.NodeType = ExpressionType.Parameter ->
             let o = m.Object
             qb.AppendRaw "jsonb_extract("
             visit o qb |> ignore
-
             qb.AppendRaw $",'$.$type')"
-            
-        else if m.Method.Name = "TypeOf" && m.Type = typeof<Type> then
-            let t = m.Method.Invoke (null, Array.empty) :?> Type
+        
+        | "TypeOf" when m.Type = typeof<Type> ->
+            let t = m.Method.Invoke(null, Array.empty) :?> Type
             let name = match t |> typeToName with Some x -> x | None -> ""
-            qb.AppendVariable (name)
-            
-        else if m.Method.Name = "NewSqlId" then
-            let arg1 = m.Arguments[0]
+            qb.AppendVariable name
+        
+        | "NewSqlId" ->
+            let arg1 = m.Arguments.[0]
             visit arg1 qb
-        else if isFullyConstant m then
-            let value = evaluateExpr m
-            qb.AppendVariable value
-            
-        else
+        
+        | "Concat" when m.Type = typeof<string> ->            
+            let len = m.Arguments.Count
+
+            let args =
+                if len = 1 && m.Arguments.[0].Type.IsAssignableTo typeof<IEnumerable<string>> && m.Arguments.[0].NodeType = ExpressionType.NewArrayInit then
+                    let array = m.Arguments.[0] :?> NewArrayExpression
+                    array.Expressions
+                else if len > 1 then            
+                    m.Arguments
+                else failwithf "Unknown such concat function: %A" m.Method
+
+            let len = args.Count
+            qb.AppendRaw "concat("
+            for i, arg in args |> Seq.indexed do
+                visit arg qb |> ignore
+                if i + 1 < len then qb.AppendRaw ", "
+
+            qb.AppendRaw ")"
+
+        | "StartsWith" when m.Object.Type = typeof<string> ->
+            let arg = 
+                if m.Arguments.[0].Type = typeof<string> then
+                    m.Arguments.[0]
+                else if m.Arguments.[0].Type = typeof<char> && isFullyConstant m.Arguments.[0] then
+                    let value = evaluateExpr<obj> (m.Arguments.[0])
+                    Expression.Constant(value.ToString(), typeof<string>)
+                else failwithf "Unknown %s method" m.Method.Name
+
+            let likeMeth = Expression.Call(typeof<SoloDatabase.Extensions>.GetMethod(nameof(SoloDatabase.Extensions.Like)), m.Object, Expression.Call(typeof<String>.GetMethod("Concat", [|typeof<string>; typeof<string>|]), arg, Expression.Constant("%")))
+            visit likeMeth qb
+        
+        | "EndsWith" when m.Object.Type = typeof<string> ->
+            let arg = 
+                if m.Arguments.[0].Type = typeof<string> then
+                    m.Arguments.[0]
+                else if m.Arguments.[0].Type = typeof<char> && isFullyConstant m.Arguments.[0] then
+                    let value = evaluateExpr<obj> (m.Arguments.[0])
+                    Expression.Constant(value.ToString(), typeof<string>)
+                else failwithf "Unknown %s method" m.Method.Name
+
+            let likeMeth = Expression.Call(typeof<SoloDatabase.Extensions>.GetMethod(nameof(SoloDatabase.Extensions.Like)), m.Object, Expression.Call(typeof<String>.GetMethod("Concat", [|typeof<string>; typeof<string>|]), Expression.Constant("%"), arg))
+            visit likeMeth qb
+
+        | _ -> 
             raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 
     and private visitLambda (m: LambdaExpression) (qb: QueryBuilder) =
@@ -318,6 +360,11 @@ module QueryTranslator =
         else failwithf "Convert not yet implemented: %A" m.Type
 
     and private visitBinary (b: BinaryExpression) (qb: QueryBuilder) =
+        if b.NodeType = ExpressionType.Add && (b.Left.Type = typeof<string> || b.Right.Type = typeof<string>) then
+            let expr = Expression.Call(typeof<String>.GetMethod("Concat", [|typeof<string seq>|]), Expression.NewArrayInit(typeof<string>, [|b.Left; b.Right|]))
+            visit expr qb
+        else
+
         let isLeftNull =
             match b.Left with
             | :? ConstantExpression as c when c.Value = null -> true
@@ -336,7 +383,7 @@ module QueryTranslator =
         visit(left) qb |> ignore
         match b.NodeType with
         | ExpressionType.And
-        | ExpressionType.AndAlso -> qb.AppendRaw(" AND ")  |> ignore
+        | ExpressionType.AndAlso -> qb.AppendRaw(" AND ") |> ignore
         | ExpressionType.OrElse
         | ExpressionType.Or -> qb.AppendRaw(" OR ")  |> ignore
         | ExpressionType.Equal -> if isAnyNull then qb.AppendRaw(" IS ") else qb.AppendRaw(" = ")  |> ignore
@@ -345,6 +392,12 @@ module QueryTranslator =
         | ExpressionType.LessThanOrEqual -> qb.AppendRaw(" <= ")  |> ignore
         | ExpressionType.GreaterThan -> qb.AppendRaw(" > ")  |> ignore
         | ExpressionType.GreaterThanOrEqual -> qb.AppendRaw(" >= ") |> ignore
+
+        | ExpressionType.Add -> qb.AppendRaw(" + ") |> ignore
+        | ExpressionType.Subtract -> qb.AppendRaw(" - ") |> ignore
+        | ExpressionType.Multiply -> qb.AppendRaw(" * ") |> ignore
+        | ExpressionType.Divide -> qb.AppendRaw(" / ") |> ignore
+        | ExpressionType.Modulo -> qb.AppendRaw(" % ") |> ignore
         | _ -> raise (NotSupportedException(sprintf "The binary operator %O is not supported" b.NodeType))
         visit(right) qb |> ignore
         qb.AppendRaw(")")  |> ignore        
