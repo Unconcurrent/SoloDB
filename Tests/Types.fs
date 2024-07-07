@@ -97,6 +97,7 @@ type Tiger() =
 type Dog() =
     inherit Animal()
 
+    member val Tammed: bool = true with get, set
     member val Bark: string = "Hau" with get, set
 
 

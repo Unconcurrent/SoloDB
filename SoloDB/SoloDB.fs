@@ -534,7 +534,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 reraise()
         finally connectionForTransaction.DisposeReal(true)
 
-    member this.Analyze() =
+    member this.Optimize() =
         use dbConnection = connectionManager.Borrow()
         dbConnection.Execute "PRAGMA optimize;"
 
@@ -566,7 +566,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         dbConnection.Execute("
                             PRAGMA journal_mode=wal;
                             CREATE TABLE IF NOT EXISTS SoloDBCollections (Name TEXT NOT NULL) STRICT;
-                            CREATE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDB(Name);
+                            CREATE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
                             ") |> ignore
 
         dbConnection.Execute("

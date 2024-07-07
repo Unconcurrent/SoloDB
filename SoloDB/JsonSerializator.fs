@@ -38,22 +38,35 @@ module JsonSerializator =
         | BoolenToken of bool
         | EndOfInput
 
-    let tokenize (input: string) : Token list =
+    let tokenize (input: string) : Token seq =
         let isDigit c = Char.IsDigit c || c = '-'
         let isInitialIdentifierChar c = Char.IsLetter c || c = '_'
         let isIdentifierChar c = isInitialIdentifierChar c || Char.IsDigit c
-        let rec tokenize' index tokens =
-            if index >= input.Length then
-                tokens @ [EndOfInput]
-            else
+
+        seq {
+            let mutable index = 0
+
+            while index < input.Length do
                 let currentChar = input.[index]
                 match currentChar with
-                | '{' -> tokenize' (index + 1) (tokens @ [OpenBrace])
-                | '}' -> tokenize' (index + 1) (tokens @ [CloseBrace])
-                | '[' -> tokenize' (index + 1) (tokens @ [OpenBracket])
-                | ']' -> tokenize' (index + 1) (tokens @ [CloseBracket])
-                | ',' -> tokenize' (index + 1) (tokens @ [Comma])
-                | ':' -> tokenize' (index + 1) (tokens @ [Colon])
+                | '{' -> 
+                    OpenBrace
+                    index <- index + 1
+                | '}' -> 
+                    CloseBrace
+                    index <- index + 1
+                | '[' -> 
+                    index <- index + 1
+                    OpenBracket
+                | ']' -> 
+                    index <- index + 1
+                    CloseBracket
+                | ',' -> 
+                    index <- index + 1
+                    Comma
+                | ':' -> 
+                    index <- index + 1
+                    Colon
                 | '"' | '\'' as quote ->
                     let sb = System.Text.StringBuilder()
                     let mutable i = index + 1
@@ -61,14 +74,16 @@ module JsonSerializator =
                         sb.Append(input.[i]) |> ignore
                         i <- i + 1
                     sb.Replace("\\u002B", "+") |> ignore
-                    tokenize' (i + 1) (tokens @ [StringToken(sb.ToString())])
+                    index <- (i + 1)
+                    StringToken(sb.ToString())
                 | c when isDigit c ->
                     let sb = System.Text.StringBuilder()
                     let mutable i = index
                     while i < input.Length && (isDigit input.[i] || input.[i] = '.' || input.[i] = 'e' || input.[i] = '+') do
                         sb.Append(input.[i]) |> ignore
                         i <- i + 1
-                    tokenize' i (tokens @ [NumberToken (Decimal.Parse(sb.ToString(), CultureInfo.InvariantCulture))])
+                    index <- i
+                    NumberToken (Decimal.Parse(sb.ToString(), CultureInfo.InvariantCulture))
                 | c when isInitialIdentifierChar c ->
                     let sb = System.Text.StringBuilder()
                     let mutable i = index
@@ -76,15 +91,21 @@ module JsonSerializator =
                         sb.Append(input.[i]) |> ignore
                         i <- i + 1
                     let txt = sb.ToString()
+                    index <- i
                     match txt with
                     | "null"
-                    | "NULL" -> tokenize' i (tokens @ [NullToken])
-                    | "true" -> tokenize' i (tokens @ [BoolenToken(true)])
-                    | "false" -> tokenize' i (tokens @ [BoolenToken(false)])
-                    | other -> tokenize' i (tokens @ [StringToken(txt)])
-                | c when Char.IsWhiteSpace(c) -> tokenize' (index + 1) tokens
+                    | "NULL" -> NullToken
+                    | "true" -> BoolenToken(true)
+                    | "false" -> BoolenToken(false)
+                    | other -> StringToken(txt)
+                | c when Char.IsWhiteSpace(c) ->
+                    index <- index + 1
                 | _ -> failwith "Invalid JSON format"
-        tokenize' 0 []
+
+            EndOfInput
+        }
+
+        
 
 
     type JsonValue =
@@ -156,8 +177,9 @@ module JsonSerializator =
                             for prop in props do
                                 if prop.CanRead then
                                     let propValue = prop.GetValue(value)
-                                    let serializedValue = JsonValue.Serialize propValue
-                                    dict.Add(prop.Name, serializedValue)
+                                    if propValue <> null then
+                                        let serializedValue = JsonValue.Serialize propValue
+                                        dict.Add(prop.Name, serializedValue)
                             Object dict
                     | value -> value
 
@@ -311,7 +333,7 @@ module JsonSerializator =
                         deserializeTuple targetType json
                     | JsonValue.List _ when isCollectionType targetType ->
                         deserializeList targetType json
-                    | JsonValue.Object _ when targetType.IsClass ->
+                    | JsonValue.Object _ when targetType.IsClass || targetType.IsAbstract ->
                         deserializeObject targetType json
                     | _ -> failwithf "JSON value cannot be deserialized into type %A" targetType
                 | primitive -> primitive
@@ -416,49 +438,62 @@ module JsonSerializator =
         static member New() = JsonValue.Object(Dictionary(StringComparer.OrdinalIgnoreCase))
 
         static member Parse (jsonString: string) =
-            let parse (tokens: Token list) : JsonValue =
-                let rec parseTokens tokens =
-                    match tokens with
-                    | OpenBrace :: rest ->
+            let parse (tokens: Token seq) : JsonValue =
+                let next(tokens: IEnumerator<Token>) =
+                    if tokens.MoveNext() then
+                        tokens.Current, tokens
+                    else EndOfInput, tokens
+
+                let rec parseTokens (tokens: IEnumerator<Token>) =
+                    let current, rest = next tokens
+                    match current with
+                    | OpenBrace ->
                         let obj, remainingTokens = parseObject rest
                         Object obj, remainingTokens
-                    | OpenBracket :: rest ->
+                    | OpenBracket ->
                         let list, remainingTokens = parseArray rest
                         List list, remainingTokens
-                    | StringToken str :: rest ->
+                    | StringToken str ->
                         String str, rest
-                    | NumberToken num :: rest ->
+                    | NumberToken num ->
                         Number num, rest
-                    | BoolenToken b :: rest ->
+                    | BoolenToken b ->
                         JsonValue.Boolean b, rest
-                    | NullToken :: rest ->
+                    | NullToken ->
                         Null, rest
                     | _ -> failwith "Unexpected token during parsing"
         
                 and parseObject tokens =
                     let dict = new Dictionary<string, JsonValue>(StringComparer.OrdinalIgnoreCase)
                     let rec parseMembers tokens =
-                        match tokens with
-                        | CloseBrace :: rest -> dict, rest
-                        | StringToken key :: Colon :: valueTokens ->
+                        let current, rest = next tokens
+                        match current with
+                        | CloseBrace -> dict, rest
+                        | StringToken key ->
+                            let colon, valueTokens = next tokens
+                            if colon <> Colon then failwithf "Malformed json."
+
                             let value, postValueTokens = parseTokens valueTokens
-                            dict.Add(key.ToLower(), value)
-                            parseMembers (if postValueTokens.Head = Comma then postValueTokens.Tail else postValueTokens)
+                            dict.Add(key, value)
+                            parseMembers postValueTokens
+                        | Comma -> parseMembers rest
                         | _ -> failwith "Invalid object syntax"
                     parseMembers tokens
         
                 and parseArray tokens =
                     let items = new List<JsonValue>()
                     let rec parseElements tokens =
-                        match tokens with
-                        | CloseBracket :: rest -> items, rest
-                        | _ ->
-                            let item, remainingTokens = parseTokens tokens
-                            items.Add(item)
-                            parseElements (if remainingTokens.Head = Comma then remainingTokens.Tail else remainingTokens)
+                        let item, remainingTokens = parseTokens tokens
+                        items.Add(item)
+
+                        let current, rest = next remainingTokens
+                        match current with
+                        | CloseBracket -> items, rest
+                        | Comma -> parseElements rest
+                        | _ -> failwithf "Malformed json."
                     parseElements tokens
         
-                fst (parseTokens tokens)
+                tokens.GetEnumerator() |> parseTokens |> fst
 
             let tokens = tokenize jsonString
             parse tokens
