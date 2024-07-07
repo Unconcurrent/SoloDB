@@ -130,7 +130,7 @@ collection.Insert(data);
 Console.WriteLine("{0}", data.Id); // 2
 
 // Query all documents into a C# list
-var documents = collection.Select().OnAll().ToList();
+var documents = collection.Select().OnAll().Enumerate().ToList();
 
 // Query the Data property, where Name starts with 'Document'
 var documentsData = collection.Select(d => d.Data).Where(d => d.Name.StartsWith("Document")).ToList();
