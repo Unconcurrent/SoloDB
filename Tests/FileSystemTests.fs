@@ -6,10 +6,8 @@ open System.IO
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open SoloDatabase
 open SoloDatabase.Types
-open SoloDatabase.JsonFunctions
 open SoloDatabase.FileStorage
 open SoloDatabase.Utils
-open Types
 open TestUtils
 open System.Security.Cryptography
 open System.Globalization

@@ -822,7 +822,7 @@ type SoloDBStandardTesting() =
     [<TestMethod>]
     member this.InitializeCollectionCreatesTable() =
         db.GetCollection<User>() |> ignore
-        Assert.IsTrue(db.ExistCollection<User>(), "Table for User was not created")
+        Assert.IsTrue(db.CollectionExists<User>(), "Table for User was not created")
 
     [<TestMethod>]
     member this.GetCollectionReturnsConsistentInstance() =
@@ -834,7 +834,7 @@ type SoloDBStandardTesting() =
     member this.DropCollectionIfExistsWorksCorrectly() =
         db.GetCollection<User>()  |> ignore
         let result = db.DropCollectionIfExists<User>()
-        Assert.IsTrue(result && not (db.ExistCollection<User>()), "DropCollectionIfExists failed to drop the table")
+        Assert.IsTrue(result && not (db.CollectionExists<User>()), "DropCollectionIfExists failed to drop the table")
 
     [<TestMethod>]
     member this.DropCollectionThatDoesNotExistReturnsFalse() =
@@ -859,7 +859,7 @@ type SoloDBStandardTesting() =
         }
         let tasks = [| for _ in 1 .. 5 -> Async.StartAsTask initAction :> Task |]
         Task.WaitAll(tasks)
-        Assert.IsTrue(db.ExistCollection<User>(), "Lock handling during collection initialization failed")
+        Assert.IsTrue(db.CollectionExists<User>(), "Lock handling during collection initialization failed")
 
     [<TestMethod>]
     member this.EnsureOldUserToNewUserDeserialization() =
@@ -891,7 +891,7 @@ type SoloDBStandardTesting() =
         db.DropCollection "RandomData" |> ignore
         db.Dispose()
 
-        assertEqual (backup.ExistCollection "RandomData") true "Backup incomplete: not equal."
+        assertEqual (backup.CollectionExists "RandomData") true "Backup incomplete: not equal."
         let backupRandomData = backup.GetUntypedCollection "RandomData"
         let backupRandomDataValues = backupRandomData.Select().OnAll().ToList()
         let backupRandomDataValuesString = sprintf "%A" backupRandomDataValues
@@ -906,7 +906,7 @@ type SoloDBStandardTesting() =
     member this.BackupVacuumFromMemoryToDiskFail() =
         for i in 1..10 do db.GetUntypedCollection("Data").Insert {|abc = "1010"|} |> ignore
 
-        let ex = Assert.ThrowsException<exn>(fun () -> let rez = db.BackupVacuumTo "./temp/temp.db" in ())
+        let ex = Assert.ThrowsException<exn>(fun () -> let rez = db.VacuumTo "./temp/temp.db" in ())
         assertEqual ex.Message "Cannot vaccuum backup from or to memory." "Not correct exception."
 
     [<TestMethod>]
@@ -923,7 +923,7 @@ type SoloDBStandardTesting() =
         try
             printfn "[%s] Start backup." (DateTime.Now.ToShortTimeString())
 
-            let rez = db.BackupVacuumTo "./temp/temp.db"
+            let rez = db.VacuumTo "./temp/temp.db"
             use backup = SoloDB.Instantiate "./temp/temp.db"
 
             let backupCount = backup.GetUntypedCollection("Data").Count().Where(fun x -> x?abc = "1010").First() |> int

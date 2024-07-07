@@ -72,7 +72,7 @@ module Utils =
         | other -> raise (InvalidDataException(sprintf "Cannot hash object of type: %A" (other.GetType())))
 
 
-    // Function to create the lookup table
+    // Function to create the lookup table.
     let private createLookup32Unsafe () =
         let mem = NativeMemory.AllocZeroed(256 * sizeof<uint> |> unativeint) |> NativePtr.ofVoidPtr<uint>
         for i in 0..255 do
@@ -87,13 +87,16 @@ module Utils =
 
         mem
 
-    // Declare the lookup array and the pinned pointer
+    // Declare the lookup array.
     let private lookup32Unsafe = createLookup32Unsafe()
 
-    // Function to convert byte array to hex string using the lookup table
-    let private byteArrayToHexViaLookup32Unsafe (bytes: byte[]) =
+    // Function to convert byte array to hex string using the lookup table.
+    let private byteArrayToHexViaLookupUnsafe (bytes: byte[]) =
         let lookup = lookup32Unsafe
-        let result = new string((char)0, bytes.Length * 2)
+
+        // Kinda sketchy, see
+        // https://stackoverflow.com/questions/58025460/is-it-legal-to-modify-strings
+        let result = new string((char)0, bytes.Length * 2) 
         use resultP = fixed result
         let resultPI = resultP |> NativePtr.toVoidPtr |> NativePtr.ofVoidPtr<uint>
         for i in 0..(bytes.Length - 1) do
@@ -105,7 +108,7 @@ module Utils =
         result
 
     let hashBytesToStr (hash: byte array) =
-        byteArrayToHexViaLookup32Unsafe hash
+        byteArrayToHexViaLookupUnsafe hash
 
 
     let mutable debug =

@@ -969,10 +969,9 @@
     <Compile Include="PolymorphicTests.fs" />
     <Compile Include="JsonTests.fs" />
     <Compile Include="FileSystemTests.fs" />
+    <Compile Include="ReadMeTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
-
-  <ItemGroup />
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.10.0" />
