@@ -5,8 +5,7 @@
 open System
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open SoloDatabase
-open SoloDatabase.Types
-open SoloDatabase.JsonFunctions
+open FSharp.Interop.Dynamic
 open Types
 open TestUtils
 
@@ -429,3 +428,84 @@ type SoloDBTransactionalTesting() =
                 id1, id2
         ) |> ignore
         ()
+
+    [<TestMethod>]
+    member this.SelectUntypedTest() =   
+        db.WithTransaction(fun db ->
+            let users = db.GetCollection<User>()
+
+            let ids = users.InsertBatch(randomUsersToInsert)
+
+            let users = users.Select(fun u -> (u?Username, u?CarType)).Where(fun u -> u?Username > "A").ToList()
+            let usersStr = sprintf "%A" users
+            printfn "%s" usersStr
+            assertEqual users.[0] ("John", null) "SelectUntypedTest failed."
+            assertEqual users.[1] ("Mihail", null) "SelectUntypedTest failed."
+            assertEqual users.[2] ("Vanya", null) "SelectUntypedTest failed."
+            assertEqual users.[3] ("Givany", null) "SelectUntypedTest failed."
+        )
+
+    [<TestMethod>]
+    member this.UntypedCollectionInsertTest() =
+        db.WithTransaction(fun db ->
+            let objs = db.GetUntypedCollection("Statistics")
+
+            let id = objs.InsertBatch [
+                {|Name="Alpha"|}
+                {|Name="Beta"|}
+                {|Type="None"|}
+                {|Type="None"|}
+                {|Type="Int"; Data=10|}
+                {|Type="Int"; Data=12|}
+                {|Type="Int"; Data=(-42)|}
+                {|Type="String"; Data="AAA"|}
+                {|Type="Obj"; Data={|Number=10; Name = "Alice"|}|}
+            ]
+
+            let users = objs.Select().OnAll().ToList()
+
+            assertEqual users.Length 9 "Count unequal."
+        )
+
+    [<TestMethod>]
+    member this.UntypedCollectionSelectTest() = 
+        db.WithTransaction(fun db ->
+            let objs = db.GetUntypedCollection("Statistics")
+
+            let id = objs.InsertBatch [
+                {|Name="Alpha"|}
+                {|Name="Beta"|}
+                {|Type="None"|}
+                {|Type="None"|}
+                {|Type="Int"; Data=10|}
+                {|Type="Int"; Data=12|}
+                {|Type="Int"; Data=(-42)|}
+                {|Type="String"; Data="AAA"|}
+                {|Type="Obj"; Data={|Number=10; Name = "Alice"|}|}
+            ]
+
+            let users = objs.Select(fun o -> o?Name).OnAll().ToList()
+
+            assertEqual users.Length 2 "Count unequal."
+        )
+
+     [<TestMethod>]
+     member this.ExistCollectionFalse() = 
+        db.WithTransaction(fun db ->
+            db.ExistCollection<User>() |> not |> assertTrue
+        )
+
+    [<TestMethod>]
+    member this.ExistCollectionTrue() = 
+        db.WithTransaction(fun db ->
+            let users = db.GetCollection<User>()
+            db.ExistCollection<User>() |> assertTrue
+        )
+
+    [<TestMethod>]
+    member this.ListCollectionNames() = 
+        db.WithTransaction(fun db ->
+            assertEqual (db.ListCollectionNames() |> Seq.toArray) [||] "ListCollectionNames failed."
+            let users = db.GetCollection<User>()
+            assertEqual (db.ListCollectionNames() |> Seq.toArray) [|"User"|] "ListCollectionNames failed."
+        )

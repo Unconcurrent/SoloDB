@@ -5,6 +5,8 @@ open System.Reflection
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open System.Diagnostics
 open System.Text.RegularExpressions
+open SoloDatabase
+open SoloDatabase.Operators
 
 type TestResult =
     | Passed of string * int64

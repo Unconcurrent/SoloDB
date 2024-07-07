@@ -213,12 +213,6 @@ module QueryTranslator =
             qb.AppendRaw "),"
             qb.AppendRaw $"'$[{index}]'),"
         
-        | "op_BarPlusBar" ->
-            let a = m.Arguments.[0]
-            let b = m.Arguments.[1]
-            visit a qb |> ignore
-            visit b qb |> ignore
-        
         | "op_Dynamic" -> // todo: add C# version of dynamic.
             let o = m.Arguments.[0]
             let property = (m.Arguments.[1] :?> ConstantExpression).Value

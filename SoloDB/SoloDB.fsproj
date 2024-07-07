@@ -29,6 +29,7 @@
     <Compile Include="Connections.fs" />
     <Compile Include="FileStorage.fs" />
     <Compile Include="SoloDB.fs" />
+    <Compile Include="SoloDBOperators.fs" />
   </ItemGroup>
 
   <ItemGroup>
