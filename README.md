@@ -1,6 +1,6 @@
 # <img src="./icon.png" alt="icon" width="50"/> SoloDB
 
-SoloDB is a light, fast and robust SQL and NoSQL .NET database built on top of SQLite using the JSONB data type.
+SoloDB is a light, fast and robust NoSQL and SQL embedded .NET database built on top of SQLite using the [JSONB](https://sqlite.org/jsonb.html) data type.
 
 ## Features
 
