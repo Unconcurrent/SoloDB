@@ -143,11 +143,11 @@ using (var session = client.StartSession())
 #### LiteDB
 See the [ulong issue](https://github.com/mbdavid/LiteDB/issues/681).
 ```csharp
-var created = ldb.BeginTrans();
+var created = db.BeginTrans();
 
 db.GetCollection<ulong>().Insert(420);
 
-db.Commit(); // Or ldb.Rollback();
+db.Commit(); // Or db.Rollback();
 ```
 
 ### Direct SQLite access using [Dapper](https://github.com/DapperLib/Dapper)
@@ -173,7 +173,7 @@ Does not support SQL.
 #### LiteDB
 It has [expressions](https://www.litedb.org/docs/expressions/).
 ```csharp
-var reader = ldb.Execute("SELECT { upper_titles: ARRAY(UPPER($.Books[*].Title)) } WHERE $.Name LIKE \"John%\"");
+var reader = db.Execute("SELECT { upper_titles: ARRAY(UPPER($.Books[*].Title)) } WHERE $.Name LIKE \"John%\"");
 
 while (reader.Read())
 {
