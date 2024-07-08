@@ -7,6 +7,8 @@
     <Title>SoloDB</Title>
     <Description>SoloDB is a document database built on top of SQLite using the JSONB data type. It leverages the robustness and simplicity of SQLite to provide an efficient and lightweight database solution for handling JSON documents.</Description>
     <Copyright>Radu Sologub</Copyright>
+    <Authors>Radu Sologub</Authors>
+    <RootNamespace>SoloDatabase</RootNamespace>
     <PackageProjectUrl>https://github.com/Unconcurrent/SoloDB</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/Unconcurrent/SoloDB</RepositoryUrl>
@@ -17,6 +19,8 @@
     <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
     <IncludeSymbols>True</IncludeSymbols>
     <PackageOutputPath>$(OutputPath)</PackageOutputPath>
+    <VersionPrefix>0.0.1</VersionPrefix>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
   <ItemGroup>
