@@ -1,5 +1,7 @@
 ﻿module StandardTests
 
+open Microsoft.Data.Sqlite
+
 
 
 #nowarn "3391" // Implicit on SqlId
@@ -774,7 +776,7 @@ type SoloDBStandardTesting() =
         assertEqual resultName (expectedUsers.[0].Username) "The complex condition query returned incorrect number of users."
 
     [<TestMethod>]
-    member this.EnsureIndex() =        
+    member this.EnsureIndex() =
         let users = db.GetCollection<User>()
         users.InsertBatch randomUsersToInsert |> ignore
         let ex = users.EnsureIndex(fun u -> u.Username)
@@ -784,10 +786,10 @@ type SoloDBStandardTesting() =
         ()
 
     [<TestMethod>]
-    member this.EnsureIndexTuple() =        
+    member this.EnsureIndex2() =
         let users = db.GetCollection<User>()
+
         users.InsertBatch randomUsersToInsert |> ignore
-        let ex = Assert.ThrowsException<exn>(fun () -> users.EnsureIndex(fun u -> (u.Username, u.Auth)) |> ignore)
 
         users.EnsureIndex(fun u -> u.Username) |> ignore
         users.EnsureIndex(fun u -> u.Auth) |> ignore
@@ -797,6 +799,44 @@ type SoloDBStandardTesting() =
         if plan.Contains "USING INDEX" |> not then failwithf "Does not use index"
 
         let plan = users.Select(fun u -> u.Username, u.Auth).Where(fun u -> u.Auth = true).ExplainQueryPlan()
+        printfn "%s" plan
+        if plan.Contains "USING INDEX" |> not then failwithf "Does not use index"
+        ()
+
+
+    [<TestMethod>]
+    member this.EnsureIndexTuple() =        
+        let users = db.GetCollection<User>()
+        users.InsertBatch randomUsersToInsert |> ignore
+
+        let exec = users.EnsureIndex(fun u -> (u.Username, u.Auth))
+        assertTrue (exec <> 0)
+        let exec = users.DropIndexIfExists(fun u -> (u.Username, u.Auth))
+        assertTrue (exec <> 0)
+        let exec = users.EnsureIndex(fun u -> (u.Username, u.Auth))
+
+        let plan = users.Select(fun u -> u.Username, u.Auth).Where(fun u -> u.Username > "AABB").ExplainQueryPlan()
+        printfn "%s" plan
+        if plan.Contains "USING INDEX" |> not then failwithf "Does not use index"
+        ()
+
+    [<TestMethod>]
+    member this.EnsureUniqueIndexTuple() =        
+        let users = db.GetCollection<User>()        
+
+        let exec = users.EnsureUniqueAndIndex(fun u -> (u.Username, u.Auth))
+        assertTrue (exec <> 0)
+        let exec = users.DropIndexIfExists(fun u -> (u.Username, u.Auth))
+        assertTrue (exec <> 0)
+        let exec = users.EnsureUniqueAndIndex(fun u -> (u.Username, u.Auth))
+
+        users.InsertBatch randomUsersToInsert |> ignore
+
+        let ex = Assert.ThrowsException<SqliteException>(fun () ->
+            users.Insert randomUsersToInsert.[0] |> ignore
+        )
+
+        let plan = users.Select(fun u -> u.Username, u.Auth).Where(fun u -> u.Username > "AABB").ExplainQueryPlan()
         printfn "%s" plan
         if plan.Contains "USING INDEX" |> not then failwithf "Does not use index"
         ()

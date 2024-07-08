@@ -313,7 +313,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         let whereSQL =
             match expressionBody with
             | :? NewExpression as ne when ne.Type.IsAssignableTo(typeof<System.Runtime.CompilerServices.ITuple>)
-                -> failwithf "Cannot index an tuple expression, please use multiple indexes." 
+                -> whereSQL.Substring("json_array".Length)
             | :? MemberExpression as me ->                
                 $"({whereSQL})"
             | other -> failwithf "Cannot index an expression with type: %A" (other.GetType())
@@ -326,6 +326,14 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         let indexName, whereSQL = this.GetIndexWhereAndName expression
 
         let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON {name}{whereSQL}"
+
+        use connection = connection.Get()
+        connection.Execute(indexSQL)
+
+    member this.EnsureUniqueAndIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
+        let indexName, whereSQL = this.GetIndexWhereAndName expression
+
+        let indexSQL = $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON {name}{whereSQL}"
 
         use connection = connection.Get()
         connection.Execute(indexSQL)
