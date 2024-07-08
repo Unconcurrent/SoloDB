@@ -103,5 +103,5 @@ type TestRunner() =
 
 [<EntryPoint>]
 let main argv =
-    TestRunner.GetTests([|Assembly.GetExecutingAssembly()|]).Run "StructCast"
+    TestRunner.GetTests([|Assembly.GetExecutingAssembly()|]).Run "FileStorage"
     0

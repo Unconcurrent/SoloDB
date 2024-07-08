@@ -225,3 +225,42 @@ type FileSystemTests() =
 
         assertTrue (fs.DeleteDirAt path) 
         assertTrue ((fs.DeleteDirAt path) = false)
+
+    [<TestMethod>]
+    member this.ListFiles() =
+        let path = "/abc/"
+        let dir = fs.GetOrCreateDirAt path
+
+        for i in 1..10 do
+            fs.GetOrCreateAt $"{path}{i}.txt" |> ignore
+
+        for i in 1..20 do
+            fs.GetOrCreateDirAt $"{path}{i}" |> ignore
+
+        let files = fs.ListFilesAt path |> Seq.toList
+        assertTrue (files.Length = [|1..10|].Length)
+
+        let uniqueFileNames = files |> List.distinctBy(fun f -> f.Name)
+
+        assertTrue (uniqueFileNames.Length = files.Length)
+
+    [<TestMethod>]
+    member this.ListDirs() =
+        let path = "/abc/"
+        let dir = fs.GetOrCreateDirAt path
+
+        for i in 1..10 do
+            fs.GetOrCreateAt $"{path}{i}.txt" |> ignore
+
+        for i in 1..20 do
+            fs.GetOrCreateDirAt $"{path}{i}" |> ignore
+
+        let directories = fs.ListDirectoriesAt path |> Seq.toList
+        assertTrue (directories.Length = [|1..20|].Length)
+
+        let uniqueDirectoriesNames = directories |> List.distinctBy(fun d -> d.Name)
+
+        assertTrue (uniqueDirectoriesNames.Length = directories.Length)
+
+
+

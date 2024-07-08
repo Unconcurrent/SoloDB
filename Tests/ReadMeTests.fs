@@ -58,14 +58,14 @@ type ReadMeTests() =
     member this.Transaction() =
         let ex = Assert.ThrowsException(fun () -> 
             db.WithTransaction(fun tx -> 
-                let collection = tx.GetCollection<int64>();
+                let collection = tx.GetCollection<uint64>();
                 // Perform operations within the transaction.
-                let id = collection.Insert(420)
+                let id = collection.Insert(420UL)
                 failwithf "Simulate a fail."
             )
         )
 
-        db.CollectionExists<int64>() |> not |> assertTrue
+        db.CollectionExists<uint64>() |> not |> assertTrue
         ()
 
     [<TestMethod>]
@@ -82,6 +82,7 @@ type ReadMeTests() =
     member this.Optimize() =
         let exec = db.Optimize()
         ()
+                
 
     [<TestMethod>]
     member this.Example() =
