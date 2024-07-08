@@ -177,7 +177,7 @@ Console.WriteLine("{0}", data.Id); // 2
 var documents = collection.Select().OnAll().Enumerate().ToList();
 
 // Query the Data property, where Name starts with 'Document'
-var documentsData = collection.Select(d => d.Data).Where(d => d.Name.StartsWith("Document")).ToList();
+var documentsData = collection.Select(d => d.Data).Where(d => d.Name.StartsWith("Document")).Enumerate().ToList();
 
 data.Data = "Updated data";
 
