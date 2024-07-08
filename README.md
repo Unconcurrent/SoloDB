@@ -20,6 +20,13 @@ Imagine the power of MongoDB and SQL combined.
 - [Open source](./LICENSE.txt).
 - Pretty well tested: 160+ of mostly integration tests.
 
+## How to install
+
+#### From NuGet
+```cmd
+dotnet add package SoloDB
+```
+
 ## Usage
 
 Usage in SoloDB vs. other providers[\*](#footnote): [MongoDB](https://www.mongodb.com/docs/drivers/csharp/current/), [LiteDB](https://github.com/mbdavid/LiteDB).
