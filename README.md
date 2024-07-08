@@ -450,3 +450,4 @@ You can read the [LICENSE.txt](./LICENSE.txt).
 ##### Footnote
 
 ###### The examples of the other providers can be approximative.
+###### API is subject to change.
