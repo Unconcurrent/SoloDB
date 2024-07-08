@@ -19,7 +19,7 @@ public abstract class StandardTests
     public void Init()
     {
         var dbSource = $"memory:Test{Random.Shared.NextInt64()}";
-        this.db = SoloDB.Instantiate(dbSource);
+        this.db = new SoloDB(dbSource);
     }
 
     [TestCleanup]

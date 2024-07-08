@@ -432,6 +432,109 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
     let mutable disposed = false
 
+    new(source: string) =
+        let connectionString, location =
+            if source.StartsWith("memory:", StringComparison.InvariantCultureIgnoreCase) then
+                let memoryName = source.Substring "memory:".Length
+                let memoryName = memoryName.Trim()
+                sprintf "Data Source=%s;Mode=Memory;Cache=Shared" memoryName, Memory memoryName
+            else 
+                let source = Path.GetFullPath source
+                $"Data Source={source}", File source
+
+        let setup (connection: SqliteConnection) =
+            connection.CreateFunction("UNIXTIMESTAMP", Func<int64>(fun () -> DateTimeOffset.Now.ToUnixTimeMilliseconds()), false)
+            connection.CreateFunction("SHA_HASH", Func<byte array, obj>(fun o -> Utils.shaHash o), true)
+
+        let manager = new ConnectionManager(connectionString, setup)
+
+        do
+            use dbConnection = manager.Borrow()
+
+            dbConnection.Execute("
+                                PRAGMA journal_mode=wal;
+                                CREATE TABLE IF NOT EXISTS SoloDBCollections (Name TEXT NOT NULL) STRICT;
+                                CREATE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
+                                ") |> ignore
+
+            dbConnection.Execute("
+                                CREATE TABLE IF NOT EXISTS SoloDBDirectoryHeader (
+                                    Id INTEGER PRIMARY KEY,
+                                    Name TEXT NOT NULL CHECK ((length(Name) != 0 OR ParentId IS NULL) AND (Name != \".\") AND (Name != \"..\") AND NOT Name GLOB \"*/*\"),
+                                    FullPath TEXT NOT NULL CHECK (FullPath != \"\" AND NOT FullPath GLOB \"*/./*\" AND NOT FullPath GLOB \"*/../*\"),
+                                    ParentId INTEGER,
+                                    Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
+                                    Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
+                                    FOREIGN KEY (ParentId) REFERENCES SoloDBDirectoryHeader(Id) ON DELETE CASCADE,
+                                    UNIQUE(ParentId, Name),
+                                    UNIQUE(FullPath)
+                                ) STRICT;
+
+                                CREATE TABLE IF NOT EXISTS SoloDBFileHeader (
+                                    Id INTEGER PRIMARY KEY,
+                                    Name TEXT NOT NULL CHECK (length(Name) != 0 AND Name != \".\" AND Name != \"..\"),
+                                    DirectoryId INTEGER NOT NULL,
+                                    Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
+                                    Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
+                                    Length INTEGER NOT NULL DEFAULT 0,
+                                    Hash BLOB NOT NULL DEFAULT (SHA_HASH('')),
+                                    FOREIGN KEY (DirectoryId) REFERENCES SoloDBDirectoryHeader(Id) ON DELETE CASCADE,
+                                    UNIQUE(DirectoryId, Name)
+                                ) STRICT;
+
+                                CREATE TABLE IF NOT EXISTS SoloDBFileChunk (
+                                    FileId INTEGER NOT NULL,
+                                    Number INTEGER NOT NULL,
+                                    Data BLOB NOT NULL,
+                                    FOREIGN KEY (FileId) REFERENCES SoloDBFileHeader(Id) ON DELETE CASCADE,
+                                    UNIQUE(FileId, Number) ON CONFLICT REPLACE
+                                ) STRICT;
+
+                                CREATE TABLE IF NOT EXISTS SoloDBFileMetadata (
+                                    Id INTEGER PRIMARY KEY,
+                                    FileId INTEGER NOT NULL,
+                                    Key TEXT NOT NULL,
+                                    Value TEXT NOT NULL,
+                                    UNIQUE(FileId, Key) ON CONFLICT REPLACE,
+                                    FOREIGN KEY (FileId) REFERENCES SoloDBFileHeader(Id) ON DELETE CASCADE
+                                ) STRICT;
+
+                                CREATE TABLE IF NOT EXISTS SoloDBDirectoryMetadata (
+                                    Id INTEGER PRIMARY KEY,
+                                    DirectoryId INTEGER NOT NULL,
+                                    Key TEXT NOT NULL,
+                                    Value TEXT NOT NULL,
+                                    UNIQUE(DirectoryId, Key) ON CONFLICT REPLACE,
+                                    FOREIGN KEY (DirectoryId) REFERENCES SoloDBDirectoryHeader(Id) ON DELETE CASCADE
+                                ) STRICT;
+
+                                CREATE INDEX IF NOT EXISTS SoloDBSoloDBDirectoryHeaderNameAndParentIdIndex ON SoloDBDirectoryHeader(Name, ParentId);
+                                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBDirectoryHeaderFullPathIndex ON SoloDBDirectoryHeader(FullPath);
+                                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBDirectoryMetadataDirectoryIdAndKey ON SoloDBDirectoryMetadata(DirectoryId, Key);
+
+                                CREATE INDEX IF NOT EXISTS SoloDBSoloDBFileHeaderNameAndDirectoryIdIndex ON SoloDBFileHeader(Name, DirectoryId);
+                                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBFileChunkFileIdAndNumberIndex ON SoloDBFileChunk(FileId, Number);
+                                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBFileMetadataFileIdAndKey ON SoloDBFileMetadata(FileId, Key);
+                                CREATE INDEX IF NOT EXISTS SoloDBFileHashIndex ON SoloDBFileHeader(Hash);
+
+                                ")|> ignore
+
+        
+            use t = dbConnection.BeginTransaction(false)
+            try
+                let rootDir = dbConnection.Query<SqlId>("SELECT Id FROM SoloDBDirectoryHeader WHERE ParentId IS NULL AND length(Name) = 0") |> Seq.tryHead
+                if rootDir.IsNone then
+                    dbConnection.Execute("INSERT INTO SoloDBDirectoryHeader(Name, ParentId, FullPath) VALUES (\"\", NULL, \"/\");", transaction = t) |> ignore
+                t.Commit()
+            with e -> 
+                t.Rollback()
+                reraise()
+
+            let rez = dbConnection.Execute("PRAGMA optimize;")
+            ()
+        
+        new SoloDB(manager, connectionString, location)
+
     member this.Connection = connectionManager
     member this.ConnectionString = connectionString
     member internal this.DataLocation = location
@@ -552,105 +655,3 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
     interface IDisposable with
         member this.Dispose() = this.Dispose()
-
-    static member Instantiate (source: string) =        
-        let connectionString, location =
-            if source.StartsWith("memory:", StringComparison.InvariantCultureIgnoreCase) then
-                let memoryName = source.Substring "memory:".Length
-                let memoryName = memoryName.Trim()
-                sprintf "Data Source=%s;Mode=Memory;Cache=Shared" memoryName, Memory memoryName
-            else 
-                let source = Path.GetFullPath source
-                $"Data Source={source}", File source
-
-        let setup (connection: SqliteConnection) =
-            connection.CreateFunction("UNIXTIMESTAMP", Func<int64>(fun () -> DateTimeOffset.Now.ToUnixTimeMilliseconds()), false)
-            connection.CreateFunction("SHA_HASH", Func<byte array, obj>(fun o -> Utils.shaHash o), true)
-
-        let manager = new ConnectionManager(connectionString, setup)
-
-        use dbConnection = manager.Borrow()
-
-        dbConnection.Execute("
-                            PRAGMA journal_mode=wal;
-                            CREATE TABLE IF NOT EXISTS SoloDBCollections (Name TEXT NOT NULL) STRICT;
-                            CREATE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
-                            ") |> ignore
-
-        dbConnection.Execute("
-                            CREATE TABLE IF NOT EXISTS SoloDBDirectoryHeader (
-                                Id INTEGER PRIMARY KEY,
-                                Name TEXT NOT NULL CHECK ((length(Name) != 0 OR ParentId IS NULL) AND (Name != \".\") AND (Name != \"..\") AND NOT Name GLOB \"*/*\"),
-                                FullPath TEXT NOT NULL CHECK (FullPath != \"\" AND NOT FullPath GLOB \"*/./*\" AND NOT FullPath GLOB \"*/../*\"),
-                                ParentId INTEGER,
-                                Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
-                                Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
-                                FOREIGN KEY (ParentId) REFERENCES SoloDBDirectoryHeader(Id) ON DELETE CASCADE,
-                                UNIQUE(ParentId, Name),
-                                UNIQUE(FullPath)
-                            ) STRICT;
-
-                            CREATE TABLE IF NOT EXISTS SoloDBFileHeader (
-                                Id INTEGER PRIMARY KEY,
-                                Name TEXT NOT NULL CHECK (length(Name) != 0 AND Name != \".\" AND Name != \"..\"),
-                                DirectoryId INTEGER NOT NULL,
-                                Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
-                                Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
-                                Length INTEGER NOT NULL DEFAULT 0,
-                                Hash BLOB NOT NULL DEFAULT (SHA_HASH('')),
-                                FOREIGN KEY (DirectoryId) REFERENCES SoloDBDirectoryHeader(Id) ON DELETE CASCADE,
-                                UNIQUE(DirectoryId, Name)
-                            ) STRICT;
-
-                            CREATE TABLE IF NOT EXISTS SoloDBFileChunk (
-                                FileId INTEGER NOT NULL,
-                                Number INTEGER NOT NULL,
-                                Data BLOB NOT NULL,
-                                FOREIGN KEY (FileId) REFERENCES SoloDBFileHeader(Id) ON DELETE CASCADE,
-                                UNIQUE(FileId, Number) ON CONFLICT REPLACE
-                            ) STRICT;
-
-                            CREATE TABLE IF NOT EXISTS SoloDBFileMetadata (
-                                Id INTEGER PRIMARY KEY,
-                                FileId INTEGER NOT NULL,
-                                Key TEXT NOT NULL,
-                                Value TEXT NOT NULL,
-                                UNIQUE(FileId, Key) ON CONFLICT REPLACE,
-                                FOREIGN KEY (FileId) REFERENCES SoloDBFileHeader(Id) ON DELETE CASCADE
-                            ) STRICT;
-
-                            CREATE TABLE IF NOT EXISTS SoloDBDirectoryMetadata (
-                                Id INTEGER PRIMARY KEY,
-                                DirectoryId INTEGER NOT NULL,
-                                Key TEXT NOT NULL,
-                                Value TEXT NOT NULL,
-                                UNIQUE(DirectoryId, Key) ON CONFLICT REPLACE,
-                                FOREIGN KEY (DirectoryId) REFERENCES SoloDBDirectoryHeader(Id) ON DELETE CASCADE
-                            ) STRICT;
-
-                            CREATE INDEX IF NOT EXISTS SoloDBSoloDBDirectoryHeaderNameAndParentIdIndex ON SoloDBDirectoryHeader(Name, ParentId);
-                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBDirectoryHeaderFullPathIndex ON SoloDBDirectoryHeader(FullPath);
-                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBDirectoryMetadataDirectoryIdAndKey ON SoloDBDirectoryMetadata(DirectoryId, Key);
-
-                            CREATE INDEX IF NOT EXISTS SoloDBSoloDBFileHeaderNameAndDirectoryIdIndex ON SoloDBFileHeader(Name, DirectoryId);
-                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBFileChunkFileIdAndNumberIndex ON SoloDBFileChunk(FileId, Number);
-                            CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBFileMetadataFileIdAndKey ON SoloDBFileMetadata(FileId, Key);
-                            CREATE INDEX IF NOT EXISTS SoloDBFileHashIndex ON SoloDBFileHeader(Hash);
-
-                            ")|> ignore
-
-        
-        do
-            use t = dbConnection.BeginTransaction(false)
-            try
-                let rootDir = dbConnection.Query<SqlId>("SELECT Id FROM SoloDBDirectoryHeader WHERE ParentId IS NULL AND length(Name) = 0") |> Seq.tryHead
-                if rootDir.IsNone then
-                    dbConnection.Execute("INSERT INTO SoloDBDirectoryHeader(Name, ParentId, FullPath) VALUES (\"\", NULL, \"/\");", transaction = t) |> ignore
-                t.Commit()
-            with e -> 
-                t.Rollback()
-                reraise()
-
-        let rez = dbConnection.Execute("PRAGMA optimize;")
-        
-        new SoloDB(manager, connectionString, location)
