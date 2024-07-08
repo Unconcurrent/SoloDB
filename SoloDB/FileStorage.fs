@@ -636,3 +636,12 @@ module FileStorage =
         member this.DeleteDirAt(path) =
             use db = manager.Borrow()
             deleteDirectoryAt db path
+
+        member this.ListFilesAt(path) =
+            use db = manager.Borrow()
+            listFilesAt db path
+
+        member this.ListDirectoriesAt(path) =
+            use db = manager.Borrow()
+            listDirectoriesAt db path
+            

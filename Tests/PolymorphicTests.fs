@@ -3,12 +3,46 @@
 #nowarn "3391" // Implicit on SqlId
 
 open System
+open System.Text
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open SoloDatabase
 open SoloDatabase.Types
 open SoloDatabase.JsonFunctions
 open Types
 open TestUtils
+
+[<AbstractClass>]
+type Animal() =
+    member val Id: SqlId = SqlId(0) with get, set
+
+    member val Size: float = 1 with get, set
+    member val Tammed: bool = false with get, set
+
+    override this.ToString() =
+        let sb = StringBuilder()
+        sb.AppendLine("{") |> ignore
+        sb.AppendLine(sprintf "  \"Size\": \"%f\"," this.Size) |> ignore
+        sb.AppendLine(sprintf "  \"Tammed\": %b," this.Tammed) |> ignore
+        sb.Append("}") |> ignore
+        sb.ToString()
+
+type Cat() =
+    inherit Animal()
+
+    member val TailSize: float = 1 with get, set
+
+type Tiger() =
+    inherit Cat()
+
+    member val TailSize: float = 2 with get, set
+
+type Dog() =
+    inherit Animal()
+
+    member val Tammed: bool = true with get, set
+    member val Bark: string = "Hau" with get, set
+
+
 
 type IMakeSound =
     abstract member MakeNoise: unit -> string
@@ -43,7 +77,7 @@ type PolymorphicTests() =
 
     [<TestMethod>]
     member this.SelectType() =
-        let animals = db.GetCollection<Animal>()
+        let animals = db.GetCollection<Animal>() // For polymorphic support you must put the root class/interface in the collection. 
         
         animals.Insert (Cat()) |> ignore
         let tammedCat = Cat()
