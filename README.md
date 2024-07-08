@@ -160,7 +160,7 @@ pooledConnection.Execute(
 
 // Create a new user
 var insertSql = "INSERT INTO Users (Name, Age) VALUES (@Name, @Age) RETURNING Id;";
-userId = pooledConnection.QuerySingle<long>(insertSql, new { Name = "John Doe", Age = 30 });
+var userId = pooledConnection.QuerySingle<long>(insertSql, new { Name = "John Doe", Age = 30 });
 Assert.IsTrue(userId > 0, "Failed to insert new user.");
 ```
 
