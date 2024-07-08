@@ -29,7 +29,7 @@ type JsonTests() =
     [<TestInitialize>]
     member this.Init() =
         let dbSource = $"memory:Test{Random.Shared.NextInt64()}"
-        db <- SoloDB.Instantiate dbSource
+        db <- new SoloDB (dbSource)
     
     [<TestCleanup>]
     member this.Cleanup() =

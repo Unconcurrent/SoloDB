@@ -20,7 +20,7 @@ type ReadMeTests() =
     [<TestInitialize>]
     member this.Init() =
         let dbSource = $"memory:Test{Random.Shared.NextInt64()}"
-        db <- SoloDB.Instantiate dbSource
+        db <- new SoloDB (dbSource)
         fs <- db.FileSystem
     
     [<TestCleanup>]
@@ -29,8 +29,8 @@ type ReadMeTests() =
 
     [<TestMethod>]
     member this.Instantiate() =
-        let onDiskDB = SoloDB.Instantiate("./database.db");
-        let inMemoryDB = SoloDB.Instantiate("memory:database-name");
+        let onDiskDB = new SoloDB("./database.db");
+        let inMemoryDB = new SoloDB("memory:database-name");
         ()
 
     [<TestMethod>]

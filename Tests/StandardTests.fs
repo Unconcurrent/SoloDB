@@ -2,8 +2,6 @@
 
 open Microsoft.Data.Sqlite
 
-
-
 #nowarn "3391" // Implicit on SqlId
 
 open System
@@ -15,7 +13,6 @@ open FSharp.Interop.Dynamic
 open SoloDatabase
 open Dapper
 open SoloDatabase.Types
-open SoloDatabase.JsonFunctions
 open Types
 open TestUtils
 
@@ -27,7 +24,7 @@ type SoloDBStandardTesting() =
     [<TestInitialize>]
     member this.Init() =
         let dbSource = $"memory:Test{Random.Shared.NextInt64()}"
-        db <- SoloDB.Instantiate dbSource
+        db <- new SoloDB(dbSource)
 
     [<TestCleanup>]
     member this.Cleanup() =
@@ -925,7 +922,7 @@ type SoloDBStandardTesting() =
 
         db.GetUntypedCollection("RandomData").InsertBatch randomData |> ignore
 
-        use backup = SoloDB.Instantiate "memory:backup1"
+        use backup = new SoloDB "memory:backup1"
         db.BackupTo backup
 
         db.DropCollection "RandomData" |> ignore
@@ -956,7 +953,7 @@ type SoloDBStandardTesting() =
         Directory.CreateDirectory "./temp/" |> ignore
 
         if File.Exists "./temp/temp_from.db" then File.Delete "./temp/temp_from.db"
-        db <- SoloDB.Instantiate "./temp/temp_from.db"
+        db <- new SoloDB "./temp/temp_from.db"
 
         for i in 1..10 do db.GetUntypedCollection("Data").Insert {|abc = "1010"|} |> ignore
             
@@ -964,7 +961,7 @@ type SoloDBStandardTesting() =
             printfn "[%s] Start backup." (DateTime.Now.ToShortTimeString())
 
             let rez = db.VacuumTo "./temp/temp.db"
-            use backup = SoloDB.Instantiate "./temp/temp.db"
+            use backup = new SoloDB "./temp/temp.db"
 
             let backupCount = backup.GetUntypedCollection("Data").Count().Where(fun x -> x?abc = "1010").First() |> int
             printfn "Backup count: %i" backupCount
