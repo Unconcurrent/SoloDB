@@ -1,5 +1,4 @@
-﻿using LiteDB;
-using Microsoft.VisualStudio.TestTools.UnitTesting;
+﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SoloDatabase;
 using SoloDatabase.Types;
 using System.Text;
@@ -95,16 +94,5 @@ public abstract class ReadMeTests
 
         // Delete a document
         var count = collection.DeleteById(data.Id);
-    }
-
-    [TestMethod]
-    public void LiteDBAPI()
-    {
-        using var ldb = new LiteDatabase(new MemoryStream());
-
-        var created = ldb.BeginTrans();
-        
-        
-        ldb.Commit(); // Or ldb.Rollback();
     }
 }
