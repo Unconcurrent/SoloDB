@@ -82,8 +82,6 @@ type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string
 
         let finalSQL = postModifySQL finalSQL
 
-        printfn "%s" finalSQL 
-
         finalSQL, parameters
 
     member this.Limit(?count: uint64) =
