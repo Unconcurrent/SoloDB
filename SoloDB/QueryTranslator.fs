@@ -139,7 +139,7 @@ module QueryTranslator =
         | _ -> true
 
     let rec private visit (exp: Expression) (qb: QueryBuilder) : unit =
-        if exp.NodeType <> ExpressionType.Lambda && isFullyConstant exp then
+        if exp.NodeType <> ExpressionType.Lambda && isFullyConstant exp && (match exp with | :? ConstantExpression as ce when ce.Value = null -> false | other -> true) then
             let value = evaluateExpr exp
             qb.AppendVariable value
         else
