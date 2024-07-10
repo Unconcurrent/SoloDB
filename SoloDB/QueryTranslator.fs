@@ -89,6 +89,7 @@ module QueryTranslator =
         | :? ConstantExpression as e -> Some e
         | :? MemberExpression as inner -> tryRootConstant inner.Expression
         | _ -> None
+            
 
     let rec isFullyConstant (expr: Expression) : bool =
         match expr with
@@ -138,7 +139,7 @@ module QueryTranslator =
         | _ -> true
 
     let rec private visit (exp: Expression) (qb: QueryBuilder) : unit =
-        if isFullyConstant exp && exp.NodeType <> ExpressionType.Lambda then
+        if exp.NodeType <> ExpressionType.Lambda && isFullyConstant exp then
             let value = evaluateExpr exp
             qb.AppendVariable value
         else
@@ -178,20 +179,28 @@ module QueryTranslator =
         | ExpressionType.Parameter ->
             visitParameter (exp :?> ParameterExpression) qb
         | ExpressionType.ArrayIndex ->
-            visitParameter (exp :?> ParameterExpression) qb
+            match exp with
+            | :? ParameterExpression as pe -> visitParameter pe qb
+            | :? BinaryExpression as be -> arrayIndex be.Left be.Right qb
+
         | _ ->
             raise (Exception(sprintf "Unhandled expression type: '%O'" exp.NodeType))
+
+    and private arrayIndex (array: Expression) (index: Expression) (qb: QueryBuilder) : unit =
+        qb.AppendRaw "jsonb_extract("
+        visit array qb |> ignore
+        qb.AppendRaw ", '$["
+        visit index qb |> ignore
+        qb.AppendRaw "]')"
+        ()
 
     and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =        
         match m.Method.Name with
         | "GetArray" ->
             let array = m.Arguments.[0]
             let index = m.Arguments.[1]
-            qb.AppendRaw "jsonb_extract("
-            visit array qb |> ignore
-            qb.AppendRaw ", '$["
-            visit index qb |> ignore
-            qb.AppendRaw "]')"
+
+            arrayIndex array index qb
             
         | "Like" ->
             let string = m.Arguments.[0]
@@ -400,7 +409,9 @@ module QueryTranslator =
             qb.AppendRaw $"'$'"
         else
             if qb.JsonExtractSelfValue then
-                qb.AppendRaw $"jsonb_extract({qb.TableNameDot}Value, '$')"
+                if qb.StringBuilder.Length = 0 
+                then qb.AppendRaw $"json_extract(json({qb.TableNameDot}Value), '$')" // To avoit returning the jsonB format instead of normal json.
+                else qb.AppendRaw $"jsonb_extract({qb.TableNameDot}Value, '$')"
             else
                 qb.AppendRaw $"{qb.TableNameDot}Value"
         

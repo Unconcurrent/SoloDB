@@ -103,5 +103,5 @@ type TestRunner() =
 
 [<EntryPoint>]
 let main argv =
-    TestRunner.GetTests([|Assembly.GetExecutingAssembly()|]).Run "EnsureUniqueIndexTuple"
+    TestRunner.GetTests([|Assembly.GetExecutingAssembly()|]).Run "SelectWhereArrayIndexEquals"
     0

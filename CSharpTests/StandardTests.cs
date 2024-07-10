@@ -68,6 +68,44 @@ public abstract class StandardTests
         Assert.AreEqual(35, user.Age, "User age not updated correctly.");
     }
 
+    [TestMethod]
+    public void SelectWhereArrayIndexEquals()
+    {
+        var userCollections = this.db.GetCollection<ObjectWithTags>();
+
+        userCollections.InsertBatch(new []
+        {
+            new ObjectWithTags(new []{"ADSFHDJ", "GRGDEKOSAPJF"}),
+            new ObjectWithTags(new []{"ADSFHDJ1", "GRGDE34KOSAPJF"}),
+            new ObjectWithTags(new []{"ADSFH4DJ", "GRGDfrEKfeOSAPJF"}),
+            new ObjectWithTags(new []{"ADSFHr44DJ", "ABDBSDBSFSFSF"}),
+            new ObjectWithTags(new []{"ADSfFHDJ", "GRGDEK645OSAPJF"}),
+            new ObjectWithTags(new []{"AD5SFHDJ", "GRGD54EKOSAPJF"}),
+        });
+
+        var selectedUsers = userCollections.Select(u => u).Where(u => u.Tags[1] == "ABDBSDBSFSFSF").Enumerate().ToList();
+        Assert.AreEqual(selectedUsers.Count, 1);
+        Assert.AreEqual(selectedUsers[0].Tags[1], "ABDBSDBSFSFSF");
+    }
+
+    [TestMethod]
+    public void SelectItself()
+    {
+        var userCollections = this.db.GetCollection<ObjectWithTags>();
+
+        userCollections.InsertBatch(new[]
+        {
+            new ObjectWithTags(new []{"John", "Alex"}),
+        });
+
+        var selectedUsers = userCollections.Select(u => u /* This is the test. */).OnAll().Enumerate().ToList();
+        Assert.AreEqual(selectedUsers.Count, 1);
+        Assert.AreEqual(selectedUsers[0].Tags[0], "John");
+        Assert.AreEqual(selectedUsers[0].Tags[1], "Alex");
+    }
+
+    public record ObjectWithTags(string[] Tags);
+
     public class User
     {
         public long Id { get; set; }

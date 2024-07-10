@@ -104,7 +104,7 @@ type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string
 
     member this.Enumerate() =
         let finalSQL, parameters = this.getQueryParameters()
-        let connection = connection // Cannot access 'this.' in the following builder, because it is a struct.
+        let connection = connection // Cannot access 'this.' in the following builder, because 'this.' is a struct.
         let select = select
 
         seq {
