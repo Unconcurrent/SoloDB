@@ -262,6 +262,11 @@ let count = collection.DeleteById(data.Id) // 1
 ### Licence
 You can read the [LICENSE.txt](./LICENSE.txt).
 
+## (FA)Q
+
+### Why create this project?
+- For fun and profit, and to have a more simple alternative to MongoDB.
+
 ##### Footnote
 
 ###### API is subject to change.
