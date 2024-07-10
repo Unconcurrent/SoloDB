@@ -182,6 +182,7 @@ module QueryTranslator =
             match exp with
             | :? ParameterExpression as pe -> visitParameter pe qb
             | :? BinaryExpression as be -> arrayIndex be.Left be.Right qb
+            | other -> failwithf "Unknown array index expression of: %A" other
 
         | _ ->
             raise (Exception(sprintf "Unhandled expression type: '%O'" exp.NodeType))
