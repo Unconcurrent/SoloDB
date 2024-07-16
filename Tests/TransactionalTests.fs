@@ -7,6 +7,7 @@ open Microsoft.VisualStudio.TestTools.UnitTesting
 open SoloDatabase
 open FSharp.Interop.Dynamic
 open Types
+open SoloDatabase.Connections
 open TestUtils
 
 [<TestClass>]
@@ -509,3 +510,16 @@ type SoloDBTransactionalTesting() =
             let users = db.GetCollection<User>()
             assertEqual (db.ListCollectionNames() |> Seq.toArray) [|"User"|] "ListCollectionNames failed."
         )
+
+    [<TestMethod>]
+    member this.IsWithinTransactionFalse() = 
+        use conn = db.Connection.Borrow()
+        assertTrue (not (conn.IsWithinTransaction()))
+        ()
+
+    [<TestMethod>]
+    member this.IsWithinTransactionTrue() = 
+        db.WithTransaction(fun db ->
+            assertTrue (db.Connection.IsWithinTransaction())
+        )
+        ()

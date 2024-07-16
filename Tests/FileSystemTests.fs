@@ -13,6 +13,7 @@ open System.Security.Cryptography
 open System.Globalization
 
 let testFileBytes = "Hello this is some random data." |> Encoding.UTF8.GetBytes
+let testFileBytes2 = "This data is different from the previous one." |> Encoding.UTF8.GetBytes
 
 [<TestClass>]
 type FileSystemTests() =
@@ -44,6 +45,20 @@ type FileSystemTests() =
         use tempMs = new MemoryStream()
         fs.Download(path, tempMs)
         assertEqual (tempMs.ToArray()) testFileBytes "File corrupted on storage."
+
+    [<TestMethod>]
+    member this.FileUploadReplaceDownloadTransation() =
+        let path = "/abc.txt"
+        use ms = new MemoryStream(testFileBytes)
+        fs.Upload(path, ms)
+
+        use ms = new MemoryStream(testFileBytes2)
+
+        fs.ReplaceAsyncWithinTransaction(path, ms).GetAwaiter().GetResult()
+
+        use tempMs = new MemoryStream()
+        fs.Download(path, tempMs)
+        assertEqual (tempMs.ToArray()) testFileBytes2 "File corrupted on storage."
 
     [<TestMethod>]
     member this.FileLen() =

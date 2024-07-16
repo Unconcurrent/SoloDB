@@ -4,6 +4,8 @@ module Connections =
     open Dapper
     open System
     open System.Collections.Concurrent
+    open System.Threading.Tasks
+    open Utils
 
     type TransactionalConnection internal (connectionStr: string) =
         inherit SqliteConnection(connectionStr)
@@ -49,10 +51,41 @@ module Connections =
                 all.Push c
                 c
 
-        member this.CreateForTransaction() =
+        member internal this.CreateForTransaction() =
             let c = new TransactionalConnection(connectionStr)
             setup c
             c
+
+        member internal this.WithTransaction(f: SqliteConnection -> 'T) =
+            use connectionForTransaction = this.CreateForTransaction()
+            try
+                connectionForTransaction.Open()
+                connectionForTransaction.Execute("BEGIN;") |> ignore
+                
+                try
+                    let ret = f connectionForTransaction
+                    connectionForTransaction.Execute "COMMIT;" |> ignore
+                    ret
+                with ex -> 
+                    connectionForTransaction.Execute "ROLLBACK;" |> ignore
+                    reraise()
+            finally connectionForTransaction.DisposeReal(true)
+
+        member internal this.WithAsyncTransaction(f: SqliteConnection -> Task<'T>) = task {
+            use connectionForTransaction = this.CreateForTransaction()
+            try
+                connectionForTransaction.Open()
+                connectionForTransaction.Execute("BEGIN;") |> ignore
+        
+                try
+                    let! ret = f connectionForTransaction
+                    connectionForTransaction.Execute "COMMIT;" |> ignore
+                    return ret
+                with ex -> 
+                    connectionForTransaction.Execute "ROLLBACK;" |> ignore
+                    return reraiseAnywhere ex
+            finally connectionForTransaction.DisposeReal(true)
+        }
 
         interface IDisposable with
             override this.Dispose() =
@@ -70,3 +103,9 @@ module Connections =
             match this with
             | Pooled pool -> pool.Borrow()
             | Transactional conn -> conn
+
+    type SqliteConnection with
+        member this.IsWithinTransaction() =
+            match this with
+            | :? TransactionalConnection -> true
+            | other -> false

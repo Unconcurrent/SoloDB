@@ -19,9 +19,16 @@ module FileStorage =
         let mutex = new DisposableMutex($"SoloDB-{db.ConnectionString.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-Path-{path.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}")
         mutex
 
-    let private lockFileId (db: SqliteConnection) (id: SqlId) =
+    let private lockFileIdIfNotInTransaction (db: SqliteConnection) (id: SqlId) =
+        if db.IsWithinTransaction() then
+            { 
+            new System.IDisposable with
+                member this.Dispose() =
+                    ()
+            }
+        else
         let mutex = new DisposableMutex($"SoloDB-{db.ConnectionString.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-FileId-{id.Value}")
-        mutex
+        mutex :> IDisposable
 
     let fillDirectoryMetadata (db: SqliteConnection) (directory: SoloDBDirectoryHeader) =
         let allMetadata = db.Query<Metadata>("SELECT Key, Value FROM SoloDBDirectoryMetadata WHERE DirectoryId = @DirectoryId", {|DirectoryId = directory.Id|}) |> Seq.toList
@@ -170,6 +177,25 @@ module FileStorage =
         WHERE Id = @FileId", {|Hash = hash; FileId = fileId|})
         |> ignore
 
+    let private calculateHash (db: SqliteConnection) (fileId: SqlId) (len: int64) =
+        use sha1 = SHA1.Create()
+        let allChunks = getAllChunks db fileId
+
+        allChunks 
+        |> Seq.map (fun b -> 
+            let currentChunkDataOffset = b.Number * chunkSize
+            if currentChunkDataOffset + chunkSize <= len then 
+                ValueTuple<byte array, int, int>(b.Data, 0, b.Data.Length) 
+            else 
+                let blockReadCount = int (len - currentChunkDataOffset) // Calculate how many bytes should actually be read to not exceed the file length
+                ValueTuple<byte array, int, int>(b.Data, 0, blockReadCount)) // Trim the chunk data to match the file's actual length
+        |> Seq.iter (fun struct (data, start, len) -> sha1.TransformBlock (data, start, len, null, 0) |> ignore)
+
+        sha1.TransformFinalBlock([||], 0, 0) |> ignore
+
+        let hash = sha1.Hash
+        hash
+
     [<Sealed>]
     type DbFileStream(db: SqliteConnection, fileId: SqlId) =
         inherit Stream()
@@ -180,24 +206,8 @@ module FileStorage =
         let checkDisposed() = if disposed then raise (ObjectDisposedException(nameof(DbFileStream)))
 
         member private this.UpdateHash() =
-            use sha1 = SHA1.Create()
-            let allChunks = getAllChunks db fileId
-            let len = this.Length
-
-            allChunks 
-            |> Seq.map (fun b -> 
-                let currentChunkDataOffset = b.Number * chunkSize
-                if currentChunkDataOffset + chunkSize <= len then 
-                    ValueTuple<byte array, int, int>(b.Data, 0, b.Data.Length) 
-                else 
-                    let blockReadCount = int (len - currentChunkDataOffset) // Calculate how many bytes should actually be read to not exceed the file length
-                    ValueTuple<byte array, int, int>(b.Data, 0, blockReadCount)) // Trim the chunk data to match the file's actual length
-            |> Seq.iter (fun struct (data, start, len) -> sha1.TransformBlock (data, start, len, null, 0) |> ignore)
-
-            sha1.TransformFinalBlock([||], 0, 0) |> ignore
-
-            let hash = sha1.Hash
-            updateHashById db fileId hash
+            let hash = calculateHash db fileId this.Length
+            updateHashById db fileId hash 
 
 
         override _.CanRead = true
@@ -274,7 +284,7 @@ module FileStorage =
             let mutable bytesToWrite = 0L
 
             try
-                use l = lockFileId db fileId
+                use l = lockFileIdIfNotInTransaction db fileId
 
                 let chunkNumber = position / int64 chunkSize
                 let chunkOffset = position % int64 chunkSize
@@ -302,12 +312,12 @@ module FileStorage =
 
         override _.SetLength(value: int64) =
             checkDisposed()
-            use l = lockFileId db fileId
+            use l = lockFileIdIfNotInTransaction db fileId
             downsetFileLength db fileId value null
 
         override this.Seek(offset: int64, origin: SeekOrigin) =
             checkDisposed()
-            use l = lockFileId db fileId
+            use l = lockFileIdIfNotInTransaction db fileId
             match origin with
             | SeekOrigin.Begin -> position <- offset
             | SeekOrigin.Current -> position <- position + offset
@@ -485,27 +495,35 @@ module FileStorage =
         member this.Upload(path, stream: Stream) =
             use db = manager.Borrow()
             use file = openOrCreateFile db path
-            stream.CopyTo file
+            stream.CopyTo(file, int chunkSize)
             file.SetLength file.Position
 
         member this.UploadAsync(path, stream: Stream) = task {
             use db = manager.Borrow()
             use file = openOrCreateFile db path
-            do! stream.CopyToAsync file
+            do! stream.CopyToAsync(file, int chunkSize)
             file.SetLength file.Position
+        }
+
+        member this.ReplaceAsyncWithinTransaction(path, stream: Stream) = task {
+            return! manager.WithAsyncTransaction(fun db -> task {
+                use file = openOrCreateFile db path
+                do! stream.CopyToAsync(file, int chunkSize)
+                file.SetLength file.Position
+            })
         }
 
         member this.Download(path, stream: Stream) =
             use db = manager.Borrow()
             let fileHeader = match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
             use fileStream = openFile db fileHeader
-            fileStream.CopyTo stream
+            fileStream.CopyTo(stream, int chunkSize)
 
         member this.DownloadAsync(path, stream: Stream) = task {
             use db = manager.Borrow()
             let fileHeader = match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
             use fileStream = openFile db fileHeader
-            do! fileStream.CopyToAsync stream
+            do! fileStream.CopyToAsync(stream, int chunkSize)
         }
 
         member this.GetAt path =
@@ -536,16 +554,16 @@ module FileStorage =
             use db = manager.Borrow()
             openFile db file
 
-        member this.OpenAt path =
-            use db = manager.Borrow()
+        member this.OpenAt path =            
             let file = this.GetAt path
+            use db = manager.Borrow()
             openFile db file
 
-        member this.TryOpenAt path =
-            use db = manager.Borrow()
+        member this.TryOpenAt path =            
             match this.TryGetAt path with
             | None -> None
             | Some file ->
+            use db = manager.Borrow()
             openFile db file |> Some
 
         member this.OpenOrCreateAt path =
@@ -615,7 +633,7 @@ module FileStorage =
 
         member this.GetFileByHash(hash) =
             match this.TryGetFileByHash hash with
-            | None -> raise (FileNotFoundException("No file with such hash.", Utils.hashBytesToStr hash))
+            | None -> raise (FileNotFoundException("No file with such hash.", Utils.bytesToHexFast hash))
             | Some f -> f
 
         member this.Delete(file) =

@@ -1,5 +1,8 @@
 ﻿namespace SoloDatabase
 
+open System.Runtime.CompilerServices
+open System
+
 #nowarn "9" // Unsafe functions.
 
 module Utils =
@@ -12,6 +15,13 @@ module Utils =
     open System.Text
     open System.Runtime.InteropServices
     open Microsoft.FSharp.NativeInterop
+    open System.Runtime.ExceptionServices
+    
+    // For the use in F# Builders, like task { .. }.
+    // https://stackoverflow.com/a/72132958/9550932
+    let inline reraiseAnywhere<'a> (e: exn) : 'a =
+        ExceptionDispatchInfo.Capture(e).Throw()
+        Unchecked.defaultof<'a>
 
     let isNumber (value: obj) =
         match value with
@@ -74,7 +84,8 @@ module Utils =
 
     // Function to create the lookup table.
     let private createLookup32Unsafe () =
-        let mem = NativeMemory.AllocZeroed(256 * sizeof<uint> |> unativeint) |> NativePtr.ofVoidPtr<uint>
+        let memPtr = NativeMemory.AllocZeroed(256 * sizeof<uint> |> unativeint)
+        let mem = memPtr |> NativePtr.ofVoidPtr<uint>
         for i in 0..255 do
             let s = i.ToString("x2")
             let ch =
@@ -85,30 +96,35 @@ module Utils =
 
             NativePtr.set mem i ch
 
-        mem
+        memPtr
 
     // Declare the lookup array.
     let private lookup32Unsafe = createLookup32Unsafe()
+    let private getLookup() =
+        Span<uint>(lookup32Unsafe, 256)
 
     // Function to convert byte array to hex string using the lookup table.
-    let private byteArrayToHexViaLookupUnsafe (bytes: byte[]) =
-        let lookup = lookup32Unsafe
+    let private byteArrayToHexViaLookupSafer (bytes: byte array) =
+        let resultI: Span<uint> =
+            if bytes.Length > 256 then
+                Span<uint>(Array.zeroCreate<uint> (bytes.Length))
+            else
+                Span<uint>(NativePtr.toVoidPtr (NativePtr.stackalloc<uint> (bytes.Length)) , bytes.Length)
 
-        // Kinda sketchy, see
-        // https://stackoverflow.com/questions/58025460/is-it-legal-to-modify-strings
-        let result = new string((char)0, bytes.Length * 2) 
-        use resultP = fixed result
-        let resultPI = resultP |> NativePtr.toVoidPtr |> NativePtr.ofVoidPtr<uint>
+        let lookup = getLookup()
+
         for i in 0..(bytes.Length - 1) do
             let b = bytes.[i]
-            let v = NativePtr.get lookup (int b)
+            let v = lookup.[(int b)]
 
-            NativePtr.set resultPI i v
+            resultI[i] <- v
 
-        result
+        let result = MemoryMarshal.Cast<uint, char>(resultI)
 
-    let hashBytesToStr (hash: byte array) =
-        byteArrayToHexViaLookupUnsafe hash
+        new string(result)
+
+    let bytesToHexFast (hash: byte array) =
+        byteArrayToHexViaLookupSafer hash
 
 
     let mutable debug =
