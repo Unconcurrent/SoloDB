@@ -244,7 +244,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         WhereBuilder(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>(), id)
 
     member this.TryFirst(func: Expression<System.Func<'T, bool>>) =
-        this.Select().Where(func).Enumerate() |> Seq.tryHead
+        this.Select().Where(func).Limit(1UL).Enumerate() |> Seq.tryHead
 
     member this.Count() =
         WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), id)
@@ -358,6 +358,8 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
 
 type TransactionalSoloDB internal (connection: TransactionalConnection) =
     let connectionString = connection.ConnectionString
+
+    member this.Connection = connection
 
     member private this.InitializeCollection<'T> name =
         if not (Helper.existsCollection name connection) then 

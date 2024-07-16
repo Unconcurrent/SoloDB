@@ -7,7 +7,6 @@ open Dapper
 open System.Collections.Generic
 open System.Runtime.CompilerServices
 
-[<IsByRefLike; Struct>]
 type internal DisposableMutex =
     val mutex: Mutex
 
