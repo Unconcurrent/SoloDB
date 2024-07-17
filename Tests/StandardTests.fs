@@ -1,9 +1,9 @@
 ﻿module StandardTests
 
-open Microsoft.Data.Sqlite
-
 #nowarn "3391" // Implicit on SqlId
 
+
+open Microsoft.Data.Sqlite
 open System
 open System.IO
 open System.Threading
@@ -100,7 +100,7 @@ type SoloDBStandardTesting() =
             prevId <- id
 
     [<TestMethod>]
-    member this.QueryTest1() =        
+    member this.WhereTest1() =        
         let users = db.GetCollection<User>()
 
         let ids = users.InsertBatch(randomUsersToInsert)
@@ -112,7 +112,7 @@ type SoloDBStandardTesting() =
                             .ToList()
 
         let selectedDataText = sprintf "%A" selectedData
-        let expected = "[(\"Vanya\", \"tag1-B\"); (\"John\", \"tag1-A\"); (\"Givany\", \"tag1-C\")]" 
+        let expected = "seq [(\"Vanya\", \"tag1-B\"); (\"John\", \"tag1-A\"); (\"Givany\", \"tag1-C\")]" 
         printfn "%s" selectedDataText
         printfn "%s" expected
         assertEqual selectedDataText expected "The query is wrong."
@@ -131,7 +131,7 @@ type SoloDBStandardTesting() =
                             .ToList()
 
         let selectedDataText = sprintf "%A" selectedData
-        let expected = "[([|\"tag2\"|], true, true, \"Mihail\")]"
+        let expected = "seq [([|\"tag2\"|], true, true, \"Mihail\")]"
         printfn "%s" selectedDataText
         printfn "%s" expected
         assertEqual selectedDataText expected "The query is wrong."
@@ -632,7 +632,7 @@ type SoloDBStandardTesting() =
         users.InsertBatch randomUsersToInsert |> ignore
         let orderedUsers = users.Select(fun u -> u.Username).OnAll().OrderByAsc(fun u -> u.Username).ToList()
         let sortedUsernames = randomUsersToInsert |> Array.map (fun u -> u.Username) |> Array.sort
-        assertEqual (orderedUsers) (Array.toList sortedUsernames) "The ascending order query returned incorrect order of users."
+        assertEqual (orderedUsers.ToArray()) (sortedUsernames) "The ascending order query returned incorrect order of users."
     
     [<TestMethod>]
     member this.OrderByDescUsers() =        
@@ -640,7 +640,7 @@ type SoloDBStandardTesting() =
         users.InsertBatch randomUsersToInsert |> ignore
         let orderedUsers = users.Select(fun u -> u.Username).OnAll().OrderByDesc(fun u -> u.Username).ToList()
         let sortedUsernames = randomUsersToInsert |> Array.map (fun u -> u.Username) |> Array.sortDescending
-        assertEqual (orderedUsers) (Array.toList sortedUsernames) "The descending order query returned incorrect order of users."
+        assertEqual (orderedUsers.ToArray()) (sortedUsernames) "The descending order query returned incorrect order of users."
         
     [<TestMethod>]
     member this.CountWhereUsers() =        
@@ -930,7 +930,7 @@ type SoloDBStandardTesting() =
 
         assertEqual (backup.CollectionExists "RandomData") true "Backup incomplete: not equal."
         let backupRandomData = backup.GetUntypedCollection "RandomData"
-        let backupRandomDataValues = backupRandomData.Select().OnAll().ToList()
+        let backupRandomDataValues = backupRandomData.Select().OnAll().ToList() |> Seq.toList
         let backupRandomDataValuesString = sprintf "%A" backupRandomDataValues
         let randomDataString = sprintf "%A" randomData
 
@@ -1180,8 +1180,8 @@ type SoloDBStandardTesting() =
         let numbers = db.GetCollection<int64>()
         numbers.InsertBatch [|-100..100|] |> ignore
 
-        let query1 = numbers.Select(fun n -> n + 10L).Where(fun n -> n + 50L <= 0L).ToList()
-        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n + 50L <= 0L) |> List.map(fun n -> n + 10L)) "Not correct query."
+        let query1 = numbers.Select(fun n -> n + 10L).Where(fun n -> n + 50L <= 0L).ToList().ToArray()
+        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n + 50L <= 0L) |> List.map(fun n -> n + 10L) |> List.toArray) "Not correct query."
 
 
     [<TestMethod>]
@@ -1189,24 +1189,24 @@ type SoloDBStandardTesting() =
         let numbers = db.GetCollection<int64>()
         numbers.InsertBatch [|-100..100|] |> ignore
 
-        let query1 = numbers.Select(fun n -> n - 10L).Where(fun n -> n - 50L <= 0L).ToList()
-        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n - 50L <= 0L) |> List.map(fun n -> n - 10L)) "Not correct query."
+        let query1 = numbers.Select(fun n -> n - 10L).Where(fun n -> n - 50L <= 0L).ToList().ToArray()
+        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n - 50L <= 0L) |> List.map(fun n -> n - 10L) |> List.toArray) "Not correct query."
 
     [<TestMethod>]
     member this.Multiplication() =
         let numbers = db.GetCollection<int64>()
         numbers.InsertBatch [|-100..100|] |> ignore
 
-        let query1 = numbers.Select(fun n -> n * 10L).Where(fun n -> n * 50L <= 0L).ToList()
-        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n * 50L <= 0L) |> List.map(fun n -> n * 10L)) "Not correct query."
+        let query1 = numbers.Select(fun n -> n * 10L).Where(fun n -> n * 50L <= 0L).ToList().ToArray()
+        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n * 50L <= 0L) |> List.map(fun n -> n * 10L) |> List.toArray) "Not correct query."
 
     [<TestMethod>]
     member this.DivisionAndModulus() =
         let numbers = db.GetCollection<int64>()
         numbers.InsertBatch [|-100..100|] |> ignore
 
-        let query1 = numbers.Select(fun n -> n / 10L).Where(fun n -> n % 5L = 0L).ToList()
-        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n % 5L = 0L) |> List.map(fun n -> n / 10L)) "Not correct query."
+        let query1 = numbers.Select(fun n -> n / 10L).Where(fun n -> n % 5L = 0L).ToList().ToArray()
+        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n % 5L = 0L) |> List.map(fun n -> n / 10L) |> List.toArray) "Not correct query."
 
 
     [<TestMethod>]
@@ -1214,16 +1214,16 @@ type SoloDBStandardTesting() =
         let numbers = db.GetCollection<int64>()
         numbers.InsertBatch [|-100..100|] |> ignore
 
-        let query1 = numbers.Select(fun n -> n / 10L).Where(fun n -> n / 2L <= 0L).ToList()
-        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n / 2L <= 0L) |> List.map(fun n -> n / 10L)) "Not correct query."
+        let query1 = numbers.Select(fun n -> n / 10L).Where(fun n -> n / 2L <= 0L).ToList().ToArray()
+        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n / 2L <= 0L) |> List.map(fun n -> n / 10L) |> List.toArray) "Not correct query."
 
     [<TestMethod>]
     member this.Modulus() =
         let numbers = db.GetCollection<int64>()
         numbers.InsertBatch [|-100..100|] |> ignore
 
-        let query1 = numbers.Select(fun n -> n % 10L).Where(fun n -> n % 5L = 0L).ToList()
-        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n % 5L = 0L) |> List.map(fun n -> n % 10L)) "Not correct query."
+        let query1 = numbers.Select(fun n -> n % 10L).Where(fun n -> n % 5L = 0L).ToList().ToArray()
+        assertEqual query1 ([-100L..100L] |> List.filter(fun n -> n % 5L = 0L) |> List.map(fun n -> n % 10L) |> List.toArray) "Not correct query."
 
     [<TestMethod>]
     member this.FailedToCloseTransactionFail() =        
@@ -1233,3 +1233,52 @@ type SoloDBStandardTesting() =
             ()
         )
         assertEqual ex.Message "The transaction must be finished before you return the connection to the pool." "Wrong exception."
+
+    [<TestMethod>]
+    member this.WhereTest() =
+        let users = db.GetCollection<User>()
+
+        let ids = users.InsertBatch(randomUsersToInsert)
+
+        let selectedData = users
+                            .Where(fun u -> u.Data.Tags[0].Like "tag1%")
+                            .OrderByDesc(fun u -> u.Username)
+                            .ToList() 
+                            |> Seq.map(fun u -> (u.Username, u.Data.Tags.[0]))
+                            |> Seq.toList
+
+        let selectedDataText = sprintf "%A" selectedData
+        let expected = "[(\"Vanya\", \"tag1-B\"); (\"John\", \"tag1-A\"); (\"Givany\", \"tag1-C\")]" 
+        printfn "%s" selectedDataText
+        printfn "%s" expected
+        assertEqual selectedDataText expected "The query is wrong."
+
+    [<TestMethod>]
+    member this.ToListTest() =
+        let users = db.GetCollection<User>()
+
+        let ids = users.InsertBatch(randomUsersToInsert)
+
+        let selectedData = users
+                            .ToList()
+
+        for user in randomUsersToInsert do
+            assertTrue (selectedData |> Seq.exists(fun s -> s.Username = user.Username && s.Data = user.Data))
+
+    [<TestMethod>]
+    member this.EnumerateTest() =
+        let users = db.GetCollection<User>()
+
+        let ids = users.InsertBatch(randomUsersToInsert)
+
+        for user in randomUsersToInsert do
+            assertTrue (users.Enumerate() |> Seq.exists(fun s -> s.Username = user.Username && s.Data = user.Data))
+
+    [<TestMethod>]
+    member this.GetEnumeratorTest() =
+        let users = db.GetCollection<User>()
+
+        let ids = users.InsertBatch(randomUsersToInsert)
+
+        for user in randomUsersToInsert do
+            assertTrue (seq {for user in users do user} |> Seq.exists(fun s -> s.Username = user.Username && s.Data = user.Data))

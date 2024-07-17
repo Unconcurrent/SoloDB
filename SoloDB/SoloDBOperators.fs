@@ -65,3 +65,8 @@ module Operators =
         static member tryFirst<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> func |> collection.TryFirst
 
         static member any<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> func |> collection.Any
+
+        static member where (f) (collection: Collection<'T>) = collection.Where(f)
+
+        static member toSeq (collection: Collection<'T>) = collection.Enumerate()
+        static member toList (collection: Collection<'T>) = collection.ToList()
