@@ -338,9 +338,9 @@ type SoloDBTransactionalTesting() =
             fun db ->
                 let users = db.GetCollection<User>()
                 users.InsertBatch randomUsersToInsert |> ignore
-                let orderedUsers = users.Select(fun u -> u.Username).OnAll().OrderByAsc(fun u -> u.Username).ToList()
+                let orderedUsers = users.Select(fun u -> u.Username).OnAll().OrderByAsc(fun u -> u.Username).ToList().ToArray()
                 let sortedUsernames = randomUsersToInsert |> Array.map (fun u -> u.Username) |> Array.sort
-                assertEqual (orderedUsers) (Array.toList sortedUsernames) "The ascending order query returned incorrect order of users."
+                assertEqual (orderedUsers) (sortedUsernames) "The ascending order query returned incorrect order of users."
         )
     
     [<TestMethod>]

@@ -7,16 +7,16 @@ open System
 open System.Collections.Generic
 open System.Collections
 open FSharp.Interop.Dynamic
-open JsonFunctions
-open System.Collections.Concurrent
+open System.Linq
 open SoloDatabase.Types
 open Dynamitey
 open System.IO
-open FileStorage
-open Connections
 open System.Runtime.CompilerServices
 open System.Reflection
 open System.Text
+open JsonFunctions
+open FileStorage
+open Connections
 
 module internal Helper =
     let internal lockTable (connectionStr: string) (name: string) =
@@ -144,8 +144,7 @@ type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string
         |> String.concat ";\n"
 
     member this.ToList() =
-        this.Enumerate() 
-        |> Seq.toList
+        Utils.CompatilibilityList<'R>(this.Enumerate())
 
 [<Struct>]
 type WhereBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string, select: 'Q -> 'R, vars: Dictionary<string, obj>, postModifySQL: string -> string) =
@@ -245,6 +244,19 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
 
     member this.TryFirst(func: Expression<System.Func<'T, bool>>) =
         this.Select().Where(func).Limit(1UL).Enumerate() |> Seq.tryHead
+
+    member this.Where(f: Expression<Func<'T, bool>>) = this.Select().Where(f)
+
+    member this.ToList() = this.Select().OnAll().ToList()
+
+    member this.Enumerate() = this.Select().OnAll().Enumerate()
+
+    interface IEnumerable<'T> with
+        override this.GetEnumerator() =
+            this.Enumerate().GetEnumerator()
+
+        override this.GetEnumerator() =
+            this.Enumerate().GetEnumerator() :> IEnumerator
 
     member this.Count() =
         WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), id)

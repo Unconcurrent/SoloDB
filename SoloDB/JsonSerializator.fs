@@ -296,8 +296,9 @@ module JsonSerializator =
 
             let deserializeObject (targetType: Type) (jsonObj: JsonValue) =
                 let targetType =
-                    let typeProp = match jsonObj.TryGetProperty "$type" with true, x -> x.ToObject<string>() |> nameToType | false, _ -> null
-                    match targetType.IsSealed, typeProp with
+                    // Be careful, a potential attacker can put anything in this field.
+                    let unsafeTypeProp = match jsonObj.TryGetProperty "$type" with true, x -> x.ToObject<string>() |> nameToType | false, _ -> null
+                    match targetType.IsSealed, unsafeTypeProp with
                     | true, _ -> targetType
                     | _, null -> targetType
                     | false, (jsonType) when (jsonType).IsAssignableTo targetType -> jsonType
