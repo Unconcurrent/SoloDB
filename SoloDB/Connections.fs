@@ -30,6 +30,10 @@ module Connections =
     and ConnectionManager internal (connectionStr: string, setup: SqliteConnection -> unit) =
         let all = ConcurrentStack<PooledConnection>()
         let pool = ConcurrentStack<PooledConnection>()
+        let mutable disposed = false
+
+        let checkDisposed () =
+            if disposed then raise (ObjectDisposedException(nameof(ConnectionManager)))
 
         member internal this.TakeBack(pooledConn: PooledConnection) =
             // SQLite does not support nested transactions, therefore we can use it to check if the user forgot to 
@@ -42,6 +46,7 @@ module Connections =
             pool.Push pooledConn
 
         member this.Borrow() =
+            checkDisposed()
             match pool.TryPop() with
             | true, c -> c
             | false, _ -> 
@@ -52,6 +57,7 @@ module Connections =
                 c
 
         member internal this.CreateForTransaction() =
+            checkDisposed()
             let c = new TransactionalConnection(connectionStr)
             setup c
             c
@@ -89,9 +95,11 @@ module Connections =
 
         interface IDisposable with
             override this.Dispose() =
+                disposed <- true
                 for c in all do
                     c.DisposeReal(true)
                 all.Clear()
+                pool.Clear()
                 ()
 
     [<Struct>]

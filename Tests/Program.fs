@@ -103,5 +103,78 @@ type TestRunner() =
 
 [<EntryPoint>]
 let main argv =
-    TestRunner.GetTests([|Assembly.GetExecutingAssembly()|]).Run "*"
+    TestRunner.GetTests([|Assembly.GetExecutingAssembly()|]).Run "*ManyFiles"
     0
+
+
+    (*todo: --EXPLAIN QUERY PLAN SELECT * FROM SoloDBDirectoryHeader WHERE Name = "" AND ParentId = 1
+    
+    -- PRAGMA optimize;
+    
+    EXPLAIN QUERY PLAN 
+    WITH RECURSIVE DirectoryTree AS (
+        -- Base case: start with the specified directory
+        SELECT
+            Id,
+            Name,
+            FullPath,
+            ParentId,
+    		Created,
+    		Modified,
+            0 AS Level -- starting level
+        FROM
+            SoloDBDirectoryHeader
+        WHERE
+            Id = 1
+    
+        UNION ALL
+    
+        -- Recursive case: get the subdirectories
+        SELECT
+            d.Id,
+            d.Name,
+            d.FullPath,
+            d.ParentId,
+    		d.Created,
+    		d.Modified,
+            dt.Level + 1 AS Level
+        FROM
+            SoloDBDirectoryHeader d
+        INNER JOIN
+            DirectoryTree dt ON d.ParentId = dt.Id
+    )
+    
+    SELECT
+        dt.Level,
+        'Directory' AS Type,
+        dt.FullPath AS Path,
+        dt.Name AS Name,
+    	0 AS Size,
+    	dt.Created as Created,
+    	dt.Modified as Modified,
+        dm.Key AS MetadataKey,
+        dm.Value AS MetadataValue
+    FROM
+        DirectoryTree dt
+    LEFT JOIN
+        SoloDBDirectoryMetadata dm ON dt.Id = dm.DirectoryId
+    
+    UNION ALL
+    
+    SELECT
+        dt.Level + 1 AS Level,
+        'File' AS Type,
+        fh.FullPath AS Path,
+        fh.Name AS Name,
+    	fh.Length AS Size,
+    	fh.Created as Created,
+    	fh.Modified as Modified,
+        fm.Key AS MetadataKey,
+        fm.Value AS MetadataValue
+    FROM
+        DirectoryTree dt
+    INNER JOIN
+        SoloDBFileHeader fh ON dt.Id = fh.DirectoryId
+    LEFT JOIN
+        SoloDBFileMetadata fm ON fh.Id = fm.FileId
+    *)
