@@ -99,15 +99,19 @@ type FileSystemTests() =
     [<TestMethod>]
     member this.FileMetadata() =
         let path = "/xyz.txt"
+
         let file = fs.GetOrCreateAt path
         use ms = new MemoryStream(testFileBytes)
         fs.Upload(path, ms)
+
+        fs.SetMetadata(file, "Owner", "Artur")
         fs.SetMetadata(file, "Owner", "John")
         fs.SetMetadata(file, "Tags", "One")
 
         let file2 = fs.GetAt path
 
         assertEqual file2.Metadata.["Owner"] "John" "Metadata not set."
+        assertEqual file2.Metadata.["Tags"] "One" "Metadata not set."
 
         fs.DeleteMetadata(file, "Owner")
 
@@ -122,12 +126,14 @@ type FileSystemTests() =
         let dir = fs.GetOrCreateDirAt path
         use ms = new MemoryStream(testFileBytes)
 
+        fs.SetDirectoryMetadata(dir, "Owner", "Artur")
         fs.SetDirectoryMetadata(dir, "Owner", "John")
         fs.SetDirectoryMetadata(dir, "Tags", "One")
 
         let dir2 = fs.GetDirAt path
 
         assertEqual dir2.Metadata.["Owner"] "John" "Metadata not set."
+        assertEqual dir2.Metadata.["Tags"] "One" "Metadata not set."
 
         fs.DeleteDirectoryMetadata(dir, "Owner")
 

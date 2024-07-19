@@ -1,4 +1,7 @@
 ﻿namespace SoloDatabase
+
+open System.Collections.Generic
+
 module FileStorage =
     open System
     open System.IO
@@ -30,8 +33,8 @@ module FileStorage =
         let mutex = new DisposableMutex($"SoloDB-{db.ConnectionString.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-FileId-{id.Value}")
         mutex :> IDisposable
 
-    let fillDirectoryMetadata (db: SqliteConnection) (directory: SoloDBDirectoryHeader) =
-        let allMetadata = db.Query<Metadata>("SELECT Key, Value FROM SoloDBDirectoryMetadata WHERE DirectoryId = @DirectoryId", {|DirectoryId = directory.Id|}) |> Seq.toList
+    let private fillDirectoryMetadata (db: SqliteConnection) (directory: SoloDBDirectoryHeader) =
+        let allMetadata = db.Query<Metadata>("SELECT Key, Value FROM SoloDBDirectoryMetadata WHERE DirectoryId = @DirectoryId", {|DirectoryId = directory.Id|})
         let dict = Dictionary<string, string>()
 
         for meta in allMetadata do
@@ -39,12 +42,48 @@ module FileStorage =
 
         {directory with Metadata = dict}
 
+
+    let private tryGetDirectoriesWhere (connection: SqliteConnection) (where: string) (parameters: obj) =
+        let query = $"""
+            SELECT dh.*, dm.Key, dm.Value
+            FROM SoloDBDirectoryHeader dh
+            LEFT JOIN SoloDBDirectoryMetadata dm ON dh.Id = dm.DirectoryId
+            WHERE {where};
+        """
+    
+        let directoryDictionary = new System.Collections.Generic.Dictionary<SqlId, SoloDBDirectoryHeader>()
+        let isNull x = Object.ReferenceEquals(x, null)
+
+        
+        connection.Query<SoloDBDirectoryHeader, Metadata, unit>(
+            query,
+            (fun directory metadata ->
+                let dir = 
+                    match directoryDictionary.TryGetValue(directory.Id) with
+                    | true, dir ->
+                        dir
+                    | false, _ ->
+                        let dir = 
+                            if isNull directory.Metadata then
+                                {directory with Metadata = Dictionary()}
+                            else directory
+                            
+                        directoryDictionary.Add(dir.Id, dir)
+                        dir
+
+                if not (isNull metadata) then
+                    dir.Metadata.Add(metadata.Key, metadata.Value)
+                ()
+            ),
+            parameters,
+            splitOn = "Key",
+            buffered = false
+        ) |> Seq.iter ignore
+    
+        directoryDictionary.Values :> SoloDBDirectoryHeader seq
+
     let private tryGetDir (db: SqliteConnection) (path: string) =
-        let dir = db.QueryFirstOrDefault<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE FullPath = @Path", {|Path = path|})
-        if Object.ReferenceEquals(dir, null) then
-            None
-        else 
-            dir |> fillDirectoryMetadata db |> Some
+        tryGetDirectoriesWhere db "dh.FullPath = @Path" {|Path = path|} |> Seq.tryHead
 
     let private getOrCreateDir (db: SqliteConnection) (path: string) =
         use l = lockPath db path
@@ -389,7 +428,7 @@ module FileStorage =
             header.Metadata[metadata.Key] <- metadata.Value
         header
 
-    let private tryGetFileWhere (connection: SqliteConnection) (where: string) (parameters) =
+    let private getFilesWhere (connection: SqliteConnection) (where: string) (parameters) =
         let query = sprintf """
                     SELECT fh.*, fm.Key, fm.Value
                     FROM SoloDBFileHeader fh
@@ -397,26 +436,49 @@ module FileStorage =
                     WHERE %s;
                     """ where
     
-        connection.Query<SoloDBFileHeader, Metadata, SoloDBFileHeader>(
-            query, 
-            metadataFiller,
+        let fileDictionary = new System.Collections.Generic.Dictionary<SqlId, SoloDBFileHeader>()
+        let isNull x = Object.ReferenceEquals(x, null)
+
+        
+        connection.Query<SoloDBFileHeader, Metadata, unit>(
+            query,
+            (fun fileHeader metadata ->
+                let file = 
+                    match fileDictionary.TryGetValue(fileHeader.Id) with
+                    | true, f ->
+                        f
+                    | false, _ ->
+                        let f = 
+                            if isNull fileHeader.Metadata then
+                                {fileHeader with Metadata = Dictionary()}
+                            else fileHeader
+                            
+                        fileDictionary.Add(f.Id, f)
+                        f
+
+                if not (isNull metadata) then
+                    file.Metadata.Add(metadata.Key, metadata.Value)
+                ()
+            ),
             parameters,
-            splitOn = "Key"
-        )
-        |> Seq.tryHead
+            splitOn = "Key",
+            buffered = false
+        ) |> Seq.iter ignore
+    
+        fileDictionary.Values :> SoloDBFileHeader seq
 
     let tryGetFile (connection: SqliteConnection) (fileId: SqlId) =
-        tryGetFileWhere connection "fh.Id = @FileId" {| FileId = fileId |}
+        getFilesWhere connection "fh.Id = @FileId" {| FileId = fileId |}
 
     let tryGetFileAt (db: SqliteConnection) (path: string) =
         let dirPath, name = getPathAndName path
         match tryGetDir db dirPath with
         | None -> None
         | Some dir -> 
-        tryGetFileWhere db "fh.DirectoryId = @DirectoryId AND fh.Name = @Name" {|DirectoryId = dir.Id; Name = name|}
+        getFilesWhere db "fh.DirectoryId = @DirectoryId AND fh.Name = @Name" {|DirectoryId = dir.Id; Name = name|} |> Seq.tryHead
 
-    let tryGetFileByHash (db: SqliteConnection) (hash: byte array) =
-        tryGetFileWhere db "fh.Hash = @Hash" {|Hash = hash|}
+    let getFilesByHash (db: SqliteConnection) (hash: byte array) =
+        getFilesWhere db "fh.Hash = @Hash" {|Hash = hash|}
 
     let getOrCreateFileAt (db: SqliteConnection) (path: string) =
         use l = lockPath db path
@@ -479,14 +541,14 @@ module FileStorage =
         [|directoryPath; file.Name|] |> combinePathArr
 
     let setSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) (value: string) =
-        db.Execute("INSERT INTO SoloDBFileMetadata(FileId, Key, Value) VALUES(@FileId, @Key, @Value)", {|FileId = file.Id; Key = key; Value = value|}) |> ignore
+        db.Execute("INSERT OR REPLACE INTO SoloDBFileMetadata(FileId, Key, Value) VALUES(@FileId, @Key, @Value)", {|FileId = file.Id; Key = key; Value = value|}) |> ignore
 
     let deleteSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) =
         db.Execute("DELETE FROM SoloDBFileMetadata WHERE FileId = @FileId AND Key = @Key", {|FileId = file.Id; Key = key|}) |> ignore
 
 
     let setDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) (value: string) =
-        db.Execute("INSERT INTO SoloDBDirectoryMetadata(DirectoryId, Key, Value) VALUES(@DirectoryId, @Key, @Value)", {|DirectoryId = dir.Id; Key = key; Value = value|}) |> ignore
+        db.Execute("INSERT OR REPLACE INTO SoloDBDirectoryMetadata(DirectoryId, Key, Value) VALUES(@DirectoryId, @Key, @Value)", {|DirectoryId = dir.Id; Key = key; Value = value|}) |> ignore
 
     let deleteDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) =
         db.Execute("DELETE FROM SoloDBDirectoryMetadata WHERE DirectoryId = @DirectoryId AND Key = @Key", {|DirectoryId = dir.Id; Key = key|}) |> ignore
@@ -542,7 +604,7 @@ module FileStorage =
             use db = manager.Borrow()
             match tryGetDir db path with | Some f -> f | None -> raise (DirectoryNotFoundException("Directory not found at: " + path))
 
-        member this.TryDirGetAt path =
+        member this.TryGetDirAt path =
             use db = manager.Borrow()
             tryGetDir db path
 
@@ -627,12 +689,12 @@ module FileStorage =
             use db = manager.Borrow()
             deleteDirMetadata db dir key
 
-        member this.TryGetFileByHash(hash) =
+        member this.GetFilesByHash(hash) =
             use db = manager.Borrow()
-            tryGetFileByHash db hash
+            getFilesByHash db hash
 
         member this.GetFileByHash(hash) =
-            match this.TryGetFileByHash hash with
+            match this.GetFilesByHash hash |> Seq.tryHead with
             | None -> raise (FileNotFoundException("No file with such hash.", Utils.bytesToHexFast hash))
             | Some f -> f
 
