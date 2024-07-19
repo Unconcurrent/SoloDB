@@ -89,6 +89,7 @@ type Metadata = {
 type SoloDBFileHeader = {
     Id: SqlId
     Name: string
+    FullPath: string
     DirectoryId: SqlId
     Length: int64
     Created: DateTimeOffset

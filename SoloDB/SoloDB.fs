@@ -463,13 +463,14 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         do
             use dbConnection = manager.Borrow()
 
-            dbConnection.Execute("
+            let initCommands = [|"
                                 PRAGMA journal_mode=wal;
-                                CREATE TABLE IF NOT EXISTS SoloDBCollections (Name TEXT NOT NULL) STRICT;
-                                CREATE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
-                                ") |> ignore
 
-            dbConnection.Execute("
+                                BEGIN EXCLUSIVE;
+
+                                CREATE TABLE IF NOT EXISTS SoloDBCollections (Name TEXT NOT NULL) STRICT;
+                                
+
                                 CREATE TABLE IF NOT EXISTS SoloDBDirectoryHeader (
                                     Id INTEGER PRIMARY KEY,
                                     Name TEXT NOT NULL CHECK ((length(Name) != 0 OR ParentId IS NULL) AND (Name != \".\") AND (Name != \"..\") AND NOT Name GLOB \"*/*\"),
@@ -485,6 +486,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                                 CREATE TABLE IF NOT EXISTS SoloDBFileHeader (
                                     Id INTEGER PRIMARY KEY,
                                     Name TEXT NOT NULL CHECK (length(Name) != 0 AND Name != \".\" AND Name != \"..\"),
+                                    FullPath TEXT NOT NULL CHECK (FullPath != \"\" AND NOT FullPath GLOB \"*/./*\" AND NOT FullPath GLOB \"*/../*\"),
                                     DirectoryId INTEGER NOT NULL,
                                     Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
                                     Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
@@ -520,27 +522,122 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                                     FOREIGN KEY (DirectoryId) REFERENCES SoloDBDirectoryHeader(Id) ON DELETE CASCADE
                                 ) STRICT;
 
-                                CREATE INDEX IF NOT EXISTS SoloDBSoloDBDirectoryHeaderNameAndParentIdIndex ON SoloDBDirectoryHeader(Name, ParentId);
-                                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBDirectoryHeaderFullPathIndex ON SoloDBDirectoryHeader(FullPath);
-                                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBDirectoryMetadataDirectoryIdAndKey ON SoloDBDirectoryMetadata(DirectoryId, Key);
+                                COMMIT TRANSACTION;
+                                "
+                                ;
+                                "
+                                BEGIN EXCLUSIVE;
 
-                                CREATE INDEX IF NOT EXISTS SoloDBSoloDBFileHeaderNameAndDirectoryIdIndex ON SoloDBFileHeader(Name, DirectoryId);
-                                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBFileChunkFileIdAndNumberIndex ON SoloDBFileChunk(FileId, Number);
-                                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBSoloDBFileMetadataFileIdAndKey ON SoloDBFileMetadata(FileId, Key);
+
+                                -- Trigger to update the Modified column on insert for SoloDBDirectoryHeader
+                                CREATE TRIGGER IF NOT EXISTS Insert_SoloDBDirectoryHeader
+                                AFTER INSERT ON SoloDBDirectoryHeader
+                                FOR EACH ROW
+                                BEGIN
+                                    -- Update parent directory's Modified timestamp, if ParentId is NULL then it will be a noop.
+                                    UPDATE SoloDBDirectoryHeader
+                                    SET Modified = UNIXTIMESTAMP()
+                                    WHERE Id = NEW.ParentId;
+                                END;
+                                
+                                -- Trigger to update the Modified column on update for SoloDBDirectoryHeader
+                                CREATE TRIGGER IF NOT EXISTS Update_SoloDBDirectoryHeader
+                                AFTER UPDATE ON SoloDBDirectoryHeader
+                                FOR EACH ROW
+                                BEGIN
+                                    UPDATE SoloDBDirectoryHeader
+                                    SET Modified = UNIXTIMESTAMP()
+                                    WHERE Id = NEW.Id;
+                                    
+                                    -- Update parent directory's Modified timestamp, if ParentId is NULL then it will be a noop.
+                                    UPDATE SoloDBDirectoryHeader
+                                    SET Modified = UNIXTIMESTAMP()
+                                    WHERE Id = NEW.ParentId;
+                                END;
+                                
+                                -- Trigger to update the Modified column on insert for SoloDBFileHeader
+                                CREATE TRIGGER IF NOT EXISTS Insert_SoloDBFileHeader
+                                AFTER INSERT ON SoloDBFileHeader
+                                FOR EACH ROW
+                                BEGIN
+                                    -- Update parent directory's Modified timestamp
+                                    UPDATE SoloDBDirectoryHeader
+                                    SET Modified = UNIXTIMESTAMP()
+                                    WHERE Id = NEW.DirectoryId;
+                                END;
+                                
+                                -- Trigger to update the Modified column on update for SoloDBFileHeader
+                                CREATE TRIGGER IF NOT EXISTS Update_SoloDBFileHeader
+                                AFTER UPDATE ON SoloDBFileHeader
+                                FOR EACH ROW
+                                BEGIN
+                                    UPDATE SoloDBFileHeader
+                                    SET Modified = UNIXTIMESTAMP()
+                                    WHERE Id = NEW.Id;
+                                    
+                                    -- Update parent directory's Modified timestamp
+                                    UPDATE SoloDBDirectoryHeader
+                                    SET Modified = UNIXTIMESTAMP()
+                                    WHERE Id = NEW.DirectoryId;
+                                END;  
+                                
+                                -- Trigger for INSERT operations on SoloDBFileChunk
+                                CREATE TRIGGER IF NOT EXISTS Insert_SoloDBFileChunk
+                                AFTER INSERT ON SoloDBFileChunk
+                                FOR EACH ROW
+                                BEGIN
+                                    UPDATE SoloDBFileHeader
+                                    SET Modified = UNIXTIMESTAMP()
+                                    WHERE Id = NEW.FileId;
+                                END;
+                                
+                                -- Trigger for UPDATE operations on SoloDBFileChunk
+                                CREATE TRIGGER IF NOT EXISTS Update_SoloDBFileChunk
+                                AFTER UPDATE ON SoloDBFileChunk
+                                FOR EACH ROW
+                                BEGIN
+                                    UPDATE SoloDBFileHeader
+                                    SET Modified = UNIXTIMESTAMP()
+                                    WHERE Id = NEW.FileId;
+                                END;
+                                
+
+
+
+                                CREATE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
+
+                                CREATE INDEX IF NOT EXISTS SoloDBDirectoryHeaderParentIdAndNameIndex ON SoloDBDirectoryHeader(ParentId, Name);
+                                CREATE INDEX IF NOT EXISTS SoloDBDirectoryHeaderParentIdIndex ON SoloDBDirectoryHeader(ParentId);
+                                CREATE INDEX IF NOT EXISTS SoloDBDirectoryHeaderNameIndex ON SoloDBDirectoryHeader(Name);
+                                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBDirectoryHeaderFullPathIndex ON SoloDBDirectoryHeader(FullPath);
+                                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileHeaderFullPathIndex ON SoloDBFileHeader(FullPath);
+                                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBDirectoryMetadataDirectoryIdAndKey ON SoloDBDirectoryMetadata(DirectoryId, Key);
+
+                                CREATE INDEX IF NOT EXISTS SoloDBFileHeaderDirectoryIdAndNameIndex ON SoloDBFileHeader(DirectoryId, Name);
+                                CREATE INDEX IF NOT EXISTS SoloDBFileHeaderDirectoryIdIndex ON SoloDBFileHeader(DirectoryId);
+                                CREATE INDEX IF NOT EXISTS SoloDBFileHeaderNameIndex ON SoloDBFileHeader(Name);
+                                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileChunkFileIdAndNumberIndex ON SoloDBFileChunk(FileId, Number);
+                                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileMetadataFileIdAndKey ON SoloDBFileMetadata(FileId, Key);
                                 CREATE INDEX IF NOT EXISTS SoloDBFileHashIndex ON SoloDBFileHeader(Hash);
 
-                                ")|> ignore
+                                INSERT INTO SoloDBDirectoryHeader (Name, ParentId, FullPath)
+                                SELECT '', NULL, '/'
+                                WHERE NOT EXISTS (
+                                    SELECT 1
+                                    FROM SoloDBDirectoryHeader
+                                    WHERE ParentId IS NULL AND Name = ''
+                                );
 
-        
-            use t = dbConnection.BeginTransaction(false)
-            try
-                let rootDir = dbConnection.Query<SqlId>("SELECT Id FROM SoloDBDirectoryHeader WHERE ParentId IS NULL AND length(Name) = 0") |> Seq.tryHead
-                if rootDir.IsNone then
-                    dbConnection.Execute("INSERT INTO SoloDBDirectoryHeader(Name, ParentId, FullPath) VALUES (\"\", NULL, \"/\");", transaction = t) |> ignore
-                t.Commit()
-            with e -> 
-                t.Rollback()
-                reraise()
+                                COMMIT TRANSACTION;
+                                "|]
+            
+            do
+                for command in initCommands do
+                    use command = new SqliteCommand(command, dbConnection)
+                    command.Prepare()
+                    let result = command.ExecuteNonQuery()
+                    ()
+                ()
 
             let rez = dbConnection.Execute("PRAGMA optimize;")
             ()

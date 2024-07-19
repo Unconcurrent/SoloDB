@@ -22,13 +22,15 @@ module FileStorage =
         let mutex = new DisposableMutex($"SoloDB-{db.ConnectionString.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-Path-{path.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}")
         mutex
 
+    let noopDisposer = { 
+         new System.IDisposable with
+             member this.Dispose() =
+                 ()
+    }
+
     let private lockFileIdIfNotInTransaction (db: SqliteConnection) (id: SqlId) =
         if db.IsWithinTransaction() then
-            { 
-            new System.IDisposable with
-                member this.Dispose() =
-                    ()
-            }
+            noopDisposer
         else
         let mutex = new DisposableMutex($"SoloDB-{db.ConnectionString.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-FileId-{id.Value}")
         mutex :> IDisposable
@@ -384,14 +386,19 @@ module FileStorage =
     let createFileAt (db: SqliteConnection) (path: string) =
         let dirPath, name = getPathAndName path
         let directory = getOrCreateDir db dirPath
-        let newFile = {|
+        let newFile = {            
             Name = name
+            FullPath = $"{dirPath}/{name}"
             DirectoryId = directory.Id
             Length = 0L
             Created = DateTimeOffset.Now
             Modified = DateTimeOffset.Now
-        |}
-        let result = db.QueryFirst<SoloDBFileHeader>("INSERT INTO SoloDBFileHeader(Name, DirectoryId, Length, Created, Modified) VALUES (@Name, @DirectoryId, @Length, @Created, @Modified) RETURNING *", newFile)
+
+            Id = SqlId 0
+            Hash = null
+            Metadata = null
+        }
+        let result = db.QueryFirst<SoloDBFileHeader>("INSERT INTO SoloDBFileHeader(Name, FullPath, DirectoryId, Length, Created, Modified) VALUES (@Name, @FullPath, @DirectoryId, @Length, @Created, @Modified) RETURNING *", newFile)
 
         result
 
@@ -399,15 +406,20 @@ module FileStorage =
     let tryCreateFileAt (db: SqliteConnection) (path: string) =
         let dirPath, name = getPathAndName path
         let directory = getOrCreateDir db dirPath
-        let newFile = {|
+        let newFile = {            
             Name = name
+            FullPath = $"{dirPath}/{name}"
             DirectoryId = directory.Id
-            Length = 0
+            Length = 0L
             Created = DateTimeOffset.Now
             Modified = DateTimeOffset.Now
-        |}
+
+            Id = SqlId 0
+            Hash = null
+            Metadata = null
+        }
         try
-            let result = db.QueryFirst<SoloDBFileHeader> ("INSERT INTO SoloDBFileHeader(Name, DirectoryId, Length, Created, Modified) VALUES (@Name, @DirectoryId, @Length, @Created, @Modified) RETURNING *", newFile)
+            let result = db.QueryFirst<SoloDBFileHeader> ("INSERT INTO SoloDBFileHeader(Name, FullPath, DirectoryId, Length, Created, Modified) VALUES (@Name, @FullPath, @DirectoryId, @Length, @Created, @Modified) RETURNING *", newFile)
             result |> Some
         with ex -> 
             None
@@ -472,16 +484,18 @@ module FileStorage =
 
     let tryGetFileAt (db: SqliteConnection) (path: string) =
         let dirPath, name = getPathAndName path
-        match tryGetDir db dirPath with
-        | None -> None
-        | Some dir -> 
-        getFilesWhere db "fh.DirectoryId = @DirectoryId AND fh.Name = @Name" {|DirectoryId = dir.Id; Name = name|} |> Seq.tryHead
+        let fullPath = $"{dirPath}/{name}"
+        getFilesWhere db "fh.FullPath = @FullPath" {|FullPath = fullPath|} |> Seq.tryHead
 
     let getFilesByHash (db: SqliteConnection) (hash: byte array) =
         getFilesWhere db "fh.Hash = @Hash" {|Hash = hash|}
 
     let getOrCreateFileAt (db: SqliteConnection) (path: string) =
         use l = lockPath db path
+
+        match tryGetFileAt db path with
+        | Some f -> f
+        | None ->
 
         let dirPath, name = getPathAndName path
         let dir = getOrCreateDir db dirPath 

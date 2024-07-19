@@ -97,8 +97,21 @@ type FileSystemTests() =
         assertEqual endOfArray startOfData "Sparse Write and Read failed."
 
     [<TestMethod>]
+    member this.ManyFiles() =
+        // db.Dispose(); db <- new SoloDB("./temp.solodb"); fs <- db.FileSystem
+
+        for d in 1..50 do
+            for f in 1..30 do
+                let path = $"/directory{d}/file{f}.txt"
+                fs.WriteAt(path, 0, testFileBytes)
+                for m in 1..5 do
+                    fs.SetMetadata(path, $"Rand{Random.Shared.NextInt64()}", Random.Shared.NextInt64().ToString())
+
+        ()
+
+    [<TestMethod>]
     member this.FileMetadata() =
-        let path = "/xyz.txt"
+        let path = "/alpha2/xyz.txt"
 
         let file = fs.GetOrCreateAt path
         use ms = new MemoryStream(testFileBytes)
@@ -121,7 +134,7 @@ type FileSystemTests() =
         assertEqual file3.Metadata.Count 1 "Metadata not deleted."
 
     [<TestMethod>]
-    member this.DirMetadata() =
+    member this.DirMetadata() =        
         let path = "/alpha"
         let dir = fs.GetOrCreateDirAt path
         use ms = new MemoryStream(testFileBytes)

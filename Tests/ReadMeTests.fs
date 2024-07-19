@@ -29,7 +29,8 @@ type ReadMeTests() =
 
     [<TestMethod>]
     member this.Instantiate() =
-        let onDiskDB = new SoloDB("./database.db");
+        if File.Exists "./test_database.db" then File.Delete "./test_database.db"
+        let onDiskDB = new SoloDB("./test_database.db");
         let inMemoryDB = new SoloDB("memory:database-name");
         ()
 
