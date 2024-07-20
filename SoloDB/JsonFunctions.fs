@@ -81,7 +81,7 @@ module JsonFunctions =
         | :? DbObjectRow as row ->
             let mutable obj = fromJsonOrSQL<'R> (row.ValueJSON)
             if hasIdType typeof<'R> then
-                obj?Id <- SqlId(row.Id)
+                obj?Id <- row.Id
             obj
         | :? string as input ->
             fromJsonOrSQL<'R> (input :> obj :?> string)

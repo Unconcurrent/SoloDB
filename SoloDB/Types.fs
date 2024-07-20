@@ -74,7 +74,7 @@ type internal DateTimeMapper() =
 
 [<CLIMutable>]
 type DbObjectRow = {
-    Id: int64
+    Id: SqlId
     ValueJSON: string
 }
 
@@ -95,7 +95,7 @@ type SoloDBFileHeader = {
     Created: DateTimeOffset
     Modified: DateTimeOffset
     Hash: byte array
-    Metadata: IDictionary<string, string>
+    Metadata: IReadOnlyDictionary<string, string>
 }
 
 [<CLIMutable>]
@@ -106,8 +106,43 @@ type SoloDBDirectoryHeader = {
     ParentId: Nullable<SqlId>
     Created: DateTimeOffset
     Modified: DateTimeOffset
-    Metadata: IDictionary<string, string>
+    Metadata: IReadOnlyDictionary<string, string>
 }
+
+[<Struct>]
+type SoloDBEntryHeader = 
+    | File of file: SoloDBFileHeader
+    | Directory of directory: SoloDBDirectoryHeader
+
+    member this.Name = 
+        match this with
+        | File f -> f.Name
+        | Directory d -> d.Name
+
+    member this.FullPath = 
+        match this with
+        | File f -> f.FullPath
+        | Directory d -> d.FullPath
+
+    member this.DirectoryId = 
+        match this with
+        | File f -> f.DirectoryId |> Nullable
+        | Directory d -> d.ParentId
+
+    member this.Created = 
+        match this with
+        | File f -> f.Created
+        | Directory d -> d.Created
+
+    member this.Modified = 
+        match this with
+        | File f -> f.Modified
+        | Directory d -> d.Modified
+
+    member this.Metadata = 
+        match this with
+        | File f -> f.Metadata
+        | Directory d -> d.Metadata
 
 [<CLIMutable>]
 type internal SoloDBFileChunk = {
