@@ -74,7 +74,7 @@ module FileStorage =
                         dir
 
                 if not (isNull metadata) then
-                    dir.Metadata.Add(metadata.Key, metadata.Value)
+                    (dir.Metadata :?> IDictionary<string, string>).Add(metadata.Key, metadata.Value)
                 ()
             ),
             parameters,
@@ -117,32 +117,30 @@ module FileStorage =
     
         innerLoop root names [] |> fillDirectoryMetadata db
     
-    let private tryGetChunkData (db: SqliteConnection) (fileId: SqlId) (chunkNumber: int64) transaction =
+    let private tryGetChunkData (db: SqliteConnection) (fileId: SqlId) (chunkNumber: int64) =
         let sql = "SELECT Data FROM SoloDBFileChunk WHERE FileId = @FileId AND Number = @ChunkNumber"
-        match db.QueryFirstOrDefault<byte array>(sql, {| FileId = fileId; ChunkNumber = chunkNumber |}, transaction) with
+        match db.QueryFirstOrDefault<byte array>(sql, {| FileId = fileId; ChunkNumber = chunkNumber |}) with
         | data when Object.ReferenceEquals(data, null) -> None
         | data -> data |> Some
 
-    let private writeChunkData (db: SqliteConnection) (fileId: SqlId) (chunkNumber: int64) (data: byte array) transaction =
-        let result = db.Execute("INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data)", {|FileId = fileId; Number = chunkNumber; Data = data|}, transaction)
+    let private writeChunkData (db: SqliteConnection) (fileId: SqlId) (chunkNumber: int64) (data: byte array) =
+        let result = db.Execute("INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data)", {|FileId = fileId; Number = chunkNumber; Data = data|})
         if result <> 1 then failwithf "writeChunkData failed."
 
-    let private updateLenById (db: SqliteConnection) (fileId: SqlId) (len: int64) transaction =
-        let result = db.Execute ("UPDATE SoloDBFileHeader SET Length = @Length WHERE Id = @Id", {|Id = fileId.Value; Length=len|}, transaction)
+    let private updateLenById (db: SqliteConnection) (fileId: SqlId) (len: int64) =
+        let result = db.Execute ("UPDATE SoloDBFileHeader SET Length = @Length WHERE Id = @Id", {|Id = fileId.Value; Length=len|})
         if result <> 1 then failwithf "updateLen failed."
 
-    let private downsetFileLength (db: SqliteConnection) (fileId: SqlId) (newFileLength: int64) transaction =
+    let private downsetFileLength (db: SqliteConnection) (fileId: SqlId) (newFileLength: int64) =
         let lastChunkNumberKeep = ((float(newFileLength) / float(chunkSize)) |> Math.Ceiling |> int64) - 1L
 
         let resultDelete = db.Execute(@"DELETE FROM SoloDBFileChunk WHERE FileId = @FileId AND Number > @LastChunkNumber",
-                       {| FileId = fileId; LastChunkNumber = lastChunkNumberKeep |},
-                       transaction = transaction)
+                       {| FileId = fileId; LastChunkNumber = lastChunkNumberKeep |})
 
         let resultUpdate = db.Execute(@"UPDATE SoloDBFileHeader 
                         SET Length = @NewFileLength
                         WHERE Id = @FileId",
-                       {| FileId = fileId; NewFileLength = newFileLength |},
-                       transaction = transaction)
+                       {| FileId = fileId; NewFileLength = newFileLength |})
         ()
 
     let getDirectoryById (db: SqliteConnection) (dirId: SqlId) =
@@ -165,36 +163,163 @@ module FileStorage =
         "/" + path
 
 
-    let private deleteFile (db: SqliteConnection) (file: SoloDBFileHeader) (transaction) =
+    let private deleteFile (db: SqliteConnection) (file: SoloDBFileHeader) =
         let result = db.Execute(@"DELETE FROM SoloDBFileHeader WHERE Id = @FileId",
-                    {| FileId = file.Id; |},
-                    transaction = transaction)
+                    {| FileId = file.Id; |})
 
         ()
 
 
-    let private listDirectoryFiles (db: SqliteConnection) (dir: SoloDBDirectoryHeader) transaction =
-        db.Query<SoloDBFileHeader>("SELECT * FROM SoloDBFileHeader WHERE DirectoryId = @DirectoryId", {|DirectoryId = dir.Id|}, transaction = transaction)
+    let private listDirectoryFiles (db: SqliteConnection) (dir: SoloDBDirectoryHeader) =
+        db.Query<SoloDBFileHeader>("SELECT * FROM SoloDBFileHeader WHERE DirectoryId = @DirectoryId", {|DirectoryId = dir.Id|})
 
 
-    let private listDirectoryChildren (db: SqliteConnection) (dir: SoloDBDirectoryHeader) transaction =
-        db.Query<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE ParentId = @Id", {|Id = dir.Id|}, transaction = transaction)
+    let private listDirectoryChildren (db: SqliteConnection) (dir: SoloDBDirectoryHeader) =
+        db.Query<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE ParentId = @Id", {|Id = dir.Id|})
 
 
-    let rec private deleteDirectory (db: SqliteConnection) (dir: SoloDBDirectoryHeader) transaction = 
+    let rec private deleteDirectory (db: SqliteConnection) (dir: SoloDBDirectoryHeader) = 
         let result = db.Execute(@"DELETE FROM SoloDBDirectoryHeader WHERE Id = @DirId",
-                        {| DirId = dir.Id; |},
-                        transaction = transaction)
+                        {| DirId = dir.Id; |})
         ()
+
+    [<CLIMutable>][<Struct>]
+    type private SQLEntry = {
+        Level: int64; 
+        Id: SqlId; 
+        Type: string; 
+        Path: string; 
+        Name: string;
+        Size: int64;
+        Created: DateTimeOffset;
+        Modified: DateTimeOffset;
+        DirectoryId: Nullable<SqlId>;
+        Hash: byte array; // Nullable
+        MetadataKey: string;
+        MetadataValue: string
+    }
+
+    let private recursiveListAllEntriesInDirectory (db: SqliteConnection) (directoryFullPath: string) =
+        let queryCommand = 
+            """
+            -- EXPLAIN QUERY PLAN 
+            WITH RECURSIVE DirectoryTree AS (
+                -- Base case: start with the specified directory
+                SELECT
+                    Id,
+                    Name,
+                    FullPath,
+                    ParentId,
+               		Created,
+               		Modified,
+                    0 AS Level -- starting level
+                FROM
+                    SoloDBDirectoryHeader
+                WHERE
+                    FullPath = @FullPath
+            
+                UNION ALL
+            
+                -- Recursive case: get the subdirectories
+                SELECT
+                    d.Id,
+                    d.Name,
+                    d.FullPath,
+                    d.ParentId,
+               		d.Created,
+               		d.Modified,
+                    dt.Level + 1 AS Level
+                FROM
+                    SoloDBDirectoryHeader d
+                INNER JOIN
+                    DirectoryTree dt ON d.ParentId = dt.Id
+            )
+            
+            SELECT
+                dt.Level,
+            	dt.Id as Id,
+                'Directory' AS Type,
+                dt.FullPath AS Path,
+                dt.Name AS Name,
+               	0 AS Size,
+               	dt.Created as Created,
+               	dt.Modified as Modified,
+                dt.ParentId as DirectoryId,
+            	NULL as Hash,
+                dm.Key AS MetadataKey,
+                dm.Value AS MetadataValue
+            FROM
+                DirectoryTree dt
+            LEFT JOIN
+                SoloDBDirectoryMetadata dm ON dt.Id = dm.DirectoryId
+            
+            UNION ALL
+            
+            SELECT
+                dt.Level + 1 AS Level,
+            	fh.Id as Id,
+                'File' AS Type,
+                fh.FullPath AS Path,
+                fh.Name AS Name,
+               	fh.Length AS Size,
+               	fh.Created as Created,
+               	fh.Modified as Modified,
+                fh.DirectoryId as DirectoryId,
+            	fh.Hash as Hash,
+                fm.Key AS MetadataKey,
+                fm.Value AS MetadataValue
+            FROM
+                DirectoryTree dt
+            INNER JOIN
+                SoloDBFileHeader fh ON dt.Id = fh.DirectoryId
+            LEFT JOIN
+                SoloDBFileMetadata fm ON fh.Id = fm.FileId
+            """        
+        let query = 
+            db.Query<SQLEntry>
+                (queryCommand, {|FullPath = directoryFullPath|}, buffered = false)
+
+        query 
+        |> Utils.SeqExt.sequentialGroupBy(fun e -> e.Path) 
+        |> Seq.map(fun entry -> 
+            let metadata = entry |> Seq.filter(fun x -> x.MetadataKey <> null) |> Seq.map(fun x -> (x.MetadataKey, x.MetadataValue)) |> readOnlyDict
+            let entryData = entry |> Seq.head
+            match entryData.Type with
+            | "File" ->
+                let file = {
+                    Id = entryData.Id;
+                    Name = entryData.Name;
+                    FullPath = entryData.Path;
+                    DirectoryId = entryData.DirectoryId.Value;
+                    Length = entryData.Size;
+                    Created = entryData.Created;
+                    Modified = entryData.Modified;
+                    Hash = entryData.Hash;
+                    Metadata = metadata;
+                }
+                SoloDBEntryHeader.File file
+            | "Directory" ->
+                let dir = {
+                    Id = entryData.Id;
+                    Name = entryData.Name;
+                    FullPath = entryData.Path;
+                    ParentId = entryData.DirectoryId;
+                    Created = entryData.Created;
+                    Modified = entryData.Modified;
+                    Metadata = metadata;
+                }
+                SoloDBEntryHeader.Directory dir
+            | other -> failwithf "Invalid entry type: %s" other
+        )
 
 
     let private getFileLength (db: SqliteConnection) (file: SoloDBFileHeader) =
         db.QueryFirst<int64>(@"SELECT Length FROM SoloDBFileHeader WHERE Name = @Name AND DirectoryId = @DirectoryId",
                        {| Name = file.Name; DirectoryId = file.DirectoryId; |})
 
-    let private getFileLengthById (db: SqliteConnection) (fileId: SqlId) transaction =
+    let private getFileLengthById (db: SqliteConnection) (fileId: SqlId) =
         db.QueryFirst<int64>(@"SELECT Length FROM SoloDBFileHeader WHERE Id = @FileId",
-                       {| FileId = fileId.Value |}, transaction)
+                       {| FileId = fileId.Value |})
 
     let private getStoredChunks (db: SqliteConnection) (fileId: SqlId) =
         db.Query<SoloDBFileChunk>("SELECT * FROM SoloDBFileChunk WHERE FileId = @FileId ORDER BY Number ASC", {|FileId = fileId|})
@@ -257,7 +382,7 @@ module FileStorage =
 
         override _.Length = 
             checkDisposed()
-            getFileLengthById db fileId null
+            getFileLengthById db fileId
 
         override this.Position 
             with get() = 
@@ -291,7 +416,7 @@ module FileStorage =
                 0
             else
 
-            match tryGetChunkData db fileId chunkNumber null with
+            match tryGetChunkData db fileId chunkNumber with
             | None -> 
                 let maxChunkNumber = (min (position + count) len) / int64 chunkSize
                 if maxChunkNumber > chunkNumber then // Try to load the other chunk if the file was sparsely allocated.
@@ -330,7 +455,7 @@ module FileStorage =
                 let chunkNumber = position / int64 chunkSize
                 let chunkOffset = position % int64 chunkSize
 
-                let tryGetChunkDataResult = tryGetChunkData db fileId chunkNumber null
+                let tryGetChunkDataResult = tryGetChunkData db fileId chunkNumber
                 let existingChunk = match tryGetChunkDataResult with Some data -> data | None -> Array.zeroCreate (int chunkSize)
 
                 let spaceInChunk = chunkSize - chunkOffset
@@ -338,11 +463,11 @@ module FileStorage =
 
                 Array.Copy(buffer, offset, existingChunk, chunkOffset, bytesToWrite)
 
-                writeChunkData db fileId chunkNumber existingChunk null
+                writeChunkData db fileId chunkNumber existingChunk
 
                 this.Position <- position + int64 bytesToWrite
                 if this.Position > this.Length then
-                    updateLenById db fileId this.Position null            
+                    updateLenById db fileId this.Position            
 
                 remainingBytes <- count - bytesToWrite
             finally ()
@@ -354,7 +479,7 @@ module FileStorage =
         override _.SetLength(value: int64) =
             checkDisposed()
             use l = lockFileIdIfNotInTransaction db fileId
-            downsetFileLength db fileId value null
+            downsetFileLength db fileId value
 
         override this.Seek(offset: int64, origin: SeekOrigin) =
             checkDisposed()
@@ -430,15 +555,9 @@ module FileStorage =
         match tryGetDir db dirPath with
         | None -> Seq.empty
         | Some dir ->
-        let childres = listDirectoryChildren db dir null
+        let childres = listDirectoryChildren db dir
         childres
 
-
-    let private metadataFiller (header: SoloDBFileHeader) (metadata: Metadata) =
-        let header = {header with Metadata = (if Object.ReferenceEquals(header.Metadata, null) then Dictionary<string, string>() :> IDictionary<string, string> else header.Metadata)}
-        if not (Object.ReferenceEquals(metadata, null)) then 
-            header.Metadata[metadata.Key] <- metadata.Value
-        header
 
     let private getFilesWhere (connection: SqliteConnection) (where: string) (parameters) =
         let query = sprintf """
@@ -469,7 +588,7 @@ module FileStorage =
                         f
 
                 if not (isNull metadata) then
-                    file.Metadata.Add(metadata.Key, metadata.Value)
+                    (file.Metadata :?> IDictionary<string, string>).Add(metadata.Key, metadata.Value)
                 ()
             ),
             parameters,
@@ -516,7 +635,7 @@ module FileStorage =
         | None -> false
         | Some dir ->
         try
-            deleteDirectory db dir null
+            deleteDirectory db dir
             true
         with ex ->
             printfn "%s" ex.Message
@@ -532,7 +651,7 @@ module FileStorage =
         match tryGetDir db dirPath with 
         | None -> Seq.empty
         | Some dir ->
-        listDirectoryFiles db dir null
+        listDirectoryFiles db dir
 
     let openFile (db: SqliteConnection) (file: SoloDBFileHeader) =
         new DbFileStream(db, file.Id)
@@ -714,11 +833,11 @@ module FileStorage =
 
         member this.Delete(file) =
             use db = manager.Borrow()
-            deleteFile db file null
+            deleteFile db file
 
         member this.Delete(dir) =
             use db = manager.Borrow()
-            deleteDirectory db dir null
+            deleteDirectory db dir
 
         member this.DeleteFileAt(path) =
             match this.TryGetAt path with
@@ -738,4 +857,8 @@ module FileStorage =
         member this.ListDirectoriesAt(path) =
             use db = manager.Borrow()
             listDirectoriesAt db path
+
+        member this.RecursiveListEntriesAt(path) =
+            use db = manager.Borrow()
+            recursiveListAllEntriesInDirectory db path
             

@@ -97,15 +97,26 @@ type FileSystemTests() =
         assertEqual endOfArray startOfData "Sparse Write and Read failed."
 
     [<TestMethod>]
-    member this.ManyFiles() =
+    member this.CreateAndCountFiles() =
         // db.Dispose(); db <- new SoloDB("./temp.solodb"); fs <- db.FileSystem
+        let mutable count = 1 // Include the root directory.
 
         for d in 1..50 do
+            count <- count + 1
             for f in 1..30 do
                 let path = $"/directory{d}/file{f}.txt"
                 fs.WriteAt(path, 0, testFileBytes)
+                count <- count + 1
                 for m in 1..5 do
                     fs.SetMetadata(path, $"Rand{Random.Shared.NextInt64()}", Random.Shared.NextInt64().ToString())
+
+        let allOfThem = fs.RecursiveListEntriesAt "/" |> System.Collections.Generic.List
+
+        assertEqual allOfThem.Count count "Invalid count in dorectory list."
+
+        let someOfThem = fs.RecursiveListEntriesAt "/directory1" |> System.Collections.Generic.List
+
+        assertEqual someOfThem.Count 31 "Invalid count in dorectory list."
 
         ()
 

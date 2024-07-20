@@ -140,3 +140,29 @@ module Utils =
         ///<summary>For compatilibility, it just calls this.Count. Gets the number of elements contained in the <see cref="T:System.Collections.Generic.List`1" />.</summary>
         ///<returns>The number of elements contained in the <see cref="T:System.Collections.Generic.List`1" />.</returns>
         member this.Length = this.Count
+
+    module SeqExt =
+        let sequentialGroupBy keySelector (sequence: seq<'T>) =
+            seq {
+                use enumerator = sequence.GetEnumerator()
+                if enumerator.MoveNext() then
+                    let mutable currentKey = keySelector enumerator.Current
+                    let mutable currentList = System.Collections.Generic.List<'T>()
+                    let mutable looping = true
+                    
+                    while looping do
+                        let current = enumerator.Current
+                        let key = keySelector current
+        
+                        if key = currentKey then
+                            currentList.Add current
+                        else
+                            yield currentList :> 'T seq
+                            currentList.Clear()
+                            currentList.Add current
+                            currentKey <- key
+        
+                        if not (enumerator.MoveNext()) then
+                            yield currentList :> 'T seq
+                            looping <- false
+            }
