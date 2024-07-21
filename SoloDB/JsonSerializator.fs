@@ -16,6 +16,20 @@ module JsonSerializator =
     open System.Text
     open System.Globalization
     open System.Runtime.CompilerServices
+    open System.IO
+    open Microsoft.FSharp.Reflection
+
+    let private implementsGeneric (genericInterfaceType: Type) (targetType: Type) =
+        let genericInterfaceType = genericInterfaceType.GetGenericTypeDefinition()
+        if not genericInterfaceType.IsGenericType then
+            invalidArg "genericInterfaceType" "The interface type must be a generic type."
+
+        if targetType.Name = genericInterfaceType.Name && targetType.Namespace = genericInterfaceType.Namespace then
+            true
+        else
+
+        targetType.GetInterfaces()
+        |> Array.exists (fun i -> i.IsGenericType && i.Name = genericInterfaceType.Name && i.Namespace = genericInterfaceType.Namespace)
 
     let inline isNullableType (typ: Type) =
         typ.IsGenericType && typ.GetGenericTypeDefinition() = typedefof<Nullable<_>>
@@ -114,6 +128,26 @@ module JsonSerializator =
         | List of IList<JsonValue>
         | Object of IDictionary<string, JsonValue>
 
+        static member private SerializeReadOnlyDictionary<'key, 'value> (dictionary: IReadOnlyDictionary<'key, 'value>) =
+            let entries = new Dictionary<string, JsonValue>(StringComparer.OrdinalIgnoreCase)
+            for key in dictionary.Keys do                
+                let value = dictionary.[key]
+                let key = key.ToString()
+                entries.Add(key.ToString(), JsonValue.Serialize value)
+            Object entries
+
+        static member private SerializeReadOnlyDictionaryGeneric (obj: obj) =
+            let t = obj.GetType()
+            match t.GetInterface("IReadOnlyDictionary`2") with
+            | null ->
+                failwith "Object does not implement IReadOnlyDictionary<'key, 'value>"
+            | i ->
+                let genericArguments = i.GetGenericArguments()
+                let method = typeof<JsonValue>.GetMethod(nameof(JsonValue.SerializeReadOnlyDictionary), BindingFlags.NonPublic ||| BindingFlags.Static)
+                let genericMethod = method.MakeGenericMethod(genericArguments)
+                genericMethod.Invoke(null, [| obj |]) :?> JsonValue
+            
+
         static member Serialize (value: obj) =
             let trySerializePrimitive (value: obj) =
                 match value with
@@ -159,6 +193,8 @@ module JsonSerializator =
                     entries.Add(key, JsonValue.Serialize value)
                 Object entries
 
+            
+
             let valueType = value.GetType()
 
             if obj.ReferenceEquals(value, null) then
@@ -167,6 +203,8 @@ module JsonSerializator =
                     | Null ->
                         if typeof<IDictionary>.IsAssignableFrom(valueType) then
                             serializeDictionary (value :?> IDictionary)
+                        elif implementsGeneric typeof<IReadOnlyDictionary<_,_>> valueType then
+                            JsonValue.SerializeReadOnlyDictionaryGeneric value
                         elif typeof<IEnumerable>.IsAssignableFrom(valueType) then
                             serializeCollection (value :?> IEnumerable)
                         else
@@ -199,12 +237,6 @@ module JsonSerializator =
                 | true, i64 -> Some i64
                 | _ -> None
 
-            let toBoolean (input: string) =
-                match input.ToLower() with
-                | "true" -> Some true
-                | "false" -> Some false
-                | _ -> None
-
             let rec deserialize json =
                 match json with
                 | JsonValue.Null -> null
@@ -234,8 +266,9 @@ module JsonSerializator =
                 else
                     System.Runtime.Serialization.FormatterServices.GetSafeUninitializedObject(targetType)            
 
-            let isCollectionType typ =
-                typeof<IList<_>>.IsAssignableFrom(typ) || typ.IsArray
+            let isCollectionType (typ: Type) =
+                typ.IsArray
+                || typ.GetInterfaces() |> Seq.exists(fun i -> i.IsGenericType && i.GetGenericTypeDefinition().Namespace = typeof<IList<_>>.Namespace && i.GetGenericTypeDefinition().Name = typeof<IList<_>>.Name)
 
             let tryDeserializePrimitive (targetType: Type) (value: JsonValue) : obj =
                 match targetType, value with
@@ -276,14 +309,14 @@ module JsonSerializator =
                         for i, v in items |> Seq.indexed do
                             array.SetValue((JsonValue.Deserialize elementType v), i)
                         array |> box
-                    else if typeof<IList<_>>.IsAssignableFrom targetType then
-                        let icollectionType = targetType.GetInterfaces() |> Array.find(fun i -> i.IsGenericType && i.IsConstructedGenericType && i.Name.StartsWith "ICollection") 
+                    else // Assuming that it is a IList<_>
+                        let icollectionType = targetType.GetInterfaces() |> Array.find(fun i -> i.IsGenericType && i.GetGenericTypeDefinition().Namespace = typeof<IList<_>>.Namespace && i.GetGenericTypeDefinition().Name = typeof<IList<_>>.Name) 
                         let elementType = icollectionType.GenericTypeArguments.[0]
                         let listInstance = Activator.CreateInstance(targetType) :?> IList
                         for item in items do
                             listInstance.Add(JsonValue.Deserialize elementType item) |> ignore
                         listInstance
-                    else failwithf "Cannot deserialize a list to type %A" targetType
+                    // else failwithf "Cannot deserialize a list to type %A" targetType
                 | _ -> failwith "Expected JSON array for collection deserialization."
 
             let deserializeTuple (targetType: Type) (value: JsonValue) =
@@ -293,6 +326,29 @@ module JsonSerializator =
                     let values = items |> Seq.zip elementsTypes |> Seq.map (fun (typ, item) -> JsonValue.Deserialize typ item) |> Seq.toArray
                     Dynamic.InvokeConstructor(targetType, values)
                 | _ -> failwith "Expected JSON array for tuple deserialization."
+
+            let deserializeDictionary (targetType: Type) (value: JsonValue) =
+                match value with
+                | JsonValue.Object properties ->
+                    let struct (keyType, valueType) =
+                        if targetType.IsGenericType then
+                            struct(targetType.GenericTypeArguments.[0], targetType.GenericTypeArguments.[1])
+                        else
+                            struct(typeof<string>, typeof<obj>)
+
+                    let targetType = 
+                        if targetType.IsInterface then
+                            typedefof<Dictionary<_,_>>.MakeGenericType(keyType, valueType)
+                        else
+                            targetType
+
+                    let dictInstance = Activator.CreateInstance(targetType) :?> IDictionary
+                    for kvp in properties do
+                        let key = Convert.ChangeType(kvp.Key, keyType)
+                        let value = JsonValue.Deserialize valueType kvp.Value
+                        dictInstance.Add(key, value)
+                    dictInstance
+                | _ -> failwith "Expected JSON object for dictionary deserialization."
 
             let deserializeObject (targetType: Type) (jsonObj: JsonValue) =
                 let targetType =
@@ -304,9 +360,20 @@ module JsonSerializator =
                     | false, (jsonType) when (jsonType).IsAssignableTo targetType -> jsonType
                     | _ -> targetType
 
-                let instance = createInstance targetType
+                
                 match jsonObj with
+                | JsonValue.Object properties when FSharpType.IsUnion targetType ->
+                    let cases = FSharpType.GetUnionCases targetType
+                    let tag = properties.["Tag"].ToObject<int>()
+                    let machingCase = cases |> Array.find(fun c -> c.Tag = tag)
+                    let fields = machingCase.GetFields()
+                    let fieldsValue = fields |> Array.map(fun f -> JsonValue.Deserialize f.PropertyType properties.[f.Name])
+                    let caseInstance = FSharpValue.MakeUnion(machingCase, fieldsValue)
+                    
+                    caseInstance
                 | JsonValue.Object properties ->
+                    let instance = createInstance targetType
+
                     let propertiesInfo = targetType.GetProperties()
                     for prop in propertiesInfo do
                         if prop.CanWrite then
@@ -316,11 +383,18 @@ module JsonSerializator =
                                 let propValue = JsonValue.Deserialize prop.PropertyType value
                                 prop.SetValue(instance, propValue, null)
                             | false, _ -> ()
+
+                    instance
                 | _ -> failwith "Expected JSON object for object deserialization."
-                instance
 
             if targetType = typeof<obj> then 
                 JsonValue.DeserializeDynamic json
+            else if targetType.Name = "Nullable`1" && targetType.GenericTypeArguments.Length = 1 then 
+                let innerValue = JsonValue.Deserialize targetType.GenericTypeArguments.[0] json
+                if isNull innerValue then
+                    Activator.CreateInstance(targetType)
+                else 
+                    Activator.CreateInstance(targetType, innerValue)
             else
             match json with
             | JsonValue.Null -> null
@@ -332,8 +406,10 @@ module JsonSerializator =
                         deserializeTuple targetType json
                     | JsonValue.List _ when isCollectionType targetType ->
                         deserializeList targetType json
-                    | JsonValue.Object _ when targetType.IsClass || targetType.IsAbstract ->
-                        deserializeObject targetType json
+                    | JsonValue.Object _ when typeof<IDictionary>.IsAssignableFrom targetType || implementsGeneric typedefof<IDictionary<_,_>> targetType || implementsGeneric typedefof<IReadOnlyDictionary<_,_>> targetType ->
+                        deserializeDictionary targetType json
+                    | JsonValue.Object _ when targetType.IsClass || targetType.IsAbstract || FSharpType.IsUnion targetType->
+                        deserializeObject targetType json                    
                     | _ -> failwithf "JSON value cannot be deserialized into type %A" targetType
                 | primitive -> primitive
 
@@ -392,44 +468,65 @@ module JsonSerializator =
             and set(name: string) (value: obj) =
                 this.SetProperty (name, JsonValue.Serialize value)
 
+        static member private Jsonize value (write: string -> unit) =
+            match value with
+            | Null -> write "null" |> ignore
+            | Boolean b -> write (if b then "true" else "false") |> ignore
+            | String s -> 
+                write "\"" |> ignore
+                write s |> ignore
+                write "\"" |> ignore
+            | Number n -> 
+                if Decimal.IsInteger n then 
+                    write (Int128.CreateSaturating(n).ToString(CultureInfo.InvariantCulture)) |> ignore
+                else 
+                    write (sprintf "%f" n) |> ignore
+            | List arr ->
+                write "[" |> ignore
+                let items = arr.Count
+                for i, item in arr |> Seq.indexed do
+                    JsonValue.Jsonize item write
+                    if i < items - 1 then write ", " |> ignore
+                write "]" |> ignore
 
-        member this.ToJsonString() =
-            let rec jsonize value (sb: StringBuilder) =
-                match value with
-                | Null -> sb.Append "null" |> ignore
-                | Boolean b -> sb.Append (if b then "true" else "false") |> ignore
-                | String s -> 
-                    sb.Append '"' |> ignore
-                    sb.Append s |> ignore
-                    sb.Append '"' |> ignore
-                | Number n -> 
-                    if Decimal.IsInteger n then 
-                        sb.Append (Int128.CreateSaturating(n).ToString(CultureInfo.InvariantCulture)) |> ignore
-                    else 
-                        sb.Append (sprintf "%f" n) |> ignore
-                | List arr ->
-                    sb.Append '[' |> ignore
-                    let items = arr.Count
-                    for i, item in arr |> Seq.indexed do
-                        jsonize item sb
-                        if i < items - 1 then sb.Append ", " |> ignore
-                    sb.Append ']' |> ignore
+            | Object obj ->
+                write "{" |> ignore
+                let items = obj.Count
+                for i, kvp in obj |> Seq.indexed do
+                    write "\"" |> ignore
+                    write kvp.Key |> ignore
+                    write "\"" |> ignore
+                    write ": " |> ignore
+                    JsonValue.Jsonize kvp.Value write
+                    if i < items - 1 then write ", " |> ignore
+                write "}" |> ignore
 
-                | Object obj ->
-                    sb.Append '{' |> ignore
-                    let items = obj.Count
-                    for i, kvp in obj |> Seq.indexed do
-                        sb.Append '"' |> ignore
-                        sb.Append kvp.Key |> ignore
-                        sb.Append '"' |> ignore
-                        sb.Append ": " |> ignore
-                        jsonize kvp.Value sb
-                        if i < items - 1 then sb.Append ", " |> ignore
-                    sb.Append '}' |> ignore
-            let sb = new StringBuilder()
-            jsonize this sb
+        member this.ToJsonString() =            
+            let sb = new StringBuilder(128)
+            JsonValue.Jsonize this (fun text -> sb.Append text |> ignore)
             sb.ToString()
 
+        member this.ToJsonIntoAsync(stream: Stream) =
+            let sb = new StringBuilder(4096)
+            use streamWriter = new StreamWriter(stream)
+
+            let flush() = task {
+                let mutable e = sb.GetChunks()
+
+                while e.MoveNext() do                      
+                    do! streamWriter.WriteAsync e.Current
+
+                sb.Clear() |> ignore
+            }
+
+            JsonValue.Jsonize this (fun text -> 
+                sb.Append text |> ignore
+
+                if sb.Length > 4000 then
+                    flush().GetAwaiter().GetResult()
+            )
+
+            flush()
 
         member this.Eq (other: obj) =
             this = JsonValue.Parse $"{other}"

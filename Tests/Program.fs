@@ -103,5 +103,5 @@ type TestRunner() =
 
 [<EntryPoint>]
 let main argv =
-    TestRunner.GetTests([|Assembly.GetExecutingAssembly()|]).Run "*CreateAndCountFiles"
+    TestRunner.GetTests([|Assembly.GetExecutingAssembly()|]).Run "*"
     0
