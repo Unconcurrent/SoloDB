@@ -200,6 +200,7 @@ module FileStorage =
     }
 
     let private recursiveListAllEntriesInDirectory (db: SqliteConnection) (directoryFullPath: string) =
+        let directoryFullPath = [|directoryFullPath|] |> combinePathArr
         let queryCommand = 
             """
             -- EXPLAIN QUERY PLAN 
@@ -274,43 +275,50 @@ module FileStorage =
                 SoloDBFileHeader fh ON dt.Id = fh.DirectoryId
             LEFT JOIN
                 SoloDBFileMetadata fm ON fh.Id = fm.FileId
-            """        
-        let query = 
-            db.Query<SQLEntry>
-                (queryCommand, {|FullPath = directoryFullPath|}, buffered = false)
+            """
 
-        query 
-        |> Utils.SeqExt.sequentialGroupBy(fun e -> e.Path) 
-        |> Seq.map(fun entry -> 
-            let metadata = entry |> Seq.filter(fun x -> x.MetadataKey <> null) |> Seq.map(fun x -> (x.MetadataKey, x.MetadataValue)) |> readOnlyDict
-            let entryData = entry |> Seq.head
-            match entryData.Type with
-            | "File" ->
-                let file = {
-                    Id = entryData.Id;
-                    Name = entryData.Name;
-                    FullPath = entryData.Path;
-                    DirectoryId = entryData.DirectoryId.Value;
-                    Length = entryData.Size;
-                    Created = entryData.Created;
-                    Modified = entryData.Modified;
-                    Hash = entryData.Hash;
-                    Metadata = metadata;
-                }
-                SoloDBEntryHeader.File file
-            | "Directory" ->
-                let dir = {
-                    Id = entryData.Id;
-                    Name = entryData.Name;
-                    FullPath = entryData.Path;
-                    ParentId = entryData.DirectoryId;
-                    Created = entryData.Created;
-                    Modified = entryData.Modified;
-                    Metadata = metadata;
-                }
-                SoloDBEntryHeader.Directory dir
-            | other -> failwithf "Invalid entry type: %s" other
-        )
+        seq {
+            let query = 
+                db.Query<SQLEntry>
+                    (queryCommand, {|FullPath = directoryFullPath|}, buffered = false)
+
+            let query = 
+                query 
+                |> Utils.SeqExt.sequentialGroupBy(fun e -> e.Path) 
+                |> Seq.map(fun entry -> 
+                    let metadata = entry |> Seq.filter(fun x -> x.MetadataKey <> null) |> Seq.map(fun x -> (x.MetadataKey, x.MetadataValue)) |> readOnlyDict
+                    let entryData = entry |> Seq.head
+                    match entryData.Type with
+                    | "File" ->
+                        let file = {
+                            Id = entryData.Id;
+                            Name = entryData.Name;
+                            FullPath = entryData.Path;
+                            DirectoryId = entryData.DirectoryId.Value;
+                            Length = entryData.Size;
+                            Created = entryData.Created;
+                            Modified = entryData.Modified;
+                            Hash = entryData.Hash;
+                            Metadata = metadata;
+                        }
+                        SoloDBEntryHeader.File file
+                    | "Directory" ->
+                        let dir = {
+                            Id = entryData.Id;
+                            Name = entryData.Name;
+                            FullPath = entryData.Path;
+                            ParentId = entryData.DirectoryId;
+                            Created = entryData.Created;
+                            Modified = entryData.Modified;
+                            Metadata = metadata;
+                        }
+                        SoloDBEntryHeader.Directory dir
+                    | other -> failwithf "Invalid entry type: %s" other
+                )
+            for item in query do item
+        }
+
+        
 
 
     let private getFileLength (db: SqliteConnection) (file: SoloDBFileHeader) =

@@ -1,6 +1,7 @@
 ﻿module JsonTests
 
 open System.IO
+open System.Collections.Generic
 
 #nowarn "3391" // Implicit on SqlId
 
@@ -22,6 +23,11 @@ type JsonTestExceptation =
 | Implementation
 | Ok
 
+type UnionTest = 
+| A
+| B of int
+| C of string
+
 [<TestClass>]
 type JsonTests() =
     let mutable db: SoloDB = Unchecked.defaultof<SoloDB>
@@ -38,6 +44,90 @@ type JsonTests() =
     [<TestMethod>]
     member this.JsonSerialize() =
         let json = JsonSerializator.JsonValue.Serialize {|First = 1; Name = "Alpha"; Likes=["Ice Scream"; "Sleep"]; Activities={|List=["Codes"]; Len=1|}|}
+        ()
+
+    [<TestMethod>]
+    member this.JsonSerializeUnion() =
+        let arr = [|
+            UnionTest.A
+            UnionTest.A
+            UnionTest.C("ASDASD1")
+            UnionTest.B -43
+        |]
+        let jsonObj = JsonSerializator.JsonValue.Serialize arr
+        let json = jsonObj.ToString()
+        let jsonObj2 = JsonSerializator.JsonValue.Parse json
+        let arr2 = jsonObj2.ToObject<UnionTest array>()
+
+        Assert.IsTrue ((arr = arr2))
+        ()
+
+    [<TestMethod>]
+    member this.JsonSerializeStringIntDict() =
+        let arr = 
+            [|
+                "a", 1
+                "b", 2
+                "c", 3
+                "d", 4
+            |] |> dict
+        let jsonObj = JsonSerializator.JsonValue.Serialize arr
+        let json = jsonObj.ToString()
+        let jsonObj2 = JsonSerializator.JsonValue.Parse json
+        let arr2 = jsonObj2.ToObject<Dictionary<string, int>>()
+
+        Assert.IsTrue (((arr |> Seq.toList) = (arr2 |> Seq.toList)))
+        ()
+
+    [<TestMethod>]
+    member this.JsonSerializeStringIntReadOnlyDict() =
+        let arr = 
+            [|
+                "a", 1
+                "b", 2
+                "c", 3
+                "d", 4
+            |] |> readOnlyDict
+        let jsonObj = JsonSerializator.JsonValue.Serialize arr
+        let json = jsonObj.ToString()
+        let jsonObj2 = JsonSerializator.JsonValue.Parse json
+        let arr2 = jsonObj2.ToObject<IReadOnlyDictionary<string, int>>()
+
+        Assert.IsTrue (((arr |> Seq.toList) = (arr2 |> Seq.toList)))
+        ()
+
+    [<TestMethod>]
+    member this.JsonSerializeIntIntDict() =
+        let arr = 
+            [|
+                2, 1
+                3, 2
+                4, 3
+                5, 4
+            |] |> dict
+        let jsonObj = JsonSerializator.JsonValue.Serialize arr
+        let json = jsonObj.ToString()
+        let jsonObj2 = JsonSerializator.JsonValue.Parse json
+        let arr2 = jsonObj2.ToObject<IDictionary<int, int>>()
+
+        Assert.IsTrue (((arr |> Seq.toList) = (arr2 |> Seq.toList)))
+        ()
+
+    [<TestMethod>]
+    member this.JsonSerializeIntIntReadOnlyDict() =
+        let arr = 
+            [|
+                2, 1
+                3, 2
+                4, 3
+                5, 4
+            |] |> readOnlyDict
+        let jsonObj = JsonSerializator.JsonValue.Serialize arr
+        let json = jsonObj.ToString()
+        let jsonObj2 = JsonSerializator.JsonValue.Parse json
+        let arr2 = jsonObj2.ToObject<IReadOnlyDictionary<int, int>>()
+
+        Assert.IsTrue (((arr |> Seq.toList) = (arr2 |> Seq.toList)))
         ()
 
     [<TestMethod>]
