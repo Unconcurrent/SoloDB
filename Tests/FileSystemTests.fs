@@ -307,5 +307,65 @@ type FileSystemTests() =
 
         assertTrue (uniqueDirectoriesNames.Length = directories.Length)
 
+    [<TestMethod>]
+    member this.MoveFile1() =
+        let path = "/abc.txt"
+        let toPath = "/xyz.txt"
+        use ms = new MemoryStream(testFileBytes)
+        fs.Upload(path, ms)
+
+        fs.MoveFile path toPath
+
+        assertEqual (fs.TryGetAt path) None "Moved file still exists at original location."
+
+        use tempMs = new MemoryStream()
+        fs.Download(toPath, tempMs)
+        assertEqual (tempMs.ToArray()) testFileBytes "File corrupted on storage."
+
+    [<TestMethod>]
+    member this.MoveFile2() =
+        let path = "/abc.txt"
+        let toPath = "/dir1/xyz.txt"
+        use ms = new MemoryStream(testFileBytes)
+        fs.Upload(path, ms)
+
+        fs.MoveFile path toPath
+
+        assertEqual (fs.TryGetAt path) None "Moved file still exists at original location."
+
+        use tempMs = new MemoryStream()
+        fs.Download(toPath, tempMs)
+        assertEqual (tempMs.ToArray()) testFileBytes "File corrupted on storage."
+
+    [<TestMethod>]
+    member this.MoveFile3() =
+        let path = "/dir1/abc.txt"
+        let toPath = "/dir2/dir3/xy4z.txt"
+        use ms = new MemoryStream(testFileBytes)
+        fs.Upload(path, ms)
+
+        fs.MoveFile path toPath
+
+        assertEqual (fs.TryGetAt path) None "Moved file still exists at original location."
+
+        use tempMs = new MemoryStream()
+        fs.Download(toPath, tempMs)
+        assertEqual (tempMs.ToArray()) testFileBytes "File corrupted on storage."
+
+    [<TestMethod>]
+    member this.MoveFileToItself() =
+        let path = "/abc.txt"
+        let toPath = "/abc.txt"
+        use ms = new MemoryStream(testFileBytes)
+        fs.Upload(path, ms)
+
+        fs.MoveFile path toPath
+
+        use tempMs = new MemoryStream()
+        fs.Download(toPath, tempMs)
+        assertEqual (tempMs.ToArray()) testFileBytes "File corrupted on storage."
+
+
+
 
 

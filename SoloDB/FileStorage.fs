@@ -15,7 +15,7 @@ module FileStorage =
     let chunkSize = 
         4096L // 4KiB
 
-    let private combinePath (a, b) = (a, b) |> Path.Combine |> _.Replace('\\', '/')
+    let private combinePath a b = Path.Combine(a, b) |> _.Replace('\\', '/')
     let private combinePathArr arr = arr |> Path.Combine |> _.Replace('\\', '/')
 
     let private lockPath (db: SqliteConnection) (path: string) =
@@ -514,14 +514,19 @@ module FileStorage =
         let sep = "/"
         let dirPath = $"/{normalizedCompletePath |> Array.take (Math.Max(normalizedCompletePath.Length - 1, 0l)) |> String.concat sep}"
         let name = match normalizedCompletePath |> Array.tryLast with Some x -> x | None -> ""
-        dirPath, name
+        struct (dirPath, name)
+
+    let private formatPath path =
+        let struct (dir, name) = getPathAndName path
+        let dirPath = combinePath dir name
+        dirPath
 
     let createFileAt (db: SqliteConnection) (path: string) =
-        let dirPath, name = getPathAndName path
+        let struct (dirPath, name) = getPathAndName path
         let directory = getOrCreateDir db dirPath
         let newFile = {            
             Name = name
-            FullPath = $"{dirPath}/{name}"
+            FullPath = combinePath dirPath name
             DirectoryId = directory.Id
             Length = 0L
             Created = DateTimeOffset.Now
@@ -537,11 +542,11 @@ module FileStorage =
 
 
     let tryCreateFileAt (db: SqliteConnection) (path: string) =
-        let dirPath, name = getPathAndName path
+        let struct (dirPath, name) = getPathAndName path
         let directory = getOrCreateDir db dirPath
         let newFile = {            
             Name = name
-            FullPath = $"{dirPath}/{name}"
+            FullPath = combinePath dirPath name
             DirectoryId = directory.Id
             Length = 0L
             Created = DateTimeOffset.Now
@@ -559,7 +564,7 @@ module FileStorage =
 
 
     let listDirectoriesAt (db: SqliteConnection) (path: string) =
-        let dirPath = getPathAndName path |> combinePath
+        let dirPath = formatPath path
         match tryGetDir db dirPath with
         | None -> Seq.empty
         | Some dir ->
@@ -610,8 +615,8 @@ module FileStorage =
         getFilesWhere connection "fh.Id = @FileId" {| FileId = fileId |}
 
     let tryGetFileAt (db: SqliteConnection) (path: string) =
-        let dirPath, name = getPathAndName path
-        let fullPath = $"{dirPath}/{name}"
+        let struct (dirPath, name) = getPathAndName path
+        let fullPath = combinePath dirPath name
         getFilesWhere db "fh.FullPath = @FullPath" {|FullPath = fullPath|} |> Seq.tryHead
 
     let getFilesByHash (db: SqliteConnection) (hash: byte array) =
@@ -624,7 +629,7 @@ module FileStorage =
         | Some f -> f
         | None ->
 
-        let dirPath, name = getPathAndName path
+        let struct (dirPath, name) = getPathAndName path
         let dir = getOrCreateDir db dirPath 
 
         match db.QueryFirstOrDefault<SoloDBFileHeader>("SELECT * FROM SoloDBFileHeader WHERE DirectoryId = @DirectoryId AND Name = @Name", {|DirectoryId = dir.Id; Name = name|}) with
@@ -633,12 +638,12 @@ module FileStorage =
 
 
     let getDirectoryAt (db: SqliteConnection) (path: string) =
-        let dirPath = getPathAndName path |> combinePath
+        let dirPath = formatPath path
         tryGetDir db dirPath
 
 
     let deleteDirectoryAt (db: SqliteConnection) (path: string) =
-        let dirPath = getPathAndName path |> combinePath
+        let dirPath = formatPath path
         match tryGetDir db dirPath with
         | None -> false
         | Some dir ->
@@ -650,12 +655,12 @@ module FileStorage =
             false
 
     let getOrCreateDirectoryAt (db: SqliteConnection) (path: string) = 
-        let dirPath = getPathAndName path |> combinePath
+        let dirPath = formatPath path
         getOrCreateDir db dirPath
 
 
     let listFilesAt (db: SqliteConnection) (path: string) : SoloDBFileHeader seq = 
-        let dirPath = getPathAndName path |> combinePath
+        let dirPath = formatPath path
         match tryGetDir db dirPath with 
         | None -> Seq.empty
         | Some dir ->
@@ -694,6 +699,15 @@ module FileStorage =
     let deleteDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) =
         db.Execute("DELETE FROM SoloDBDirectoryMetadata WHERE DirectoryId = @DirectoryId AND Key = @Key", {|DirectoryId = dir.Id; Key = key|}) |> ignore
    
+    let moveFile (db: SqliteConnection) (file: SoloDBFileHeader) (toDir: SoloDBDirectoryHeader) =
+        let newFileFullPath = combinePath toDir.FullPath file.Name
+        db.Execute("UPDATE SoloDBFileHeader 
+        SET FullPath = @NewFullPath,
+        DirectoryId = @DestDirId
+        WHERE Id = @FileId", {|NewFullPath = newFileFullPath; DestDirId = toDir.Id; FileId = file.Id|})
+        |> ignore
+        ()
+
     type FileSystem(manager: ConnectionManager) =
         member this.Upload(path, stream: Stream) =
             use db = manager.Borrow()
@@ -869,4 +883,11 @@ module FileStorage =
         member this.RecursiveListEntriesAt(path) =
             use db = manager.Borrow()
             recursiveListAllEntriesInDirectory db path
+
+        member this.MoveFile from toPath =
+            let file = this.GetAt from
+            let struct (toDirPath, fileName) = getPathAndName toPath
+            let dir = this.GetOrCreateDirAt toDirPath
+            use db = manager.Borrow()
+            moveFile db file dir
             
