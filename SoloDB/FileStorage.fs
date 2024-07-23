@@ -18,15 +18,18 @@ module FileStorage =
     let private combinePath a b = Path.Combine(a, b) |> _.Replace('\\', '/')
     let private combinePathArr arr = arr |> Path.Combine |> _.Replace('\\', '/')
 
-    let private lockPath (db: SqliteConnection) (path: string) =
-        let mutex = new DisposableMutex($"SoloDB-{db.ConnectionString.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-Path-{path.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}")
-        mutex
-
     let noopDisposer = { 
          new System.IDisposable with
              member this.Dispose() =
                  ()
     }
+
+    let private lockPathIfNotInTransaction (db: SqliteConnection) (path: string) =
+        if db.IsWithinTransaction() then
+            noopDisposer
+        else
+        let mutex = new DisposableMutex($"SoloDB-{db.ConnectionString.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-Path-{path.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}")
+        mutex :> IDisposable
 
     let private lockFileIdIfNotInTransaction (db: SqliteConnection) (id: SqlId) =
         if db.IsWithinTransaction() then
@@ -88,7 +91,7 @@ module FileStorage =
         tryGetDirectoriesWhere db "dh.FullPath = @Path" {|Path = path|} |> Seq.tryHead
 
     let private getOrCreateDir (db: SqliteConnection) (path: string) =
-        use l = lockPath db path
+        use l = lockPathIfNotInTransaction db path
 
         match tryGetDir db path with
         | Some d -> d
@@ -623,7 +626,7 @@ module FileStorage =
         getFilesWhere db "fh.Hash = @Hash" {|Hash = hash|}
 
     let getOrCreateFileAt (db: SqliteConnection) (path: string) =
-        use l = lockPath db path
+        use l = lockPathIfNotInTransaction db path
 
         match tryGetFileAt db path with
         | Some f -> f
@@ -789,13 +792,27 @@ module FileStorage =
 
         member this.WriteAt(path, offset, data, ?createIfInexistent: bool) =
             let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
-            let file = if createIfInexistent then this.GetOrCreateAt path else this.GetAt path
 
-            use db = manager.Borrow()
-            use fileStream = openFile db file
-            fileStream.Position <- offset
-            fileStream.Write(data, 0, data.Length)
-            ()
+            manager.WithTransaction(fun tx -> 
+                let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
+
+                use fileStream = openFile tx file
+                fileStream.Position <- offset
+                fileStream.Write(data, 0, data.Length)
+                ()
+            )
+
+        member this.WriteAt(path, offset, data: Stream, ?createIfInexistent: bool) =
+            let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
+
+            manager.WithTransaction(fun tx -> 
+                let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
+
+                use fileStream = openFile tx file
+                fileStream.Position <- offset
+                data.CopyTo (fileStream, int chunkSize)
+                ()
+            )
 
         member this.ReadAt(path, offset, len) =
             let file = this.GetAt path
