@@ -699,8 +699,8 @@ module FileStorage =
     let deleteDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) =
         db.Execute("DELETE FROM SoloDBDirectoryMetadata WHERE DirectoryId = @DirectoryId AND Key = @Key", {|DirectoryId = dir.Id; Key = key|}) |> ignore
    
-    let moveFile (db: SqliteConnection) (file: SoloDBFileHeader) (toDir: SoloDBDirectoryHeader) =
-        let newFileFullPath = combinePath toDir.FullPath file.Name
+    let moveFile (db: SqliteConnection) (file: SoloDBFileHeader) (toDir: SoloDBDirectoryHeader) (newName: string) =
+        let newFileFullPath = combinePath toDir.FullPath newName
         db.Execute("UPDATE SoloDBFileHeader 
         SET FullPath = @NewFullPath,
         DirectoryId = @DestDirId
@@ -889,5 +889,5 @@ module FileStorage =
             let struct (toDirPath, fileName) = getPathAndName toPath
             let dir = this.GetOrCreateDirAt toDirPath
             use db = manager.Borrow()
-            moveFile db file dir
+            moveFile db file dir fileName
             
