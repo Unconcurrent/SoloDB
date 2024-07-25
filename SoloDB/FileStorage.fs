@@ -1,19 +1,27 @@
 ﻿namespace SoloDatabase
 
 open System.Collections.Generic
+open System.Buffers
+open System
+open System.IO
+open Microsoft.Data.Sqlite
+open Dapper
+open SoloDatabase.Types
+open System.Security.Cryptography
+open SoloDatabase.Connections
+open Snappier
+
+#nowarn "9"
 
 module FileStorage =
-    open System
-    open System.IO
-    open Microsoft.Data.Sqlite
-    open Dapper
-    open SoloDatabase.Types
-    open System.Collections.Generic
-    open System.Security.Cryptography
-    open SoloDatabase.Connections
+    let maxChunkStoreSize = 
+        16384L // If the compression fails.
 
     let chunkSize = 
-        4096L // 4KiB
+        16000L // 16KB, aprox. a SQLite page size.
+
+    let disableHash = false
+    let disableCompression = false
 
     let private combinePath a b = Path.Combine(a, b) |> _.Replace('\\', '/')
     let private combinePathArr arr = arr |> Path.Combine |> _.Replace('\\', '/')
@@ -120,16 +128,6 @@ module FileStorage =
     
         innerLoop root names [] |> fillDirectoryMetadata db
     
-    let private tryGetChunkData (db: SqliteConnection) (fileId: SqlId) (chunkNumber: int64) =
-        let sql = "SELECT Data FROM SoloDBFileChunk WHERE FileId = @FileId AND Number = @ChunkNumber"
-        match db.QueryFirstOrDefault<byte array>(sql, {| FileId = fileId; ChunkNumber = chunkNumber |}) with
-        | data when Object.ReferenceEquals(data, null) -> None
-        | data -> data |> Some
-
-    let private writeChunkData (db: SqliteConnection) (fileId: SqlId) (chunkNumber: int64) (data: byte array) =
-        let result = db.Execute("INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data)", {|FileId = fileId; Number = chunkNumber; Data = data|})
-        if result <> 1 then failwithf "writeChunkData failed."
-
     let private updateLenById (db: SqliteConnection) (fileId: SqlId) (len: int64) =
         let result = db.Execute ("UPDATE SoloDBFileHeader SET Length = @Length WHERE Id = @Id", {|Id = fileId.Value; Length=len|})
         if result <> 1 then failwithf "updateLen failed."
@@ -332,16 +330,93 @@ module FileStorage =
         db.QueryFirst<int64>(@"SELECT Length FROM SoloDBFileHeader WHERE Id = @FileId",
                        {| FileId = fileId.Value |})
 
+    let private tryGetChunkData (db: SqliteConnection) (fileId: SqlId) (chunkNumber: int64) (buffer: Span<byte>) =
+        let sql = "SELECT Data FROM SoloDBFileChunk WHERE FileId = @FileId AND Number = @ChunkNumber"
+        match db.QueryFirstOrDefault<byte array>(sql, {| FileId = fileId; ChunkNumber = chunkNumber |}) with
+        | data when Object.ReferenceEquals(data, null) -> Span.Empty
+        | data -> 
+            if disableCompression then
+                Span<byte>(data).CopyTo(buffer)
+                buffer.Slice(0, data.Length)
+            else
+                let len = Snappy.Decompress(Span<byte>(data), buffer)
+                buffer.Slice(0, len)
+
+
+    let private writeChunkData (db: SqliteConnection) (fileId: SqlId) (chunkNumber: int64) (data: Span<byte>) =
+        // let result = db.Execute("INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data)", {|FileId = fileId; Number = chunkNumber; Data = data.GetEnumerator()|})
+        use command = db.CreateCommand()
+        command.CommandText <- "INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data)"
+
+        let p = command.CreateParameter()
+        p.ParameterName <- "FileId"
+        p.Value <- fileId.Value
+        command.Parameters.Add p |> ignore
+
+        let p = command.CreateParameter()
+        p.ParameterName <- "Number"
+        p.Value <- chunkNumber
+        command.Parameters.Add p |> ignore
+
+        let arrayBuffer = ArrayPool<byte>.Shared.Rent (int maxChunkStoreSize)
+        try
+            let memoryBuffer = arrayBuffer.AsSpan()
+            let len = 
+                if disableCompression then
+                    data.CopyTo(memoryBuffer)
+                    data.Length
+                else
+                    Snappy.Compress(data, memoryBuffer)
+
+            let p = command.CreateParameter()
+            p.ParameterName <- "Data"
+            p.Value <- arrayBuffer
+            p.Size <- len // Crop to size.
+            command.Parameters.Add p |> ignore
+
+            let result = command.ExecuteNonQuery()
+
+            if result <> 1 then failwithf "writeChunkData failed."
+        finally ArrayPool<byte>.Shared.Return arrayBuffer
+
+
     let private getStoredChunks (db: SqliteConnection) (fileId: SqlId) =
-        db.Query<SoloDBFileChunk>("SELECT * FROM SoloDBFileChunk WHERE FileId = @FileId ORDER BY Number ASC", {|FileId = fileId|})
+        // db.Query<SoloDBFileChunk>("SELECT * FROM SoloDBFileChunk WHERE FileId = @FileId ORDER BY Number ASC", {|FileId = fileId|})
+        use command = db.CreateCommand()
+        command.CommandText <- "SELECT Number, Data FROM SoloDBFileChunk WHERE FileId = @FileId ORDER BY Number ASC"
 
+        let p = command.CreateParameter()
+        p.ParameterName <- "FileId"
+        p.Value <- fileId.Value
+        command.Parameters.Add p |> ignore
 
-    let private emptyChunk = Array.zeroCreate<byte> (int chunkSize)
+        seq {
+            use reader = command.ExecuteReader()
+            while reader.Read() do
+                let mutable memoryBuffer = MemoryTools.AllocatorOf<byte>.New (uint maxChunkStoreSize)
+                try
+                    let number = reader.GetInt64(0)
+                    let data = reader.GetValue(1)
+                    let data = data :?> byte array
+                    let count = 
+                        if disableCompression then
+                            Span<byte>(data).CopyTo(memoryBuffer.Span)
+                            data.Length
+                        else
+                            Snappy.Decompress(Span<byte>(data), memoryBuffer.Span)
+                    memoryBuffer.DownsizeTo(count)
+
+                    struct {|Number = number; Data = memoryBuffer|}
+                finally memoryBuffer.Dispose()
+        }
+        
+
+    let private emptyChunk = MemoryTools.AllocatorOf<byte>.New (uint chunkSize)
     let private getAllChunks (db: SqliteConnection) (fileId: SqlId) = seq {
         let mutable previousNumber = -1L // Chunks start from 0.
         for chunk in getStoredChunks db fileId do
             while chunk.Number - 1L > previousNumber do
-                yield {Id = SqlId -1L; FileId = fileId; Number = previousNumber + 1L; Data = emptyChunk}
+                yield struct {|Number = previousNumber + 1L; Data = emptyChunk|}
                 previousNumber <- previousNumber + 1L
 
             yield chunk
@@ -355,36 +430,39 @@ module FileStorage =
         |> ignore
 
     let private calculateHash (db: SqliteConnection) (fileId: SqlId) (len: int64) =
-        use sha1 = SHA1.Create()
-        let allChunks = getAllChunks db fileId
+        use sha1 = IncrementalHash.CreateHash(HashAlgorithmName.SHA1)
+        
 
-        allChunks 
-        |> Seq.map (fun b -> 
-            let currentChunkDataOffset = b.Number * chunkSize
-            if currentChunkDataOffset + chunkSize <= len then 
-                ValueTuple<byte array, int, int>(b.Data, 0, b.Data.Length) 
-            else 
-                let blockReadCount = int (len - currentChunkDataOffset) // Calculate how many bytes should actually be read to not exceed the file length
-                ValueTuple<byte array, int, int>(b.Data, 0, blockReadCount)) // Trim the chunk data to match the file's actual length
-        |> Seq.iter (fun struct (data, start, len) -> sha1.TransformBlock (data, start, len, null, 0) |> ignore)
+        for chunk in getAllChunks db fileId do
+            let mutable data = chunk.Data
+            let block =
+                let currentChunkDataOffset = chunk.Number * chunkSize
+                if currentChunkDataOffset + chunkSize <= len then 
+                    data
+                else 
+                    let blockReadCount = int (len - currentChunkDataOffset) // Calculate how many bytes should actually be read to not exceed the file length
+                    data.DownsizeTo(blockReadCount) // Trim the chunk data to match the file's actual length
+                    data
 
-        sha1.TransformFinalBlock([||], 0, 0) |> ignore
+            sha1.AppendData (block.Span)
 
-        let hash = sha1.Hash
-        hash
+        sha1.GetHashAndReset()
 
     [<Sealed>]
-    type DbFileStream(db: SqliteConnection, fileId: SqlId) =
+    type DbFileStream(db: SqliteConnection, fileId: SqlId, previousHash: byte array) =
         inherit Stream()
 
         let mutable position = 0L
         let mutable disposed = false
+        let mutable dirty = false
 
         let checkDisposed() = if disposed then raise (ObjectDisposedException(nameof(DbFileStream)))
 
         member private this.UpdateHash() =
-            let hash = calculateHash db fileId this.Length
-            updateHashById db fileId hash 
+            if not disableHash && dirty then
+                let hash = calculateHash db fileId this.Length
+                if hash <> previousHash then
+                    updateHashById db fileId hash
 
 
         override _.CanRead = true
@@ -400,7 +478,7 @@ module FileStorage =
                 checkDisposed()
                 position 
             and set(value) = 
-                checkDisposed()
+                checkDisposed()                
                 this.Seek(value, SeekOrigin.Begin) |> ignore
 
         override this.Flush() =         
@@ -427,8 +505,11 @@ module FileStorage =
                 0
             else
 
-            match tryGetChunkData db fileId chunkNumber with
-            | None -> 
+            use mutable nativeBuffer = MemoryTools.AllocatorOf<byte>.New (uint maxChunkStoreSize)
+
+            match tryGetChunkData db fileId chunkNumber nativeBuffer.Span with
+            | data when data.IsEmpty ->
+                nativeBuffer.Dispose()
                 let maxChunkNumber = (min (position + count) len) / int64 chunkSize
                 if maxChunkNumber > chunkNumber then // Try to load the other chunk if the file was sparsely allocated.
                     let offsetToNextChunk = chunkSize - chunkOffset
@@ -440,9 +521,9 @@ module FileStorage =
                     this.Read(buffer, offset + int offsetToNextChunk, bytesToRead) + int offsetToNextChunk
                 else
                 0
-            | Some chunkData ->
+            | chunkData ->
 
-            Array.Copy(chunkData, chunkOffset, buffer, offset, bytesToRead)
+            chunkData.Slice(int chunkOffset, int bytesToRead).CopyTo(buffer.AsSpan(offset))
         
             this.Position <- position + bytesToRead
 
@@ -450,45 +531,59 @@ module FileStorage =
         
 
         override this.Write(buffer: byte[], offset: int, count: int) =
-            if buffer = null then raise (ArgumentNullException(nameof buffer))
-            if offset < 0 then raise (ArgumentOutOfRangeException(nameof offset))
-            if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
-            if buffer.Length - offset < count then raise (ArgumentException("Invalid offset and length."))
+            dirty <- true
+            let mutable writing = true
+            let mutable offset = int64 offset
+            let mutable count = int64 count
 
-            let position = position
-            let count = int64 count
-            let mutable remainingBytes = 0L
-            let mutable bytesToWrite = 0L
+            while writing do
+                writing <- false
+                if buffer = null then raise (ArgumentNullException(nameof buffer))
+                if offset < 0 then raise (ArgumentOutOfRangeException(nameof offset))
+                if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
+                if buffer.LongLength - offset < count then raise (ArgumentException("Invalid offset and length."))
 
-            try
-                use l = lockFileIdIfNotInTransaction db fileId
+                let position = position
+                let mutable remainingBytes = 0L
+                let mutable bytesToWrite = 0L
 
-                let chunkNumber = position / int64 chunkSize
-                let chunkOffset = position % int64 chunkSize
+                try
+                    use l = lockFileIdIfNotInTransaction db fileId
 
-                let tryGetChunkDataResult = tryGetChunkData db fileId chunkNumber
-                let existingChunk = match tryGetChunkDataResult with Some data -> data | None -> Array.zeroCreate (int chunkSize)
+                    let chunkNumber = position / int64 chunkSize
+                    let chunkOffset = position % int64 chunkSize
 
-                let spaceInChunk = chunkSize - chunkOffset
-                bytesToWrite <- min count spaceInChunk
+                    use mutable nativeBuffer = MemoryTools.AllocatorOf<byte>.New (uint maxChunkStoreSize)
+                    let dataBuffer = nativeBuffer.Span
 
-                Array.Copy(buffer, offset, existingChunk, chunkOffset, bytesToWrite)
+                    let tryGetChunkDataResult = tryGetChunkData db fileId chunkNumber dataBuffer
+                    let existingChunk = match tryGetChunkDataResult with data when data.IsEmpty -> dataBuffer.Slice(0, int chunkSize) | data -> data
 
-                writeChunkData db fileId chunkNumber existingChunk
+                    let spaceInChunk = chunkSize - chunkOffset
+                    bytesToWrite <- min count spaceInChunk
 
-                this.Position <- position + int64 bytesToWrite
-                if this.Position > this.Length then
-                    updateLenById db fileId this.Position            
+                    // Array.Copy(buffer, offset, existingChunk, chunkOffset, bytesToWrite)
 
-                remainingBytes <- count - bytesToWrite
-            finally ()
+                    buffer.AsSpan(int offset, int bytesToWrite).CopyTo(existingChunk.Slice(int chunkOffset))
 
-            if remainingBytes > 0 then
-                this.Write(buffer, offset + int bytesToWrite, int remainingBytes)
+                    writeChunkData db fileId chunkNumber existingChunk
 
+                    this.Position <- position + int64 bytesToWrite
+
+                    remainingBytes <- count - bytesToWrite
+                    if remainingBytes > 0 then
+                        writing <- true
+                        offset <- offset + bytesToWrite
+                        count <- remainingBytes
+                    else 
+                        if this.Position > this.Length then
+                            updateLenById db fileId this.Position 
+
+                finally ()
 
         override _.SetLength(value: int64) =
             checkDisposed()
+            dirty <- true
             use l = lockFileIdIfNotInTransaction db fileId
             downsetFileLength db fileId value
 
@@ -670,7 +765,7 @@ module FileStorage =
         listDirectoryFiles db dir
 
     let openFile (db: SqliteConnection) (file: SoloDBFileHeader) =
-        new DbFileStream(db, file.Id)
+        new DbFileStream(db, file.Id, file.Hash)
 
     let openOrCreateFile (db: SqliteConnection) (path: string) =
         let file = tryGetFileAt db path
@@ -678,7 +773,7 @@ module FileStorage =
                     | Some x -> x 
                     | None -> createFileAt db path
 
-        new DbFileStream(db, file.Id)
+        new DbFileStream(db, file.Id, file.Hash)
 
 
     let getFileLen db file =

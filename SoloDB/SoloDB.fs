@@ -465,6 +465,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
             let initCommands = [|"
                                 PRAGMA journal_mode=wal;
+                                PRAGMA page_size=16384;
 
                                 BEGIN EXCLUSIVE;
 
@@ -582,26 +583,31 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                                 END;  
                                 
                                 -- Trigger for INSERT operations on SoloDBFileChunk
-                                CREATE TRIGGER IF NOT EXISTS Insert_SoloDBFileChunk
-                                AFTER INSERT ON SoloDBFileChunk
-                                FOR EACH ROW
-                                BEGIN
-                                    UPDATE SoloDBFileHeader
-                                    SET Modified = UNIXTIMESTAMP()
-                                    WHERE Id = NEW.FileId;
-                                END;
+                                -- CREATE TRIGGER IF NOT EXISTS Insert_SoloDBFileChunk
+                                -- AFTER INSERT ON SoloDBFileChunk
+                                -- FOR EACH ROW
+                                -- BEGIN
+                                --     UPDATE SoloDBFileHeader
+                                --     SET Modified = UNIXTIMESTAMP()
+                                --     WHERE Id = NEW.FileId;
+                                -- END;
                                 
                                 -- Trigger for UPDATE operations on SoloDBFileChunk
-                                CREATE TRIGGER IF NOT EXISTS Update_SoloDBFileChunk
-                                AFTER UPDATE ON SoloDBFileChunk
-                                FOR EACH ROW
-                                BEGIN
-                                    UPDATE SoloDBFileHeader
-                                    SET Modified = UNIXTIMESTAMP()
-                                    WHERE Id = NEW.FileId;
-                                END;
+                                -- CREATE TRIGGER IF NOT EXISTS Update_SoloDBFileChunk
+                                -- AFTER UPDATE ON SoloDBFileChunk
+                                -- FOR EACH ROW
+                                -- BEGIN
+                                --     UPDATE SoloDBFileHeader
+                                --     SET Modified = UNIXTIMESTAMP()
+                                --     WHERE Id = NEW.FileId;
+                                -- END;
                                 
 
+                                COMMIT TRANSACTION;
+                                "
+                                ;
+                                "
+                                BEGIN EXCLUSIVE;
 
 
                                 CREATE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDBCollections(Name);

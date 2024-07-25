@@ -103,5 +103,6 @@ type TestRunner() =
 
 [<EntryPoint>]
 let main argv =
-    TestRunner.GetTests([|Assembly.GetExecutingAssembly()|]).Run "MoveFile3"
+    while true do
+        TestRunner.GetTests([|Assembly.GetExecutingAssembly()|]).Run "*"
     0
