@@ -366,6 +366,24 @@ type FileSystemTests() =
         assertEqual (tempMs.ToArray()) testFileBytes "File corrupted on storage."
 
 
+    [<TestMethod>]
+    member this.WriteIncompressableData() =
+        let path = "/abc.txt"
 
+        for i in 1..10 do
+            let data = RandomNumberGenerator.GetBytes(int chunkSize)
+            fs.WriteAt(path, 0, data)
+            let read = fs.ReadAt(path, 0, data.Length)
 
+            assertTrue (data = read)
 
+    [<TestMethod>]
+    member this.WriteCompressableData() =
+        let path = "/abc.txt"
+
+        for i in 1..10 do
+            let data = Array.init (int chunkSize) (fun _ -> byte i)
+            fs.WriteAt(path, 0, data)
+            let read = fs.ReadAt(path, 0, data.Length)
+
+            assertTrue (data = read)
