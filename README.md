@@ -106,7 +106,7 @@ The [`Optimize`](https://www.sqlite.org/pragma.html#pragma_optimize) method can 
 ```csharp
 db.Optimize();
 ```
-### [File storage](./Tests/FileSystemTests.fs)
+### File storage
 
 ```csharp
 var fs = db.FileSystem;
