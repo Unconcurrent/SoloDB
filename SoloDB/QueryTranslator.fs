@@ -5,8 +5,6 @@ module QueryTranslator =
     open System
     open System.Reflection
     open System.Collections.Generic
-    open Microsoft.FSharp.Linq.RuntimeHelpers
-    open System.Text.Json
     open JsonFunctions
     open Utils
     open SoloDatabase.Types
@@ -44,7 +42,7 @@ module QueryTranslator =
 
         static member New(sb: StringBuilder, variables: Dictionary<string, obj>, updateMode: bool, tableName) =
             let appendVariable (value: obj) =
-                let name = $"VAR{Random.Shared.NextInt64():X}{Random.Shared.NextInt64():X}"
+                let name = $"VAR{Random.Shared.Next():X}{Random.Shared.Next():X}{Random.Shared.Next():X}{Random.Shared.Next():X}"
                 match value with
                 | :? bool as b -> 
                      sb.Append (sprintf "%i" (if b then 1 else 0)) |> ignore
@@ -132,7 +130,7 @@ module QueryTranslator =
             invocationExpr.Arguments |> Seq.exists isAnyConstant || isAnyConstant invocationExpr.Expression
         | :? LambdaExpression as lambdaExpr ->
             lambdaExpr.Body |> isAnyConstant
-        | :? NewExpression as ne when ne.Type.IsAssignableTo(typeof<System.Runtime.CompilerServices.ITuple>) ->
+        | :? NewExpression as ne when isTuple ne.Type ->
             ne.Arguments |> Seq.exists isAnyConstant
         | :? NewArrayExpression as na ->
             na.Expressions |> Seq.exists isFullyConstant
@@ -357,7 +355,7 @@ module QueryTranslator =
             let len = m.Arguments.Count
 
             let args =
-                if len = 1 && m.Arguments.[0].Type.IsAssignableTo typeof<IEnumerable<string>> && m.Arguments.[0].NodeType = ExpressionType.NewArrayInit then
+                if len = 1 && typeof<IEnumerable<string>>.IsAssignableFrom m.Arguments.[0].Type && m.Arguments.[0].NodeType = ExpressionType.NewArrayInit then
                     let array = m.Arguments.[0] :?> NewArrayExpression
                     array.Expressions
                 else if len > 1 then            
@@ -424,7 +422,7 @@ module QueryTranslator =
     and private visitNew (m: NewExpression) (qb: QueryBuilder) =
         let t = m.Type
 
-        if typeof<System.Runtime.CompilerServices.ITuple>.IsAssignableFrom t then
+        if isTuple t then
             qb.AppendRaw "json_array("
             for i, arg in m.Arguments |> Seq.indexed do
                 visit(arg) qb |> ignore

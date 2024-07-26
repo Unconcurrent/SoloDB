@@ -3,8 +3,6 @@
 open System.Runtime.CompilerServices
 open System
 
-#nowarn "9" // Unsafe functions.
-
 // FormatterServices.GetSafeUninitializedObject for 
 // types without a parameterless constructor.
 #nowarn "0044"
@@ -31,12 +29,32 @@ module Utils =
 
     let initEmpty t =
         emptyObjContructor.GetOrAdd(t, Func<Type, unit -> obj>(fun t -> 
-            let constr = t.GetConstructor(BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic, [||])
-            if constr <> null then
-                fun () -> constr.Invoke([||])
-            else
-                fun () -> System.Runtime.Serialization.FormatterServices.GetSafeUninitializedObject(t)
+            let constr = t.GetConstructors() |> Seq.tryFind(fun c -> c.GetParameters().Length = 0 && (c.IsPublic || c.IsPrivate))
+            match constr with
+            | Some constr -> fun () -> constr.Invoke([||])
+            | None -> fun () -> System.Runtime.Serialization.FormatterServices.GetSafeUninitializedObject(t)
         ))()
+
+    let isTuple (t: Type) =
+        typeof<Tuple>.IsAssignableFrom t || typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "Tuple`"
+
+    type Random with
+        static member Shared = Random()
+
+    type System.Char with
+        static member IsAsciiLetterOrDigit this =
+            (this >= '0' && this <= '9') ||
+            (this >= 'A' && this <= 'Z') ||
+            (this >= 'a' && this <= 'z')
+
+        static member IsAsciiLetter this =
+            (this >= '0' && this <= '9') ||
+            (this >= 'A' && this <= 'Z') ||
+            (this >= 'a' && this <= 'z')
+
+    type System.Decimal with
+        static member IsInteger (this: Decimal) =
+            this = decimal (System.Math.Floor(this))
 
     let isNumber (value: obj) =
         match value with
@@ -85,59 +103,26 @@ module Utils =
                                             else AppDomain.CurrentDomain.GetAssemblies() 
                                                     |> Seq.collect(fun a -> a.GetTypes()) 
                                                     |> Seq.find(fun t -> t.FullName = typeName)
-                                            )    
+                                            )
+
+    let private shaHashBytes (bytes: byte array) =
+        use sha = SHA1.Create()
+        sha.ComputeHash(bytes)
+
     let shaHash (o: obj) = 
         match o with
         | :? (byte array) as bytes -> 
-            SHA1.HashData(bytes)
+            shaHashBytes(bytes)
         | :? string as str -> 
-            SHA1.HashData(str |> Encoding.UTF8.GetBytes)
+            shaHashBytes(str |> Encoding.UTF8.GetBytes)
         | other -> raise (InvalidDataException(sprintf "Cannot hash object of type: %A" (other.GetType())))
 
-
-    // Function to create the lookup table.
-    let private createLookup32Unsafe () =
-        let memPtr = NativeMemory.AllocZeroed(256 * sizeof<uint> |> unativeint)
-        let mem = memPtr |> NativePtr.ofVoidPtr<uint>
-        for i in 0..255 do
-            let s = i.ToString("x2")
-            let ch =
-                if BitConverter.IsLittleEndian then
-                    uint32 s.[0] + (uint32 s.[1] <<< 16)
-                else
-                    uint32 s.[1] + (uint32 s.[0] <<< 16)
-
-            NativePtr.set mem i ch
-
-        memPtr
-
-    // Declare the lookup array.
-    let private lookup32Unsafe = createLookup32Unsafe()
-    let private getLookup() =
-        Span<uint>(lookup32Unsafe, 256)
-
-    // Function to convert byte array to hex string using the lookup table.
-    let private byteArrayToHexViaLookupSafer (bytes: byte array) =
-        let resultI: Span<uint> =
-            if bytes.Length > 256 then
-                Span<uint>(Array.zeroCreate<uint> (bytes.Length))
-            else
-                Span<uint>(NativePtr.toVoidPtr (NativePtr.stackalloc<uint> (bytes.Length)) , bytes.Length)
-
-        let lookup = getLookup()
-
-        for i in 0..(bytes.Length - 1) do
-            let b = bytes.[i]
-            let v = lookup.[(int b)]
-
-            resultI[i] <- v
-
-        let result = MemoryMarshal.Cast<uint, char>(resultI)
-
-        new string(result)
-
     let bytesToHexFast (hash: byte array) =
-        byteArrayToHexViaLookupSafer hash
+        let sb = new StringBuilder()
+        for b in hash do
+            sb.Append (b.ToString("x2")) |> ignore
+
+        sb.ToString()
 
 
     let mutable debug =

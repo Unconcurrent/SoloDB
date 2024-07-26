@@ -11,8 +11,6 @@ open System.Security.Cryptography
 open SoloDatabase.Connections
 open Snappier
 
-#nowarn "9"
-
 module FileStorage =
     let maxChunkStoreSize = 
         16384L // If the compression fails.
@@ -36,14 +34,14 @@ module FileStorage =
         if db.IsWithinTransaction() then
             noopDisposer
         else
-        let mutex = new DisposableMutex($"SoloDB-{db.ConnectionString.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-Path-{path.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}")
+        let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(db.ConnectionString)}-Path-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(path)}")
         mutex :> IDisposable
 
     let private lockFileIdIfNotInTransaction (db: SqliteConnection) (id: SqlId) =
         if db.IsWithinTransaction() then
             noopDisposer
         else
-        let mutex = new DisposableMutex($"SoloDB-{db.ConnectionString.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-FileId-{id.Value}")
+        let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(db.ConnectionString)}-FileId-{id.Value}")
         mutex :> IDisposable
 
     let private fillDirectoryMetadata (db: SqliteConnection) (directory: SoloDBDirectoryHeader) =
@@ -105,7 +103,7 @@ module FileStorage =
         | None ->
 
 
-        let names = path.Split ('/', StringSplitOptions.RemoveEmptyEntries) |> Array.toList
+        let names = path.Split ([|'/'|], StringSplitOptions.RemoveEmptyEntries) |> Array.toList
         let root = db.QueryFirst<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE Name = @RootName", {|RootName = ""|})
 
 
@@ -391,30 +389,28 @@ module FileStorage =
         seq {
             use reader = command.ExecuteReader()
             while reader.Read() do
-                let mutable memoryBuffer = MemoryTools.AllocatorOf<byte>.New (uint maxChunkStoreSize)
+                let memoryBuffer = ArrayPool.Shared.Rent (int maxChunkStoreSize)
                 try
                     let number = reader.GetInt64(0)
                     let data = reader.GetValue(1)
                     let data = data :?> byte array
                     let count = 
                         if disableCompression then
-                            Span<byte>(data).CopyTo(memoryBuffer.Span)
+                            Array.Copy(data, memoryBuffer, 0)
                             data.Length
                         else
-                            Snappy.Decompress(Span<byte>(data), memoryBuffer.Span)
-                    memoryBuffer.DownsizeTo(count)
-
-                    struct {|Number = number; Data = memoryBuffer|}
-                finally memoryBuffer.Dispose()
+                            Snappy.Decompress(data, Span<byte>(memoryBuffer))
+                    struct {|Number = number; Data = memoryBuffer; Len = count|}
+                finally ArrayPool.Shared.Return memoryBuffer
         }
         
 
-    let private emptyChunk = MemoryTools.AllocatorOf<byte>.New (uint chunkSize)
+    let private emptyChunk = Array.zeroCreate<byte> (int chunkSize)
     let private getAllChunks (db: SqliteConnection) (fileId: SqlId) = seq {
         let mutable previousNumber = -1L // Chunks start from 0.
         for chunk in getStoredChunks db fileId do
             while chunk.Number - 1L > previousNumber do
-                yield struct {|Number = previousNumber + 1L; Data = emptyChunk|}
+                yield struct {|Number = previousNumber + 1L; Data = emptyChunk; Len = (int chunkSize)|}
                 previousNumber <- previousNumber + 1L
 
             yield chunk
@@ -432,17 +428,16 @@ module FileStorage =
         
 
         for chunk in getAllChunks db fileId do
-            let mutable data = chunk.Data
-            let block =
+            let data = chunk.Data
+            let struct (block, len) =
                 let currentChunkDataOffset = chunk.Number * chunkSize
                 if currentChunkDataOffset + chunkSize <= len then 
-                    data
+                    struct (data, chunk.Len)
                 else 
                     let blockReadCount = int (len - currentChunkDataOffset) // Calculate how many bytes should actually be read to not exceed the file length
-                    data.DownsizeTo(blockReadCount) // Trim the chunk data to match the file's actual length
-                    data
+                    struct (data, blockReadCount) // Trim the chunk data to match the file's actual length
 
-            sha1.AppendData (block.Span)
+            sha1.AppendData(block, 0, len)
 
         sha1.GetHashAndReset()
 
@@ -503,11 +498,10 @@ module FileStorage =
                 0
             else
 
-            use mutable nativeBuffer = MemoryTools.AllocatorOf<byte>.New (uint maxChunkStoreSize)
+            let poolBuffer = Array.zeroCreate (int maxChunkStoreSize)
 
-            match tryGetChunkData db fileId chunkNumber nativeBuffer.Span with
+            match tryGetChunkData db fileId chunkNumber (Span poolBuffer) with
             | data when data.IsEmpty ->
-                nativeBuffer.Dispose()
                 let maxChunkNumber = (min (position + count) len) / int64 chunkSize
                 if maxChunkNumber > chunkNumber then // Try to load the other chunk if the file was sparsely allocated.
                     let offsetToNextChunk = chunkSize - chunkOffset
@@ -545,14 +539,14 @@ module FileStorage =
                 let mutable remainingBytes = 0L
                 let mutable bytesToWrite = 0L
 
+                let poolArray = ArrayPool.Shared.Rent (int maxChunkStoreSize)
                 try
                     use l = lockFileIdIfNotInTransaction db fileId
 
                     let chunkNumber = position / int64 chunkSize
                     let chunkOffset = position % int64 chunkSize
 
-                    use mutable nativeBuffer = MemoryTools.AllocatorOf<byte>.New (uint maxChunkStoreSize)
-                    let dataBuffer = nativeBuffer.Span
+                    let dataBuffer = Span(poolArray)
 
                     let tryGetChunkDataResult = tryGetChunkData db fileId chunkNumber dataBuffer
                     let existingChunk = match tryGetChunkDataResult with data when data.IsEmpty -> dataBuffer.Slice(0, int chunkSize) | data -> data
@@ -577,7 +571,7 @@ module FileStorage =
                         if this.Position > this.Length then
                             updateLenById db fileId this.Position 
 
-                finally ()
+                finally ArrayPool.Shared.Return poolArray
 
         override _.SetLength(value: int64) =
             checkDisposed()
@@ -908,13 +902,11 @@ module FileStorage =
 
         member this.ReadAt(path, offset, len) =
             let file = this.GetAt path
-            let array = Array.zeroCreate<byte> len
 
             use db = manager.Borrow()
-            use fileStream = openFile db file
-            fileStream.Position <- offset
-            fileStream.ReadExactly(array, 0, len)
-            array
+            use fileStream = new BinaryReader(openFile db file)
+            fileStream.BaseStream.Position <- offset
+            fileStream.ReadBytes len
 
         member this.SetMetadata(file, key, value) =
             use db = manager.Borrow()
