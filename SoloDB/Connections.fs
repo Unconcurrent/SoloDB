@@ -1,7 +1,7 @@
 ﻿namespace SoloDatabase
 module Connections =
     open Microsoft.Data.Sqlite
-    open Dapper
+    open SQLiteTools
     open System
     open System.Collections.Concurrent
     open System.Threading.Tasks

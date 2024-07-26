@@ -3,7 +3,6 @@
 open System.Linq.Expressions
 open System
 open System.Threading
-open Dapper
 open System.Collections.Generic
 open System.Runtime.CompilerServices
 
@@ -51,25 +50,6 @@ type SqlId =
     member this.Value =
         let (SqlId value) = this
         value
-
-type internal AccountTypeHandler() =
-    inherit SqlMapper.TypeHandler<SqlId>()
-    override __.Parse(value) =
-        value :?> int64 |> SqlId
-
-    override __.SetValue(p, value) =
-        p.DbType <- Data.DbType.Int64
-        p.Value <- value.Value
-
-type internal DateTimeMapper() =
-    inherit SqlMapper.TypeHandler<DateTimeOffset>()
-
-    override this.Parse(o) =
-        DateTimeOffset.FromUnixTimeMilliseconds (o :?> int64)
-
-    override this.SetValue (para, value) =
-        para.Value <- value.ToUnixTimeMilliseconds()
-        ()
 
 
 [<CLIMutable>]

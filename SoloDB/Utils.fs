@@ -5,6 +5,10 @@ open System
 
 #nowarn "9" // Unsafe functions.
 
+// FormatterServices.GetSafeUninitializedObject for 
+// types without a parameterless constructor.
+#nowarn "0044"
+
 module Utils =
     open System
     open System.Collections.Concurrent
@@ -22,6 +26,17 @@ module Utils =
     let inline reraiseAnywhere<'a> (e: exn) : 'a =
         ExceptionDispatchInfo.Capture(e).Throw()
         Unchecked.defaultof<'a>
+
+    let private emptyObjContructor = ConcurrentDictionary<Type, unit -> obj>()
+
+    let initEmpty t =
+        emptyObjContructor.GetOrAdd(t, Func<Type, unit -> obj>(fun t -> 
+            let constr = t.GetConstructor(BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic, [||])
+            if constr <> null then
+                fun () -> constr.Invoke([||])
+            else
+                fun () -> System.Runtime.Serialization.FormatterServices.GetSafeUninitializedObject(t)
+        ))()
 
     let isNumber (value: obj) =
         match value with
@@ -54,8 +69,6 @@ module Utils =
 
     let isIntegerBased (value: obj) =
         value.GetType() |> isIntegerBasedType
-
-
 
     let typeToName (t: Type) = 
         let fullname = t.FullName

@@ -1,9 +1,5 @@
 ﻿namespace SoloDatabase
 
-// FormatterServices.GetSafeUninitializedObject for 
-// types without a parameterless constructor.
-#nowarn "0044"
-
 module JsonSerializator =
     open System
     open System.Collections.Generic
@@ -260,11 +256,7 @@ module JsonSerializator =
 
         static member Deserialize (targetType: Type) (json: JsonValue) : obj =
             let createInstance (targetType: Type) =
-                let constr = targetType.GetConstructor(BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic, [||])
-                if constr <> null then
-                    constr.Invoke([||])
-                else
-                    System.Runtime.Serialization.FormatterServices.GetSafeUninitializedObject(targetType)            
+                Utils.initEmpty targetType
 
             let isCollectionType (typ: Type) =
                 typ.IsArray
@@ -273,8 +265,17 @@ module JsonSerializator =
             let tryDeserializePrimitive (targetType: Type) (value: JsonValue) : obj =
                 match targetType, value with
                 | t, JsonValue.Boolean b when t = typeof<bool> -> b
+
                 | t, JsonValue.String s when t = typeof<string> -> s
                 | t, JsonValue.String s when t = typeof<Type> -> s |> nameToType |> box
+
+                | t, JsonValue.String s when t = typeof<DateTimeOffset> -> DateTimeOffset.Parse(s, CultureInfo.InvariantCulture) |> box
+                | t, JsonValue.String s when t = typeof<DateTime> -> DateTime.Parse(s, CultureInfo.InvariantCulture) |> box
+                | t, JsonValue.String s when t = typeof<DateOnly> -> DateOnly.Parse(s, CultureInfo.InvariantCulture) |> box
+                | t, JsonValue.String s when t = typeof<TimeOnly> -> TimeOnly.Parse(s, CultureInfo.InvariantCulture) |> box
+                | t, JsonValue.String s when t = typeof<TimeSpan> -> TimeSpan.Parse(s, CultureInfo.InvariantCulture) |> box
+
+
                 | t, JsonValue.Number n when t = typeof<float32> -> float32 n
                 | t, JsonValue.Number n when t = typeof<float> -> float n
                 | t, JsonValue.Number n when t = typeof<bool> -> if n = Decimal.Zero then false else true
