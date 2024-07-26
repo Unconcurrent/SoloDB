@@ -18,7 +18,8 @@ Imagine the power of MongoDB and SQL combined.
 - LINQ-like queries.
 - [Direct SQL support](#direct-sqlite-access-using-dapper).
 - [Open source](./LICENSE.txt).
-- Pretty well tested: 160+ of mostly integration tests.
+- [.NET Standard 2.0](https://learn.microsoft.com/en-us/dotnet/standard/net-standard?tabs=net-standard-2-0)
+- Pretty well tested: 180+ of tests, but in the tradition of SQLite, we keep them private.
 
 ## How to install
 

@@ -7,7 +7,6 @@ open System.Reflection
 open System.Collections
 open System.Collections.Generic
 open SoloDatabase
-open MemoryTools
 
 
 type SQLiteTypeMapper = 

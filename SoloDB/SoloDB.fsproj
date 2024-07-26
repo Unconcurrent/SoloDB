@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>Library</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>netstandard2.0</TargetFramework>
     <SignAssembly>False</SignAssembly>
     <Title>SoloDB</Title>
     <Description>SoloDB is a document database built on top of SQLite using the JSONB data type. It leverages the robustness and simplicity of SQLite to provide an efficient and lightweight database solution for handling JSON documents.</Description>
@@ -24,7 +24,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="MemoryTools.fs" />
     <Compile Include="Types.fs" />
     <Compile Include="Utils.fs" />
     <Compile Include="Extensions.fs" />
@@ -56,6 +55,7 @@
   <ItemGroup>
     <PackageReference Include="FSharp.Interop.Dynamic" Version="5.0.1.268" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.6" />
+    <PackageReference Include="Portable.System.DateTimeOnly" Version="8.0.1" />
     <PackageReference Include="Snappier" Version="1.1.6" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.8" />
     <PackageReference Include="System.Data.SqlClient" Version="4.8.6" />

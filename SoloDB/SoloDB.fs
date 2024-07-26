@@ -17,10 +17,11 @@ open System.Text
 open JsonFunctions
 open FileStorage
 open Connections
+open Utils
 
 module internal Helper =
     let internal lockTable (connectionStr: string) (name: string) =
-        let mutex = new DisposableMutex($"SoloDB-{connectionStr.GetHashCode(StringComparison.InvariantCultureIgnoreCase)}-Table-{name}")
+        let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(connectionStr)}-Table-{name}")
         mutex
 
     let internal createTableInner (name: string) (conn: SqliteConnection) =
@@ -68,6 +69,14 @@ module internal Helper =
     let internal getNameFrom<'T>() =
         typeof<'T>.Name |> formatName
 
+    let internal createDict(items: KeyValuePair<'a, 'b> seq) =
+        let dic = new Dictionary<'a, 'b>()
+        
+        for kvp in items do
+            dic.Add(kvp.Key, kvp.Value)
+
+        dic
+
 [<Struct>]
 type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string, variablesP: Dictionary<string, obj>, select: 'Q -> 'R, postModifySQL: string -> string, limitP: uint64 option, ?offsetP: uint64, ?orderByListP: string list) =
     member private this.SQLText = sqlP
@@ -79,7 +88,10 @@ type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string
     member private this.getQueryParameters() =
         let variables = this.Variables
         let variables = seq {for key in variables.Keys do KeyValuePair<string, obj>(key, variables.[key])} |> Seq.toList
-        let parameters = new Dictionary<string, obj>(variables)
+        let parameters = new Dictionary<string, obj>()
+
+        for kvp in variables do
+            parameters.Add(kvp.Key, kvp.Value)
 
         let finalSQL = 
             this.SQLText 
@@ -302,7 +314,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.CountAllLimit(limit: uint64) =
         // https://stackoverflow.com/questions/1824490/how-do-you-enable-limit-for-delete-in-sqlite
         // By default, SQLite does not support LIMIT in a COUNT statement, but there is this workaround.
-        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" LIMIT @limit)", Dictionary<string, obj>([|KeyValuePair("limit", limit :> obj)|]), fromJsonOrSQL<int64>, id, None).First()
+        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" LIMIT @limit)", Helper.createDict([|KeyValuePair("limit", limit :> obj)|]), fromJsonOrSQL<int64>, id, None).First()
 
     member this.CountWhere(func: Expression<System.Func<'T, bool>>) =
         WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), id).Where(func).First()
@@ -332,7 +344,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {fullUpdateSQL})", fromJsonOrSQL<int64>, variables, id)
 
     member this.Replace(item: 'T) =
-        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Dictionary([|KeyValuePair("item", (if this.IncludeType then toTypedJson item else toJson item) |> box)|]), id)
+        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Helper.createDict([|KeyValuePair("item", (if this.IncludeType then toTypedJson item else toJson item) |> box)|]), id)
 
     member this.Update(item: 'T) =
         match item :> obj with
@@ -357,7 +369,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
 
         let whereSQL =
             match expressionBody with
-            | :? NewExpression as ne when ne.Type.IsAssignableTo(typeof<System.Runtime.CompilerServices.ITuple>)
+            | :? NewExpression as ne when isTuple ne.Type
                 -> whereSQL.Substring("json_array".Length)
             | :? MemberExpression as me ->                
                 $"({whereSQL})"

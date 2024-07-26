@@ -14,6 +14,7 @@ module JsonSerializator =
     open System.Runtime.CompilerServices
     open System.IO
     open Microsoft.FSharp.Reflection
+    open Utils
 
     let private implementsGeneric (genericInterfaceType: Type) (targetType: Type) =
         let genericInterfaceType = genericInterfaceType.GetGenericTypeDefinition()
@@ -224,12 +225,12 @@ module JsonSerializator =
 
         static member DeserializeDynamic (json: JsonValue) : obj =
             let toDecimal (input: string) =
-                match Decimal.TryParse (input, CultureInfo.InvariantCulture) with
+                match Decimal.TryParse (input, NumberStyles.Float, CultureInfo.InvariantCulture) with
                 | true, dec -> Some dec
                 | _ -> None
 
             let toInt64 (input: string) =
-                match Int64.TryParse (input, CultureInfo.InvariantCulture) with
+                match Int64.TryParse (input, NumberStyles.Integer, CultureInfo.InvariantCulture) with
                 | true, i64 -> Some i64
                 | _ -> None
 
@@ -243,7 +244,7 @@ module JsonSerializator =
                     match toDecimal s with
                     | Some x -> x
                     | None -> s
-                | JsonValue.Number n -> if Decimal.IsInteger n && abs n < decimal Int64.MaxValue then Int64.CreateSaturating n else n
+                | JsonValue.Number n -> if Decimal.IsInteger n && abs n < decimal Int64.MaxValue then (int64 n) else n
                 | JsonValue.Boolean b -> b
                 | JsonValue.List lst ->
                     lst |> Seq.map deserialize |> Generic.List<obj> |> box
@@ -358,7 +359,7 @@ module JsonSerializator =
                     match targetType.IsSealed, unsafeTypeProp with
                     | true, _ -> targetType
                     | _, null -> targetType
-                    | false, (jsonType) when (jsonType).IsAssignableTo targetType -> jsonType
+                    | false, (jsonType) when targetType.IsAssignableFrom jsonType -> jsonType
                     | _ -> targetType
 
                 
@@ -403,7 +404,7 @@ module JsonSerializator =
                 match tryDeserializePrimitive targetType json with
                 | null ->
                     match json with
-                    | JsonValue.List _ when typeof<System.Runtime.CompilerServices.ITuple>.IsAssignableFrom targetType ->
+                    | JsonValue.List _ when isTuple targetType ->
                         deserializeTuple targetType json
                     | JsonValue.List _ when isCollectionType targetType ->
                         deserializeList targetType json
@@ -479,9 +480,9 @@ module JsonSerializator =
                 write "\"" |> ignore
             | Number n -> 
                 if Decimal.IsInteger n then 
-                    write (Int128.CreateSaturating(n).ToString(CultureInfo.InvariantCulture)) |> ignore
+                    write (n.ToString("F0", CultureInfo.InvariantCulture)) |> ignore
                 else 
-                    write (sprintf "%f" n) |> ignore
+                    write (n.ToString(CultureInfo.InvariantCulture)) |> ignore
             | List arr ->
                 write "[" |> ignore
                 let items = arr.Count
@@ -506,28 +507,6 @@ module JsonSerializator =
             let sb = new StringBuilder(128)
             JsonValue.Jsonize this (fun text -> sb.Append text |> ignore)
             sb.ToString()
-
-        member this.ToJsonIntoAsync(stream: Stream) =
-            let sb = new StringBuilder(4096)
-            use streamWriter = new StreamWriter(stream)
-
-            let flush() = task {
-                let mutable e = sb.GetChunks()
-
-                while e.MoveNext() do                      
-                    do! streamWriter.WriteAsync e.Current
-
-                sb.Clear() |> ignore
-            }
-
-            JsonValue.Jsonize this (fun text -> 
-                sb.Append text |> ignore
-
-                if sb.Length > 4000 then
-                    flush().GetAwaiter().GetResult()
-            )
-
-            flush()
 
         member this.Eq (other: obj) =
             this = JsonValue.Parse $"{other}"
