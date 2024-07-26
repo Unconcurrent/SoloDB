@@ -11,7 +11,6 @@ open System.Threading.Tasks
 open Microsoft.VisualStudio.TestTools.UnitTesting
 open FSharp.Interop.Dynamic
 open SoloDatabase
-open Dapper
 open SoloDatabase.Types
 open Types
 open TestUtils

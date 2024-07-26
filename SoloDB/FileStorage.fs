@@ -5,7 +5,7 @@ open System.Buffers
 open System
 open System.IO
 open Microsoft.Data.Sqlite
-open Dapper
+open SQLiteTools
 open SoloDatabase.Types
 open System.Security.Cryptography
 open SoloDatabase.Connections
@@ -89,8 +89,7 @@ module FileStorage =
                 ()
             ),
             parameters,
-            splitOn = "Key",
-            buffered = false
+            splitOn = "Key"
         ) |> Seq.iter ignore
     
         directoryDictionary.Values :> SoloDBDirectoryHeader seq
@@ -184,7 +183,7 @@ module FileStorage =
                         {| DirId = dir.Id; |})
         ()
 
-    [<CLIMutable>][<Struct>]
+    [<CLIMutable>]
     type private SQLEntry = {
         Level: int64; 
         Id: SqlId; 
@@ -278,46 +277,45 @@ module FileStorage =
                 SoloDBFileMetadata fm ON fh.Id = fm.FileId
             """
 
-        seq {
-            let query = 
-                db.Query<SQLEntry>
-                    (queryCommand, {|FullPath = directoryFullPath|}, buffered = false)
+        let query = 
+            db.Query<SQLEntry>
+                (queryCommand, {|FullPath = directoryFullPath|})
 
-            let query = 
-                query 
-                |> Utils.SeqExt.sequentialGroupBy(fun e -> e.Path) 
-                |> Seq.map(fun entry -> 
-                    let metadata = entry |> Seq.filter(fun x -> x.MetadataKey <> null) |> Seq.map(fun x -> (x.MetadataKey, x.MetadataValue)) |> readOnlyDict
-                    let entryData = entry |> Seq.head
-                    match entryData.Type with
-                    | "File" ->
-                        let file = {
-                            Id = entryData.Id;
-                            Name = entryData.Name;
-                            FullPath = entryData.Path;
-                            DirectoryId = entryData.DirectoryId.Value;
-                            Length = entryData.Size;
-                            Created = entryData.Created;
-                            Modified = entryData.Modified;
-                            Hash = entryData.Hash;
-                            Metadata = metadata;
-                        }
-                        SoloDBEntryHeader.File file
-                    | "Directory" ->
-                        let dir = {
-                            Id = entryData.Id;
-                            Name = entryData.Name;
-                            FullPath = entryData.Path;
-                            ParentId = entryData.DirectoryId;
-                            Created = entryData.Created;
-                            Modified = entryData.Modified;
-                            Metadata = metadata;
-                        }
-                        SoloDBEntryHeader.Directory dir
-                    | other -> failwithf "Invalid entry type: %s" other
-                )
-            for item in query do item
-        }
+        let query = 
+            query 
+            |> Utils.SeqExt.sequentialGroupBy(fun e -> e.Path) 
+            |> Seq.map(fun entry -> 
+                let metadata = entry |> Seq.filter(fun x -> x.MetadataKey <> null) |> Seq.map(fun x -> (x.MetadataKey, x.MetadataValue)) |> readOnlyDict
+                let entryData = entry |> Seq.head
+                match entryData.Type with
+                | "File" ->
+                    let file = {
+                        Id = entryData.Id;
+                        Name = entryData.Name;
+                        FullPath = entryData.Path;
+                        DirectoryId = entryData.DirectoryId.Value;
+                        Length = entryData.Size;
+                        Created = entryData.Created;
+                        Modified = entryData.Modified;
+                        Hash = entryData.Hash;
+                        Metadata = metadata;
+                    }
+                    SoloDBEntryHeader.File file
+                | "Directory" ->
+                    let dir = {
+                        Id = entryData.Id;
+                        Name = entryData.Name;
+                        FullPath = entryData.Path;
+                        ParentId = entryData.DirectoryId;
+                        Created = entryData.Created;
+                        Modified = entryData.Modified;
+                        Metadata = metadata;
+                    }
+                    SoloDBEntryHeader.Directory dir
+                | other -> failwithf "Invalid entry type: %s" other
+            )
+
+        query
 
         
 
@@ -703,8 +701,7 @@ module FileStorage =
                 ()
             ),
             parameters,
-            splitOn = "Key",
-            buffered = false
+            splitOn = "Key"
         ) |> Seq.iter ignore
     
         fileDictionary.Values :> SoloDBFileHeader seq
@@ -993,8 +990,10 @@ module FileStorage =
             listDirectoriesAt db path
 
         member this.RecursiveListEntriesAt(path) =
-            use db = manager.Borrow()
-            recursiveListAllEntriesInDirectory db path
+            seq {
+                use db = manager.Borrow()
+                yield! recursiveListAllEntriesInDirectory db path
+            }
 
         member this.MoveFile from toPath =
             let file = this.GetAt from

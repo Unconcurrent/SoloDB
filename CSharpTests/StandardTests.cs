@@ -1,11 +1,11 @@
 ﻿using System.Dynamic;
-using Dapper;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using SoloDatabase;
 using static SoloDatabase.Extensions;
 using FSharp.Interop.Dynamic;
 using SoloDatabase.Types;
 using System.Transactions;
+using Microsoft.FSharp.Core;
 
 namespace CSharpTests;
 
@@ -36,12 +36,12 @@ public abstract class StandardTests
         {
             try
             {
-                pooledConnection.Execute(
-                    "CREATE TABLE Users (\r\n    Id INTEGER PRIMARY KEY,\r\n    Name TEXT,\r\n    Age INTEGER\r\n)", transaction);
-
+                SQLiteTools.execute(pooledConnection,
+                    "CREATE TABLE Users (\r\n    Id INTEGER PRIMARY KEY,\r\n    Name TEXT,\r\n    Age INTEGER\r\n)", null);
+                    
                 // Create a new user
                 var insertSql = "INSERT INTO Users (Name, Age) VALUES (@Name, @Age) RETURNING Id;";
-                userId = pooledConnection.QuerySingle<long>(insertSql, new { Name = "John Doe", Age = 30 }, transaction);
+                userId = SQLiteTools.queryFirst<long>(pooledConnection, insertSql, new { Name = "John Doe", Age = 30 });
                 Assert.IsTrue(userId > 0, "Failed to insert new user.");
                 
                 
@@ -58,12 +58,12 @@ public abstract class StandardTests
 
         // Update the user's age
         var updateSql = "UPDATE Users SET Age = @Age WHERE Id = @Id";
-        var affectedRows = pooledConnection.Execute(updateSql, new { Id = userId, Age = 35 });
+        var affectedRows = SQLiteTools.execute(pooledConnection, updateSql, new { Id = userId, Age = 35 });
         Assert.AreEqual(1, affectedRows, "Update affected an unexpected number of rows.");
 
         // Retrieve the updated user
         var selectSql = "SELECT * FROM Users WHERE Id = @Id";
-        var user = pooledConnection.QuerySingleOrDefault<User>(selectSql, new { Id = userId });
+        var user = SQLiteTools.queryFirstOrDefault<User>(pooledConnection, selectSql, new { Id = userId });
         Assert.IsNotNull(user, "User not found.");
         Assert.AreEqual(35, user.Age, "User age not updated correctly.");
     }

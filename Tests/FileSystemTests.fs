@@ -112,6 +112,10 @@ type FileSystemTests() =
 
         let allOfThem = fs.RecursiveListEntriesAt "/" |> System.Collections.Generic.List
 
+        let metadataCount = allOfThem |> Seq.sumBy(fun e -> e.Metadata.Count)
+
+        assertEqual metadataCount (50 * 30 * 5) "Metadate is missing."
+
         assertEqual allOfThem.Count count "Invalid count in dorectory list."
 
         let someOfThem = fs.RecursiveListEntriesAt "/directory1" |> System.Collections.Generic.List
