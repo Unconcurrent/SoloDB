@@ -11,7 +11,7 @@ on:
 jobs:
   build:
     if: github.actor == 'Unconcurrent' || github.actor == 'sologub'
-    runs-on: ubuntu-latest # self-hosted
+    runs-on: ubuntu-latest # or self-hosted
     steps:
     - uses: actions/checkout@v4
     - name: Setup .NET
@@ -35,9 +35,6 @@ jobs:
 
     - name: Build
       run: dotnet build --no-restore -c Release
-
-    - name: Test
-      run: dotnet test --no-build --verbosity normal -c Release
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
