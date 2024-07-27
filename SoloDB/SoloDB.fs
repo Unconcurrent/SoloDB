@@ -43,11 +43,11 @@ module internal Helper =
 
         let existsId = hasIdType typeof<'T>
 
-        if existsId && SqlId(0) <> item?Id then 
+        if existsId && 0L <> item?Id then 
             failwithf "Cannot insert a item with a non zero Id, maybe you meant Update?"
 
         let orReplaceText = "OR REPLACE"
-        let id = connection.QueryFirst<SqlId>($"INSERT {if orReplace then orReplaceText else String.Empty} INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|})
+        let id = connection.QueryFirst<int64>($"INSERT {if orReplace then orReplaceText else String.Empty} INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|})
 
         if existsId then 
             item?Id <- id
@@ -176,7 +176,7 @@ type WhereBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string,
 
         FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select, postModifySQL, None)
 
-    member this.Where(expression: Expression<System.Func<SqlId, 'T, bool>>) =
+    member this.Where(expression: Expression<System.Func<int64, 'T, bool>>) =
         let whereSQL, newVariables = QueryTranslator.translate name expression
         let sql = sql + sprintf "WHERE %s " whereSQL
 
@@ -185,11 +185,11 @@ type WhereBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string,
 
         FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select, postModifySQL, None)
 
-    member this.WhereId(id: SqlId) =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql + sprintf "WHERE Id = %i " id.Value, vars, select, postModifySQL, None)
+    member this.WhereId(id: int64) =
+        FinalBuilder<'T, 'Q, 'R>(connection, name, sql + sprintf "WHERE Id = %i " id, vars, select, postModifySQL, None)
 
-    member this.WhereId(func: Expression<System.Func<SqlId, bool>>) =
-        let whereSQL, newVariables = QueryTranslator.translate name func
+    member this.WhereId(func: Expression<System.Func<int64, bool>>) =
+        let whereSQL, newVariables = QueryTranslator.translateWithId name func 0
         let sql = sql + sprintf "WHERE %s " whereSQL
 
         for var in vars do
@@ -219,7 +219,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.InsertBatch (items: 'T seq) =
         if this.InTransaction then
             use connection = connection.Get()
-            let ids = List<SqlId>()
+            let ids = List<int64>()
             for item in items do
                 Helper.insertInner this.IncludeType item connection name |> ids.Add
             ids
@@ -229,7 +229,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         let withinTransaction = connection.IsWithinTransaction()
         if not withinTransaction then connection.Execute "BEGIN;" |> ignore
         try
-            let ids = List<SqlId>()
+            let ids = List<int64>()
             for item in items do
                 Helper.insertInner this.IncludeType item connection name |> ids.Add
 
@@ -242,7 +242,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.InsertOrReplaceBatch (items: 'T seq) =
         if this.InTransaction then
             use connection = connection.Get()
-            let ids = List<SqlId>()
+            let ids = List<int64>()
             for item in items do
                 Helper.insertInner this.IncludeType item connection name |> ids.Add
             ids
@@ -252,7 +252,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         let withinTransaction = connection.IsWithinTransaction()
         if not withinTransaction then connection.Execute "BEGIN;" |> ignore
         try
-            let ids = List<SqlId>()
+            let ids = List<int64>()
             for item in items do
                 Helper.insertOrReplaceInner this.IncludeType item connection name |> ids.Add
 
@@ -262,15 +262,15 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
             if not withinTransaction then connection.Execute "ROLLBACK;" |> ignore
             reraise()
 
-    member this.TryGetById(id: SqlId) =
+    member this.TryGetById(id: int64) =
         use connection = connection.Get()
-        match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id.Value|}) with
+        match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
         | json when Object.ReferenceEquals(json, null) -> None
         | json -> fromDapper<'T> json |> Some
 
-    member this.GetById(id: SqlId) =
+    member this.GetById(id: int64) =
         match this.TryGetById id with
-        | None -> failwithf "There is no element with id %i" id.Value
+        | None -> failwithf "There is no element with id %i" id
         | Some x -> x
 
     member this.Select<'R>(select: Expression<System.Func<'T, 'R>>) =
@@ -287,7 +287,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         WhereBuilder<'T, DbObjectRow, 'T>(connection, name, $"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" ", fromDapper<'T>, Dictionary<string, obj>(), id)
 
     member this.SelectWithId() =
-        WhereBuilder(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>(), id)
+        WhereBuilder<'T, string, (int64 * 'T)>(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>(), id)
 
     member this.TryFirst(func: Expression<System.Func<'T, bool>>) =
         this.Select().Where(func).Limit(1UL).Enumerate() |> Seq.tryHead
@@ -348,7 +348,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
 
     member this.Update(item: 'T) =
         match item :> obj with
-        | :? 'T as value -> this.Replace(value).WhereId(Dynamic.InvokeConvert(item?Id, typeof<SqlId>, false) :?> SqlId).Execute() |> ignore
+        | :? 'T as value -> this.Replace(value).WhereId(Dynamic.InvokeConvert(item?Id, typeof<int64>, false) :?> int64).Execute() |> ignore
         | other -> failwithf "Cannot insert a %s in a %s Collection, but if you want it use a UntypedCollection with the name '%s'." (other.GetType().FullName) (typeof<'T>.FullName) (name)
 
     member this.Delete() =
@@ -356,7 +356,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         // By default, SQLite does not support LIMIT in a DELETE statement, but there is this workaround.
         WhereBuilder<'T, string, int64>(connection, name, $"DELETE FROM \"{name}\" WHERE Id IN (SELECT Id FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), fun sql -> sql + ")")
 
-    member this.DeleteById(id: SqlId) : int =
+    member this.DeleteById(id: int64) : int =
         this.Delete().WhereId(id).Execute()
 
     member private this.GetIndexWhereAndName(expression: Expression<System.Func<'T, 'R>>)  =

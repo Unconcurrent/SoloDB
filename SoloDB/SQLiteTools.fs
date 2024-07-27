@@ -14,19 +14,7 @@ type SQLiteTypeMapper =
     abstract member Read: reader: SqliteDataReader -> index: int -> obj
     abstract member Write: this: obj -> ValueTuple<obj, int>
 
-let private customMappers = [|
-    {
-        new SQLiteTypeMapper with
-            member this.Type = typeof<SqlId>
-
-            member this.Read reader index =
-                SqlId(reader.GetInt64 index)
-
-            member _.Write this =
-                let this = this :?> SqlId
-                struct (this.Value, sizeof<int64>)
-
-    }    
+let private customMappers = [| 
     {
         new SQLiteTypeMapper with
             member this.Type = typeof<DateTimeOffset>

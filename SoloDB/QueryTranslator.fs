@@ -1,4 +1,7 @@
 ﻿namespace SoloDatabase
+
+open System.Collections.ObjectModel
+
 module QueryTranslator =
     open System.Text
     open System.Linq.Expressions
@@ -7,7 +10,6 @@ module QueryTranslator =
     open System.Collections.Generic
     open JsonFunctions
     open Utils
-    open SoloDatabase.Types
 
     type private MemberAccess = 
         {
@@ -37,10 +39,12 @@ module QueryTranslator =
             UpdateMode: bool
             TableNameDot: string
             JsonExtractSelfValue: bool
+            Parameters: ReadOnlyCollection<ParameterExpression>
+            IdParameterIndex: int
         }
         override this.ToString() = this.StringBuilder.ToString()
 
-        static member New(sb: StringBuilder, variables: Dictionary<string, obj>, updateMode: bool, tableName) =
+        static member New(sb: StringBuilder)(variables: Dictionary<string, obj>)(updateMode: bool)(tableName)(expression: Expression)(idIndex: int) =
             let appendVariable (value: obj) =
                 let name = $"VAR{Random.Shared.Next():X}{Random.Shared.Next():X}{Random.Shared.Next():X}{Random.Shared.Next():X}"
                 match value with
@@ -70,6 +74,8 @@ module QueryTranslator =
                 UpdateMode = updateMode
                 TableNameDot = tableName + "."
                 JsonExtractSelfValue = true
+                Parameters = (expression :?> LambdaExpression).Parameters
+                IdParameterIndex = idIndex
             }
 
     let private evaluateExpr<'O> e =
@@ -402,7 +408,13 @@ module QueryTranslator =
         visit(m.Body) qb
 
     and private visitParameter (m: ParameterExpression) (qb: QueryBuilder) =
-        if m.Type = typeof<SqlId> then
+        if m.Type = typeof<int64> // Check if it is an id type.
+            && ((qb.Parameters.IndexOf m = 0 // For the .SelectWithId function, it is always at index 0,
+                && qb.Parameters.Count = 2 // and has 2 parameters the id and the item.
+                )
+                || qb.IdParameterIndex = qb.Parameters.IndexOf m // Or it is specified as an id.
+                )
+        then
             qb.AppendRaw $"{qb.TableNameDot}Id"
         else if qb.UpdateMode then
             qb.AppendRaw $"'$'"
@@ -506,7 +518,7 @@ module QueryTranslator =
             qb.AppendRaw "length("
             visit m.Expression qb
             qb.AppendRaw ")"
-        else if m.ReturnType = typeof<SqlId> && m.MemberName = "Id" then
+        else if m.ReturnType = typeof<int64> && m.MemberName = "Id" then
             qb.AppendRaw $"{qb.TableNameDot}Id" |> ignore
         else if m.Expression <> null && isRootParameter m.Expression then
             let jsonPath = buildJsonPath m.Expression [m.MemberName]
@@ -534,7 +546,15 @@ module QueryTranslator =
     let translate (tableName: string) (expression: Expression) =
         let sb = StringBuilder()
         let variables = Dictionary<string, obj>()
-        let builder = QueryBuilder.New(sb, variables, false, tableName)
+        let builder = QueryBuilder.New sb variables false tableName expression -1
+    
+        let e = visit expression builder
+        sb.ToString(), variables
+
+    let translateWithId (tableName: string) (expression: Expression) idParameterIndex =
+        let sb = StringBuilder()
+        let variables = Dictionary<string, obj>()
+        let builder = QueryBuilder.New sb variables false tableName expression idParameterIndex
     
         let e = visit expression builder
         sb.ToString(), variables
@@ -542,7 +562,7 @@ module QueryTranslator =
     let translateUpdateMode (tableName: string) (expression: Expression) =
         let sb = StringBuilder()
         let variables = Dictionary<string, obj>()
-        let builder = QueryBuilder.New(sb, variables, true, tableName)
+        let builder = QueryBuilder.New sb variables true tableName expression -1
     
         let e = visit expression builder
         sb.ToString(), variables

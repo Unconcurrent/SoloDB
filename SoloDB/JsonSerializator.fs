@@ -164,7 +164,7 @@ module JsonSerializator =
                 | :? float as f -> Number (decimal f)
                 | :? decimal as i -> Number (decimal i)
 
-                | :? SqlId as i -> Number (decimal i.Value)
+                | :? int64 as i -> Number (decimal i)
 
                 | :? DateTimeOffset as date -> date.ToUnixTimeMilliseconds() |> decimal |> Number
                 | :? DateTime as date -> date.ToBinary() |> decimal |> Number
@@ -292,7 +292,7 @@ module JsonSerializator =
                 | t, JsonValue.Number n when t = typeof<uint64> -> uint64 n
 
                 | t, JsonValue.Number n when t = typeof<decimal> -> decimal n
-                | t, JsonValue.Number n when t = typeof<SqlId> -> (SqlId)(int64 n) |> box
+                | t, JsonValue.Number n when t = typeof<int64> -> (int64 n) |> box
 
                 | t, JsonValue.Number n when t = typeof<DateTimeOffset> -> n |> int64 |> DateTimeOffset.FromUnixTimeMilliseconds |> box
                 | t, JsonValue.Number n when t = typeof<DateTime> -> n |> int64 |> DateTime.FromBinary |> box

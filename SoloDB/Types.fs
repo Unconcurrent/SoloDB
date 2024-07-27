@@ -22,39 +22,9 @@ type internal DisposableMutex =
             this.mutex.Dispose()
 
 
-[<Struct>]
-type SqlId =
-    SqlId of int64
-    with
-    static member (+) (SqlId a, SqlId b) = SqlId (a + b)
-    static member (-) (SqlId a, SqlId b) = SqlId (a - b)
-    static member (*) (SqlId a, SqlId b) = SqlId (a * b)
-    static member (/) (SqlId a, SqlId b) = SqlId (a / b)
-    static member (%) (SqlId a, SqlId b) = SqlId (a % b)
-    static member (<<<) (SqlId a, shift) = SqlId (a <<< shift)
-    static member (>>>) (SqlId a, shift) = SqlId (a >>> shift)
-    static member (&&&) (SqlId a, SqlId b) = SqlId (a &&& b)
-    static member (|||) (SqlId a, SqlId b) = SqlId (a ||| b)
-    static member (^^^) (SqlId a, SqlId b) = SqlId (a ^^^ b)
-    static member (~-) (SqlId a) = SqlId (-a)
-    static member (~+) (SqlId a) = SqlId (+a)
-    static member (~~~) (SqlId a) = SqlId (~~~a)
-    static member op_Explicit(SqlId a) = a
-    static member op_Implicit(a: int64) = SqlId a
-    static member op_Implicit(a: SqlId) = a
-
-    override this.ToString() =
-        let (SqlId value) = this
-        value.ToString()
-
-    member this.Value =
-        let (SqlId value) = this
-        value
-
-
 [<CLIMutable>]
 type DbObjectRow = {
-    Id: SqlId
+    Id: int64
     ValueJSON: string
 }
 
@@ -67,10 +37,10 @@ type Metadata = {
 
 [<CLIMutable>]
 type SoloDBFileHeader = {
-    Id: SqlId
+    Id: int64
     Name: string
     FullPath: string
-    DirectoryId: SqlId
+    DirectoryId: int64
     Length: int64
     Created: DateTimeOffset
     Modified: DateTimeOffset
@@ -80,10 +50,10 @@ type SoloDBFileHeader = {
 
 [<CLIMutable>]
 type SoloDBDirectoryHeader = {
-    Id: SqlId
+    Id: int64
     Name: string
     FullPath: string
-    ParentId: Nullable<SqlId>
+    ParentId: Nullable<int64>
     Created: DateTimeOffset
     Modified: DateTimeOffset
     Metadata: IReadOnlyDictionary<string, string>
@@ -126,8 +96,8 @@ type SoloDBEntryHeader =
 
 [<CLIMutable>]
 type internal SoloDBFileChunk = {
-    Id: SqlId
-    FileId: SqlId
+    Id: int64
+    FileId: int64
     Number: int64
     Data: byte array
 }
