@@ -124,8 +124,12 @@ let rec private mapToType<'T> (reader: SqliteDataReader) (startIndex: int) (colu
             let instance = Utils.initEmpty targetType
             let props = 
                 if targetType.IsValueType 
-                then targetType.GetProperties(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
-                else targetType.GetProperties(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
+                then targetType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+                else targetType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+
+            if props |> Seq.sumBy(fun p -> if p.CanWrite then 1 else 0) = 0 then
+                failwithf "Could not desealize the type %s, it does not have any public writable property." targetType.Name
+
             for prop in props do
                 if prop.CanWrite then
                     let propType = 

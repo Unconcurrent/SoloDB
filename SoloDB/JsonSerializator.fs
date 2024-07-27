@@ -353,6 +353,7 @@ module JsonSerializator =
                 | _ -> failwith "Expected JSON object for dictionary deserialization."
 
             let deserializeObject (targetType: Type) (jsonObj: JsonValue) =
+                let ogTargetType = targetType
                 let targetType =
                     // Be careful, a potential attacker can put anything in this field.
                     let unsafeTypeProp = match jsonObj.TryGetProperty "$type" with true, x -> x.ToObject<string>() |> nameToType | false, _ -> null
@@ -377,6 +378,10 @@ module JsonSerializator =
                     let instance = createInstance targetType
 
                     let propertiesInfo = targetType.GetProperties()
+
+                    if (not ogTargetType.IsAbstract) && propertiesInfo |> Seq.sumBy(fun p -> if p.CanWrite then 1 else 0) = 0 then
+                        failwithf "Could not desealize the type %s, it does not have any public writable property." targetType.Name
+
                     for prop in propertiesInfo do
                         if prop.CanWrite then
                             let propName = prop.Name
