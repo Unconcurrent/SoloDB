@@ -37,11 +37,11 @@ module FileStorage =
         let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(db.ConnectionString)}-Path-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(path)}")
         mutex :> IDisposable
 
-    let private lockFileIdIfNotInTransaction (db: SqliteConnection) (id: SqlId) =
+    let private lockFileIdIfNotInTransaction (db: SqliteConnection) (id: int64) =
         if db.IsWithinTransaction() then
             noopDisposer
         else
-        let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(db.ConnectionString)}-FileId-{id.Value}")
+        let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(db.ConnectionString)}-FileId-{id}")
         mutex :> IDisposable
 
     let private fillDirectoryMetadata (db: SqliteConnection) (directory: SoloDBDirectoryHeader) =
@@ -62,7 +62,7 @@ module FileStorage =
             WHERE {where};
         """
     
-        let directoryDictionary = new System.Collections.Generic.Dictionary<SqlId, SoloDBDirectoryHeader>()
+        let directoryDictionary = new System.Collections.Generic.Dictionary<int64, SoloDBDirectoryHeader>()
         let isNull x = Object.ReferenceEquals(x, null)
 
         
@@ -125,11 +125,11 @@ module FileStorage =
     
         innerLoop root names [] |> fillDirectoryMetadata db
     
-    let private updateLenById (db: SqliteConnection) (fileId: SqlId) (len: int64) =
-        let result = db.Execute ("UPDATE SoloDBFileHeader SET Length = @Length WHERE Id = @Id", {|Id = fileId.Value; Length=len|})
+    let private updateLenById (db: SqliteConnection) (fileId: int64) (len: int64) =
+        let result = db.Execute ("UPDATE SoloDBFileHeader SET Length = @Length WHERE Id = @Id", {|Id = fileId; Length=len|})
         if result <> 1 then failwithf "updateLen failed."
 
-    let private downsetFileLength (db: SqliteConnection) (fileId: SqlId) (newFileLength: int64) =
+    let private downsetFileLength (db: SqliteConnection) (fileId: int64) (newFileLength: int64) =
         let lastChunkNumberKeep = ((float(newFileLength) / float(chunkSize)) |> Math.Ceiling |> int64) - 1L
 
         let resultDelete = db.Execute(@"DELETE FROM SoloDBFileChunk WHERE FileId = @FileId AND Number > @LastChunkNumber",
@@ -141,13 +141,13 @@ module FileStorage =
                        {| FileId = fileId; NewFileLength = newFileLength |})
         ()
 
-    let getDirectoryById (db: SqliteConnection) (dirId: SqlId) =
+    let getDirectoryById (db: SqliteConnection) (dirId: int64) =
         let directory = db.QueryFirst<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE Id = @DirId", {|DirId = dirId|})
         directory
 
 
     let getDirectoryPath (db: SqliteConnection) (dir: SoloDBDirectoryHeader) =
-        let rec innerLoop currentPath (dirId: Nullable<SqlId>) =
+        let rec innerLoop currentPath (dirId: Nullable<int64>) =
             match dirId with
             | dirId when not dirId.HasValue -> currentPath |> List.rev |> String.concat "/"
             | dirId -> 
@@ -184,14 +184,14 @@ module FileStorage =
     [<CLIMutable>]
     type SQLEntry = {
         Level: int64; 
-        Id: SqlId; 
+        Id: int64; 
         Type: string; 
         Path: string; 
         Name: string;
         Size: int64;
         Created: DateTimeOffset;
         Modified: DateTimeOffset;
-        DirectoryId: Nullable<SqlId>;
+        DirectoryId: Nullable<int64>;
         Hash: byte array; // Nullable
         MetadataKey: string;
         MetadataValue: string
@@ -322,11 +322,11 @@ module FileStorage =
         db.QueryFirst<int64>(@"SELECT Length FROM SoloDBFileHeader WHERE Name = @Name AND DirectoryId = @DirectoryId",
                        {| Name = file.Name; DirectoryId = file.DirectoryId; |})
 
-    let private getFileLengthById (db: SqliteConnection) (fileId: SqlId) =
+    let private getFileLengthById (db: SqliteConnection) (fileId: int64) =
         db.QueryFirst<int64>(@"SELECT Length FROM SoloDBFileHeader WHERE Id = @FileId",
-                       {| FileId = fileId.Value |})
+                       {| FileId = fileId |})
 
-    let private tryGetChunkData (db: SqliteConnection) (fileId: SqlId) (chunkNumber: int64) (buffer: Span<byte>) =
+    let private tryGetChunkData (db: SqliteConnection) (fileId: int64) (chunkNumber: int64) (buffer: Span<byte>) =
         let sql = "SELECT Data FROM SoloDBFileChunk WHERE FileId = @FileId AND Number = @ChunkNumber"
         match db.QueryFirstOrDefault<byte array>(sql, {| FileId = fileId; ChunkNumber = chunkNumber |}) with
         | data when Object.ReferenceEquals(data, null) -> Span.Empty
@@ -339,14 +339,14 @@ module FileStorage =
                 buffer.Slice(0, len)
 
 
-    let private writeChunkData (db: SqliteConnection) (fileId: SqlId) (chunkNumber: int64) (data: Span<byte>) =
+    let private writeChunkData (db: SqliteConnection) (fileId: int64) (chunkNumber: int64) (data: Span<byte>) =
         // let result = db.Execute("INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data)", {|FileId = fileId; Number = chunkNumber; Data = data.GetEnumerator()|})
         use command = db.CreateCommand()
         command.CommandText <- "INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data)"
 
         let p = command.CreateParameter()
         p.ParameterName <- "FileId"
-        p.Value <- fileId.Value
+        p.Value <- fileId
         command.Parameters.Add p |> ignore
 
         let p = command.CreateParameter()
@@ -376,14 +376,14 @@ module FileStorage =
         finally ArrayPool<byte>.Shared.Return arrayBuffer
 
 
-    let private getStoredChunks (db: SqliteConnection) (fileId: SqlId) =
+    let private getStoredChunks (db: SqliteConnection) (fileId: int64) =
         // db.Query<SoloDBFileChunk>("SELECT * FROM SoloDBFileChunk WHERE FileId = @FileId ORDER BY Number ASC", {|FileId = fileId|})
         use command = db.CreateCommand()
         command.CommandText <- "SELECT Number, Data FROM SoloDBFileChunk WHERE FileId = @FileId ORDER BY Number ASC"
 
         let p = command.CreateParameter()
         p.ParameterName <- "FileId"
-        p.Value <- fileId.Value
+        p.Value <- fileId
         command.Parameters.Add p |> ignore
 
         seq {
@@ -406,7 +406,7 @@ module FileStorage =
         
 
     let private emptyChunk = Array.zeroCreate<byte> (int chunkSize)
-    let private getAllChunks (db: SqliteConnection) (fileId: SqlId) = seq {
+    let private getAllChunks (db: SqliteConnection) (fileId: int64) = seq {
         let mutable previousNumber = -1L // Chunks start from 0.
         for chunk in getStoredChunks db fileId do
             while chunk.Number - 1L > previousNumber do
@@ -417,13 +417,13 @@ module FileStorage =
             previousNumber <- chunk.Number
     }
 
-    let private updateHashById (db: SqliteConnection) (fileId: SqlId) (hash: byte array) =
+    let private updateHashById (db: SqliteConnection) (fileId: int64) (hash: byte array) =
         db.Execute("UPDATE SoloDBFileHeader 
         SET Hash = @Hash
         WHERE Id = @FileId", {|Hash = hash; FileId = fileId|})
         |> ignore
 
-    let private calculateHash (db: SqliteConnection) (fileId: SqlId) (len: int64) =
+    let private calculateHash (db: SqliteConnection) (fileId: int64) (len: int64) =
         use sha1 = IncrementalHash.CreateHash(HashAlgorithmName.SHA1)
         
 
@@ -442,7 +442,7 @@ module FileStorage =
         sha1.GetHashAndReset()
 
     [<Sealed>]
-    type DbFileStream(db: SqliteConnection, fileId: SqlId, previousHash: byte array) =
+    type DbFileStream(db: SqliteConnection, fileId: int64, previousHash: byte array) =
         inherit Stream()
 
         let mutable position = 0L
@@ -622,7 +622,7 @@ module FileStorage =
             Created = DateTimeOffset.Now
             Modified = DateTimeOffset.Now
 
-            Id = SqlId 0
+            Id = 0
             Hash = null
             Metadata = null
         }
@@ -642,7 +642,7 @@ module FileStorage =
             Created = DateTimeOffset.Now
             Modified = DateTimeOffset.Now
 
-            Id = SqlId 0
+            Id = 0
             Hash = null
             Metadata = null
         }
@@ -670,7 +670,7 @@ module FileStorage =
                     WHERE %s;
                     """ where
     
-        let fileDictionary = new System.Collections.Generic.Dictionary<SqlId, SoloDBFileHeader>()
+        let fileDictionary = new System.Collections.Generic.Dictionary<int64, SoloDBFileHeader>()
         let isNull x = Object.ReferenceEquals(x, null)
 
         
@@ -700,7 +700,7 @@ module FileStorage =
     
         fileDictionary.Values :> SoloDBFileHeader seq
 
-    let tryGetFile (connection: SqliteConnection) (fileId: SqlId) =
+    let tryGetFile (connection: SqliteConnection) (fileId: int64) =
         getFilesWhere connection "fh.Id = @FileId" {| FileId = fileId |}
 
     let tryGetFileAt (db: SqliteConnection) (path: string) =
