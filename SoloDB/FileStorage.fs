@@ -182,7 +182,7 @@ module FileStorage =
         ()
 
     [<CLIMutable>]
-    type private SQLEntry = {
+    type SQLEntry = {
         Level: int64; 
         Id: SqlId; 
         Type: string; 

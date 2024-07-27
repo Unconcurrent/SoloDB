@@ -64,7 +64,7 @@ module internal Helper =
         connection.Execute($"INSERT INTO \"{name}\"(Id, Value) VALUES(@id, jsonb(@jsonText))", {|name = name; id = item.Id; jsonText = item.ValueJSON|})
 
     let internal formatName (name: string) =
-        name.Replace("\"", "").Replace(" ", "") // Anti SQL injection
+        String(name.ToCharArray() |> Array.filter(fun c -> Char.IsLetterOrDigit c || c = '_')) // Anti SQL injection
 
     let internal getNameFrom<'T>() =
         typeof<'T>.Name |> formatName
