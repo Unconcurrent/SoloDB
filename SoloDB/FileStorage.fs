@@ -145,22 +145,6 @@ module FileStorage =
         let directory = db.QueryFirst<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE Id = @DirId", {|DirId = dirId|})
         directory
 
-
-    let getDirectoryPath (db: SqliteConnection) (dir: SoloDBDirectoryHeader) =
-        let rec innerLoop currentPath (dirId: Nullable<int64>) =
-            match dirId with
-            | dirId when not dirId.HasValue -> currentPath |> List.rev |> String.concat "/"
-            | dirId -> 
-                let dirId = dirId.Value
-                let directory = db.QueryFirst<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE Id = @DirId", {|DirId = dirId|})
-                innerLoop (directory.Name :: currentPath) directory.ParentId
-    
-
-        let path = innerLoop [] (Nullable dir.Id)
-
-        "/" + path
-
-
     let private deleteFile (db: SqliteConnection) (file: SoloDBFileHeader) =
         let result = db.Execute(@"DELETE FROM SoloDBFileHeader WHERE Id = @FileId",
                     {| FileId = file.Id; |})
@@ -772,7 +756,7 @@ module FileStorage =
 
     let getFilePath db (file: SoloDBFileHeader) = 
         let directory = getDirectoryById db file.DirectoryId
-        let directoryPath = getDirectoryPath db directory
+        let directoryPath = directory.FullPath
         [|directoryPath; file.Name|] |> combinePathArr
 
     let setSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) (value: string) =
