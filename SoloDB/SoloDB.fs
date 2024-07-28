@@ -60,9 +60,6 @@ module internal Helper =
     let internal insertOrReplaceInner (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) =
         insertImpl typed item connection name true
 
-    let internal insertInnerRaw (item: DbObjectRow) (connection: SqliteConnection) (name: string) =
-        connection.Execute($"INSERT INTO \"{name}\"(Id, Value) VALUES(@id, jsonb(@jsonText))", {|name = name; id = item.Id; jsonText = item.ValueJSON|})
-
     let internal formatName (name: string) =
         String(name.ToCharArray() |> Array.filter(fun c -> Char.IsLetterOrDigit c || c = '_')) // Anti SQL injection
 
@@ -211,6 +208,9 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
 
         Helper.insertInner this.IncludeType item connection name
 
+    /// <summary>
+    /// Will insert or replace the item in the DB based on its UNIQUE INDEXES, throwing if the Id is non zero.
+    /// </summary>
     member this.InsertOrReplace (item: 'T) =
         use connection = connection.Get()
 
@@ -226,40 +226,41 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         else
 
         use connection = connection.Get()
-        let withinTransaction = connection.IsWithinTransaction()
-        if not withinTransaction then connection.Execute "BEGIN;" |> ignore
+        connection.Execute "BEGIN;" |> ignore
         try
             let ids = List<int64>()
             for item in items do
                 Helper.insertInner this.IncludeType item connection name |> ids.Add
 
-            if not withinTransaction then connection.Execute "COMMIT;" |> ignore
+            connection.Execute "COMMIT;" |> ignore
             ids
         with ex ->
-            if not withinTransaction then connection.Execute "ROLLBACK;" |> ignore
+            connection.Execute "ROLLBACK;" |> ignore
             reraise()
 
+    /// <summary>
+    /// Will insert or replace the items in the DB based on its UNIQUE INDEXES, throwing if the Id is non zero.
+    /// </summary>
     member this.InsertOrReplaceBatch (items: 'T seq) =
         if this.InTransaction then
             use connection = connection.Get()
             let ids = List<int64>()
             for item in items do
-                Helper.insertInner this.IncludeType item connection name |> ids.Add
+                Helper.insertOrReplaceInner this.IncludeType item connection name |> ids.Add
             ids
         else
 
         use connection = connection.Get()
-        let withinTransaction = connection.IsWithinTransaction()
-        if not withinTransaction then connection.Execute "BEGIN;" |> ignore
+        connection.Execute "BEGIN;" |> ignore
         try
             let ids = List<int64>()
             for item in items do
                 Helper.insertOrReplaceInner this.IncludeType item connection name |> ids.Add
 
-            if not withinTransaction then connection.Execute "COMMIT;" |> ignore
+            connection.Execute "COMMIT;" |> ignore
             ids
         with ex ->
-            if not withinTransaction then connection.Execute "ROLLBACK;" |> ignore
+            connection.Execute "ROLLBACK;" |> ignore
             reraise()
 
     member this.TryGetById(id: int64) =
@@ -346,10 +347,14 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.Replace(item: 'T) =
         WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Helper.createDict([|KeyValuePair("item", (if this.IncludeType then toTypedJson item else toJson item) |> box)|]), id)
 
+    /// <summary>
+    /// Will replace the item in the DB based on its Id, and if it does not have one then it will throw an InvalidOperationException.
+    /// </summary>
     member this.Update(item: 'T) =
-        match item :> obj with
-        | :? 'T as value -> this.Replace(value).WhereId(Dynamic.InvokeConvert(item?Id, typeof<int64>, false) :?> int64).Execute() |> ignore
-        | other -> failwithf "Cannot insert a %s in a %s Collection, but if you want it use a UntypedCollection with the name '%s'." (other.GetType().FullName) (typeof<'T>.FullName) (name)
+        if not (hasIdType typeof<'T>) then
+            raise (InvalidOperationException $"The item's type {typeof<'T>.Name} does not have a int64 Id property to use in the update process.")
+
+        this.Replace(item).WhereId(item?Id |> box :?> int64).Execute() |> ignore
 
     member this.Delete() =
         // https://stackoverflow.com/questions/1824490/how-do-you-enable-limit-for-delete-in-sqlite
@@ -365,7 +370,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         if variables.Count > 0 then failwithf "Cannot have variables in index."
         let expressionBody = expression.Body
 
-        if QueryTranslator.isAnyConstant expressionBody then failwithf "Cannot index an outside expression."
+        if QueryTranslator.isAnyConstant expressionBody then failwithf "Cannot index an outside or constant expression."
 
         let whereSQL =
             match expressionBody with
@@ -436,10 +441,10 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
         
         this.InitializeCollection<obj>(name)
 
-    member this.ExistCollection name =
+    member this.CollectionExists name =
         Helper.existsCollection name connection
 
-    member this.ExistCollection<'T>() =
+    member this.CollectionExists<'T>() =
         let name = Helper.getNameFrom<'T>()
         Helper.existsCollection name connection
 
