@@ -20,11 +20,12 @@ module FileStorage =
 
     let disableHash = false
     let disableCompression = false
+    let ensureFullBufferReadInDbFileStream = true // There are some libraries that wrongly assume so.
 
     let private combinePath a b = Path.Combine(a, b) |> _.Replace('\\', '/')
     let private combinePathArr arr = arr |> Path.Combine |> _.Replace('\\', '/')
 
-    let noopDisposer = { 
+    let private noopDisposer = { 
          new System.IDisposable with
              member this.Dispose() =
                  ()
@@ -140,10 +141,6 @@ module FileStorage =
                         WHERE Id = @FileId",
                        {| FileId = fileId; NewFileLength = newFileLength |})
         ()
-
-    let getDirectoryById (db: SqliteConnection) (dirId: int64) =
-        let directory = db.QueryFirst<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE Id = @DirId", {|DirId = dirId|})
-        directory
 
     let private deleteFile (db: SqliteConnection) (file: SoloDBFileHeader) =
         let result = db.Execute(@"DELETE FROM SoloDBFileHeader WHERE Id = @FileId",
@@ -299,12 +296,6 @@ module FileStorage =
 
         query
 
-        
-
-
-    let private getFileLength (db: SqliteConnection) (file: SoloDBFileHeader) =
-        db.QueryFirst<int64>(@"SELECT Length FROM SoloDBFileHeader WHERE Name = @Name AND DirectoryId = @DirectoryId",
-                       {| Name = file.Name; DirectoryId = file.DirectoryId; |})
 
     let private getFileLengthById (db: SqliteConnection) (fileId: int64) =
         db.QueryFirst<int64>(@"SELECT Length FROM SoloDBFileHeader WHERE Id = @FileId",
@@ -482,9 +473,9 @@ module FileStorage =
                 0
             else
 
-            let poolBuffer = Array.zeroCreate (int maxChunkStoreSize)
+            let chunkBuffer = Array.zeroCreate (int maxChunkStoreSize)
 
-            match tryGetChunkData db fileId chunkNumber (Span poolBuffer) with
+            match tryGetChunkData db fileId chunkNumber (Span chunkBuffer) with
             | data when data.IsEmpty ->
                 let maxChunkNumber = (min (position + count) len) / int64 chunkSize
                 if maxChunkNumber > chunkNumber then // Try to load the other chunk if the file was sparsely allocated.
@@ -502,8 +493,11 @@ module FileStorage =
             chunkData.Slice(int chunkOffset, int bytesToRead).CopyTo(buffer.AsSpan(offset))
         
             this.Position <- position + bytesToRead
+            let remainingBytes = count - bytesToRead
 
-            int bytesToRead
+            if ensureFullBufferReadInDbFileStream && remainingBytes > 0 then
+                this.Read(buffer, offset + int bytesToRead, int remainingBytes) + int bytesToRead
+            else int bytesToRead
         
 
         override this.Write(buffer: byte[], offset: int, count: int) =
@@ -583,7 +577,7 @@ module FileStorage =
             ()
 
 
-    let getPathAndName (path: string) =
+    let private getPathAndName (path: string) =
         let normalizedCompletePath = path.Split('\\', '/') |> Array.filter (fun x -> x |> String.IsNullOrWhiteSpace |> not)
         let sep = "/"
         let dirPath = $"/{normalizedCompletePath |> Array.take (Math.Max(normalizedCompletePath.Length - 1, 0l)) |> String.concat sep}"
@@ -595,7 +589,7 @@ module FileStorage =
         let dirPath = combinePath dir name
         dirPath
 
-    let createFileAt (db: SqliteConnection) (path: string) =
+    let private createFileAt (db: SqliteConnection) (path: string) =
         let struct (dirPath, name) = getPathAndName path
         let directory = getOrCreateDir db dirPath
         let newFile = {            
@@ -614,30 +608,7 @@ module FileStorage =
 
         result
 
-
-    let tryCreateFileAt (db: SqliteConnection) (path: string) =
-        let struct (dirPath, name) = getPathAndName path
-        let directory = getOrCreateDir db dirPath
-        let newFile = {            
-            Name = name
-            FullPath = combinePath dirPath name
-            DirectoryId = directory.Id
-            Length = 0L
-            Created = DateTimeOffset.Now
-            Modified = DateTimeOffset.Now
-
-            Id = 0
-            Hash = null
-            Metadata = null
-        }
-        try
-            let result = db.QueryFirst<SoloDBFileHeader> ("INSERT INTO SoloDBFileHeader(Name, FullPath, DirectoryId, Length, Created, Modified) VALUES (@Name, @FullPath, @DirectoryId, @Length, @Created, @Modified) RETURNING *", newFile)
-            result |> Some
-        with ex -> 
-            None
-
-
-    let listDirectoriesAt (db: SqliteConnection) (path: string) =
+    let private listDirectoriesAt (db: SqliteConnection) (path: string) =
         let dirPath = formatPath path
         match tryGetDir db dirPath with
         | None -> Seq.empty
@@ -684,18 +655,15 @@ module FileStorage =
     
         fileDictionary.Values :> SoloDBFileHeader seq
 
-    let tryGetFile (connection: SqliteConnection) (fileId: int64) =
-        getFilesWhere connection "fh.Id = @FileId" {| FileId = fileId |}
-
-    let tryGetFileAt (db: SqliteConnection) (path: string) =
+    let private tryGetFileAt (db: SqliteConnection) (path: string) =
         let struct (dirPath, name) = getPathAndName path
         let fullPath = combinePath dirPath name
         getFilesWhere db "fh.FullPath = @FullPath" {|FullPath = fullPath|} |> Seq.tryHead
 
-    let getFilesByHash (db: SqliteConnection) (hash: byte array) =
+    let private getFilesByHash (db: SqliteConnection) (hash: byte array) =
         getFilesWhere db "fh.Hash = @Hash" {|Hash = hash|}
 
-    let getOrCreateFileAt (db: SqliteConnection) (path: string) =
+    let private getOrCreateFileAt (db: SqliteConnection) (path: string) =
         use l = lockPathIfNotInTransaction db path
 
         match tryGetFileAt db path with
@@ -709,13 +677,7 @@ module FileStorage =
         | file when Object.ReferenceEquals(file, null) -> createFileAt db path
         | file -> file
 
-
-    let getDirectoryAt (db: SqliteConnection) (path: string) =
-        let dirPath = formatPath path
-        tryGetDir db dirPath
-
-
-    let deleteDirectoryAt (db: SqliteConnection) (path: string) =
+    let private deleteDirectoryAt (db: SqliteConnection) (path: string) =
         let dirPath = formatPath path
         match tryGetDir db dirPath with
         | None -> false
@@ -727,22 +689,22 @@ module FileStorage =
             printfn "%s" ex.Message
             false
 
-    let getOrCreateDirectoryAt (db: SqliteConnection) (path: string) = 
+    let private getOrCreateDirectoryAt (db: SqliteConnection) (path: string) = 
         let dirPath = formatPath path
         getOrCreateDir db dirPath
 
 
-    let listFilesAt (db: SqliteConnection) (path: string) : SoloDBFileHeader seq = 
+    let private listFilesAt (db: SqliteConnection) (path: string) : SoloDBFileHeader seq = 
         let dirPath = formatPath path
         match tryGetDir db dirPath with 
         | None -> Seq.empty
         | Some dir ->
         listDirectoryFiles db dir
 
-    let openFile (db: SqliteConnection) (file: SoloDBFileHeader) =
+    let private openFile (db: SqliteConnection) (file: SoloDBFileHeader) =
         new DbFileStream(db, file.Id, file.Hash)
 
-    let openOrCreateFile (db: SqliteConnection) (path: string) =
+    let private openOrCreateFile (db: SqliteConnection) (path: string) =
         let file = tryGetFileAt db path
         let file = match file with
                     | Some x -> x 
@@ -750,29 +712,20 @@ module FileStorage =
 
         new DbFileStream(db, file.Id, file.Hash)
 
-
-    let getFileLen db file =
-        getFileLength db file
-
-    let getFilePath db (file: SoloDBFileHeader) = 
-        let directory = getDirectoryById db file.DirectoryId
-        let directoryPath = directory.FullPath
-        [|directoryPath; file.Name|] |> combinePathArr
-
-    let setSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) (value: string) =
+    let private setSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) (value: string) =
         db.Execute("INSERT OR REPLACE INTO SoloDBFileMetadata(FileId, Key, Value) VALUES(@FileId, @Key, @Value)", {|FileId = file.Id; Key = key; Value = value|}) |> ignore
 
-    let deleteSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) =
+    let private deleteSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) =
         db.Execute("DELETE FROM SoloDBFileMetadata WHERE FileId = @FileId AND Key = @Key", {|FileId = file.Id; Key = key|}) |> ignore
 
 
-    let setDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) (value: string) =
+    let private setDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) (value: string) =
         db.Execute("INSERT OR REPLACE INTO SoloDBDirectoryMetadata(DirectoryId, Key, Value) VALUES(@DirectoryId, @Key, @Value)", {|DirectoryId = dir.Id; Key = key; Value = value|}) |> ignore
 
-    let deleteDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) =
+    let private deleteDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) =
         db.Execute("DELETE FROM SoloDBDirectoryMetadata WHERE DirectoryId = @DirectoryId AND Key = @Key", {|DirectoryId = dir.Id; Key = key|}) |> ignore
    
-    let moveFile (db: SqliteConnection) (file: SoloDBFileHeader) (toDir: SoloDBDirectoryHeader) (newName: string) =
+    let private moveFile (db: SqliteConnection) (file: SoloDBFileHeader) (toDir: SoloDBDirectoryHeader) (newName: string) =
         let newFileFullPath = combinePath toDir.FullPath newName
         db.Execute("UPDATE SoloDBFileHeader 
         SET FullPath = @NewFullPath,
@@ -780,7 +733,7 @@ module FileStorage =
         WHERE Id = @FileId", {|NewFullPath = newFileFullPath; DestDirId = toDir.Id; FileId = file.Id|})
         |> ignore
         ()
-
+    
     type FileSystem(manager: ConnectionManager) =
         member this.Upload(path, stream: Stream) =
             use db = manager.Borrow()

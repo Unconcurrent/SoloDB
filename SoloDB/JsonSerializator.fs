@@ -164,8 +164,6 @@ module JsonSerializator =
                 | :? float as f -> Number (decimal f)
                 | :? decimal as i -> Number (decimal i)
 
-                | :? int64 as i -> Number (decimal i)
-
                 | :? DateTimeOffset as date -> date.ToUnixTimeMilliseconds() |> decimal |> Number
                 | :? DateTime as date -> date.ToBinary() |> decimal |> Number
                 | :? DateOnly as date -> date.DayNumber |> decimal |> Number
@@ -196,6 +194,8 @@ module JsonSerializator =
 
             if obj.ReferenceEquals(value, null) then
                 Null
+            else if typeof<JsonValue>.IsAssignableFrom valueType then
+                value :?> JsonValue
             else match trySerializePrimitive value with
                     | Null ->
                         if typeof<IDictionary>.IsAssignableFrom(valueType) then
@@ -292,7 +292,6 @@ module JsonSerializator =
                 | t, JsonValue.Number n when t = typeof<uint64> -> uint64 n
 
                 | t, JsonValue.Number n when t = typeof<decimal> -> decimal n
-                | t, JsonValue.Number n when t = typeof<int64> -> (int64 n) |> box
 
                 | t, JsonValue.Number n when t = typeof<DateTimeOffset> -> n |> int64 |> DateTimeOffset.FromUnixTimeMilliseconds |> box
                 | t, JsonValue.Number n when t = typeof<DateTime> -> n |> int64 |> DateTime.FromBinary |> box
@@ -396,6 +395,8 @@ module JsonSerializator =
 
             if targetType = typeof<obj> then 
                 JsonValue.DeserializeDynamic json
+            else if targetType = typeof<JsonValue> then
+                json
             else if targetType.Name = "Nullable`1" && targetType.GenericTypeArguments.Length = 1 then 
                 let innerValue = JsonValue.Deserialize targetType.GenericTypeArguments.[0] json
                 if isNull innerValue then
