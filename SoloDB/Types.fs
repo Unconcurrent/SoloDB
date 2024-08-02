@@ -1,10 +1,8 @@
 ﻿namespace SoloDatabase.Types
 
-open System.Linq.Expressions
 open System
 open System.Threading
 open System.Collections.Generic
-open System.Runtime.CompilerServices
 
 type internal DisposableMutex =
     val mutex: Mutex

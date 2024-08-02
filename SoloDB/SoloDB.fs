@@ -1,19 +1,15 @@
 ﻿namespace SoloDatabase
 
 open Microsoft.Data.Sqlite
-open SQLiteTools
 open System.Linq.Expressions
 open System
 open System.Collections.Generic
 open System.Collections
 open FSharp.Interop.Dynamic
-open System.Linq
 open SoloDatabase.Types
-open Dynamitey
 open System.IO
-open System.Runtime.CompilerServices
-open System.Reflection
 open System.Text
+open SQLiteTools
 open JsonFunctions
 open FileStorage
 open Connections
@@ -581,6 +577,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                                 CREATE TRIGGER IF NOT EXISTS Update_SoloDBDirectoryHeader
                                 AFTER UPDATE ON SoloDBDirectoryHeader
                                 FOR EACH ROW
+                                WHEN NOT (NEW.Modified <> OLD.Modified OR NEW.Created <> OLD.Created)
                                 BEGIN
                                     UPDATE SoloDBDirectoryHeader
                                     SET Modified = UNIXTIMESTAMP()
@@ -607,6 +604,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                                 CREATE TRIGGER IF NOT EXISTS Update_SoloDBFileHeader
                                 AFTER UPDATE ON SoloDBFileHeader
                                 FOR EACH ROW
+                                WHEN (NEW.Hash <> OLD.Hash)
                                 BEGIN
                                     UPDATE SoloDBFileHeader
                                     SET Modified = UNIXTIMESTAMP()
@@ -616,28 +614,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                                     UPDATE SoloDBDirectoryHeader
                                     SET Modified = UNIXTIMESTAMP()
                                     WHERE Id = NEW.DirectoryId;
-                                END;  
-                                
-                                -- Trigger for INSERT operations on SoloDBFileChunk
-                                -- CREATE TRIGGER IF NOT EXISTS Insert_SoloDBFileChunk
-                                -- AFTER INSERT ON SoloDBFileChunk
-                                -- FOR EACH ROW
-                                -- BEGIN
-                                --     UPDATE SoloDBFileHeader
-                                --     SET Modified = UNIXTIMESTAMP()
-                                --     WHERE Id = NEW.FileId;
-                                -- END;
-                                
-                                -- Trigger for UPDATE operations on SoloDBFileChunk
-                                -- CREATE TRIGGER IF NOT EXISTS Update_SoloDBFileChunk
-                                -- AFTER UPDATE ON SoloDBFileChunk
-                                -- FOR EACH ROW
-                                -- BEGIN
-                                --     UPDATE SoloDBFileHeader
-                                --     SET Modified = UNIXTIMESTAMP()
-                                --     WHERE Id = NEW.FileId;
-                                -- END;
-                                
+                                END;                 
 
                                 COMMIT TRANSACTION;
                                 "

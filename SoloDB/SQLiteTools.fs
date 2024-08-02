@@ -2,7 +2,6 @@
 
 open Microsoft.Data.Sqlite
 open System
-open SoloDatabase.Types
 open System.Reflection
 open System.Collections
 open System.Collections.Generic
