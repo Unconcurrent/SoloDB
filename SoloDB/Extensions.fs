@@ -4,7 +4,6 @@ open System
 open System.Collections.Generic
 open System.Collections
 open System.Text.RegularExpressions
-open SoloDatabase.Types
 open System.Runtime.CompilerServices
 open System.Linq.Expressions
 open FSharp.Interop.Dynamic

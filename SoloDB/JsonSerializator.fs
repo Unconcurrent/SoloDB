@@ -7,14 +7,11 @@ module JsonSerializator =
     open System.Reflection
     open Dynamitey
     open System.Dynamic
-    open SoloDatabase.Types
     open SoloDatabase.Utils
     open System.Text
     open System.Globalization
     open System.Runtime.CompilerServices
-    open System.IO
     open Microsoft.FSharp.Reflection
-    open Utils
 
     let private implementsGeneric (genericInterfaceType: Type) (targetType: Type) =
         let genericInterfaceType = genericInterfaceType.GetGenericTypeDefinition()
