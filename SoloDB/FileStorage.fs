@@ -722,8 +722,9 @@ module FileStorage =
         try
             db.Execute("UPDATE SoloDBFileHeader 
             SET FullPath = @NewFullPath,
-            DirectoryId = @DestDirId
-            WHERE Id = @FileId", {|NewFullPath = newFileFullPath; DestDirId = toDir.Id; FileId = file.Id|})
+            DirectoryId = @DestDirId,
+            Name = @NewName
+            WHERE Id = @FileId", {|NewFullPath = newFileFullPath; DestDirId = toDir.Id; FileId = file.Id; NewName = newName|})
             |> ignore
         with
         | :? SqliteException as ex when ex.SqliteErrorCode = 19(*SQLITE_CONSTRAINT*) && ex.Message.Contains "SoloDBFileHeader.FullPath" ->

@@ -167,6 +167,8 @@ module JsonSerializator =
                 | :? TimeOnly as time -> time.ToTimeSpan().TotalMilliseconds |> int64 (* Convert to int64 because SQLite only stores 32 bit precision floats in JSON. *) |> decimal |> Number
                 | :? TimeSpan as span -> span .TotalMilliseconds |> int64 |> decimal |> Number
 
+                | :? Guid as guid -> guid.ToString("D", CultureInfo.InvariantCulture) |> String
+
                 | :? string as s -> String s        
             
                 | _ -> Null
@@ -266,6 +268,7 @@ module JsonSerializator =
 
                 | t, JsonValue.String s when t = typeof<string> -> s
                 | t, JsonValue.String s when t = typeof<Type> -> s |> nameToType |> box
+                | t, JsonValue.String s when t = typeof<Guid> -> Guid.Parse(s) |> box
 
                 | t, JsonValue.String s when t = typeof<DateTimeOffset> -> DateTimeOffset.Parse(s, CultureInfo.InvariantCulture) |> box
                 | t, JsonValue.String s when t = typeof<DateTime> -> DateTime.Parse(s, CultureInfo.InvariantCulture) |> box
@@ -370,6 +373,18 @@ module JsonSerializator =
                     let caseInstance = FSharpValue.MakeUnion(machingCase, fieldsValue)
                     
                     caseInstance
+
+                | JsonValue.Object properties when FSharpType.IsRecord targetType ->
+                    let recordFields = FSharpType.GetRecordFields targetType
+                    let recordValues = recordFields |> Seq.map(fun field ->
+                        let propName = field.Name
+                        match properties.TryGetValue(propName) with
+                        | true, value ->
+                            let propValue = JsonValue.Deserialize field.PropertyType value
+                            propValue
+                        | false, _ -> null) |> Seq.toArray
+
+                    FSharpValue.MakeRecord(targetType, recordValues)
                 | JsonValue.Object properties ->
                     let instance = createInstance targetType
 
