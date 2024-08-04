@@ -363,6 +363,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member private this.GetIndexWhereAndName(expression: Expression<System.Func<'T, 'R>>)  =
         let whereSQL, variables = QueryTranslator.translate name expression
         let whereSQL = whereSQL.Replace($"{name}.Value", "Value") // {name}.Value is not allowed in an index.
+        if whereSQL.Contains $"{name}.Id" then failwithf "The Id of a collection is always stored in an index."
         if variables.Count > 0 then failwithf "Cannot have variables in index."
         let expressionBody = expression.Body
 

@@ -66,7 +66,7 @@ module Connections =
             use connectionForTransaction = this.CreateForTransaction()
             try
                 connectionForTransaction.Open()
-                connectionForTransaction.Execute("BEGIN;") |> ignore
+                connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
                 
                 try
                     let ret = f connectionForTransaction
@@ -81,7 +81,7 @@ module Connections =
             use connectionForTransaction = this.CreateForTransaction()
             try
                 connectionForTransaction.Open()
-                connectionForTransaction.Execute("BEGIN;") |> ignore
+                connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
         
                 try
                     let! ret = f connectionForTransaction
