@@ -751,7 +751,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
     member this.VacuumTo(location: string) =
         match this.DataLocation with
-        | Memory _ -> failwithf "Cannot vaccuum backup from or to memory."
+        | Memory _ -> failwithf "Cannot vacuum backup from or to memory."
         | other ->
 
         let location = Path.GetFullPath location
@@ -759,6 +759,14 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
         use dbConnection = connectionManager.Borrow()
         dbConnection.Execute($"VACUUM INTO '{location}'")
+
+    member this.Vacuum() =
+        match this.DataLocation with
+        | Memory _ -> failwithf "Cannot vacuum memory databases."
+        | other ->
+
+        use dbConnection = connectionManager.Borrow()
+        dbConnection.Execute($"VACUUM;")
 
     member this.WithTransaction<'R>(func: Func<TransactionalSoloDB, 'R>) : 'R =        
         use connectionForTransaction = connectionManager.CreateForTransaction()

@@ -5,9 +5,9 @@ VisualStudioVersion = 17.10.34916.146
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{6EC3EE1D-3C4E-46DD-8F32-0CC8E7565705}") = "SoloDB", "SoloDB\SoloDB.fsproj", "{AD8262F4-F835-4F10-ACF8-A7A78488FBB2}"
 EndProject
-Project("{6EC3EE1D-3C4E-46DD-8F32-0CC8E7565705}") = "Tests", "Tests\Tests\Tests.fsproj", "{6345B0D6-909E-4C54-9630-0188C07BEDF4}"
+Project("{6EC3EE1D-3C4E-46DD-8F32-0CC8E7565705}") = "Tests", "..\SoloDBTests\Tests\Tests.fsproj", "{6345B0D6-909E-4C54-9630-0188C07BEDF4}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CSharpTests", "Tests\CSharpTests\CSharpTests.csproj", "{1846A323-5030-4682-8C3D-B49D3543D1DE}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CSharpTests", "..\SoloDBTests\CSharpTests\CSharpTests.csproj", "{1846A323-5030-4682-8C3D-B49D3543D1DE}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
