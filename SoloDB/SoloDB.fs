@@ -97,10 +97,10 @@ type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string
         finalSQL, parameters
 
     member this.Limit(?count: uint64) =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, this.SQLText, this.Variables, select, postModifySQL, count, this.SQLOffset)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, this.SQLText, this.Variables, select, postModifySQL, count, this.SQLOffset, this.OrderByList)
 
     member this.Offset(index: uint64) =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, this.SQLText, this.Variables, select, postModifySQL, this.SQLLimit, index)
+        FinalBuilder<'T, 'Q, 'R>(connection, name, this.SQLText, this.Variables, select, postModifySQL, this.SQLLimit, index, this.OrderByList)
 
     member this.OrderByAsc(expression: Expression<System.Func<'T, obj>>) =
         let orderSelector, _ = QueryTranslator.translate name expression
