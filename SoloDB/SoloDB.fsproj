@@ -19,7 +19,7 @@
     <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
     <IncludeSymbols>True</IncludeSymbols>
     <PackageOutputPath>$(OutputPath)</PackageOutputPath>
-    <VersionPrefix>0.0.14</VersionPrefix>
+    <VersionPrefix>0.0.15</VersionPrefix>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
