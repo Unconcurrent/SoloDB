@@ -11,11 +11,11 @@ open SoloDatabase.Connections
 open Snappier
 
 module FileStorage =
-    let maxChunkStoreSize = 
-        16384L // If the compression fails.
-
     let chunkSize = 
-        16000L // 16KB, aprox. a SQLite page size.
+        16384L // 16KB, aprox. a SQLite page size.
+
+    let maxChunkStoreSize = 
+        chunkSize + 100L // If the compression fails.
 
     let disableHash = false
     let disableCompression = false
@@ -545,9 +545,14 @@ module FileStorage =
 
         override _.SetLength(value: int64) =
             checkDisposed()
+
+            if value < 0 then 
+                raise (ArgumentOutOfRangeException("Length"))
+
             dirty <- true
             use l = lockFileIdIfNotInTransaction db fileId
             downsetFileLength db fileId value
+            if position > value then position <- value
 
         override this.Seek(offset: int64, origin: SeekOrigin) =
             checkDisposed()
@@ -730,6 +735,13 @@ module FileStorage =
         | :? SqliteException as ex when ex.SqliteErrorCode = 19(*SQLITE_CONSTRAINT*) && ex.Message.Contains "SoloDBFileHeader.FullPath" ->
             raise (IOException("File already exists.", ex))
     
+    type BulkFileData = {
+        FullPath: string
+        Data: byte array
+        Created: Nullable<DateTimeOffset>
+        Modified: Nullable<DateTimeOffset>
+    }
+
     type FileSystem(manager: ConnectionManager) =
         member this.Upload(path, stream: Stream) =
             use db = manager.Borrow()
@@ -743,6 +755,25 @@ module FileStorage =
             do! stream.CopyToAsync(file, int chunkSize)
             file.SetLength file.Position
         }
+
+        member this.UploadBulk(files: BulkFileData seq) =
+            manager.WithTransaction(fun tx -> 
+                for file in files do
+                    let fileHeader = getOrCreateFileAt tx file.FullPath
+
+                    do
+                        use fileStream = openFile tx fileHeader
+                        fileStream.Write(file.Data, 0, file.Data.Length)
+                        fileStream.SetLength file.Data.Length
+                    
+                    if file.Modified.HasValue then
+                        setFileModifiedById tx fileHeader.Id file.Modified.Value
+
+                    if file.Created.HasValue then
+                        setFileCreatedById tx fileHeader.Id file.Created.Value
+
+                    ()
+            )
 
         member this.ReplaceAsyncWithinTransaction(path, stream: Stream) = task {
             return! manager.WithAsyncTransaction(fun db -> task {
