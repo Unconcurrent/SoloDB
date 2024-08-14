@@ -11,8 +11,8 @@ Imagine the power of MongoDB and SQL combined.
 - Simple API, similar to [LiteDB](https://github.com/mbdavid/LiteDB), see the [below](#usage).
 - Thread safe using a connection pool.
 - [ACID](https://www.sqlite.org/transactional.html) with [full transaction support](#transactions).
-- [File System](./Tests/FileSystemTests.fs) for large files storage.
-- Support for [polymorphic](./Tests/PolymorphicTests.fs) types.
+- File System for large files storage.
+- Support for polymorphic types.
 - [Reliable](https://sqlite.org/hirely.html) with a [WAL log file](https://www.sqlite.org/wal.html).
 - Support for [indexes](https://www.sqlite.org/expridx.html) for fast search.
 - LINQ-like queries.
