@@ -82,7 +82,7 @@ module Utils =
         | _ when t = typeof<uint32> -> true
         | _ when t = typeof<int64>  -> true
         | _ when t = typeof<uint64> -> true
-        | _ when t = typeof<int64> -> true
+        | _ when t = typeof<int64>  -> true
         | _ -> false
 
     let isIntegerBased (value: obj) =
