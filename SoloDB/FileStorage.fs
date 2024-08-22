@@ -408,8 +408,8 @@ module FileStorage =
 
         sha1.GetHashAndReset()
 
-    [<Sealed>]
-    type DbFileStream(db: SqliteConnection, fileId: int64, previousHash: byte array) =
+    
+    type DbFileStream(db: SqliteConnection, fileId: int64, fullPath: string, previousHash: byte array) =
         inherit Stream()
 
         let mutable position = 0L
@@ -425,9 +425,9 @@ module FileStorage =
                     updateHashById db fileId hash
 
 
-        override _.CanRead = true
-        override _.CanSeek = true
-        override _.CanWrite = true
+        override _.CanRead = not disposed
+        override _.CanSeek = not disposed
+        override _.CanWrite = not disposed
 
         override _.Length = 
             checkDisposed()
@@ -440,6 +440,13 @@ module FileStorage =
             and set(value) = 
                 checkDisposed()                
                 this.Seek(value, SeekOrigin.Begin) |> ignore
+
+        /// <summary>
+        /// This returns the FullPath of the file at the moment of opening of the stream,
+        /// if the file moved while the stream is still open then this will be wrong.
+        /// </summary>
+        member this.FullPath =
+            fullPath
 
         override this.Flush() =         
             checkDisposed()
@@ -699,7 +706,7 @@ module FileStorage =
         getFilesWhere db "DirectoryId = @DirectoryId" {|DirectoryId = dir.Id|}
 
     let private openFile (db: SqliteConnection) (file: SoloDBFileHeader) =
-        new DbFileStream(db, file.Id, file.Hash)
+        new DbFileStream(db, file.Id, file.FullPath, file.Hash)
 
     let private openOrCreateFile (db: SqliteConnection) (path: string) =
         let file = tryGetFileAt db path
@@ -707,7 +714,7 @@ module FileStorage =
                     | Some x -> x 
                     | None -> createFileAt db path
 
-        new DbFileStream(db, file.Id, file.Hash)
+        new DbFileStream(db, file.Id, file.FullPath, file.Hash)
 
     let private setSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) (value: string) =
         db.Execute("INSERT OR REPLACE INTO SoloDBFileMetadata(FileId, Key, Value) VALUES(@FileId, @Key, @Value)", {|FileId = file.Id; Key = key; Value = value|}) |> ignore
@@ -734,6 +741,39 @@ module FileStorage =
         with
         | :? SqliteException as ex when ex.SqliteErrorCode = 19(*SQLITE_CONSTRAINT*) && ex.Message.Contains "SoloDBFileHeader.FullPath" ->
             raise (IOException("File already exists.", ex))
+
+    let rec private moveDirectoryMustBeWithinTransaction (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (newParentDir: SoloDBDirectoryHeader) (newName: string) =
+        // Step 1: Calculate the new path for the directory being moved
+        let newDirFullPath = combinePath newParentDir.FullPath newName
+    
+        try
+            // Step 2: Update the directory path
+            db.Execute("UPDATE SoloDBDirectoryHeader 
+                        SET FullPath = @NewFullPath, 
+                            ParentId = @NewParentId, 
+                            Name = @NewName 
+                        WHERE Id = @DirId",
+                        {| NewFullPath = newDirFullPath; NewParentId = newParentDir.Id; DirId = dir.Id; NewName = newName |})
+            |> ignore
+    
+            let oldDirPath = dir.FullPath
+            let dir = {dir with FullPath = newDirFullPath; ParentId = Nullable newParentDir.Id; Name = newName}
+
+            // Step 3: Update paths of all subdirectories
+            let subDirs = db.Query<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE ParentId = @DirId", {| DirId = dir.Id |})
+            for subDir in subDirs do
+                let subDirNewName = subDir.Name
+                moveDirectoryMustBeWithinTransaction db subDir dir subDirNewName
+    
+            // Step 4: Update paths of all files in the directory
+            db.Execute("UPDATE SoloDBFileHeader 
+                        SET FullPath = REPLACE(FullPath, @OldFullPath, @NewFullPath)
+                        WHERE DirectoryId = @DirId",
+                        {| OldFullPath = oldDirPath; NewFullPath = newDirFullPath; DirId = dir.Id |})
+            |> ignore
+        with
+        | :? SqliteException as ex when ex.SqliteErrorCode = 19 (* SQLITE_CONSTRAINT *) && ex.Message.Contains "FullPath" ->
+            raise (IOException("Directory or file already exists in the destination.", ex))
     
     type BulkFileData = {
         FullPath: string
@@ -974,5 +1014,14 @@ module FileStorage =
                         deleteFile db replacedFile
                 | None -> ()
                 moveFile db file dir fileName
+            )
+
+        member this.MoveDirectory(from, toPath) =
+            let struct (toDirPath, fileName) = getPathAndName toPath
+            manager.WithTransaction(fun db ->
+                let dirToMove = match tryGetDir db from with | Some f -> f | None -> raise (DirectoryNotFoundException("From directory not found at: " + from))
+                let toPathParent = match tryGetDir db toDirPath with | Some f -> f | None -> raise (DirectoryNotFoundException("To directory not found at: " + toDirPath))
+
+                moveDirectoryMustBeWithinTransaction db dirToMove toPathParent fileName
             )
             
