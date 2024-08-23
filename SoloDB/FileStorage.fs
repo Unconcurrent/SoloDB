@@ -459,7 +459,7 @@ module FileStorage =
             if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
             if buffer.Length - offset < count then raise (ArgumentException("Invalid offset and length."))
 
-            let position = position
+            let position = this.Position
             let count = int64 count
 
             let chunkNumber = position / int64 chunkSize
@@ -497,58 +497,62 @@ module FileStorage =
             if ensureFullBufferReadInDbFileStream && remainingBytes > 0 then
                 this.Read(buffer, offset + int bytesToRead, int remainingBytes) + int bytesToRead
             else int bytesToRead
-        
-
-        override this.Write(buffer: byte[], offset: int, count: int) =
+        #if NETSTANDARD2_1_OR_GREATER
+        override 
+        #else
+        member
+        #endif
+            this.Write(buffer: ReadOnlySpan<byte>) =
             dirty <- true
             let mutable writing = true
-            let mutable offset = int64 offset
-            let mutable count = int64 count
+            let mutable offset = int64 0
+            let mutable count = int64 buffer.Length
 
             while writing do
                 writing <- false
-                if buffer = null then raise (ArgumentNullException(nameof buffer))
-                if offset < 0 then raise (ArgumentOutOfRangeException(nameof offset))
-                if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
-                if buffer.LongLength - offset < count then raise (ArgumentException("Invalid offset and length."))
 
                 let position = position
                 let mutable remainingBytes = 0L
                 let mutable bytesToWrite = 0L
 
                 let bufferArray = Array.zeroCreate (int maxChunkStoreSize)
-                try
-                    use l = lockFileIdIfNotInTransaction db fileId
+                use l = lockFileIdIfNotInTransaction db fileId
 
-                    let chunkNumber = position / int64 chunkSize
-                    let chunkOffset = position % int64 chunkSize
+                let chunkNumber = position / int64 chunkSize
+                let chunkOffset = position % int64 chunkSize
 
-                    let dataBuffer = Span(bufferArray)
+                let dataBuffer = Span(bufferArray)
 
-                    let tryGetChunkDataResult = tryGetChunkData db fileId chunkNumber dataBuffer
-                    let existingChunk = match tryGetChunkDataResult with data when data.IsEmpty -> dataBuffer.Slice(0, int chunkSize) | data -> data
+                let tryGetChunkDataResult = tryGetChunkData db fileId chunkNumber dataBuffer
+                let existingChunk = match tryGetChunkDataResult with data when data.IsEmpty -> dataBuffer.Slice(0, int chunkSize) | data -> data
 
-                    let spaceInChunk = chunkSize - chunkOffset
-                    bytesToWrite <- min count spaceInChunk
+                let spaceInChunk = chunkSize - chunkOffset
+                bytesToWrite <- min count spaceInChunk
 
-                    // Array.Copy(buffer, offset, existingChunk, chunkOffset, bytesToWrite)
+                buffer.Slice(int offset, int bytesToWrite).CopyTo(existingChunk.Slice(int chunkOffset))
 
-                    buffer.AsSpan(int offset, int bytesToWrite).CopyTo(existingChunk.Slice(int chunkOffset))
+                writeChunkData db fileId chunkNumber existingChunk
 
-                    writeChunkData db fileId chunkNumber existingChunk
+                let newPosition = position + int64 bytesToWrite
 
-                    this.Position <- position + int64 bytesToWrite
+                remainingBytes <- count - bytesToWrite
+                if remainingBytes > 0 then
+                    writing <- true
+                    offset <- offset + bytesToWrite
+                    count <- remainingBytes
+                else 
+                    if newPosition > this.Length then
+                        updateLenById db fileId newPosition
 
-                    remainingBytes <- count - bytesToWrite
-                    if remainingBytes > 0 then
-                        writing <- true
-                        offset <- offset + bytesToWrite
-                        count <- remainingBytes
-                    else 
-                        if this.Position > this.Length then
-                            updateLenById db fileId this.Position 
+                this.Position <- newPosition
 
-                finally ()
+
+        override this.Write(buffer: byte[], offset: int, count: int) =
+            if buffer = null then raise (ArgumentNullException(nameof buffer))
+            if offset < 0 then raise (ArgumentOutOfRangeException(nameof offset))
+            if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
+            if buffer.Length - offset < count then raise (ArgumentException("Invalid offset and length."))
+            this.Write(buffer.AsSpan(offset, count))
 
         override _.SetLength(value: int64) =
             checkDisposed()
@@ -960,7 +964,7 @@ module FileStorage =
 
         member this.GetFileByHash(hash) =
             match this.GetFilesByHash hash |> Seq.tryHead with
-            | None -> raise (FileNotFoundException("No file with such hash.", Utils.bytesToHexFast hash))
+            | None -> raise (FileNotFoundException("No file with such hash.", Utils.bytesToHex hash))
             | Some f -> f
 
         member this.Delete(file) =

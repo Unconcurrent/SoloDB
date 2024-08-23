@@ -121,17 +121,12 @@ type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string
 
         seq {
             use connection = connection.Get()
-            try            
-                for item in connection.Query<'Q>(finalSQL, parameters) 
-                            |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
-                            |> Seq.map select 
-                            |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
-                            do
-                    yield item
-
-            with ex -> 
-                let ex = ex // For breakpoint.
-                raise ex
+            for item in connection.Query<'Q>(finalSQL, parameters) 
+                        |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
+                        |> Seq.map select 
+                        |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
+                        do
+                yield item
         }
        
 
