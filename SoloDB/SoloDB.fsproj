@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>Library</OutputType>
-    <TargetFramework>netstandard2.0</TargetFramework>
+    <TargetFrameworks>netstandard2.0;netstandard2.1</TargetFrameworks>
     <SignAssembly>False</SignAssembly>
     <Title>SoloDB</Title>
     <Description>SoloDB is a document database built on top of SQLite using the JSONB data type. It leverages the robustness and simplicity of SQLite to provide an efficient and lightweight database solution for handling JSON documents.</Description>

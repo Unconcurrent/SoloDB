@@ -117,7 +117,7 @@ module Utils =
             shaHashBytes(str |> Encoding.UTF8.GetBytes)
         | other -> raise (InvalidDataException(sprintf "Cannot hash object of type: %A" (other.GetType())))
 
-    let bytesToHexFast (hash: byte array) =
+    let bytesToHex (hash: byte array) =
         let sb = new StringBuilder()
         for b in hash do
             sb.Append (b.ToString("x2")) |> ignore

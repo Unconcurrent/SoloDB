@@ -369,7 +369,11 @@ module JsonSerializator =
                     let tag = properties.["Tag"].ToObject<int>()
                     let machingCase = cases |> Array.find(fun c -> c.Tag = tag)
                     let fields = machingCase.GetFields()
-                    let fieldsValue = fields |> Array.map(fun f -> JsonValue.Deserialize f.PropertyType properties.[f.Name])
+                    let fieldsValue = fields |> Array.map(fun f -> 
+                        match properties.TryGetValue f.Name with 
+                        | true, value -> JsonValue.Deserialize f.PropertyType value
+                        | false, _ -> null
+                    )
                     let caseInstance = FSharpValue.MakeUnion(machingCase, fieldsValue)
                     
                     caseInstance
