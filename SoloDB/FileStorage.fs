@@ -415,11 +415,12 @@ module FileStorage =
         let mutable position = 0L
         let mutable disposed = false
         let mutable dirty = false
+        let mutable dontRehash = false
 
         let checkDisposed() = if disposed then raise (ObjectDisposedException(nameof(DbFileStream)))
 
         member private this.UpdateHash() =
-            if not disableHash && dirty then
+            if not disableHash && dirty && not dontRehash then
                 let hash = calculateHash db fileId this.Length
                 if hash <> previousHash then
                     updateHashById db fileId hash
@@ -447,6 +448,12 @@ module FileStorage =
         /// </summary>
         member this.FullPath =
             fullPath
+
+        member this.UnsafeDontRehash() =
+            dontRehash <- true
+
+        member this.GetDirty() =
+            dirty <- true
 
         override this.Flush() =         
             checkDisposed()
@@ -909,8 +916,9 @@ module FileStorage =
                 ()
             )
 
-        member this.WriteAt(path, offset, data: Stream, ?createIfInexistent: bool) =
+        member this.WriteAtRehash(path, offset, data: Stream, ?createIfInexistent: bool, ?rehash: bool) =
             let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
+            let rehash = match rehash with Some x -> x | None -> true
 
             manager.WithTransaction(fun tx -> 
                 let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
@@ -918,8 +926,15 @@ module FileStorage =
                 use fileStream = openFile tx file
                 fileStream.Position <- offset
                 data.CopyTo (fileStream, int chunkSize)
+                if not rehash then
+                    fileStream.UnsafeDontRehash()
                 ()
             )
+
+        member this.WriteAt(path, offset, data: Stream, ?createIfInexistent: bool) =
+            let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
+
+            this.WriteAtRehash(path, offset, data, createIfInexistent)
 
         member this.ReadAt(path, offset, len) =
             let file = this.GetAt path
