@@ -246,12 +246,12 @@ module FileStorage =
                 SoloDBFileMetadata fm ON fh.Id = fm.FileId
             """
 
-        let query = 
+        let entries = 
             db.Query<SQLEntry> (queryCommand, {|FullPath = directoryFullPath|}) 
             |> Utils.SeqExt.sequentialGroupBy(fun e -> e.Path) 
             |> Seq.map(fun entry -> 
                 let metadata = entry |> Seq.filter(fun x -> x.MetadataKey <> null) |> Seq.map(fun x -> (x.MetadataKey, x.MetadataValue)) |> readOnlyDict
-                let entryData = entry |> Seq.head
+                let entryData = entry.[0]
                 match entryData.Type with
                 | "File" ->
                     let file = {
@@ -280,7 +280,7 @@ module FileStorage =
                 | other -> failwithf "Invalid entry type: %s" other
             )
 
-        query
+        entries         
 
 
     let private getFileLengthById (db: SqliteConnection) (fileId: int64) =
@@ -497,6 +497,7 @@ module FileStorage =
             if ensureFullBufferReadInDbFileStream && remainingBytes > 0 then
                 this.Read(buffer, offset + int bytesToRead, int remainingBytes) + int bytesToRead
             else int bytesToRead
+
         #if NETSTANDARD2_1_OR_GREATER
         override 
         #else
@@ -546,13 +547,16 @@ module FileStorage =
 
                 this.Position <- newPosition
 
-
         override this.Write(buffer: byte[], offset: int, count: int) =
             if buffer = null then raise (ArgumentNullException(nameof buffer))
             if offset < 0 then raise (ArgumentOutOfRangeException(nameof offset))
             if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
             if buffer.Length - offset < count then raise (ArgumentException("Invalid offset and length."))
             this.Write(buffer.AsSpan(offset, count))
+
+        override this.WriteAsync(buffer: byte[], offset: int, count: int, ct) =
+            this.Write(buffer, offset, count)
+            Threading.Tasks.Task.CompletedTask
 
         override _.SetLength(value: int64) =
             checkDisposed()
@@ -627,41 +631,50 @@ module FileStorage =
 
     let private getFilesWhere (connection: SqliteConnection) (where: string) (parameters: obj) =
         let query = sprintf """
-                    SELECT fh.*, fm.Key, fm.Value
+                    SELECT fh.*, fm.Key as MetaKey, fm.Value as MetaValue
                     FROM SoloDBFileHeader fh
                     LEFT JOIN SoloDBFileMetadata fm ON fh.Id = fm.FileId
                     WHERE %s;
                     """ where
     
-        let fileDictionary = new System.Collections.Generic.Dictionary<int64, SoloDBFileHeader>()
-        let isNull x = Object.ReferenceEquals(x, null)
+        connection.Query<{|
+            Id: int64
+            Name: string
+            FullPath: string
+            DirectoryId: int64
+            Length: int64
+            Created: DateTimeOffset
+            Modified: DateTimeOffset
+            Hash: byte array
 
-        
-        connection.Query<SoloDBFileHeader, Metadata, unit>(
+            MetaKey: string
+            MetaValue: string
+            |}>(
             query,
-            (fun fileHeader metadata ->
-                let file = 
-                    match fileDictionary.TryGetValue(fileHeader.Id) with
-                    | true, f ->
-                        f
-                    | false, _ ->
-                        let f = 
-                            if isNull fileHeader.Metadata then
-                                {fileHeader with Metadata = Dictionary()}
-                            else fileHeader
-                            
-                        fileDictionary.Add(f.Id, f)
-                        f
+            parameters
+        ) 
+        |> Utils.SeqExt.sequentialGroupBy(fun e -> e.Id)
+        |> Seq.map(fun fileAndDatas ->
+            let allMetadata = 
+                fileAndDatas 
+                |> Seq.filter(fun fileAndData -> fileAndData.MetaKey <> null) 
+                |> Seq.map(fun fileAndData -> (fileAndData.MetaKey, fileAndData.MetaValue))
+                |> readOnlyDict
 
-                if not (isNull metadata) then
-                    (file.Metadata :?> IDictionary<string, string>).Add(metadata.Key, metadata.Value)
-                ()
-            ),
-            parameters,
-            splitOn = "Key"
-        ) |> Seq.iter ignore
-    
-        fileDictionary.Values :> SoloDBFileHeader seq
+            let file = fileAndDatas.[0]
+
+            {
+                Id = file.Id
+                Name = file.Name
+                FullPath = file.FullPath
+                DirectoryId = file.DirectoryId
+                Length = file.Length
+                Created = file.Created
+                Modified = file.Modified
+                Hash = file.Hash
+                Metadata = allMetadata
+            }
+        )
 
     let private tryGetFileAt (db: SqliteConnection) (path: string) =
         let struct (dirPath, name) = getPathAndName path
@@ -669,7 +682,7 @@ module FileStorage =
         getFilesWhere db "fh.FullPath = @FullPath" {|FullPath = fullPath|} |> Seq.tryHead
 
     let private getFilesByHash (db: SqliteConnection) (hash: byte array) =
-        getFilesWhere db "fh.Hash = @Hash" {|Hash = hash|}
+        getFilesWhere db "fh.Hash = @Hash" {|Hash = hash|} |> ResizeArray :> ICollection<SoloDBFileHeader>
 
     let private getOrCreateFileAt (db: SqliteConnection) (path: string) =
         use l = lockPathIfNotInTransaction db path
@@ -707,7 +720,7 @@ module FileStorage =
         match tryGetDir db dirPath with 
         | None -> Seq.empty
         | Some dir ->
-        getFilesWhere db "DirectoryId = @DirectoryId" {|DirectoryId = dir.Id|}
+        getFilesWhere db "DirectoryId = @DirectoryId" {|DirectoryId = dir.Id|} |> ResizeArray :> SoloDBFileHeader seq
 
     let private openFile (db: SqliteConnection) (file: SoloDBFileHeader) =
         new DbFileStream(db, file.Id, file.FullPath, file.Hash)
@@ -995,10 +1008,17 @@ module FileStorage =
             listDirectoriesAt db path
 
         member this.RecursiveListEntriesAt(path) =
-            seq {
-                use db = manager.Borrow()
-                yield! recursiveListAllEntriesInDirectory db path
-            }
+            use db = manager.Borrow()
+            recursiveListAllEntriesInDirectory db path   
+            // If the downstream processing is slow, it can lock the DB and timeout on other's access,
+            // therefore we will cache them in a List.
+            |> ResizeArray 
+            :> ICollection<SoloDBEntryHeader>
+
+        member this.RecursiveListEntriesAtLazy(path) = seq {
+            use db = manager.Borrow()
+            yield! recursiveListAllEntriesInDirectory db path
+        }
 
         member this.MoveFile(from, toPath) =
             let file = this.GetAt from

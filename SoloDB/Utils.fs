@@ -2,6 +2,7 @@
 
 open System.Runtime.CompilerServices
 open System
+open System.Collections.Generic
 
 // FormatterServices.GetSafeUninitializedObject for 
 // types without a parameterless constructor.
@@ -155,12 +156,12 @@ module Utils =
                         if key = currentKey then
                             currentList.Add current
                         else
-                            yield currentList :> 'T seq
+                            yield currentList :> IList<'T>
                             currentList.Clear()
                             currentList.Add current
                             currentKey <- key
         
                         if not (enumerator.MoveNext()) then
-                            yield currentList :> 'T seq
+                            yield currentList :> IList<'T>
                             looping <- false
             }

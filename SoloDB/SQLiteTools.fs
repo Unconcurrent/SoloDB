@@ -25,7 +25,6 @@ let private customMappers = [|
                 let this = this :?> DateTimeOffset
 
                 struct (this.ToUnixTimeMilliseconds(), sizeof<int64>)
-
     }
 |]
 
@@ -76,6 +75,21 @@ let private createCommand(this: SqliteConnection)(sql: string)(parameters: obj o
     command
 
 let rec private mapToType<'T> (reader: SqliteDataReader) (startIndex: int) (columns: IDictionary<string, int>) : 'T =
+    let readColumn (name) (propType) =
+        match columns.TryGetValue(name) with
+        | true, index ->
+            match Array.tryFind (fun (m: SQLiteTypeMapper) -> m.Type = propType) customMappers with
+            | Some mapper -> 
+                if reader.IsDBNull index then null
+                else mapper.Read(reader)(index)
+            | None -> match reader.GetValue(index) with
+                        | :? DBNull -> null
+                        | value -> value
+        | false, _ ->
+            if propType.IsClass && propType <> typeof<string> then
+                mapToType (reader) (startIndex) columns
+            else null
+
     let targetType = typeof<'T>
 
     if targetType = typeof<obj> then
@@ -107,37 +121,26 @@ let rec private mapToType<'T> (reader: SqliteDataReader) (startIndex: int) (colu
         | t when t = typeof<byte array> -> reader.GetValue(startIndex) :?> 'T
         | t when t = typeof<Guid> -> reader.GetGuid(startIndex) :> obj :?> 'T
         | t when t = typeof<DateTime> -> reader.GetDateTime(startIndex) :> obj :?> 'T
-        | _ -> 
-            let instance = Utils.initEmpty targetType
-            let props = 
-                if targetType.IsValueType 
-                then targetType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-                else targetType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+        | _ ->             
+            let props = targetType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
 
-            if props |> Seq.sumBy(fun p -> if p.CanWrite then 1 else 0) = 0 then
-                failwithf "Could not desealize the type %s, it does not have any public writable property." targetType.Name
+            // If the type is a F# record/union/etc then to use the more complete Json Serializer.
+            let jsonMode = props |> Seq.sumBy(fun p -> if p.CanWrite then 1 else 0) = 0
+
+            let instance: obj = 
+                if jsonMode 
+                then JsonSerializator.JsonValue.New()
+                else Utils.initEmpty targetType
 
             for prop in props do
-                if prop.CanWrite then
+                if prop.CanWrite || jsonMode then
                     let propType = 
                         if prop.PropertyType.Name.StartsWith "Nullable`" then
                             Nullable.GetUnderlyingType prop.PropertyType
                         else
                             prop.PropertyType
-                    let value =
-                        match columns.TryGetValue(prop.Name) with
-                        | true, index ->
-                            match Array.tryFind (fun (m: SQLiteTypeMapper) -> m.Type = propType) customMappers with
-                            | Some mapper -> 
-                                if reader.IsDBNull index then null
-                                else mapper.Read(reader)(index)
-                            | None -> match reader.GetValue(index) with
-                                        | :? DBNull -> null
-                                        | value -> value
-                        | false, _ ->
-                            if prop.PropertyType.IsClass && prop.PropertyType <> typeof<string> then
-                                mapToType (reader) (startIndex) columns
-                            else null
+
+                    let value = readColumn prop.Name propType                    
 
                     if value <> null then
                         let valueType = value.GetType()
@@ -149,8 +152,17 @@ let rec private mapToType<'T> (reader: SqliteDataReader) (startIndex: int) (colu
                                     Convert.ChangeType(value, prop.PropertyType)
                             else
                                 value
-                        prop.SetValue(instance, value)
-            instance :?> 'T
+
+                        if jsonMode then
+                            (instance :?> JsonSerializator.JsonValue).[prop.Name] <- JsonSerializator.JsonValue.Serialize value
+                        else
+                            prop.SetValue(instance, value)
+
+            if jsonMode then
+                let jsonObj = (instance :?> JsonSerializator.JsonValue)
+                jsonObj.ToObject<'T>()
+            else
+                instance :?> 'T
 
 
 let private queryInner<'T> this (sql: string)(parameters: obj option) = seq {
