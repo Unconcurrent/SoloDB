@@ -449,7 +449,7 @@ module FileStorage =
         member this.FullPath =
             fullPath
 
-        member this.UnsafeDontRehash() =
+        member internal this.UnsafeDontRehash() =
             dontRehash <- true
 
         member this.GetDirty() =
@@ -928,8 +928,18 @@ module FileStorage =
                 data.CopyTo (fileStream, int chunkSize)
                 if not rehash then
                     fileStream.UnsafeDontRehash()
+                else if rehash && fileStream.Position = offset then
+                    // If the should rehash, but the data was empty
+                    fileStream.GetDirty() // then recalculate the hash.
                 ()
             )
+
+        member this.WriteAtRehash(path, offset, data: byte array, ?createIfInexistent: bool, ?rehash: bool) =
+            use data = new MemoryStream(data)
+            let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
+            let rehash = match rehash with Some x -> x | None -> true
+
+            this.WriteAtRehash(path, offset, data, createIfInexistent, rehash)
 
         member this.WriteAt(path, offset, data: Stream, ?createIfInexistent: bool) =
             let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
