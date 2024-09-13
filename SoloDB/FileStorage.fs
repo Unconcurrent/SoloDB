@@ -147,7 +147,7 @@ module FileStorage =
 
         ()
 
-    let rec private deleteDirectory (db: SqliteConnection) (dir: SoloDBDirectoryHeader) = 
+    let private deleteDirectory (db: SqliteConnection) (dir: SoloDBDirectoryHeader) = 
         let result = db.Execute(@"DELETE FROM SoloDBDirectoryHeader WHERE Id = @DirId",
                         {| DirId = dir.Id; |})
         ()
@@ -710,12 +710,9 @@ module FileStorage =
         match tryGetDir db dirPath with
         | None -> false
         | Some dir ->
-        try
-            deleteDirectory db dir
-            true
-        with ex ->
-            printfn "%s" ex.Message
-            false
+
+        deleteDirectory db dir
+        true
 
     let private getOrCreateDirectoryAt (db: SqliteConnection) (path: string) = 
         let dirPath = formatPath path

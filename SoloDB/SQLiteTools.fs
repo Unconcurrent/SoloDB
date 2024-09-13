@@ -181,6 +181,7 @@ let private queryInner<'T> this (sql: string)(parameters: obj option) = seq {
 type SqliteConnection with
     member this.Execute(sql: string, ?parameters: obj) =
         use command = createCommand this sql parameters
+        command.Prepare() // To throw all errors, not silently fail them.
         command.ExecuteNonQuery()
 
     member this.Query<'T>(sql: string, ?parameters: obj) =

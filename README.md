@@ -18,8 +18,8 @@ Imagine the power of MongoDB and SQL combined.
 - LINQ-like queries.
 - [Direct SQL support](#direct-sqlite-access-using-dapper).
 - [Open source](./LICENSE.txt).
-- [.NET Standard 2.0](https://learn.microsoft.com/en-us/dotnet/standard/net-standard?tabs=net-standard-2-0)
-- Pretty well tested: 210+ of tests, but in the tradition of SQLite, we keep them private.
+- [.NET Standard 2.0 and 2.1](https://learn.microsoft.com/en-us/dotnet/standard/net-standard?tabs=net-standard-2-0)
+- Pretty well tested: 320+ of tests, but in the tradition of SQLite, we keep them private.
 
 ## How to install
 
@@ -188,44 +188,6 @@ collection.Update(data);
 // Delete a document
 var count = collection.DeleteById(data.Id); // 1
 ```
-#### MongoDB
-```csharp
-using MongoDB.Bson;
-using MongoDB.Driver;
-
-public class MyType
-{
-    public ObjectId Id { get; set; }
-    public string Name { get; set; }
-    public string Data { get; set; }
-}
-
-var client = new MongoClient("mongodb://localhost:27017");
-var database = client.GetDatabase("mydatabase");
-var collection = database.GetCollection<MyType>("MyType");
-
-// Insert a document
-var newDocument = new MyType { Name = "Document 1", Data = "Some data" };
-collection.InsertOne(newDocument);
-Console.WriteLine(newDocument.Id);
-
-// Query all documents into a C# list
-var documents = collection.Find(FilterDefinition<MyType>.Empty).ToList();
-
-// Query the Data property, where Name starts with 'Document'
-var filter = Builders<MyType>.Filter.Regex("Name", new BsonRegularExpression("^Document"));
-var documentsData = collection.Find(filter).Project(d => d.Data).ToList();
-
-newDocument.Data = "Updated data";
-
-// Update a document
-collection.ReplaceOne(d => d.Id == newDocument.Id, newDocument);
-
-// Delete a document
-var deleteResult = collection.DeleteOne(d => d.Id == newDocument.Id);
-Console.WriteLine(deleteResult.DeletedCount); // 1
-```
-
 
 And in F#:
 

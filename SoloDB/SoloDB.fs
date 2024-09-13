@@ -494,6 +494,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             let initCommands = [|"
                                 PRAGMA journal_mode=wal;
                                 PRAGMA page_size=16384;
+                                PRAGMA recursive_triggers = ON;
 
                                 BEGIN EXCLUSIVE;
 
@@ -502,8 +503,19 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
                                 CREATE TABLE IF NOT EXISTS SoloDBDirectoryHeader (
                                     Id INTEGER PRIMARY KEY,
-                                    Name TEXT NOT NULL CHECK ((length(Name) != 0 OR ParentId IS NULL) AND (Name != \".\") AND (Name != \"..\") AND NOT Name GLOB \"*/*\"),
-                                    FullPath TEXT NOT NULL CHECK (FullPath != \"\" AND NOT FullPath GLOB \"*/./*\" AND NOT FullPath GLOB \"*/../*\"),
+                                    Name TEXT NOT NULL 
+                                            CHECK ((length(Name) != 0 OR ParentId IS NULL) 
+                                                    AND (Name != \".\") 
+                                                    AND (Name != \"..\") 
+                                                    AND NOT Name GLOB \"*\\*\"
+                                                    AND NOT Name GLOB \"*/*\"),
+                                    FullPath TEXT NOT NULL 
+                                            CHECK (FullPath != \"\" 
+                                                    AND NOT FullPath GLOB \"*/./*\" 
+                                                    AND NOT FullPath GLOB \"*/../*\"
+                                                    AND NOT FullPath GLOB \"*\\*\"
+                                                    -- Recursion limit check.
+                                                    AND (LENGTH(FullPath) - LENGTH(REPLACE(FullPath, '/', '')) < 1000)),
                                     ParentId INTEGER,
                                     Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
                                     Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
@@ -514,8 +526,18 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
                                 CREATE TABLE IF NOT EXISTS SoloDBFileHeader (
                                     Id INTEGER PRIMARY KEY,
-                                    Name TEXT NOT NULL CHECK (length(Name) != 0 AND Name != \".\" AND Name != \"..\"),
-                                    FullPath TEXT NOT NULL CHECK (FullPath != \"\" AND NOT FullPath GLOB \"*/./*\" AND NOT FullPath GLOB \"*/../*\"),
+                                    Name TEXT NOT NULL 
+                                            CHECK (length(Name) != 0 
+                                                    AND Name != \".\" 
+                                                    AND Name != \"..\"
+                                                    AND NOT Name GLOB \"*\\*\"
+                                                    AND NOT Name GLOB \"*/*\"
+                                                    ),
+                                    FullPath TEXT NOT NULL 
+                                            CHECK (FullPath != \"\" 
+                                                    AND NOT FullPath GLOB \"*/./*\"
+                                                    AND NOT FullPath GLOB \"*/../*\"
+                                                    AND NOT FullPath GLOB \"*\\*\"),
                                     DirectoryId INTEGER NOT NULL,
                                     Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
                                     Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
@@ -566,7 +588,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                                     -- Update parent directory's Modified timestamp, if ParentId is NULL then it will be a noop.
                                     UPDATE SoloDBDirectoryHeader
                                     SET Modified = UNIXTIMESTAMP()
-                                    WHERE Id = NEW.ParentId;
+                                    WHERE Id = NEW.ParentId AND Modified < UNIXTIMESTAMP();
                                 END;
                                 
                                 -- Trigger to update the Modified column on update for SoloDBDirectoryHeader
