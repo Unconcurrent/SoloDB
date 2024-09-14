@@ -74,11 +74,46 @@ module JsonSerializator =
                 | '"' | '\'' as quote ->
                     let sb = System.Text.StringBuilder()
                     let mutable i = index + 1
-                    while input.[i] <> quote do
-                        sb.Append(input.[i]) |> ignore
+                    while i < input.Length && input.[i] <> quote do
+                        if input.[i] = '\\' then
+                            i <- i + 1
+                            match input.[i] with
+                            | '\\' -> sb.Append('\\') |> ignore
+                            | '\"' -> sb.Append('"') |> ignore
+                            | '\'' -> sb.Append('\'') |> ignore
+                            | '/'  -> sb.Append('/') |> ignore
+                            | 'b'  -> sb.Append('\b') |> ignore
+                            | 'f'  -> sb.Append('\f') |> ignore
+                            | 'n'  -> sb.Append('\n') |> ignore
+                            | 'r'  -> sb.Append('\r') |> ignore
+                            | 't'  -> sb.Append('\t') |> ignore
+                            | 'u'  ->
+                                // Parse the first Unicode escape sequence
+                                let unicodeSeq1 = input.Substring(i + 1, 4)
+                                let unicodeVal1 = Convert.ToInt32(unicodeSeq1, 16)
+                                let mutable unicodeChar = char unicodeVal1
+                                i <- i + 4
+                
+                                // Handle surrogate pairs if necessary
+                                if Char.IsHighSurrogate(unicodeChar) then
+                                    if input.[i] = '\\' && input.[i+1] = 'u' then
+                                        let unicodeSeq2 = input.Substring(i + 2, 4)
+                                        let unicodeVal2 = Convert.ToInt32(unicodeSeq2, 16)
+                                        let lowSurrogate = char unicodeVal2
+                                        if Char.IsLowSurrogate(lowSurrogate) then
+                                            unicodeChar <- Char.ConvertFromUtf32((unicodeVal1 - 0xD800) * 0x400 + (unicodeVal2 - 0xDC00) + 0x10000).[0]
+                                            i <- i + 5 // Skip the low surrogate characters
+                                        else
+                                            failwith "Invalid low surrogate"
+                                    else
+                                        failwith "Expected low surrogate after high surrogate"
+                                sb.Append(unicodeChar) |> ignore
+                            | _ -> failwith "Invalid escape sequence"
+                        else
+                            sb.Append(input.[i]) |> ignore
                         i <- i + 1
-                    sb.Replace("\\u002B", "+") |> ignore
-                    index <- (i + 1)
+                    if i >= input.Length then failwith "Unterminated string"
+                    index <- i + 1
                     StringToken(sb.ToString())
                 | c when isDigit c ->
                     let sb = System.Text.StringBuilder()
@@ -101,7 +136,7 @@ module JsonSerializator =
                     | "NULL" -> NullToken
                     | "true" -> BooleanToken(true)
                     | "false" -> BooleanToken(false)
-                    | other -> StringToken other
+                    | other -> StringToken other // Non standard, but used.
                 | c when Char.IsWhiteSpace(c) ->
                     index <- index + 1
                 | _ -> failwith "Invalid JSON format"
