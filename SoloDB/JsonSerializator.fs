@@ -12,6 +12,7 @@ module JsonSerializator =
     open System.Globalization
     open System.Runtime.CompilerServices
     open Microsoft.FSharp.Reflection
+    open System.Web
 
     let private implementsGeneric (genericInterfaceType: Type) (targetType: Type) =
         let genericInterfaceType = genericInterfaceType.GetGenericTypeDefinition()
@@ -25,14 +26,8 @@ module JsonSerializator =
         targetType.GetInterfaces()
         |> Array.exists (fun i -> i.IsGenericType && i.Name = genericInterfaceType.Name && i.Namespace = genericInterfaceType.Namespace)
 
-    let inline isNullableType (typ: Type) =
+    let inline private isNullableType (typ: Type) =
         typ.IsGenericType && typ.GetGenericTypeDefinition() = typedefof<Nullable<_>>
-
-    let typeOfNullable (typ: Type) =
-        if isNullableType typ then
-            typ.GetGenericArguments().[0]
-        else
-            typ
 
     type Token =
         | NullToken
@@ -47,7 +42,7 @@ module JsonSerializator =
         | BooleanToken of bool
         | EndOfInput
 
-    let tokenize (input: string) : Token seq =
+    let private tokenize (input: string) : Token seq =
         let isDigit c = Char.IsDigit c || c = '-'
         let isInitialIdentifierChar c = Char.IsLetter c || c = '_'
         let isIdentifierChar c = isInitialIdentifierChar c || Char.IsDigit c
@@ -498,7 +493,8 @@ module JsonSerializator =
             | Boolean b -> write (if b then "true" else "false") |> ignore
             | String s -> 
                 write "\"" |> ignore
-                write s |> ignore
+                let escapedString = HttpUtility.JavaScriptStringEncode(s, false)
+                write escapedString |> ignore
                 write "\"" |> ignore
             | Number n -> 
                 if Decimal.IsInteger n then 
