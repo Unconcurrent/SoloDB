@@ -89,25 +89,31 @@ module JsonSerializator =
                             | 't'  -> sb.Append('\t') |> ignore
                             | 'u'  ->
                                 // Parse the first Unicode escape sequence
-                                let unicodeSeq1 = input.Substring(i + 1, 4)
-                                let unicodeVal1 = Convert.ToInt32(unicodeSeq1, 16)
-                                let mutable unicodeChar = char unicodeVal1
-                                i <- i + 4
+                                if i + 4 < input.Length then
+                                    let unicodeSeq1 = input.Substring(i + 1, 4)
+                                    let unicodeVal1 = Convert.ToInt32(unicodeSeq1, 16)
+                                    let mutable unicodeChar = char unicodeVal1
+                                    i <- i + 4
                 
-                                // Handle surrogate pairs if necessary
-                                if Char.IsHighSurrogate(unicodeChar) then
-                                    if input.[i] = '\\' && input.[i+1] = 'u' then
-                                        let unicodeSeq2 = input.Substring(i + 2, 4)
-                                        let unicodeVal2 = Convert.ToInt32(unicodeSeq2, 16)
-                                        let lowSurrogate = char unicodeVal2
-                                        if Char.IsLowSurrogate(lowSurrogate) then
-                                            unicodeChar <- Char.ConvertFromUtf32((unicodeVal1 - 0xD800) * 0x400 + (unicodeVal2 - 0xDC00) + 0x10000).[0]
-                                            i <- i + 5 // Skip the low surrogate characters
+                                    // Handle surrogate pairs if necessary
+                                    if Char.IsHighSurrogate(unicodeChar) then
+                                        if i + 6 < input.Length && input.[i + 1] = '\\' && input.[i + 2] = 'u' then
+                                            let unicodeSeq2 = input.Substring(i + 3, 4)
+                                            let unicodeVal2 = Convert.ToInt32(unicodeSeq2, 16)
+                                            let lowSurrogate = char unicodeVal2
+                                            if Char.IsLowSurrogate(lowSurrogate) then
+                                                let fullCodePoint = Char.ConvertToUtf32(unicodeChar, lowSurrogate)
+                                                let fullUnicodeChar = Char.ConvertFromUtf32(fullCodePoint)
+                                                sb.Append(fullUnicodeChar) |> ignore
+                                                i <- i + 6 // Move past the low surrogate and escape sequence
+                                            else
+                                                failwith "Invalid low surrogate"
                                         else
-                                            failwith "Invalid low surrogate"
+                                            failwith "Expected low surrogate after high surrogate"
                                     else
-                                        failwith "Expected low surrogate after high surrogate"
-                                sb.Append(unicodeChar) |> ignore
+                                        sb.Append(unicodeChar) |> ignore
+                                else
+                                    failwith "Invalid Unicode escape sequence"
                             | _ -> failwith "Invalid escape sequence"
                         else
                             sb.Append(input.[i]) |> ignore
