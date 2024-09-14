@@ -59,13 +59,13 @@ module Connections =
         member internal this.CreateForTransaction() =
             checkDisposed()
             let c = new TransactionalConnection(connectionStr)
+            c.Open()
             setup c
             c
 
         member internal this.WithTransaction(f: SqliteConnection -> 'T) =
             use connectionForTransaction = this.CreateForTransaction()
             try
-                connectionForTransaction.Open()
                 connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
                 
                 try
@@ -80,7 +80,6 @@ module Connections =
         member internal this.WithAsyncTransaction(f: SqliteConnection -> Task<'T>) = task {
             use connectionForTransaction = this.CreateForTransaction()
             try
-                connectionForTransaction.Open()
                 connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
         
                 try
