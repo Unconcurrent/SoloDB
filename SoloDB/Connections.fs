@@ -1,4 +1,7 @@
 ﻿namespace SoloDatabase
+
+open System.Data
+
 module Connections =
     open Microsoft.Data.Sqlite
     open SQLiteTools
@@ -48,7 +51,10 @@ module Connections =
         member this.Borrow() =
             checkDisposed()
             match pool.TryPop() with
-            | true, c -> c
+            | true, c -> 
+                if c.State <> ConnectionState.Open then
+                    c.Open()
+                c
             | false, _ -> 
                 let c = new PooledConnection(connectionStr, this)
                 c.Open()
@@ -63,7 +69,32 @@ module Connections =
             setup c
             c
 
-        member internal this.WithTransaction(f: SqliteConnection -> 'T) =
+        member private this.WithTransactionBorrowed(f: SqliteConnection -> 'T) =
+            use connectionForTransaction = this.Borrow()
+            connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
+                
+            try
+                let ret = f connectionForTransaction
+                connectionForTransaction.Execute "COMMIT;" |> ignore
+                ret
+            with ex -> 
+                connectionForTransaction.Execute "ROLLBACK;" |> ignore
+                reraise()
+
+        member private this.WithTransactionBorrowedAsync(f: SqliteConnection -> Task<'T>) = task {
+            use connectionForTransaction = this.Borrow()
+            connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
+                
+            try
+                let! ret = f connectionForTransaction
+                connectionForTransaction.Execute "COMMIT;" |> ignore
+                return ret
+            with ex -> 
+                connectionForTransaction.Execute "ROLLBACK;" |> ignore
+                return reraiseAnywhere ex
+        }
+
+        member private this.WithTransactionNewlyCreated(f: SqliteConnection -> 'T) =
             use connectionForTransaction = this.CreateForTransaction()
             try
                 connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
@@ -77,7 +108,7 @@ module Connections =
                     reraise()
             finally connectionForTransaction.DisposeReal(true)
 
-        member internal this.WithAsyncTransaction(f: SqliteConnection -> Task<'T>) = task {
+        member private this.WithTransactionNewlyCreatedAsync(f: SqliteConnection -> Task<'T>) = task {
             use connectionForTransaction = this.CreateForTransaction()
             try
                 connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
@@ -90,6 +121,14 @@ module Connections =
                     connectionForTransaction.Execute "ROLLBACK;" |> ignore
                     return reraiseAnywhere ex
             finally connectionForTransaction.DisposeReal(true)
+        }
+
+
+        member internal this.WithTransaction(f: SqliteConnection -> 'T) =
+            this.WithTransactionBorrowed f
+
+        member internal this.WithAsyncTransaction(f: SqliteConnection -> Task<'T>) = task {
+            return! this.WithTransactionBorrowedAsync f
         }
 
         interface IDisposable with
