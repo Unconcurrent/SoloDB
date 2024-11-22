@@ -95,16 +95,43 @@ module FileStorage =
     let private tryGetDir (db: SqliteConnection) (path: string) =
         tryGetDirectoriesWhere db "dh.FullPath = @Path" {|Path = path|} |> Seq.tryHead
 
-    let private getOrCreateDir (db: SqliteConnection) (path: string) =
+    let rec private getOrCreateDir (db: SqliteConnection) (path: string) =
         use l = lockPathIfNotInTransaction db path
 
         match tryGetDir db path with
         | Some d -> d
         | None ->
+        match path with
+        | "/" -> db.QueryFirst<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE Name = @RootName", {|RootName = ""|}) |> fillDirectoryMetadata db
+        | path ->
 
 
-        let names = path.Split ([|'/'|], StringSplitOptions.RemoveEmptyEntries) |> Array.toList
-        let root = db.QueryFirst<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE Name = @RootName", {|RootName = ""|})
+
+        let names = path.Split ([|'/'|], StringSplitOptions.RemoveEmptyEntries)
+        let previousNames = names |> Array.take (names.Length - 1)
+        let currentName = names |> Array.last
+        let previousPath = "/" + (previousNames |> String.concat "/")
+        let previousDir = getOrCreateDir db previousPath
+        let fullPath = combinePath previousPath currentName
+        if fullPath <> path then failwithf "Inconsistent paths!"
+
+        let newDir = {|
+            Name = currentName
+            ParentId = previousDir.Id
+            FullPath = path
+        |}
+
+        let _result = db.Execute("INSERT INTO SoloDBDirectoryHeader(Name, ParentId, FullPath) VALUES(@Name, @ParentId, @FullPath)", newDir)
+
+        match db.QueryFirstOrDefault<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE FullPath = @FullPath", {|FullPath = path|}) with
+        | dir when Utils.isNull dir -> failwithf "Normally you cannot end up here, cannot find a directory that has just created: %s" path
+        | dir -> dir |> fillDirectoryMetadata db
+
+
+        (*let root = db.QueryFirst<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE Name = @RootName", {|RootName = ""|})
+
+
+
 
 
         let rec innerLoop (prev: SoloDBDirectoryHeader) (remNames: string list) (prevName: string list) = 
@@ -123,7 +150,7 @@ module FileStorage =
                     innerLoop prev (head :: tail) prevName
                 | dir -> innerLoop dir tail (prevName @ [head])
     
-        innerLoop root names [] |> fillDirectoryMetadata db
+        innerLoop root names [] |> fillDirectoryMetadata db*)
     
     let private updateLenById (db: SqliteConnection) (fileId: int64) (len: int64) =
         let result = db.Execute ("UPDATE SoloDBFileHeader SET Length = @Length WHERE Id = @Id", {|Id = fileId; Length=len|})
@@ -303,6 +330,7 @@ module FileStorage =
     let private writeChunkData (db: SqliteConnection) (fileId: int64) (chunkNumber: int64) (data: Span<byte>) =
         use command = db.CreateCommand()
         command.CommandText <- "INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data)"
+        
 
         let p = command.CreateParameter()
         p.ParameterName <- "FileId"
@@ -328,6 +356,8 @@ module FileStorage =
         p.Value <- arrayBuffer
         p.Size <- len // Crop to size.
         command.Parameters.Add p |> ignore
+
+        command.Prepare()
 
         let result = command.ExecuteNonQuery()
 
@@ -697,13 +727,14 @@ module FileStorage =
         match tryGetFileAt db path with
         | Some f -> f
         | None ->
+        createFileAt db path
 
-        let struct (dirPath, name) = getPathAndName path
+        (*let struct (dirPath, name) = getPathAndName path
         let dir = getOrCreateDir db dirPath 
 
         match getFilesWhere db "DirectoryId = @DirectoryId AND Name = @Name" {|DirectoryId = dir.Id; Name = name|} |> Seq.tryHead with
         | None -> createFileAt db path
-        | Some file -> file
+        | Some file -> file*)
 
     let private deleteDirectoryAt (db: SqliteConnection) (path: string) =
         let dirPath = formatPath path
@@ -922,7 +953,7 @@ module FileStorage =
 
                 use fileStream = openFile tx file
                 fileStream.Position <- offset
-                data.CopyTo (fileStream, int chunkSize)
+                data.CopyTo (fileStream, int chunkSize * 10)
                 if not rehash then
                     fileStream.UnsafeDontRehash()
                 else if rehash && fileStream.Position = offset then

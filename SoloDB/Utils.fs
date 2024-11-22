@@ -20,6 +20,8 @@ module Utils =
     open Microsoft.FSharp.NativeInterop
     open System.Runtime.ExceptionServices
     
+    let isNull x = Object.ReferenceEquals(x, null)
+
     // For the use in F# Builders, like task { .. }.
     // https://stackoverflow.com/a/72132958/9550932
     let inline reraiseAnywhere<'a> (e: exn) : 'a =
