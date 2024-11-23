@@ -489,6 +489,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
         let manager = new ConnectionManager(connectionString, setup)
 
+        // todo: Put it into a separate file.
         do
             use dbConnection = manager.Borrow()
 
