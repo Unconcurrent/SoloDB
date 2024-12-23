@@ -57,7 +57,7 @@ module Utils =
 
     type System.Decimal with
         static member IsInteger (this: Decimal) =
-            this = decimal (System.Math.Floor(this))
+            this = (Decimal.Floor this)
 
     let isNumber (value: obj) =
         match value with

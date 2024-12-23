@@ -211,6 +211,30 @@ module QueryTranslator =
         qb.AppendRaw "]')"
         ()
 
+    and private visitProperty (o: Expression) (property: obj)  (m: MethodCallExpression) (qb: QueryBuilder) =
+        match property with
+        | :? string as property ->
+            let memberAccess = {
+                Expression = o
+                MemberName = property
+                InputType = m.Type
+                ReturnType = typeof<obj>
+                OriginalExpression = None
+            }
+            visitMemberAccess memberAccess qb
+
+        | :? int as index ->
+            let memberAccess = {
+                Expression = o
+                MemberName = $"[{index}]"
+                InputType = m.Type
+                ReturnType = typeof<obj>
+                OriginalExpression = None
+            }
+            visitMemberAccess memberAccess qb
+
+        | other -> failwithf "Unable to translate property access."
+
     and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =        
         match m.Method.Name with
         | "GetArray" ->
@@ -341,33 +365,18 @@ module QueryTranslator =
             let arg1 = m.Arguments.[0]
             visit arg1 qb
         
+        | "get_Item" when typeof<System.Collections.ICollection>.IsAssignableFrom m.Object.Type || typeof<Array>.IsAssignableFrom m.Object.Type || typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.Object.Type ->
+            let o = m.Object
+            let property = (m.Arguments.[0] :?> ConstantExpression).Value
+
+            visitProperty o property m qb
+
         | "Dyn" ->
             let o = m.Arguments.[0]
             let property = (m.Arguments.[1] :?> ConstantExpression).Value
 
-            match property with
-            | :? string as property ->
-                let memberAccess = {
-                    Expression = o
-                    MemberName = property
-                    InputType = m.Type
-                    ReturnType = typeof<obj>
-                    OriginalExpression = None
-                }
-                visitMemberAccess memberAccess qb
-
-            | :? int as index ->
-                let memberAccess = {
-                    Expression = o
-                    MemberName = $"[{index}]"
-                    InputType = m.Type
-                    ReturnType = typeof<obj>
-                    OriginalExpression = None
-                }
-                visitMemberAccess memberAccess qb
-
-            | other -> failwithf "Unable to translate property access."
-
+            
+            visitProperty o property m qb
 
         | "Concat" when m.Type = typeof<string> ->            
             let len = m.Arguments.Count
@@ -411,7 +420,6 @@ module QueryTranslator =
 
             let likeMeth = Expression.Call(typeof<SoloDatabase.Extensions>.GetMethod(nameof(SoloDatabase.Extensions.Like)), m.Object, Expression.Call(typeof<String>.GetMethod("Concat", [|typeof<string>; typeof<string>|]), Expression.Constant("%"), arg))
             visit likeMeth qb
-
 
         | _ -> 
             raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))

@@ -95,7 +95,7 @@ let rec private mapToType<'T> (reader: SqliteDataReader) (startIndex: int) (colu
     if targetType = typeof<obj> then
         let jsonObj = JsonSerializator.JsonValue.New()
         for key in columns.Keys do
-            jsonObj.JS(key) <- reader.GetValue(columns.[key])
+            jsonObj.[key] <- reader.GetValue(columns.[key])
 
         jsonObj.ToObject<obj>() :?> 'T
     else

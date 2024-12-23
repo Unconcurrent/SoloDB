@@ -49,7 +49,8 @@ module JsonFunctions =
         json.ToObject<'T>()    
 
     let rec fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
-        if data = null then null :> obj :?> 'T
+        if data = null then 
+            Unchecked.defaultof<'T>
         else
 
         if typeof<'T> <> typeof<obj> then
