@@ -14,6 +14,7 @@ open JsonFunctions
 open FileStorage
 open Connections
 open Utils
+open System.Runtime.CompilerServices
 
 module internal Helper =
     let internal lockTable (connectionStr: string) (name: string) =
@@ -412,6 +413,16 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         member this.Equals (other) =
             this.ConnectionString = other.ConnectionString && this.Name = other.Name
 
+[<Extension>]
+type UntypedCollectionExt =
+    [<Extension>]
+    static member InsertBatchObj(collection: Collection<JsonSerializator.JsonValue>, s: obj seq) =
+        s |> Seq.map JsonSerializator.JsonValue.SerializeWithType |> collection.InsertBatch
+
+    [<Extension>]
+    static member InsertObj(collection: Collection<JsonSerializator.JsonValue>, o: obj) =
+        o |> JsonSerializator.JsonValue.SerializeWithType |> collection.Insert
+
 type TransactionalSoloDB internal (connection: TransactionalConnection) =
     let connectionString = connection.ConnectionString
 
@@ -431,7 +442,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
     member this.GetUntypedCollection(name: string) =
         let name = name |> Helper.formatName
         
-        this.InitializeCollection<obj>(name)
+        this.InitializeCollection<JsonSerializator.JsonValue>(name)
 
     member this.CollectionExists name =
         Helper.existsCollection name connection
@@ -441,7 +452,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
         Helper.existsCollection name connection
 
     member this.DropCollectionIfExists name =
-        use mutex = Helper.lockTable connectionString name
+        use _mutex = Helper.lockTable connectionString name
 
         if Helper.existsCollection name connection then
             Helper.dropCollection name connection
@@ -702,12 +713,13 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
     member private this.GetNewConnection() = connectionManager.Borrow()
         
-    member private this.InitializeCollection<'T> name =     
+    member private this.InitializeCollection<'T> (name: string) =     
         if disposed then raise (ObjectDisposedException(nameof(SoloDB)))
+        if name.StartsWith "SoloDB" then raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
         use connection = connectionManager.Borrow()
 
-        use mutex = Helper.lockTable connectionString name // To prevent a race condition where the next if statment is true for 2 threads.
+        use _mutex = Helper.lockTable connectionString name // To prevent a race condition where the next if statment is true for 2 threads.
         if not (Helper.existsCollection name connection) then 
             let withinTransaction = connection.IsWithinTransaction()
             if not withinTransaction then connection.Execute "BEGIN;" |> ignore
@@ -726,10 +738,13 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         
         this.InitializeCollection<'T>(name)
 
+    member this.GetCollection<'T>(name) =        
+        this.InitializeCollection<'T>(name)
+
     member this.GetUntypedCollection(name: string) =
         let name = name |> Helper.formatName
         
-        this.InitializeCollection<obj>(name)
+        this.InitializeCollection<JsonSerializator.JsonValue>(name)
 
     member this.CollectionExists name =
         use dbConnection = connectionManager.Borrow()

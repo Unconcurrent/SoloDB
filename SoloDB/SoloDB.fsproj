@@ -35,6 +35,7 @@
     <Compile Include="FileStorage.fs" />
     <Compile Include="SoloDB.fs" />
     <Compile Include="SoloDBOperators.fs" />
+    <Compile Include="MongoEmulation.fs" />
   </ItemGroup>
 
   <ItemGroup>

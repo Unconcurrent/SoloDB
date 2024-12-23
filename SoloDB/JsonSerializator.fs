@@ -1,5 +1,8 @@
 ﻿namespace SoloDatabase
 
+open FSharp.Interop.Dynamic
+open System.Linq.Expressions
+
 module JsonSerializator =
     open System
     open System.Collections.Generic
@@ -488,12 +491,30 @@ module JsonSerializator =
                 list.[index] <- value
             | other -> failwithf "Cannot index %s" (other.ToString())
 
-        member this.TryGetProperty(name: string) : bool * JsonValue =
+        member this.Contains (name: string) =
             match this with
-            | Object o -> o.TryGetValue(name)
+            | Object o -> o.ContainsKey name
+            | List list -> 
+                match Int32.TryParse (name, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+                | true, index -> list.Count > index
+                | false, _ -> false
+            | other -> failwithf "Cannot index %s" (other.ToString())
+
+
+        member this.TryGetProperty(name: string, [<System.Runtime.InteropServices.Out>] v: byref<JsonValue>) : bool =
+            match this with
+            | Object o -> 
+                match o.TryGetValue(name) with
+                | true, out ->
+                    v <- out
+                    true
+                | false, out ->
+                    v <- out
+                    false
             | List list -> 
                 let index = Int32.Parse (name, CultureInfo.InvariantCulture)
-                true, list.[index]
+                v <- list.[index]
+                true
             | other -> failwithf "Cannot index %s" (other.ToString())
 
         member this.GetProperty(name: string) =
@@ -501,6 +522,29 @@ module JsonSerializator =
             | true, value -> value
             | false, _ -> failwith "Property not found"
 
+        // If rename then also rename the string from JsonValueMetaObject
+        member internal this.GetPropertyForBinder(name: string) =
+            match this.TryGetProperty(name) with
+            | true, value ->
+                match value with
+                | Null -> null :> obj
+                | Boolean b -> b
+                | String s -> s
+                | Number n -> 
+                    if Decimal.IsInteger n then
+                        match n with
+                        | n when n >= decimal Int32.MinValue && n <= decimal Int32.MaxValue -> int n :> obj
+                        | n when n >= decimal Int64.MinValue && n <= decimal Int64.MaxValue -> int64 n :> obj
+                        | other -> other
+                    else
+                        match n with
+                        | n when n >= decimal Double.MinValue && n <= decimal Double.MaxValue -> float n :> obj
+                        | other -> other
+                | List _l -> value // Return the full object for complex types.
+                | Object _d -> value
+            | false, _ -> failwith "Property not found"
+
+        [<System.Runtime.CompilerServices.IndexerName("Item")>]
         member this.Item
             with get(name: string) =
                 match this.TryGetProperty(name) with
@@ -508,25 +552,11 @@ module JsonSerializator =
                 | false, _ -> failwith "Property not found"
 
             and set(name: string) (value: obj) =
-                this.SetProperty (name, JsonValue.Serialize value)
-
-        member this.JS
-            with get(name: string) =            
-                let rec toObj (json: JsonValue) : obj =
-                    match json with
-                    | Null -> null
-                    | Boolean b -> b
-                    | String s -> s
-                    | Number n -> n
-                    | List arr -> arr
-                    | Object o -> o
-
-                match this.TryGetProperty(name) with
-                | true, value -> toObj value
-                | false, _ -> failwith "Property not found"
-
-            and set(name: string) (value: obj) =
-                this.SetProperty (name, JsonValue.Serialize value)
+                let jValue =
+                    match value with
+                    | :? JsonValue as v -> v
+                    | value -> JsonValue.Serialize value
+                this.SetProperty (name, jValue)
 
         static member private Jsonize value (write: string -> unit) =
             match value with
@@ -644,3 +674,70 @@ module JsonSerializator =
             parse tokens
 
         override this.ToString() = this.ToJsonString()
+
+        interface IDynamicMetaObjectProvider with
+            member this.GetMetaObject(expression: Linq.Expressions.Expression): DynamicMetaObject = 
+                JsonValueMetaObject(expression, BindingRestrictions.Empty, this)
+
+
+    and internal JsonValueMetaObject(expression: Expression, restrictions: BindingRestrictions, value: obj) =
+        inherit DynamicMetaObject(expression, restrictions, value)
+    
+        static member private GetPropertyMethod = typeof<JsonValue>.GetMethod("GetPropertyForBinder", BindingFlags.NonPublic ||| BindingFlags.Instance)
+        static member private SetPropertyMethod = typeof<JsonValue>.GetMethod("set_Item")
+        static member private ToObjectMethod = typeof<JsonValue>.GetMethod("ToObject")
+        static member private ToStringMethod = typeof<obj>.GetMethod("ToString")
+
+        override this.BindGetMember(binder: GetMemberBinder) : DynamicMetaObject =
+            let resultExpression = Expression.Call(Expression.Convert(this.Expression, typeof<JsonValue>), JsonValueMetaObject.GetPropertyMethod, Expression.Constant(binder.Name))
+            DynamicMetaObject(resultExpression, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
+    
+        override this.BindSetMember(binder: SetMemberBinder, value: DynamicMetaObject) : DynamicMetaObject =
+            let setExpression = Expression.Call(Expression.Convert(this.Expression, typeof<JsonValue>), JsonValueMetaObject.SetPropertyMethod, Expression.Constant(binder.Name), value.Expression)
+
+            let returnExpre = Expression.Block(setExpression, value.Expression)
+
+            DynamicMetaObject(returnExpre, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
+    
+        override this.BindConvert(binder: ConvertBinder) : DynamicMetaObject =
+            let convertMethod = JsonValueMetaObject.ToObjectMethod.MakeGenericMethod(binder.Type)
+            let convertExpression = Expression.Call(Expression.Convert(this.Expression, typeof<JsonValue>), convertMethod)
+            DynamicMetaObject(convertExpression, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
+   
+    
+        override this.BindGetIndex(binder: GetIndexBinder, indexes: DynamicMetaObject[]) : DynamicMetaObject =
+            // Check that exactly one index is provided
+            if indexes.Length <> 1 then
+                failwithf "Json does not support indexes length <> 1: %i" indexes.Length
+        
+            let indexExpr = indexes.[0].Expression
+            let targetType = Expression.Convert(this.Expression, typeof<JsonValue>)
+            let resultExpression = Expression.Call(
+                targetType,
+                JsonValueMetaObject.GetPropertyMethod,
+                Expression.Call(indexExpr, JsonValueMetaObject.ToStringMethod))
+
+            DynamicMetaObject(resultExpression, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
+        
+        override this.BindSetIndex (binder: SetIndexBinder, indexes: DynamicMetaObject array, value: DynamicMetaObject): DynamicMetaObject = 
+            // Check that exactly one index is provided
+            if indexes.Length <> 1 then
+                failwithf "Json does not support indexes length <> 1: %i" indexes.Length
+        
+            let indexExpr = indexes.[0].Expression
+            let targetType = Expression.Convert(this.Expression, typeof<JsonValue>)
+
+            let setExpression = Expression.Call(Expression.Convert(this.Expression, typeof<JsonValue>), JsonValueMetaObject.SetPropertyMethod, Expression.Call(indexExpr, JsonValueMetaObject.ToStringMethod), value.Expression)
+
+            let returnExpre = Expression.Block(setExpression, value.Expression)
+
+            DynamicMetaObject(returnExpre, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
+
+    
+        override this.GetDynamicMemberNames() : IEnumerable<string> =
+            match value with
+            | :? JsonValue as jsonValue ->
+                match jsonValue with
+                | Object o -> seq { for kv in o do yield kv.Key }
+                | _ -> Seq.empty
+            | _ -> Seq.empty
