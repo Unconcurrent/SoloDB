@@ -1,4 +1,4 @@
-﻿namespace SoloDatabase
+﻿namespace SoloDatabase.MongoDB
 
 open Microsoft.Data.Sqlite
 open System.Linq.Expressions
@@ -10,12 +10,20 @@ open SoloDatabase.Types
 open System.IO
 open System.Text
 open SQLiteTools
-open JsonFunctions
-open FileStorage
-open Connections
-open Utils
+open SoloDatabase.JsonFunctions
+open SoloDatabase.FileStorage
+open SoloDatabase.Connections
+open SoloDatabase.Utils
+open SoloDatabase
 open System.Threading
 open System.Runtime.CompilerServices
+
+
+
+type InsertManyResult = {
+    Ids: ResizeArray<int64>
+    Count: int64
+}
 
 [<Extension>]
 type CollectionExtensions =
@@ -29,7 +37,11 @@ type CollectionExtensions =
 
     [<Extension>]
     static member InsertMany<'a>(collection: SoloDatabase.Collection<'a>, documents: 'a seq) =
-        collection.InsertBatch documents
+        let result =(collection.InsertBatch documents)
+        {
+            Ids = result
+            Count = result.Count
+        }
         
     [<Extension>]
     static member ReplaceOne<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>, document: 'a) =
@@ -54,6 +66,72 @@ type CollectionExtensions =
     [<Extension>]
     static member AsQueryable<'a>(collection: SoloDatabase.Collection<'a>) =
         collection.Select()
+
+type FilterDefinitionBuilder<'T> internal () =
+    let mutable filters =[]
+
+    // Add an equality filter
+    member this.Eq<'TField>(field: Expression<Func<'T, 'TField>>, value: 'TField) : FilterDefinitionBuilder<'T> =
+        let parameter = field.Parameters.[0]
+        let body = Expression.Equal(field.Body, Expression.Constant(value, typeof<'TField>))
+        let lambda = Expression.Lambda<Func<'T, bool>>(body, parameter)
+        filters <- lambda :: filters
+        this
+
+    // Add a greater-than filter
+    member this.Gt<'TField when 'TField :> IComparable>(field: Expression<Func<'T, 'TField>>, value: 'TField) : FilterDefinitionBuilder<'T> =
+        let parameter = field.Parameters.[0]
+        let body = Expression.GreaterThan(field.Body, Expression.Constant(value, typeof<'TField>))
+        let lambda = Expression.Lambda<Func<'T, bool>>(body, parameter)
+        filters <- lambda :: filters
+        this
+
+    // Add a less-than filter
+    member this.Lt<'TField when 'TField :> IComparable>(field: Expression<Func<'T, 'TField>>, value: 'TField) : FilterDefinitionBuilder<'T> =
+        let parameter = field.Parameters.[0]
+        let body = Expression.LessThan(field.Body, Expression.Constant(value, typeof<'TField>))
+        let lambda = Expression.Lambda<Func<'T, bool>>(body, parameter)
+        filters <- lambda :: filters
+        this
+
+    // Add a contains filter (for collections or strings)
+    member this.In<'TField>(field: Expression<Func<'T, 'TField>>, values: IEnumerable<'TField>) : FilterDefinitionBuilder<'T> =
+        let parameter = field.Parameters.[0]
+        let expressions =
+            values
+            |> Seq.map (fun value ->
+                Expression.Equal(field.Body, Expression.Constant(value, typeof<'TField>))
+            )
+            |> Seq.toList
+
+        let combinedBody =
+            expressions
+            |> List.reduce (fun acc expr -> Expression.OrElse(acc, expr))
+
+        let lambda = Expression.Lambda<Func<'T, bool>>(combinedBody, parameter)
+        filters <- lambda :: filters
+        this
+
+
+    // Combine all filters into a single LINQ expression
+    member this.Build() : Expression<Func<'T, bool>> =
+        if filters.IsEmpty then
+            Expression.Lambda<Func<'T, bool>>(Expression.Constant(true), Expression.Parameter(typeof<'T>, "x"))
+        else
+            let parameter = Expression.Parameter(typeof<'T>, "x")
+            let combined = 
+                filters
+                |> List.reduce (fun acc filter -> 
+                    Expression.AndAlso(acc.Body, Expression.Invoke(filter, parameter))
+                    |> Expression.Lambda<Func<'T, bool>>)
+            combined
+
+    static member op_Implicit(builder: FilterDefinitionBuilder<'T>) : Expression<Func<'T, bool>> =
+        builder.Build()
+
+[<Sealed>]
+type Builders<'T> =
+    static member Filter with get() = FilterDefinitionBuilder<'T> ()
 
 type MongoDatabase internal(soloDB: SoloDB) =
     member this.GetCollection<'doc> (name: string) =
