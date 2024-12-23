@@ -1,7 +1,5 @@
 ﻿namespace SoloDatabase
 
-open FSharp.Interop.Dynamic
-open System.Linq.Expressions
 
 module JsonSerializator =
     open System
@@ -16,6 +14,7 @@ module JsonSerializator =
     open System.Runtime.CompilerServices
     open Microsoft.FSharp.Reflection
     open System.Web
+    open System.Linq.Expressions
 
     let private implementsGeneric (genericInterfaceType: Type) (targetType: Type) =
         let genericInterfaceType = genericInterfaceType.GetGenericTypeDefinition()
@@ -28,9 +27,6 @@ module JsonSerializator =
 
         targetType.GetInterfaces()
         |> Array.exists (fun i -> i.IsGenericType && i.Name = genericInterfaceType.Name && i.Namespace = genericInterfaceType.Namespace)
-
-    let inline private isNullableType (typ: Type) =
-        typ.IsGenericType && typ.GetGenericTypeDefinition() = typedefof<Nullable<_>>
 
     type Token =
         | NullToken
@@ -602,6 +598,12 @@ module JsonSerializator =
 
         static member New() = JsonValue.Object(Dictionary(StringComparer.OrdinalIgnoreCase))
 
+        static member New(values: KeyValuePair<string, obj> seq) = 
+            let json = JsonValue.New()
+            for KeyValue(key ,v) in values do
+                json.[key] <- v
+            json
+        
         static member Parse (jsonString: string) =
             let parse (tokens: Token seq) : JsonValue =
                 let next(tokens: IEnumerator<Token>) =
@@ -679,7 +681,6 @@ module JsonSerializator =
             member this.GetMetaObject(expression: Linq.Expressions.Expression): DynamicMetaObject = 
                 JsonValueMetaObject(expression, BindingRestrictions.Empty, this)
 
-
     and internal JsonValueMetaObject(expression: Expression, restrictions: BindingRestrictions, value: obj) =
         inherit DynamicMetaObject(expression, restrictions, value)
     
@@ -741,3 +742,25 @@ module JsonSerializator =
                 | Object o -> seq { for kv in o do yield kv.Key }
                 | _ -> Seq.empty
             | _ -> Seq.empty
+
+
+    let createJson (values: #((obj * obj) seq)) = 
+        let json = JsonValue.New()
+        for (key, v) in values do
+            let key = 
+                match key with
+                | :? string as s -> s
+                | :? int16 as i -> i.ToString(CultureInfo.InvariantCulture)
+                | :? uint16 as i -> i.ToString(CultureInfo.InvariantCulture)
+                | :? int as i -> i.ToString(CultureInfo.InvariantCulture)
+                | :? uint as i -> i.ToString(CultureInfo.InvariantCulture)
+                | :? int64 as i -> i.ToString(CultureInfo.InvariantCulture)
+                | :? uint64 as i -> i.ToString(CultureInfo.InvariantCulture)
+
+                | :? float32 as i -> i.ToString(CultureInfo.InvariantCulture)
+                | :? float as i -> i.ToString(CultureInfo.InvariantCulture)
+                | :? decimal as i -> i.ToString(CultureInfo.InvariantCulture)
+                | other -> other.ToString()
+
+            json.[key] <- v
+        json
