@@ -199,7 +199,17 @@ module QueryTranslator =
             | :? ParameterExpression as pe -> visitParameter pe qb
             | :? BinaryExpression as be -> arrayIndex be.Left be.Right qb
             | other -> failwithf "Unknown array index expression of: %A" other
+        | ExpressionType.Index ->
+            let exp = exp :?> IndexExpression
+            if exp.Arguments.Count <> 1 then failwithf "The SQL translator does not support multiple args indexes."
+            let arge = exp.Arguments.[0]
+            if not (isFullyConstant arge) then failwithf "The SQL translator does not support non constant index arg."
+            
 
+            if arge.Type = typeof<string> then
+                let arg = evaluateExpr<obj> arge
+                visitProperty exp.Object arg ({new Expression() with member this.Type = exp.Object.Type}) qb
+            else arrayIndex exp.Object arge qb
         | _ ->
             raise (Exception(sprintf "Unhandled expression type: '%O'" exp.NodeType))
 
@@ -211,7 +221,7 @@ module QueryTranslator =
         qb.AppendRaw "]')"
         ()
 
-    and private visitProperty (o: Expression) (property: obj)  (m: MethodCallExpression) (qb: QueryBuilder) =
+    and private visitProperty (o: Expression) (property: obj)  (m: Expression) (qb: QueryBuilder) =
         match property with
         | :? string as property ->
             let memberAccess = {
@@ -375,7 +385,6 @@ module QueryTranslator =
             let o = m.Arguments.[0]
             let property = (m.Arguments.[1] :?> ConstantExpression).Value
 
-            
             visitProperty o property m qb
 
         | "Concat" when m.Type = typeof<string> ->            
@@ -421,6 +430,40 @@ module QueryTranslator =
             let likeMeth = Expression.Call(typeof<SoloDatabase.Extensions>.GetMethod(nameof(SoloDatabase.Extensions.Like)), m.Object, Expression.Call(typeof<String>.GetMethod("Concat", [|typeof<string>; typeof<string>|]), Expression.Constant("%"), arg))
             visit likeMeth qb
 
+        | "ToObject" when typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.Method.DeclaringType || m.Method.DeclaringType.FullName = "SoloDatabase.MongoDB.BsonDocument" ->
+            let castToType = m.Method.GetGenericArguments().[0]
+
+            let typ =
+                match castToType with
+                | OfType float
+                | OfType float32
+                | OfType decimal
+                    -> "REAL"
+                | OfType bool
+                | OfType int8
+                | OfType uint8
+                | OfType int16
+                | OfType uint16
+                | OfType int32
+                | OfType uint32
+                | OfType int64
+                | OfType uint64
+                | OfType nativeint
+                | OfType unativeint
+                    -> "INTEGER"
+                | _other -> "NOOP"
+
+            if typ = "NOOP" then
+                visit m.Object qb
+            else
+
+
+            qb.AppendRaw "CAST("
+            let innerQb = {qb with UpdateMode = false}
+            visit m.Object innerQb
+            qb.AppendRaw " AS "
+            qb.AppendRaw typ
+            qb.AppendRaw ")"
         | _ -> 
             raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 

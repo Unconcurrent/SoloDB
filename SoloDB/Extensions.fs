@@ -11,7 +11,7 @@ open FSharp.Interop.Dynamic
 [<Extension>]
 type Extensions =
     [<Extension>]
-    static member Set<'T>(this: 'T, value: 'T) : unit =
+    static member Set<'T, 'V>(this: 'T, value: 'V) : unit =
         failwithf "This is a dummy function for the SQL builder."
 
     [<Extension>]

@@ -95,6 +95,20 @@ type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string
 
         let finalSQL = postModifySQL finalSQL
 
+        let finalSQL =
+            // A patch to allow UPDATES with limits on SQLites without its support, I can out it inside the .Update(...)
+            // function, but I belive it will slow down and complicate all other normal queries, therefore I leave it here.
+            if finalSQL.StartsWith "UPDATE" && (this.SQLLimit.IsSome || this.SQLOffset > 0UL) then
+                match finalSQL.Split ([|"WHERE"|], StringSplitOptions.RemoveEmptyEntries) with
+                | [|preWhere ; postWhere|] -> $"{preWhere} WHERE Id IN (SELECT Id FROM \"{name}\" WHERE {postWhere})"
+                | [|_noWhere|] -> 
+                    match finalSQL.Split ([|"LIMIT"|], StringSplitOptions.RemoveEmptyEntries) with
+                    | [|preLimit ; postLimit|] -> $"{preLimit} WHERE Id IN (SELECT Id FROM \"{name}\" LIMIT {postLimit})"
+                    | _other -> failwithf "The SQL transator does not support this kind of UPDATE with LIMIT."
+                | _other -> failwithf "The SQL transator does not support this kind of UPDATE with WHERE and LIMIT."
+            else
+                finalSQL
+
         finalSQL, parameters
 
     member this.Limit(?count: uint64) =
