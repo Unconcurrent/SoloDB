@@ -207,7 +207,10 @@ module QueryTranslator =
             
 
             if arge.Type = typeof<string> then
-                let arg = evaluateExpr<obj> arge
+                let arg = evaluateExpr<string> arge
+                match arg with
+                | "Id" when isRootParameter exp.Object -> qb.AppendRaw $"{qb.TableNameDot}Id"
+                | arg ->
                 visitProperty exp.Object arg ({new Expression() with member this.Type = exp.Object.Type}) qb
             else arrayIndex exp.Object arge qb
         | _ ->
@@ -484,7 +487,7 @@ module QueryTranslator =
         else
             if qb.JsonExtractSelfValue then
                 if qb.StringBuilder.Length = 0 
-                then qb.AppendRaw $"json_extract(json({qb.TableNameDot}Value), '$')" // To avoit returning the jsonB format instead of normal json.
+                then qb.AppendRaw $"json_extract(json({qb.TableNameDot}Value), '$')" // To avoid returning the jsonB format instead of normal json.
                 else qb.AppendRaw $"jsonb_extract({qb.TableNameDot}Value, '$')"
             else
                 qb.AppendRaw $"{qb.TableNameDot}Value"
@@ -594,7 +597,10 @@ module QueryTranslator =
                 qb.AppendRaw(formatAccess pathStr) |> ignore            
         else 
         match m.OriginalExpression with
-        | None -> failwithf "Unable to parse the member access."
+        | None -> 
+            qb.AppendRaw "jsonb_extract("
+            visit m.Expression qb
+            qb.AppendRaw $", '$.{m.MemberName}')"
         | Some m ->
         if m.Expression = null then
             let value = (m.Member :?> PropertyInfo).GetValue null
