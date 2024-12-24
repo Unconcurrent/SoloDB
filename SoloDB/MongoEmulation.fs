@@ -21,6 +21,7 @@ open System.Runtime.CompilerServices
 open System.Runtime.InteropServices
 open System.Dynamic
 open System.Globalization
+open System.Reflection
 
 type BsonDocument (json: JsonValue) =
     new () = BsonDocument (JsonValue.New())
@@ -51,10 +52,81 @@ type BsonDocument (json: JsonValue) =
 
         | _ -> failwith "Invalid operation: the internal data structure is not an object."
 
+    member this.Contains(item: obj) =
+        let itemJson = JsonValue.Serialize item
+        match json with
+        | List l -> l.Contains itemJson
+        | Object o -> o.Keys.Contains (itemJson.ToObject<string>())
+        | other -> raise (InvalidOperationException (sprintf "Cannot call Contains(%A) on %A" itemJson other))
+
     member this.ToObject<'T>() = json.ToObject<'T>()
 
     // Method to serialize this BsonDocument to a JSON string
     member this.ToJsonString () = json.ToJsonString ()
+
+    member this.AsBoolean = match json with JsonValue.Boolean b -> b | _ -> raise (InvalidCastException("Not a boolean"))
+    member this.AsBsonArray = match json with JsonValue.List _l -> BsonDocument(json) | _ -> raise (InvalidCastException("Not a BSON array"))
+    member this.AsBsonDocument = match json with JsonValue.Object _o -> BsonDocument(json) | _ -> raise (InvalidCastException("Not a BSON document"))
+    member this.AsString = match json with JsonValue.String s -> s | _ -> raise (InvalidCastException("Not a string"))
+    member this.AsInt32 = match json with JsonValue.Number n when n <= decimal Int32.MaxValue && n >= decimal Int32.MinValue -> int n | _ -> raise (InvalidCastException("Not an int32"))
+    member this.AsInt64 = match json with JsonValue.Number n when n <= decimal Int64.MaxValue && n >= decimal Int64.MinValue -> int64 n | _ -> raise (InvalidCastException("Not an int64"))
+    member this.AsDouble = match json with JsonValue.Number n -> double n | _ -> raise (InvalidCastException("Not a double"))
+    member this.AsDecimal = match json with JsonValue.Number n -> n | _ -> raise (InvalidCastException("Not a decimal"))
+
+    member this.IsBoolean = match json with JsonValue.Boolean _ -> true | _ -> false
+    member this.IsBsonArray = match json with JsonValue.List _ -> true | _ -> false
+    member this.IsBsonDocument = match json with JsonValue.Object _ -> true | _ -> false
+    member this.IsString = match json with JsonValue.String _ -> true | _ -> false
+    member this.IsInt32 = match json with JsonValue.Number n when n <= decimal Int32.MaxValue && n >= decimal Int32.MinValue -> true | _ -> false
+    member this.IsInt64 = match json with JsonValue.Number n when n <= decimal Int64.MaxValue && n >= decimal Int64.MinValue -> true | _ -> false
+    member this.IsDouble = match json with JsonValue.Number _ -> true | _ -> false
+
+    member this.ToBoolean() =
+        match json with
+        | JsonValue.Boolean b -> b
+        | JsonValue.String "" -> false
+        | JsonValue.String _s -> true
+        | JsonValue.Number n when n = decimal 0 -> false
+        | JsonValue.Number _n -> true
+        | JsonValue.List _l -> true
+        | JsonValue.Object _o -> true
+        | JsonValue.Null -> false
+
+    member this.ToInt32() =
+        match json with
+        | JsonValue.Number n when n <= decimal Int32.MaxValue && n >= decimal Int32.MinValue -> int n
+        | JsonValue.String s -> 
+            match Int32.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture) with
+            | true, i -> i
+            | false, _ -> raise (InvalidCastException("Cannot convert to int32"))
+        | _ -> raise (InvalidCastException("Cannot convert to int32"))
+
+    member this.ToInt64() =
+        match json with
+        | JsonValue.Number n when n <= decimal Int64.MaxValue && n >= decimal Int64.MinValue -> int64 n
+        | JsonValue.String s -> 
+            match Int64.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture) with
+            | true, i -> i
+            | false, _ -> raise (InvalidCastException("Cannot convert to int64"))
+        | _ -> raise (InvalidCastException("Cannot convert to int64"))
+
+    member this.ToDouble() =
+        match json with
+        | JsonValue.Number n -> double n
+        | JsonValue.String s -> 
+            match Double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture) with
+            | true, d -> d
+            | false, _ -> raise (InvalidCastException("Cannot convert to double"))
+        | _ -> raise (InvalidCastException("Cannot convert to double"))
+
+    member this.ToDecimal() =
+        match json with
+        | JsonValue.Number n -> n
+        | JsonValue.String s -> 
+            match Decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture) with
+            | true, d -> d
+            | false, _ -> raise (InvalidCastException("Cannot convert to decimal"))
+        | _ -> raise (InvalidCastException("Cannot convert to decimal"))
 
     // Method to deserialize a JSON string to update this BsonDocument
     static member Deserialize (jsonString: string) =
@@ -75,9 +147,76 @@ type BsonDocument (json: JsonValue) =
         override this.GetEnumerator (): IEnumerator = 
             (this :> IEnumerable<KeyValuePair<string, JsonValue>>).GetEnumerator () :> IEnumerator
 
+    member internal this.GetPropertyForBinder(name: string) =
+        match json.GetPropertyForBinder name with
+        | :? JsonValue as v -> v |> BsonDocument |> box
+        | other -> other
+
     interface IDynamicMetaObjectProvider with
         member this.GetMetaObject(expression: Linq.Expressions.Expression): DynamicMetaObject = 
-            JsonValueMetaObject(expression, BindingRestrictions.Empty, json)
+            BsonDocumentMetaObject(expression, BindingRestrictions.Empty, this)
+
+and internal BsonDocumentMetaObject(expression: Expression, restrictions: BindingRestrictions, value: BsonDocument) =
+    inherit DynamicMetaObject(expression, restrictions, value)
+
+    static member private GetPropertyMethod = typeof<BsonDocument>.GetMethod("GetPropertyForBinder", BindingFlags.NonPublic ||| BindingFlags.Instance)
+    static member private SetPropertyMethod = typeof<BsonDocument>.GetMethod("set_Item")
+    static member private ToJsonMethod = typeof<BsonDocument>.GetMethod("ToJsonString")
+    static member private ToStringMethod = typeof<obj>.GetMethod("ToString")
+
+    override this.BindGetMember(binder: GetMemberBinder) : DynamicMetaObject =
+        let resultExpression = Expression.Call(
+            Expression.Convert(this.Expression, typeof<BsonDocument>),
+            BsonDocumentMetaObject.GetPropertyMethod,
+            Expression.Constant(binder.Name)
+        )
+        DynamicMetaObject(resultExpression, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
+
+    override this.BindSetMember(binder: SetMemberBinder, value: DynamicMetaObject) : DynamicMetaObject =
+        let setExpression = Expression.Call(
+            Expression.Convert(this.Expression, typeof<BsonDocument>),
+            BsonDocumentMetaObject.SetPropertyMethod,
+            Expression.Constant(binder.Name),
+            value.Expression
+        )
+        let returnExpression = Expression.Block(setExpression, value.Expression)
+        DynamicMetaObject(returnExpression, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
+
+    override this.BindConvert(binder: ConvertBinder) : DynamicMetaObject =
+        let convertExpression = Expression.Call(
+            Expression.Convert(this.Expression, typeof<BsonDocument>),
+            BsonDocumentMetaObject.ToJsonMethod
+        )
+        DynamicMetaObject(convertExpression, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
+
+    override this.BindGetIndex(binder: GetIndexBinder, indexes: DynamicMetaObject[]) : DynamicMetaObject =
+        if indexes.Length <> 1 then
+            failwithf "BSON does not support indexes length <> 1: %i" indexes.Length
+        let indexExpr = indexes.[0].Expression
+        let resultExpression = Expression.Call(
+            Expression.Convert(this.Expression, typeof<BsonDocument>),
+            BsonDocumentMetaObject.GetPropertyMethod,
+            Expression.Call(indexExpr, BsonDocumentMetaObject.ToStringMethod)
+        )
+        DynamicMetaObject(resultExpression, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
+
+    override this.BindSetIndex(binder: SetIndexBinder, indexes: DynamicMetaObject[], value: DynamicMetaObject) : DynamicMetaObject =
+        if indexes.Length <> 1 then
+            failwithf "BSON does not support indexes length <> 1: %i" indexes.Length
+        let indexExpr = indexes.[0].Expression
+        let setExpression = Expression.Call(
+            Expression.Convert(this.Expression, typeof<BsonDocument>),
+            BsonDocumentMetaObject.SetPropertyMethod,
+            Expression.Call(indexExpr, BsonDocumentMetaObject.ToStringMethod),
+            value.Expression
+        )
+        let returnExpression = Expression.Block(setExpression, value.Expression)
+        DynamicMetaObject(returnExpression, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
+
+    override this.GetDynamicMemberNames() : IEnumerable<string> =
+        match value.Json with
+        | JsonValue.Object o -> seq { for kv in o do yield kv.Key }
+        | _ -> Seq.empty
 
 
 type InsertManyResult = {
@@ -87,6 +226,18 @@ type InsertManyResult = {
 
 [<Extension>]
 type CollectionExtensions =
+    [<Extension>]
+    static member Remove<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>) : int64 =
+        collection.Delete().Where(filter).Execute()
+
+    [<Extension>]
+    static member CountDocuments<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>) : int64 =
+        collection.CountWhere(filter)
+
+    [<Extension>]
+    static member CountDocuments<'a>(collection: SoloDatabase.Collection<'a>) : int64 =
+        collection.CountAll()
+
     [<Extension>]
     static member FirstOrDefault(builder: SoloDatabase.FinalBuilder<'T, 'Q, 'R>) =
         builder.Enumerate() |> Seq.tryHead |> Option.defaultWith (fun() -> Unchecked.defaultof<'R>)
@@ -131,24 +282,43 @@ type CollectionExtensions =
     static member AsQueryable<'a>(collection: SoloDatabase.Collection<'a>) =
         collection.Select()
 
+module private Helper =
+    // Helper to create an expression from a string field name
+    let internal getPropertyExpression (fieldPath: string) : Expression<Func<'T, 'TField>> =
+        let parameter = Expression.Parameter(typeof<'T>, "x")
+        let fields = fieldPath.Split('.')
+        
+        let rec buildExpression (expr: Expression) (fields: string list) : Expression =
+            match fields with
+            | [] -> expr
+            | field :: rest -> // Handle intermediate fields
+                let field = 
+                    if field = "_id" then "Id"
+                    else field
+
+                let propertyOrField =
+                    if expr.Type.GetField(field) <> null || expr.Type.GetProperty(field) <> null then
+                        Expression.PropertyOrField(expr, field) :> Expression
+                    else
+                        let indexExpr =
+                            Expression.MakeIndex(expr, expr.Type.GetProperty "Item", [Expression.Constant field]) :> Expression
+
+                        if rest.IsEmpty && field <> "Id" && (expr.Type = typeof<BsonDocument> || expr.Type = typeof<JsonValue>) then
+                            Expression.Call(indexExpr, expr.Type.GetMethod("ToObject").MakeGenericMethod(typeof<'TField>))
+                        elif field = "Id" then
+                            Expression.Convert(Expression.Convert(indexExpr, typeof<obj>), typeof<'TField>)
+                        else
+                            indexExpr
+
+                buildExpression propertyOrField rest
+
+        let finalExpr = buildExpression (parameter :> Expression) (fields |> List.ofArray)
+        Expression.Lambda<Func<'T, 'TField>>(finalExpr, parameter)
+
 type FilterDefinitionBuilder<'T> () =
     let mutable filters = []
 
-    // Helper to create an expression from a string field name
-    let makeExpression (fieldName: string) : Expression<Func<'T, 'TField>> =
-        let parameter = Expression.Parameter(typeof<'T>, "x")
-        let propertyOrField =
-            if typeof<'T>.GetField fieldName <> null || typeof<'T>.GetProperty fieldName <> null then
-                Expression.PropertyOrField(parameter, fieldName) :> Expression
-            else 
-                let indexExpr =
-                    Expression.MakeIndex(parameter, typeof<'T>.GetProperty "Item", [Expression.Constant fieldName]) :> Expression
-
-                if typeof<'T> = typeof<BsonDocument> || typeof<'T> = typeof<JsonValue> then
-                    Expression.Call(indexExpr, typeof<'T>.GetMethod("ToObject").MakeGenericMethod(typeof<'TField>))
-                else 
-                    indexExpr
-        Expression.Lambda<Func<'T, 'TField>>(propertyOrField, parameter)
+    member this.Empty = Expression.Lambda<Func<'T, bool>>(Expression.Constant(true), Expression.Parameter(typeof<'T>, "x"))
 
     // Add an equality filter
     member this.Eq<'TField>(field: Expression<Func<'T, 'TField>>, value: 'TField) : FilterDefinitionBuilder<'T> =
@@ -194,16 +364,16 @@ type FilterDefinitionBuilder<'T> () =
 
     // Overloaded method for string field names
     member this.Eq<'TField>(field: string, value: 'TField) : FilterDefinitionBuilder<'T> =
-        this.Eq<'TField>(makeExpression (field), value)
+        this.Eq<'TField>(Helper.getPropertyExpression (field), value)
 
     member this.Gt<'TField when 'TField :> IComparable>(field: string, value: 'TField) : FilterDefinitionBuilder<'T> =
-        this.Gt<'TField>(makeExpression (field), value)
+        this.Gt<'TField>(Helper.getPropertyExpression (field), value)
 
     member this.Lt<'TField when 'TField :> IComparable>(field: string, value: 'TField) : FilterDefinitionBuilder<'T> =
-        this.Lt<'TField>(makeExpression (field), value)
+        this.Lt<'TField>(Helper.getPropertyExpression (field), value)
 
     member this.In<'TField>(field: string, values: IEnumerable<'TField>) : FilterDefinitionBuilder<'T> =
-        this.In<'TField>(makeExpression (field), values)
+        this.In<'TField>(Helper.getPropertyExpression (field), values)
 
     // Combine all filters into a single LINQ expression
     member this.Build() : Expression<Func<'T, bool>> =
@@ -255,16 +425,71 @@ type UpdateDefinitionBuilder<'T> () =
         updates <- lambda :: updates
         this
 
+    member this.Set<'TFieldValue>(field: string, value: 'TFieldValue) : UpdateDefinitionBuilder<'T> =
+        this.Set(Helper.getPropertyExpression field, value)
+
+    member this.UnSet<'TFieldValue>(field: string) : UpdateDefinitionBuilder<'T> =
+        this.UnSet(Helper.getPropertyExpression field)
+
+    member this.Inc<'TFieldValue>(field: string, value: 'TFieldValue) : UpdateDefinitionBuilder<'T> =
+        this.Inc(Helper.getPropertyExpression field, value)
+
     member this.Build() : Expression<Action<'T>> array =
         updates |> List.toArray
 
     static member op_Implicit(builder: UpdateDefinitionBuilder<'T>) : Expression<Action<'T>> array =
         builder.Build()
 
+type QueryDefinitionBuilder<'T>() =
+    let filterBuilder = new FilterDefinitionBuilder<'T>()
+
+    member this.Empty = filterBuilder.Empty
+
+    member this.EQ<'TField>(field: Expression<Func<'T, 'TField>>, value: 'TField) : QueryDefinitionBuilder<'T> =
+        filterBuilder.Eq<'TField>(field, value) |> ignore
+        this
+
+    member this.GT<'TField when 'TField :> IComparable>(field: Expression<Func<'T, 'TField>>, value: 'TField) : QueryDefinitionBuilder<'T> =
+        filterBuilder.Gt<'TField>(field, value) |> ignore
+        this
+
+    member this.LT<'TField when 'TField :> IComparable>(field: Expression<Func<'T, 'TField>>, value: 'TField) : QueryDefinitionBuilder<'T> =
+        filterBuilder.Lt<'TField>(field, value) |> ignore
+        this
+
+    member this.IN<'TField>(field: Expression<Func<'T, 'TField>>, values: IEnumerable<'TField>) : QueryDefinitionBuilder<'T> =
+        filterBuilder.In<'TField>(field, values) |> ignore
+        this
+
+    member this.EQ<'TField>(field: string, value: 'TField) : QueryDefinitionBuilder<'T> =
+        filterBuilder.Eq<'TField>(field, value) |> ignore
+        this
+
+    member this.GT<'TField when 'TField :> IComparable>(field: string, value: 'TField) : QueryDefinitionBuilder<'T> =
+        filterBuilder.Gt<'TField>(field, value) |> ignore
+        this
+
+    member this.LT<'TField when 'TField :> IComparable>(field: string, value: 'TField) : QueryDefinitionBuilder<'T> =
+        filterBuilder.Lt<'TField>(field, value) |> ignore
+        this
+
+    member this.IN<'TField>(field: string, values: IEnumerable<'TField>) : QueryDefinitionBuilder<'T> =
+        filterBuilder.In<'TField>(field, values) |> ignore
+        this
+
+    // Method to combine all filters into a single LINQ expression and build the query.
+    member this.Build() : Expression<Func<'T, bool>> =
+        filterBuilder.Build()
+
+    static member op_Implicit(builder: QueryDefinitionBuilder<'T>) : Expression<Func<'T, bool>> =
+        builder.Build()
+
 [<Sealed>]
 type Builders<'T> =
     static member Filter with get() = FilterDefinitionBuilder<'T> ()
     static member Update with get() = UpdateDefinitionBuilder<'T> ()
+
+    static member Query with get() = QueryDefinitionBuilder<'T> ()
 
 type MongoDatabase internal (soloDB: SoloDB) =
     member this.GetCollection<'doc> (name: string) =

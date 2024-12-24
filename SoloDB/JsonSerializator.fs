@@ -231,7 +231,6 @@ module JsonSerializator =
                 Object entries
 
             
-
             let valueType = value.GetType()
 
             if obj.ReferenceEquals(value, null) then
@@ -459,8 +458,8 @@ module JsonSerializator =
             else if targetType = typeof<JsonValue> then
                 json
             // We cannot reference it forwards, so we do this.
-            else if targetType.Name = "BsonDocument" && targetType.Namespace = "SoloDatabase.MongoDB" then
-                Activator.CreateInstance(targetType, [|json|])
+            else if targetType.FullName = "SoloDatabase.MongoDB.BsonDocument" then
+                Activator.CreateInstance(targetType, json)
             else if targetType.Name = "Nullable`1" && targetType.GenericTypeArguments.Length = 1 then 
                 let innerValue = JsonValue.Deserialize targetType.GenericTypeArguments.[0] json
                 if isNull innerValue then
@@ -712,20 +711,27 @@ module JsonSerializator =
             override this.GetEnumerator (): IEnumerator = 
                 (this :> IEnumerable<KeyValuePair<string, JsonValue>>).GetEnumerator () :> IEnumerator
 
-    and internal JsonValueMetaObject(expression: Expression, restrictions: BindingRestrictions, value: obj) =
+    and internal JsonValueMetaObject(expression: Expression, restrictions: BindingRestrictions, value: JsonValue) =
         inherit DynamicMetaObject(expression, restrictions, value)
     
         static member private GetPropertyMethod = typeof<JsonValue>.GetMethod("GetPropertyForBinder", BindingFlags.NonPublic ||| BindingFlags.Instance)
         static member private SetPropertyMethod = typeof<JsonValue>.GetMethod("set_Item")
         static member private ToObjectMethod = typeof<JsonValue>.GetMethod("ToObject")
         static member private ToStringMethod = typeof<obj>.GetMethod("ToString")
+        static member private SerializeMethod = typeof<JsonValue>.GetMethod("Serialize")
 
         override this.BindGetMember(binder: GetMemberBinder) : DynamicMetaObject =
             let resultExpression = Expression.Call(Expression.Convert(this.Expression, typeof<JsonValue>), JsonValueMetaObject.GetPropertyMethod, Expression.Constant(binder.Name))
             DynamicMetaObject(resultExpression, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
+
     
         override this.BindSetMember(binder: SetMemberBinder, value: DynamicMetaObject) : DynamicMetaObject =
-            let setExpression = Expression.Call(Expression.Convert(this.Expression, typeof<JsonValue>), JsonValueMetaObject.SetPropertyMethod, Expression.Constant(binder.Name), value.Expression)
+            let setExpression = Expression.Call(
+                Expression.Convert(this.Expression, typeof<JsonValue>), 
+                JsonValueMetaObject.SetPropertyMethod, 
+                Expression.Constant(binder.Name), 
+                Expression.Call(JsonValueMetaObject.SerializeMethod, value.Expression)
+            )
 
             let returnExpre = Expression.Block(setExpression, value.Expression)
 
@@ -759,7 +765,12 @@ module JsonSerializator =
             let indexExpr = indexes.[0].Expression
             let targetType = Expression.Convert(this.Expression, typeof<JsonValue>)
 
-            let setExpression = Expression.Call(Expression.Convert(this.Expression, typeof<JsonValue>), JsonValueMetaObject.SetPropertyMethod, Expression.Call(indexExpr, JsonValueMetaObject.ToStringMethod), value.Expression)
+            let setExpression = Expression.Call(
+                Expression.Convert(this.Expression, typeof<JsonValue>), 
+                JsonValueMetaObject.SetPropertyMethod,
+                Expression.Call(indexExpr, JsonValueMetaObject.ToStringMethod),
+                Expression.Call(JsonValueMetaObject.SerializeMethod, value.Expression)
+            )
 
             let returnExpre = Expression.Block(setExpression, value.Expression)
 
@@ -768,10 +779,7 @@ module JsonSerializator =
     
         override this.GetDynamicMemberNames() : IEnumerable<string> =
             match value with
-            | :? JsonValue as jsonValue ->
-                match jsonValue with
-                | Object o -> seq { for kv in o do yield kv.Key }
-                | _ -> Seq.empty
+            | Object o -> seq { for kv in o do yield kv.Key }
             | _ -> Seq.empty
 
 
