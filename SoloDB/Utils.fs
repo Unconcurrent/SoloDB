@@ -1,6 +1,5 @@
 ﻿namespace SoloDatabase
 
-open System.Runtime.CompilerServices
 open System
 open System.Collections.Generic
 
@@ -9,15 +8,10 @@ open System.Collections.Generic
 #nowarn "0044"
 
 module Utils =
-    open System
     open System.Collections.Concurrent
-    open System.Reflection
-    open SoloDatabase.Types
     open System.Security.Cryptography
     open System.IO
     open System.Text
-    open System.Runtime.InteropServices
-    open Microsoft.FSharp.NativeInterop
     open System.Runtime.ExceptionServices
     
     let isNull x = Object.ReferenceEquals(x, null)
@@ -101,11 +95,45 @@ module Utils =
 
     let internal nameToType (typeName: string) = 
         nameToTypeCache.GetOrAdd(typeName, fun typeName -> 
-                                            let fastType = Type.GetType(typeName)
-                                            if fastType <> null then fastType
-                                            else AppDomain.CurrentDomain.GetAssemblies() 
-                                                    |> Seq.collect(fun a -> a.GetTypes()) 
-                                                    |> Seq.find(fun t -> t.FullName = typeName)
+                                            match typeName with
+                                            | "Double" | "double" -> typeof<double>
+                                            | "Single" | "float" -> typeof<float>
+                                            | "Byte" | "byte" -> typeof<byte>
+                                            | "SByte" | "sbyte" -> typeof<sbyte>
+                                            | "Int16" | "short" -> typeof<Int16>
+                                            | "UInt16" | "ushort" -> typeof<UInt16>
+                                            | "Int32" | "int" -> typeof<int>
+                                            | "UInt32" | "uint" -> typeof<uint>
+                                            | "Int64" | "long" -> typeof<Int64>
+                                            | "UInt64" | "ulong" -> typeof<UInt64>
+                                            | "Char" | "char" -> typeof<char>
+                                            | "Boolean" | "bool" -> typeof<bool>
+                                            | "Object" | "object" -> typeof<obj>
+                                            | "String" | "string" -> typeof<string>
+                                            | "Decimal" | "decimal" -> typeof<decimal>
+                                            | "DateTime" -> typeof<DateTime>
+                                            | "Guid" -> typeof<Guid>
+                                            | "TimeSpan" -> typeof<TimeSpan>
+                                            | "IntPtr" -> typeof<IntPtr>
+                                            | "UIntPtr" -> typeof<UIntPtr>
+                                            | "Array" -> typeof<Array>
+                                            | "Delegate" -> typeof<Delegate>
+                                            | "MulticastDelegate" -> typeof<MulticastDelegate>
+                                            | "IDisposable" -> typeof<System.IDisposable>
+                                            | "Stream" -> typeof<System.IO.Stream>
+                                            | "Exception" -> typeof<System.Exception>
+                                            | "Thread" -> typeof<System.Threading.Thread>
+                                            | typeName ->
+
+                                            match Type.GetType(typeName) with
+                                            | null -> 
+                                                match Type.GetType("System." + typeName) with
+                                                | null ->
+                                                    AppDomain.CurrentDomain.GetAssemblies() 
+                                                        |> Seq.collect(fun a -> a.GetTypes()) 
+                                                        |> Seq.find(fun t -> t.FullName = typeName)
+                                                | fastType -> fastType
+                                            | fastType -> fastType
                                             )
 
     let private shaHashBytes (bytes: byte array) =
@@ -127,6 +155,11 @@ module Utils =
 
         sb.ToString()
 
+    [<return: Struct>]
+    let internal (|OfType|_|) (_typ: 'x -> 'a) (objType: Type) =
+        let name = typeof<'a>.Name
+        let typ = nameToType name
+        if typ.IsAssignableFrom(objType) then ValueSome () else ValueNone
 
     let mutable debug =
         #if DEBUG

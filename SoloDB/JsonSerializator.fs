@@ -149,6 +149,15 @@ module JsonSerializator =
             EndOfInput
         }
 
+    [<Struct>]
+    type JsonValueType =
+    | Null = 1uy
+    | Boolean = 2uy
+    | String = 3uy
+    | Number = 4uy
+    | List = 5uy
+    | Object = 6uy
+
     type JsonValue =
         | Null
         | Boolean of bool
@@ -175,7 +184,6 @@ module JsonSerializator =
                 let method = typeof<JsonValue>.GetMethod(nameof(JsonValue.SerializeReadOnlyDictionary), BindingFlags.NonPublic ||| BindingFlags.Static)
                 let genericMethod = method.MakeGenericMethod(genericArguments)
                 genericMethod.Invoke(null, [| obj |]) :?> JsonValue
-            
 
         static member Serialize (value: obj) =
             let trySerializePrimitive (value: obj) =
@@ -230,6 +238,8 @@ module JsonSerializator =
                 Null
             else if typeof<JsonValue>.IsAssignableFrom valueType then
                 value :?> JsonValue
+            else if valueType.FullName = "SoloDatabase.MongoDB.BsonDocument" then
+                valueType.GetProperty("Json").GetValue(value) :?> JsonValue
             else match trySerializePrimitive value with
                     | Null ->
                         if typeof<IDictionary>.IsAssignableFrom(valueType) then
@@ -253,7 +263,7 @@ module JsonSerializator =
         static member SerializeWithType (value: obj) =
             let json = JsonValue.Serialize value
             match json, value.GetType() |> typeToName with
-            | Object _, Some t -> json["$type"] <- t
+            | Object _, Some t -> json["$type"] <- String t
             | other -> ()
             json
 
@@ -448,6 +458,9 @@ module JsonSerializator =
                 JsonValue.DeserializeDynamic json
             else if targetType = typeof<JsonValue> then
                 json
+            // We cannot reference it forwards, so we do this.
+            else if targetType.Name = "BsonDocument" && targetType.Namespace = "SoloDatabase.MongoDB" then
+                Activator.CreateInstance(targetType, [|json|])
             else if targetType.Name = "Nullable`1" && targetType.GenericTypeArguments.Length = 1 then 
                 let innerValue = JsonValue.Deserialize targetType.GenericTypeArguments.[0] json
                 if isNull innerValue then
@@ -472,6 +485,15 @@ module JsonSerializator =
                     | _ -> failwithf "JSON value cannot be deserialized into type %A" targetType
                 | primitive -> primitive
 
+        // For C# usage.
+        member this.JsonType = 
+            match this with 
+            | Null -> JsonValueType.Null
+            | Boolean _b -> JsonValueType.Boolean
+            | String _s -> JsonValueType.String
+            | Number _n -> JsonValueType.Number
+            | List _l -> JsonValueType.List
+            | Object _o -> JsonValueType.Object
 
         member this.ToObject (targetType: Type) =
             JsonValue.Deserialize targetType this
@@ -547,11 +569,7 @@ module JsonSerializator =
                 | true, value -> value
                 | false, _ -> failwith "Property not found"
 
-            and set(name: string) (value: obj) =
-                let jValue =
-                    match value with
-                    | :? JsonValue as v -> v
-                    | value -> JsonValue.Serialize value
+            and set(name: string) (jValue: JsonValue) =
                 this.SetProperty (name, jValue)
 
         static member private Jsonize value (write: string -> unit) =
@@ -601,7 +619,7 @@ module JsonSerializator =
         static member New(values: KeyValuePair<string, obj> seq) = 
             let json = JsonValue.New()
             for KeyValue(key ,v) in values do
-                json.[key] <- v
+                json.[key] <- JsonValue.Serialize v
             json
         
         static member Parse (jsonString: string) =
@@ -677,9 +695,22 @@ module JsonSerializator =
 
         override this.ToString() = this.ToJsonString()
 
+        static member op_Implicit(o: obj) : JsonValue =
+            JsonValue.Serialize o
+
         interface IDynamicMetaObjectProvider with
             member this.GetMetaObject(expression: Linq.Expressions.Expression): DynamicMetaObject = 
                 JsonValueMetaObject(expression, BindingRestrictions.Empty, this)
+
+        interface IEnumerable<KeyValuePair<string, JsonValue>> with
+            override this.GetEnumerator (): IEnumerator<KeyValuePair<string,JsonValue>> =
+                match this with
+                | Object o -> o.GetEnumerator()
+                | List l -> (l |> Seq.indexed |> Seq.map(fun (i, v) -> KeyValuePair<string, JsonValue>(string i, v))).GetEnumerator()
+                | _other -> failwithf "This Json type does not support iteration: %A" (this.JsonType)
+
+            override this.GetEnumerator (): IEnumerator = 
+                (this :> IEnumerable<KeyValuePair<string, JsonValue>>).GetEnumerator () :> IEnumerator
 
     and internal JsonValueMetaObject(expression: Expression, restrictions: BindingRestrictions, value: obj) =
         inherit DynamicMetaObject(expression, restrictions, value)
@@ -762,5 +793,5 @@ module JsonSerializator =
                 | :? decimal as i -> i.ToString(CultureInfo.InvariantCulture)
                 | other -> other.ToString()
 
-            json.[key] <- v
+            json.[key] <- JsonValue.Serialize v
         json

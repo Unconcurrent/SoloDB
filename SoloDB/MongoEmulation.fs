@@ -15,9 +15,69 @@ open SoloDatabase.FileStorage
 open SoloDatabase.Connections
 open SoloDatabase.Utils
 open SoloDatabase
+open SoloDatabase.JsonSerializator
 open System.Threading
 open System.Runtime.CompilerServices
+open System.Runtime.InteropServices
+open System.Dynamic
+open System.Globalization
 
+type BsonDocument (json: JsonValue) =
+    new () = BsonDocument (JsonValue.New())
+    new (objToSerialize: obj) = BsonDocument (JsonValue.Serialize objToSerialize)
+
+    member this.Json = json
+
+    // Method to add or update a key-value pair
+    member this.Add (key: string, value: obj) =
+        json.[key] <- JsonValue.Serialize value
+
+    // Method to retrieve a value by key
+    member this.GetValue (key: string) : JsonValue =
+        match json.TryGetProperty(key) with
+        | true, v -> v
+        | false, _ -> JsonValue.Null
+
+    // Method to remove a key-value pair
+    member this.Remove (key: string) : bool =
+        match json with
+        | JsonValue.Object(map) -> map.Remove(key)
+        | JsonValue.List(l) -> 
+            let index = Int32.Parse(key, CultureInfo.InvariantCulture)
+            if index < l.Count then
+                l.RemoveAt(index)
+                true
+            else false
+
+        | _ -> failwith "Invalid operation: the internal data structure is not an object."
+
+    member this.ToObject<'T>() = json.ToObject<'T>()
+
+    // Method to serialize this BsonDocument to a JSON string
+    member this.ToJsonString () = json.ToJsonString ()
+
+    // Method to deserialize a JSON string to update this BsonDocument
+    static member Deserialize (jsonString: string) =
+        BsonDocument (JsonValue.Parse (jsonString))
+
+    // Override of ToString to return the JSON string representation of the document
+    override this.ToString () = this.ToJsonString ()
+
+    member this.Item
+        with get (key: string) : BsonDocument = 
+            json.[key] |> BsonDocument
+        and set (key: string) (value: BsonDocument) =
+            json.[key] <- value.Json
+
+    interface IEnumerable<KeyValuePair<string, JsonValue>> with
+        override this.GetEnumerator ()  =
+            (json :> IEnumerable<KeyValuePair<string, JsonValue>>).GetEnumerator ()
+        override this.GetEnumerator (): IEnumerator = 
+            (this :> IEnumerable<KeyValuePair<string, JsonValue>>).GetEnumerator () :> IEnumerator
+
+    interface IDynamicMetaObjectProvider with
+        member this.GetMetaObject(expression: Linq.Expressions.Expression): DynamicMetaObject = 
+            JsonValueMetaObject(expression, BindingRestrictions.Empty, json)
 
 
 type InsertManyResult = {
@@ -27,6 +87,10 @@ type InsertManyResult = {
 
 [<Extension>]
 type CollectionExtensions =
+    [<Extension>]
+    static member FirstOrDefault(builder: SoloDatabase.FinalBuilder<'T, 'Q, 'R>) =
+        builder.Enumerate() |> Seq.tryHead |> Option.defaultWith (fun() -> Unchecked.defaultof<'R>)
+
     [<Extension>]
     static member Find<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>) =
         collection.Where filter
@@ -67,8 +131,24 @@ type CollectionExtensions =
     static member AsQueryable<'a>(collection: SoloDatabase.Collection<'a>) =
         collection.Select()
 
-type FilterDefinitionBuilder<'T> internal () =
-    let mutable filters =[]
+type FilterDefinitionBuilder<'T> () =
+    let mutable filters = []
+
+    // Helper to create an expression from a string field name
+    let makeExpression (fieldName: string) : Expression<Func<'T, 'TField>> =
+        let parameter = Expression.Parameter(typeof<'T>, "x")
+        let propertyOrField =
+            if typeof<'T>.GetField fieldName <> null || typeof<'T>.GetProperty fieldName <> null then
+                Expression.PropertyOrField(parameter, fieldName) :> Expression
+            else 
+                let indexExpr =
+                    Expression.MakeIndex(parameter, typeof<'T>.GetProperty "Item", [Expression.Constant fieldName]) :> Expression
+
+                if typeof<'T> = typeof<BsonDocument> || typeof<'T> = typeof<JsonValue> then
+                    Expression.Call(indexExpr, typeof<'T>.GetMethod("ToObject").MakeGenericMethod(typeof<'TField>))
+                else 
+                    indexExpr
+        Expression.Lambda<Func<'T, 'TField>>(propertyOrField, parameter)
 
     // Add an equality filter
     member this.Eq<'TField>(field: Expression<Func<'T, 'TField>>, value: 'TField) : FilterDefinitionBuilder<'T> =
@@ -112,6 +192,18 @@ type FilterDefinitionBuilder<'T> internal () =
         filters <- lambda :: filters
         this
 
+    // Overloaded method for string field names
+    member this.Eq<'TField>(field: string, value: 'TField) : FilterDefinitionBuilder<'T> =
+        this.Eq<'TField>(makeExpression (field), value)
+
+    member this.Gt<'TField when 'TField :> IComparable>(field: string, value: 'TField) : FilterDefinitionBuilder<'T> =
+        this.Gt<'TField>(makeExpression (field), value)
+
+    member this.Lt<'TField when 'TField :> IComparable>(field: string, value: 'TField) : FilterDefinitionBuilder<'T> =
+        this.Lt<'TField>(makeExpression (field), value)
+
+    member this.In<'TField>(field: string, values: IEnumerable<'TField>) : FilterDefinitionBuilder<'T> =
+        this.In<'TField>(makeExpression (field), values)
 
     // Combine all filters into a single LINQ expression
     member this.Build() : Expression<Func<'T, bool>> =
@@ -129,11 +221,52 @@ type FilterDefinitionBuilder<'T> internal () =
     static member op_Implicit(builder: FilterDefinitionBuilder<'T>) : Expression<Func<'T, bool>> =
         builder.Build()
 
+type UpdateDefinitionBuilder<'T> () =
+    let mutable updates = []
+
+    member this.Set<'TField, 'TFieldValue>(field: Expression<Func<'T, 'TField>>, value: 'TFieldValue) : UpdateDefinitionBuilder<'T> =
+        let parameter = field.Parameters.[0]
+        let body = Expression.Call(typeof<SoloDatabase.Extensions>.GetMethod("Set").MakeGenericMethod(typeof<'TField>, typeof<'TFieldValue>), [|field.Body; Expression.Constant(value)|])
+        let lambda = Expression.Lambda<Action<'T>>(body, parameter)
+        updates <- lambda :: updates
+        this
+
+    member this.UnSet<'TField>(field: Expression<Func<'T, 'TField>>) : UpdateDefinitionBuilder<'T> =
+        this.Set<'TField, obj>(field, Unchecked.defaultof<obj>)
+
+    member this.Inc<'TField>(field: Expression<Func<'T, 'TField>>, value: 'TField) : UpdateDefinitionBuilder<'T> =
+        let parameter = field.Parameters.[0]
+        let lambda = Expression.Lambda<Action<'T>>(
+            Expression.Call(typeof<SoloDatabase.Extensions>.GetMethod("Set").MakeGenericMethod(typeof<'TField>, typeof<'TField>), [|
+                field.Body;
+                if typeof<BsonDocument>.IsAssignableFrom typeof<'T> then
+                    Expression.Add(
+                        Expression.Call(field.Body, typeof<BsonDocument>.GetMethod("ToObject").MakeGenericMethod(typeof<'TField>)),
+                        Expression.Constant value)
+                if typeof<JsonValue>.IsAssignableFrom typeof<'T> then
+                    Expression.Add(
+                        Expression.Call(field.Body, typeof<JsonValue>.GetMethod("ToObject").MakeGenericMethod(typeof<'TField>)),
+                        Expression.Constant value)
+                else
+                    Expression.Add(field.Body, Expression.Constant value)
+            |]),
+            parameter
+        )
+        updates <- lambda :: updates
+        this
+
+    member this.Build() : Expression<Action<'T>> array =
+        updates |> List.toArray
+
+    static member op_Implicit(builder: UpdateDefinitionBuilder<'T>) : Expression<Action<'T>> array =
+        builder.Build()
+
 [<Sealed>]
 type Builders<'T> =
     static member Filter with get() = FilterDefinitionBuilder<'T> ()
+    static member Update with get() = UpdateDefinitionBuilder<'T> ()
 
-type MongoDatabase internal(soloDB: SoloDB) =
+type MongoDatabase internal (soloDB: SoloDB) =
     member this.GetCollection<'doc> (name: string) =
         soloDB.GetCollection<'doc> name
 
@@ -170,10 +303,11 @@ type MongoClient(directoryDatabaseSource: string) =
     let connectedDatabases = ResizeArray<WeakReference<MongoDatabase>> ()
     let mutable disposed = false
 
-    member this.GetDatabase(?name : string) =
+    member this.GetDatabase( [<Optional; DefaultParameterValue(null: string)>] name : string) =
         if disposed then raise (ObjectDisposedException(nameof(MongoClient)))
 
-        let name = match name with Some n -> n | None -> "Master"
+        let name = match name with null -> "Master" | n -> n 
+        let name = name + ".solodb"
         let dbSource =
             match location with
             | Disk disk ->
