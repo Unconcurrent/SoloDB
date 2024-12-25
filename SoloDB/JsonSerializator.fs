@@ -724,7 +724,7 @@ module JsonSerializator =
             let resultExpression = Expression.Call(Expression.Convert(this.Expression, typeof<JsonValue>), JsonValueMetaObject.GetPropertyMethod, Expression.Constant(binder.Name))
             DynamicMetaObject(resultExpression, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
 
-    
+        /// This is used for the setting of the properties and fields.
         override this.BindSetMember(binder: SetMemberBinder, value: DynamicMetaObject) : DynamicMetaObject =
             let setExpression = Expression.Call(
                 Expression.Convert(this.Expression, typeof<JsonValue>), 
@@ -737,12 +737,13 @@ module JsonSerializator =
 
             DynamicMetaObject(returnExpre, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
     
+        /// This is used for the conversion of the JsonValue to the target type.
         override this.BindConvert(binder: ConvertBinder) : DynamicMetaObject =
             let convertMethod = JsonValueMetaObject.ToObjectMethod.MakeGenericMethod(binder.Type)
             let convertExpression = Expression.Call(Expression.Convert(this.Expression, typeof<JsonValue>), convertMethod)
             DynamicMetaObject(convertExpression, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
    
-    
+        /// This is used for the indexers.    
         override this.BindGetIndex(binder: GetIndexBinder, indexes: DynamicMetaObject[]) : DynamicMetaObject =
             // Check that exactly one index is provided
             if indexes.Length <> 1 then
@@ -763,8 +764,7 @@ module JsonSerializator =
                 failwithf "Json does not support indexes length <> 1: %i" indexes.Length
         
             let indexExpr = indexes.[0].Expression
-            let targetType = Expression.Convert(this.Expression, typeof<JsonValue>)
-
+            
             let setExpression = Expression.Call(
                 Expression.Convert(this.Expression, typeof<JsonValue>), 
                 JsonValueMetaObject.SetPropertyMethod,
@@ -775,7 +775,6 @@ module JsonSerializator =
             let returnExpre = Expression.Block(setExpression, value.Expression)
 
             DynamicMetaObject(returnExpre, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
-
     
         override this.GetDynamicMemberNames() : IEnumerable<string> =
             match value with
