@@ -33,7 +33,7 @@ module Operators =
         static member insert<'T> (item: 'T) (collection: Collection<'T>) = collection.Insert item
         static member insertBatch<'T> (items: 'T seq) (collection: Collection<'T>) = collection.InsertBatch items
 
-        static member updateF<'T> (func: Expression<Action<'T>> array) = fun (collection: Collection<'T>) -> collection.Update func
+        static member updateF<'T> ([<ParamArray>] func: Expression<Action<'T>> array) = fun (collection: Collection<'T>) -> collection.Update func
         static member update<'T> (item: 'T) (collection: Collection<'T>) = collection.Update item
         static member replace<'T> (item: 'T) (collection: Collection<'T>) = collection.Replace item
 
@@ -65,8 +65,6 @@ module Operators =
         static member tryFirst<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> func |> collection.TryFirst
 
         static member any<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> func |> collection.Any
-
-        static member where (f) (collection: Collection<'T>) = collection.Where(f)
 
         static member toSeq (collection: Collection<'T>) = collection.Enumerate()
         static member toList (collection: Collection<'T>) = collection.ToList()
