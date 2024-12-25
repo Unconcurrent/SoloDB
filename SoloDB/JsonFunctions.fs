@@ -8,7 +8,7 @@ module JsonFunctions =
     open FSharp.Interop.Dynamic
 
     let private hasIdTypeCache = ConcurrentDictionary<Type, bool>()
-    let hasIdType (t: Type) = hasIdTypeCache.GetOrAdd(t, fun t -> t.GetProperties() |> Array.exists(fun p -> p.Name = "Id" && p.PropertyType = typeof<int64>))
+    let hasIdType (t: Type) = hasIdTypeCache.GetOrAdd(t, fun t -> t.GetProperties() |> Array.exists(fun p -> p.Name = "Id" && p.PropertyType = typeof<int64> && p.CanWrite))
 
     let toJson<'T> o = 
         let element = JsonValue.Serialize o
