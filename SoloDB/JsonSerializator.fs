@@ -16,6 +16,18 @@ module JsonSerializator =
     open System.Web
     open System.Linq.Expressions
 
+    let private isSupportedNewtownsoftArrayType (t: Type) =
+        // For now support only primitive arrays.
+        t.IsArray &&
+        let elementType = t.GetElementType ()
+        match elementType with
+        | _ when elementType.IsPrimitive -> true  // Covers Boolean, Byte, SByte, Int16, UInt16, Int32, UInt32, Int64, UInt64, IntPtr, UIntPtr, Char, Double, and Single.
+        | _ when elementType = typeof<decimal> -> true
+        | _ when elementType = typeof<DateTime> -> true
+        | _ when elementType = typeof<TimeSpan> -> true
+        | _ when elementType = typeof<string> -> true
+        | _ -> false
+
     let private implementsGeneric (genericInterfaceType: Type) (targetType: Type) =
         let genericInterfaceType = genericInterfaceType.GetGenericTypeDefinition()
         if not genericInterfaceType.IsGenericType then
@@ -354,14 +366,14 @@ module JsonSerializator =
                         for i, v in items |> Seq.indexed do
                             array.SetValue((JsonValue.Deserialize elementType v), i)
                         array |> box
-                    else // Assuming that it is a IList<_>
-                        let icollectionType = targetType.GetInterfaces() |> Array.find(fun i -> i.IsGenericType && i.GetGenericTypeDefinition().Namespace = typeof<IList<_>>.Namespace && i.GetGenericTypeDefinition().Name = typeof<IList<_>>.Name) 
+                    elif typedefof<IList<_>>.IsAssignableFrom targetType then
+                        let icollectionType = targetType.GetInterfaces() |> Array.find(fun i -> i.IsGenericType && i.GetGenericTypeDefinition() = typedefof<IList<_>>) 
                         let elementType = icollectionType.GenericTypeArguments.[0]
                         let listInstance = Activator.CreateInstance(targetType) :?> IList
                         for item in items do
                             listInstance.Add(JsonValue.Deserialize elementType item) |> ignore
                         listInstance
-                    // else failwithf "Cannot deserialize a list to type %A" targetType
+                    else failwithf "Cannot deserialize a list to type %A" targetType
                 | _ -> failwith "Expected JSON array for collection deserialization."
 
             let deserializeTuple (targetType: Type) (value: JsonValue) =
@@ -433,6 +445,13 @@ module JsonSerializator =
                         | false, _ -> null) |> Seq.toArray
 
                     FSharpValue.MakeRecord(targetType, recordValues)
+                // This is for partial support for Newtonsoft's json format.
+                | JsonValue.Object properties when jsonObj.Contains "$type" && jsonObj.Contains "$values" && isSupportedNewtownsoftArrayType targetType ->
+                    match properties.TryGetValue "$values" with
+                    | false, _ -> failwithf "It is impossible to execute this code."
+                    | true, value ->
+                    
+                    deserializeList targetType value
                 | JsonValue.Object properties ->
                     let instance = createInstance targetType
 
