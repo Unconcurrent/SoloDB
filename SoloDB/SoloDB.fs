@@ -383,7 +383,8 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
             match expressionBody with
             | :? NewExpression as ne when isTuple ne.Type
                 -> whereSQL.Substring("json_array".Length)
-            | :? MemberExpression as me ->                
+            | :? MethodCallExpression
+            | :? MemberExpression ->
                 $"({whereSQL})"
             | other -> failwithf "Cannot index an expression with type: %A" (other.GetType())
 

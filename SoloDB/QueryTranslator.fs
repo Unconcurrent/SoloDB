@@ -134,11 +134,16 @@ module QueryTranslator =
 
     let rec isAnyConstant (expr: Expression) : bool =
         match expr with
+        | :? IndexExpression as ie -> isAnyConstant ie.Object
         | :? ParameterExpression -> false
         | :? BinaryExpression as binExpr ->
             isAnyConstant binExpr.Left || isAnyConstant binExpr.Right
         | :? UnaryExpression as unaryExpr ->
             isAnyConstant unaryExpr.Operand
+        | :? MethodCallExpression as methodCallExpr when methodCallExpr.Method.Name = "op_Dynamic" ->
+            isAnyConstant methodCallExpr.Arguments.[0]
+        | :? MethodCallExpression as methodCallExpr when methodCallExpr.Method.Name = "get_Item" -> 
+            isAnyConstant methodCallExpr.Object
         | :? MethodCallExpression as methodCallExpr ->
             methodCallExpr.Arguments |> Seq.exists isAnyConstant || isAnyConstant methodCallExpr.Object
         | :? MemberExpression as memberExpr ->
@@ -153,6 +158,7 @@ module QueryTranslator =
         | :? NewArrayExpression as na ->
             na.Expressions |> Seq.exists isFullyConstant
         | _ -> true
+
 
     let rec private visit (exp: Expression) (qb: QueryBuilder) : unit =
         if exp.NodeType <> ExpressionType.Lambda && isFullyConstant exp && (match exp with | :? ConstantExpression as ce when ce.Value = null -> false | other -> true) then
