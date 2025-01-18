@@ -409,7 +409,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         connection.Execute(indexSQL)
 
     member this.DropIndexIfExists<'R>(expression: Expression<System.Func<'T, 'R>>) =
-        let indexName, whereSQL = this.GetIndexWhereAndName expression
+        let indexName, _whereSQL = this.GetIndexWhereAndName expression
 
         let indexSQL = $"DROP INDEX IF EXISTS {indexName}"
 
