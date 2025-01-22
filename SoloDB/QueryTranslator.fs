@@ -140,7 +140,7 @@ module QueryTranslator =
             isAnyConstant binExpr.Left || isAnyConstant binExpr.Right
         | :? UnaryExpression as unaryExpr ->
             isAnyConstant unaryExpr.Operand
-        | :? MethodCallExpression as methodCallExpr when methodCallExpr.Method.Name = "op_Dynamic" ->
+        | :? MethodCallExpression as methodCallExpr when methodCallExpr.Method.Name = "op_Dynamic" || methodCallExpr.Method.Name = "Dyn" ->
             isAnyConstant methodCallExpr.Arguments.[0]
         | :? MethodCallExpression as methodCallExpr when methodCallExpr.Method.Name = "get_Item" -> 
             isAnyConstant methodCallExpr.Object
@@ -392,7 +392,12 @@ module QueryTranslator =
 
         | "Dyn" ->
             let o = m.Arguments.[0]
-            let property = (m.Arguments.[1] :?> ConstantExpression).Value
+
+            let property =
+                match m.Arguments[1].Type with
+                | t when t = typeof<string> || isIntegerBasedType t ->
+                    evaluateExpr<obj> m.Arguments.[1]
+                | _other -> failwithf "Cannot access dynamic property of %A" o
 
             visitProperty o property m qb
 

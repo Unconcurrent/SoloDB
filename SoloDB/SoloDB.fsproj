@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <Compile Include="Types.fs" />
+    <Compile Include="Attributes.fs" />
     <Compile Include="Utils.fs" />
     <Compile Include="Extensions.fs" />
     <Compile Include="JsonSerializator.fs" />
