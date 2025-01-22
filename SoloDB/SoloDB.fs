@@ -15,18 +15,19 @@ open FileStorage
 open Connections
 open Utils
 open System.Runtime.CompilerServices
+open System.Reflection
+
+
+// For the F# compiler to allow the implicit use of
+// the .NET Expression we need to use it in a C# style class.
+[<Sealed>][<AbstractClass>] // make it static
+type internal ExpressionHelper =
+    static member internal get<'a, 'b>(expression: Expression<System.Func<'a, 'b>>) = expression
 
 module internal Helper =
     let internal lockTable (connectionStr: string) (name: string) =
         let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(connectionStr)}-Table-{name}")
         mutex
-
-    let internal createTableInner (name: string) (conn: SqliteConnection) =
-        conn.Execute($"CREATE TABLE \"{name}\" (
-    	        Id INTEGER NOT NULL PRIMARY KEY UNIQUE,
-    	        Value JSONB NOT NULL
-            );", {|name = name|}) |> ignore
-        conn.Execute("INSERT INTO SoloDBCollections(Name) VALUES (@name)", {|name = name|}) |> ignore
 
     let internal existsCollection (name: string) (connection: SqliteConnection)  =
         connection.QueryFirstOrDefault<string>("SELECT Name FROM SoloDBCollections WHERE Name = @name LIMIT 1", {|name = name|}) <> null
@@ -71,6 +72,68 @@ module internal Helper =
 
         dic
 
+    let internal getIndexesFields<'a>() =
+        // Get all serializable properties
+        typeof<'a>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+        |> Array.choose(
+            fun p -> // That have the IndexedAttribute
+                match p.GetCustomAttribute<SoloDatabase.Attributes.IndexedAttribute>() with
+                | a when isNull a -> None
+                | a -> Some(p, a)) // With its uniqueness information.
+
+    let internal getIndexWhereAndName<'T, 'R> (name: string) (expression: Expression<System.Func<'T, 'R>>)  =
+        let whereSQL, variables = QueryTranslator.translate name expression
+        let whereSQL = whereSQL.Replace($"{name}.Value", "Value") // {name}.Value is not allowed in an index.
+        if whereSQL.Contains $"{name}.Id" then failwithf "The Id of a collection is always stored in an index."
+        if variables.Count > 0 then failwithf "Cannot have variables in index."
+        let expressionBody = expression.Body
+
+        if QueryTranslator.isAnyConstant expressionBody then failwithf "Cannot index an outside or constant expression."
+
+        let whereSQL =
+            match expressionBody with
+            | :? NewExpression as ne when isTuple ne.Type
+                -> whereSQL.Substring("json_array".Length)
+            | :? MethodCallExpression
+            | :? MemberExpression ->
+                $"({whereSQL})"
+            | other -> failwithf "Cannot index an expression with type: %A" (other.GetType())
+
+        let expressionStr = whereSQL.ToCharArray() |> Seq.filter(fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""
+        let indexName = $"{name}_index_{expressionStr}"
+        indexName, whereSQL
+
+    let internal ensureIndex<'T, 'R> (collectionName: string) (conn: SqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
+        let indexName, whereSQL = getIndexWhereAndName<'T,'R> collectionName expression
+
+        let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON {collectionName}{whereSQL}"
+
+        conn.Execute(indexSQL)
+
+    let internal ensureUniqueAndIndex<'T,'R> (collectionName: string) (conn: SqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
+        let indexName, whereSQL = getIndexWhereAndName<'T,'R> collectionName expression
+
+        let indexSQL = $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON {collectionName}{whereSQL}"
+
+        conn.Execute(indexSQL)
+
+    let internal ensureDeclaredIndexesFields<'T> (name: string) (conn: SqliteConnection) =
+        for (pi, indexed) in getIndexesFields<'T>() do
+            let ensureIndexesFn = if indexed.Unique then ensureUniqueAndIndex else ensureIndex
+            let _code = ensureIndexesFn name conn (ExpressionHelper.get<obj, obj>(fun row -> row.Dyn<obj>(pi.Name)))
+            ()
+
+    let internal createTableInner<'T> (name: string) (conn: SqliteConnection) =
+        conn.Execute($"CREATE TABLE \"{name}\" (
+    	        Id INTEGER NOT NULL PRIMARY KEY UNIQUE,
+    	        Value JSONB NOT NULL
+            );", {|name = name|}) |> ignore
+        conn.Execute("INSERT INTO SoloDBCollections(Name) VALUES (@name)", {|name = name|}) |> ignore
+
+        // Ignore the untyped collections.
+        if not (typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T>) then
+            ensureDeclaredIndexesFields<'T> name conn
+
 [<Struct>]
 type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string, variablesP: Dictionary<string, obj>, select: 'Q -> 'R, postModifySQL: string -> string, limitP: uint64 option, ?offsetP: uint64, ?orderByListP: string list) =
     member private this.SQLText = sqlP
@@ -96,8 +159,8 @@ type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string
         let finalSQL = postModifySQL finalSQL
 
         let finalSQL =
-            // A patch to allow UPDATES with limits on SQLites without its support, I can out it inside the .Update(...)
-            // function, but I belive it will slow down and complicate all other normal queries, therefore I leave it here.
+            // A patch to allow UPDATES with limits on SQLite without its native support, I can write it inside the .Update(...)
+            // function for all updates, but I belive it will slow down and complicate all other normal queries, therefore I leave it here.
             if finalSQL.StartsWith "UPDATE" && (this.SQLLimit.IsSome || this.SQLOffset > 0UL) then
                 match finalSQL.Split ([|"WHERE"|], StringSplitOptions.RemoveEmptyEntries) with
                 | [|preWhere ; postWhere|] -> $"{preWhere} WHERE Id IN (SELECT Id FROM \"{name}\" WHERE {postWhere})"
@@ -370,52 +433,33 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.DeleteById(id: int64) : int =
         this.Delete().WhereId(id).Execute()
 
-    member private this.GetIndexWhereAndName(expression: Expression<System.Func<'T, 'R>>)  =
-        let whereSQL, variables = QueryTranslator.translate name expression
-        let whereSQL = whereSQL.Replace($"{name}.Value", "Value") // {name}.Value is not allowed in an index.
-        if whereSQL.Contains $"{name}.Id" then failwithf "The Id of a collection is always stored in an index."
-        if variables.Count > 0 then failwithf "Cannot have variables in index."
-        let expressionBody = expression.Body
-
-        if QueryTranslator.isAnyConstant expressionBody then failwithf "Cannot index an outside or constant expression."
-
-        let whereSQL =
-            match expressionBody with
-            | :? NewExpression as ne when isTuple ne.Type
-                -> whereSQL.Substring("json_array".Length)
-            | :? MethodCallExpression
-            | :? MemberExpression ->
-                $"({whereSQL})"
-            | other -> failwithf "Cannot index an expression with type: %A" (other.GetType())
-
-        let expressionStr = whereSQL.ToCharArray() |> Seq.filter(fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""
-        let indexName = $"{name}_index_{expressionStr}"
-        indexName, whereSQL
-
     member this.EnsureIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
-        let indexName, whereSQL = this.GetIndexWhereAndName expression
-
-        let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON {name}{whereSQL}"
-
         use connection = connection.Get()
-        connection.Execute(indexSQL)
+
+        Helper.ensureIndex name connection expression
 
     member this.EnsureUniqueAndIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
-        let indexName, whereSQL = this.GetIndexWhereAndName expression
-
-        let indexSQL = $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON {name}{whereSQL}"
-
         use connection = connection.Get()
-        connection.Execute(indexSQL)
+        
+        Helper.ensureUniqueAndIndex name connection expression
 
     member this.DropIndexIfExists<'R>(expression: Expression<System.Func<'T, 'R>>) =
-        let indexName, _whereSQL = this.GetIndexWhereAndName expression
+        let indexName, _whereSQL = Helper.getIndexWhereAndName<'T, 'R> name expression
 
         let indexSQL = $"DROP INDEX IF EXISTS {indexName}"
 
         use connection = connection.Get()
         connection.Execute(indexSQL)
         
+    /// <summary>
+    /// Will ensure that all attribute indexes will exists, even if added after the collection's creation.
+    /// </summary>
+    member this.EnsureAddedAttributeIndexes() =
+        // Ignore the untyped collections.
+        if not (typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T>) then
+            use conn = connection.Get()
+            Helper.ensureDeclaredIndexesFields<'T> name conn
+
     override this.Equals(other) = 
         match other with
         | :? Collection<'T> as other ->
@@ -445,8 +489,8 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
 
     member private this.InitializeCollection<'T> name =
         if not (Helper.existsCollection name connection) then 
-            Helper.createTableInner name connection
-
+            Helper.createTableInner<'T> name connection
+            
         Collection<'T>(Transactional connection, name, connectionString)
 
     member this.GetCollection<'T>() =
@@ -739,7 +783,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             let withinTransaction = connection.IsWithinTransaction()
             if not withinTransaction then connection.Execute "BEGIN;" |> ignore
             try
-                Helper.createTableInner name connection
+                Helper.createTableInner<'T> name connection
 
                 if not withinTransaction then connection.Execute "COMMIT;" |> ignore
             with ex ->
