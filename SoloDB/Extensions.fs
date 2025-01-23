@@ -44,3 +44,7 @@ type Extensions =
     [<Extension>]
     static member Dyn(this: obj, property: string) : obj =
         this |> Dyn.get property
+
+    [<Extension>]
+    static member CastTo<'T>(this: obj) : 'T =
+        this :?> 'T

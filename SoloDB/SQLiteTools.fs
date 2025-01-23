@@ -6,11 +6,13 @@ open System.Reflection
 open System.Collections
 open System.Collections.Generic
 open SoloDatabase
+open System.Data
+open System.Data.Common
 
 
 type SQLiteTypeMapper = 
     abstract member Type: Type
-    abstract member Read: reader: SqliteDataReader -> index: int -> obj
+    abstract member Read: reader: IDataReader -> index: int -> obj
     abstract member Write: this: obj -> ValueTuple<obj, int>
 
 let private customMappers = [| 
@@ -28,7 +30,7 @@ let private customMappers = [|
     }
 |]
 
-let private addParameter (command: SqliteCommand) (key: string) (value: obj) =
+let private addParameter (command: IDbCommand) (key: string) (value: obj) =
     let struct (value, size) = 
         if value = null then 
             struct (null, -1)
@@ -54,7 +56,7 @@ let private addParameter (command: SqliteCommand) (key: string) (value: obj) =
 
     command.Parameters.Add par |> ignore
 
-let private createCommand(this: SqliteConnection)(sql: string)(parameters: obj option) =
+let private createCommand(this: IDbConnection)(sql: string)(parameters: obj option) =
     let command = this.CreateCommand()
     command.CommandText <- sql
     match parameters with
@@ -74,7 +76,7 @@ let private createCommand(this: SqliteConnection)(sql: string)(parameters: obj o
 
     command
 
-let rec private mapToType<'T> (reader: SqliteDataReader) (startIndex: int) (columns: IDictionary<string, int>) : 'T =
+let rec private mapToType<'T> (reader: IDataReader) (startIndex: int) (columns: IDictionary<string, int>) : 'T =
     let readColumn (name) (propType) =
         match columns.TryGetValue(name) with
         | true, index ->
@@ -178,7 +180,7 @@ let private queryInner<'T> this (sql: string)(parameters: obj option) = seq {
    }
     
 
-type SqliteConnection with
+type IDbConnection with
     member this.Execute(sql: string, ?parameters: obj) =
         use command = createCommand this sql parameters
         command.Prepare() // To throw all errors, not silently fail them.
@@ -216,7 +218,7 @@ type SqliteConnection with
     }
 
 // For C# usage.
-let execute (this: SqliteConnection) sql (parameters: obj) = this.Execute(sql, parameters)
-let query<'T> (this: SqliteConnection) sql (parameters: obj) = this.Query<'T>(sql, parameters)
-let queryFirst<'T> (this: SqliteConnection) sql (parameters: obj) = this.QueryFirst<'T>(sql, parameters)
-let queryFirstOrDefault<'T> (this: SqliteConnection) sql (parameters: obj) = this.QueryFirstOrDefault<'T>(sql, parameters)
+let execute (this: IDbConnection) sql (parameters: obj) = this.Execute(sql, parameters)
+let query<'T> (this: IDbConnection) sql (parameters: obj) = this.Query<'T>(sql, parameters)
+let queryFirst<'T> (this: IDbConnection) sql (parameters: obj) = this.QueryFirst<'T>(sql, parameters)
+let queryFirstOrDefault<'T> (this: IDbConnection) sql (parameters: obj) = this.QueryFirstOrDefault<'T>(sql, parameters)

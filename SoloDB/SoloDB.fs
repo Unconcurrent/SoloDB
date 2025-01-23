@@ -16,6 +16,7 @@ open Connections
 open Utils
 open System.Runtime.CompilerServices
 open System.Reflection
+open System.Data
 
 
 // For the F# compiler to allow the implicit use of
@@ -29,34 +30,47 @@ module internal Helper =
         let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(connectionStr)}-Table-{name}")
         mutex
 
-    let internal existsCollection (name: string) (connection: SqliteConnection)  =
+    let internal existsCollection (name: string) (connection: IDbConnection)  =
         connection.QueryFirstOrDefault<string>("SELECT Name FROM SoloDBCollections WHERE Name = @name LIMIT 1", {|name = name|}) <> null
 
-    let internal dropCollection (name: string) (connection: SqliteConnection) =
+    let internal dropCollection (name: string) (connection: IDbConnection) =
         connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name) |> ignore
         connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}) |> ignore
 
-    let private insertImpl (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) (orReplace: bool) =
+    let private insertImpl<'T when 'T :> obj> (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (orReplace: bool) (getTransitiveCollection: IDbConnection -> obj) =
+        let t = typeof<'T>
+        let customIdGen = getCustomIdType t
+        
+        match customIdGen with
+        | Some x ->
+            let oldId = x.GetId item
+            if x.Generator.IsEmpty oldId then
+                let collection = getTransitiveCollection connection
+                let id = x.Generator.GenerateId collection item
+                x.SetId id item
+        | None -> ()
+        
         let json = if typed then toTypedJson item else toJson item
+        
+        let existsWritebleDirectId = hasIdType t && (customIdGen.IsNone || customIdGen.Value.IdType <> typeof<int64>)
 
-        let existsId = hasIdType typeof<'T>
-
-        if existsId && 0L <> item?Id then 
+        if existsWritebleDirectId && 0L <> item?Id then 
             failwithf "Cannot insert a item with a non zero Id, maybe you meant Update?"
 
+        
         let orReplaceText = "OR REPLACE"
         let id = connection.QueryFirst<int64>($"INSERT {if orReplace then orReplaceText else String.Empty} INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|})
 
-        if existsId then 
+        if existsWritebleDirectId then 
             item?Id <- id
 
         id
 
-    let internal insertInner (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) =
-        insertImpl typed item connection name false
+    let internal insertInner (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (collection: IDbConnection -> obj) =
+        insertImpl typed item connection name false collection
 
-    let internal insertOrReplaceInner (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) =
-        insertImpl typed item connection name true
+    let internal insertOrReplaceInner (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (collection: IDbConnection -> obj) =
+        insertImpl typed item connection name true collection
 
     let internal formatName (name: string) =
         String(name.ToCharArray() |> Array.filter(fun c -> Char.IsLetterOrDigit c || c = '_')) // Anti SQL injection
@@ -77,7 +91,7 @@ module internal Helper =
         typeof<'a>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
         |> Array.choose(
             fun p -> // That have the IndexedAttribute
-                match p.GetCustomAttribute<SoloDatabase.Attributes.IndexedAttribute>() with
+                match p.GetCustomAttribute<SoloDatabase.Attributes.IndexedAttribute>(true) with
                 | a when isNull a -> None
                 | a -> Some(p, a)) // With its uniqueness information.
 
@@ -103,27 +117,27 @@ module internal Helper =
         let indexName = $"{name}_index_{expressionStr}"
         indexName, whereSQL
 
-    let internal ensureIndex<'T, 'R> (collectionName: string) (conn: SqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
+    let internal ensureIndex<'T, 'R> (collectionName: string) (conn: IDbConnection) (expression: Expression<System.Func<'T, 'R>>) =
         let indexName, whereSQL = getIndexWhereAndName<'T,'R> collectionName expression
 
         let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
 
         conn.Execute(indexSQL)
 
-    let internal ensureUniqueAndIndex<'T,'R> (collectionName: string) (conn: SqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
+    let internal ensureUniqueAndIndex<'T,'R> (collectionName: string) (conn: IDbConnection) (expression: Expression<System.Func<'T, 'R>>) =
         let indexName, whereSQL = getIndexWhereAndName<'T,'R> collectionName expression
 
         let indexSQL = $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
 
         conn.Execute(indexSQL)
 
-    let internal ensureDeclaredIndexesFields<'T> (name: string) (conn: SqliteConnection) =
+    let internal ensureDeclaredIndexesFields<'T> (name: string) (conn: IDbConnection) =
         for (pi, indexed) in getIndexesFields<'T>() do
             let ensureIndexesFn = if indexed.Unique then ensureUniqueAndIndex else ensureIndex
             let _code = ensureIndexesFn name conn (ExpressionHelper.get<obj, obj>(fun row -> row.Dyn<obj>(pi.Name)))
             ()
 
-    let internal createTableInner<'T> (name: string) (conn: SqliteConnection) =
+    let internal createTableInner<'T> (name: string) (conn: IDbConnection) =
         conn.Execute($"CREATE TABLE \"{name}\" (
     	        Id INTEGER NOT NULL PRIMARY KEY UNIQUE,
     	        Value JSONB NOT NULL
@@ -267,6 +281,9 @@ type WhereBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string,
         FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select, postModifySQL, None)
 
 type Collection<'T>(connection: Connection, name: string, connectionString: string) =
+    // This is only because F# does not allow forward references, therefore you cannot instantiate a Collection<'T> in the Helper.insertInner,
+    // and this is the solution.
+    member private this.GetTransitiveCollection = fun (connection) -> Collection<'T>(Connection.Transitive (new DirectConnection(connection)), name, connectionString) |> box
     member private this.ConnectionString = connectionString
     member this.Name = name
     member this.InTransaction = match connection with | Transactional _ -> true | Pooled _ -> false
@@ -274,32 +291,53 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
 
     member this.Insert (item: 'T) =
         use connection = connection.Get()
+        
 
-        Helper.insertInner this.IncludeType item connection name
+        Helper.insertInner this.IncludeType item connection name this.GetTransitiveCollection
 
     /// <summary>
     /// Will insert or replace the item in the DB based on its UNIQUE INDEXES, throwing if the Id is non zero.
     /// </summary>
     member this.InsertOrReplace (item: 'T) =
         use connection = connection.Get()
+        let getTransitiveCollection = fun () -> Collection<'T>(Connection.Transitive (new DirectConnection(connection)), name, connectionString) |> box
 
-        Helper.insertOrReplaceInner this.IncludeType item connection name
+        Helper.insertOrReplaceInner this.IncludeType item connection name this.GetTransitiveCollection
 
     member this.InsertBatch (items: 'T seq) =
         if this.InTransaction then
             use connection = connection.Get()
+
+            let getTransitiveCollection = 
+                let mutable cache: obj = null
+                fun (c) -> 
+                    if cache = null then
+                        let tc = this.GetTransitiveCollection c
+                        cache <- tc
+                    cache
+
+
             let ids = List<int64>()
             for item in items do
-                Helper.insertInner this.IncludeType item connection name |> ids.Add
+                Helper.insertInner this.IncludeType item connection name getTransitiveCollection |> ids.Add
             ids
         else
 
         use connection = connection.Get()
         connection.Execute "BEGIN;" |> ignore
+
+        let getTransitiveCollection = 
+            let mutable cache: obj = null
+            fun (c) -> 
+                if cache = null then
+                    let tc = this.GetTransitiveCollection c
+                    cache <- tc
+                cache
+
         try
             let ids = List<int64>()
             for item in items do
-                Helper.insertInner this.IncludeType item connection name |> ids.Add
+                Helper.insertInner this.IncludeType item connection name getTransitiveCollection |> ids.Add
 
             connection.Execute "COMMIT;" |> ignore
             ids
@@ -313,18 +351,36 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.InsertOrReplaceBatch (items: 'T seq) =
         if this.InTransaction then
             use connection = connection.Get()
+
+            let getTransitiveCollection = 
+                let mutable cache: obj = null
+                fun (c) -> 
+                    if cache = null then
+                        let tc = this.GetTransitiveCollection c
+                        cache <- tc
+                    cache
+
             let ids = List<int64>()
             for item in items do
-                Helper.insertOrReplaceInner this.IncludeType item connection name |> ids.Add
+                Helper.insertOrReplaceInner this.IncludeType item connection name getTransitiveCollection |> ids.Add
             ids
         else
 
         use connection = connection.Get()
         connection.Execute "BEGIN;" |> ignore
+        
+        let getTransitiveCollection = 
+            let mutable cache: obj = null
+            fun (c) -> 
+                if cache = null then
+                    let tc = this.GetTransitiveCollection c
+                    cache <- tc
+                cache
+
         try
             let ids = List<int64>()
             for item in items do
-                Helper.insertOrReplaceInner this.IncludeType item connection name |> ids.Add
+                Helper.insertOrReplaceInner this.IncludeType item connection name getTransitiveCollection |> ids.Add
 
             connection.Execute "COMMIT;" |> ignore
             ids

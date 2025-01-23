@@ -1,4 +1,10 @@
 ﻿namespace SoloDatabase
+
+open SoloDatabase.Attributes
+open System.Reflection
+
+#nowarn "3536" // IIdGenerator
+
 module JsonFunctions =
     open System
     open System.Collections.Concurrent
@@ -9,6 +15,36 @@ module JsonFunctions =
 
     let private hasIdTypeCache = ConcurrentDictionary<Type, bool>()
     let hasIdType (t: Type) = hasIdTypeCache.GetOrAdd(t, fun t -> t.GetProperties() |> Array.exists(fun p -> p.Name = "Id" && p.PropertyType = typeof<int64> && p.CanWrite))
+    
+
+    let private customIdTypeCache = ConcurrentDictionary<Type, {|Generator: IIdGenerator; SetId: obj -> obj -> unit; GetId: obj -> obj; IdType: Type|} option>()
+    let getCustomIdType(t: Type) =
+        customIdTypeCache.GetOrAdd(t, 
+            fun t ->
+                t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+                |> Seq.choose(
+                    fun p -> 
+                        match p.GetCustomAttribute<SoloId>(true) with
+                        | a when isNull a -> None
+                        | a -> 
+                        if not p.CanWrite then failwithf "Cannot create a generator for a non writtable parameter '%s' for type %s" p.Name t.FullName
+                        match a.IdGenerator with
+                        | null -> None
+                        | generator -> Some (p, generator)
+                        ) 
+                |> Seq.tryHead
+                |> Option.bind(
+                    fun (p, gt) ->
+                        let instance = (Activator.CreateInstance gt) :?> IIdGenerator
+                        Some {|
+                            Generator = instance
+                            SetId = fun id o -> p.SetValue(o, id)
+                            GetId = fun o -> p.GetValue(o)
+                            IdType = p.PropertyType
+                        |}
+                )
+
+            )
 
     let toJson<'T> o = 
         let element = JsonValue.Serialize o
@@ -75,6 +111,7 @@ module JsonFunctions =
         let element = JsonValue.Parse idValueJSON
         let id = element.["Id"].ToObject<int64>()
         let value = element.GetProperty("Value").ToJsonString() |> fromJsonOrSQL<'T>
+
         id, value
 
     let fromDapper<'R when 'R :> obj> (input: obj) : 'R =

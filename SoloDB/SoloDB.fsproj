@@ -21,11 +21,14 @@
     <PackageOutputPath>$(OutputPath)</PackageOutputPath>
     <VersionPrefix>0.0.24</VersionPrefix>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <LangVersion>8</LangVersion>
   </PropertyGroup>
+
 
   <ItemGroup>
     <Compile Include="Types.fs" />
     <Compile Include="Attributes.fs" />
+    <Compile Include="IdGenerator.fs" />
     <Compile Include="Utils.fs" />
     <Compile Include="Extensions.fs" />
     <Compile Include="JsonSerializator.fs" />

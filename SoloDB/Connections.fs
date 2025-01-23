@@ -10,6 +10,26 @@ module Connections =
     open System.Threading.Tasks
     open Utils
 
+    type DirectConnection internal (connection: IDbConnection) =
+        interface IDbConnection with
+            override this.BeginTransaction() = connection.BeginTransaction()
+            override this.BeginTransaction (il: IsolationLevel) = connection.BeginTransaction il
+            override this.ChangeDatabase (databaseName: string) = connection.ChangeDatabase databaseName
+            override this.Close() = connection.Close()
+            override this.CreateCommand() = connection.CreateCommand()
+            override this.Open() = connection.Open()
+            member this.ConnectionString with get() = connection.ConnectionString and set (cs) = connection.ConnectionString <- cs
+            member this.ConnectionTimeout: int = connection.ConnectionTimeout
+            member this.Database: string = connection.Database
+            member this.State: ConnectionState = connection.State
+
+        interface IDisposable with 
+            override this.Dispose (): unit = 
+                ()
+
+        member this.DisposeReal() =
+            connection.Dispose()
+
     type TransactionalConnection internal (connectionStr: string) =
         inherit SqliteConnection(connectionStr)
 
@@ -144,13 +164,15 @@ module Connections =
     type Connection =
         | Pooled of pool: ConnectionManager
         | Transactional of conn: TransactionalConnection
+        | Transitive of tc: IDbConnection
 
-        member this.Get() : SqliteConnection =
+        member this.Get() : IDbConnection =
             match this with
             | Pooled pool -> pool.Borrow()
             | Transactional conn -> conn
+            | Transitive c -> c
 
-    type SqliteConnection with
+    type IDbConnection with
         member this.IsWithinTransaction() =
             match this with
             | :? TransactionalConnection -> true
