@@ -254,6 +254,39 @@ module QueryTranslator =
 
         | other -> failwithf "Unable to translate property access."
 
+    and private castTo (qb: QueryBuilder) (castToType: Type) (o: Expression) =
+        let typ =
+            match castToType with
+            | OfType float
+            | OfType float32
+            | OfType decimal
+                -> "REAL"
+            | OfType bool
+            | OfType int8
+            | OfType uint8
+            | OfType int16
+            | OfType uint16
+            | OfType int32
+            | OfType uint32
+            | OfType int64
+            | OfType uint64
+            | OfType nativeint
+            | OfType unativeint
+                -> "INTEGER"
+            | _other -> "NOOP"
+
+        if typ = "NOOP" then
+            visit o qb
+        else
+
+
+        qb.AppendRaw "CAST("
+        let innerQb = {qb with UpdateMode = false}
+        visit o innerQb
+        qb.AppendRaw " AS "
+        qb.AppendRaw typ
+        qb.AppendRaw ")"
+
     and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =        
         match m.Method.Name with
         | "GetArray" ->
@@ -446,38 +479,10 @@ module QueryTranslator =
 
         | "ToObject" when typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.Method.DeclaringType || m.Method.DeclaringType.FullName = "SoloDatabase.MongoDB.BsonDocument" ->
             let castToType = m.Method.GetGenericArguments().[0]
-
-            let typ =
-                match castToType with
-                | OfType float
-                | OfType float32
-                | OfType decimal
-                    -> "REAL"
-                | OfType bool
-                | OfType int8
-                | OfType uint8
-                | OfType int16
-                | OfType uint16
-                | OfType int32
-                | OfType uint32
-                | OfType int64
-                | OfType uint64
-                | OfType nativeint
-                | OfType unativeint
-                    -> "INTEGER"
-                | _other -> "NOOP"
-
-            if typ = "NOOP" then
-                visit m.Object qb
-            else
-
-
-            qb.AppendRaw "CAST("
-            let innerQb = {qb with UpdateMode = false}
-            visit m.Object innerQb
-            qb.AppendRaw " AS "
-            qb.AppendRaw typ
-            qb.AppendRaw ")"
+            castTo qb castToType m.Object
+        | "CastTo" ->
+            let castToType = m.Method.GetGenericArguments().[0]
+            castTo qb castToType m.Arguments.[0]
         | _ -> 
             raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 

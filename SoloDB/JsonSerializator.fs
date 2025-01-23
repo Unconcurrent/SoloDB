@@ -236,6 +236,13 @@ module JsonSerializator =
                 | :? (byte seq) as bs -> trySerializePrimitive (bs |> Seq.toArray)
                 | _ -> Null
     
+            let serializeEnum (e: Enum) =
+                let t = e.GetType()
+                let enumValue = Convert.ChangeType(e, Enum.GetUnderlyingType(t))
+                match trySerializePrimitive enumValue with
+                | Null -> failwithf "Could not serialize enum: \"%A\" of type %A" e t
+                | ok -> ok
+
             let serializeCollection (collection: IEnumerable) =
                 let items = System.Collections.Generic.List<JsonValue>()
                 for item in collection do
@@ -259,25 +266,29 @@ module JsonSerializator =
                 value :?> JsonValue
             else if valueType.FullName = "SoloDatabase.MongoDB.BsonDocument" then
                 valueType.GetProperty("Json").GetValue(value) :?> JsonValue
-            else match trySerializePrimitive value with
-                    | Null ->
-                        if typeof<IDictionary>.IsAssignableFrom(valueType) then
-                            serializeDictionary (value :?> IDictionary)
-                        elif implementsGeneric typeof<IReadOnlyDictionary<_,_>> valueType then
-                            JsonValue.SerializeReadOnlyDictionaryGeneric value
-                        elif typeof<IEnumerable>.IsAssignableFrom(valueType) then
-                            serializeCollection (value :?> IEnumerable)
-                        else
-                            let props = valueType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-                            let dict = new Dictionary<string, JsonValue>(StringComparer.OrdinalIgnoreCase)
-                            for prop in props do
-                                if prop.CanRead then
-                                    let propValue = prop.GetValue(value)
-                                    if propValue <> null then
-                                        let serializedValue = JsonValue.Serialize propValue
-                                        dict.Add(prop.Name, serializedValue)
-                            Object dict
-                    | value -> value
+            else 
+            match value with
+            | :? Enum as e -> serializeEnum e
+            | _other -> 
+            match trySerializePrimitive value with
+            | Null ->
+                if typeof<IDictionary>.IsAssignableFrom(valueType) then
+                    serializeDictionary (value :?> IDictionary)
+                elif implementsGeneric typeof<IReadOnlyDictionary<_,_>> valueType then
+                    JsonValue.SerializeReadOnlyDictionaryGeneric value
+                elif typeof<IEnumerable>.IsAssignableFrom(valueType) then
+                    serializeCollection (value :?> IEnumerable)
+                else
+                    let props = valueType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+                    let dict = new Dictionary<string, JsonValue>(StringComparer.OrdinalIgnoreCase)
+                    for prop in props do
+                        if prop.CanRead then
+                            let propValue = prop.GetValue(value)
+                            if propValue <> null then
+                                let serializedValue = JsonValue.Serialize propValue
+                                dict.Add(prop.Name, serializedValue)
+                    Object dict
+            | value -> value
 
         static member SerializeWithType (value: obj) =
             let json = JsonValue.Serialize value
@@ -394,6 +405,12 @@ module JsonSerializator =
                     Dynamic.InvokeConstructor(targetType, values)
                 | _ -> failwith "Expected JSON array for tuple deserialization."
 
+            let deserializeEnum (targetType: Type) (value: JsonValue) =
+                match tryDeserializePrimitive (Enum.GetUnderlyingType(targetType)) value with
+                | null -> failwithf "Could not deserialize enum: \"%A\" of type %A" value targetType
+                | ok ->
+                Enum.ToObject(targetType, ok)
+
             let deserializeDictionary (targetType: Type) (value: JsonValue) =
                 match value with
                 | JsonValue.Object properties ->
@@ -484,18 +501,21 @@ module JsonSerializator =
 
             if targetType = typeof<obj> then 
                 JsonValue.DeserializeDynamic json
-            else if targetType = typeof<JsonValue> then
+            elif targetType = typeof<JsonValue> then
                 json
             // We cannot reference it forwards, so we do this.
-            else if targetType.FullName = "SoloDatabase.MongoDB.BsonDocument" then
+            elif targetType.FullName = "SoloDatabase.MongoDB.BsonDocument" then
                 Activator.CreateInstance(targetType, json)
-            else if targetType.Name = "Nullable`1" && targetType.GenericTypeArguments.Length = 1 then 
+            elif targetType.Name = "Nullable`1" && targetType.GenericTypeArguments.Length = 1 then 
                 let innerValue = JsonValue.Deserialize targetType.GenericTypeArguments.[0] json
                 if isNull innerValue then
                     Activator.CreateInstance(targetType)
                 else 
                     Activator.CreateInstance(targetType, innerValue)
+            elif targetType.IsEnum then
+                deserializeEnum targetType json
             else
+
             match json with
             | JsonValue.Null -> null
             | json ->
