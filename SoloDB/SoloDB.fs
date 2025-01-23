@@ -83,8 +83,8 @@ module internal Helper =
 
     let internal getIndexWhereAndName<'T, 'R> (name: string) (expression: Expression<System.Func<'T, 'R>>)  =
         let whereSQL, variables = QueryTranslator.translate name expression
-        let whereSQL = whereSQL.Replace($"{name}.Value", "Value") // {name}.Value is not allowed in an index.
-        if whereSQL.Contains $"{name}.Id" then failwithf "The Id of a collection is always stored in an index."
+        let whereSQL = whereSQL.Replace($"\"{name}\".Value", "Value") // {name}.Value is not allowed in an index.
+        if whereSQL.Contains $"\"{name}\".Id" then failwithf "The Id of a collection is always stored in an index."
         if variables.Count > 0 then failwithf "Cannot have variables in index."
         let expressionBody = expression.Body
 
@@ -106,14 +106,14 @@ module internal Helper =
     let internal ensureIndex<'T, 'R> (collectionName: string) (conn: SqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
         let indexName, whereSQL = getIndexWhereAndName<'T,'R> collectionName expression
 
-        let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON {collectionName}{whereSQL}"
+        let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
 
         conn.Execute(indexSQL)
 
     let internal ensureUniqueAndIndex<'T,'R> (collectionName: string) (conn: SqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
         let indexName, whereSQL = getIndexWhereAndName<'T,'R> collectionName expression
 
-        let indexSQL = $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON {collectionName}{whereSQL}"
+        let indexSQL = $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
 
         conn.Execute(indexSQL)
 
@@ -446,7 +446,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.DropIndexIfExists<'R>(expression: Expression<System.Func<'T, 'R>>) =
         let indexName, _whereSQL = Helper.getIndexWhereAndName<'T, 'R> name expression
 
-        let indexSQL = $"DROP INDEX IF EXISTS {indexName}"
+        let indexSQL = $"DROP INDEX IF EXISTS \"{indexName}\""
 
         use connection = connection.Get()
         connection.Execute(indexSQL)
