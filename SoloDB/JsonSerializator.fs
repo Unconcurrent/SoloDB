@@ -40,6 +40,12 @@ module JsonSerializator =
         targetType.GetInterfaces()
         |> Array.exists (fun i -> i.IsGenericType && i.Name = genericInterfaceType.Name && i.Namespace = genericInterfaceType.Namespace)
 
+    let private byteArrayToJSONCompatibleString(ba: byte array) =
+        Convert.ToBase64String ba
+
+    let private JSONStringToByteArray(s: string) =
+        Convert.FromBase64String s
+
     type Token =
         | NullToken
         | OpenBrace
@@ -198,7 +204,7 @@ module JsonSerializator =
                 genericMethod.Invoke(null, [| obj |]) :?> JsonValue
 
         static member Serialize (value: obj) =
-            let trySerializePrimitive (value: obj) =
+            let rec trySerializePrimitive (value: obj) =
                 match value with
                 | :? bool as b -> Boolean b
 
@@ -224,8 +230,10 @@ module JsonSerializator =
 
                 | :? Guid as guid -> guid.ToString("D", CultureInfo.InvariantCulture) |> String
 
-                | :? string as s -> String s        
-            
+                | :? string as s -> String s
+                // For efficient storage.
+                | :? (byte[]) as bs -> String(byteArrayToJSONCompatibleString bs)
+                | :? (byte seq) as bs -> trySerializePrimitive (bs |> Seq.toArray)
                 | _ -> Null
     
             let serializeCollection (collection: IEnumerable) =
@@ -322,6 +330,8 @@ module JsonSerializator =
                 match targetType, value with
                 | t, JsonValue.Boolean b when t = typeof<bool> -> b
 
+                | t, JsonValue.String s when t = typeof<byte array> -> JSONStringToByteArray s
+                | t, JsonValue.String s when t = typeof<byte seq> -> JSONStringToByteArray s
                 | t, JsonValue.String s when t = typeof<string> -> s
                 | t, JsonValue.String s when t = typeof<Type> -> s |> nameToType |> box
                 | t, JsonValue.String s when t = typeof<Guid> -> Guid.Parse(s) |> box
