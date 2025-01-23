@@ -69,7 +69,7 @@ module JsonFunctions =
         | :? float32 as x -> x :> obj, false
         | :? float as x -> x :> obj, false
 
-        | other ->
+        | _other ->
 
         let element = JsonValue.Serialize item
         match element with
@@ -78,7 +78,7 @@ module JsonFunctions =
         | Number _
         | String _
             -> element.ToObject(), false
-        | other -> other.ToJsonString(), true    
+        | other -> other.ToJsonString(), true
 
     let private fromJson<'T> (text: string) =
         let json = JsonValue.Parse text
@@ -100,12 +100,7 @@ module JsonFunctions =
                 fromJson<'T> data
         else
 
-        match Int64.TryParse data with
-        | true, i -> i :> obj :?> 'T
-        | false, _ ->
-
         fromJson<'T> data
-
 
     let fromIdJson<'T> (idValueJSON: string) =
         let element = JsonValue.Parse idValueJSON
@@ -118,7 +113,10 @@ module JsonFunctions =
         match input with
         | :? DbObjectRow as row ->
             let mutable obj = fromJsonOrSQL<'R> (row.ValueJSON)
-            if hasIdType typeof<'R> then
+            let typeOfR = typeof<'R>
+            let customIdGen = getCustomIdType typeOfR
+            
+            if hasIdType typeOfR && (customIdGen.IsNone || customIdGen.Value.IdType <> typeof<int64>) then
                 obj?Id <- row.Id
             obj
         | :? string as input ->

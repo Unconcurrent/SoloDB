@@ -286,7 +286,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member private this.GetTransitiveCollection = fun (connection) -> Collection<'T>(Connection.Transitive (new DirectConnection(connection)), name, connectionString) |> box
     member private this.ConnectionString = connectionString
     member this.Name = name
-    member this.InTransaction = match connection with | Transactional _ -> true | Pooled _ -> false
+    member this.InTransaction = match connection with | Transactional _ -> true | Pooled _ -> false | Transitive _ -> true
     member this.IncludeType = typeof<'T>.IsAbstract
 
     member this.Insert (item: 'T) =
