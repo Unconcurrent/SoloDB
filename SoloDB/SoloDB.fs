@@ -37,10 +37,39 @@ module internal Helper =
         connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name) |> ignore
         connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}) |> ignore
 
+    
+    let private orReplaceText = "OR REPLACE"
+    let private idColumnText = "Id,"
+    let private idParameterText = "@id,"
+    let private insertJson (orReplace: bool) (id: int64 option) (name: string) (json: string) (connection: IDbConnection) =
+        let includeId = id.IsSome
+
+        let queryString =
+            $"INSERT {if orReplace then orReplaceText else String.Empty} 
+            INTO \"{name}\"({if includeId then idColumnText else String.Empty}Value) 
+            VALUES({if includeId then idParameterText else String.Empty}jsonb(@jsonText)) 
+            RETURNING Id;"
+
+        let parameters: obj = 
+            if includeId then {|
+                name = name
+                jsonText = json
+                id = id.Value
+            |}
+            else {|
+                name = name
+                jsonText = json
+            |}
+
+
+        connection.QueryFirst<int64>(queryString, parameters)
+
     let private insertImpl<'T when 'T :> obj> (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (orReplace: bool) (getTransitiveCollection: IDbConnection -> obj) =
         let t = typeof<'T>
         let customIdGen = getCustomIdType t
-        
+        let existsWritebleDirectId = hasIdType t
+
+
         match customIdGen with
         | Some x ->
             let oldId = x.GetId item
@@ -52,14 +81,14 @@ module internal Helper =
         
         let json = if typed then toTypedJson item else toJson item
         
-        let existsWritebleDirectId = hasIdType t && (customIdGen.IsNone || customIdGen.Value.IdType <> typeof<int64>)
 
-        if existsWritebleDirectId && 0L <> item?Id then 
-            failwithf "Cannot insert a item with a non zero Id, maybe you meant Update?"
-
-        
-        let orReplaceText = "OR REPLACE"
-        let id = connection.QueryFirst<int64>($"INSERT {if orReplace then orReplaceText else String.Empty} INTO \"{name}\"(Value) VALUES(jsonb(@jsonText)) RETURNING Id;", {|name = name; jsonText = json|})
+        let id = 
+            if existsWritebleDirectId && 0L <> item?Id then 
+                // Inserting with Id
+                insertJson orReplace (Some item?Id) name json connection
+            else
+                // Inserting without Id
+                insertJson orReplace None name json connection
 
         if existsWritebleDirectId then 
             item?Id <- id
@@ -291,16 +320,14 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
 
     member this.Insert (item: 'T) =
         use connection = connection.Get()
-        
 
         Helper.insertInner this.IncludeType item connection name this.GetTransitiveCollection
 
     /// <summary>
-    /// Will insert or replace the item in the DB based on its UNIQUE INDEXES, throwing if the Id is non zero.
+    /// Will insert or replace the item in the DB based on its UNIQUE INDEXES.
     /// </summary>
     member this.InsertOrReplace (item: 'T) =
         use connection = connection.Get()
-        let getTransitiveCollection = fun () -> Collection<'T>(Connection.Transitive (new DirectConnection(connection)), name, connectionString) |> box
 
         Helper.insertOrReplaceInner this.IncludeType item connection name this.GetTransitiveCollection
 
@@ -476,10 +503,16 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     /// Will replace the item in the DB based on its Id, and if it does not have one then it will throw an InvalidOperationException.
     /// </summary>
     member this.Update(item: 'T) =
-        if not (hasIdType typeof<'T>) then
-            raise (InvalidOperationException $"The item's type {typeof<'T>.Name} does not have a int64 Id property to use in the update process.")
-
-        this.Replace(item).WhereId(item?Id |> box :?> int64).Execute() |> ignore
+        let t = typeof<'T>
+        if hasIdType t then
+            this.Replace(item).WhereId(item?Id |> box :?> int64).Execute() |> ignore
+        else match getCustomIdType t with
+             | Some customId ->
+                let id = customId.GetId (item |> box)
+                this.Replace(item).Where(fun e -> e.Dyn<obj>("Id") = id).Execute() |> ignore
+             | None ->
+                raise (InvalidOperationException $"The item's type {typeof<'T>.Name} does not have a int64 Id property or a custom Id to use in the update process.")
+        
 
     member this.Delete() =
         // https://stackoverflow.com/questions/1824490/how-do-you-enable-limit-for-delete-in-sqlite
