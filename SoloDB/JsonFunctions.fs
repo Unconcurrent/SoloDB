@@ -14,7 +14,7 @@ module JsonFunctions =
     open FSharp.Interop.Dynamic
 
     let private hasIdTypeCache = ConcurrentDictionary<Type, bool>()
-    let hasIdType (t: Type) = hasIdTypeCache.GetOrAdd(t, fun t -> t.GetProperties() |> Array.exists(fun p -> p.Name = "Id" && p.PropertyType = typeof<int64> && p.CanWrite))
+    let internal hasIdType (t: Type) = hasIdTypeCache.GetOrAdd(t, fun t -> t.GetProperties() |> Array.exists(fun p -> p.Name = "Id" && p.PropertyType = typeof<int64> && p.CanWrite))
     
 
     let private customIdTypeCache = ConcurrentDictionary<Type, {|Generator: IIdGenerator; SetId: obj -> obj -> unit; GetId: obj -> obj; IdType: Type|} option>()
@@ -116,7 +116,7 @@ module JsonFunctions =
             let typeOfR = typeof<'R>
             let customIdGen = getCustomIdType typeOfR
             
-            if hasIdType typeOfR && (customIdGen.IsNone || customIdGen.Value.IdType <> typeof<int64>) then
+            if hasIdType typeOfR then
                 obj?Id <- row.Id
             obj
         | :? string as input ->
