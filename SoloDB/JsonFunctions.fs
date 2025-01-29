@@ -121,4 +121,5 @@ module JsonFunctions =
             obj
         | :? string as input ->
             fromJsonOrSQL<'R> (input :> obj :?> string)
+        | null -> Unchecked.defaultof<'R>
         | other -> failwithf "Input is not DbObjectRow or json string."

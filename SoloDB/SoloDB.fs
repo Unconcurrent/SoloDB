@@ -256,6 +256,11 @@ type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string
         use connection = connection.Get()
         connection.QueryFirst<'Q>(finalSQL, parameters) |> select
 
+    member this.FirstOrDefault() =        
+        let finalSQL, parameters = this.getQueryParameters()
+        use connection = connection.Get()
+        connection.QueryFirstOrDefault<'Q>(finalSQL, parameters) |> select
+
     member this.Execute() =
         let finalSQL, parameters = this.getQueryParameters()
         use connection = connection.Get()
