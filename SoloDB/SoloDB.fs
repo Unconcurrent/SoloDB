@@ -249,6 +249,13 @@ type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string
                         do
                 yield item
         }
+
+    interface IEnumerable<'R> with
+        override this.GetEnumerator() =
+            this.Enumerate().GetEnumerator()
+
+        override this.GetEnumerator() =
+            this.Enumerate().GetEnumerator() :> IEnumerator
        
 
     member this.First() =        
@@ -313,6 +320,25 @@ type WhereBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string,
 
     member this.OnAll() =
         FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select, postModifySQL, None)
+
+    member this.Execute() =
+        this.OnAll().Execute()
+
+    member this.First() =
+        this.OnAll().First()
+
+    member this.FirstOrDefault() =        
+        this.OnAll().FirstOrDefault()
+
+    member this.ToList() =
+        Utils.CompatilibilityList<'R>(this)
+
+    interface IEnumerable<'R> with
+        override this.GetEnumerator() =
+            this.OnAll().Enumerate().GetEnumerator()
+
+        override this.GetEnumerator() =
+            this.OnAll().Enumerate().GetEnumerator() :> IEnumerator
 
 type Collection<'T>(connection: Connection, name: string, connectionString: string) =
     // This is only because F# does not allow forward references, therefore you cannot instantiate a Collection<'T> in the Helper.insertInner,
