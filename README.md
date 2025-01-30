@@ -175,10 +175,10 @@ collection.Insert(data);
 Console.WriteLine("{0}", data.Id); // 2
 
 // Query all documents into a C# list
-var documents = collection.Select().OnAll().Enumerate().ToList();
+var documents = collection.Select().ToList();
 
 // Query the Data property, where Name starts with 'Document'
-var documentsData = collection.Select(d => d.Data).Where(d => d.Name.StartsWith("Document")).Enumerate().ToList();
+var documentsData = collection.Select(d => d.Data).Where(d => d.Name.StartsWith("Document")).ToList();
 
 data.Data = "Updated data";
 
@@ -209,7 +209,7 @@ collection.Insert(data) |> ignore
 printfn "%A" data.Id // 2
         
 // Query all documents into a F# list
-let documents = collection.Select().OnAll().ToList()
+let documents = collection.ToList()
         
 // Query the Data property, where Name starts with 'Document'
 let documentsData = collection.Select(fun d -> d.Data).Where(fun d -> d.Name.StartsWith "Document").ToList()
