@@ -224,7 +224,7 @@ type InsertManyResult = {
     Count: int64
 }
 
-[<Extension>]
+[<Extension; AbstractClass; Sealed>]
 type CollectionExtensions =
     [<Extension>]
     static member Remove<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>) : int64 =

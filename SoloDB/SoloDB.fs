@@ -23,7 +23,7 @@ open System.Data
 // the .NET Expression we need to use it in a C# style class.
 [<Sealed>][<AbstractClass>] // make it static
 type internal ExpressionHelper =
-    static member internal get<'a, 'b>(expression: Expression<System.Func<'a, 'b>>) = expression
+    static member inline internal get<'a, 'b>(expression: Expression<System.Func<'a, 'b>>) = expression
 
 module internal Helper =
     let internal lockTable (connectionStr: string) (name: string) =
@@ -348,6 +348,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.Name = name
     member this.InTransaction = match connection with | Transactional _ -> true | Pooled _ -> false | Transitive _ -> true
     member this.IncludeType = typeof<'T>.IsAbstract
+    member internal this.Connection = connection
 
     member this.Insert (item: 'T) =
         use connection = connection.Get()
