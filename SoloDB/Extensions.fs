@@ -8,7 +8,7 @@ open System.Runtime.CompilerServices
 open System.Linq.Expressions
 open FSharp.Interop.Dynamic
 
-[<Extension>]
+[<Extension; AbstractClass; Sealed>]
 type Extensions =
     [<Extension>]
     static member Set<'T, 'V>(this: 'T, value: 'V) : unit =

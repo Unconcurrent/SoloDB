@@ -84,7 +84,7 @@ module QueryTranslator =
                 AppendRaw = appendRaw
                 RollBack = fun N -> sb.Remove(sb.Length - (int)N, (int)N) |> ignore
                 UpdateMode = updateMode
-                TableNameDot = "\"" + tableName + "\"."
+                TableNameDot = if String.IsNullOrEmpty tableName then String.Empty else "\"" + tableName + "\"."
                 JsonExtractSelfValue = true
                 Parameters = (expression :?> LambdaExpression).Parameters
                 IdParameterIndex = idIndex
@@ -364,14 +364,6 @@ module QueryTranslator =
                 visitMemberAccess memberAccess qb
 
             | other -> failwithf "Unable to translate property access."
-
-            (*qb.AppendRaw "jsonb_extract("
-            visit o qb |> ignore
-            if isIntegerBased property then
-                qb.AppendRaw $",'$[{property}]')"
-            else
-                qb.AppendRaw $",'$.{property}')"*)
-        
         | "AnyInEach" ->
             let array = m.Arguments.[0]
             let whereFuncExpr = m.Arguments.[1]
@@ -636,7 +628,7 @@ module QueryTranslator =
         let e = visit expression builder
         sb.ToString(), variables
 
-    let translateWithId (tableName: string) (expression: Expression) idParameterIndex =
+    let internal translateWithId (tableName: string) (expression: Expression) idParameterIndex =
         let sb = StringBuilder()
         let variables = Dictionary<string, obj>()
         let builder = QueryBuilder.New sb variables false tableName expression idParameterIndex
@@ -644,7 +636,7 @@ module QueryTranslator =
         let e = visit expression builder
         sb.ToString(), variables
 
-    let translateUpdateMode (tableName: string) (expression: Expression) =
+    let internal translateUpdateMode (tableName: string) (expression: Expression) =
         let sb = StringBuilder()
         let variables = Dictionary<string, obj>()
         let builder = QueryBuilder.New sb variables true tableName expression -1

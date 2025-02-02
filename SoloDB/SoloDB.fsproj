@@ -38,6 +38,7 @@
     <Compile Include="Connections.fs" />
     <Compile Include="FileStorage.fs" />
     <Compile Include="SoloDB.fs" />
+    <Compile Include="Queryable.fs" />
     <Compile Include="SoloDBOperators.fs" />
     <Compile Include="MongoEmulation.fs" />
   </ItemGroup>
