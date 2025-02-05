@@ -75,9 +75,8 @@ type internal SoloDBCollectionQueryProvider<'T>(source: Collection<'T>) =
             let query, variables = translate source expression true
             let t = typeof<'TResult>
             match t with
-            | _ when 
-                    t.IsGenericType
-                    && typedefof<IEnumerable<_>>.IsAssignableFrom (t.GetGenericTypeDefinition()) ->
+            | _ when t.IsGenericType
+                     && typedefof<IEnumerable<_>> = (typedefof<'TResult>) ->
                 let elemType = t.GetGenericArguments().[0]
                 let m = 
                     typeof<SoloDBCollectionQueryProvider<'T>>

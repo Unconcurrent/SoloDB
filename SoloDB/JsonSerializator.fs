@@ -387,7 +387,7 @@ module JsonSerializator =
                         for i, v in items |> Seq.indexed do
                             array.SetValue((JsonValue.Deserialize elementType v), i)
                         array |> box
-                    elif typedefof<IList<_>>.IsAssignableFrom targetType then
+                    elif targetType.GetInterface(typedefof<IList<_>>.Name) <> null then
                         let icollectionType = targetType.GetInterfaces() |> Array.find(fun i -> i.IsGenericType && i.GetGenericTypeDefinition() = typedefof<IList<_>>) 
                         let elementType = icollectionType.GenericTypeArguments.[0]
                         let listInstance = Activator.CreateInstance(targetType) :?> IList
