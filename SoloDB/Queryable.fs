@@ -1,4 +1,4 @@
-﻿module Queryable
+﻿namespace SoloDatabase
 
 open System.Linq
 open System.Collections
@@ -12,44 +12,201 @@ open SQLiteTools
 open Microsoft.FSharp.Reflection
 open System.Data
 open System.Reflection
+open System.Text
 
-let private concatVars(vars1: Dictionary<string, obj>) (vars2: Dictionary<string, obj>) =
-    let d = Dictionary<string, obj>(vars1.Count + vars2.Count)
-    for KeyValue(k, v) in vars1 do
-        d.Add(k, v)
-    for KeyValue(k, v) in vars2 do
-        d.Add(k, v)
-    d
+type private QueryableBuilder<'T> = 
+    {
+        SQLiteCommand: StringBuilder
+        Variables: Dictionary<string, obj>
+        Source: Collection<'T>
+    }
+    member this.Append(text: string) =
+        this.SQLiteCommand.Append text |> ignore
 
-let rec private translateCall (source: Collection<'T>) (expression: MethodCallExpression) (first: bool) =
-    match expression.Method.Name with
-    | "Sum" ->
-        let selection, variables = 
+
+module private QueryHelper =
+    let rec private aggregateTranslator (fnName: string) (builder: QueryableBuilder<'T>) (expression: MethodCallExpression) =
+        builder.Append "SELECT "
+        builder.Append fnName
+        builder.Append "("
+
+        match expression.Arguments.Count with
+        | 1 -> QueryTranslator.translateQueryable "" (ExpressionHelper.get(fun x -> x)) builder.SQLiteCommand builder.Variables
+        | 2 -> QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+        | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+
+        builder.Append ") FROM ("
+
+        translate builder expression.Arguments.[0]
+        builder.Append ")"
+
+    and private translateCall (builder: QueryableBuilder<'T>) (expression: MethodCallExpression) =
+        // todo: add test
+        match expression.Method.Name with
+        | "Sum" ->
+            // SUM() return NULL if all elements are NULL, TOTAL() return 0.0.
+            // TOTAL() always returns a float, therefore we will just check for NULL
+            builder.Append "SELECT COALESCE(("
+            aggregateTranslator "SUM" builder expression
+            builder.Append "),0) as Value"
+
+        | "Average" ->
+            aggregateTranslator "AVG" builder expression
+
+        | "Min" ->
+            aggregateTranslator "MIN" builder expression
+
+        | "Max" ->
+            aggregateTranslator "MAX" builder expression
+
+        | "DistinctBy"
+        | "Distinct" ->
+            builder.Append "SELECT Id, Value FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ") GROUP BY "
+
             match expression.Arguments.Count with
-            | 1 -> QueryTranslator.translate "" (ExpressionHelper.get(fun x -> x))
-            | 2 -> QueryTranslator.translate "" expression.Arguments.[1]
+            | 1 -> QueryTranslator.translateQueryable "" (ExpressionHelper.get(fun x -> x)) builder.SQLiteCommand builder.Variables
+            | 2 -> QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+            builder.Append ", Id"
+
+        | "Count"
+        | "LongCount" ->
+            builder.Append "SELECT COUNT(Id) FROM ("
+
+            translate builder expression.Arguments.[0]
+            builder.Append ")"
+            match expression.Arguments.Count with
+            | 1 -> () // Noop needed.
+            | 2 -> 
+                builder.Append "WHERE " 
+                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
-        let sql, recVariables = translate source expression.Arguments.[0] false
-        $"SELECT SUM({selection}) FROM ({sql})", concatVars variables recVariables
-    | other -> failwithf "Queryable method not implemented: %s" other
+        | "Where" ->
+            match expression.Arguments.[0] with
+            | :? ConstantExpression as ce when ce.Type.Name.StartsWith "RootQueryable" ->
+                builder.Append "SELECT Id, \""
+                builder.Append builder.Source.Name
+                builder.Append "\".Value as Value FROM \""
+                
+                builder.Append builder.Source.Name
+                builder.Append "\" WHERE "
+                QueryTranslator.translateQueryable builder.Source.Name expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            | _other ->
+                builder.Append "SELECT Id, Value FROM ("
 
-and private translateConstant (source: Collection<'T>) (expression: ConstantExpression) (first: bool) =
-    if expression.Type.Name.StartsWith "DummyQueryable" then
-        if first then
-            $"SELECT json(\"{source.Name}\".Value) as Value FROM \"{source.Name}\"", Dictionary()
+                translate builder expression.Arguments.[0]
+
+                builder.Append ") WHERE "
+                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+
+        | "Select" ->
+            builder.Append "SELECT Id, "
+            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            builder.Append " as Value FROM "
+            match expression.Arguments.[0] with
+            | :? ConstantExpression as ce when ce.Type.Name.StartsWith "RootQueryable" ->
+                builder.Append "\""
+                builder.Append builder.Source.Name
+                builder.Append "\""
+            | other ->
+                builder.Append "("
+                translate builder other
+                builder.Append ")"
+
+        | "OrderBy" | "OrderByDescending" ->
+            translate builder expression.Arguments.[0]
+            builder.Append " ORDER BY "
+            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            if expression.Method.Name = "OrderByDescending" then
+                builder.Append "DESC "
+
+        | "Take" ->
+            translate builder expression.Arguments.[0]
+            builder.Append "LIMIT "
+            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+
+        | "Skip" ->
+            translate builder expression.Arguments.[0]
+            builder.Append "OFFSET "
+            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+
+        | "First" | "FirstOrDefault" ->
+            translate builder expression.Arguments.[0]
+            
+            match expression.Arguments.Count with
+            | 1 -> () // Noop needed.
+            | 2 -> 
+                builder.Append "WHERE " 
+                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+
+            builder.Append "LIMIT 1 "
+
+        | "Last" | "LastOrDefault" ->
+            translate builder expression.Arguments.[0]
+
+            match expression.Arguments.Count with
+            | 1 -> () // Noop needed.
+            | 2 -> 
+                builder.Append "WHERE " 
+                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+
+            builder.Append "ORDER BY Id DESC LIMIT 1 "
+
+        | "All" ->
+            builder.Append "SELECT COUNT(*) = (SELECT COUNT(*) FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ")) FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ") WHERE "
+            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+
+        | "Any" ->
+            builder.Append "SELECT EXISTS(SELECT 1 FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append "))"
+
+        | other -> failwithf "Queryable method not implemented: %s" other
+
+    and private translateConstant (builder: QueryableBuilder<'T>) (expression: ConstantExpression) =
+        if expression.Type.Name.StartsWith "RootQueryable" then
+            builder.Append "SELECT Id, \""
+            builder.Append builder.Source.Name
+            builder.Append "\".Value as Value FROM \""
+            builder.Append builder.Source.Name
+            builder.Append "\""
         else
-            $"SELECT \"{source.Name}\".Value as Value FROM \"{source.Name}\"", Dictionary()
-    else
-        QueryTranslator.translate "" expression
+            QueryTranslator.translateQueryable "" expression builder.SQLiteCommand builder.Variables
 
-and private translate (source: Collection<'T>) (expression: Expression) (first: bool) =
-    match expression.NodeType with
-    | ExpressionType.Call ->
-        translateCall source (expression :?> MethodCallExpression) (first)
-    | ExpressionType.Constant ->
-        translateConstant source (expression :?> ConstantExpression) (first)
-    | other -> failwithf "Could not translate Queryable expression of type: %A" other
+    and private translate (builder: QueryableBuilder<'T>) (expression: Expression) =
+        match expression.NodeType with
+        | ExpressionType.Call ->
+            translateCall builder (expression :?> MethodCallExpression)
+        | ExpressionType.Constant ->
+            translateConstant builder (expression :?> ConstantExpression)
+        | other -> failwithf "Could not translate Queryable expression of type: %A" other
+
+    let internal startTranslation (source: Collection<'T>) (expression: Expression) =
+        let builder = {
+            SQLiteCommand = StringBuilder()
+            Variables = Dictionary<string, obj>()
+            Source = source
+        }
+
+        if typeof<IEnumerable>.IsAssignableFrom expression.Type then
+            builder.Append "SELECT CASE WHEN TYPEOF(Value) = 'blob' THEN json_extract(Value, '$') ELSE Value END FROM ("
+            translate builder expression
+            builder.Append ")"
+        else
+            translate builder expression
+
+
+        builder.SQLiteCommand.ToString(), builder.Variables
+
 
 type internal SoloDBCollectionQueryProvider<'T>(source: Collection<'T>) =
     member internal this.ExecuteEnumetable<'Elem> (expression: Expression) (query: string) (par: obj) : IEnumerable<'Elem> =
@@ -72,7 +229,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: Collection<'T>) =
 
 
         member this.Execute<'TResult>(expression: Expression) : 'TResult =
-            let query, variables = translate source expression true
+            let query, variables = QueryHelper.startTranslation source expression
             let t = typeof<'TResult>
             match t with
             | _ when t.IsGenericType
@@ -103,8 +260,8 @@ and internal SoloDbCollectionQueryable<'I, 'T>(provider: IQueryProvider, express
         member this.GetEnumerator() =
             (this :> IEnumerable<'T>).GetEnumerator() :> IEnumerator
 
-and [<Sealed>] private DummyQueryable<'T>() =
-    static member internal Instance = DummyQueryable<'T>()
+and [<Sealed>] private RootQueryable<'T>() =
+    static member internal Instance = RootQueryable<'T>()
 
     interface IQueryable<'T> with
         member _.Provider = null
@@ -123,4 +280,4 @@ and [<Sealed>] private DummyQueryable<'T>() =
 type QueryableExtensions =
     [<Extension>]
     static member AsQueryable(collection: Collection<'A>) : IQueryable<'A> =
-        SoloDbCollectionQueryable<'A, 'A>(SoloDBCollectionQueryProvider(collection), Expression.Constant(DummyQueryable<'A>.Instance))
+        SoloDbCollectionQueryable<'A, 'A>(SoloDBCollectionQueryProvider(collection), Expression.Constant(RootQueryable<'A>.Instance))
