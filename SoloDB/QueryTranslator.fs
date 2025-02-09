@@ -86,7 +86,12 @@ module QueryTranslator =
                 UpdateMode = updateMode
                 TableNameDot = if String.IsNullOrEmpty tableName then String.Empty else "\"" + tableName + "\"."
                 JsonExtractSelfValue = true
-                Parameters = (expression :?> LambdaExpression).Parameters
+                Parameters = 
+                    let expression = 
+                        if expression.NodeType = ExpressionType.Quote 
+                        then (expression :?> UnaryExpression).Operand 
+                        else expression 
+                    in (expression :?> LambdaExpression).Parameters
                 IdParameterIndex = idIndex
             }
 
@@ -186,6 +191,9 @@ module QueryTranslator =
             visitBinary (exp :?> BinaryExpression) qb
         | ExpressionType.Not ->
             visitNot (exp :?> UnaryExpression) qb
+        | ExpressionType.Negate
+        | ExpressionType.NegateChecked ->
+            visitNegate (exp :?> UnaryExpression) qb
         | ExpressionType.Lambda ->
             visitLambda (exp :?> LambdaExpression) qb
         | ExpressionType.Call ->
@@ -219,6 +227,8 @@ module QueryTranslator =
                 | arg ->
                 visitProperty exp.Object arg ({new Expression() with member this.Type = exp.Object.Type}) qb
             else arrayIndex exp.Object arge qb
+        | ExpressionType.Quote ->
+            visit (exp :?> UnaryExpression).Operand qb
         | _ ->
             raise (Exception(sprintf "Unhandled expression type: '%O'" exp.NodeType))
 
@@ -289,6 +299,25 @@ module QueryTranslator =
 
     and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =        
         match m.Method.Name with
+        | "Abs"
+        | "abs" -> // todo: add test
+            let value = m.Arguments.[0]
+            qb.AppendRaw "ABS("
+            visit value qb
+            qb.AppendRaw ")"
+
+        | "ToLower" -> // todo: add test
+            let value = m.Arguments.[0]
+            qb.AppendRaw "LOWER("
+            visit value qb
+            qb.AppendRaw ")"
+
+        | "ToUpper" -> // todo: add test
+            let value = m.Arguments.[0]
+            qb.AppendRaw "UPPER("
+            visit value qb
+            qb.AppendRaw ")"
+
         | "GetArray" ->
             let array = m.Arguments.[0]
             let index = m.Arguments.[1]
@@ -472,9 +501,11 @@ module QueryTranslator =
         | "ToObject" when typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.Method.DeclaringType || m.Method.DeclaringType.FullName = "SoloDatabase.MongoDB.BsonDocument" ->
             let castToType = m.Method.GetGenericArguments().[0]
             castTo qb castToType m.Object
+
         | "CastTo" ->
             let castToType = m.Method.GetGenericArguments().[0]
             castTo qb castToType m.Arguments.[0]
+
         | _ -> 
             raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 
@@ -503,7 +534,11 @@ module QueryTranslator =
 
     and private visitNot (m: UnaryExpression) (qb: QueryBuilder) =
         qb.AppendRaw "NOT "
-        visit m.Operand qb |> ignore        
+        visit m.Operand qb
+
+    and private visitNegate (m: UnaryExpression) (qb: QueryBuilder) =
+        qb.AppendRaw "-"
+        visit m.Operand qb
 
     and private visitNew (m: NewExpression) (qb: QueryBuilder) =
         let t = m.Type
@@ -514,7 +549,7 @@ module QueryTranslator =
                 visit(arg) qb |> ignore
                 if m.Arguments.IndexOf arg <> m.Arguments.Count - 1 then
                     qb.AppendRaw ","
-            qb.AppendRaw ")"            
+            qb.AppendRaw ")"
         else
             failwithf "Cannot construct new in SQL query %A" t
 
@@ -625,15 +660,19 @@ module QueryTranslator =
         let variables = Dictionary<string, obj>()
         let builder = QueryBuilder.New sb variables false tableName expression -1
     
-        let e = visit expression builder
+        visit expression builder
         sb.ToString(), variables
+
+    let internal translateQueryable (tableName: string) (expression: Expression) (sb: StringBuilder) (variables: Dictionary<string, obj>) =
+        let builder = QueryBuilder.New sb variables false tableName expression -1
+        visit expression builder
 
     let internal translateWithId (tableName: string) (expression: Expression) idParameterIndex =
         let sb = StringBuilder()
         let variables = Dictionary<string, obj>()
         let builder = QueryBuilder.New sb variables false tableName expression idParameterIndex
     
-        let e = visit expression builder
+        visit expression builder
         sb.ToString(), variables
 
     let internal translateUpdateMode (tableName: string) (expression: Expression) =
@@ -641,5 +680,5 @@ module QueryTranslator =
         let variables = Dictionary<string, obj>()
         let builder = QueryBuilder.New sb variables true tableName expression -1
     
-        let e = visit expression builder
+        visit expression builder
         sb.ToString(), variables
