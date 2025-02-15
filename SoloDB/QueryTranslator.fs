@@ -64,9 +64,17 @@ module QueryTranslator =
                      sb.Append (sprintf "%i" (if b then 1 else 0)) |> ignore
                 | other ->
 
-                if isIntegerBased value then
-                    sb.Append (sprintf "%s" (value.ToString())) |> ignore
-                else
+                match value with
+                | :? int8 as i -> sprintf "%i" i |> sb.Append |> ignore
+                | :? uint8 as i -> sprintf "%i" i |> sb.Append |> ignore
+                | :? int16 as i -> sprintf "%i" i |> sb.Append |> ignore
+                | :? uint16 as i -> sprintf "%i" i |> sb.Append |> ignore
+                | :? int32 as i -> sprintf "%i" i |> sb.Append |> ignore
+                | :? uint32 as i -> sprintf "%i" i |> sb.Append |> ignore
+                | :? int64 as i -> sprintf "%i" i |> sb.Append |> ignore
+                | :? uint64 as i -> sprintf "%i" i |> sb.Append |> ignore
+                | :? nativeint as i -> sprintf "%i" i |> sb.Append |> ignore
+                | _other -> 
                 
                 let jsonValue, kind = toSQLJson value
                 if kind then 
@@ -167,7 +175,7 @@ module QueryTranslator =
 
     let rec private visit (exp: Expression) (qb: QueryBuilder) : unit =
         if exp.NodeType <> ExpressionType.Lambda && isFullyConstant exp && (match exp with | :? ConstantExpression as ce when ce.Value = null -> false | other -> true) then
-            let value = evaluateExpr exp
+            let value = evaluateExpr<obj> exp
             qb.AppendVariable value
         else
 
