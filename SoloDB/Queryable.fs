@@ -116,8 +116,24 @@ module private QueryHelper =
                 translate builder other
                 builder.Append ")"
 
-        | "OrderBy" | "OrderByDescending" ->
+        | "ThenBy" | "ThenByDescending" ->
             translate builder expression.Arguments.[0]
+            builder.Append ","
+            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            if expression.Method.Name = "ThenByDescending" then
+                builder.Append "DESC "
+
+        | "OrderBy" | "OrderByDescending" ->
+            // Remove all previous order by's, they are noop.
+            let innerExpression = 
+                let mutable expr = expression.Arguments.[0]
+                while match expr with
+                        | :? MethodCallExpression as mce -> mce.Method.Name = "OrderBy" || mce.Method.Name = "OrderByDescending" || mce.Method.Name = "ThenBy" || mce.Method.Name = "ThenByDescending"
+                        | _other -> false 
+                    do expr <- (expr :?> MethodCallExpression).Arguments.[0]
+                expr
+
+            translate builder innerExpression
             builder.Append " ORDER BY "
             QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
             if expression.Method.Name = "OrderByDescending" then
@@ -170,6 +186,19 @@ module private QueryHelper =
             translate builder expression.Arguments.[0]
             builder.Append "))"
 
+        | "Contains" ->
+            builder.Append "SELECT EXISTS(SELECT 1 FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ") WHERE "
+
+            let value = 
+                match expression.Arguments.[1] with
+                | :? ConstantExpression as ce -> ce.Value
+                | other -> failwithf "Invalid Contains(...) parameter: %A" other
+
+            QueryTranslator.translateQueryable "" (ExpressionHelper.get(fun x -> x = value)) builder.SQLiteCommand builder.Variables
+            builder.Append ")"
+
         | other -> failwithf "Queryable method not implemented: %s" other
 
     and private translateConstant (builder: QueryableBuilder<'T>) (expression: ConstantExpression) =
@@ -192,8 +221,8 @@ module private QueryHelper =
 
     let internal startTranslation (source: Collection<'T>) (expression: Expression) =
         let builder = {
-            SQLiteCommand = StringBuilder()
-            Variables = Dictionary<string, obj>()
+            SQLiteCommand = StringBuilder(256)
+            Variables = Dictionary<string, obj>(16)
             Source = source
         }
 
@@ -209,7 +238,7 @@ module private QueryHelper =
 
 
 type internal SoloDBCollectionQueryProvider<'T>(source: Collection<'T>) =
-    member internal this.ExecuteEnumetable<'Elem> (expression: Expression) (query: string) (par: obj) : IEnumerable<'Elem> =
+    member internal this.ExecuteEnumetable<'Elem> (query: string) (par: obj) : IEnumerable<'Elem> =
         seq {
             use connection = source.Connection.Get()
             yield! SQLiteTools.query<'Elem> connection query par
@@ -227,25 +256,25 @@ type internal SoloDBCollectionQueryProvider<'T>(source: Collection<'T>) =
         member this.Execute(expression: Expression) : obj =
             (this :> IQueryProvider).Execute<IEnumerable<'T>>(expression)
 
-
         member this.Execute<'TResult>(expression: Expression) : 'TResult =
             let query, variables = QueryHelper.startTranslation source expression
-            let t = typeof<'TResult>
-            match t with
-            | _ when t.IsGenericType
+            match typeof<'TResult> with
+            | t when t.IsGenericType
                      && typedefof<IEnumerable<_>> = (typedefof<'TResult>) ->
                 let elemType = t.GetGenericArguments().[0]
                 let m = 
                     typeof<SoloDBCollectionQueryProvider<'T>>
                         .GetMethod(nameof(this.ExecuteEnumetable), BindingFlags.NonPublic ||| BindingFlags.Instance)
                         .MakeGenericMethod(elemType)
-                m.Invoke(this, [|expression; query; variables|]) :?> 'TResult
+                m.Invoke(this, [|query; variables|]) :?> 'TResult
             | _other ->
                 use connection = source.Connection.Get()
                 connection.QueryFirstOrDefault<'TResult>(query, variables)
             
 
 and internal SoloDbCollectionQueryable<'I, 'T>(provider: IQueryProvider, expression: Expression) =
+    interface IOrderedQueryable<'T>
+
     interface IQueryable<'T> with
         member _.Provider = provider
         member _.Expression = expression

@@ -24,7 +24,7 @@ module Utils =
 
     let private emptyObjContructor = ConcurrentDictionary<Type, unit -> obj>()
 
-    let initEmpty t =
+    let internal initEmpty t =
         emptyObjContructor.GetOrAdd(t, Func<Type, unit -> obj>(fun t -> 
             let constr = t.GetConstructors() |> Seq.tryFind(fun c -> c.GetParameters().Length = 0 && (c.IsPublic || c.IsPrivate))
             match constr with
@@ -32,7 +32,7 @@ module Utils =
             | None -> fun () -> System.Runtime.Serialization.FormatterServices.GetSafeUninitializedObject(t)
         ))()
 
-    let isTuple (t: Type) =
+    let internal isTuple (t: Type) =
         typeof<Tuple>.IsAssignableFrom t || typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "Tuple`"
 
     type Random with
@@ -53,39 +53,51 @@ module Utils =
         static member IsInteger (this: Decimal) =
             this = (Decimal.Floor this)
 
-    let isNumber (value: obj) =
+    let internal isNumber (value: obj) =
         match value with
-        | :? sbyte
-        | :? byte
+        | :? int8
+        | :? uint8
         | :? int16
         | :? uint16
-        | :? int
+        | :? int32
         | :? uint32
         | :? int64
         | :? uint64
-        | :? int64
+        | :? nativeint
+
         | :? float32
         | :? float
         | :? decimal -> true
         | _ -> false
 
-    let isIntegerBasedType (t: Type) =
+    let internal isIntegerBasedType (t: Type) =
         match t with
-        | _ when t = typeof<sbyte>  -> true
-        | _ when t = typeof<byte>   -> true
+        | _ when t = typeof<int8>  -> true
+        | _ when t = typeof<uint8>   -> true
         | _ when t = typeof<int16>  -> true
         | _ when t = typeof<uint16> -> true
         | _ when t = typeof<int32>  -> true
         | _ when t = typeof<uint32> -> true
-        | _ when t = typeof<int64>  -> true
         | _ when t = typeof<uint64> -> true
         | _ when t = typeof<int64>  -> true
+        | _ when t = typeof<nativeint>  -> true
         | _ -> false
 
-    let isIntegerBased (value: obj) =
-        value.GetType() |> isIntegerBasedType
+    let internal isIntegerBased (value: obj) =
+        match value with
+        | :? int8
+        | :? uint8
+        | :? int16
+        | :? uint16
+        | :? int32
+        | :? uint32
+        | :? int64
+        | :? uint64
+        | :? nativeint
+            -> true
+        | _other -> false
 
-    let typeToName (t: Type) = 
+    let internal typeToName (t: Type) = 
         let fullname = t.FullName
         if fullname.Length > 0 && Char.IsAsciiLetter fullname.[0] // To not insert auto generated classes.
         then Some fullname
@@ -140,7 +152,7 @@ module Utils =
         use sha = SHA1.Create()
         sha.ComputeHash(bytes)
 
-    let shaHash (o: obj) = 
+    let internal shaHash (o: obj) = 
         match o with
         | :? (byte array) as bytes -> 
             shaHashBytes(bytes)
@@ -148,7 +160,7 @@ module Utils =
             shaHashBytes(str |> Encoding.UTF8.GetBytes)
         | other -> raise (InvalidDataException(sprintf "Cannot hash object of type: %A" (other.GetType())))
 
-    let bytesToHex (hash: byte array) =
+    let internal bytesToHex (hash: byte array) =
         let sb = new StringBuilder()
         for b in hash do
             sb.Append (b.ToString("x2")) |> ignore
@@ -157,26 +169,24 @@ module Utils =
 
     [<return: Struct>]
     let internal (|OfType|_|) (_typ: 'x -> 'a) (objType: Type) =
-        let name = typeof<'a>.Name
-        let typ = nameToType name
-        if typ.IsAssignableFrom(objType) then ValueSome () else ValueNone
+        if typeof<'a>.IsAssignableFrom(objType) then ValueSome () else ValueNone
 
-    let mutable debug =
+    let mutable internal debug =
         #if DEBUG
         true
         #else
         false
         #endif
 
-    type CompatilibilityList<'T>(elements: 'T seq) =
+    type CompatilibilityList<'T> internal (elements: 'T seq) =
         inherit System.Collections.Generic.List<'T>(elements)
     
         ///<summary>For compatilibility, it just calls this.Count. Gets the number of elements contained in the <see cref="T:System.Collections.Generic.List`1" />.</summary>
         ///<returns>The number of elements contained in the <see cref="T:System.Collections.Generic.List`1" />.</returns>
         member this.Length = this.Count
 
-    module SeqExt =
-        let sequentialGroupBy keySelector (sequence: seq<'T>) =
+    module internal SeqExt =
+        let internal sequentialGroupBy keySelector (sequence: seq<'T>) =
             seq {
                 use enumerator = sequence.GetEnumerator()
                 if enumerator.MoveNext() then
