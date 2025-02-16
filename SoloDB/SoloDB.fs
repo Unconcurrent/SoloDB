@@ -66,8 +66,8 @@ module internal Helper =
 
     let private insertImpl<'T when 'T :> obj> (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (orReplace: bool) (getTransitiveCollection: IDbConnection -> obj) =
         let t = typeof<'T>
-        let customIdGen = getCustomIdType t
-        let existsWritebleDirectId = hasIdType t
+        let customIdGen = CustomTypeId<'T>.Value
+        let existsWritebleDirectId = HasTypeId<'T>.Value
 
 
         match customIdGen with
@@ -451,7 +451,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         use connection = connection.Get()
         match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
         | json when Object.ReferenceEquals(json, null) -> None
-        | json -> fromDapper<'T> json |> Some
+        | json -> fromSQLite<'T> json |> Some
 
     member this.GetById(id: int64) =
         match this.TryGetById id with
@@ -461,15 +461,15 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.Select<'R>(select: Expression<System.Func<'T, 'R>>) =
         let selectSQL, variables = QueryTranslator.translate name select
 
-        WhereBuilder<'T, DbObjectRow, 'R>(connection, name, $"SELECT Id, {selectSQL} as ValueJSON FROM \"{name}\" ", fromDapper<'R>, variables, id)
+        WhereBuilder<'T, DbObjectRow, 'R>(connection, name, $"SELECT Id, {selectSQL} as ValueJSON FROM \"{name}\" ", fromSQLite<'R>, variables, id)
 
     member this.SelectUnique<'R>(select: Expression<System.Func<'T, 'R>>) =
         let selectSQL, variables = QueryTranslator.translate name select
 
-        WhereBuilder<'T, 'R, 'R>(connection, name, $"SELECT DISTINCT {selectSQL} FROM \"{name}\" ", fromDapper<'R>, variables, id)
+        WhereBuilder<'T, 'R, 'R>(connection, name, $"SELECT DISTINCT {selectSQL} FROM \"{name}\" ", fromSQLite<'R>, variables, id)
 
     member this.Select() =
-        WhereBuilder<'T, DbObjectRow, 'T>(connection, name, $"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" ", fromDapper<'T>, Dictionary<string, obj>(), id)
+        WhereBuilder<'T, DbObjectRow, 'T>(connection, name, $"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" ", fromSQLite<'T>, Dictionary<string, obj>(), id)
 
     member this.SelectWithId() =
         WhereBuilder<'T, string, (int64 * 'T)>(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>(), id)
@@ -536,9 +536,9 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     /// </summary>
     member this.Update(item: 'T) =
         let t = typeof<'T>
-        if hasIdType t then
+        if HasTypeId<'T>.Value then
             this.Replace(item).WhereId(item?Id |> box :?> int64).Execute() |> ignore
-        else match getCustomIdType t with
+        else match CustomTypeId<'T>.Value with
              | Some customId ->
                 let id = customId.GetId (item |> box)
                 this.Replace(item).Where(fun e -> e.Dyn<obj>("Id") = id).Execute() |> ignore
@@ -830,16 +830,12 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
                 CREATE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
 
-                CREATE INDEX IF NOT EXISTS SoloDBDirectoryHeaderParentIdAndNameIndex ON SoloDBDirectoryHeader(ParentId, Name);
                 CREATE INDEX IF NOT EXISTS SoloDBDirectoryHeaderParentIdIndex ON SoloDBDirectoryHeader(ParentId);
-                CREATE INDEX IF NOT EXISTS SoloDBDirectoryHeaderNameIndex ON SoloDBDirectoryHeader(Name);
                 CREATE UNIQUE INDEX IF NOT EXISTS SoloDBDirectoryHeaderFullPathIndex ON SoloDBDirectoryHeader(FullPath);
                 CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileHeaderFullPathIndex ON SoloDBFileHeader(FullPath);
                 CREATE UNIQUE INDEX IF NOT EXISTS SoloDBDirectoryMetadataDirectoryIdAndKey ON SoloDBDirectoryMetadata(DirectoryId, Key);
 
-                CREATE INDEX IF NOT EXISTS SoloDBFileHeaderDirectoryIdAndNameIndex ON SoloDBFileHeader(DirectoryId, Name);
                 CREATE INDEX IF NOT EXISTS SoloDBFileHeaderDirectoryIdIndex ON SoloDBFileHeader(DirectoryId);
-                CREATE INDEX IF NOT EXISTS SoloDBFileHeaderNameIndex ON SoloDBFileHeader(Name);
                 CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileChunkFileIdAndNumberIndex ON SoloDBFileChunk(FileId, Number);
                 CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileMetadataFileIdAndKey ON SoloDBFileMetadata(FileId, Key);
                 CREATE INDEX IF NOT EXISTS SoloDBFileHashIndex ON SoloDBFileHeader(Hash);

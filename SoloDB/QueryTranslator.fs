@@ -2,8 +2,6 @@
 
 module QueryTranslator =
     open System.Collections.ObjectModel
-    open System.Security.Cryptography
-    open System.Runtime.InteropServices
     open System.Text
     open System.Linq.Expressions
     open System
@@ -11,17 +9,6 @@ module QueryTranslator =
     open System.Collections.Generic
     open JsonFunctions
     open Utils
-
-    let private cryptoRandom = RandomNumberGenerator.Create()
-    let mutable private variableNameCounter: uint32 = 0u
-    let private getRandomVarName () =
-        variableNameCounter <- if variableNameCounter = UInt32.MaxValue then 0u else variableNameCounter + 1u
-        let bytes = Array.zeroCreate<byte> (4 * sizeof<uint>)
-        cryptoRandom.GetBytes bytes
-        
-        let randomUInts = MemoryMarshal.Cast<byte, uint>(Span<byte>(bytes))
-        $"VAR{(randomUInts.[0] + variableNameCounter):X}{randomUInts.[1]:X}{randomUInts.[2]:X}{randomUInts.[3]:X}"
-        
 
     type private MemberAccess = 
         {

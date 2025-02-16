@@ -162,7 +162,13 @@ module private QueryHelper =
             builder.Append "LIMIT 1 "
 
         | "Last" | "LastOrDefault" ->
-            translate builder expression.Arguments.[0]
+            match expression.Arguments.[0] with
+            | :? MethodCallExpression as mce when mce.Method.Name.StartsWith "OrderBy" ->
+                builder.Append "SELECT Id, Value FROM ("
+                translate builder expression.Arguments.[0]
+                builder.Append ") "
+            | _other ->
+                translate builder expression.Arguments.[0]
 
             match expression.Arguments.Count with
             | 1 -> () // Noop needed.
@@ -172,6 +178,79 @@ module private QueryHelper =
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
             builder.Append "ORDER BY Id DESC LIMIT 1 "
+
+        | "Single" ->
+            let countVar = Utils.getRandomVarName()
+
+            builder.Append "SELECT jsonb_extract(Encoded, '$.Id') as Id, jsonb_extract(Encoded, '$.Value') as Value FROM ("
+
+            builder.Append "SELECT CASE WHEN "
+            builder.Append countVar
+            builder.Append " = 0 THEN (SELECT jsonb_object('Id', NULL, 'Value', '\"Sequence contains no elements\"'))"
+            builder.Append "WHEN "
+            builder.Append countVar
+            builder.Append " > 1 THEN (SELECT jsonb_object('Id', NULL, 'Value', '\"Sequence contains more than one matching element\"')) ELSE ("
+
+            builder.Append "SELECT jsonb_object('Id', Id, 'Value', Value) FROM ("
+
+            match expression.Arguments.Count with
+            | 1 -> translate builder expression.Arguments.[0]
+            | 2 -> 
+                builder.Append "SELECT Id, Value FROM ("
+                translate builder expression.Arguments.[0]
+                builder.Append ") WHERE " 
+                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+
+            
+            builder.Append ")"
+
+            builder.Append ") END as Encoded FROM "
+            builder.Append "(SELECT COUNT(*) as "
+            builder.Append countVar
+            builder.Append " FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ")"
+            match expression.Arguments.Count with
+            | 1 -> () // Noop needed.
+            | 2 -> 
+                builder.Append "WHERE " 
+                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+            builder.Append "LIMIT 2)) WHERE Id IS NOT NULL OR Value IS NOT NULL"
+
+        | "SingleOrDefault" ->
+            let countVar = Utils.getRandomVarName()
+
+            builder.Append "SELECT jsonb_extract(Encoded, '$.Id') as Id, jsonb_extract(Encoded, '$.Value') as Value FROM ("
+
+            builder.Append "SELECT CASE WHEN "
+            builder.Append countVar
+            builder.Append " = 0 THEN"
+            builder.Append "(SELECT 0 WHERE 0)"
+            builder.Append "WHEN "
+            builder.Append countVar
+            builder.Append " > 1 THEN "
+            builder.Append "(SELECT jsonb_object('Id', NULL, 'Value', '\"Sequence contains more than one matching element\"')) "
+            builder.Append "ELSE ("
+
+            builder.Append "SELECT jsonb_object('Id', Id, 'Value', Value) FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ")"
+
+            builder.Append ") END as Encoded FROM "
+            builder.Append "(SELECT COUNT(*) as "
+            builder.Append countVar
+            builder.Append " FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ")"
+            match expression.Arguments.Count with
+            | 1 -> () // Noop needed.
+            | 2 -> 
+                builder.Append "WHERE " 
+                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+            builder.Append "LIMIT 2)) WHERE Id IS NOT NULL OR Value IS NOT NULL"
 
         | "All" ->
             builder.Append "SELECT COUNT(*) = (SELECT COUNT(*) FROM ("
@@ -226,12 +305,9 @@ module private QueryHelper =
             Source = source
         }
 
-        if typeof<IEnumerable>.IsAssignableFrom expression.Type then
-            builder.Append "SELECT CASE WHEN TYPEOF(Value) = 'blob' THEN json_extract(Value, '$') ELSE Value END FROM ("
-            translate builder expression
-            builder.Append ")"
-        else
-            translate builder expression
+        builder.Append "SELECT Id, json(Value) as ValueJSON FROM ("
+        translate builder expression
+        builder.Append ")"
 
 
         builder.SQLiteCommand.ToString(), builder.Variables
@@ -241,7 +317,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: Collection<'T>) =
     member internal this.ExecuteEnumetable<'Elem> (query: string) (par: obj) : IEnumerable<'Elem> =
         seq {
             use connection = source.Connection.Get()
-            yield! SQLiteTools.query<'Elem> connection query par
+            yield! Seq.map JsonFunctions.fromSQLite<'Elem> (connection.Query<Types.DbObjectRow>(query, par))
         }
 
     interface IQueryProvider with
@@ -269,7 +345,13 @@ type internal SoloDBCollectionQueryProvider<'T>(source: Collection<'T>) =
                 m.Invoke(this, [|query; variables|]) :?> 'TResult
             | _other ->
                 use connection = source.Connection.Get()
-                connection.QueryFirstOrDefault<'TResult>(query, variables)
+                match connection.Query<Types.DbObjectRow>(query, variables) |> Seq.tryHead with
+                | None ->
+                    match expression with
+                    | :? MethodCallExpression as mce when mce.Method.Name.EndsWith "OrDefault" ->
+                        Unchecked.defaultof<'TResult>
+                    | _other -> failwithf "Sequence contains no elements"
+                | Some row -> JsonFunctions.fromSQLite<'TResult> row
             
 
 and internal SoloDbCollectionQueryable<'I, 'T>(provider: IQueryProvider, expression: Expression) =

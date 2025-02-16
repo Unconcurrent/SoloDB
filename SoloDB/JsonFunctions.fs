@@ -13,37 +13,39 @@ module JsonFunctions =
     open JsonSerializator
     open FSharp.Interop.Dynamic
 
-    let private hasIdTypeCache = ConcurrentDictionary<Type, bool>()
-    let internal hasIdType (t: Type) = hasIdTypeCache.GetOrAdd(t, fun t -> t.GetProperties() |> Array.exists(fun p -> p.Name = "Id" && p.PropertyType = typeof<int64> && p.CanWrite))
-    
+    // Instead of concurrent dictionaries, we can use a static class
+    // if the parameters can be represented as generic types.
 
-    let private customIdTypeCache = ConcurrentDictionary<Type, {|Generator: IIdGenerator; SetId: obj -> obj -> unit; GetId: obj -> obj; IdType: Type|} option>()
-    let getCustomIdType(t: Type) =
-        customIdTypeCache.GetOrAdd(t, 
-            fun t ->
-                t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-                |> Seq.choose(
-                    fun p -> 
-                        match p.GetCustomAttribute<SoloId>(true) with
-                        | a when isNull a -> None
-                        | a -> 
-                        if not p.CanWrite then failwithf "Cannot create a generator for a non writtable parameter '%s' for type %s" p.Name t.FullName
-                        match a.IdGenerator with
-                        | null -> None
-                        | generator -> Some (p, generator)
-                        ) 
-                |> Seq.tryHead
-                |> Option.bind(
-                    fun (p, gt) ->
-                        let instance = (Activator.CreateInstance gt) :?> IIdGenerator
-                        Some {|
-                            Generator = instance
-                            SetId = fun id o -> p.SetValue(o, id)
-                            GetId = fun o -> p.GetValue(o)
-                            IdType = p.PropertyType
-                        |}
-                )
+    [<AbstractClass; Sealed>]
+    type internal HasTypeId<'t> =
+        static member val internal Value = 
+            typeof<'t>.GetProperties() 
+            |> Array.exists(fun p -> p.Name = "Id" && p.PropertyType = typeof<int64> && p.CanWrite)
 
+    [<AbstractClass; Sealed>]
+    type internal CustomTypeId<'t> =
+        static member val internal Value = 
+            typeof<'t>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+            |> Seq.choose(
+                fun p -> 
+                    match p.GetCustomAttribute<SoloId>(true) with
+                    | a when isNull a -> None
+                    | a -> 
+                    if not p.CanWrite then failwithf "Cannot create a generator for a non writtable parameter '%s' for type %s" p.Name typeof<'t>.FullName
+                    match a.IdGenerator with
+                    | null -> None
+                    | generator -> Some (p, generator)
+                    ) 
+            |> Seq.tryHead
+            |> Option.bind(
+                fun (p, gt) ->
+                    let instance = (Activator.CreateInstance gt) :?> IIdGenerator
+                    Some {|
+                        Generator = instance
+                        SetId = fun id o -> p.SetValue(o, id)
+                        GetId = fun o -> p.GetValue(o)
+                        IdType = p.PropertyType
+                    |}
             )
 
     let toJson<'T> o = 
@@ -109,15 +111,18 @@ module JsonFunctions =
 
         id, value
 
-    let fromDapper<'R when 'R :> obj> (input: obj) : 'R =
+    let fromSQLite<'R when 'R :> obj> (input: obj) : 'R =
         match input with
         | :? DbObjectRow as row ->
+            // If the Id is NULL then the ValueJSON is a error message encoded in a JSON string.
+            if not row.Id.HasValue then
+                let exc = fromJson<string> row.ValueJSON
+                raise (exn exc)
+
             let mutable obj = fromJsonOrSQL<'R> (row.ValueJSON)
-            let typeOfR = typeof<'R>
-            let customIdGen = getCustomIdType typeOfR
             
-            if hasIdType typeOfR then
-                obj?Id <- row.Id
+            if HasTypeId<'R>.Value then
+                obj?Id <- row.Id.Value
             obj
         | :? string as input ->
             fromJsonOrSQL<'R> (input :> obj :?> string)

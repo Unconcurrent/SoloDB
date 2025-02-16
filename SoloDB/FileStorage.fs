@@ -126,31 +126,6 @@ module FileStorage =
         match db.QueryFirstOrDefault<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE FullPath = @FullPath", {|FullPath = path|}) with
         | dir when Utils.isNull dir -> failwithf "Normally you cannot end up here, cannot find a directory that has just created: %s" path
         | dir -> dir |> fillDirectoryMetadata db
-
-
-        (*let root = db.QueryFirst<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE Name = @RootName", {|RootName = ""|})
-
-
-
-
-
-        let rec innerLoop (prev: SoloDBDirectoryHeader) (remNames: string list) (prevName: string list) = 
-            match remNames with
-            | [] -> prev
-            | head :: tail ->
-                match db.QueryFirstOrDefault<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE Name = @Name AND ParentId = @ParentId", {|Name = head; ParentId = prev.Id|}) with
-                | dir when Object.ReferenceEquals(dir, null) -> 
-                    let sep = "/"
-                    let newDir = {|
-                        Name = head
-                        ParentId = prev.Id
-                        FullPath = $"/{(prevName @ [head] |> String.concat sep)}"
-                    |}
-                    let result = db.Execute("INSERT INTO SoloDBDirectoryHeader(Name, ParentId, FullPath) VALUES(@Name, @ParentId, @FullPath)", newDir)
-                    innerLoop prev (head :: tail) prevName
-                | dir -> innerLoop dir tail (prevName @ [head])
-    
-        innerLoop root names [] |> fillDirectoryMetadata db*)
     
     let private updateLenById (db: SqliteConnection) (fileId: int64) (len: int64) =
         let result = db.Execute ("UPDATE SoloDBFileHeader SET Length = @Length WHERE Id = @Id", {|Id = fileId; Length=len|})
@@ -728,13 +703,6 @@ module FileStorage =
         | Some f -> f
         | None ->
         createFileAt db path
-
-        (*let struct (dirPath, name) = getPathAndName path
-        let dir = getOrCreateDir db dirPath 
-
-        match getFilesWhere db "DirectoryId = @DirectoryId AND Name = @Name" {|DirectoryId = dir.Id; Name = name|} |> Seq.tryHead with
-        | None -> createFileAt db path
-        | Some file -> file*)
 
     let private deleteDirectoryAt (db: SqliteConnection) (path: string) =
         let dirPath = formatPath path
