@@ -23,8 +23,8 @@ type internal DisposableMutex =
 
 [<CLIMutable>]
 type DbObjectRow = {
-    Id: Nullable<int64>
     // If the Id is NULL then the ValueJSON is a error message encoded in a JSON string.
+    Id: Nullable<int64>
     ValueJSON: string
 }
 
