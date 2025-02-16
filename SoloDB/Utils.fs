@@ -2,19 +2,32 @@
 
 open System
 open System.Collections.Generic
+open System.Collections.Concurrent
+open System.Security.Cryptography
+open System.IO
+open System.Text
+open System.Runtime.ExceptionServices
+open System.Security.Cryptography
+open System.Runtime.InteropServices
+
 
 // FormatterServices.GetSafeUninitializedObject for 
 // types without a parameterless constructor.
 #nowarn "0044"
 
 module Utils =
-    open System.Collections.Concurrent
-    open System.Security.Cryptography
-    open System.IO
-    open System.Text
-    open System.Runtime.ExceptionServices
-    
     let isNull x = Object.ReferenceEquals(x, null)
+
+    let private cryptoRandom = RandomNumberGenerator.Create()
+    let mutable private variableNameCounter: uint32 = 0u
+    let internal getRandomVarName () =
+        variableNameCounter <- if variableNameCounter = UInt32.MaxValue then 0u else variableNameCounter + 1u
+        let bytes = Array.zeroCreate<byte> (4 * sizeof<uint>)
+        cryptoRandom.GetBytes bytes
+        
+        let randomUInts = MemoryMarshal.Cast<byte, uint>(Span<byte>(bytes))
+        $"VAR{(randomUInts.[0] + variableNameCounter):X}{randomUInts.[1]:X}{randomUInts.[2]:X}{randomUInts.[3]:X}"
+        
 
     // For the use in F# Builders, like task { .. }.
     // https://stackoverflow.com/a/72132958/9550932
@@ -28,8 +41,8 @@ module Utils =
         emptyObjContructor.GetOrAdd(t, Func<Type, unit -> obj>(fun t -> 
             let constr = t.GetConstructors() |> Seq.tryFind(fun c -> c.GetParameters().Length = 0 && (c.IsPublic || c.IsPrivate))
             match constr with
-            | Some constr -> fun () -> constr.Invoke([||])
-            | None -> fun () -> System.Runtime.Serialization.FormatterServices.GetSafeUninitializedObject(t)
+            | Some constr -> fun () -> constr.Invoke Array.empty
+            | None -> fun () -> System.Runtime.Serialization.FormatterServices.GetSafeUninitializedObject t
         ))()
 
     let internal isTuple (t: Type) =
@@ -53,6 +66,10 @@ module Utils =
         static member IsInteger (this: Decimal) =
             this = (Decimal.Floor this)
 
+    [<return: Struct>]
+    let internal (|OfType|_|) (_typ: 'x -> 'a) (objType: Type) =
+        if typeof<'a>.IsAssignableFrom(objType) then ValueSome () else ValueNone
+
     let internal isNumber (value: obj) =
         match value with
         | :? int8
@@ -72,15 +89,16 @@ module Utils =
 
     let internal isIntegerBasedType (t: Type) =
         match t with
-        | _ when t = typeof<int8>  -> true
-        | _ when t = typeof<uint8>   -> true
-        | _ when t = typeof<int16>  -> true
-        | _ when t = typeof<uint16> -> true
-        | _ when t = typeof<int32>  -> true
-        | _ when t = typeof<uint32> -> true
-        | _ when t = typeof<uint64> -> true
-        | _ when t = typeof<int64>  -> true
-        | _ when t = typeof<nativeint>  -> true
+        | OfType int8
+        | OfType uint8
+        | OfType int16
+        | OfType uint16
+        | OfType int32 
+        | OfType uint32
+        | OfType int64
+        | OfType uint64
+        | OfType nativeint  
+                        -> true
         | _ -> false
 
     let internal isIntegerBased (value: obj) =
@@ -166,10 +184,6 @@ module Utils =
             sb.Append (b.ToString("x2")) |> ignore
 
         sb.ToString()
-
-    [<return: Struct>]
-    let internal (|OfType|_|) (_typ: 'x -> 'a) (objType: Type) =
-        if typeof<'a>.IsAssignableFrom(objType) then ValueSome () else ValueNone
 
     let mutable internal debug =
         #if DEBUG

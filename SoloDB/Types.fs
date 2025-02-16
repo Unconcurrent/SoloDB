@@ -20,9 +20,11 @@ type internal DisposableMutex =
             this.mutex.Dispose()
 
 
+
 [<CLIMutable>]
 type DbObjectRow = {
-    Id: int64
+    Id: Nullable<int64>
+    // If the Id is NULL then the ValueJSON is a error message encoded in a JSON string.
     ValueJSON: string
 }
 
