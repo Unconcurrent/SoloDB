@@ -165,6 +165,8 @@ module private QueryHelper =
             builder.Append "LIMIT 1 "
 
         | "Last" | "LastOrDefault" ->
+            // todo: Fix it as SQlite does not guarantee the order of elements without an ORDER BY, a
+            // the current implementation will mess up with the inner ORDER By's.
             match expression.Arguments.[0] with
             | :? MethodCallExpression as mce when let name = mce.Method.Name in name.StartsWith "OrderBy" || name.StartsWith "Where" ->
                 builder.Append "SELECT Id, Value FROM ("
