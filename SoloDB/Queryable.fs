@@ -35,7 +35,7 @@ module private QueryHelper =
         | 2 -> QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
         | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
-        builder.Append ") FROM ("
+        builder.Append ") as Value FROM ("
 
         translate builder expression.Arguments.[0]
         builder.Append ")"
@@ -73,7 +73,7 @@ module private QueryHelper =
 
         | "Count"
         | "LongCount" ->
-            builder.Append "SELECT COUNT(Id) FROM ("
+            builder.Append "SELECT COUNT(Id) as Value FROM ("
 
             translate builder expression.Arguments.[0]
             builder.Append ")"
@@ -140,18 +140,21 @@ module private QueryHelper =
                 builder.Append "DESC "
 
         | "Take" ->
+            builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append "LIMIT "
+            builder.Append ") LIMIT "
             QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
 
         | "Skip" ->
+            builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append "OFFSET "
+            builder.Append ") OFFSET "
             QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
 
         | "First" | "FirstOrDefault" ->
+            builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            
+            builder.Append ") "
             match expression.Arguments.Count with
             | 1 -> () // Noop needed.
             | 2 -> 
@@ -163,7 +166,7 @@ module private QueryHelper =
 
         | "Last" | "LastOrDefault" ->
             match expression.Arguments.[0] with
-            | :? MethodCallExpression as mce when mce.Method.Name.StartsWith "OrderBy" ->
+            | :? MethodCallExpression as mce when let name = mce.Method.Name in name.StartsWith "OrderBy" || name.StartsWith "Where" ->
                 builder.Append "SELECT Id, Value FROM ("
                 translate builder expression.Arguments.[0]
                 builder.Append ") "
@@ -255,7 +258,7 @@ module private QueryHelper =
         | "All" ->
             builder.Append "SELECT COUNT(*) = (SELECT COUNT(*) FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ")) FROM ("
+            builder.Append ")) as Value FROM ("
             translate builder expression.Arguments.[0]
             builder.Append ") WHERE "
             QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
@@ -263,7 +266,7 @@ module private QueryHelper =
         | "Any" ->
             builder.Append "SELECT EXISTS(SELECT 1 FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append "))"
+            builder.Append ")) as Value"
 
         | "Contains" ->
             builder.Append "SELECT EXISTS(SELECT 1 FROM ("
@@ -276,7 +279,7 @@ module private QueryHelper =
                 | other -> failwithf "Invalid Contains(...) parameter: %A" other
 
             QueryTranslator.translateQueryable "" (ExpressionHelper.get(fun x -> x = value)) builder.SQLiteCommand builder.Variables
-            builder.Append ")"
+            builder.Append ") as Value"
 
         | other -> failwithf "Queryable method not implemented: %s" other
 
@@ -298,6 +301,23 @@ module private QueryHelper =
             translateConstant builder (expression :?> ConstantExpression)
         | other -> failwithf "Could not translate Queryable expression of type: %A" other
 
+    let internal doesNotReturnIdFn (expression: Expression) =
+        match expression with
+        | :? MethodCallExpression as mce ->
+            match mce.Method.Name with
+            | "Sum"
+            | "Average"
+            | "Min"
+            | "Max"
+            | "Count"
+            | "LongCount"
+            | "All"
+            | "Any"
+            | "Contains"
+                -> true
+            | _other -> false
+        | _other -> false
+
     let internal startTranslation (source: Collection<'T>) (expression: Expression) =
         let builder = {
             SQLiteCommand = StringBuilder(256)
@@ -305,9 +325,14 @@ module private QueryHelper =
             Source = source
         }
 
-        builder.Append "SELECT Id, json(Value) as ValueJSON FROM ("
-        translate builder expression
-        builder.Append ")"
+        if doesNotReturnIdFn expression then
+            builder.Append "SELECT -1 as Id, json_quote(Value) as ValueJSON FROM ("
+            translate builder expression
+            builder.Append ")"
+        else
+            builder.Append "SELECT Id, json_quote(Value) as ValueJSON FROM ("
+            translate builder expression
+            builder.Append ")"
 
 
         builder.SQLiteCommand.ToString(), builder.Variables

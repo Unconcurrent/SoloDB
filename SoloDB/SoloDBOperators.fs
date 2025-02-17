@@ -7,8 +7,7 @@ module Operators =
     type SoloDB with
         // The pipe operators.
         // If you want to use Expression<System.Func<'T, bool>> fluently, 
-        // by just defining a normal function (fun (...) -> ...) you need to use a static member
-        // with C# like arguments.
+        // by just defining a normal function (fun (...) -> ...) you need to use a static member.
 
         static member collection<'T> (db: SoloDB) = db.GetCollection<'T>()
         static member collectionUntyped name (db: SoloDB) = db.GetUntypedCollection name
