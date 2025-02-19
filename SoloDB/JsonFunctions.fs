@@ -2,6 +2,7 @@
 
 open SoloDatabase.Attributes
 open System.Reflection
+open System.Linq.Expressions
 
 #nowarn "3536" // IIdGenerator
 
@@ -18,9 +19,24 @@ module JsonFunctions =
 
     [<AbstractClass; Sealed>]
     type internal HasTypeId<'t> =
+        static member val private Properties: PropertyInfo array = typeof<'t>.GetProperties()
+        static member private IdPropertyFilter (p: PropertyInfo) = p.Name = "Id" && p.PropertyType = typeof<int64> && p.CanWrite
         static member val internal Value = 
-            typeof<'t>.GetProperties() 
-            |> Array.exists(fun p -> p.Name = "Id" && p.PropertyType = typeof<int64> && p.CanWrite)
+            HasTypeId<'t>.Properties
+            |> Array.exists HasTypeId<'t>.IdPropertyFilter
+        static member val internal Read =
+            match HasTypeId<'t>.Properties
+                   |> Array.tryFind HasTypeId<'t>.IdPropertyFilter
+                with
+                | Some p -> 
+                    let x = ParameterExpression.Parameter(typeof<'t>, "x")
+                    let l = LambdaExpression.Lambda<Func<'t, int64>>(
+                        MethodCallExpression.Call(x, p.GetMethod),
+                        [x]
+                    )
+                    let fn = l.Compile(false)
+                    fn.Invoke
+                | None -> fun (_x: 't) -> failwithf "Cannot read nonexistant Id from Type %A" typeof<'t>.FullName
 
     [<AbstractClass; Sealed>]
     type internal CustomTypeId<'t> =

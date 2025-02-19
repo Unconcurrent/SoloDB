@@ -9,6 +9,7 @@ open System.Text
 open System.Runtime.ExceptionServices
 open System.Security.Cryptography
 open System.Runtime.InteropServices
+open System.Buffers
 
 
 // FormatterServices.GetSafeUninitializedObject for 
@@ -22,11 +23,16 @@ module Utils =
     let mutable private variableNameCounter: uint32 = 0u
     let internal getRandomVarName () =
         variableNameCounter <- if variableNameCounter = UInt32.MaxValue then 0u else variableNameCounter + 1u
-        let bytes = Array.zeroCreate<byte> (4 * sizeof<uint>)
-        cryptoRandom.GetBytes bytes
+
+        let minLen = 4 * sizeof<uint>
+        let bytes = ArrayPool<byte>.Shared.Rent minLen
+        try
+            cryptoRandom.GetBytes bytes
         
-        let randomUInts = MemoryMarshal.Cast<byte, uint>(Span<byte>(bytes))
-        $"VAR{(randomUInts.[0] + variableNameCounter):X}{randomUInts.[1]:X}{randomUInts.[2]:X}{randomUInts.[3]:X}"
+            let randomUInts = MemoryMarshal.Cast<byte, uint>(Span<byte>(bytes, 0, minLen))
+            $"VAR{(randomUInts.[0] + variableNameCounter):X}{randomUInts.[1]:X}{randomUInts.[2]:X}{randomUInts.[3]:X}"
+        finally
+            ArrayPool<byte>.Shared.Return (bytes, false)
         
 
     // For the use in F# Builders, like task { .. }.
