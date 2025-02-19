@@ -28,6 +28,32 @@ module QueryTranslator =
                 OriginalExpression = expr |> Some
             }
 
+    let internal appendVariable (sb: StringBuilder) (variables: #IDictionary<string, obj>) (value: obj) =
+        let name = getRandomVarName ()
+        match value with
+        | :? bool as b -> 
+                sb.Append (sprintf "%i" (if b then 1 else 0)) |> ignore
+        | _other ->
+
+        match value with
+        | :? int8 as i -> sprintf "%i" i |> sb.Append |> ignore
+        | :? uint8 as i -> sprintf "%i" i |> sb.Append |> ignore
+        | :? int16 as i -> sprintf "%i" i |> sb.Append |> ignore
+        | :? uint16 as i -> sprintf "%i" i |> sb.Append |> ignore
+        | :? int32 as i -> sprintf "%i" i |> sb.Append |> ignore
+        | :? uint32 as i -> sprintf "%i" i |> sb.Append |> ignore
+        | :? int64 as i -> sprintf "%i" i |> sb.Append |> ignore
+        | :? uint64 as i -> sprintf "%i" i |> sb.Append |> ignore
+        | :? nativeint as i -> sprintf "%i" i |> sb.Append |> ignore
+        | _other -> 
+                
+        let jsonValue, kind = toSQLJson value
+        if kind then 
+            sb.Append (sprintf "jsonb(@%s)" name) |> ignore
+        else 
+            sb.Append (sprintf "@%s" name) |> ignore
+        variables.[name] <- jsonValue
+
     type private QueryBuilder = 
         {
             StringBuilder: StringBuilder
@@ -44,38 +70,11 @@ module QueryTranslator =
         override this.ToString() = this.StringBuilder.ToString()
 
         static member New(sb: StringBuilder)(variables: Dictionary<string, obj>)(updateMode: bool)(tableName)(expression: Expression)(idIndex: int) =
-            let appendVariable (value: obj) =
-                let name = getRandomVarName ()
-                match value with
-                | :? bool as b -> 
-                     sb.Append (sprintf "%i" (if b then 1 else 0)) |> ignore
-                | other ->
-
-                match value with
-                | :? int8 as i -> sprintf "%i" i |> sb.Append |> ignore
-                | :? uint8 as i -> sprintf "%i" i |> sb.Append |> ignore
-                | :? int16 as i -> sprintf "%i" i |> sb.Append |> ignore
-                | :? uint16 as i -> sprintf "%i" i |> sb.Append |> ignore
-                | :? int32 as i -> sprintf "%i" i |> sb.Append |> ignore
-                | :? uint32 as i -> sprintf "%i" i |> sb.Append |> ignore
-                | :? int64 as i -> sprintf "%i" i |> sb.Append |> ignore
-                | :? uint64 as i -> sprintf "%i" i |> sb.Append |> ignore
-                | :? nativeint as i -> sprintf "%i" i |> sb.Append |> ignore
-                | _other -> 
-                
-                let jsonValue, kind = toSQLJson value
-                if kind then 
-                    sb.Append (sprintf "jsonb(@%s)" name) |> ignore
-                else 
-                    sb.Append (sprintf "@%s" name) |> ignore
-                variables.[name] <- jsonValue
-
             let appendRaw (s: string) = sb.Append s |> ignore
-
             {
                 StringBuilder = sb
                 Variables = variables
-                AppendVariable = appendVariable
+                AppendVariable = appendVariable sb variables
                 AppendRaw = appendRaw
                 RollBack = fun N -> sb.Remove(sb.Length - (int)N, (int)N) |> ignore
                 UpdateMode = updateMode
@@ -90,7 +89,7 @@ module QueryTranslator =
                 IdParameterIndex = idIndex
             }
 
-    let private evaluateExpr<'O> e =
+    let internal evaluateExpr<'O> e =
         let exprFunc = Expression.Lambda<Func<'O>>(UnaryExpression.Convert(e, typeof<'O>)).Compile(true)
         exprFunc.Invoke()
 

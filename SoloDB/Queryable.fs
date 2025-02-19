@@ -13,6 +13,7 @@ open Microsoft.FSharp.Reflection
 open System.Data
 open System.Reflection
 open System.Text
+open JsonFunctions
 
 type private QueryableBuilder<'T> = 
     {
@@ -22,9 +23,14 @@ type private QueryableBuilder<'T> =
     }
     member this.Append(text: string) =
         this.SQLiteCommand.Append text |> ignore
+    member this.AppendVariable(value: string) =
+        QueryTranslator.appendVariable this.SQLiteCommand this.Variables value
 
 
 module private QueryHelper =
+    let private escapeSQLiteString (input: string) : string =
+        input.Replace("'", "''")
+
     let rec private aggregateTranslator (fnName: string) (builder: QueryableBuilder<'T>) (expression: MethodCallExpression) =
         builder.Append "SELECT "
         builder.Append fnName
@@ -39,6 +45,12 @@ module private QueryHelper =
 
         translate builder expression.Arguments.[0]
         builder.Append ")"
+
+    and private serializeForCollection (value: 'T) =
+        match typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T> with
+        | true -> JsonSerializator.JsonValue.SerializeWithType value
+        | false -> JsonSerializator.JsonValue.Serialize value
+        |> _.ToJsonString(), HasTypeId<'T>.Value
 
     and private translateCall (builder: QueryableBuilder<'T>) (expression: MethodCallExpression) =
         // todo: add test
@@ -72,6 +84,7 @@ module private QueryHelper =
             builder.Append ", Id"
 
         | "Count"
+        | "CountBy"
         | "LongCount" ->
             builder.Append "SELECT COUNT(Id) as Value FROM ("
 
@@ -282,6 +295,26 @@ module private QueryHelper =
 
             QueryTranslator.translateQueryable "" (ExpressionHelper.get(fun x -> x = value)) builder.SQLiteCommand builder.Variables
             builder.Append ") as Value"
+
+        | "Append" ->
+            translate builder expression.Arguments.[0]
+            builder.Append " UNION ALL "
+            builder.Append "SELECT "
+            let appendingObj = QueryTranslator.evaluateExpr<'T> expression.Arguments.[1]
+            let jsonStringElement, hasId = serializeForCollection appendingObj
+            match hasId with
+            | false ->
+                builder.Append "-1 as Id,"
+            | true ->
+                let id = HasTypeId<'T>.Read appendingObj
+                builder.Append (sprintf "%i" id)
+                builder.Append " as Id,"
+
+            let escapedString = escapeSQLiteString jsonStringElement
+            builder.Append "jsonb('"
+            builder.Append escapedString
+            builder.Append "')"
+            builder.Append " As Value"
 
         | other -> failwithf "Queryable method not implemented: %s" other
 
