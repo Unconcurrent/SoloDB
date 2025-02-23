@@ -23,13 +23,27 @@ type private QueryableBuilder<'T> =
     }
     member this.Append(text: string) =
         this.SQLiteCommand.Append text |> ignore
-    member this.AppendVariable(value: string) =
-        QueryTranslator.appendVariable this.SQLiteCommand this.Variables value
 
+// Translation validation helpers.
+type private SoloDBQueryProvider = interface end
+type private IRootQueryable =
+    abstract member SourceTableName: string
 
 module private QueryHelper =
     let private escapeSQLiteString (input: string) : string =
         input.Replace("'", "''")
+
+    let private translateSource<'T> (builder: QueryableBuilder<'T>) (root: IRootQueryable) =
+        let sourceName = root.SourceTableName
+        builder.Append "SELECT Id, \""
+        builder.Append sourceName
+        builder.Append "\".Value as Value FROM \""
+        builder.Append sourceName
+        builder.Append "\""
+
+    let private translateSourceExpr<'T> (builder: QueryableBuilder<'T>) (rootExpr: Expression) =
+        let root = QueryTranslator.evaluateExpr<IRootQueryable> rootExpr
+        translateSource builder root
 
     let rec private aggregateTranslator (fnName: string) (builder: QueryableBuilder<'T>) (expression: MethodCallExpression) =
         builder.Append "SELECT "
@@ -99,14 +113,15 @@ module private QueryHelper =
 
         | "Where" ->
             match expression.Arguments.[0] with
-            | :? ConstantExpression as ce when ce.Type.Name.StartsWith "RootQueryable" ->
+            | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
+                let tableName = (ce.Value :?> IRootQueryable).SourceTableName
                 builder.Append "SELECT Id, \""
-                builder.Append builder.Source.Name
+                builder.Append tableName
                 builder.Append "\".Value as Value FROM \""
                 
-                builder.Append builder.Source.Name
+                builder.Append tableName
                 builder.Append "\" WHERE "
-                QueryTranslator.translateQueryable builder.Source.Name expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+                QueryTranslator.translateQueryable tableName expression.Arguments.[1] builder.SQLiteCommand builder.Variables
             | _other ->
                 builder.Append "SELECT Id, Value FROM ("
 
@@ -120,9 +135,10 @@ module private QueryHelper =
             QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
             builder.Append " as Value FROM "
             match expression.Arguments.[0] with
-            | :? ConstantExpression as ce when ce.Type.Name.StartsWith "RootQueryable" ->
+            | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
+                let tableName = (ce.Value :?> IRootQueryable).SourceTableName
                 builder.Append "\""
-                builder.Append builder.Source.Name
+                builder.Append tableName
                 builder.Append "\""
             | other ->
                 builder.Append "("
@@ -178,24 +194,21 @@ module private QueryHelper =
             builder.Append "LIMIT 1 "
 
         | "Last" | "LastOrDefault" ->
-            // todo: Fix it as SQlite does not guarantee the order of elements without an ORDER BY, a
-            // the current implementation will mess up with the inner ORDER By's.
+            // SQlite does not guarantee the order of elements without an ORDER BY,
+            // ensure that it is the only one, or throw an explanatory exception.
             match expression.Arguments.[0] with
-            | :? MethodCallExpression as mce when let name = mce.Method.Name in name.StartsWith "OrderBy" || name.StartsWith "Where" ->
-                builder.Append "SELECT Id, Value FROM ("
+            | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
                 translate builder expression.Arguments.[0]
-                builder.Append ") "
+                match expression.Arguments.Count with
+                | 1 -> () // Noop needed.
+                | 2 -> 
+                    builder.Append "WHERE " 
+                    QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+                | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+
+                builder.Append "ORDER BY Id DESC LIMIT 1 "
             | _other ->
-                translate builder expression.Arguments.[0]
-
-            match expression.Arguments.Count with
-            | 1 -> () // Noop needed.
-            | 2 -> 
-                builder.Append "WHERE " 
-                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
-            | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
-
-            builder.Append "ORDER BY Id DESC LIMIT 1 "
+                failwithf "Because SQLite does not guarantee the order of elements without an ORDER BY, this function cannot be implemented if it is not the only one applied(in this case it sorts by Id). Use an OrderBy() with a First'OrDefault'()"
 
         | "Single" ->
             let countVar = Utils.getRandomVarName()
@@ -316,15 +329,33 @@ module private QueryHelper =
             builder.Append "')"
             builder.Append " As Value"
 
+        | "Concat" ->
+            translate builder expression.Arguments.[0]
+            builder.Append " UNION ALL "
+            builder.Append "SELECT Id, Value FROM ("
+
+            let failwithMsg = "Cannot concat with an IEnumerable other that another SoloDB IQueryable, on the same connection. Do do this anyway, use to AsEnumerable()."
+            let appendingQE =
+                match expression.Arguments.[1] with
+                | :? ConstantExpression as ce -> 
+                    match QueryTranslator.evaluateExpr<IEnumerable> ce with
+                    | :? IQueryable<'T> as appendingQuery when (match appendingQuery.Provider with :? SoloDBQueryProvider -> true | _other -> false) ->
+                        appendingQuery.Expression
+                    | :? IRootQueryable as rq ->
+                        Expression.Constant(rq, typeof<IRootQueryable>)
+                    | _other -> failwith failwithMsg
+                | :? MethodCallExpression as mcl ->
+                    mcl
+                | _other -> failwith failwithMsg
+
+            translate builder appendingQE
+            builder.Append ")"
+
         | other -> failwithf "Queryable method not implemented: %s" other
 
     and private translateConstant (builder: QueryableBuilder<'T>) (expression: ConstantExpression) =
-        if expression.Type.Name.StartsWith "RootQueryable" then
-            builder.Append "SELECT Id, \""
-            builder.Append builder.Source.Name
-            builder.Append "\".Value as Value FROM \""
-            builder.Append builder.Source.Name
-            builder.Append "\""
+        if typedefof<IRootQueryable>.IsAssignableFrom expression.Type then
+            translateSourceExpr builder expression
         else
             QueryTranslator.translateQueryable "" expression builder.SQLiteCommand builder.Variables
 
@@ -374,6 +405,7 @@ module private QueryHelper =
 
 
 type internal SoloDBCollectionQueryProvider<'T>(source: Collection<'T>) =
+    interface SoloDBQueryProvider
     member internal this.ExecuteEnumetable<'Elem> (query: string) (par: obj) : IEnumerable<'Elem> =
         seq {
             use connection = source.Connection.Get()
@@ -431,12 +463,15 @@ and internal SoloDbCollectionQueryable<'I, 'T>(provider: IQueryProvider, express
         member this.GetEnumerator() =
             (this :> IEnumerable<'T>).GetEnumerator() :> IEnumerator
 
-and [<Sealed>] private RootQueryable<'T>() =
-    static member internal Instance = RootQueryable<'T>()
+and [<Sealed>] private RootQueryable<'T>(c: Collection<'T>) =
+    member val Source = c
+
+    interface IRootQueryable with
+        override this.SourceTableName = this.Source.Name
 
     interface IQueryable<'T> with
         member _.Provider = null
-        member _.Expression = Expression.Constant(null)
+        member _.Expression = Expression.Constant(c)
         member _.ElementType = typeof<'T>
 
     interface IEnumerable<'T> with
@@ -450,5 +485,5 @@ and [<Sealed>] private RootQueryable<'T>() =
 [<Extension; AbstractClass; Sealed>]
 type QueryableExtensions =
     [<Extension>]
-    static member AsQueryable(collection: Collection<'A>) : IQueryable<'A> =
-        SoloDbCollectionQueryable<'A, 'A>(SoloDBCollectionQueryProvider(collection), Expression.Constant(RootQueryable<'A>.Instance))
+    static member AsQueryable<'A>(collection: Collection<'A>) : IQueryable<'A> =
+        SoloDbCollectionQueryable<'A, 'A>(SoloDBCollectionQueryProvider(collection), Expression.Constant(RootQueryable<'A>(collection))) :> IQueryable<'A>

@@ -90,8 +90,8 @@ module internal Helper =
                 // Inserting without Id
                 insertJson orReplace None name json connection
 
-        if existsWritebleDirectId then 
-            item?Id <- id
+        if existsWritebleDirectId then
+            HasTypeId<'T>.Write item id
 
         id
 
@@ -481,14 +481,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
 
     member this.ToList() = this.Select().OnAll().ToList()
 
-    member this.Enumerate() = this.Select().OnAll().Enumerate()
-
-    interface IEnumerable<'T> with
-        override this.GetEnumerator() =
-            this.Enumerate().GetEnumerator()
-
-        override this.GetEnumerator() =
-            this.Enumerate().GetEnumerator() :> IEnumerator
+    member this.AsEnumerable() = this.Select().OnAll().Enumerate()
 
     member this.Count() =
         WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), id)

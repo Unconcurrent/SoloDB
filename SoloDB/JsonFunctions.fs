@@ -20,10 +20,11 @@ module JsonFunctions =
     [<AbstractClass; Sealed>]
     type internal HasTypeId<'t> =
         static member val private Properties: PropertyInfo array = typeof<'t>.GetProperties()
-        static member private IdPropertyFilter (p: PropertyInfo) = p.Name = "Id" && p.PropertyType = typeof<int64> && p.CanWrite
+        static member private IdPropertyFilter (p: PropertyInfo) = p.Name = "Id" && p.PropertyType = typeof<int64> && p.CanWrite && p.CanRead
         static member val internal Value = 
             HasTypeId<'t>.Properties
             |> Array.exists HasTypeId<'t>.IdPropertyFilter
+
         static member val internal Read =
             match HasTypeId<'t>.Properties
                    |> Array.tryFind HasTypeId<'t>.IdPropertyFilter
@@ -37,6 +38,21 @@ module JsonFunctions =
                     let fn = l.Compile(false)
                     fn.Invoke
                 | None -> fun (_x: 't) -> failwithf "Cannot read nonexistant Id from Type %A" typeof<'t>.FullName
+
+        static member val internal Write =
+            match HasTypeId<'t>.Properties
+                   |> Array.tryFind HasTypeId<'t>.IdPropertyFilter
+                with
+                | Some p -> 
+                    let x = ParameterExpression.Parameter(typeof<'t>, "x")
+                    let y = ParameterExpression.Parameter(typeof<int64>, "y")
+                    let l = LambdaExpression.Lambda<Action<'t, int64>>(
+                        MethodCallExpression.Call(x, p.SetMethod, y),
+                        [|x; y|]
+                    )
+                    let fn = l.Compile(false)
+                    fun x y -> fn.Invoke(x, y)
+                | None -> fun (_x: 't) (_y: int64) -> failwithf "Cannot write nonexistant Id from Type %A" typeof<'t>.FullName
 
     [<AbstractClass; Sealed>]
     type internal CustomTypeId<'t> =

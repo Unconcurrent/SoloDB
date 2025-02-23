@@ -89,7 +89,11 @@ module QueryTranslator =
                 IdParameterIndex = idIndex
             }
 
-    let internal evaluateExpr<'O> e =
+    let internal evaluateExpr<'O> (e: Expression) =
+        match e with
+        | :? ConstantExpression as ce ->
+            ce.Value :?> 'O
+        | _other ->
         let exprFunc = Expression.Lambda<Func<'O>>(UnaryExpression.Convert(e, typeof<'O>)).Compile(true)
         exprFunc.Invoke()
 
