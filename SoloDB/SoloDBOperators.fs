@@ -65,5 +65,5 @@ module Operators =
 
         static member any<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> func |> collection.Any
 
-        static member toSeq (collection: Collection<'T>) = collection.Enumerate()
+        static member toSeq (collection: Collection<'T>) = collection.AsEnumerable()
         static member toList (collection: Collection<'T>) = collection.ToList()
