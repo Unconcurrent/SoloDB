@@ -4,4 +4,4 @@
 type IndexedAttribute(unique: bool) =
     inherit System.Attribute()
 
-    member this.Unique = unique
+    member val Unique = unique

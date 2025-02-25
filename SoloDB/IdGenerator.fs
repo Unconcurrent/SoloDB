@@ -18,4 +18,4 @@ type IIdGenerator =
 type SoloId(idGenerator: Type) =
     inherit IndexedAttribute(true)
 
-    member this.IdGenerator = idGenerator
+    member val IdGenerator = idGenerator

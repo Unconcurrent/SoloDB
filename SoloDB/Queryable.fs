@@ -14,6 +14,7 @@ open System.Data
 open System.Reflection
 open System.Text
 open JsonFunctions
+open System.Collections.Concurrent
 
 type private QueryableBuilder<'T> = 
     {
@@ -30,6 +31,20 @@ type private IRootQueryable =
     abstract member SourceTableName: string
 
 module private QueryHelper =
+    type private MethodInfoEquality() =
+        interface IEqualityComparer<MethodInfo> with
+            override this.Equals (x: MethodInfo, y: MethodInfo): bool = 
+                x.MethodHandle.Value = y.MethodHandle.Value
+            override this.GetHashCode (obj: MethodInfo): int = 
+                obj.MethodHandle.Value |> int
+
+    type private GenericArgCache =
+        static member val private cache = ConcurrentDictionary<MethodInfo, Type array>(MethodInfoEquality ())
+        static member Get(method: MethodInfo) =
+            let args = GenericArgCache.cache.GetOrAdd(method, (fun m -> m.GetGenericArguments()))
+            args
+
+
     let private escapeSQLiteString (input: string) : string =
         input.Replace("'", "''")
 
@@ -192,6 +207,46 @@ module private QueryHelper =
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
             builder.Append "LIMIT 1 "
+
+        | "DefaultIfEmpty" ->
+            builder.Append "SELECT Id, Value FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ") UNION ALL SELECT -1 as Id, "
+
+            match expression.Arguments.Count with
+            | 1 -> 
+                // If no default value is provided, then provide .NET's default.
+
+                let genericArg = (GenericArgCache.Get expression.Method).[0]
+                if genericArg.IsValueType then
+                    let defaultValueType = Activator.CreateInstance(genericArg)
+                    let jsonObj = JsonSerializator.JsonValue.Serialize defaultValueType
+                    let jsonText = jsonObj.ToJsonString()
+                    let escapedJsonText = escapeSQLiteString jsonText
+
+                    builder.Append "jsonb('"
+                    builder.Append escapedJsonText
+                    builder.Append "')"
+                else
+                    builder.Append "jsonb(NULL)"
+
+            | 2 -> 
+                // If a default value is provided, return it when the result set is empty
+                
+                let o = QueryTranslator.evaluateExpr<obj> expression.Arguments.[1]
+                let jsonObj = JsonSerializator.JsonValue.Serialize o
+                let jsonText = jsonObj.ToJsonString()
+                let escapedJsonText = escapeSQLiteString jsonText
+
+                builder.Append "jsonb('"
+                builder.Append escapedJsonText
+                builder.Append "')"
+
+            | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+
+            builder.Append " as Value WHERE NOT EXISTS (SELECT 1 FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append "))"
 
         | "Last" | "LastOrDefault" ->
             // SQlite does not guarantee the order of elements without an ORDER BY,
@@ -440,7 +495,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: Collection<'T>) =
                 match connection.Query<Types.DbObjectRow>(query, variables) |> Seq.tryHead with
                 | None ->
                     match expression with
-                    | :? MethodCallExpression as mce when mce.Method.Name.EndsWith "OrDefault" ->
+                    | :? MethodCallExpression as mce when let name = mce.Method.Name in name.EndsWith "OrDefault" ->
                         Unchecked.defaultof<'TResult>
                     | _other -> failwithf "Sequence contains no elements"
                 | Some row -> JsonFunctions.fromSQLite<'TResult> row
