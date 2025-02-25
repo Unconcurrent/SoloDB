@@ -153,7 +153,8 @@ module JsonFunctions =
 
             let mutable obj = fromJsonOrSQL<'R> (row.ValueJSON)
             
-            if HasTypeId<'R>.Value then
+            // An Id of -1 mean that it is an inserted object inside the IQueryable.
+            if row.Id.Value <> -1 && HasTypeId<'R>.Value then
                 obj?Id <- row.Id.Value
             obj
         | :? string as input ->

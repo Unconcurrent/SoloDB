@@ -82,10 +82,12 @@ module internal Helper =
         let json = if typed then toTypedJson item else toJson item
         
 
-        let id = 
-            if existsWritebleDirectId && 0L <> item?Id then 
+        let id =
+            if existsWritebleDirectId && -1L = HasTypeId<'T>.Read item then 
+                failwithf "The Id value of -1 has a special meaning in Queyable, therefore it is not allowed."
+            elif existsWritebleDirectId && 0L <> HasTypeId<'T>.Read item then 
                 // Inserting with Id
-                insertJson orReplace (Some item?Id) name json connection
+                insertJson orReplace (Some (HasTypeId<'T>.Read item)) name json connection
             else
                 // Inserting without Id
                 insertJson orReplace None name json connection
@@ -343,12 +345,12 @@ type WhereBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string,
 type Collection<'T>(connection: Connection, name: string, connectionString: string) =
     // This is only because F# does not allow forward references, therefore you cannot instantiate a Collection<'T> in the Helper.insertInner,
     // and this is the solution.
-    member private this.GetTransitiveCollection = fun (connection) -> Collection<'T>(Connection.Transitive (new DirectConnection(connection)), name, connectionString) |> box
-    member private this.ConnectionString = connectionString
-    member this.Name = name
-    member this.InTransaction = match connection with | Transactional _ -> true | Pooled _ -> false | Transitive _ -> true
-    member this.IncludeType = typeof<'T>.IsAbstract
-    member internal this.Connection = connection
+    member val private GetTransitiveCollection = fun (connection) -> Collection<'T>(Connection.Transitive (new DirectConnection(connection)), name, connectionString) |> box
+    member val private ConnectionString = connectionString
+    member val Name = name
+    member val InTransaction = match connection with | Transactional _ -> true | Pooled _ -> false | Transitive _ -> true
+    member val IncludeType = typeof<'T>.IsAbstract
+    member val internal Connection = connection
 
     member this.Insert (item: 'T) =
         use connection = connection.Get()
@@ -599,7 +601,7 @@ type UntypedCollectionExt =
 type TransactionalSoloDB internal (connection: TransactionalConnection) =
     let connectionString = connection.ConnectionString
 
-    member this.Connection = connection
+    member val Connection = connection
 
     member private this.InitializeCollection<'T> name =
         if not (Helper.existsCollection name connection) then 
@@ -877,8 +879,8 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
     member this.Connection = connectionManager
     member this.ConnectionString = connectionString
-    member internal this.DataLocation = location
-    member this.FileSystem = FileSystem(connectionManager)
+    member val internal DataLocation = location
+    member val FileSystem = FileSystem connectionManager
 
     member private this.GetNewConnection() = connectionManager.Borrow()
         

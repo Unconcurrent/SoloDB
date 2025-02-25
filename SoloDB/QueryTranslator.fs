@@ -337,7 +337,7 @@ module QueryTranslator =
             visit newValue qb |> ignore
             qb.AppendRaw ","
         
-        | name when name = "AddToEnd" || name = "Add" ->
+        | "AddToEnd" | "Add" ->
             let array = m.Arguments.[0]
             let newValue = m.Arguments.[1]
             visit array qb |> ignore
