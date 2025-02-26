@@ -3,17 +3,13 @@
 open SoloDatabase.Attributes
 open System.Reflection
 open System.Linq.Expressions
-
-#nowarn "3536" // IIdGenerator
+open System
+open SoloDatabase
+open Utils
+open SoloDatabase.Types
+open JsonSerializator
 
 module JsonFunctions =
-    open System
-    open System.Collections.Concurrent
-    open Utils
-    open SoloDatabase.Types
-    open JsonSerializator
-    open FSharp.Interop.Dynamic
-
     // Instead of concurrent dictionaries, we can use a static class
     // if the parameters can be represented as generic types.
 
@@ -155,7 +151,7 @@ module JsonFunctions =
             
             // An Id of -1 mean that it is an inserted object inside the IQueryable.
             if row.Id.Value <> -1 && HasTypeId<'R>.Value then
-                obj?Id <- row.Id.Value
+                HasTypeId<'R>.Write obj row.Id.Value
             obj
         | :? string as input ->
             fromJsonOrSQL<'R> (input :> obj :?> string)

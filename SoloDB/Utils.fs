@@ -7,9 +7,9 @@ open System.Security.Cryptography
 open System.IO
 open System.Text
 open System.Runtime.ExceptionServices
-open System.Security.Cryptography
 open System.Runtime.InteropServices
 open System.Buffers
+open System.Reflection
 
 
 // FormatterServices.GetSafeUninitializedObject for 
@@ -190,6 +190,35 @@ module Utils =
             sb.Append (b.ToString("x2")) |> ignore
 
         sb.ToString()
+
+    [<AbstractClass; Sealed>]
+    type internal GenericMethodArgCache =
+        static member val private cache = ConcurrentDictionary<MethodInfo, Type array>({
+                new IEqualityComparer<MethodInfo> with
+                    override this.Equals (x: MethodInfo, y: MethodInfo): bool = 
+                        x.MethodHandle.Value = y.MethodHandle.Value
+                    override this.GetHashCode (obj: MethodInfo): int = 
+                        obj.MethodHandle.Value |> int
+        })
+
+        static member Get(method: MethodInfo) =
+            let args = GenericMethodArgCache.cache.GetOrAdd(method, (fun m -> m.GetGenericArguments()))
+            args
+
+    [<AbstractClass; Sealed>]
+    type internal GenericTypeArgCache =
+        static member val private cache = ConcurrentDictionary<Type, Type array>({
+                new IEqualityComparer<Type> with
+                    override this.Equals (x: Type, y: Type): bool = 
+                        x.TypeHandle.Value = y.TypeHandle.Value
+                    override this.GetHashCode (obj: Type): int = 
+                        obj.TypeHandle.Value |> int
+        })
+
+        static member Get(t: Type) =
+            let args = GenericTypeArgCache.cache.GetOrAdd(t, (fun m -> m.GetGenericArguments()))
+            args
+
 
     let mutable internal debug =
         #if DEBUG

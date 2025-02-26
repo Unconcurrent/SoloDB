@@ -1,6 +1,5 @@
 ﻿namespace SoloDatabase
 
-
 module JsonSerializator =
     open System
     open System.Collections.Generic
@@ -15,6 +14,7 @@ module JsonSerializator =
     open Microsoft.FSharp.Reflection
     open System.Web
     open System.Linq.Expressions
+    open System.Linq
 
     let private isSupportedNewtownsoftArrayType (t: Type) =
         // For now support only primitive arrays.
@@ -28,17 +28,29 @@ module JsonSerializator =
         | _ when elementType = typeof<string> -> true
         | _ -> false
 
-    let private implementsGeneric (genericInterfaceType: Type) (targetType: Type) =
-        let genericInterfaceType = genericInterfaceType.GetGenericTypeDefinition()
-        if not genericInterfaceType.IsGenericType then
-            invalidArg "genericInterfaceType" "The interface type must be a generic type."
+    let private implementsGenericCache = System.Collections.Concurrent.ConcurrentDictionary<struct (Type * Type), bool>()
+    let private implementsGeneric (genericTypeDefinition: Type) (targetType: Type) =        
+        implementsGenericCache.GetOrAdd(struct (genericTypeDefinition, targetType), fun struct (genericTypeDefinition, targetType) ->
+            targetType.IsGenericType && 
+            targetType.GetGenericTypeDefinition() = genericTypeDefinition ||
+            targetType.GetInterfaces() 
+            |> Array.exists (fun interfaceType -> 
+                interfaceType.IsGenericType && 
+                interfaceType.GetGenericTypeDefinition() = genericTypeDefinition)
+        )
 
-        if targetType.Name = genericInterfaceType.Name && targetType.Namespace = genericInterfaceType.Namespace then
-            true
-        else
+    type internal Grouping<'key, 'item> (key: 'key, items: 'item array) =
+        member this.Key = (this :> IGrouping<'key, 'item>).Key
+        member this.Length = items.LongLength
 
-        targetType.GetInterfaces()
-        |> Array.exists (fun i -> i.IsGenericType && i.Name = genericInterfaceType.Name && i.Namespace = genericInterfaceType.Namespace)
+        override this.ToString (): string = 
+            sprintf "Key = %i" this.Length
+
+        interface IGrouping<'key, 'item> with
+            member this.Key = key
+            member this.GetEnumerator() = (items :> 'item seq).GetEnumerator()
+            member this.GetEnumerator() : IEnumerator = 
+                (items :> IEnumerable).GetEnumerator()
 
     let private byteArrayToJSONCompatibleString(ba: byte array) =
         Convert.ToBase64String ba
@@ -434,6 +446,16 @@ module JsonSerializator =
                     dictInstance
                 | _ -> failwith "Expected JSON object for dictionary deserialization."
 
+            let deserializeIGrouping (targetType: Type) (jsonObj: JsonValue) =
+                let groupingTypes = GenericTypeArgCache.Get targetType
+                let key: JsonValue = jsonObj.["Key"]
+                let items: JsonValue = jsonObj.["Items"]
+
+                let key: obj = key.ToObject groupingTypes.[0]
+                let items: obj = items.ToObject (groupingTypes.[1].MakeArrayType ())
+
+                Activator.CreateInstance(typedefof<Grouping<_, _>>.MakeGenericType(groupingTypes.[0], groupingTypes.[1]), key, items)
+
             let deserializeObject (targetType: Type) (jsonObj: JsonValue) =
                 let ogTargetType = targetType
                 let targetType =
@@ -519,19 +541,21 @@ module JsonSerializator =
             match json with
             | JsonValue.Null -> null
             | json ->
-                match tryDeserializePrimitive targetType json with
-                | null ->
-                    match json with
-                    | JsonValue.List _ when isTuple targetType ->
-                        deserializeTuple targetType json
-                    | JsonValue.List _ when isCollectionType targetType ->
-                        deserializeList targetType json
-                    | JsonValue.Object _ when typeof<IDictionary>.IsAssignableFrom targetType || implementsGeneric typedefof<IDictionary<_,_>> targetType || implementsGeneric typedefof<IReadOnlyDictionary<_,_>> targetType ->
-                        deserializeDictionary targetType json
-                    | JsonValue.Object _ when targetType.IsClass || targetType.IsAbstract || FSharpType.IsUnion targetType->
-                        deserializeObject targetType json                    
-                    | _ -> failwithf "JSON value cannot be deserialized into type %A" targetType
-                | primitive -> primitive
+            match tryDeserializePrimitive targetType json with
+            | null ->
+                match json with
+                | JsonValue.List _ when isTuple targetType ->
+                    deserializeTuple targetType json
+                | JsonValue.List _ when isCollectionType targetType ->
+                    deserializeList targetType json
+                | JsonValue.Object _ when typeof<IDictionary>.IsAssignableFrom targetType || implementsGeneric typedefof<IDictionary<_,_>> targetType || implementsGeneric typedefof<IReadOnlyDictionary<_,_>> targetType ->
+                    deserializeDictionary targetType json
+                | JsonValue.Object _ when implementsGeneric typedefof<IGrouping<_, _>> targetType ->
+                    deserializeIGrouping targetType json  
+                | JsonValue.Object _ when targetType.IsClass || targetType.IsAbstract || FSharpType.IsUnion targetType->
+                    deserializeObject targetType json                    
+                | _ -> failwithf "JSON value cannot be deserialized into type %A" targetType
+            | primitive -> primitive
 
         // For C# usage.
         member this.JsonType = 
