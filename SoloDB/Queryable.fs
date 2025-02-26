@@ -171,7 +171,6 @@ module private QueryHelper =
             
                 builder.Append "SELECT -1 as Id, jsonb_object('Key', "
             
-                // Select the key (similar to the DistinctBy implementation)
                 QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
             
                 // Create an array of all items with the same key
@@ -250,8 +249,9 @@ module private QueryHelper =
                     do expr <- (expr :?> MethodCallExpression).Arguments.[0]
                 expr
 
+            builder.Append "SELECT Id, Value FROM ("
             translate builder innerExpression
-            builder.Append " ORDER BY "
+            builder.Append ") ORDER BY "
             QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
             if expression.Method.Name = "OrderByDescending" then
                 builder.Append "DESC "
@@ -260,13 +260,13 @@ module private QueryHelper =
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
             builder.Append ") LIMIT "
-            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            QueryTranslator.appendVariable builder.SQLiteCommand builder.Variables (QueryTranslator.evaluateExpr<obj> expression.Arguments.[1])
 
         | Skip ->
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ") OFFSET "
-            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            builder.Append ") LIMIT -1 OFFSET "
+            QueryTranslator.appendVariable builder.SQLiteCommand builder.Variables (QueryTranslator.evaluateExpr<obj> expression.Arguments.[1])
 
         | First | FirstOrDefault ->
             builder.Append "SELECT Id, Value FROM ("
@@ -279,7 +279,7 @@ module private QueryHelper =
                 QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
-            builder.Append "LIMIT 1 "
+            builder.Append " LIMIT 1 "
 
         | DefaultIfEmpty ->
             builder.Append "SELECT Id, Value FROM ("

@@ -44,7 +44,7 @@ module JsonSerializator =
         member this.Length = items.LongLength
 
         override this.ToString (): string = 
-            sprintf "Key = %i" this.Length
+            sprintf "Key = %A" this.Key
 
         interface IGrouping<'key, 'item> with
             member this.Key = key
@@ -454,7 +454,8 @@ module JsonSerializator =
                 let key: obj = key.ToObject groupingTypes.[0]
                 let items: obj = items.ToObject (groupingTypes.[1].MakeArrayType ())
 
-                Activator.CreateInstance(typedefof<Grouping<_, _>>.MakeGenericType(groupingTypes.[0], groupingTypes.[1]), key, items)
+                let g = Activator.CreateInstance(typedefof<Grouping<_, _>>.MakeGenericType(groupingTypes.[0], groupingTypes.[1]), key, items)
+                g
 
             let deserializeObject (targetType: Type) (jsonObj: JsonValue) =
                 let ogTargetType = targetType
