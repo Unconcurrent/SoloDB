@@ -54,9 +54,6 @@ module Utils =
     let internal isTuple (t: Type) =
         typeof<Tuple>.IsAssignableFrom t || typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "Tuple`"
 
-    type Random with
-        static member Shared = Random()
-
     type System.Char with
         static member IsAsciiLetterOrDigit this =
             (this >= '0' && this <= '9') ||

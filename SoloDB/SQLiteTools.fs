@@ -10,14 +10,14 @@ open System.Runtime.CompilerServices
 open System.Runtime.InteropServices
 
 module SQLiteTools =
-    type SQLiteTypeMapper = 
+    type ISQLiteTypeMapper = 
         abstract member Type: Type
         abstract member Read: reader: IDataReader -> index: int -> obj
         abstract member Write: this: obj -> ValueTuple<obj, int>
 
     let private customMappers = [| 
         {
-            new SQLiteTypeMapper with
+            new ISQLiteTypeMapper with
                 member this.Type = typeof<DateTimeOffset>
 
                 member this.Read reader index =
@@ -36,7 +36,7 @@ module SQLiteTools =
                 struct (null, -1)
             else
             let valType = value.GetType()
-            match Array.tryFind (fun (m: SQLiteTypeMapper) -> m.Type = valType) customMappers with
+            match Array.tryFind (fun (m: ISQLiteTypeMapper) -> m.Type = valType) customMappers with
             | Some mapper -> 
                 mapper.Write value
             | None -> 
@@ -80,7 +80,7 @@ module SQLiteTools =
         let readColumn (name) (propType) =
             match columns.TryGetValue(name) with
             | true, index ->
-                match Array.tryFind (fun (m: SQLiteTypeMapper) -> m.Type = propType) customMappers with
+                match Array.tryFind (fun (m: ISQLiteTypeMapper) -> m.Type = propType) customMappers with
                 | Some mapper -> 
                     if reader.IsDBNull index then null
                     else mapper.Read(reader)(index)
@@ -102,7 +102,7 @@ module SQLiteTools =
             jsonObj.ToObject<obj>() :?> 'T
         else
         // Check if the target type itself is a custom mapper type
-        match Array.tryFind (fun (m: SQLiteTypeMapper) -> m.Type = targetType) customMappers with
+        match Array.tryFind (fun (m: ISQLiteTypeMapper) -> m.Type = targetType) customMappers with
         | Some mapper -> 
             mapper.Read(reader)(startIndex) :?> 'T
         | None ->
@@ -167,7 +167,7 @@ module SQLiteTools =
                     instance :?> 'T
 
 
-    let private queryInner<'T> this (sql: string)(parameters: obj option) = seq {
+    let private queryInner<'T> this (sql: string) (parameters: obj option) = seq {
            use command = createCommand this sql parameters
            use reader = command.ExecuteReader()
            let dict = Dictionary<string, int>()
