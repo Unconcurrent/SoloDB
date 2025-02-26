@@ -3,18 +3,47 @@
 open System.Linq
 open System.Collections
 open System.Collections.Generic
-open Microsoft.Data.Sqlite
 open System.Linq.Expressions
 open System
 open SoloDatabase
 open System.Runtime.CompilerServices
 open SQLiteTools
-open Microsoft.FSharp.Reflection
-open System.Data
 open System.Reflection
 open System.Text
 open JsonFunctions
-open System.Collections.Concurrent
+open Utils
+
+type internal SupportedLinqMethods =
+| Sum
+| Average
+| Min
+| Max
+| Distinct
+| DistinctBy
+| Count
+| CountBy
+| LongCount
+| Where
+| Select
+| ThenBy
+| ThenByDescending
+| OrderBy
+| OrderByDescending
+| Take
+| Skip
+| First
+| FirstOrDefault
+| DefaultIfEmpty
+| Last
+| LastOrDefault
+| Single
+| SingleOrDefault
+| All
+| Any
+| Contains
+| Append
+| Concat
+| GroupBy
 
 type private QueryableBuilder<'T> = 
     {
@@ -31,19 +60,39 @@ type private IRootQueryable =
     abstract member SourceTableName: string
 
 module private QueryHelper =
-    type private MethodInfoEquality() =
-        interface IEqualityComparer<MethodInfo> with
-            override this.Equals (x: MethodInfo, y: MethodInfo): bool = 
-                x.MethodHandle.Value = y.MethodHandle.Value
-            override this.GetHashCode (obj: MethodInfo): int = 
-                obj.MethodHandle.Value |> int
-
-    type private GenericArgCache =
-        static member val private cache = ConcurrentDictionary<MethodInfo, Type array>(MethodInfoEquality ())
-        static member Get(method: MethodInfo) =
-            let args = GenericArgCache.cache.GetOrAdd(method, (fun m -> m.GetGenericArguments()))
-            args
-
+    let private parseSupportedMethod (methodName: string) : SupportedLinqMethods option =
+        match methodName with
+        | "Sum" -> Some Sum
+        | "Average" -> Some Average
+        | "Min" -> Some Min
+        | "Max" -> Some Max
+        | "Distinct" -> Some Distinct
+        | "DistinctBy" -> Some DistinctBy
+        | "Count" -> Some Count
+        | "CountBy" -> Some CountBy
+        | "LongCount" -> Some LongCount
+        | "Where" -> Some Where
+        | "Select" -> Some Select
+        | "ThenBy" -> Some ThenBy
+        | "ThenByDescending" -> Some ThenByDescending
+        | "OrderBy" -> Some OrderBy
+        | "OrderByDescending" -> Some OrderByDescending
+        | "Take" -> Some Take
+        | "Skip" -> Some Skip
+        | "First" -> Some First
+        | "FirstOrDefault" -> Some FirstOrDefault
+        | "DefaultIfEmpty" -> Some DefaultIfEmpty
+        | "Last" -> Some Last
+        | "LastOrDefault" -> Some LastOrDefault
+        | "Single" -> Some Single
+        | "SingleOrDefault" -> Some SingleOrDefault
+        | "All" -> Some All
+        | "Any" -> Some Any
+        | "Contains" -> Some Contains
+        | "Append" -> Some Append
+        | "Concat" -> Some Concat
+        | "GroupBy" -> Some GroupBy
+        | _ -> None
 
     let private escapeSQLiteString (input: string) : string =
         input.Replace("'", "''")
@@ -82,26 +131,28 @@ module private QueryHelper =
         |> _.ToJsonString(), HasTypeId<'T>.Value
 
     and private translateCall (builder: QueryableBuilder<'T>) (expression: MethodCallExpression) =
-        // todo: add test
-        match expression.Method.Name with
-        | "Sum" ->
+        match parseSupportedMethod expression.Method.Name with
+        | None -> failwithf "Queryable method not implemented: %s" expression.Method.Name
+        | Some method ->
+        match method with
+        | Sum ->
             // SUM() return NULL if all elements are NULL, TOTAL() return 0.0.
             // TOTAL() always returns a float, therefore we will just check for NULL
             builder.Append "SELECT COALESCE(("
             aggregateTranslator "SUM" builder expression
             builder.Append "),0) as Value"
 
-        | "Average" ->
+        | Average ->
             aggregateTranslator "AVG" builder expression
 
-        | "Min" ->
+        | Min ->
             aggregateTranslator "MIN" builder expression
 
-        | "Max" ->
+        | Max ->
             aggregateTranslator "MAX" builder expression
 
-        | "DistinctBy"
-        | "Distinct" ->
+        | DistinctBy
+        | Distinct ->
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
             builder.Append ") GROUP BY "
@@ -112,9 +163,31 @@ module private QueryHelper =
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
             builder.Append ", Id"
 
-        | "Count"
-        | "CountBy"
-        | "LongCount" ->
+        // GroupBy<TSource,TKey>(IQueryable<TSource>, Expression<Func<TSource,TKey>>) implementation
+        | GroupBy ->
+            match expression.Arguments.Count with
+            | 2 ->
+                let keySelector = expression.Arguments.[1]
+            
+                builder.Append "SELECT -1 as Id, jsonb_object('Key', "
+            
+                // Select the key (similar to the DistinctBy implementation)
+                QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
+            
+                // Create an array of all items with the same key
+                builder.Append ", 'Items', jsonb_group_array(Value)) as Value FROM ("
+            
+                translate builder expression.Arguments.[0]
+            
+                // Group by the key selector
+                builder.Append ") GROUP BY "
+                QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
+
+            | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+
+        | Count
+        | CountBy
+        | LongCount ->
             builder.Append "SELECT COUNT(Id) as Value FROM ("
 
             translate builder expression.Arguments.[0]
@@ -126,7 +199,7 @@ module private QueryHelper =
                 QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
-        | "Where" ->
+        | Where ->
             match expression.Arguments.[0] with
             | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
                 let tableName = (ce.Value :?> IRootQueryable).SourceTableName
@@ -145,7 +218,7 @@ module private QueryHelper =
                 builder.Append ") WHERE "
                 QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
 
-        | "Select" ->
+        | Select ->
             builder.Append "SELECT Id, "
             QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
             builder.Append " as Value FROM "
@@ -160,14 +233,14 @@ module private QueryHelper =
                 translate builder other
                 builder.Append ")"
 
-        | "ThenBy" | "ThenByDescending" ->
+        | ThenBy | ThenByDescending ->
             translate builder expression.Arguments.[0]
             builder.Append ","
             QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
             if expression.Method.Name = "ThenByDescending" then
                 builder.Append "DESC "
 
-        | "OrderBy" | "OrderByDescending" ->
+        | OrderBy | OrderByDescending ->
             // Remove all previous order by's, they are noop.
             let innerExpression = 
                 let mutable expr = expression.Arguments.[0]
@@ -183,19 +256,19 @@ module private QueryHelper =
             if expression.Method.Name = "OrderByDescending" then
                 builder.Append "DESC "
 
-        | "Take" ->
+        | Take ->
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
             builder.Append ") LIMIT "
             QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
 
-        | "Skip" ->
+        | Skip ->
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
             builder.Append ") OFFSET "
             QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
 
-        | "First" | "FirstOrDefault" ->
+        | First | FirstOrDefault ->
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
             builder.Append ") "
@@ -208,7 +281,7 @@ module private QueryHelper =
 
             builder.Append "LIMIT 1 "
 
-        | "DefaultIfEmpty" ->
+        | DefaultIfEmpty ->
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
             builder.Append ") UNION ALL SELECT -1 as Id, "
@@ -217,7 +290,7 @@ module private QueryHelper =
             | 1 -> 
                 // If no default value is provided, then provide .NET's default.
 
-                let genericArg = (GenericArgCache.Get expression.Method).[0]
+                let genericArg = (GenericMethodArgCache.Get expression.Method).[0]
                 if genericArg.IsValueType then
                     let defaultValueType = Activator.CreateInstance(genericArg)
                     let jsonObj = JsonSerializator.JsonValue.Serialize defaultValueType
@@ -248,7 +321,7 @@ module private QueryHelper =
             translate builder expression.Arguments.[0]
             builder.Append "))"
 
-        | "Last" | "LastOrDefault" ->
+        | Last | LastOrDefault ->
             // SQlite does not guarantee the order of elements without an ORDER BY,
             // ensure that it is the only one, or throw an explanatory exception.
             match expression.Arguments.[0] with
@@ -265,7 +338,7 @@ module private QueryHelper =
             | _other ->
                 failwithf "Because SQLite does not guarantee the order of elements without an ORDER BY, this function cannot be implemented if it is not the only one applied(in this case it sorts by Id). Use an OrderBy() with a First'OrDefault'()"
 
-        | "Single" ->
+        | Single ->
             let countVar = Utils.getRandomVarName()
 
             builder.Append "SELECT jsonb_extract(Encoded, '$.Id') as Id, jsonb_extract(Encoded, '$.Value') as Value FROM ("
@@ -305,7 +378,7 @@ module private QueryHelper =
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
             builder.Append "LIMIT 2)) WHERE Id IS NOT NULL OR Value IS NOT NULL"
 
-        | "SingleOrDefault" ->
+        | SingleOrDefault ->
             let countVar = Utils.getRandomVarName()
 
             builder.Append "SELECT jsonb_extract(Encoded, '$.Id') as Id, jsonb_extract(Encoded, '$.Value') as Value FROM ("
@@ -338,7 +411,7 @@ module private QueryHelper =
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
             builder.Append "LIMIT 2)) WHERE Id IS NOT NULL OR Value IS NOT NULL"
 
-        | "All" ->
+        | All ->
             builder.Append "SELECT COUNT(*) = (SELECT COUNT(*) FROM ("
             translate builder expression.Arguments.[0]
             builder.Append ")) as Value FROM ("
@@ -346,12 +419,12 @@ module private QueryHelper =
             builder.Append ") WHERE "
             QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
 
-        | "Any" ->
+        | Any ->
             builder.Append "SELECT EXISTS(SELECT 1 FROM ("
             translate builder expression.Arguments.[0]
             builder.Append ")) as Value"
 
-        | "Contains" ->
+        | Contains ->
             builder.Append "SELECT EXISTS(SELECT 1 FROM ("
             translate builder expression.Arguments.[0]
             builder.Append ") WHERE "
@@ -364,7 +437,7 @@ module private QueryHelper =
             QueryTranslator.translateQueryable "" (ExpressionHelper.get(fun x -> x = value)) builder.SQLiteCommand builder.Variables
             builder.Append ") as Value"
 
-        | "Append" ->
+        | Append ->
             translate builder expression.Arguments.[0]
             builder.Append " UNION ALL "
             builder.Append "SELECT "
@@ -384,7 +457,7 @@ module private QueryHelper =
             builder.Append "')"
             builder.Append " As Value"
 
-        | "Concat" ->
+        | Concat ->
             translate builder expression.Arguments.[0]
             builder.Append " UNION ALL "
             builder.Append "SELECT Id, Value FROM ("
@@ -406,8 +479,6 @@ module private QueryHelper =
             translate builder appendingQE
             builder.Append ")"
 
-        | other -> failwithf "Queryable method not implemented: %s" other
-
     and private translateConstant (builder: QueryableBuilder<'T>) (expression: ConstantExpression) =
         if typedefof<IRootQueryable>.IsAssignableFrom expression.Type then
             translateSourceExpr builder expression
@@ -425,18 +496,42 @@ module private QueryHelper =
     let internal doesNotReturnIdFn (expression: Expression) =
         match expression with
         | :? MethodCallExpression as mce ->
-            match mce.Method.Name with
-            | "Sum"
-            | "Average"
-            | "Min"
-            | "Max"
-            | "Count"
-            | "LongCount"
-            | "All"
-            | "Any"
-            | "Contains"
+            match parseSupportedMethod mce.Method.Name with
+            | None -> false
+            | Some method ->
+            match method with
+            | Sum
+            | Average
+            | Min
+            | Max
+            | Count
+            | CountBy
+            | LongCount
+            | All
+            | Any
+            | Contains
                 -> true
-            | _other -> false
+            | Distinct
+            | DistinctBy
+            | Where
+            | Select
+            | ThenBy
+            | ThenByDescending
+            | OrderBy
+            | OrderByDescending
+            | Take
+            | Skip
+            | First
+            | FirstOrDefault
+            | DefaultIfEmpty
+            | Last
+            | LastOrDefault
+            | Single
+            | SingleOrDefault
+            | Append
+            | Concat
+            | GroupBy
+                -> false
         | _other -> false
 
     let internal startTranslation (source: Collection<'T>) (expression: Expression) =

@@ -1,22 +1,12 @@
 ﻿namespace SoloDatabase.MongoDB
 
-open Microsoft.Data.Sqlite
 open System.Linq.Expressions
 open System
 open System.Collections.Generic
 open System.Collections
-open FSharp.Interop.Dynamic
-open SoloDatabase.Types
 open System.IO
-open System.Text
-open SQLiteTools
-open SoloDatabase.JsonFunctions
-open SoloDatabase.FileStorage
-open SoloDatabase.Connections
-open SoloDatabase.Utils
 open SoloDatabase
 open SoloDatabase.JsonSerializator
-open System.Threading
 open System.Runtime.CompilerServices
 open System.Runtime.InteropServices
 open System.Dynamic
