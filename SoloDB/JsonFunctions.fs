@@ -111,8 +111,14 @@ module JsonFunctions =
         | other -> other.ToJsonString(), true
 
     let private fromJson<'T> (text: string) =
-        let json = JsonValue.Parse text
-        json.ToObject<'T>()    
+        match JsonValue.Parse text with
+        | Null when typeof<float> = typeof<'T> -> 
+            nan :> obj :?> 'T
+        | Null when typeof<float32> = typeof<'T> -> 
+            nanf :> obj :?> 'T
+        | Null when typeof<'T>.IsValueType -> 
+            raise (InvalidOperationException "Invalid operation on a value type.") 
+        | json -> json.ToObject<'T>()    
 
     let rec fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
         if data = null then 

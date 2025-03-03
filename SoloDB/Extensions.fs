@@ -21,7 +21,7 @@ type Extensions =
         Regex.IsMatch(this, regexPattern, RegexOptions.IgnoreCase)
 
     [<Extension>]
-    static member AddToEnd(this: IEnumerable, value: obj) : unit = // For arrays
+    static member Append(this: IEnumerable, value: obj) : unit = // For arrays
         failwithf "This is a dummy function for the SQL builder."
 
     [<Extension>]
@@ -33,9 +33,9 @@ type Extensions =
         failwithf "This is a dummy function for the SQL builder."
 
     [<Extension>]
-    static member AnyInEach<'T>(this: ICollection<'T>, condition: Expression<Func<'T, bool>>) = 
-        failwithf "This is a dummy function for the SQL builder."
-        bool()
+    static member Any<'T>(this: ICollection<'T>, condition: Expression<Func<'T, bool>>) =
+        let f = condition.Compile true
+        this |> Seq.exists f.Invoke
 
     [<Extension>]
     static member Dyn<'T>(this: obj, property: string) : 'T = // LINQ Expressions do not support C# dynamic.

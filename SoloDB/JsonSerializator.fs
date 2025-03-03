@@ -19,13 +19,12 @@ module JsonSerializator =
     let private isSupportedNewtownsoftArrayType (t: Type) =
         // For now support only primitive arrays.
         t.IsArray &&
-        let elementType = t.GetElementType ()
-        match elementType with
-        | _ when elementType.IsPrimitive -> true  // Covers Boolean, Byte, SByte, Int16, UInt16, Int32, UInt32, Int64, UInt64, IntPtr, UIntPtr, Char, Double, and Single.
-        | _ when elementType = typeof<decimal> -> true
-        | _ when elementType = typeof<DateTime> -> true
-        | _ when elementType = typeof<TimeSpan> -> true
-        | _ when elementType = typeof<string> -> true
+        match t.GetElementType () with
+        | elementType when elementType.IsPrimitive -> true  // Covers Boolean, Byte, SByte, Int16, UInt16, Int32, UInt32, Int64, UInt64, IntPtr, UIntPtr, Char, Double, and Single.
+        | elementType when elementType = typeof<decimal> -> true
+        | elementType when elementType = typeof<DateTime> -> true
+        | elementType when elementType = typeof<TimeSpan> -> true
+        | elementType when elementType = typeof<string> -> true
         | _ -> false
 
     let private implementsGenericCache = System.Collections.Concurrent.ConcurrentDictionary<struct (Type * Type), bool>()
@@ -58,7 +57,7 @@ module JsonSerializator =
     let private JSONStringToByteArray(s: string) =
         Convert.FromBase64String s
 
-    type Token =
+    type private Token =
         | NullToken
         | OpenBrace
         | CloseBrace
@@ -157,7 +156,16 @@ module JsonSerializator =
                         sb.Append(input.[i]) |> ignore
                         i <- i + 1
                     index <- i
-                    NumberToken (Decimal.Parse(sb.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture))
+                    let s = sb.ToString()
+                    NumberToken (
+                        try Decimal.Parse(s, NumberStyles.Any, CultureInfo.InvariantCulture)
+                        with
+                        | :? OverflowException ->
+                            if s.[0] = '-' then
+                                Decimal.MinValue
+                            else
+                                Decimal.MaxValue
+                    )
                 | c when isInitialIdentifierChar c ->
                     let sb = System.Text.StringBuilder()
                     let mutable i = index
@@ -247,7 +255,7 @@ module JsonSerializator =
                 | :? DateTimeOffset as date -> date.ToUnixTimeMilliseconds() |> decimal |> Number
                 | :? DateTime as date -> date.ToBinary() |> decimal |> Number
                 | :? DateOnly as date -> date.DayNumber |> decimal |> Number
-                | :? TimeOnly as time -> time.ToTimeSpan().TotalMilliseconds |> int64 (* Convert to int64 because SQLite only stores 32 bit precision floats in JSON. *) |> decimal |> Number
+                | :? TimeOnly as time -> time.ToTimeSpan().TotalMilliseconds |> int64 (* Convert to int64 to allow for higher precision in SQLite. *) |> decimal |> Number
                 | :? TimeSpan as span -> span .TotalMilliseconds |> int64 |> decimal |> Number
 
                 | :? Guid as guid -> guid.ToString("D", CultureInfo.InvariantCulture) |> String

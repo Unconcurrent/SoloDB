@@ -17,6 +17,7 @@ open Utils
 open System.Runtime.CompilerServices
 open System.Reflection
 open System.Data
+open System.Globalization
 
 
 // For the F# compiler to allow the implicit use of
@@ -664,9 +665,12 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 let source = Path.GetFullPath source
                 $"Data Source={source}", File source
 
+        let usCultureInfo = CultureInfo.GetCultureInfo("en-us")
         let setup (connection: SqliteConnection) =            
             connection.CreateFunction("UNIXTIMESTAMP", Func<int64>(fun () -> DateTimeOffset.Now.ToUnixTimeMilliseconds()), false)
             connection.CreateFunction("SHA_HASH", Func<byte array, obj>(fun o -> Utils.shaHash o), true)
+            connection.CreateFunction("TO_LOWER", Func<string, string>(_.ToLower(usCultureInfo)), true)
+            connection.CreateFunction("TO_UPPER", Func<string, string>(_.ToUpper(usCultureInfo)), true)
             connection.Execute "PRAGMA recursive_triggers = ON;" |> ignore // This must be enabled on every connection separately.
 
         let manager = new ConnectionManager(connectionString, setup)

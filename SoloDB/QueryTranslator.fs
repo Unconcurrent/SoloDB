@@ -58,7 +58,8 @@ module QueryTranslator =
         {
             StringBuilder: StringBuilder
             Variables: Dictionary<string, obj>
-            AppendRaw: string -> unit
+            AppendRawString: string -> unit
+            AppendRawChar: char -> unit
             AppendVariable: obj -> unit
             RollBack: uint -> unit
             UpdateMode: bool
@@ -67,15 +68,23 @@ module QueryTranslator =
             Parameters: ReadOnlyCollection<ParameterExpression>
             IdParameterIndex: int
         }
+        member this.AppendRaw (s: string) =
+            this.AppendRawString s
+
+        member this.AppendRaw (s: char) =
+            this.AppendRawChar s
+
         override this.ToString() = this.StringBuilder.ToString()
 
         static member New(sb: StringBuilder)(variables: Dictionary<string, obj>)(updateMode: bool)(tableName)(expression: Expression)(idIndex: int) =
             let appendRaw (s: string) = sb.Append s |> ignore
+            let appendRawChar (s: char) = sb.Append s |> ignore
             {
                 StringBuilder = sb
                 Variables = variables
                 AppendVariable = appendVariable sb variables
-                AppendRaw = appendRaw
+                AppendRawString = appendRaw
+                AppendRawChar = appendRawChar
                 RollBack = fun N -> sb.Remove(sb.Length - (int)N, (int)N) |> ignore
                 UpdateMode = updateMode
                 TableNameDot = if String.IsNullOrEmpty tableName then String.Empty else "\"" + tableName + "\"."
@@ -88,6 +97,75 @@ module QueryTranslator =
                     in (expression :?> LambdaExpression).Parameters
                 IdParameterIndex = idIndex
             }
+
+    /// <summary>
+    /// The Math method name and its SQLite format. $N, where N in 1..9, are arguments.
+    /// </summary>
+    let private mathFunctionTransformation = 
+        let arr = [|
+            (1, "Sin"), "SIN($1)"
+            (1, "sin"), "SIN($1)"
+            (1, "Cos"), "COS($1)"
+            (1, "cos"), "COS($1)"
+            (1, "Tan"), "TAN($1)"
+            (1, "tan"), "TAN($1)"
+            (1, "Asin"), "ASIN($1)"
+            (1, "asin"), "ASIN($1)"
+            (1, "Acos"), "ACOS($1)"
+            (1, "acos"), "ACOS($1)"
+            (1, "Atan"), "ATAN($1)"
+            (1, "atan"), "ATAN($1)"
+            (2, "Atan2"), "ATAN2($1, $2)"
+            (2, "atan2"), "ATAN2($1, $2)"
+            (1, "Sinh"), "SINH($1)"
+            (1, "sinh"), "SINH($1)"
+            (1, "Cosh"), "COSH($1)"
+            (1, "cosh"), "COSH($1)"
+            (1, "Tanh"), "TANH($1)"
+            (1, "tanh"), "TANH($1)"
+            (1, "Asinh"), "ASINH($1)"
+            (1, "asinh"), "ASINH($1)"
+            (1, "Acosh"), "ACOSH($1)"
+            (1, "acosh"), "ACOSH($1)"
+            (1, "Atanh"), "ATANH($1)"
+            (1, "atanh"), "ATANH($1)"
+            (1, "Log"), "LN($1)"
+            (1, "log"), "LN($1)"
+            (1, "Log2"), "LOG(2,$1)"
+            (1, "Log10"), "LOG10($1)"
+            (1, "log10"), "LOG10($1)"
+            (1, "Exp"), "EXP($1)"
+            (1, "exp"), "EXP($1)"
+            (2, "Pow"), "POW($1, $2)"
+            (1, "Sqrt"), "SQRT($1)"
+            (1, "sqrt"), "SQRT($1)"
+            (1, "Ceiling"), "CEIL($1)"
+            (1, "ceil"), "CEIL($1)"
+            (1, "Floor"), "FLOOR($1)"
+            (1, "floor"), "FLOOR($1)"
+            (1, "Round"), "ROUND($1, 0)"
+            (2, "Round"), "ROUND($1, $2)"
+            (1, "round"), "ROUND($1, 0)"
+            (1, "Truncate"), "TRUNC($1)"
+            (1, "truncate"), "TRUNC($1)"
+            (1, "Abs"), "ABS($1)"
+            (1, "abs"), "ABS($1)"
+            (1, "Sign"), "SIGN($1)"
+            (1, "sign"), "SIGN($1)"
+            (2, "Min"), "MIN($1, $2)"
+            (2, "min"), "MIN($1, $2)"
+            (2, "Max"), "MAX($1, $2)"
+            (2, "max"), "MAX($1, $2)"
+            (2, "IEEERemainder"), "($1 - $2 * ROUND($1 / $2))"
+            (2, "BigMul"), "($1 * $2)"
+        |]
+
+        // F# uses the function differently.
+        let fSharpFormatedArray = arr |> Array.map(fun ((n, fnName), op) -> (n + 1, fnName + "$W"), op.Replace("$2", "$3").Replace("$1", "$2"))
+
+        arr
+        |> Array.append fSharpFormatedArray
+        |> readOnlyDict
 
     let internal evaluateExpr<'O> (e: Expression) =
         match e with
@@ -295,24 +373,41 @@ module QueryTranslator =
         qb.AppendRaw typ
         qb.AppendRaw ")"
 
-    and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =        
+    and private visitMathMethod (m: MethodCallExpression) (qb: QueryBuilder) =
+        match mathFunctionTransformation.TryGetValue ((m.Arguments.Count, m.Method.Name)) with
+        | false, _ -> false
+        | true, format ->
+            let mutable visitNextChar = false
+            for c in format do
+                if visitNextChar && Char.IsDigit c then
+                    visitNextChar <- false
+                    visit
+                        (match int c - int '0' with 
+                            | 0 -> m.Object
+                            | c -> m.Arguments[c - 1])
+                        qb
+                elif c = '$' then
+                    visitNextChar <- true
+                else
+                    qb.AppendRaw c
+            true
+
+    and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =     
+        match visitMathMethod m qb with
+        | true -> ()
+        | false ->
         match m.Method.Name with
-        | "Abs"
-        | "abs" -> // todo: add test
-            let value = m.Arguments.[0]
-            qb.AppendRaw "ABS("
+        | "ToLower" ->
+            let value = m.Object
+            // User defined function to also support non ASCII.
+            qb.AppendRaw "TO_LOWER("
             visit value qb
             qb.AppendRaw ")"
 
-        | "ToLower" -> // todo: add test
-            let value = m.Arguments.[0]
-            qb.AppendRaw "LOWER("
-            visit value qb
-            qb.AppendRaw ")"
-
-        | "ToUpper" -> // todo: add test
-            let value = m.Arguments.[0]
-            qb.AppendRaw "UPPER("
+        | "ToUpper" ->
+            let value = m.Object
+            // User defined function to also support non ASCII.
+            qb.AppendRaw "TO_UPPER("
             visit value qb
             qb.AppendRaw ")"
 
@@ -337,7 +432,7 @@ module QueryTranslator =
             visit newValue qb |> ignore
             qb.AppendRaw ","
         
-        | "AddToEnd" | "Add" ->
+        | "Append" | "Add" ->
             let array = m.Arguments.[0]
             let newValue = m.Arguments.[1]
             visit array qb |> ignore
@@ -391,7 +486,7 @@ module QueryTranslator =
                 visitMemberAccess memberAccess qb
 
             | other -> failwithf "Unable to translate property access."
-        | "AnyInEach" ->
+        | "Any" ->
             let array = m.Arguments.[0]
             let whereFuncExpr = m.Arguments.[1]
             let exprFunc = Expression.Lambda<Func<Expression>>(whereFuncExpr).Compile(true)
@@ -473,28 +568,31 @@ module QueryTranslator =
             qb.AppendRaw ")"
 
         | "StartsWith" when m.Object.Type = typeof<string> ->
-            let arg = 
-                if m.Arguments.[0].Type = typeof<string> then
-                    m.Arguments.[0]
-                else if m.Arguments.[0].Type = typeof<char> && isFullyConstant m.Arguments.[0] then
-                    let value = evaluateExpr<obj> (m.Arguments.[0])
-                    Expression.Constant(value.ToString(), typeof<string>)
-                else failwithf "Unknown %s method" m.Method.Name
+            let arg = m.Object
+            let v = m.Arguments.[0]
 
-            let likeMeth = Expression.Call(typeof<SoloDatabase.Extensions>.GetMethod(nameof(SoloDatabase.Extensions.Like)), m.Object, Expression.Call(typeof<String>.GetMethod("Concat", [|typeof<string>; typeof<string>|]), arg, Expression.Constant("%")))
-            visit likeMeth qb
-        
+            qb.AppendRaw "SUBSTR("
+            visit arg qb
+            qb.AppendRaw ","
+            qb.AppendRaw "1,"
+            qb.AppendRaw "LENGTH("
+            visit v qb
+            qb.AppendRaw "))"
+            qb.AppendRaw " = "
+            visit v qb
+                    
         | "EndsWith" when m.Object.Type = typeof<string> ->
-            let arg = 
-                if m.Arguments.[0].Type = typeof<string> then
-                    m.Arguments.[0]
-                else if m.Arguments.[0].Type = typeof<char> && isFullyConstant m.Arguments.[0] then
-                    let value = evaluateExpr<obj> (m.Arguments.[0])
-                    Expression.Constant(value.ToString(), typeof<string>)
-                else failwithf "Unknown %s method" m.Method.Name
+            let arg = m.Object
+            let v = m.Arguments.[0]
 
-            let likeMeth = Expression.Call(typeof<SoloDatabase.Extensions>.GetMethod(nameof(SoloDatabase.Extensions.Like)), m.Object, Expression.Call(typeof<String>.GetMethod("Concat", [|typeof<string>; typeof<string>|]), Expression.Constant("%"), arg))
-            visit likeMeth qb
+            qb.AppendRaw "SUBSTR("
+            visit arg qb
+            qb.AppendRaw ","
+            qb.AppendRaw "-LENGTH("
+            visit v qb
+            qb.AppendRaw "))"
+            qb.AppendRaw " = "
+            visit v qb
 
         | "ToObject" when typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.Method.DeclaringType || m.Method.DeclaringType.FullName = "SoloDatabase.MongoDB.BsonDocument" ->
             let castToType = m.Method.GetGenericArguments().[0]
@@ -554,9 +652,8 @@ module QueryTranslator =
     and private visitConvert (m: UnaryExpression) (qb: QueryBuilder) =
         if m.Type = typeof<obj> || m.Operand.Type = typeof<obj> then
             visit(m.Operand) qb
-        else if isIntegerBasedType m.Type then // ignore cast like (int64)1
-            visit(m.Operand) qb
-        else failwithf "Convert not yet implemented: %A" m.Type
+        else 
+        castTo qb m.Type m.Operand
 
     and private visitBinary (b: BinaryExpression) (qb: QueryBuilder) =
         if b.NodeType = ExpressionType.Add && (b.Left.Type = typeof<string> || b.Right.Type = typeof<string>) then
