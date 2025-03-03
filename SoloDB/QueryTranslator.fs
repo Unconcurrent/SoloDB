@@ -58,8 +58,6 @@ module QueryTranslator =
         {
             StringBuilder: StringBuilder
             Variables: Dictionary<string, obj>
-            AppendRawString: string -> unit
-            AppendRawChar: char -> unit
             AppendVariable: obj -> unit
             RollBack: uint -> unit
             UpdateMode: bool
@@ -69,22 +67,18 @@ module QueryTranslator =
             IdParameterIndex: int
         }
         member this.AppendRaw (s: string) =
-            this.AppendRawString s
+            this.StringBuilder.Append s |> ignore
 
         member this.AppendRaw (s: char) =
-            this.AppendRawChar s
+            this.StringBuilder.Append s |> ignore
 
         override this.ToString() = this.StringBuilder.ToString()
 
         static member New(sb: StringBuilder)(variables: Dictionary<string, obj>)(updateMode: bool)(tableName)(expression: Expression)(idIndex: int) =
-            let appendRaw (s: string) = sb.Append s |> ignore
-            let appendRawChar (s: char) = sb.Append s |> ignore
             {
                 StringBuilder = sb
                 Variables = variables
                 AppendVariable = appendVariable sb variables
-                AppendRawString = appendRaw
-                AppendRawChar = appendRawChar
                 RollBack = fun N -> sb.Remove(sb.Length - (int)N, (int)N) |> ignore
                 UpdateMode = updateMode
                 TableNameDot = if String.IsNullOrEmpty tableName then String.Empty else "\"" + tableName + "\"."
