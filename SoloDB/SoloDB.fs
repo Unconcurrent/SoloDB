@@ -37,18 +37,23 @@ module internal Helper =
         connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name) |> ignore
         connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}) |> ignore
 
-    
-    let private orReplaceText = "OR REPLACE"
-    let private idColumnText = "Id,"
-    let private idParameterText = "@id,"
     let private insertJson (orReplace: bool) (id: int64 option) (name: string) (json: string) (connection: IDbConnection) =
         let includeId = id.IsSome
 
+        let queryStringBuilder = StringBuilder(64 + name.Length + (if orReplace then 11 else 0) + (if includeId then 7 else 0))
+
         let queryString =
-            $"INSERT {if orReplace then orReplaceText else String.Empty} 
-            INTO \"{name}\"({if includeId then idColumnText else String.Empty}Value) 
-            VALUES({if includeId then idParameterText else String.Empty}jsonb(@jsonText)) 
-            RETURNING Id;"
+            queryStringBuilder
+                .Append("INSERT ")
+                .Append(if orReplace then "OR REPLACE " else String.Empty)
+                .Append(" INTO \"")
+                .Append(name)
+                .Append("\"(")
+                .Append(if includeId then "Id," else String.Empty)
+                .Append("Value) VALUES(")
+                .Append(if includeId then "@id," else String.Empty)
+                .Append("jsonb(@jsonText)) RETURNING Id;")
+                .ToString()
 
         let parameters: obj = 
             if includeId then {|
@@ -65,7 +70,6 @@ module internal Helper =
         connection.QueryFirst<int64>(queryString, parameters)
 
     let private insertImpl<'T when 'T :> obj> (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (orReplace: bool) (getTransitiveCollection: IDbConnection -> obj) =
-        let t = typeof<'T>
         let customIdGen = CustomTypeId<'T>.Value
         let existsWritebleDirectId = HasTypeId<'T>.Value
 
@@ -83,8 +87,8 @@ module internal Helper =
         
 
         let id =
-            if existsWritebleDirectId && -1L = HasTypeId<'T>.Read item then 
-                failwithf "The Id value of -1 has a special meaning in Queyable, therefore it is not allowed."
+            if existsWritebleDirectId && -1L >= HasTypeId<'T>.Read item then 
+                failwithf "The Id must be either be:\n a) equal to 0, for it to be replaced by SQLite.\n b) A value greater than 0, for a specific Id to be inserted."
             elif existsWritebleDirectId && 0L <> HasTypeId<'T>.Read item then 
                 // Inserting with Id
                 insertJson orReplace (Some (HasTypeId<'T>.Read item)) name json connection
@@ -105,9 +109,6 @@ module internal Helper =
 
     let internal formatName (name: string) =
         String(name.ToCharArray() |> Array.filter(fun c -> Char.IsLetterOrDigit c || c = '_')) // Anti SQL injection
-
-    let internal getNameFrom<'T>() =
-        typeof<'T>.Name |> formatName
 
     let internal createDict(items: KeyValuePair<'a, 'b> seq) =
         let dic = new Dictionary<'a, 'b>()
@@ -178,6 +179,9 @@ module internal Helper =
         // Ignore the untyped collections.
         if not (typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T>) then
             ensureDeclaredIndexesFields<'T> name conn
+
+    let internal collectionNameOf<'T> =
+        typeof<'T>.Name |> formatName
 
 [<Struct>]
 type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string, variablesP: Dictionary<string, obj>, select: 'Q -> 'R, postModifySQL: string -> string, limitP: uint64 option, ?offsetP: uint64, ?orderByListP: string list) =
@@ -365,18 +369,28 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
 
         Helper.insertOrReplaceInner this.IncludeType item connection name this.GetTransitiveCollection
 
+    /// <summary>
+    /// This a inlined function that will cache the created transitive collection, to be used in batched context.
+    /// It will not allocate anything if the 'T will not use the function.
+    /// </summary>
+    static member inline private GetTransitiveCollectionCachingFn<'T>(this: Collection<'T>) = 
+        // If it can be needed, then create it.
+        if CustomTypeId<'T>.Value.IsSome then
+            let mutable cache: obj = null
+            fun (c) -> 
+                if cache = null then
+                    let tc = this.GetTransitiveCollection c
+                    cache <- tc
+                cache
+        else
+            // Else return a static function.
+            fun (_c) -> failwith "This function should never be called."
+
     member this.InsertBatch (items: 'T seq) =
         if this.InTransaction then
             use connection = connection.Get()
 
-            let getTransitiveCollection = 
-                let mutable cache: obj = null
-                fun (c) -> 
-                    if cache = null then
-                        let tc = this.GetTransitiveCollection c
-                        cache <- tc
-                    cache
-
+            let getTransitiveCollection = Collection<'T>.GetTransitiveCollectionCachingFn this
 
             let ids = List<int64>()
             for item in items do
@@ -387,13 +401,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         use connection = connection.Get()
         connection.Execute "BEGIN;" |> ignore
 
-        let getTransitiveCollection = 
-            let mutable cache: obj = null
-            fun (c) -> 
-                if cache = null then
-                    let tc = this.GetTransitiveCollection c
-                    cache <- tc
-                cache
+        let getTransitiveCollection = Collection<'T>.GetTransitiveCollectionCachingFn this
 
         try
             let ids = List<int64>()
@@ -413,13 +421,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         if this.InTransaction then
             use connection = connection.Get()
 
-            let getTransitiveCollection = 
-                let mutable cache: obj = null
-                fun (c) -> 
-                    if cache = null then
-                        let tc = this.GetTransitiveCollection c
-                        cache <- tc
-                    cache
+            let getTransitiveCollection = Collection<'T>.GetTransitiveCollectionCachingFn this
 
             let ids = List<int64>()
             for item in items do
@@ -430,13 +432,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         use connection = connection.Get()
         connection.Execute "BEGIN;" |> ignore
         
-        let getTransitiveCollection = 
-            let mutable cache: obj = null
-            fun (c) -> 
-                if cache = null then
-                    let tc = this.GetTransitiveCollection c
-                    cache <- tc
-                cache
+        let getTransitiveCollection = Collection<'T>.GetTransitiveCollectionCachingFn this
 
         try
             let ids = List<int64>()
@@ -610,7 +606,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
         Collection<'T>(Transactional connection, name, connectionString)
 
     member this.GetCollection<'T>() =
-        let name = Helper.getNameFrom<'T>()
+        let name = Helper.collectionNameOf<'T>
         
         this.InitializeCollection<'T>(name)
 
@@ -623,7 +619,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
         Helper.existsCollection name connection
 
     member this.CollectionExists<'T>() =
-        let name = Helper.getNameFrom<'T>()
+        let name = Helper.collectionNameOf<'T>
         Helper.existsCollection name connection
 
     member this.DropCollectionIfExists name =
@@ -635,12 +631,12 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
         else false
 
     member this.DropCollectionIfExists<'T>() =
-        let name = Helper.getNameFrom<'T>()
+        let name = Helper.collectionNameOf<'T>
         this.DropCollectionIfExists name
 
     member this.DropCollection<'T>() =
         if this.DropCollectionIfExists<'T>() = false then
-            let name = Helper.getNameFrom<'T>()
+            let name = Helper.collectionNameOf<'T>
             failwithf "Collection %s does not exists." name
 
     member this.DropCollection name =
@@ -905,7 +901,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         Collection<'T>(Pooled connectionManager, name, connectionString)
 
     member this.GetCollection<'T>() =
-        let name = Helper.getNameFrom<'T>()
+        let name = Helper.collectionNameOf<'T>
         
         this.InitializeCollection<'T>(name)
 
@@ -922,7 +918,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         Helper.existsCollection name dbConnection
 
     member this.CollectionExists<'T>() =
-        let name = Helper.getNameFrom<'T>()
+        let name = Helper.collectionNameOf<'T>
         use dbConnection = connectionManager.Borrow()
         Helper.existsCollection name dbConnection
 
@@ -945,12 +941,12 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         else false
 
     member this.DropCollectionIfExists<'T>() =
-        let name = Helper.getNameFrom<'T>()
+        let name = Helper.collectionNameOf<'T>
         this.DropCollectionIfExists name
 
     member this.DropCollection<'T>() =
         if this.DropCollectionIfExists<'T>() = false then
-            let name = Helper.getNameFrom<'T>()
+            let name = Helper.collectionNameOf<'T>
             failwithf "Collection %s does not exists." name
 
     member this.DropCollection name =
