@@ -125,7 +125,7 @@ module QueryTranslator =
             (1, "atanh"), "ATANH($1)"
             (1, "Log"), "LN($1)"
             (1, "log"), "LN($1)"
-            (1, "Log2"), "LOG(2,$1)"
+            (1, "Log2"), "LOG(2, $1)"
             (1, "Log10"), "LOG10($1)"
             (1, "log10"), "LOG10($1)"
             (1, "Exp"), "EXP($1)"
@@ -155,7 +155,7 @@ module QueryTranslator =
         |]
 
         // F# uses the function differently.
-        let fSharpFormatedArray = arr |> Array.map(fun ((n, fnName), op) -> (n + 1, fnName + "$W"), op.Replace("$2", "$3").Replace("$1", "$2"))
+        let fSharpFormatedArray = arr |> Array.map(fun ((n, fnName), op) -> (n + 1, fnName + "$W" (* Adding the postfix to the function name. *)), (* And shifting the parameters by 1. *) op.Replace("$2", "$3").Replace("$1", "$2"))
 
         arr
         |> Array.append fSharpFormatedArray
@@ -332,7 +332,7 @@ module QueryTranslator =
             }
             visitMemberAccess memberAccess qb
 
-        | other -> failwithf "Unable to translate property access."
+        | _other -> failwithf "Unable to translate property access."
 
     and private castTo (qb: QueryBuilder) (castToType: Type) (o: Expression) =
         let typ =
