@@ -29,7 +29,6 @@ module QueryTranslator =
             }
 
     let internal appendVariable (sb: StringBuilder) (variables: #IDictionary<string, obj>) (value: obj) =
-        let name = getRandomVarName ()
         match value with
         | :? bool as b -> 
                 sb.Append (sprintf "%i" (if b then 1 else 0)) |> ignore
@@ -48,6 +47,7 @@ module QueryTranslator =
         | _other -> 
                 
         let jsonValue, kind = toSQLJson value
+        let name = getRandomVarName ()
         if kind then 
             sb.Append (sprintf "jsonb(@%s)" name) |> ignore
         else 
