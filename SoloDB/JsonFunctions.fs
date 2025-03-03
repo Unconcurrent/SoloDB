@@ -87,7 +87,7 @@ module JsonFunctions =
     let toSQLJson<'T> (item: obj) = 
         match item with
         | :? string as s -> s :> obj, false
-        | :? char as c -> c.ToString() :> obj, false
+        | :? char as c -> string c :> obj, false
 
         | :? Type as t -> t.FullName :> obj, false
 
