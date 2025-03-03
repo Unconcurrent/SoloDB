@@ -44,6 +44,8 @@ type internal SupportedLinqMethods =
 | Append
 | Concat
 | GroupBy
+| Except
+| Intersect
 
 type private QueryableBuilder<'T> = 
     {
@@ -92,10 +94,26 @@ module private QueryHelper =
         | "Append" -> Some Append
         | "Concat" -> Some Concat
         | "GroupBy" -> Some GroupBy
+        | "Except" -> Some Except
+        | "Intersect" -> Some Intersect
         | _ -> None
 
     let private escapeSQLiteString (input: string) : string =
         input.Replace("'", "''")
+
+    let private readSoloDBQueryable<'T> (methodArg: Expression) =
+        let failwithMsg = "Cannot concat with an IEnumerable other that another SoloDB IQueryable, on the same connection. Do do this anyway, use to AsEnumerable()."
+        match methodArg with
+        | :? ConstantExpression as ce -> 
+            match QueryTranslator.evaluateExpr<IEnumerable> ce with
+            | :? IQueryable<'T> as appendingQuery when (match appendingQuery.Provider with :? SoloDBQueryProvider -> true | _other -> false) ->
+                appendingQuery.Expression
+            | :? IRootQueryable as rq ->
+                Expression.Constant(rq, typeof<IRootQueryable>)
+            | _other -> failwith failwithMsg
+        | :? MethodCallExpression as mcl ->
+            mcl
+        | _other -> failwith failwithMsg
 
     let private translateSource<'T> (builder: QueryableBuilder<'T>) (root: IRootQueryable) =
         let sourceName = root.SourceTableName
@@ -462,22 +480,49 @@ module private QueryHelper =
             builder.Append " UNION ALL "
             builder.Append "SELECT Id, Value FROM ("
 
-            let failwithMsg = "Cannot concat with an IEnumerable other that another SoloDB IQueryable, on the same connection. Do do this anyway, use to AsEnumerable()."
-            let appendingQE =
-                match expression.Arguments.[1] with
-                | :? ConstantExpression as ce -> 
-                    match QueryTranslator.evaluateExpr<IEnumerable> ce with
-                    | :? IQueryable<'T> as appendingQuery when (match appendingQuery.Provider with :? SoloDBQueryProvider -> true | _other -> false) ->
-                        appendingQuery.Expression
-                    | :? IRootQueryable as rq ->
-                        Expression.Constant(rq, typeof<IRootQueryable>)
-                    | _other -> failwith failwithMsg
-                | :? MethodCallExpression as mcl ->
-                    mcl
-                | _other -> failwith failwithMsg
+            let appendingQE = readSoloDBQueryable<'T> expression.Arguments.[1]
 
             translate builder appendingQE
             builder.Append ")"
+
+        | Except ->
+            if expression.Arguments.Count <> 2 then
+                failwithf "Invalid number of arguments in %s: %A" expression.Method.Name expression.Arguments.Count
+
+            builder.Append "SELECT Id, Value FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ")"
+
+            // Extract it, to convert it if it's binary encoded.
+            builder.Append " WHERE jsonb_extract(Value, '$') NOT IN ("
+                
+            do  // Skip the Id selection here.
+                builder.Append "SELECT jsonb_extract(Value, '$') FROM ("
+                let exceptingQuery = readSoloDBQueryable<'T> expression.Arguments.[1]
+                translate builder exceptingQuery
+                builder.Append ")"
+
+            builder.Append ")"
+
+        | Intersect ->
+            if expression.Arguments.Count <> 2 then
+                failwithf "Invalid number of arguments in %s: %A" expression.Method.Name expression.Arguments.Count
+
+            builder.Append "SELECT Id, Value FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ")"
+
+            // Extract it, to convert it if it's binary encoded.
+            builder.Append " WHERE jsonb_extract(Value, '$') IN ("
+                
+            do  // Skip the Id selection here.
+                builder.Append "SELECT jsonb_extract(Value, '$') FROM ("
+                let exceptingQuery = readSoloDBQueryable<'T> expression.Arguments.[1]
+                translate builder exceptingQuery
+                builder.Append ")"
+
+            builder.Append ")"
+
 
     and private translateConstant (builder: QueryableBuilder<'T>) (expression: ConstantExpression) =
         if typedefof<IRootQueryable>.IsAssignableFrom expression.Type then
@@ -531,6 +576,8 @@ module private QueryHelper =
             | Append
             | Concat
             | GroupBy
+            | Except
+            | Intersect
                 -> false
         | _other -> false
 
