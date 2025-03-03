@@ -18,7 +18,7 @@ type Extensions =
     static member Like(this: string, pattern: string) =
         let regexPattern = 
             "^" + Regex.Escape(pattern).Replace("\\%", ".*").Replace("\\_", ".") + "$"
-        Regex.IsMatch(this.ToString(), regexPattern, RegexOptions.IgnoreCase)
+        Regex.IsMatch(this, regexPattern, RegexOptions.IgnoreCase)
 
     [<Extension>]
     static member AddToEnd(this: IEnumerable, value: obj) : unit = // For arrays

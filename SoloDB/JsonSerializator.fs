@@ -196,22 +196,32 @@ module JsonSerializator =
         | List of IList<JsonValue>
         | Object of IDictionary<string, JsonValue>
 
-        static member private SerializeReadOnlyDictionary<'key, 'value> (dictionary: IReadOnlyDictionary<'key, 'value>) =
+        static member private SerializeDictionary<'key, 'value> (dictionary: obj) =
             let entries = new Dictionary<string, JsonValue>(StringComparer.OrdinalIgnoreCase)
-            for key in dictionary.Keys do                
-                let value = dictionary.[key]
-                let key = key.ToString()
-                entries.Add(key.ToString(), JsonValue.Serialize value)
+            match dictionary with
+            | :? IReadOnlyDictionary<'key, 'value> as dictionary ->
+                for key in dictionary.Keys do                
+                    let value = dictionary.[key]
+                    let key = string key
+                    entries.Add(key, JsonValue.Serialize value)
+            | :? IDictionary<'key, 'value> as dictionary ->
+                for key in dictionary.Keys do                
+                    let value = dictionary.[key]
+                    let key = string key
+                    entries.Add(key, JsonValue.Serialize value)
+            | other ->
+                failwithf "Type %s does not implement IDictionary<,> or IReadOnlyDictionary<,>" (other.GetType().Name)
+           
             Object entries
 
-        static member private SerializeReadOnlyDictionaryGeneric (obj: obj) =
+        static member private SerializeDictionaryGeneric (obj: obj) =
             let t = obj.GetType()
-            match t.GetInterface("IReadOnlyDictionary`2") with
+            match t.GetInterface("IReadOnlyDictionary`2") |> Option.ofObj |> Option.defaultWith (fun () -> t.GetInterface("IDictionary`2")) with
             | null ->
-                failwith "Object does not implement IReadOnlyDictionary<'key, 'value>"
+                failwith "Object does not implement IReadOnlyDictionary<'key, 'value> or IDictionary<'key, 'value>"
             | i ->
                 let genericArguments = i.GetGenericArguments()
-                let method = typeof<JsonValue>.GetMethod(nameof(JsonValue.SerializeReadOnlyDictionary), BindingFlags.NonPublic ||| BindingFlags.Static)
+                let method = typeof<JsonValue>.GetMethod(nameof(JsonValue.SerializeDictionary), BindingFlags.NonPublic ||| BindingFlags.Static)
                 let genericMethod = method.MakeGenericMethod(genericArguments)
                 genericMethod.Invoke(null, [| obj |]) :?> JsonValue
 
@@ -286,8 +296,8 @@ module JsonSerializator =
             | Null ->
                 if typeof<IDictionary>.IsAssignableFrom(valueType) then
                     serializeDictionary (value :?> IDictionary)
-                elif implementsGeneric typeof<IReadOnlyDictionary<_,_>> valueType then
-                    JsonValue.SerializeReadOnlyDictionaryGeneric value
+                elif implementsGeneric typedefof<IReadOnlyDictionary<_,_>> valueType || implementsGeneric typedefof<IDictionary<_,_>> valueType then
+                    JsonValue.SerializeDictionaryGeneric value
                 elif typeof<IEnumerable>.IsAssignableFrom(valueType) then
                     serializeCollection (value :?> IEnumerable)
                 else
@@ -872,7 +882,7 @@ module JsonSerializator =
                 | :? float32 as i -> i.ToString(CultureInfo.InvariantCulture)
                 | :? float as i -> i.ToString(CultureInfo.InvariantCulture)
                 | :? decimal as i -> i.ToString(CultureInfo.InvariantCulture)
-                | other -> other.ToString()
+                | other -> string other
 
             json.[key] <- JsonValue.Serialize v
         json

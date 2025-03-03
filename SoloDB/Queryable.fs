@@ -45,7 +45,9 @@ type internal SupportedLinqMethods =
 | Concat
 | GroupBy
 | Except
+| ExceptBy
 | Intersect
+| IntersectBy
 
 type private QueryableBuilder<'T> = 
     {
@@ -95,7 +97,9 @@ module private QueryHelper =
         | "Concat" -> Some Concat
         | "GroupBy" -> Some GroupBy
         | "Except" -> Some Except
+        | "ExceptBy" -> Some ExceptBy
         | "Intersect" -> Some Intersect
+        | "IntersectBy" -> Some IntersectBy
         | _ -> None
 
     let private escapeSQLiteString (input: string) : string =
@@ -523,6 +527,53 @@ module private QueryHelper =
 
             builder.Append ")"
 
+        | ExceptBy ->
+            if expression.Arguments.Count <> 3 then
+                failwithf "Invalid number of arguments in %s: %A" expression.Method.Name expression.Arguments.Count
+            
+            builder.Append "SELECT Id, Value FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ")"
+            
+            let keySelector = expression.Arguments.[2]
+            
+            builder.Append " WHERE "
+            QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
+            builder.Append " NOT IN ("
+            
+            do
+                builder.Append "SELECT "
+                QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
+                builder.Append " FROM ("
+
+                let exceptingQuery = readSoloDBQueryable<'T> expression.Arguments.[1]
+                translate builder exceptingQuery
+                builder.Append ")"
+            builder.Append ")"
+        
+        | IntersectBy ->
+            if expression.Arguments.Count <> 3 then
+                failwithf "Invalid number of arguments in %s: %A" expression.Method.Name expression.Arguments.Count
+            
+            builder.Append "SELECT Id, Value FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ")"
+            
+            let keySelector = expression.Arguments.[2]
+            
+            builder.Append " WHERE "
+            QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
+            builder.Append " IN ("
+            
+            do
+                builder.Append "SELECT "
+                QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
+                builder.Append " FROM ("
+                let intersectingQuery = readSoloDBQueryable<'T> expression.Arguments.[1]
+                translate builder intersectingQuery
+                builder.Append ")"
+            builder.Append ")"
+
 
     and private translateConstant (builder: QueryableBuilder<'T>) (expression: ConstantExpression) =
         if typedefof<IRootQueryable>.IsAssignableFrom expression.Type then
@@ -577,7 +628,9 @@ module private QueryHelper =
             | Concat
             | GroupBy
             | Except
+            | ExceptBy
             | Intersect
+            | IntersectBy
                 -> false
         | _other -> false
 
