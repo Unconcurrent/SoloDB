@@ -146,6 +146,19 @@ module private QueryHelper =
         translate builder expression.Arguments.[0]
         builder.Append ")"
 
+    and private raiseIfNullAggregateTranslator (fnName: string) (builder: QueryableBuilder<'T>) (expression: MethodCallExpression) (errorMsg: string) =
+        builder.Append "SELECT "
+        // In this case NULL is an invalid operation, therefore to emulate the .NET behavior of throwing an exception, we return the Id = NULL.
+        // And downstream the pipeline it will be checked and throwed.
+        builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN NULL ELSE -1 END AS Id, "
+        builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN '"
+        builder.Append (escapeSQLiteString errorMsg)
+        builder.Append "' ELSE Value END AS Value "
+
+        builder.Append "FROM ("
+        aggregateTranslator fnName builder expression
+        builder.Append ")"
+
     and private serializeForCollection (value: 'T) =
         match typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T> with
         | true -> JsonSerializator.JsonValue.SerializeWithType value
@@ -165,13 +178,13 @@ module private QueryHelper =
             builder.Append "),0) as Value"
 
         | Average ->
-            aggregateTranslator "AVG" builder expression
+            raiseIfNullAggregateTranslator "AVG" builder expression "Sequence contains no elements"
 
         | Min ->
-            aggregateTranslator "MIN" builder expression
+            raiseIfNullAggregateTranslator "MIN" builder expression "Sequence contains no elements"
 
         | Max ->
-            aggregateTranslator "MAX" builder expression
+            raiseIfNullAggregateTranslator "MAX" builder expression "Sequence contains no elements"
 
         | DistinctBy
         | Distinct ->
@@ -597,7 +610,6 @@ module private QueryHelper =
             | Some method ->
             match method with
             | Sum
-            | Average
             | Min
             | Max
             | Count
@@ -607,6 +619,7 @@ module private QueryHelper =
             | Any
             | Contains
                 -> true
+            | Average
             | Distinct
             | DistinctBy
             | Where
