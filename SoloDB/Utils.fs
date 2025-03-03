@@ -104,6 +104,14 @@ module Utils =
                         -> true
         | _ -> false
 
+    let inline internal isFloatBasedType (t: Type) =
+        match t with
+        | OfType float32
+        | OfType float
+        | OfType decimal
+                        -> true
+        | _ -> false
+
     let internal isIntegerBased (value: obj) =
         match value with
         | :? int8
