@@ -7,7 +7,7 @@ open System
 open SoloDatabase
 open Utils
 open SoloDatabase.Types
-open JsonSerializator
+open SoloDatabase.JsonSerializator
 
 module JsonFunctions =
     // Instead of concurrent dictionaries, we can use a static class
