@@ -1,11 +1,14 @@
 ﻿namespace SoloDatabase
 
+open System.Collections.Concurrent
+
 module JsonSerializator =
     open System
     open System.Collections.Generic
     open System.Collections
     open System.Reflection
     open Dynamitey
+    open FSharp.Interop.Dynamic
     open System.Dynamic
     open SoloDatabase.Utils
     open System.Text
@@ -37,6 +40,23 @@ module JsonSerializator =
                 interfaceType.IsGenericType && 
                 interfaceType.GetGenericTypeDefinition() = genericTypeDefinition)
         )
+
+    type private FSharpListDeserialize =
+        static member val private Cache = ConcurrentDictionary<Type, obj seq -> obj>()
+        static member private OfSeq<'a>(c: obj seq) = c |> Seq.map (fun a -> a :?> 'a) |> List.ofSeq
+
+        static member internal MakeFrom (elementType: Type) =
+                FSharpListDeserialize.Cache.GetOrAdd(elementType, Func<Type, obj seq -> obj>(
+                    fun elementType ->
+                        let method =
+                            typedefof<FSharpListDeserialize>
+                             .GetMethod(nameof FSharpListDeserialize.OfSeq, BindingFlags.NonPublic ||| BindingFlags.Static)
+                             .MakeGenericMethod(elementType)
+
+                        fun (contents) ->
+                            method.Invoke(null, [|contents|])
+                    )
+                )
 
     type internal Grouping<'key, 'item> (key: 'key, items: 'item array) =
         member this.Key = (this :> IGrouping<'key, 'item>).Key
@@ -142,7 +162,7 @@ module JsonSerializator =
                                         sb.Append(unicodeChar) |> ignore
                                 else
                                     failwith "Invalid Unicode escape sequence"
-                            | _ -> failwith "Invalid escape sequence"
+                            | other -> failwithf "Invalid escape sequence: '%c'" other
                         else
                             sb.Append(input.[i]) |> ignore
                         i <- i + 1
@@ -324,7 +344,8 @@ module JsonSerializator =
             let json = JsonValue.Serialize value
             match json, value.GetType() |> typeToName with
             | Object _, Some t -> json["$type"] <- String t
-            | other -> ()
+            | _other, Some t -> failwithf "Cannot serialize with type a primitive type: %s" t
+            | _other, None -> failwithf "Cannot get the name for the serialization with type information."
             json
 
         static member DeserializeDynamic (json: JsonValue) : obj =
@@ -365,7 +386,10 @@ module JsonSerializator =
 
             let isCollectionType (typ: Type) =
                 typ.IsArray
-                || typ.GetInterfaces() |> Seq.exists(fun i -> i.IsGenericType && i.GetGenericTypeDefinition().Namespace = typeof<IList<_>>.Namespace && i.GetGenericTypeDefinition().Name = typeof<IList<_>>.Name)
+                || typ.GetInterfaces() |> Array.exists(fun i -> i.IsGenericType && i.GetGenericTypeDefinition().Namespace = typeof<IList<_>>.Namespace && i.GetGenericTypeDefinition().Name = typeof<IList<_>>.Name)
+
+            let isFSharpList (typ: Type) =
+                implementsGeneric typedefof<obj list> typ
 
             let tryDeserializePrimitive (targetType: Type) (value: JsonValue) : obj =
                 match targetType, value with
@@ -425,6 +449,18 @@ module JsonSerializator =
                             listInstance.Add(JsonValue.Deserialize elementType item) |> ignore
                         listInstance
                     else failwithf "Cannot deserialize a list to type %A" targetType
+                | _ -> failwith "Expected JSON array for collection deserialization."
+
+            let deserializeFSharpList (targetType: Type) (value: JsonValue) =
+                match value with
+                | JsonValue.List items ->
+                    match GenericTypeArgCache.Get targetType |> Array.tryHead with
+                    | None -> failwithf "Cannot deserialize a F# list from type: %A" targetType
+                    | Some elementType ->
+                        items
+                        |> Seq.map (JsonValue.Deserialize elementType)
+                        |> FSharpListDeserialize.MakeFrom elementType
+
                 | _ -> failwith "Expected JSON array for collection deserialization."
 
             let deserializeTuple (targetType: Type) (value: JsonValue) =
@@ -567,12 +603,15 @@ module JsonSerializator =
                     deserializeTuple targetType json
                 | JsonValue.List _ when isCollectionType targetType ->
                     deserializeList targetType json
+                | JsonValue.List _ when isFSharpList targetType ->
+                    deserializeFSharpList targetType json
                 | JsonValue.Object _ when typeof<IDictionary>.IsAssignableFrom targetType || implementsGeneric typedefof<IDictionary<_,_>> targetType || implementsGeneric typedefof<IReadOnlyDictionary<_,_>> targetType ->
                     deserializeDictionary targetType json
                 | JsonValue.Object _ when implementsGeneric typedefof<IGrouping<_, _>> targetType ->
                     deserializeIGrouping targetType json  
                 | JsonValue.Object _ when targetType.IsClass || targetType.IsAbstract || FSharpType.IsUnion targetType->
                     deserializeObject targetType json                    
+                | JsonValue.String s -> failwithf "JSON value cannot be deserialized into type %A, value: {%s}" targetType s
                 | _ -> failwithf "JSON value cannot be deserialized into type %A" targetType
             | primitive -> primitive
 

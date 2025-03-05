@@ -48,6 +48,8 @@ type internal SupportedLinqMethods =
 | ExceptBy
 | Intersect
 | IntersectBy
+| Cast
+| OfType
 
 type private QueryableBuilder<'T> = 
     {
@@ -57,6 +59,9 @@ type private QueryableBuilder<'T> =
     }
     member this.Append(text: string) =
         this.SQLiteCommand.Append text |> ignore
+
+    member this.AppendVar(variable: obj) =
+        QueryTranslator.appendVariable this.SQLiteCommand this.Variables variable
 
 // Translation validation helpers.
 type private SoloDBQueryProvider = interface end
@@ -100,6 +105,8 @@ module private QueryHelper =
         | "ExceptBy" -> Some ExceptBy
         | "Intersect" -> Some Intersect
         | "IntersectBy" -> Some IntersectBy
+        | "Cast" -> Some Cast
+        | "OfType" -> Some OfType
         | _ -> None
 
     let private escapeSQLiteString (input: string) : string =
@@ -148,7 +155,8 @@ module private QueryHelper =
 
     and private raiseIfNullAggregateTranslator (fnName: string) (builder: QueryableBuilder<'T>) (expression: MethodCallExpression) (errorMsg: string) =
         builder.Append "SELECT "
-        // In this case NULL is an invalid operation, therefore to emulate the .NET behavior of throwing an exception, we return the Id = NULL.
+        // In this case NULL is an invalid operation, therefore to emulate the .NET behavior 
+        // of throwing an exception we return the Id = NULL, and Value = {exception message}
         // And downstream the pipeline it will be checked and throwed.
         builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN NULL ELSE -1 END AS Id, "
         builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN '"
@@ -196,7 +204,7 @@ module private QueryHelper =
             | 1 -> QueryTranslator.translateQueryable "" (ExpressionHelper.get(fun x -> x)) builder.SQLiteCommand builder.Variables
             | 2 -> QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
-            builder.Append ", Id"
+
 
         // GroupBy<TSource,TKey>(IQueryable<TSource>, Expression<Func<TSource,TKey>>) implementation
         | GroupBy ->
@@ -587,6 +595,60 @@ module private QueryHelper =
                 builder.Append ")"
             builder.Append ")"
 
+        | Cast ->
+            if expression.Arguments.Count <> 1 then
+                failwithf "Invalid number of arguments in %s: %A" expression.Method.Name expression.Arguments.Count
+
+            match GenericMethodArgCache.Get expression.Method |> Array.tryHead with
+            | None -> failwithf "Invalid type from Cast<T> method."
+            | Some t when typeof<JsonSerializator.JsonValue>.IsAssignableFrom t ->
+                // If .Cast<JsonValue>() then just continue.
+                translate builder expression.Arguments.[0]
+            | Some t ->
+            match t |> typeToName with
+            | None -> failwithf "Icompatible type from Cast<T> method."
+            | Some typeName -> 
+
+            builder.Append "SELECT "
+            
+            // First check if the type is null
+            builder.Append "CASE WHEN jsonb_extract(Value, '$.$type') IS NULL THEN NULL "
+            // Then check if the type matches
+            builder.Append "WHEN jsonb_extract(Value, '$.$type') <> "
+            builder.AppendVar typeName
+            builder.Append " THEN NULL ELSE Id END AS Id, "
+            
+            // Error message for null type
+            builder.Append "CASE WHEN jsonb_extract(Value, '$.$type') IS NULL THEN json_quote('The type of item is not stored in the database, if you want to include it, then add the Polimorphic attribute to the type and reinsert all elements.') "
+            // Error message for type mismatch
+            builder.Append "WHEN jsonb_extract(Value, '$.$type') <> "
+            builder.AppendVar typeName
+            builder.Append " THEN json_quote('Unable to cast object to the specified type, because the types are different.') ELSE Value END AS Value "
+            
+            builder.Append "FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ")"
+
+        | OfType ->
+            if expression.Arguments.Count <> 1 then
+                failwithf "Invalid number of arguments in %s: %A" expression.Method.Name expression.Arguments.Count
+
+            match GenericMethodArgCache.Get expression.Method |> Array.tryHead with
+            | None -> failwithf "Invalid type from OfType<T> method."
+            | Some t when typeof<JsonSerializator.JsonValue>.IsAssignableFrom t ->
+                // If .Cast<JsonValue>() then just continue.
+                translate builder expression.Arguments.[0]
+            | Some t ->
+            match t |> typeToName with
+            | None -> failwithf "Icompatible type from OfType<T> method."
+            | Some typeName -> 
+
+            builder.Append "SELECT Id, Value FROM ("
+            do translate builder expression.Arguments.[0]
+            builder.Append ") WHERE jsonb_extract(Value, '$.$type') = "
+            builder.AppendVar typeName
+            builder.Append " "
+
 
     and private translateConstant (builder: QueryableBuilder<'T>) (expression: ConstantExpression) =
         if typedefof<IRootQueryable>.IsAssignableFrom expression.Type then
@@ -610,8 +672,6 @@ module private QueryHelper =
             | Some method ->
             match method with
             | Sum
-            | Min
-            | Max
             | Count
             | CountBy
             | LongCount
@@ -619,6 +679,8 @@ module private QueryHelper =
             | Any
             | Contains
                 -> true
+            | Min
+            | Max
             | Average
             | Distinct
             | DistinctBy
@@ -644,6 +706,8 @@ module private QueryHelper =
             | ExceptBy
             | Intersect
             | IntersectBy
+            | Cast
+            | OfType
                 -> false
         | _other -> false
 

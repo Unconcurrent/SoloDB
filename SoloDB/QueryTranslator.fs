@@ -299,8 +299,37 @@ module QueryTranslator =
             else arrayIndex exp.Object arge qb
         | ExpressionType.Quote ->
             visit (exp :?> UnaryExpression).Operand qb
+        | ExpressionType.Conditional ->
+            visitIfElse (exp :?> ConditionalExpression) qb
+        | ExpressionType.TypeIs ->
+            let exp = exp :?> TypeBinaryExpression
+            visitTypeIs exp qb
         | _ ->
             raise (Exception(sprintf "Unhandled expression type: '%O'" exp.NodeType))
+
+    and private visitTypeIs (exp: TypeBinaryExpression) (qb: QueryBuilder) =
+        if not (mustIncludeTypeInformationInSerializationFn exp.Expression.Type) then
+            failwithf "Cannot translate TypeIs expression, because the DB will not store its type information for %A" exp.Type
+
+        qb.AppendRaw "json_extract("
+        do  visit exp.Expression qb
+            qb.AppendRaw ','
+            qb.AppendRaw "'$.$type'"
+        qb.AppendRaw ')'
+        qb.AppendRaw '='
+        match exp.TypeOperand |> typeToName with
+        | None -> failwithf "Cannot translate TypeIs expression with the TypeOperand: %A" exp.TypeOperand
+        | Some typeName ->
+        qb.AppendVariable typeName
+
+    and private visitIfElse (conditionalExp: ConditionalExpression) (qb: QueryBuilder) =
+        qb.AppendRaw "CASE WHEN "
+        visit conditionalExp.Test qb
+        qb.AppendRaw " THEN "
+        visit conditionalExp.IfTrue qb
+        qb.AppendRaw " ELSE "
+        visit conditionalExp.IfFalse qb
+        qb.AppendRaw " END"
 
     and private arrayIndex (array: Expression) (index: Expression) (qb: QueryBuilder) : unit =
         qb.AppendRaw "jsonb_extract("

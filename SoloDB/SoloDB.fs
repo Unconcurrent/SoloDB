@@ -354,7 +354,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member val private ConnectionString = connectionString
     member val Name = name
     member val InTransaction = match connection with | Transactional _ -> true | Pooled _ -> false | Transitive _ -> true
-    member val IncludeType = typeof<'T>.IsAbstract
+    member val IncludeType = mustIncludeTypeInformationInSerialization<'T>
     member val internal Connection = connection
 
     member this.Insert (item: 'T) =
