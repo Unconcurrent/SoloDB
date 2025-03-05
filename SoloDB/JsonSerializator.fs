@@ -344,8 +344,8 @@ module JsonSerializator =
             let json = JsonValue.Serialize value
             match json, value.GetType() |> typeToName with
             | Object _, Some t -> json["$type"] <- String t
-            | _other, Some t -> failwithf "Cannot serialize with type a primitive type: %s" t
-            | _other, None -> failwithf "Cannot get the name for the serialization with type information."
+            | _other, Some t -> () // Ignore
+            | _other, None -> () // Also ignore
             json
 
         static member DeserializeDynamic (json: JsonValue) : obj =
