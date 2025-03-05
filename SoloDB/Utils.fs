@@ -235,9 +235,9 @@ module Utils =
     type internal GenericMethodArgCache =
         static member val private cache = ConcurrentDictionary<MethodInfo, Type array>({
                 new IEqualityComparer<MethodInfo> with
-                    override this.Equals (x: MethodInfo, y: MethodInfo): bool = 
+                    override this.Equals (x: MethodInfo, y: MethodInfo): bool =
                         x.MethodHandle.Value = y.MethodHandle.Value
-                    override this.GetHashCode (obj: MethodInfo): int = 
+                    override this.GetHashCode (obj: MethodInfo): int =
                         obj.MethodHandle.Value |> int
         })
 
@@ -249,9 +249,9 @@ module Utils =
     type internal GenericTypeArgCache =
         static member val private cache = ConcurrentDictionary<Type, Type array>({
                 new IEqualityComparer<Type> with
-                    override this.Equals (x: Type, y: Type): bool = 
+                    override this.Equals (x: Type, y: Type): bool =
                         x.TypeHandle.Value = y.TypeHandle.Value
-                    override this.GetHashCode (obj: Type): int = 
+                    override this.GetHashCode (obj: Type): int =
                         obj.TypeHandle.Value |> int
         })
 
@@ -259,11 +259,12 @@ module Utils =
             let args = GenericTypeArgCache.cache.GetOrAdd(t, (fun m -> m.GetGenericArguments()))
             args
 
+    /// <summary>For compatilibility, it just a <see cref="T:System.Collections.Generic.List`1" /> with a Length property that calls Count.</summary>
     type CompatilibilityList<'T> internal (elements: 'T seq) =
         inherit System.Collections.Generic.List<'T>(elements)
     
-        ///<summary>For compatilibility, it just calls this.Count. Gets the number of elements contained in the <see cref="T:System.Collections.Generic.List`1" />.</summary>
-        ///<returns>The number of elements contained in the <see cref="T:System.Collections.Generic.List`1" />.</returns>
+        /// <summary>For compatilibility, it just calls this.Count. Gets the number of elements contained in the <see cref="T:System.Collections.Generic.List`1" />.</summary>
+        /// <returns>The number of elements contained in the <see cref="T:System.Collections.Generic.List`1" />.</returns>
         member this.Length = this.Count
 
     module internal SeqExt =
