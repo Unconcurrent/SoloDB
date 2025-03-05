@@ -27,6 +27,8 @@ type internal SupportedLinqMethods =
 | Select
 | ThenBy
 | ThenByDescending
+| Order
+| OrderDescending
 | OrderBy
 | OrderByDescending
 | Take
@@ -85,6 +87,8 @@ module private QueryHelper =
         | "ThenBy" -> Some ThenBy
         | "ThenByDescending" -> Some ThenByDescending
         | "OrderBy" -> Some OrderBy
+        | "Order" -> Some Order
+        | "OrderDescending" -> Some OrderDescending
         | "OrderByDescending" -> Some OrderByDescending
         | "Take" -> Some Take
         | "Skip" -> Some Skip
@@ -287,7 +291,7 @@ module private QueryHelper =
             let innerExpression = 
                 let mutable expr = expression.Arguments.[0]
                 while match expr with
-                        | :? MethodCallExpression as mce -> mce.Method.Name = "OrderBy" || mce.Method.Name = "OrderByDescending" || mce.Method.Name = "ThenBy" || mce.Method.Name = "ThenByDescending"
+                        | :? MethodCallExpression as mce -> match mce.Method.Name with "Order" |  "OrderDescending" | "OrderBy" | "OrderByDescending" | "ThenBy" | "ThenByDescending" -> true | _other -> false
                         | _other -> false 
                     do expr <- (expr :?> MethodCallExpression).Arguments.[0]
                 expr
@@ -296,7 +300,14 @@ module private QueryHelper =
             translate builder innerExpression
             builder.Append ") ORDER BY "
             QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
-            if expression.Method.Name = "OrderByDescending" then
+            if method = OrderByDescending then
+                builder.Append "DESC "
+
+        | Order | OrderDescending ->
+            builder.Append "SELECT Id, Value FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ") ORDER BY jsonb_extract(Value, '$') "
+            if method = OrderDescending then
                 builder.Append "DESC "
 
         | Take ->
@@ -689,6 +700,8 @@ module private QueryHelper =
             | ThenBy
             | ThenByDescending
             | OrderBy
+            | Order
+            | OrderDescending
             | OrderByDescending
             | Take
             | Skip
