@@ -105,7 +105,7 @@ module Utils =
             this = (Decimal.Floor this)
 
     [<return: Struct>]
-    let internal (|OfType|_|) (_typ: 'x -> 'a when 'a : (new: unit -> 'a)) (objType: Type) =
+    let internal (|OfType|_|) (_typ: 'x -> 'a) (objType: Type) =
         if typeof<'a>.IsAssignableFrom(objType) then ValueSome () else ValueNone
 
     let internal isNumber (value: obj) =
