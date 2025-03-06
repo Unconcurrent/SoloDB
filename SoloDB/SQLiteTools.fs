@@ -13,6 +13,7 @@ open System.Linq.Expressions
 open Microsoft.FSharp.Reflection
 open System.Runtime.Serialization
 open SoloDatabase.JsonSerializator
+open System.Collections.Concurrent
 
 module SQLiteTools =
     let private addParameter (command: IDbCommand) (key: string) (value: obj) =
@@ -20,11 +21,12 @@ module SQLiteTools =
             if value = null then 
                 struct (null, -1)
             else
-            let valType = value.GetType()
+            
             match value with
             | :? DateTimeOffset as dto ->
                  struct (dto.ToUnixTimeMilliseconds() |> box, sizeof<int64>)
             | _ ->
+                let valType = value.GetType()
                 if valType.Name.StartsWith "Nullable`" then
                     if valType.GetProperty("HasValue").GetValue value = true then
                         struct (valType.GetProperty("Value").GetValue value, -1)
@@ -41,6 +43,7 @@ module SQLiteTools =
 
         command.Parameters.Add par |> ignore
 
+    let private dynamicParameterCache = ConcurrentDictionary<Type, Action<IDbCommand, obj>>()
     let private createCommand(this: IDbConnection)(sql: string)(parameters: obj option) =
         let command = this.CreateCommand()
         command.CommandText <- sql
@@ -54,9 +57,26 @@ module SQLiteTools =
                     addParameter command key value
 
             | parameters ->
-            for p in parameters.GetType().GetProperties() do
-                if p.CanRead then
-                    addParameter command p.Name (p.GetValue parameters)
+            let fn = dynamicParameterCache.GetOrAdd(parameters.GetType(), Func<Type, Action<IDbCommand, obj>>(
+                fun t ->
+                    let props = t.GetProperties() |> Array.filter(_.CanRead)
+                    let dbCmdPar = Expression.Parameter typeof<IDbCommand>
+                    let parametersPar = Expression.Parameter typeof<obj>
+
+                    let addParameterFunc = Action<IDbCommand,string,obj>(addParameter)
+
+                    let meth = typeof<Action<IDbCommand,string,obj>>.GetMethod "Invoke"
+
+                    let l = Expression.Lambda<Action<IDbCommand, obj>>(
+                                Expression.Block([|
+                                    for p in props do
+                                        Expression.Call(Expression.Constant(addParameterFunc), meth, [|dbCmdPar :> Expression; Expression.Constant(p.Name); Expression.Convert(Expression.Property(Expression.Convert(parametersPar, t), p), typeof<obj>)|]) :> Expression
+                                |]),
+                                [|dbCmdPar; parametersPar|])
+
+                    l.Compile(false)
+            ))
+            fn.Invoke(command, parameters)
         | _ -> ()
 
         command
