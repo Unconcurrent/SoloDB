@@ -1,5 +1,6 @@
 ﻿namespace SoloDatabase
 
+open SoloDatabase.JsonSerializator
 open Microsoft.Data.Sqlite
 open System.Linq.Expressions
 open System
@@ -18,7 +19,6 @@ open System.Runtime.CompilerServices
 open System.Reflection
 open System.Data
 open System.Globalization
-
 
 // For the F# compiler to allow the implicit use of
 // the .NET Expression we need to use it in a C# style class.
@@ -471,7 +471,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         WhereBuilder<'T, DbObjectRow, 'T>(connection, name, $"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" ", fromSQLite<'T>, Dictionary<string, obj>(), id)
 
     member this.SelectWithId() =
-        WhereBuilder<'T, string, (int64 * 'T)>(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>(), id)
+        WhereBuilder<'T, JsonValue, (int64 * 'T)>(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>(), id)
 
     member this.TryFirst(func: Expression<System.Func<'T, bool>>) =
         this.Select().Where(func).Limit(1UL).Enumerate() |> Seq.tryHead
@@ -483,24 +483,24 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.AsEnumerable() = this.Select().OnAll().Enumerate()
 
     member this.Count() =
-        WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), id)
+        WhereBuilder<'T, int64, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", id, Dictionary<string, obj>(), id)
 
     member this.CountAll() =        
-        WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), id).OnAll().First()
+        WhereBuilder<'T, int64, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", id, Dictionary<string, obj>(), id).OnAll().First()
 
     member this.CountAllLimit(limit: uint64) =
         // https://stackoverflow.com/questions/1824490/how-do-you-enable-limit-for-delete-in-sqlite
         // By default, SQLite does not support LIMIT in a COUNT statement, but there is this workaround.
-        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" LIMIT @limit)", Helper.createDict([|KeyValuePair("limit", limit :> obj)|]), fromJsonOrSQL<int64>, id, None).First()
+        FinalBuilder<'T, int64, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" LIMIT @limit)", Helper.createDict([|KeyValuePair("limit", limit :> obj)|]), id, id, None).First()
 
     member this.CountWhere(func: Expression<System.Func<'T, bool>>) =
-        WhereBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), id).Where(func).First()
+        WhereBuilder<'T, int64, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", id, Dictionary<string, obj>(), id).Where(func).First()
 
     member this.CountWhere(func: Expression<System.Func<'T, bool>>, limit: uint64) =
         let whereSQL, variables = QueryTranslator.translate name func
         variables["limit"] <- limit :> obj
 
-        FinalBuilder<'T, string, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" WHERE {whereSQL} LIMIT @limit)", variables, fromJsonOrSQL<int64>, id, None).First()
+        FinalBuilder<'T, int64, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" WHERE {whereSQL} LIMIT @limit)", variables, id, id, None).First()
 
     member this.Any(func) = this.CountWhere(func, 1UL) > 0L
 
@@ -518,10 +518,10 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         fullUpdateSQL.Remove(fullUpdateSQL.Length - 1, 1) |> ignore // Remove the ',' at the end.
         let fullUpdateSQL = fullUpdateSQL.ToString()
 
-        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {fullUpdateSQL})", fromJsonOrSQL<int64>, variables, id)
+        WhereBuilder<'T, int64, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {fullUpdateSQL})", id, variables, id)
 
     member this.Replace(item: 'T) =
-        WhereBuilder<'T, string, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", fromJsonOrSQL<int64>, Helper.createDict([|KeyValuePair("item", (if this.IncludeType then toTypedJson item else toJson item) |> box)|]), id)
+        WhereBuilder<'T, int64, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", id, Helper.createDict([|KeyValuePair("item", (if this.IncludeType then toTypedJson item else toJson item) |> box)|]), id)
 
     /// <summary>
     /// Will replace the item in the DB based on its Id, and if it does not have one then it will throw an InvalidOperationException.
@@ -541,7 +541,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.Delete() =
         // https://stackoverflow.com/questions/1824490/how-do-you-enable-limit-for-delete-in-sqlite
         // By default, SQLite does not support LIMIT in a DELETE statement, but there is this workaround.
-        WhereBuilder<'T, string, int64>(connection, name, $"DELETE FROM \"{name}\" WHERE Id IN (SELECT Id FROM \"{name}\" ", fromJsonOrSQL<int64>, Dictionary<string, obj>(), fun sql -> sql + ")")
+        WhereBuilder<'T, int64, int64>(connection, name, $"DELETE FROM \"{name}\" WHERE Id IN (SELECT Id FROM \"{name}\" ", id, Dictionary<string, obj>(), fun sql -> sql + ")")
 
     member this.DeleteById(id: int64) : int =
         this.Delete().WhereId(id).Execute()
