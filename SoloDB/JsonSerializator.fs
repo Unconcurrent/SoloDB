@@ -46,6 +46,7 @@ module private JsonHelper =
     let internal JSONStringToByteArray(s: string) =
         Convert.FromBase64String s
 
+
 type internal Token =
     | NullToken
     | OpenBrace
@@ -225,131 +226,13 @@ type JsonValue =
     | List of IList<JsonValue>
     | Object of IDictionary<string, JsonValue>
 
-    static member private SerializeDictionary<'key, 'value> (dictionary: obj) =
-        let entries = new Dictionary<string, JsonValue>()
-        match dictionary with
-        | :? IReadOnlyDictionary<'key, 'value> as dictionary ->
-            for key in dictionary.Keys do                
-                let value = dictionary.[key]
-                let key = string key
-                entries.Add(key, JsonValue.Serialize value)
-        | :? IDictionary<'key, 'value> as dictionary ->
-            for key in dictionary.Keys do                
-                let value = dictionary.[key]
-                let key = string key
-                entries.Add(key, JsonValue.Serialize value)
-        | other ->
-            failwithf "Type %s does not implement IDictionary<,> or IReadOnlyDictionary<,>" (other.GetType().Name)
-           
-        Object entries
+    static member Serialize<'T>(t: 'T) : JsonValue =
+        JsonSerializerImpl<'T>.Serialize t
 
-    static member internal SerializeDictionaryGeneric (obj: obj) =
-        let t = obj.GetType()
-        match t.GetInterface("IReadOnlyDictionary`2") |> Option.ofObj |> Option.defaultWith (fun () -> t.GetInterface("IDictionary`2")) with
-        | null ->
-            failwith "Object does not implement IReadOnlyDictionary<'key, 'value> or IDictionary<'key, 'value>"
-        | i ->
-            let genericArguments = i.GetGenericArguments()
-            let method = typeof<JsonValue>.GetMethod(nameof(JsonValue.SerializeDictionary), BindingFlags.NonPublic ||| BindingFlags.Static)
-            let genericMethod = method.MakeGenericMethod(genericArguments)
-            genericMethod.Invoke(null, [| obj |]) :?> JsonValue
+    static member SerializeWithType<'T>(t: 'T) : JsonValue =
+        JsonSerializerImpl<'T>.SerializeWithType t
 
-    static member Serialize (value: obj) =
-        let rec trySerializePrimitive (value: obj) =
-            match value with
-            | :? bool as b -> Boolean b
-
-            | :? uint8 as i -> Number (decimal i)
-            | :? uint16 as i -> Number (decimal i)
-            | :? uint32 as i -> Number (decimal i)
-            | :? uint64 as i -> Number (decimal i)
-
-            | :? int8 as i -> Number (decimal i)
-            | :? int16 as i -> Number (decimal i)
-            | :? int32 as i -> Number (decimal i)
-            | :? int64 as i -> Number (decimal i)
-
-            | :? float32 as i -> Number (decimal i)
-            | :? float as f -> Number (decimal f)
-            | :? decimal as i -> Number (decimal i)
-
-            | :? DateTimeOffset as date -> date.ToUnixTimeMilliseconds() |> decimal |> Number
-            | :? DateTime as date -> date.ToBinary() |> decimal |> Number
-            | :? DateOnly as date -> date.DayNumber |> decimal |> Number
-            | :? TimeOnly as time -> time.ToTimeSpan().TotalMilliseconds |> int64 (* Convert to int64 to allow for higher precision in SQLite. *) |> decimal |> Number
-            | :? TimeSpan as span -> span.TotalMilliseconds |> int64 |> decimal |> Number
-
-            | :? Guid as guid -> guid.ToString("D", CultureInfo.InvariantCulture) |> String
-
-            | :? string as s -> String s
-            // For efficient storage.
-            | :? (byte[]) as bs -> String(JsonHelper.byteArrayToJSONCompatibleString bs)
-            | :? (byte seq) as bs -> trySerializePrimitive (bs |> Seq.toArray)
-            | _ -> Null
-    
-        let serializeEnum (e: Enum) =
-            let t = e.GetType()
-            let enumValue = Convert.ChangeType(e, Enum.GetUnderlyingType(t))
-            match trySerializePrimitive enumValue with
-            | Null -> failwithf "Could not serialize enum: \"%A\" of type %A" e t
-            | ok -> ok
-
-        let serializeCollection (collection: IEnumerable) =
-            let items = System.Collections.Generic.List<JsonValue>()
-            for item in collection do
-                items.Add(JsonValue.Serialize item)
-            List items
-    
-        let serializeDictionary (dictionary: IDictionary) =
-            let entries = new Dictionary<string, JsonValue>()
-            for key in dictionary.Keys do
-                let key = key.ToString()
-                let value = dictionary.[key]
-                entries.Add(key, JsonValue.Serialize value)
-            Object entries
-
-            
-        let valueType = value.GetType()
-
-        if obj.ReferenceEquals(value, null) then
-            Null
-        else if typeof<JsonValue>.IsAssignableFrom valueType then
-            value :?> JsonValue
-        else if valueType.FullName = "SoloDatabase.MongoDB.BsonDocument" then
-            valueType.GetProperty("Json").GetValue(value) :?> JsonValue
-        else 
-        match value with
-        | :? Enum as e -> serializeEnum e
-        | _other -> 
-        match trySerializePrimitive value with
-        | Null ->
-            if typeof<IDictionary>.IsAssignableFrom(valueType) then
-                serializeDictionary (value :?> IDictionary)
-            elif JsonHelper.implementsGeneric typedefof<IReadOnlyDictionary<_,_>> valueType || JsonHelper.implementsGeneric typedefof<IDictionary<_,_>> valueType then
-                JsonValue.SerializeDictionaryGeneric value
-            elif typeof<IEnumerable>.IsAssignableFrom(valueType) then
-                serializeCollection (value :?> IEnumerable)
-            else
-                let props = valueType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-                let dict = new Dictionary<string, JsonValue>()
-                for prop in props do
-                    if prop.CanRead then
-                        let propValue = prop.GetValue(value)
-                        if propValue <> null then
-                            let serializedValue = JsonValue.Serialize propValue
-                            dict.Add(prop.Name, serializedValue)
-                Object dict
-        | value -> value
-
-    static member SerializeWithType (value: obj) =
-        let json = JsonValue.Serialize value
-        match json, value.GetType() |> typeToName with
-        | Object _, Some t -> json["$type"] <- String t
-        | _other, Some t -> () // Ignore
-        | _other, None -> () // Also ignore
-        json
-
-    static member DeserializeDynamic (json: JsonValue) : obj =
+    static member private DeserializeDynamic (json: JsonValue) : obj =
         let toDecimal (input: string) =
             match Decimal.TryParse (input, NumberStyles.Float, CultureInfo.InvariantCulture) with
             | true, dec -> Some dec
@@ -381,241 +264,6 @@ type JsonValue =
                 expando :> obj
         deserialize json
 
-    static member Deserialize (targetType: Type) (json: JsonValue) : obj =
-        let createInstance (targetType: Type) =
-            Utils.initEmpty targetType
-
-        let isCollectionType (typ: Type) =
-            typ.IsArray
-            || typ.GetInterfaces() |> Array.exists(fun i -> i.IsGenericType && i.GetGenericTypeDefinition().Namespace = typeof<IList<_>>.Namespace && i.GetGenericTypeDefinition().Name = typeof<IList<_>>.Name)
-
-        let isFSharpList (typ: Type) =
-            JsonHelper.implementsGeneric typedefof<obj list> typ
-
-        let tryDeserializePrimitive (targetType: Type) (value: JsonValue) : obj =
-            match targetType, value with
-            | t, JsonValue.Boolean b when t = typeof<bool> -> b
-
-            | t, JsonValue.String s when t = typeof<byte array> -> JsonHelper.JSONStringToByteArray s
-            | t, JsonValue.String s when t = typeof<byte seq> -> JsonHelper.JSONStringToByteArray s
-            | t, JsonValue.String s when t = typeof<string> -> s
-            | t, JsonValue.String s when t = typeof<Type> -> s |> nameToType |> box
-            | t, JsonValue.String s when t = typeof<Guid> -> Guid.Parse(s) |> box
-
-            | t, JsonValue.String s when t = typeof<DateTimeOffset> -> DateTimeOffset.Parse(s, CultureInfo.InvariantCulture) |> box
-            | t, JsonValue.String s when t = typeof<DateTime> -> DateTime.Parse(s, CultureInfo.InvariantCulture) |> box
-            | t, JsonValue.String s when t = typeof<DateOnly> -> DateOnly.Parse(s, CultureInfo.InvariantCulture) |> box
-            | t, JsonValue.String s when t = typeof<TimeOnly> -> TimeOnly.Parse(s, CultureInfo.InvariantCulture) |> box
-            | t, JsonValue.String s when t = typeof<TimeSpan> -> TimeSpan.Parse(s, CultureInfo.InvariantCulture) |> box
-
-
-            | t, JsonValue.Number n when t = typeof<float32> -> float32 n
-            | t, JsonValue.Number n when t = typeof<float> -> float n
-            | t, JsonValue.Number n when t = typeof<bool> -> if n = Decimal.Zero then false else true
-
-            | t, JsonValue.Number n when t = typeof<int8> -> int8 n
-            | t, JsonValue.Number n when t = typeof<int16> -> int16 n
-            | t, JsonValue.Number n when t = typeof<int32> -> int32 n
-            | t, JsonValue.Number n when t = typeof<int64> -> int64 n
-
-            | t, JsonValue.Number n when t = typeof<uint8> -> uint8 n
-            | t, JsonValue.Number n when t = typeof<uint16> -> uint16 n
-            | t, JsonValue.Number n when t = typeof<uint32> -> uint32 n
-            | t, JsonValue.Number n when t = typeof<uint64> -> uint64 n
-
-            | t, JsonValue.Number n when t = typeof<decimal> -> decimal n
-
-            | t, JsonValue.Number n when t = typeof<DateTimeOffset> -> n |> int64 |> DateTimeOffset.FromUnixTimeMilliseconds |> box
-            | t, JsonValue.Number n when t = typeof<DateTime> -> n |> int64 |> DateTime.FromBinary |> box
-            | t, JsonValue.Number n when t = typeof<DateOnly> -> n |> int |> DateOnly.FromDayNumber |> box
-            | t, JsonValue.Number n when t = typeof<TimeOnly> -> n |> float |> TimeSpan.FromMilliseconds |> TimeOnly.FromTimeSpan |> box
-            | t, JsonValue.Number n when t = typeof<TimeSpan> -> n |> float |> TimeSpan.FromMilliseconds |> box
-
-            | _ -> null
-
-        let deserializeList (targetType: Type) (value: JsonValue) =
-            match value with
-            | JsonValue.List items ->
-                if targetType.IsArray then
-                    let elementType = targetType.GetElementType()
-                    let array = Array.CreateInstance(elementType, items.Count)
-                    for i, v in items |> Seq.indexed do
-                        array.SetValue((JsonValue.Deserialize elementType v), i)
-                    array |> box
-                elif targetType.GetInterface(typedefof<IList<_>>.Name) <> null then
-                    let icollectionType = targetType.GetInterfaces() |> Array.find(fun i -> i.IsGenericType && i.GetGenericTypeDefinition() = typedefof<IList<_>>) 
-                    let elementType = icollectionType.GenericTypeArguments.[0]
-                    let listInstance = Activator.CreateInstance(targetType) :?> IList
-                    for item in items do
-                        listInstance.Add(JsonValue.Deserialize elementType item) |> ignore
-                    listInstance
-                else failwithf "Cannot deserialize a list to type %A" targetType
-            | _ -> failwith "Expected JSON array for collection deserialization."
-
-        let deserializeFSharpList (targetType: Type) (value: JsonValue) =
-            match value with
-            | JsonValue.List items ->
-                match GenericTypeArgCache.Get targetType |> Array.tryHead with
-                | None -> failwithf "Cannot deserialize a F# list from type: %A" targetType
-                | Some elementType ->
-                    items
-                    |> Seq.map (JsonValue.Deserialize elementType)
-                    |> FSharpListDeserialize.MakeFrom elementType
-
-            | _ -> failwith "Expected JSON array for collection deserialization."
-
-        let deserializeTuple (targetType: Type) (value: JsonValue) =
-            match value with
-            | JsonValue.List items ->
-                let elementsTypes = targetType.GetGenericArguments()
-                let values = items |> Seq.zip elementsTypes |> Seq.map (fun (typ, item) -> JsonValue.Deserialize typ item) |> Seq.toArray
-                Dynamic.InvokeConstructor(targetType, values)
-            | _ -> failwith "Expected JSON array for tuple deserialization."
-
-        let deserializeEnum (targetType: Type) (value: JsonValue) =
-            match tryDeserializePrimitive (Enum.GetUnderlyingType(targetType)) value with
-            | null -> failwithf "Could not deserialize enum: \"%A\" of type %A" value targetType
-            | ok ->
-            Enum.ToObject(targetType, ok)
-
-        let deserializeDictionary (targetType: Type) (value: JsonValue) =
-            match value with
-            | JsonValue.Object properties ->
-                let struct (keyType, valueType) =
-                    if targetType.IsGenericType then
-                        struct(targetType.GenericTypeArguments.[0], targetType.GenericTypeArguments.[1])
-                    else
-                        struct(typeof<string>, typeof<obj>)
-
-                let targetType = 
-                    if targetType.IsInterface then
-                        typedefof<Dictionary<_,_>>.MakeGenericType(keyType, valueType)
-                    else
-                        targetType
-
-                let dictInstance = Activator.CreateInstance(targetType) :?> IDictionary
-                for kvp in properties do
-                    let key = Convert.ChangeType(kvp.Key, keyType)
-                    let value = JsonValue.Deserialize valueType kvp.Value
-                    dictInstance.Add(key, value)
-                dictInstance
-            | _ -> failwith "Expected JSON object for dictionary deserialization."
-
-        let deserializeIGrouping (targetType: Type) (jsonObj: JsonValue) =
-            let groupingTypes = GenericTypeArgCache.Get targetType
-            let key: JsonValue = jsonObj.["Key"]
-            let items: JsonValue = jsonObj.["Items"]
-
-            let key: obj = key.ToObject groupingTypes.[0]
-            let items: obj = items.ToObject (groupingTypes.[1].MakeArrayType ())
-
-            let g = Activator.CreateInstance(typedefof<Grouping<_, _>>.MakeGenericType(groupingTypes.[0], groupingTypes.[1]), key, items)
-            g
-
-        let deserializeObject (targetType: Type) (jsonObj: JsonValue) =
-            let ogTargetType = targetType
-            let targetType =
-                // Be careful, a potential attacker can put anything in this field.
-                let unsafeTypeProp = match jsonObj.TryGetProperty "$type" with true, x -> x.ToObject<string>() |> nameToType | false, _ -> null
-                match targetType.IsSealed, unsafeTypeProp with
-                | true, _ -> targetType
-                | _, null -> targetType
-                | false, (jsonType) when targetType.IsAssignableFrom jsonType -> jsonType
-                | _ -> targetType
-
-                
-            match jsonObj with
-            | JsonValue.Object properties when FSharpType.IsUnion targetType ->
-                let cases = FSharpType.GetUnionCases targetType
-                let tag = properties.["Tag"].ToObject<int>()
-                let machingCase = cases |> Array.find(fun c -> c.Tag = tag)
-                let fields = machingCase.GetFields()
-                let fieldsValue = fields |> Array.map(fun f -> 
-                    match properties.TryGetValue f.Name with 
-                    | true, value -> JsonValue.Deserialize f.PropertyType value
-                    | false, _ -> null
-                )
-                let caseInstance = FSharpValue.MakeUnion(machingCase, fieldsValue)
-                    
-                caseInstance
-
-            | JsonValue.Object properties when FSharpType.IsRecord targetType ->
-                let recordFields = FSharpType.GetRecordFields targetType
-                let recordValues = recordFields |> Seq.map(fun field ->
-                    let propName = field.Name
-                    match properties.TryGetValue(propName) with
-                    | true, value ->
-                        let propValue = JsonValue.Deserialize field.PropertyType value
-                        propValue
-                    | false, _ -> null) |> Seq.toArray
-
-                FSharpValue.MakeRecord(targetType, recordValues)
-            // This is for partial support for Newtonsoft's json format.
-            | JsonValue.Object properties when jsonObj.Contains "$type" && jsonObj.Contains "$values" && JsonHelper.isSupportedNewtownsoftArrayType targetType ->
-                match properties.TryGetValue "$values" with
-                | false, _ -> failwithf "It is impossible to execute this code."
-                | true, value ->
-                    
-                deserializeList targetType value
-            | JsonValue.Object properties ->
-                let instance = createInstance targetType
-
-                let propertiesInfo = targetType.GetProperties()
-
-                if (not ogTargetType.IsAbstract) && propertiesInfo |> Seq.sumBy(fun p -> if p.CanWrite then 1 else 0) = 0 then
-                    failwithf "Could not desealize the type %s, it does not have any public writable property." targetType.Name
-
-                for prop in propertiesInfo do
-                    if prop.CanWrite then
-                        let propName = prop.Name
-                        match properties.TryGetValue(propName) with
-                        | true, value ->
-                            let propValue = JsonValue.Deserialize prop.PropertyType value
-                            prop.SetValue(instance, propValue, null)
-                        | false, _ -> ()
-
-                instance
-            | _ -> failwith "Expected JSON object for object deserialization."
-
-        if targetType = typeof<obj> then 
-            JsonValue.DeserializeDynamic json
-        elif targetType = typeof<JsonValue> then
-            json
-        // We cannot reference it forwards, so we do this.
-        elif targetType.FullName = "SoloDatabase.MongoDB.BsonDocument" then
-            Activator.CreateInstance(targetType, json)
-        elif targetType.Name = "Nullable`1" && targetType.GenericTypeArguments.Length = 1 then 
-            let innerValue = JsonValue.Deserialize targetType.GenericTypeArguments.[0] json
-            if isNull innerValue then
-                Activator.CreateInstance(targetType)
-            else 
-                Activator.CreateInstance(targetType, innerValue)
-        elif targetType.IsEnum then
-            deserializeEnum targetType json
-        else
-
-        match json with
-        | JsonValue.Null -> null
-        | json ->
-        match tryDeserializePrimitive targetType json with
-        | null ->
-            match json with
-            | JsonValue.List _ when isTuple targetType ->
-                deserializeTuple targetType json
-            | JsonValue.List _ when isCollectionType targetType ->
-                deserializeList targetType json
-            | JsonValue.List _ when isFSharpList targetType ->
-                deserializeFSharpList targetType json
-            | JsonValue.Object _ when typeof<IDictionary>.IsAssignableFrom targetType || JsonHelper.implementsGeneric typedefof<IDictionary<_,_>> targetType || JsonHelper.implementsGeneric typedefof<IReadOnlyDictionary<_,_>> targetType ->
-                deserializeDictionary targetType json
-            | JsonValue.Object _ when JsonHelper.implementsGeneric typedefof<IGrouping<_, _>> targetType ->
-                deserializeIGrouping targetType json  
-            | JsonValue.Object _ when targetType.IsClass || targetType.IsAbstract || FSharpType.IsUnion targetType->
-                deserializeObject targetType json                    
-            | JsonValue.String s -> failwithf "JSON value cannot be deserialized into type %A, value: {%s}" targetType s
-            | _ -> failwithf "JSON value cannot be deserialized into type %A" targetType
-        | primitive -> primitive
-
     // For C# usage.
     member this.JsonType = 
         match this with 
@@ -627,10 +275,10 @@ type JsonValue =
         | Object _o -> JsonValueType.Object
 
     member this.ToObject (targetType: Type) =
-        JsonValue.Deserialize targetType this
+        JsonImpl.DeserializeByType targetType this
 
     member this.ToObject<'T>() : 'T =
-        JsonValue.Deserialize typeof<'T> this :?> 'T
+        JsonDeserializerImpl<'T>.Deserialize this
 
     member this.SetProperty(name: string, value: JsonValue) =
         match this with
@@ -750,7 +398,7 @@ type JsonValue =
     static member New(values: KeyValuePair<string, obj> seq) = 
         let json = JsonValue.New()
         for KeyValue(key ,v) in values do
-            json.[key] <- JsonValue.Serialize v
+            json.[key] <- JsonSerializerImpl<obj>.Serialize v
         json
         
     static member Parse (jsonString: string) =
@@ -842,13 +490,61 @@ type JsonValue =
                 | :? decimal as i -> i.ToString(CultureInfo.InvariantCulture)
                 | other -> string other
     
-            json.[key] <- JsonValue.Serialize v
+            json.[key] <- JsonSerializerImpl<obj>.Serialize v
         json
 
     override this.ToString() = this.ToJsonString()
 
+    static member op_Implicit<'T>(o: 'T) : JsonValue =
+        JsonSerializerImpl<'T>.Serialize o
+
     static member op_Implicit(o: obj) : JsonValue =
-        JsonValue.Serialize o
+        JsonValue.op_Implicit<obj> o
+
+    static member op_Implicit(o: int8) : JsonValue =
+        JsonValue.op_Implicit<int8> o
+    static member op_Implicit(o: int16) : JsonValue =
+        JsonValue.op_Implicit<int16> o
+    static member op_Implicit(o: int32) : JsonValue =
+        JsonValue.op_Implicit<int32> o
+    static member op_Implicit(o: int64) : JsonValue =
+        JsonValue.op_Implicit<int64> o
+    static member op_Implicit(o: uint8) : JsonValue =
+        JsonValue.op_Implicit<uint8> o
+    static member op_Implicit(o: uint16) : JsonValue =
+        JsonValue.op_Implicit<uint16> o
+    static member op_Implicit(o: uint32) : JsonValue =
+        JsonValue.op_Implicit<uint32> o
+    static member op_Implicit(o: uint64) : JsonValue =
+        JsonValue.op_Implicit<uint64> o
+    static member op_Implicit(o: float32) : JsonValue =
+        JsonValue.op_Implicit<float32> o
+    static member op_Implicit(o: float) : JsonValue =
+        JsonValue.op_Implicit<float> o
+    static member op_Implicit(o: decimal) : JsonValue =
+        JsonValue.op_Implicit<decimal> o
+    static member op_Implicit(o: bool) : JsonValue =
+        JsonValue.op_Implicit<bool> o
+    static member op_Implicit(o: char) : JsonValue =
+        JsonValue.op_Implicit<char> o
+    static member op_Implicit(o: string) : JsonValue =
+        JsonValue.op_Implicit<string> o
+    static member op_Implicit(o: byte array) : JsonValue =
+        JsonValue.op_Implicit<byte array> o
+    static member op_Implicit(o: Guid) : JsonValue =
+        JsonValue.op_Implicit<Guid> o
+    static member op_Implicit(o: DateTime) : JsonValue =
+        JsonValue.op_Implicit<DateTime> o
+    static member op_Implicit(o: DateTimeOffset) : JsonValue =
+        JsonValue.op_Implicit<DateTimeOffset> o
+    static member op_Implicit(o: TimeSpan) : JsonValue =
+        JsonValue.op_Implicit<TimeSpan> o
+    static member op_Implicit(o: DateOnly) : JsonValue =
+        JsonValue.op_Implicit<DateOnly> o
+    static member op_Implicit(o: TimeOnly) : JsonValue =
+        JsonValue.op_Implicit<TimeOnly> o
+    static member op_Implicit(o: byte seq) : JsonValue =
+        JsonValue.op_Implicit<byte seq> o
 
     interface IDynamicMetaObjectProvider with
         member this.GetMetaObject(expression: Linq.Expressions.Expression): DynamicMetaObject = 
@@ -864,22 +560,98 @@ type JsonValue =
         override this.GetEnumerator (): IEnumerator = 
             (this :> IEnumerable<KeyValuePair<string, JsonValue>>).GetEnumerator () :> IEnumerator
 
-and JsonSerializerImpl<'A when 'A :> obj> =
-    static member private SerializeFunc(a: 'A) : JsonValue =
-        JsonSerializerImpl<'A>.Serialize a
+and private ConvertStringTo<'T> =
+    static member val internal Convert =
+        match typeof<'T> with
+        | OfType string -> 
+            (id: string -> string) :> obj :?> (string -> 'T)
 
-    static member private FSharpString<'T>(a: 'T) : string = string a
+        | OfType int8 -> (fun (x: string) -> int8 x) :> obj :?> (string -> 'T)
+        | OfType int16 -> (fun (x: string) -> int16 x) :> obj :?> (string -> 'T)
+        | OfType int32 -> (fun (x: string) -> int32 x) :> obj :?> (string -> 'T)
+        | OfType int64 -> (fun (x: string) -> int64 x) :> obj :?> (string -> 'T)
 
-    static member private CreateJsonObj(d: IDictionary<string, JsonValue>) =
+        | OfType uint8 -> (fun (x: string) -> uint8 x) :> obj :?> (string -> 'T)
+        | OfType uint16 -> (fun (x: string) -> uint16 x) :> obj :?> (string -> 'T)
+        | OfType uint32 -> (fun (x: string) -> uint32 x) :> obj :?> (string -> 'T)
+        | OfType uint64 -> (fun (x: string) -> uint64 x) :> obj :?> (string -> 'T)
+
+        | OfType float32 -> (fun (x: string) -> float32 x) :> obj :?> (string -> 'T)
+        | OfType float -> (fun (x: string) -> float x) :> obj :?> (string -> 'T)
+        | OfType decimal -> (fun (x: string) -> decimal x) :> obj :?> (string -> 'T)
+
+        | other -> failwithf "Cannot convert string to %s" other.FullName
+
+and private JsonImpl =
+    static member internal CreateJsonObj(d: IDictionary<string, JsonValue>) =
         JsonValue.Object d
 
-    static member private IEnumerableSerialize<'T>(o: 'T seq) =
+    static member internal AsListOrFail(json: JsonValue) =
+        match json with
+        | List l -> l
+        | other -> failwithf "Expected json object to be a list, instead it is a %A" other
+
+    static member internal AsDictOrFail(json: JsonValue) =
+        match json with
+        | Object d -> d
+        | other -> failwithf "Expected json object to be a object/dictionary, instead it is a %A" other
+
+    static member inline internal TryGetTypeFromJson<'A> (jsonObj: JsonValue) =
+        let targetType = typeof<'A>
+        // Be careful, a potential attacker can put anything in this field.
+        let unsafeTypeProp = match jsonObj.TryGetProperty "$type" with true, x -> x.ToObject<string>() |> nameToType | false, _ -> null
+        match struct (targetType.IsSealed, unsafeTypeProp) with
+        | struct (true, _) -> targetType
+        | struct (_, null) -> targetType
+        | struct (false, (jsonType)) when targetType.IsAssignableFrom jsonType -> jsonType
+        | _ -> targetType
+
+    
+    static member internal IEnumerableSerialize<'T>(o: 'T seq) =
         let items = System.Collections.Generic.List<JsonValue>()
         for item in o do
             items.Add(JsonSerializerImpl<'T>.Serialize item)
         List items
 
-    static member private SerializeDictionary<'key, 'value> (dictionary: obj) =
+    // For the direct interface of a type with a IEnumerable contructor
+    static member internal IEnumerableDeserialize<'T>(jsonArray: JsonValue) =
+        match jsonArray with
+        | List items ->
+            let result = new System.Collections.Generic.List<'T>(items.Count)
+            for item in items do
+                result.Add(JsonDeserializerImpl<'T>.Deserialize item)
+            result :> IEnumerable<'T>
+        | other ->
+            failwithf "Expected JsonValue.List but got %A" other
+
+    static member internal IListDeserialize<'T, 'L when 'L :> IList<'T>>(result: 'L) (jsonArray: JsonValue) =
+        match jsonArray with
+        | List items ->
+            for item in items do
+                result.Add(JsonDeserializerImpl<'T>.Deserialize item)
+            result
+        | other ->
+            failwithf "Expected JsonValue.List but got %A" other
+
+    static member internal FSharpListDeserialize<'T>(jsonArray: JsonValue) =
+        match jsonArray with
+        | List items ->
+            [
+                for item in items do
+                    JsonDeserializerImpl<'T>.Deserialize item
+            ]
+        | other ->
+            failwithf "Expected JsonValue.List but got %A" other
+
+    static member internal ArrayDeserialize<'T>(jsonArray: JsonValue) =
+        match jsonArray with
+        | List items ->
+            let arr = Array.init items.Count (fun i -> JsonDeserializerImpl<'T>.Deserialize items.[i])
+            arr
+        | other ->
+            failwithf "Expected JsonValue.List but got %A" other
+    
+    static member internal SerializeDictionary<'key, 'value> (dictionary: obj) =
         let entries = 
             match dictionary with
             | :? IReadOnlyDictionary<'key, 'value> as dictionary ->
@@ -898,10 +670,932 @@ and JsonSerializerImpl<'A when 'A :> obj> =
                 entries
             | other ->
                 failwithf "Type %s does not implement IDictionary<,> or IReadOnlyDictionary<,>" (other.GetType().Name)
-           
+               
         Object entries
 
-    static member val Serialize: 'A -> JsonValue = 
+    static member internal DictionaryDeserialize<'TKey, 'TValue when 'TKey : equality>(jsonObj: JsonValue) =
+        match jsonObj with
+        | Object properties ->
+            let result = new Dictionary<'TKey, 'TValue>(properties.Count)
+            for KeyValue(key, value) in properties do
+                let typedKey = ConvertStringTo<'TKey>.Convert key
+                let typedValue = JsonDeserializerImpl<'TValue>.Deserialize value
+                result.Add(typedKey, typedValue)
+            result :> IDictionary<'TKey, 'TValue>
+        | other ->
+            failwithf "Expected JsonValue.Object but got %A" other
+
+
+    static member internal IReadOnlyDictionaryDeserialize<'TKey, 'TValue when 'TKey : equality>(jsonObj: JsonValue) =
+        match jsonObj with
+        | Object properties ->
+            let dict = new Dictionary<'TKey, 'TValue>(properties.Count)
+            for KeyValue(key, value) in properties do
+                let typedKey = ConvertStringTo<'TKey>.Convert key
+
+                let typedValue = JsonDeserializerImpl<'TValue>.Deserialize value
+                dict.Add(typedKey, typedValue)
+            dict :> IReadOnlyDictionary<'TKey, 'TValue>
+        | other ->
+            failwithf "Expected JsonValue.Object but got %A" other
+
+    static member internal NonGenericDictionaryDeserialize(jsonObj: JsonValue) =
+        match jsonObj with
+        | Object properties ->
+            let result = new Hashtable(properties.Count)
+            for KeyValue(key, value) in properties do
+                let typedValue = JsonDeserializerImpl<obj>.Deserialize value
+                result.Add(key, typedValue)
+            result :> IDictionary
+        | other ->
+            failwithf "Expected JsonValue.Object but got %A" other
+
+    static member internal CustomDictionaryDeserialize<'TKey, 'TValue, 'TDict when 'TDict :> IDictionary<'TKey, 'TValue>> (result: 'TDict) (jsonObj: JsonValue) =
+        match jsonObj with
+        | Object properties ->
+            for KeyValue(key, value) in properties do
+                let typedKey = ConvertStringTo<'TKey>.Convert key
+                let typedValue = JsonDeserializerImpl<'TValue>.Deserialize value
+                result.Add(KeyValuePair<'TKey, 'TValue>(typedKey, typedValue))
+            result
+        | other ->
+            failwithf "Expected JsonValue.Object but got %A" other
+
+    static member internal CustomNonGenericDictionaryDeserialize<'TDict when 'TDict :> IDictionary> (result: 'TDict) (jsonObj: JsonValue) =
+        match jsonObj with
+        | Object properties ->
+            for KeyValue(key, value) in properties do
+                let typedValue = JsonDeserializerImpl<obj>.Deserialize value
+                result.Add(key, typedValue)
+            result
+        | other ->
+            failwithf "Expected JsonValue.Object but got %A" other
+
+    static member internal DeserializeByType =
+        let cache = ConcurrentDictionary<Type, Func<JsonValue, obj>>()
+        fun (t: Type) (v: JsonValue) ->
+            let fn = cache.GetOrAdd(t, Func<Type, Func<JsonValue, obj>>(fun t ->
+                let p = Expression.Parameter typeof<JsonValue>
+                    
+                let meth = 
+                    typedefof<JsonDeserializerImpl<_>>
+                        .MakeGenericType(t)
+                        .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+                    
+                let fn = 
+                    Expression.Lambda<Func<JsonValue, obj>>(
+                        Expression.Convert(Expression.Call(meth, p), typeof<obj>),
+                        [|p|]
+                    ).Compile(false)
+
+                fn
+                ))
+            
+            fn.Invoke v
+
+    static member private IsAllDigits(x: ReadOnlySpan<char>) =
+        if x.Length = 0 then
+            true
+        else
+
+        if not (Char.IsDigit x.[0]) then
+            false
+        else
+            JsonImpl.IsAllDigits (x.Slice 1)
+
+    static member internal IsParsableToNumber(x: ReadOnlySpan<char>) =
+        if x.Length = 0 then
+            false
+        else
+
+        if x.Length = 1 && not (Char.IsDigit x.[0]) then
+            false
+        else
+
+        if not (Char.IsDigit x.[0] || x.[0] = '+' || x.[0] = '-') then
+            false
+        else
+
+        JsonImpl.IsAllDigits (x.Slice 1)
+
+and private JsonDeserializerImpl<'A> =
+    static member internal DeserializeFunc(v: JsonValue) =
+        JsonDeserializerImpl<'A>.Deserialize v
+
+    static member val internal Deserialize: JsonValue -> 'A =
+        let inline asNumberOrParseToNumber (x: JsonValue) (cast: decimal -> 'T) (parse: string -> 'T) : 'T =
+            match x with
+            | Number i -> cast i
+            | String s -> parse s
+            | other -> failwithf "Cannot convert %A into %s" other typeof<'T>.FullName
+
+        match typeof<'A> with
+        | t when t = typeof<obj> ->
+            (fun (json: JsonValue) -> failwith "todo: Deserilize into dynamic obj" : obj) :> obj :?> (JsonValue -> 'A)
+
+        | OfType char ->
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json char char) :> obj :?> (JsonValue -> 'A)
+
+        | OfType int8 ->
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json int8 int8) :> obj :?> (JsonValue -> 'A)
+
+        | OfType int16 ->
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json int16 int16) :> obj :?> (JsonValue -> 'A)
+
+        | OfType int32 ->
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json int32 int32) :> obj :?> (JsonValue -> 'A)
+
+        | OfType int64 ->
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json int64 int64) :> obj :?> (JsonValue -> 'A)
+
+        | OfType uint8 ->
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json uint8 uint8) :> obj :?> (JsonValue -> 'A)
+
+        | OfType uint16 ->
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json uint16 uint16) :> obj :?> (JsonValue -> 'A)
+
+        | OfType uint32 ->
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json uint32 uint32) :> obj :?> (JsonValue -> 'A)
+
+        | OfType uint64 ->
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json uint64 uint64) :> obj :?> (JsonValue -> 'A)
+
+        | OfType decimal ->
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json decimal decimal) :> obj :?> (JsonValue -> 'A)
+
+        | OfType float32 ->
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json float32 float32) :> obj :?> (JsonValue -> 'A)
+
+        | OfType float ->
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json float float) :> obj :?> (JsonValue -> 'A)
+
+        | OfType decimal ->
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json id decimal) :> obj :?> (JsonValue -> 'A)
+
+        | OfType bool ->
+            (fun (json: JsonValue) -> 
+                match json with
+                | JsonValue.Boolean b -> b
+                | JsonValue.Number n -> (if n = Decimal.Zero then false else true)
+                | JsonValue.String s -> s = "true" || (JsonImpl.IsParsableToNumber (s.AsSpan()) && int64 s <> 0)
+                | JsonValue.Null -> false
+                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                
+            ) :> obj :?> (JsonValue -> 'A)
+
+        | OfType (id : byte array -> byte array) ->
+            (fun (json: JsonValue) -> 
+                match json with
+                | JsonValue.String s -> JsonHelper.JSONStringToByteArray s
+                | JsonValue.Null -> null
+                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                
+            ) :> obj :?> (JsonValue -> 'A)
+
+        | OfType (id : byte seq -> byte seq) ->
+            (fun (json: JsonValue) -> 
+                match json with
+                | JsonValue.String s -> JsonHelper.JSONStringToByteArray s :> byte seq
+                | JsonValue.Null -> null
+                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                
+            ) :> obj :?> (JsonValue -> 'A)
+
+        | OfType string ->
+            (fun (json: JsonValue) -> 
+                match json with
+                | JsonValue.String s -> s
+                | JsonValue.Number i -> string i
+                | JsonValue.Null -> null
+                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                
+            ) :> obj :?> (JsonValue -> 'A)
+
+        | OfType (id: Type -> Type) ->
+            (fun (json: JsonValue) -> 
+                match json with
+                | JsonValue.String s -> nameToType s
+                | JsonValue.Null -> null
+                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                
+            ) :> obj :?> (JsonValue -> 'A)
+
+        | OfType (id: Guid -> Guid) ->
+            (fun (json: JsonValue) -> 
+                match json with
+                | JsonValue.String s -> Guid.Parse s
+                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                
+            ) :> obj :?> (JsonValue -> 'A)
+
+        | OfType (id: DateTimeOffset -> DateTimeOffset) ->
+            (fun (json: JsonValue) -> 
+                match json with
+                | JsonValue.String s -> DateTimeOffset.Parse(s, CultureInfo.InvariantCulture)
+                | JsonValue.Number n -> n |> int64 |> DateTimeOffset.FromUnixTimeMilliseconds
+                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+            ) :> obj :?> (JsonValue -> 'A)
+    
+        | OfType (id: DateTime -> DateTime) ->
+            (fun (json: JsonValue) -> 
+                match json with
+                | JsonValue.String s -> DateTime.Parse(s, CultureInfo.InvariantCulture)
+                | JsonValue.Number n -> n |> int64 |> DateTime.FromBinary
+                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+            ) :> obj :?> (JsonValue -> 'A)
+    
+        | OfType (id: DateOnly -> DateOnly) ->
+            (fun (json: JsonValue) -> 
+                match json with
+                | JsonValue.String s -> DateOnly.Parse(s, CultureInfo.InvariantCulture)
+                | JsonValue.Number n -> n |> int |> DateOnly.FromDayNumber
+                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+            ) :> obj :?> (JsonValue -> 'A)
+    
+        | OfType (id: TimeOnly -> TimeOnly) ->
+            (fun (json: JsonValue) -> 
+                match json with
+                | JsonValue.String s -> TimeOnly.Parse(s, CultureInfo.InvariantCulture)
+                | JsonValue.Number n -> n |> float |> TimeSpan.FromMilliseconds |> TimeOnly.FromTimeSpan
+                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+            ) :> obj :?> (JsonValue -> 'A)
+    
+        | OfType (id: TimeSpan -> TimeSpan) ->
+            (fun (json: JsonValue) -> 
+                match json with
+                | JsonValue.String s -> TimeSpan.Parse(s, CultureInfo.InvariantCulture)
+                | JsonValue.Number n -> n |> float |> TimeSpan.FromMilliseconds
+                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+            ) :> obj :?> (JsonValue -> 'A)
+
+        | OfType (id: JsonValue -> JsonValue) ->
+            (fun (json: JsonValue) -> json) :> obj :?> (JsonValue -> 'A)
+
+        | t when t.FullName = "SoloDatabase.MongoDB.BsonDocument" ->
+            let p = Expression.Parameter typeof<JsonValue>
+                        
+            let fn = 
+                Expression.Lambda<Func<JsonValue, 'A>>(
+                    Expression.New(t.GetConstructor([|typeof<JsonValue>|]), [|p :> Expression|]),
+                    [|p|]
+                )
+
+            let fn = fn.Compile(false)
+
+            (fun (json: JsonValue) -> fn.Invoke json) :> obj :?> (JsonValue -> 'A)
+
+        | t when t.Name = "Nullable`1" ->
+            let genericType = GenericTypeArgCache.Get t |> Array.head
+
+            let nullValue = Activator.CreateInstance(t)
+
+            let p = Expression.Parameter typeof<JsonValue>
+            
+            let meth = typedefof<JsonDeserializerImpl<_>>
+                        .MakeGenericType(genericType)
+                        .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+
+            let notNullFn = 
+                Expression.Lambda<Func<JsonValue, 'A>>(
+                    Expression.New(t.GetConstructor([|genericType|]), [|Expression.Call(meth, [|p :> Expression|]) :> Expression|]),
+                    [|p|]
+                ).Compile(false)
+
+
+            (fun (json: JsonValue) -> 
+                match json with
+                | Null -> nullValue
+                | other -> notNullFn.Invoke other
+            ) :> obj :?> (JsonValue -> 'A)
+
+        | t when t.IsEnum ->
+            let underlyingType = Enum.GetUnderlyingType(t)
+            let p = Expression.Parameter(typeof<JsonValue>)
+            
+            let meth = 
+                typedefof<JsonDeserializerImpl<_>>
+                    .MakeGenericType(underlyingType)
+                    .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+            
+            let convertExpr = Expression.Call(meth, p)
+            let enumConvertExpr = Expression.Convert(convertExpr, t)
+            
+            let fn = 
+                Expression.Lambda<Func<JsonValue, 'A>>(
+                    enumConvertExpr,
+                    [|p|]
+                )
+
+            let fn = fn.Compile(false)
+
+            fn.Invoke
+
+        | t when isTuple t ->
+            let isValueTuple = typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "ValueTuple`"
+            let tupleItemTypes = GenericTypeArgCache.Get t
+            let jsonParam = Expression.Parameter(typeof<JsonValue>)
+            
+            // Create expressions for each item in the tuple
+            let itemExpressions = 
+                tupleItemTypes 
+                |> Array.mapi (fun i itemType ->
+                    let itemJsonExpr = Expression.Call(
+                        jsonParam,
+                        typeof<JsonValue>.GetMethod("get_Item", [| typeof<string> |]),
+                        [| Expression.Constant(string i) :> Expression |]
+                    )
+                    
+                    let deserializeMethod = 
+                        typedefof<JsonDeserializerImpl<_>>
+                            .MakeGenericType(itemType)
+                            .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+                    
+                    Expression.Call(deserializeMethod, itemJsonExpr)
+                )
+                |> Array.map(fun e -> e :> Expression)
+            
+            // Create tuple constructor or value tuple
+            let tupleCreateExpr =
+                if isValueTuple then
+                    // For ValueTuple, create a new struct with field initializers
+                    let ctor = t.GetConstructor(tupleItemTypes)
+                    Expression.New(ctor, itemExpressions) :> Expression
+                else
+                    // For reference Tuple, use the static Tuple.Create method
+                    let tupleCreateMethod = 
+                        match tupleItemTypes.Length with
+                        | n when n >= 1 && n <= 8 ->
+                            typeof<Tuple>.GetMethods()
+                            |> Array.find (fun m -> 
+                                m.Name = "Create" && 
+                                (GenericMethodArgCache.Get m).Length = tupleItemTypes.Length)
+                            |> fun m -> m.MakeGenericMethod(tupleItemTypes)
+                        | _ -> 
+                            // Handle TupleRest for tuples with more than 8 items
+                            failwith "Tuples with more than 8 items not implemented"
+                    
+                    Expression.Call(tupleCreateMethod, itemExpressions)
+            
+            // Compile the lambda
+            let fn = 
+                Expression.Lambda<Func<JsonValue, 'A>>(
+                    Expression.Convert(tupleCreateExpr, typeof<'A>),
+                    [| jsonParam |]
+                )
+
+            let fn = fn.Compile(false)
+            
+            fn.Invoke
+        
+        // Generic IDictionary<K,V> interface or abstract type - use Dictionary<K,V>
+        | t when (JsonHelper.implementsGeneric typedefof<IDictionary<_,_>> t) && (t.IsInterface || t.IsAbstract) ->
+            let iface = t.GetInterface("IDictionary`2") |> Option.ofObj |> Option.defaultValue t
+            let keyType, valueType = 
+                let args = GenericTypeArgCache.Get iface
+                args.[0], args.[1]
+                
+            let jsonParam = Expression.Parameter(typeof<JsonValue>)
+            
+            let meth = typeof<JsonImpl>
+                        .GetMethod(nameof JsonImpl.DictionaryDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                        .MakeGenericMethod([|keyType; valueType|])
+                        
+            let callExpr = Expression.Call(meth, [|jsonParam :> Expression|])
+            
+            let lambda = Expression.Lambda<Func<JsonValue, 'A>>(
+                Expression.Convert(callExpr, t),
+                [|jsonParam|]
+            )
+            
+            let fn = lambda.Compile(false)
+            fn.Invoke
+
+        // IReadOnlyDictionary<K,V> implementation
+        | t when JsonHelper.implementsGeneric typedefof<IReadOnlyDictionary<_,_>> t && not (JsonHelper.implementsGeneric typedefof<IDictionary<_,_>> t) ->
+            let iface = t.GetInterface("IReadOnlyDictionary`2") |> Option.ofObj |> Option.defaultValue t
+            let keyType, valueType = 
+                let args = GenericTypeArgCache.Get iface
+                args.[0], args.[1]
+                
+            let jsonParam = Expression.Parameter(typeof<JsonValue>)
+            
+            let meth = typeof<JsonImpl>
+                        .GetMethod(nameof JsonImpl.IReadOnlyDictionaryDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                        .MakeGenericMethod([|keyType; valueType|])
+                        
+            let callExpr = Expression.Call(meth, [|jsonParam :> Expression|])
+            
+            let lambda = Expression.Lambda<Func<JsonValue, 'A>>(
+                Expression.Convert(callExpr, t),
+                [|jsonParam|]
+            )
+            
+            let fn = lambda.Compile(false)
+            fn.Invoke
+        
+        // Concrete implementation of IDictionary<K,V> - use custom deserializer
+        | t when JsonHelper.implementsGeneric typedefof<IDictionary<_,_>> t ->
+            let iface = t.GetInterface("IDictionary`2") |> Option.ofObj |> Option.defaultValue t
+            let keyType, valueType = 
+                let args = GenericTypeArgCache.Get iface
+                args.[0], args.[1]
+                
+            let jsonParam = Expression.Parameter(typeof<JsonValue>)
+            
+            // Concrete dictionary type with parameterless constructor
+            let ctorInfo = t.GetConstructor([||])
+            if ctorInfo = null then
+                failwithf "Type %s must have a parameterless constructor" t.Name
+                
+            let meth = typeof<JsonImpl>
+                        .GetMethod(nameof JsonImpl.CustomDictionaryDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                        .MakeGenericMethod([|keyType; valueType; t|])
+                        
+            let instanceExpr = Expression.New(ctorInfo)
+            let callExpr = Expression.Call(meth, [|instanceExpr :> Expression; jsonParam|])
+            
+            let lambda = Expression.Lambda<Func<JsonValue, 'A>>(
+                callExpr,
+                [|jsonParam|]
+            )
+            
+            let fn = lambda.Compile(false)
+            fn.Invoke
+
+        // Non-generic IDictionary without generic parameters
+        | t when typeof<IDictionary>.IsAssignableFrom(t) ->
+            let jsonParam = Expression.Parameter(typeof<JsonValue>)
+            
+            if t.IsInterface || t.IsAbstract then
+                // Use the standard non-generic deserializer for interfaces
+                let meth = typeof<JsonImpl>.GetMethod(nameof JsonImpl.NonGenericDictionaryDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                let callExpr = Expression.Call(meth, [|jsonParam :> Expression|])
+                
+                let lambda = Expression.Lambda<Func<JsonValue, 'A>>(
+                    Expression.Convert(callExpr, t),
+                    [|jsonParam|]
+                )
+                
+                let fn = lambda.Compile(false)
+                fn.Invoke
+            else
+                // Concrete non-generic dictionary type with parameterless constructor
+                let ctorInfo = t.GetConstructor([||])
+                if ctorInfo = null then
+                    failwithf "Type %s must have a parameterless constructor" t.Name
+                    
+                let meth = typeof<JsonImpl>.GetMethod(nameof JsonImpl.CustomNonGenericDictionaryDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                            .MakeGenericMethod([|t|])
+                            
+                let instanceExpr = Expression.New(ctorInfo)
+                let callExpr = Expression.Call(meth, [|instanceExpr :> Expression; jsonParam|])
+                
+                let lambda = Expression.Lambda<Func<JsonValue, 'A>>(
+                    Expression.Convert(callExpr, t),
+                    [|jsonParam|]
+                )
+                
+                let fn = lambda.Compile(false)
+                fn.Invoke
+
+        // IGrouping<K,E> implementation
+        | t when JsonHelper.implementsGeneric typedefof<IGrouping<_,_>> t ->
+            let iface = t.GetInterface("IGrouping`2") |> Option.ofObj |> Option.defaultValue t
+            let keyType, elemType = 
+                let args = GenericTypeArgCache.Get iface
+                args.[0], args.[1]
+            
+            let jsonParam = Expression.Parameter(typeof<JsonValue>)
+            
+            // Extract the Key property
+            let keyJsonExpr = Expression.Call(
+                jsonParam,
+                typeof<JsonValue>.GetMethod("get_Item", [| typeof<string> |]),
+                [| Expression.Constant("Key") :> Expression |]
+            )
+            
+            // Deserialize the key using appropriate deserializer
+            let keyDeserializerMethod = 
+                typedefof<JsonDeserializerImpl<_>>
+                    .MakeGenericType(keyType)
+                    .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+            
+            let keyExpr = Expression.Call(keyDeserializerMethod, keyJsonExpr)
+            
+            // Extract the Items property
+            let itemsJsonExpr = Expression.Call(
+                jsonParam,
+                typeof<JsonValue>.GetMethod("get_Item", [| typeof<string> |]),
+                [| Expression.Constant("Items") :> Expression |]
+            )
+            
+            // Create a temporary list to hold items
+            let listType = typedefof<System.Collections.Generic.List<_>>.MakeGenericType(elemType)
+            let listVar = Expression.Variable(listType, "itemsList")
+            
+
+            let toListMeth = typeof<JsonImpl>.GetMethod(nameof JsonImpl.AsListOrFail, BindingFlags.NonPublic ||| BindingFlags.Static)
+            // Get the JsonValue.List property and items.Count
+            let listItemsExpr = Expression.Call(toListMeth, [|itemsJsonExpr :> Expression|])
+            let listItemsVar = Expression.Variable(listItemsExpr.Type, "listItemsVar")
+            let countExpr = Expression.Property(listItemsVar, typeof<ICollection<JsonValue>>.GetProperty("Count"))
+            
+            // Create a new list with capacity
+            let listCtor = listType.GetConstructor([| typeof<int> |])
+            let newListExpr = Expression.New(listCtor, [| countExpr :> Expression |])
+            let assignListExpr = Expression.Assign(listVar, newListExpr)
+            
+            // Create loop through items
+            let indexVar = Expression.Variable(typeof<int>, "i")
+            let initIndexExpr = Expression.Assign(indexVar, Expression.Constant(0))
+            
+            let loopLabel = Expression.Label("LoopItems")
+            let breakLabel = Expression.Label("BreakLoop")
+            
+            // Loop condition: i < items.Count
+            let loopCondition = Expression.LessThan(indexVar, countExpr)
+            let breakExpr = Expression.IfThen(
+                Expression.Not(loopCondition),
+                Expression.Break(breakLabel)
+            )
+            
+            // Get current item: items[i]
+            let getItemExpr = Expression.Property(
+                listItemsVar,
+                listItemsVar.Type.GetProperty("Item"),
+                [| indexVar :> Expression |]
+            )
+            
+            // Deserialize item
+            let elemDeserializerMethod = 
+                typedefof<JsonDeserializerImpl<_>>
+                    .MakeGenericType(elemType)
+                    .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+            
+            let deserializedItemExpr = Expression.Call(elemDeserializerMethod, getItemExpr)
+            
+            // Add item to list
+            let addMethod = listType.GetMethod("Add", [| elemType |])
+            let addItemExpr = Expression.Call(listVar, addMethod, [| deserializedItemExpr :> Expression |])
+            
+            // Increment index
+            let incrementExpr = Expression.AddAssign(indexVar, Expression.Constant(1))
+            
+            // Loop body
+            let loopBodyExpr = Expression.Block(
+                Expression.Label(loopLabel),
+                breakExpr,
+                addItemExpr,
+                incrementExpr,
+                Expression.Goto(loopLabel)
+            )
+            
+            // Convert list to array
+            let toArrayMethod = listType.GetMethod("ToArray")
+            let itemsArrayExpr = Expression.Call(listVar, toArrayMethod)
+            
+            // Create new Grouping instance
+            let groupingType = typedefof<Grouping<_,_>>.MakeGenericType([| keyType; elemType |])
+            let ctor = groupingType.GetConstructor([| keyType; elemType.MakeArrayType() |])
+            let newGroupingExpr = Expression.New(ctor, [| keyExpr :> Expression; itemsArrayExpr |])
+            
+            // Create block containing all expressions
+            let blockExpr = Expression.Block(
+                [| listVar; indexVar; listItemsVar |],
+                Expression.Assign(listItemsVar, listItemsExpr),
+                assignListExpr,
+                initIndexExpr,
+                loopBodyExpr,
+                Expression.Label(breakLabel),
+                Expression.Convert(newGroupingExpr, typeof<'A>)
+            )
+            
+            // Compile to lambda
+            let lambda = Expression.Lambda<Func<JsonValue, 'A>>(
+                blockExpr,
+                [| jsonParam |]
+            )
+            
+            let fn = lambda.Compile(false)
+            fn.Invoke
+
+
+        | t when JsonHelper.implementsGeneric typedefof<IEnumerable<_>> t && t <> typeof<string> ->
+
+            let standardStyleJsonFn =
+                let elemType = GenericTypeArgCache.Get (t.GetInterface("IEnumerable`1") |> Option.ofObj |> Option.defaultValue t) |> Array.head
+                let jsonParam = Expression.Parameter(typeof<JsonValue>)
+            
+                // Choose appropriate method based on type
+                let (methodName, instanceExpr) = 
+                    if t.IsArray then
+                        // For arrays use ArrayDeserialize
+                        (nameof JsonImpl.ArrayDeserialize, null)
+                    // Check for F# list type
+                    elif t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<list<_>> then
+                        // For F# lists
+                        (nameof JsonImpl.FSharpListDeserialize, null)
+                    elif typeof<IList>.IsAssignableFrom(t) && t.IsGenericType && (GenericTypeArgCache.Get t).Length = 1 then
+                        // For IList types that need an instance (like List<T>)
+                        if t.GetConstructor([||]) <> null then
+                            // If type has parameterless constructor, create instance for IListDeserialize
+                            let instance = Expression.New(t)
+                            (nameof JsonImpl.IListDeserialize, instance)
+                        else
+                            // If no parameterless constructor, fall back to IEnumerableDeserialize
+                            (nameof JsonImpl.IEnumerableDeserialize, null)
+                    else
+                        // For other IEnumerable types
+                        (nameof JsonImpl.IEnumerableDeserialize, null)
+            
+                let meth = 
+                    if methodName = nameof JsonImpl.IListDeserialize then
+                        typeof<JsonImpl>
+                            .GetMethod(methodName, BindingFlags.NonPublic ||| BindingFlags.Static)
+                            .MakeGenericMethod([|elemType; t|])
+                    else
+                        typeof<JsonImpl>
+                            .GetMethod(methodName, BindingFlags.NonPublic ||| BindingFlags.Static)
+                            .MakeGenericMethod(elemType)
+            
+                let callExpr = 
+                    if instanceExpr <> null then
+                        // For IListDeserialize which takes an instance parameter
+                        Expression.Call(meth, [|instanceExpr :> Expression; jsonParam|])
+                    else
+                        // For methods that don't need an instance
+                        Expression.Call(meth, [|jsonParam :> Expression|])
+            
+                let lambda = Expression.Lambda<Func<JsonValue, 'A>>(
+                    Expression.Convert(callExpr, t),
+                    [|jsonParam|]
+                )
+            
+                let fn = lambda.Compile(false)
+                fn.Invoke
+
+            let newtownsoftArrayFn =
+                if not (JsonHelper.isSupportedNewtownsoftArrayType t) then
+                    fun (_j) -> failwithf "Type not supported for Newtownsoft deserialization: %s" t.FullName
+                else
+                    fun (j: JsonValue) -> JsonDeserializerImpl<'A>.Deserialize j.["$values"]
+
+            (fun (json: JsonValue) ->
+                match json with
+                | List _l -> standardStyleJsonFn json
+                | Object _o when json.Contains "$type" && json.Contains "$values" -> newtownsoftArrayFn json
+                | other -> failwithf "Expected JsonValue.List or Object{$type, $values} for array deserialization but got %A" other
+            )
+
+        | t when FSharpType.IsUnion t ->
+            let unionCases = FSharpType.GetUnionCases t
+            let constructorMethods = 
+                t.GetMethods(BindingFlags.Public ||| BindingFlags.Static) 
+                |> Array.choose(
+                    fun m -> 
+                        match m.GetCustomAttributes<CompilationMappingAttribute>() |> Seq.tryFind(fun a -> a.SourceConstructFlags &&& SourceConstructFlags.UnionCase <> enum 0) with
+                        | Some x -> Some (m, x.SequenceNumber)
+                        | None -> None)
+
+            let jsonParam = Expression.Parameter typeof<JsonValue>
+            let getItem = typeof<JsonValue>.GetMethod("get_Item", [| typeof<string> |])
+            let contains = typeof<JsonValue>.GetMethod("Contains", [| typeof<string> |])
+            let toObject = typeof<JsonValue>.GetMethod("ToObject", [||])
+
+            let deserializeForCase (case: UnionCaseInfo) =
+                let m, _tag = constructorMethods |> Array.find(fun (m, tag) -> tag = case.Tag)
+                
+                let parameters =
+                    case.GetFields()
+                    |> Array.map(fun p -> 
+                        let pName = [|Expression.Constant(p.Name) :> Expression|]
+                        Expression.Condition(
+                            Expression.Call(jsonParam, contains, pName), 
+                            Expression.Call(
+                                Expression.Call(jsonParam, getItem, pName),
+                                toObject.MakeGenericMethod(p.PropertyType)
+                                ),
+
+                            if p.PropertyType.IsValueType then
+                                Expression.Default(p.PropertyType) :> Expression
+                            else
+                                Expression.Constant(null, p.PropertyType) :> Expression
+                            )
+                        )
+
+                        
+                    |> Array.map(fun x -> x :> Expression)
+
+                Expression.Call(m, parameters)
+
+
+            let switch = 
+                Expression.Switch(
+                    Expression.Call(
+                        Expression.Call(
+                            jsonParam, 
+                            getItem,
+                            [| Expression.Constant("Tag") :> Expression |]),
+                        toObject.MakeGenericMethod(typeof<int>)
+                    ),
+                    Expression.Throw(Expression.Constant(sprintf "Invalid Tag for type: %s" t.FullName |> exn), t),
+                    [|
+                        for case in unionCases do
+                            Expression.SwitchCase(
+                                (deserializeForCase case),
+                                [|Expression.Constant(case.Tag) :> Expression|]
+                            )
+                   
+                    |]
+                )
+
+
+            let lambda = Expression.Lambda<Func<JsonValue, 'A>>(
+                    switch,
+                    [|jsonParam|]
+                )
+
+            let fn = lambda.Compile(false)
+
+            fn.Invoke
+
+        // F# Record Types or has a contructor with all the properties types in order.
+        | t when FSharpType.IsRecord t || (let propertiesType = t.GetProperties() |> Array.map(_.PropertyType) in t.GetConstructors() |> Array.exists(fun c -> c.GetParameters() |> Array.map(_.ParameterType) = propertiesType)) ->
+            let jsonParam = Expression.Parameter(typeof<JsonValue>)
+            
+            let isFSharpRecord = FSharpType.IsRecord t
+
+            // Prepare variables
+            let objVar = Expression.Variable(typeof<JsonValue>)
+            let propsVar = Expression.Variable(typeof<IDictionary<string, JsonValue>>)
+            
+            // Get record constructor - F# records have a single constructor with all fields
+            let recordFields = 
+                if isFSharpRecord then
+                    FSharpType.GetRecordFields t
+                else 
+                    t.GetProperties()
+
+            let recordFieldsType = recordFields |> Array.map(_.PropertyType)
+            let ctor = t.GetConstructors() |> Array.find(fun c -> c.GetParameters() |> Array.map(_.ParameterType) = recordFieldsType)
+            
+
+            // Create parameter expressions for constructor
+            let parameterExprs = recordFields |> Array.map (fun param ->
+                let propNameExpr = Expression.Constant(param.Name)
+                
+                // Check if property exists
+                let hasPropertyExpr = Expression.Call(
+                    propsVar,
+                    typeof<IDictionary<string, JsonValue>>.GetMethod("ContainsKey"),
+                    [|propNameExpr :> Expression|]
+                )
+                
+                // Get property value and deserialize
+                let deserializeMethod = typedefof<JsonDeserializerImpl<_>>
+                                            .MakeGenericType(param.PropertyType)
+                                            .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, 
+                                                      BindingFlags.NonPublic ||| BindingFlags.Static)
+                
+                let getValueAndDeserialize = Expression.Call(
+                    deserializeMethod,
+                    [|Expression.Call(
+                        propsVar,
+                        typeof<IDictionary<string, JsonValue>>.GetMethod("get_Item"),
+                        [|propNameExpr :> Expression|]
+                    ) :> Expression|]
+                )
+                
+                // Default value if property not found
+                let defaultValue = 
+                    if param.PropertyType.IsValueType then
+                        Expression.Default(param.PropertyType) :> Expression
+                    else
+                        Expression.Constant(null, param.PropertyType) :> Expression
+                
+                // Return value from condition
+                Expression.Condition(
+                    hasPropertyExpr,
+                    getValueAndDeserialize,
+                    defaultValue
+                ) :> Expression
+            )
+            
+            let toObjMeth = typeof<JsonImpl>.GetMethod(nameof JsonImpl.AsDictOrFail, BindingFlags.NonPublic ||| BindingFlags.Static)
+
+            // Build the complete expression
+            let body = Expression.Block(
+                [|objVar; propsVar|],
+                [|                    
+                    // Get properties dictionary
+                    Expression.Assign(objVar, jsonParam) :> Expression;
+                    Expression.Assign(
+                        propsVar,
+                        Expression.Call(toObjMeth, objVar)
+                    ) :> Expression;
+                    
+                    // Create record by calling constructor with all parameters
+                    Expression.New(ctor, parameterExprs) :> Expression
+                |]
+            )
+            
+            let lambda = Expression.Lambda<Func<JsonValue, 'A>>(
+                Expression.Convert(body, typeof<'A>),
+                [|jsonParam|]
+            )
+            
+            let fn = lambda.Compile(false)
+            fn.Invoke
+
+        | t ->
+            let propertiesInfo = t.GetProperties()
+            if (not t.IsAbstract) && propertiesInfo |> Seq.sumBy(fun p -> if p.CanWrite then 1 else 0) = 0 then
+                failwithf "Could not deserialize the type %s, it does not have any public writable property." t.Name
+
+            let jsonDictParam = Expression.Parameter(typeof<IDictionary<string, JsonValue>>)
+            let outVar = Expression.Variable(t)
+            
+            let outVarInitilization =
+                let constr = t.GetConstructors() |> Seq.tryFind(fun c -> c.GetParameters().Length = 0 && (c.IsPublic || c.IsPrivate))
+                match constr with
+                | Some constr ->
+                    Expression.New(constr, [||]) :> Expression
+                | None -> 
+                    let fn = Func<'A> (fun () -> System.Runtime.Serialization.FormatterServices.GetSafeUninitializedObject t :?> 'A)
+                    Expression.Call(Expression.Constant(fn), typeof<Func<'A>>.GetMethod("Invoke"), [||])
+
+            
+
+            let lambda = Expression.Lambda<Func<IDictionary<string, JsonValue>, 'A>>(
+                Expression.Block(
+                [|outVar|],
+                [|
+                    Expression.Assign(outVar, outVarInitilization) :> Expression;
+
+                    for prop in propertiesInfo do
+                        if prop.CanWrite then
+                            let variableValue = Expression.Variable typeof<JsonValue>
+                            Expression.Block([|variableValue|],
+                                [|Expression.IfThen(
+                                    Expression.Call(
+                                        jsonDictParam,
+                                        typeof<IDictionary<string, JsonValue>>.GetMethod("TryGetValue"),
+                                        Expression.Constant(prop.Name),
+                                        variableValue
+                                    ),
+                                    
+                                    Expression.Assign(
+                                        Expression.Property(outVar, prop), 
+                                        
+                                        Expression.Call(
+                                            typedefof<JsonDeserializerImpl<_>>
+                                                .MakeGenericType(prop.PropertyType)
+                                                .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static),
+                                            variableValue))
+                                    
+                                    ) :> Expression
+                               |])
+                            ()
+
+
+                    outVar;
+                |]),
+                [|jsonDictParam|]
+            )
+            
+            let fn = lambda.Compile(false)
+            
+
+            // No need to check the $type
+            if t.IsSealed then
+                (fun (json: JsonValue) ->
+                    let dict = JsonImpl.AsDictOrFail json
+                    fn.Invoke dict)
+
+            else
+                (fun (json: JsonValue) ->
+                    let extractedType = JsonImpl.TryGetTypeFromJson<'A> json
+
+                    if extractedType <> t then
+                        // Extract differently
+                        JsonImpl.DeserializeByType extractedType json :?> 'A
+                    else
+                        let dict = JsonImpl.AsDictOrFail json
+                        fn.Invoke dict)
+
+and private JsonSerializerImpl<'A> =
+    static member private SerializeFunc(a: 'A) : JsonValue =
+        JsonSerializerImpl<'A>.Serialize a
+
+    static member internal SerializeWithType (value: 'A) : JsonValue =
+        let json = JsonSerializerImpl<'A>.Serialize value
+        match json, value.GetType() |> typeToName with
+        | Object _, Some t -> json["$type"] <- String t
+        | _other, Some _t -> () // Ignore
+        | _other, None -> () // Also ignore
+        json
+
+    static member val internal Serialize: 'A -> JsonValue = 
         match typeof<'A> with
         | t when t = typeof<obj> -> 
             let cache = ConcurrentDictionary<Type, obj -> JsonValue>()
@@ -933,7 +1627,11 @@ and JsonSerializerImpl<'A when 'A :> obj> =
             (fun (o: bool) -> Boolean o)
             :> obj :?> ('A -> JsonValue)
 
-         | OfType uint8 -> 
+        | OfType char -> 
+            (fun (o: char) -> Number (decimal o))
+            :> obj :?> ('A -> JsonValue)
+
+        | OfType uint8 -> 
             (fun (o: uint8) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
             
@@ -1011,13 +1709,25 @@ and JsonSerializerImpl<'A when 'A :> obj> =
             :> obj :?> ('A -> JsonValue)
 
         | OfType (id: byte seq -> byte seq) ->
-            (fun (bs: byte seq) ->
-                let arr = Seq.toArray bs
-                JsonSerializerImpl<byte array>.Serialize arr
-                )
-            :> obj :?> ('A -> JsonValue)
+            let fn = 
+                Func<byte seq, JsonValue>(
+                    (fun (bs: byte seq) ->
+                        let arr = Seq.toArray bs
+                        JsonSerializerImpl<byte array>.Serialize arr
+                        )
+                    )
 
-         | t when t.IsEnum ->
+            let p = Expression.Parameter(typeof<'A>)
+            let l = Expression.Lambda<Func<'A, JsonValue>>(
+                        Expression.Call(Expression.Constant(fn), typeof<Func<byte seq, JsonValue>>.GetMethod(nameof fn.Invoke), [|Expression.Convert(p, typeof<byte seq>) :> Expression|]),
+                        [|p|]
+                        )
+
+            let fn = l.Compile(false)
+
+            fn.Invoke
+
+        | t when t.IsEnum ->
             let underlyingType = Enum.GetUnderlyingType(t)
             let p = Expression.Parameter t
             
@@ -1061,8 +1771,8 @@ and JsonSerializerImpl<'A when 'A :> obj> =
 
             let param = Expression.Parameter(t)
 
-            let serializeMeth = typeof<JsonSerializerImpl<obj>>
-                                 .GetMethod(nameof JsonSerializerImpl<_>.SerializeDictionary, BindingFlags.NonPublic ||| BindingFlags.Static)
+            let serializeMeth = typeof<JsonImpl>
+                                 .GetMethod(nameof JsonImpl.SerializeDictionary, BindingFlags.NonPublic ||| BindingFlags.Static)
                                  .MakeGenericMethod(genericArgs)
 
 
@@ -1090,8 +1800,8 @@ and JsonSerializerImpl<'A when 'A :> obj> =
         | t when JsonHelper.implementsGeneric typedefof<IEnumerable<_>> t && t <> typeof<string> ->
             let elemType = GenericTypeArgCache.Get (t.GetInterface("IEnumerable`1")) |> Array.head
 
-            let meth = typeof<JsonSerializerImpl<obj>>
-                        .GetMethod((nameof JsonSerializerImpl<_>.IEnumerableSerialize), BindingFlags.NonPublic ||| BindingFlags.Static)
+            let meth = typeof<JsonImpl>
+                        .GetMethod((nameof JsonImpl.IEnumerableSerialize), BindingFlags.NonPublic ||| BindingFlags.Static)
                         .MakeGenericMethod(elemType)
 
             let param = Expression.Parameter(t)
@@ -1121,8 +1831,8 @@ and JsonSerializerImpl<'A when 'A :> obj> =
             let param = Expression.Parameter(t)
             let outDict = Expression.Variable(typeof<Dictionary<string, JsonValue>>)
 
-            let createJsonMeth = typeof<JsonSerializerImpl<obj>>
-                                    .GetMethod((nameof JsonSerializerImpl<_>.CreateJsonObj), BindingFlags.NonPublic ||| BindingFlags.Static)
+            let createJsonMeth = typeof<JsonImpl>
+                                    .GetMethod((nameof JsonImpl.CreateJsonObj), BindingFlags.NonPublic ||| BindingFlags.Static)
 
             let returnLabel = Expression.Label(typeof<JsonValue>, "Return")
 
@@ -1164,11 +1874,11 @@ and JsonSerializerImpl<'A when 'A :> obj> =
 and internal JsonValueMetaObject(expression: Expression, restrictions: BindingRestrictions, value: JsonValue) =
     inherit DynamicMetaObject(expression, restrictions, value)
     
-    static member private GetPropertyMethod = typeof<JsonValue>.GetMethod("GetPropertyForBinder", BindingFlags.NonPublic ||| BindingFlags.Instance)
-    static member private SetPropertyMethod = typeof<JsonValue>.GetMethod("set_Item")
-    static member private ToObjectMethod = typeof<JsonValue>.GetMethod("ToObject")
-    static member private ToStringMethod = typeof<obj>.GetMethod("ToString")
-    static member private SerializeMethod = typeof<JsonValue>.GetMethod("Serialize")
+    static member val private GetPropertyMethod = typeof<JsonValue>.GetMethod("GetPropertyForBinder", BindingFlags.NonPublic ||| BindingFlags.Instance)
+    static member val private SetPropertyMethod = typeof<JsonValue>.GetMethod("set_Item")
+    static member val private ToObjectMethod = typeof<JsonValue>.GetMethod("ToObject`1")
+    static member val private ToStringMethod = typeof<obj>.GetMethod("ToString")
+    static member val private SerializeMethod = typeof<JsonValue>.GetMethod("Serialize")
 
     override this.BindGetMember(binder: GetMemberBinder) : DynamicMetaObject =
         let resultExpression = Expression.Call(Expression.Convert(this.Expression, typeof<JsonValue>), JsonValueMetaObject.GetPropertyMethod, Expression.Constant(binder.Name))

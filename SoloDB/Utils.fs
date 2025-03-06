@@ -76,7 +76,7 @@ module Utils =
         ExceptionDispatchInfo.Capture(e).Throw()
         Unchecked.defaultof<'a>
 
-    let private emptyObjContructor = ConcurrentDictionary<Type, unit -> obj>()
+(*    let private emptyObjContructor = ConcurrentDictionary<Type, unit -> obj>()
 
     let internal initEmpty t =
         emptyObjContructor.GetOrAdd(t, Func<Type, unit -> obj>(fun t -> 
@@ -84,10 +84,10 @@ module Utils =
             match constr with
             | Some constr -> fun () -> constr.Invoke Array.empty
             | None -> fun () -> System.Runtime.Serialization.FormatterServices.GetSafeUninitializedObject t
-        ))()
+        ))()*)
 
     let internal isTuple (t: Type) =
-        typeof<Tuple>.IsAssignableFrom t || typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "Tuple`"
+        typeof<Tuple>.IsAssignableFrom t || typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "Tuple`" || t.Name.StartsWith "ValueTuple`"
 
     type System.Char with
         static member IsAsciiLetterOrDigit this =
