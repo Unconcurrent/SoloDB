@@ -149,10 +149,10 @@ type BsonDocument (json: JsonValue) =
 and internal BsonDocumentMetaObject(expression: Expression, restrictions: BindingRestrictions, value: BsonDocument) =
     inherit DynamicMetaObject(expression, restrictions, value)
 
-    static member private GetPropertyMethod = typeof<BsonDocument>.GetMethod("GetPropertyForBinder", BindingFlags.NonPublic ||| BindingFlags.Instance)
-    static member private SetPropertyMethod = typeof<BsonDocument>.GetMethod("set_Item")
-    static member private ToJsonMethod = typeof<BsonDocument>.GetMethod("ToJsonString")
-    static member private ToStringMethod = typeof<obj>.GetMethod("ToString")
+    static member val private GetPropertyMethod = typeof<BsonDocument>.GetMethod("GetPropertyForBinder", BindingFlags.NonPublic ||| BindingFlags.Instance)
+    static member val private SetPropertyMethod = typeof<BsonDocument>.GetMethod("set_Item")
+    static member val private ToJsonMethod = typeof<BsonDocument>.GetMethod("ToJsonString")
+    static member val private ToStringMethod = typeof<obj>.GetMethod("ToString")
 
     override this.BindGetMember(binder: GetMemberBinder) : DynamicMetaObject =
         let resultExpression = Expression.Call(

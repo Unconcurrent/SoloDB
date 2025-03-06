@@ -83,15 +83,15 @@ module JsonFunctions =
         mustIncludeTypeInformationInSerializationFn typeof<'T>
 
     let toJson<'T> o = 
-        let element = JsonValue.Serialize o
+        let element = JsonValue.Serialize<'T>  o
         element.ToJsonString()
 
     let toTypedJson<'T> o = 
-        let element = JsonValue.SerializeWithType o
+        let element = JsonValue.SerializeWithType<'T> o
         element.ToJsonString()
 
-    let toSQLJson<'T> (item: obj) = 
-        match item with
+    let toSQLJson<'T> (item: 'T) = 
+        match box item with
         | :? string as s -> s :> obj, false
         | :? char as c -> string c :> obj, false
 

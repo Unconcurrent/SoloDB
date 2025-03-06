@@ -127,12 +127,12 @@ module SQLiteTools =
                 let props = targetType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
 
                 // If the type is a F# record/union/etc then to use the more complete Json Serializer.
-                let jsonMode = props |> Seq.sumBy(fun p -> if p.CanWrite then 1 else 0) = 0
+                let jsonMode = true // props |> Seq.sumBy(fun p -> if p.CanWrite then 1 else 0) = 0
 
                 let instance: obj = 
                     if jsonMode 
                     then JsonSerializator.JsonValue.New()
-                    else Utils.initEmpty targetType
+                    else null // Utils.initEmpty targetType
 
                 for prop in props do
                     if prop.CanWrite || jsonMode then
