@@ -15,7 +15,6 @@ open Microsoft.FSharp.Reflection
 open System.Web
 open System.Linq.Expressions
 open System.Linq
-open SoloDatabase
 
 module private JsonHelper =
     let internal isSupportedNewtownsoftArrayType (t: Type) =
@@ -60,123 +59,6 @@ type internal Token =
     | BooleanToken of bool
     | EndOfInput
 
-    static member internal Parse (input: string) : Token seq =
-        let isDigit c = Char.IsDigit c || c = '-'
-        let isInitialIdentifierChar c = Char.IsLetter c || c = '_'
-        let isIdentifierChar c = isInitialIdentifierChar c || Char.IsDigit c
-
-        seq {
-            let mutable index = 0
-
-            while index < input.Length do
-                let currentChar = input.[index]
-                match currentChar with
-                | '{' -> 
-                    OpenBrace
-                    index <- index + 1
-                | '}' -> 
-                    CloseBrace
-                    index <- index + 1
-                | '[' -> 
-                    index <- index + 1
-                    OpenBracket
-                | ']' -> 
-                    index <- index + 1
-                    CloseBracket
-                | ',' -> 
-                    index <- index + 1
-                    Comma
-                | ':' -> 
-                    index <- index + 1
-                    Colon
-                | '"' | '\'' as quote ->
-                    let sb = System.Text.StringBuilder()
-                    let mutable i = index + 1
-                    while i < input.Length && input.[i] <> quote do
-                        if input.[i] = '\\' then
-                            i <- i + 1
-                            match input.[i] with
-                            | '\\' -> sb.Append('\\') |> ignore
-                            | '\"' -> sb.Append('"') |> ignore
-                            | '\'' -> sb.Append('\'') |> ignore
-                            | '/'  -> sb.Append('/') |> ignore
-                            | 'b'  -> sb.Append('\b') |> ignore
-                            | 'f'  -> sb.Append('\f') |> ignore
-                            | 'n'  -> sb.Append('\n') |> ignore
-                            | 'r'  -> sb.Append('\r') |> ignore
-                            | 't'  -> sb.Append('\t') |> ignore
-                            | 'u'  ->
-                                // Parse the first Unicode escape sequence
-                                if i + 4 < input.Length then
-                                    let unicodeSeq1 = input.Substring(i + 1, 4)
-                                    let unicodeVal1 = Convert.ToInt32(unicodeSeq1, 16)
-                                    let mutable unicodeChar = char unicodeVal1
-                                    i <- i + 4
-                
-                                    // Handle surrogate pairs if necessary
-                                    if Char.IsHighSurrogate(unicodeChar) then
-                                        if i + 6 < input.Length && input.[i + 1] = '\\' && input.[i + 2] = 'u' then
-                                            let unicodeSeq2 = input.Substring(i + 3, 4)
-                                            let unicodeVal2 = Convert.ToInt32(unicodeSeq2, 16)
-                                            let lowSurrogate = char unicodeVal2
-                                            if Char.IsLowSurrogate(lowSurrogate) then
-                                                let fullCodePoint = Char.ConvertToUtf32(unicodeChar, lowSurrogate)
-                                                let fullUnicodeChar = Char.ConvertFromUtf32(fullCodePoint)
-                                                sb.Append(fullUnicodeChar) |> ignore
-                                                i <- i + 6 // Move past the low surrogate and escape sequence
-                                            else
-                                                failwith "Invalid low surrogate"
-                                        else
-                                            failwith "Expected low surrogate after high surrogate"
-                                    else
-                                        sb.Append(unicodeChar) |> ignore
-                                else
-                                    failwith "Invalid Unicode escape sequence"
-                            | other -> failwithf "Invalid escape sequence: '%c'" other
-                        else
-                            sb.Append(input.[i]) |> ignore
-                        i <- i + 1
-                    if i >= input.Length then failwith "Unterminated string"
-                    index <- i + 1
-                    StringToken(sb.ToString())
-                | c when isDigit c ->
-                    let sb = System.Text.StringBuilder()
-                    let mutable i = index
-                    while i < input.Length && (isDigit input.[i] || input.[i] = '.' || input.[i] = 'e' || input.[i] = 'E' || input.[i] = '+') do
-                        sb.Append(input.[i]) |> ignore
-                        i <- i + 1
-                    index <- i
-                    let s = sb.ToString()
-                    NumberToken (
-                        try Decimal.Parse(s, NumberStyles.Any, CultureInfo.InvariantCulture)
-                        with
-                        | :? OverflowException ->
-                            if s.[0] = '-' then
-                                Decimal.MinValue
-                            else
-                                Decimal.MaxValue
-                    )
-                | c when isInitialIdentifierChar c ->
-                    let sb = System.Text.StringBuilder()
-                    let mutable i = index
-                    while i < input.Length && isIdentifierChar input.[i] do
-                        sb.Append(input.[i]) |> ignore
-                        i <- i + 1
-                    let txt = sb.ToString()
-                    index <- i
-                    match txt with
-                    | "null"
-                    | "NULL" -> NullToken
-                    | "true" -> BooleanToken(true)
-                    | "false" -> BooleanToken(false)
-                    | other -> StringToken other // Non standard, but used.
-                | c when Char.IsWhiteSpace(c) ->
-                    index <- index + 1
-                | _ -> failwith "Invalid JSON format"
-
-            EndOfInput
-        }
-
 type internal Grouping<'key, 'item> (key: 'key, items: 'item array) =
     member this.Key = (this :> IGrouping<'key, 'item>).Key
     member this.Length = items.LongLength
@@ -218,7 +100,203 @@ type JsonValueType =
 | List = 5uy
 | Object = 6uy
 
-type JsonValue =
+
+[<Struct>]
+type internal Tokenizer =
+    val mutable input: string
+    val mutable index: int
+    val private sb: StringBuilder
+
+    new(source: string) = { input = source; index = 0; sb = System.Text.StringBuilder() }
+    
+
+    member this.ReadNext() : Token =
+        let isDigit c = Char.IsDigit c || c = '-'
+        let isInitialIdentifierChar c = Char.IsLetter c || c = '_'
+        let isIdentifierChar c = isInitialIdentifierChar c || Char.IsDigit c
+
+        let input = this.input
+
+        if this.index < input.Length then
+            let currentChar = input.[this.index]
+            match currentChar with
+            | '{' -> 
+                this.index <- this.index + 1
+                OpenBrace
+            | '}' -> 
+                this.index <- this.index + 1
+                CloseBrace
+            | '[' -> 
+                this.index <- this.index + 1
+                OpenBracket
+            | ']' -> 
+                this.index <- this.index + 1
+                CloseBracket
+            | ',' -> 
+                this.index <- this.index + 1
+                Comma
+            | ':' -> 
+                this.index <- this.index + 1
+                Colon
+            | '"' | '\'' as quote ->
+                let sb = this.sb.Clear()
+                let mutable i = this.index + 1
+                while i < input.Length && input.[i] <> quote do
+                    if input.[i] = '\\' then
+                        i <- i + 1
+                        match this.input.[i] with
+                        | '\\' -> sb.Append('\\') |> ignore
+                        | '\"' -> sb.Append('"') |> ignore
+                        | '\'' -> sb.Append('\'') |> ignore
+                        | '/'  -> sb.Append('/') |> ignore
+                        | 'b'  -> sb.Append('\b') |> ignore
+                        | 'f'  -> sb.Append('\f') |> ignore
+                        | 'n'  -> sb.Append('\n') |> ignore
+                        | 'r'  -> sb.Append('\r') |> ignore
+                        | 't'  -> sb.Append('\t') |> ignore
+                        | 'u'  ->
+                            // Parse the first Unicode escape sequence
+                            if i + 4 < input.Length then
+                                let unicodeSeq1 = input.Substring(i + 1, 4)
+                                let unicodeVal1 = Convert.ToInt32(unicodeSeq1, 16)
+                                let mutable unicodeChar = char unicodeVal1
+                                i <- i + 4
+            
+                                // Handle surrogate pairs if necessary
+                                if Char.IsHighSurrogate(unicodeChar) then
+                                    if i + 6 < input.Length && input.[i + 1] = '\\' && input.[i + 2] = 'u' then
+                                        let unicodeSeq2 = input.Substring(i + 3, 4)
+                                        let unicodeVal2 = Convert.ToInt32(unicodeSeq2, 16)
+                                        let lowSurrogate = char unicodeVal2
+                                        if Char.IsLowSurrogate(lowSurrogate) then
+                                            let fullCodePoint = Char.ConvertToUtf32(unicodeChar, lowSurrogate)
+                                            let fullUnicodeChar = Char.ConvertFromUtf32(fullCodePoint)
+                                            sb.Append(fullUnicodeChar) |> ignore
+                                            i <- i + 6 // Move past the low surrogate and escape sequence
+                                        else
+                                            failwith "Invalid low surrogate"
+                                    else
+                                        failwith "Expected low surrogate after high surrogate"
+                                else
+                                    sb.Append(unicodeChar) |> ignore
+                            else
+                                failwith "Invalid Unicode escape sequence"
+                        | other -> failwithf "Invalid escape sequence: '%c'" other
+                    else
+                        sb.Append(input.[i]) |> ignore
+                    i <- i + 1
+                if i >= input.Length then failwith "Unterminated string"
+                this.index <- i + 1
+                StringToken(sb.ToString())
+            | c when isDigit c ->
+                let sb = this.sb.Clear()
+                let mutable i = this.index
+                while i < input.Length && (isDigit input.[i] || input.[i] = '.' || input.[i] = 'e' || input.[i] = 'E' || input.[i] = '+') do
+                    sb.Append(input.[i]) |> ignore
+                    i <- i + 1
+                this.index <- i
+                let s = sb.ToString()
+                NumberToken (
+                    try Decimal.Parse(s, NumberStyles.Any, CultureInfo.InvariantCulture)
+                    with
+                    | :? OverflowException ->
+                        if s.[0] = '-' then
+                            Decimal.MinValue
+                        else
+                            Decimal.MaxValue
+                )
+            | c when isInitialIdentifierChar c ->
+                let sb = this.sb.Clear()
+                let mutable i = this.index
+                while i < input.Length && isIdentifierChar input.[i] do
+                    sb.Append(input.[i]) |> ignore
+                    i <- i + 1
+                let txt = sb.ToString()
+                this.index <- i
+                match txt with
+                | "null"
+                | "NULL" -> NullToken
+                | "true" -> BooleanToken(true)
+                | "false" -> BooleanToken(false)
+                | other -> StringToken other // Non standard, but used.
+            | c when Char.IsWhiteSpace(c) ->
+                this.index <- this.index + 1
+                this.ReadNext()
+            | _ -> failwith "Invalid JSON format"
+        else
+        EndOfInput
+
+    /// Peek at the next token without consuming it
+    member this.Peek() : Token =
+        let savedIndex = this.index
+        try this.ReadNext()
+        finally this.index <- savedIndex
+
+    member inline private this.ParseTokensOr(f) =
+        let current = this.ReadNext()
+        match current with
+        | OpenBrace ->
+            let obj = this.ParseObject()
+            Object obj |> Some
+        | OpenBracket ->
+            let list = this.ParseArray()
+            List list |> Some
+        | StringToken str ->
+            String str |> Some
+        | NumberToken num ->
+            Number num |> Some
+        | BooleanToken b ->
+            JsonValue.Boolean b |> Some
+        | NullToken ->
+            Null |> Some
+        | other -> f other
+    
+    member private this.ParseTokens() =
+        this.ParseTokensOr(fun t -> failwithf "Malformed JSON at: %A" t) |> _.Value
+    
+    member private this.ParseMembers(dict: Dictionary<string, JsonValue>) =
+        let current = this.ReadNext()
+        match current with
+        | CloseBrace -> dict
+        | StringToken key ->
+            let colon = this.ReadNext()
+            if colon <> Colon then failwithf "Malformed json."
+    
+            let value = this.Parse()
+            dict.Add(key, value)
+            this.ParseMembers(dict)
+        | Comma -> this.ParseMembers(dict)
+        | _ -> failwith "Invalid object syntax"
+        
+    member private this.ParseObject() =
+        let dict = Dictionary<string, JsonValue>()
+        this.ParseMembers(dict)
+        
+    member private this.ParseElements(items: List<JsonValue>) =
+        let item = this.ParseTokensOr(fun t -> 
+            match t with 
+            | CloseBracket -> None 
+            | other -> failwithf "Invalid list token: %A" other)
+        
+        match item with
+        | None -> items
+        | Some item ->
+            items.Add(item)
+    
+            let current = this.ReadNext()
+            match current with
+            | CloseBracket -> items
+            | Comma -> this.ParseElements(items)
+            | _ -> failwithf "Malformed json."
+            
+    member private this.ParseArray() =
+        let items = new List<JsonValue>()
+        this.ParseElements(items)
+        
+    member this.Parse() : JsonValue =
+        this.ParseTokens()
+
+and JsonValue =
     | Null
     | Boolean of bool
     | String of string
@@ -231,38 +309,6 @@ type JsonValue =
 
     static member SerializeWithType<'T>(t: 'T) : JsonValue =
         JsonSerializerImpl<'T>.SerializeWithType t
-
-    static member private DeserializeDynamic (json: JsonValue) : obj =
-        let toDecimal (input: string) =
-            match Decimal.TryParse (input, NumberStyles.Float, CultureInfo.InvariantCulture) with
-            | true, dec -> Some dec
-            | _ -> None
-
-        let toInt64 (input: string) =
-            match Int64.TryParse (input, NumberStyles.Integer, CultureInfo.InvariantCulture) with
-            | true, i64 -> Some i64
-            | _ -> None
-
-        let rec deserialize json =
-            match json with
-            | JsonValue.Null -> null
-            | JsonValue.String s -> 
-                match toInt64 s with
-                | Some x -> x |> box
-                | None ->
-                match toDecimal s with
-                | Some x -> x
-                | None -> s
-            | JsonValue.Number n -> if Decimal.IsInteger n && abs n < decimal Int64.MaxValue then (int64 n) else n
-            | JsonValue.Boolean b -> b
-            | JsonValue.List lst ->
-                lst |> Seq.map deserialize |> Generic.List<obj> |> box
-            | JsonValue.Object obj ->
-                let expando = ExpandoObject() :> IDictionary<string, obj>
-                for kvp in obj do
-                    expando.[kvp.Key] <- deserialize kvp.Value
-                expando :> obj
-        deserialize json
 
     // For C# usage.
     member this.JsonType = 
@@ -402,75 +448,9 @@ type JsonValue =
         json
         
     static member Parse (jsonString: string) =
-        let parse (tokens: Token seq) : JsonValue =
-            let next(tokens: IEnumerator<Token>) =
-                RuntimeHelpers.EnsureSufficientExecutionStack()
-                if tokens.MoveNext() then
-                    tokens.Current
-                else EndOfInput
-            
-            let rec parseTokensOr (tokens: IEnumerator<Token>) f =
-                let current = next tokens
-                match current with
-                | OpenBrace ->
-                    let obj = parseObject tokens
-                    Object obj |> Some
-                | OpenBracket ->
-                    let list = parseArray tokens
-                    List list |> Some
-                | StringToken str ->
-                    String str |> Some
-                | NumberToken num ->
-                    Number num |> Some
-                | BooleanToken b ->
-                    JsonValue.Boolean b |> Some
-                | NullToken ->
-                    Null |> Some
-                | other -> f other
-
-            and parseTokens (tokens: IEnumerator<Token>) =
-                parseTokensOr tokens (fun t -> failwithf "Malformed JSON at: %A" t) |> _.Value
-                    
-            and parseObject tokens =
-                let dict = new Dictionary<string, JsonValue>()
-                let rec parseMembers tokens =
-                    let current = next tokens
-                    match current with
-                    | CloseBrace -> dict
-                    | StringToken key ->
-                        let colon = next tokens
-                        if colon <> Colon then failwithf "Malformed json."
-            
-                        let value = parseTokens tokens
-                        dict.Add(key, value)
-                        parseMembers tokens
-                    | Comma -> parseMembers tokens
-                    | _ -> failwith "Invalid object syntax"
-                parseMembers tokens
-                    
-            and parseArray tokens =
-                let items = new List<JsonValue>()
-                let rec parseElements tokens =
-                    let item = parseTokensOr tokens (fun t -> match t with CloseBracket -> None | other -> failwithf "Invalid list token: %A" other)
-                    match item with
-                    | None -> items
-                    | Some item ->
-                    items.Add(item)
-            
-                    let current = next tokens
-                    match current with
-                    | CloseBracket -> items
-                    | Comma -> parseElements tokens
-                    | _ -> failwithf "Malformed json."
-                parseElements tokens
-                    
-            let enumerator = tokens.GetEnumerator()
-            let jsonObj = parseTokens enumerator
-
-            jsonObj
-
-        let tokens = Token.Parse jsonString
-        parse tokens
+        let tokenizer = Tokenizer(jsonString)
+        let json = tokenizer.Parse()
+        json
 
     static member Create (values: #((obj * obj) seq)) = 
         let json = JsonValue.New()
@@ -731,7 +711,7 @@ and private JsonImpl =
         | other ->
             failwithf "Expected JsonValue.Object but got %A" other
 
-    static member internal DeserializeByType =
+    static member val internal DeserializeByType =
         let cache = ConcurrentDictionary<Type, Func<JsonValue, obj>>()
         fun (t: Type) (v: JsonValue) ->
             let fn = cache.GetOrAdd(t, Func<Type, Func<JsonValue, obj>>(fun t ->
@@ -752,6 +732,30 @@ and private JsonImpl =
                 ))
             
             fn.Invoke v
+
+    static member val internal SerializeByType =
+        let cache = ConcurrentDictionary<Type, Func<obj, JsonValue>>()
+        (fun (runtimeType: Type) (o: obj) ->
+            let fn = 
+                cache.GetOrAdd(runtimeType, Func<Type, Func<obj, JsonValue>>(fun (t: Type) ->
+                    let p = Expression.Parameter typeof<obj>
+                    
+                    let meth = 
+                        typedefof<JsonSerializerImpl<_>>
+                            .MakeGenericType(t)
+                            .GetMethod(nameof JsonSerializerImpl<_>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+                    
+                    let fn = 
+                        Expression.Lambda<Func<obj, JsonValue>>(
+                            Expression.Call(meth, Expression.Convert(p, t)),
+                            [|p|]
+                        ).Compile(false)
+
+                    fn
+                ))
+
+            fn.Invoke o
+        )
 
     static member private IsAllDigits(x: ReadOnlySpan<char>) =
         if x.Length = 0 then
@@ -778,12 +782,44 @@ and private JsonImpl =
 
         JsonImpl.IsAllDigits (x.Slice 1)
 
+    static member internal DeserializeDynamic (json: JsonValue) : obj =
+        let toDecimal (input: string) =
+            match Decimal.TryParse (input, NumberStyles.Float, CultureInfo.InvariantCulture) with
+            | true, dec -> Some dec
+            | _ -> None
+
+        let toInt64 (input: string) =
+            match Int64.TryParse (input, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+            | true, i64 -> Some i64
+            | _ -> None
+
+        let rec deserialize json =
+            match json with
+            | JsonValue.Null -> null
+            | JsonValue.String s -> 
+                match toInt64 s with
+                | Some x -> x |> box
+                | None ->
+                match toDecimal s with
+                | Some x -> x
+                | None -> s
+            | JsonValue.Number n -> if Decimal.IsInteger n && abs n < decimal Int64.MaxValue then (int64 n) else n
+            | JsonValue.Boolean b -> b
+            | JsonValue.List lst ->
+                lst |> Seq.map deserialize |> Generic.List<obj> |> box
+            | JsonValue.Object obj ->
+                let expando = ExpandoObject() :> IDictionary<string, obj>
+                for kvp in obj do
+                    expando.[kvp.Key] <- deserialize kvp.Value
+                expando :> obj
+        deserialize json
+
 and private JsonDeserializerImpl<'A> =
     static member internal DeserializeFunc(v: JsonValue) =
         JsonDeserializerImpl<'A>.Deserialize v
 
     static member val internal Deserialize: JsonValue -> 'A =
-        let inline asNumberOrParseToNumber (x: JsonValue) (cast: decimal -> 'T) (parse: string -> 'T) : 'T =
+        let asNumberOrParseToNumber (x: JsonValue) (cast: decimal -> 'T) (parse: string -> 'T) : 'T =
             match x with
             | Number i -> cast i
             | String s -> parse s
@@ -791,7 +827,7 @@ and private JsonDeserializerImpl<'A> =
 
         match typeof<'A> with
         | t when t = typeof<obj> ->
-            (fun (json: JsonValue) -> failwith "todo: Deserilize into dynamic obj" : obj) :> obj :?> (JsonValue -> 'A)
+            (fun (json: JsonValue) -> JsonImpl.DeserializeDynamic json) :> obj :?> (JsonValue -> 'A)
 
         | OfType char ->
             (fun (json: JsonValue) -> asNumberOrParseToNumber json char char) :> obj :?> (JsonValue -> 'A)
@@ -820,14 +856,19 @@ and private JsonDeserializerImpl<'A> =
         | OfType uint64 ->
             (fun (json: JsonValue) -> asNumberOrParseToNumber json uint64 uint64) :> obj :?> (JsonValue -> 'A)
 
-        | OfType decimal ->
-            (fun (json: JsonValue) -> asNumberOrParseToNumber json decimal decimal) :> obj :?> (JsonValue -> 'A)
-
         | OfType float32 ->
-            (fun (json: JsonValue) -> asNumberOrParseToNumber json float32 float32) :> obj :?> (JsonValue -> 'A)
+            (fun (json: JsonValue) -> 
+                match json with
+                | Null -> nanf
+                | json -> asNumberOrParseToNumber json float32 float32
+            ) :> obj :?> (JsonValue -> 'A)
 
         | OfType float ->
-            (fun (json: JsonValue) -> asNumberOrParseToNumber json float float) :> obj :?> (JsonValue -> 'A)
+            (fun (json: JsonValue) -> 
+                match json with
+                | Null -> nan
+                | json -> asNumberOrParseToNumber json float float
+            ) :> obj :?> (JsonValue -> 'A)
 
         | OfType decimal ->
             (fun (json: JsonValue) -> asNumberOrParseToNumber json id decimal) :> obj :?> (JsonValue -> 'A)
@@ -947,7 +988,7 @@ and private JsonDeserializerImpl<'A> =
         | t when t.Name = "Nullable`1" ->
             let genericType = GenericTypeArgCache.Get t |> Array.head
 
-            let nullValue = Activator.CreateInstance(t)
+            let nullValue = Activator.CreateInstance(t) :?> 'A
 
             let p = Expression.Parameter typeof<JsonValue>
             
@@ -965,6 +1006,11 @@ and private JsonDeserializerImpl<'A> =
             (fun (json: JsonValue) -> 
                 match json with
                 | Null -> nullValue
+                | Object _o when json.Contains "HasValue" -> 
+                    if json.["HasValue"].ToObject<bool>() then
+                        notNullFn.Invoke (json.["Value"])
+                    else
+                        nullValue
                 | other -> notNullFn.Invoke other
             ) :> obj :?> (JsonValue -> 'A)
 
@@ -1505,10 +1551,23 @@ and private JsonDeserializerImpl<'A> =
             )
             
             let fn = lambda.Compile(false)
-            fn.Invoke
+            (fun j -> fn.Invoke j)
 
         | t ->
+            if t.IsAbstract then
+                (fun (json: JsonValue) ->
+                    let extractedType = JsonImpl.TryGetTypeFromJson<'A> json
+
+                    if not extractedType.IsAbstract then
+                        // Extract differently
+                        JsonImpl.DeserializeByType extractedType json :?> 'A
+                    else
+                        failwithf "Cannot serialize an abstract Type without the $type property from json.")
+
+            else
+
             let propertiesInfo = t.GetProperties()
+
             if (not t.IsAbstract) && propertiesInfo |> Seq.sumBy(fun p -> if p.CanWrite then 1 else 0) = 0 then
                 failwithf "Could not deserialize the type %s, it does not have any public writable property." t.Name
 
@@ -1584,7 +1643,7 @@ and private JsonDeserializerImpl<'A> =
                         fn.Invoke dict)
 
 and private JsonSerializerImpl<'A> =
-    static member private SerializeFunc(a: 'A) : JsonValue =
+    static member internal SerializeFunc(a: 'A) : JsonValue =
         JsonSerializerImpl<'A>.Serialize a
 
     static member internal SerializeWithType (value: 'A) : JsonValue =
@@ -1598,30 +1657,8 @@ and private JsonSerializerImpl<'A> =
     static member val internal Serialize: 'A -> JsonValue = 
         match typeof<'A> with
         | t when t = typeof<obj> -> 
-            let cache = ConcurrentDictionary<Type, obj -> JsonValue>()
-            (fun (o: obj) -> 
-                let runtimeType = o.GetType()
-                let fn = 
-                    cache.GetOrAdd(runtimeType, Func<Type, obj -> JsonValue>(fun (t: Type) ->
-                        let p = Expression.Parameter typeof<obj>
-                        
-                        let meth = 
-                            typedefof<JsonSerializerImpl<_>>
-                                .MakeGenericType(t)
-                                .GetMethod(nameof JsonSerializerImpl<_>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
-                        
-                        let fn = 
-                            Expression.Lambda<Func<obj, JsonValue>>(
-                                Expression.Call(meth, Expression.Convert(p, t)),
-                                [|p|]
-                            ).Compile(false)
-
-                        fn.Invoke
-                    ))
-
-                fn o
-            )
-            :> obj :?> ('A -> JsonValue)
+            (fun (o: obj) -> JsonImpl.SerializeByType (o.GetType()) o)
+                :> obj :?> 'A -> JsonValue
 
         | OfType bool -> 
             (fun (o: bool) -> Boolean o)
@@ -1748,6 +1785,34 @@ and private JsonSerializerImpl<'A> =
             (fun (v: JsonValue) -> v)
             :> obj :?> ('A -> JsonValue)
 
+        | t when t.Name = "Nullable`1" ->
+            
+            let underlyingType = (GenericTypeArgCache.Get t).[0]
+            let serializerType = typedefof<JsonSerializerImpl<_>>.MakeGenericType(underlyingType)
+            let serializeMethod = serializerType.GetMethod(nameof JsonSerializerImpl<_>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+    
+            let p = Expression.Parameter(t)
+            let hasValueProp = t.GetProperty("HasValue")
+            let valueProp = t.GetProperty("Value")
+    
+            // Create condition: if (p.HasValue) then serialize p.Value else JsonValue.Null
+            let condition = Expression.Property(p, hasValueProp)
+            let valueAccess = Expression.Property(p, valueProp)
+            let serializeCall = Expression.Call(serializeMethod, valueAccess)
+            let nullValue = Expression.Constant(JsonValue.Null)
+    
+            let conditional = Expression.Condition(condition, serializeCall, nullValue, typeof<JsonValue>)
+    
+            let lambda = Expression.Lambda<Func<'A, JsonValue>>(
+                conditional,
+                [|p|]
+            )
+    
+            let fn = lambda.Compile(false)
+            
+
+            (fun (nullable: 'A) -> fn.Invoke nullable)
+
         | t when t.FullName = "SoloDatabase.MongoDB.BsonDocument" ->
             let p = Expression.Parameter(t)
             let jsonProp = t.GetProperty("Json")
@@ -1864,12 +1929,27 @@ and private JsonSerializerImpl<'A> =
 
             let fn = lambda.Compile(false)
 
-
-            (fun (o: 'A) ->
-                if obj.ReferenceEquals(o, null) 
-                then Null
-                else fn.Invoke o)
-            :> obj :?> ('A -> JsonValue)
+            if t.IsSealed then
+                (fun (o: 'A) ->
+                    if obj.ReferenceEquals(o, null) 
+                    then Null
+                    else 
+                        let json = fn.Invoke o
+                        json)
+                :> obj :?> ('A -> JsonValue)
+            else
+                // 'A can be of Class1, and o.GetType() to be of Class2
+                (fun (o: 'A) ->
+                    if obj.ReferenceEquals(o, null) 
+                    then Null
+                    else 
+                        let typeOfO = o.GetType()
+                        if typeOfO <> typeof<'A> then
+                            JsonImpl.SerializeByType typeOfO (box o)
+                        else
+                            let json = fn.Invoke o
+                            json)
+                :> obj :?> ('A -> JsonValue)
 
 and internal JsonValueMetaObject(expression: Expression, restrictions: BindingRestrictions, value: JsonValue) =
     inherit DynamicMetaObject(expression, restrictions, value)
@@ -1878,7 +1958,7 @@ and internal JsonValueMetaObject(expression: Expression, restrictions: BindingRe
     static member val private SetPropertyMethod = typeof<JsonValue>.GetMethod("set_Item")
     static member val private ToObjectMethod = typeof<JsonValue>.GetMethod("ToObject`1")
     static member val private ToStringMethod = typeof<obj>.GetMethod("ToString")
-    static member val private SerializeMethod = typeof<JsonValue>.GetMethod("Serialize")
+    static member val private SerializeMethod = typeof<JsonValue>.GetMethod("Serialize").MakeGenericMethod(typeof<obj>)
 
     override this.BindGetMember(binder: GetMemberBinder) : DynamicMetaObject =
         let resultExpression = Expression.Call(Expression.Convert(this.Expression, typeof<JsonValue>), JsonValueMetaObject.GetPropertyMethod, Expression.Constant(binder.Name))

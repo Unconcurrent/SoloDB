@@ -76,15 +76,6 @@ module Utils =
         ExceptionDispatchInfo.Capture(e).Throw()
         Unchecked.defaultof<'a>
 
-(*    let private emptyObjContructor = ConcurrentDictionary<Type, unit -> obj>()
-
-    let internal initEmpty t =
-        emptyObjContructor.GetOrAdd(t, Func<Type, unit -> obj>(fun t -> 
-            let constr = t.GetConstructors() |> Seq.tryFind(fun c -> c.GetParameters().Length = 0 && (c.IsPublic || c.IsPrivate))
-            match constr with
-            | Some constr -> fun () -> constr.Invoke Array.empty
-            | None -> fun () -> System.Runtime.Serialization.FormatterServices.GetSafeUninitializedObject t
-        ))()*)
 
     let internal isTuple (t: Type) =
         typeof<Tuple>.IsAssignableFrom t || typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "Tuple`" || t.Name.StartsWith "ValueTuple`"

@@ -116,8 +116,8 @@ module JsonFunctions =
             -> element.ToObject(), false
         | other -> other.ToJsonString(), true
 
-    let private fromJson<'T> (text: string) =
-        match JsonValue.Parse text with
+    let internal fromJson<'T> (json: JsonValue) =
+        match json with
         | Null when typeof<float> = typeof<'T> -> 
             nan :> obj :?> 'T
         | Null when typeof<float32> = typeof<'T> -> 
@@ -126,28 +126,9 @@ module JsonFunctions =
             raise (InvalidOperationException "Invalid operation on a value type.") 
         | json -> json.ToObject<'T>()    
 
-    let rec fromJsonOrSQL<'T when 'T :> obj> (data: string) : 'T =
-        if data = null then 
-            Unchecked.defaultof<'T>
-        else
-
-        if typeof<'T> <> typeof<obj> then
-            if typeof<'T> = typeof<string> then
-                data :> obj :?> 'T
-            else if isIntegerBased data then
-                data |> int64 :> obj :?> 'T
-            else if isNumber data then
-                data |> float :> obj :?> 'T
-            else
-                fromJson<'T> data
-        else
-
-        fromJson<'T> data
-
-    let fromIdJson<'T> (idValueJSON: string) =
-        let element = JsonValue.Parse idValueJSON
+    let fromIdJson<'T> (element: JsonValue) =
         let id = element.["Id"].ToObject<int64>()
-        let value = element.GetProperty("Value").ToJsonString() |> fromJsonOrSQL<'T>
+        let value = element.GetProperty("Value") |> fromJson<'T>
 
         id, value
 
@@ -156,16 +137,16 @@ module JsonFunctions =
         | :? DbObjectRow as row ->
             // If the Id is NULL then the ValueJSON is a error message encoded in a JSON string.
             if not row.Id.HasValue then
-                let exc = fromJson<string> row.ValueJSON
+                let exc = toJson<string> row.ValueJSON
                 raise (exn exc)
 
-            let mutable obj = fromJsonOrSQL<'R> (row.ValueJSON)
+            let mutable obj = fromJson<'R> (JsonValue.Parse row.ValueJSON)
             
             // An Id of -1 mean that it is an inserted object inside the IQueryable.
             if row.Id.Value <> -1 && HasTypeId<'R>.Value then
                 HasTypeId<'R>.Write obj row.Id.Value
             obj
         | :? string as input ->
-            fromJsonOrSQL<'R> (input :> obj :?> string)
+            fromJson<'R> (JsonValue.Parse input)
         | null -> Unchecked.defaultof<'R>
         | other -> failwithf "Input is not DbObjectRow or json string."
