@@ -115,6 +115,8 @@ type internal Tokenizer =
         let isInitialIdentifierChar c = Char.IsLetter c || c = '_'
         let isIdentifierChar c = isInitialIdentifierChar c || Char.IsDigit c
 
+        RuntimeHelpers.EnsureSufficientExecutionStack()
+
         let input = this.input
 
         if this.index < input.Length then
@@ -263,7 +265,7 @@ type internal Tokenizer =
             if colon <> Colon then failwithf "Malformed json."
     
             let value = this.Parse()
-            dict.Add(key, value)
+            dict.[key] <- value
             this.ParseMembers(dict)
         | Comma -> this.ParseMembers(dict)
         | _ -> failwith "Invalid object syntax"
@@ -355,7 +357,7 @@ and JsonValue =
                 v <- out
                 false
         | List list -> 
-            let index = Int32.Parse (name, CultureInfo.InvariantCulture)
+            let index = Int32.Parse (name, NumberStyles.Integer, CultureInfo.InvariantCulture)
             v <- list.[index]
             true
         | other -> failwithf "Cannot index %s" (other.ToString())
@@ -819,7 +821,7 @@ and private JsonDeserializerImpl<'A> =
         JsonDeserializerImpl<'A>.Deserialize v
 
     static member val internal Deserialize: JsonValue -> 'A =
-        let asNumberOrParseToNumber (x: JsonValue) (cast: decimal -> 'T) (parse: string -> 'T) : 'T =
+        let inline asNumberOrParseToNumber (x: JsonValue) (cast: decimal -> 'T) (parse: string -> 'T) : 'T =
             match x with
             | Number i -> cast i
             | String s -> parse s
@@ -893,11 +895,28 @@ and private JsonDeserializerImpl<'A> =
                 
             ) :> obj :?> (JsonValue -> 'A)
 
-        | OfType (id : byte seq -> byte seq) ->
+        | OfType (id : List<byte> -> List<byte>) ->
             (fun (json: JsonValue) -> 
                 match json with
-                | JsonValue.String s -> JsonHelper.JSONStringToByteArray s :> byte seq
+                | JsonValue.String s -> ResizeArray<byte>(JsonHelper.JSONStringToByteArray s)
                 | JsonValue.Null -> null
+                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                
+            ) :> obj :?> (JsonValue -> 'A)
+
+        | OfType (id : byte list -> byte list) ->
+            (fun (json: JsonValue) -> 
+                match json with
+                | JsonValue.String s -> JsonHelper.JSONStringToByteArray s |> Array.toList
+                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                
+            ) :> obj :?> (JsonValue -> 'A)
+
+        | t when t = typeof<byte seq> ->
+            (fun (json: JsonValue) -> 
+                match json with
+                | JsonValue.Null -> null
+                | JsonValue.String s -> JsonHelper.JSONStringToByteArray s :> byte seq
                 | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
                 
             ) :> obj :?> (JsonValue -> 'A)
@@ -984,6 +1003,9 @@ and private JsonDeserializerImpl<'A> =
             let fn = fn.Compile(false)
 
             (fun (json: JsonValue) -> fn.Invoke json) :> obj :?> (JsonValue -> 'A)
+
+        | t when t.Name = "FSharpOption`1" ->
+            failwithf "FSharp option is not supported yet, use Nullable<>"
 
         | t when t.Name = "Nullable`1" ->
             let genericType = GenericTypeArgCache.Get t |> Array.head
@@ -1091,7 +1113,11 @@ and private JsonDeserializerImpl<'A> =
 
             let fn = fn.Compile(false)
             
-            fn.Invoke
+            (fun (json: JsonValue) ->
+                match json with
+                | JsonValue.Null -> Unchecked.defaultof<'A>
+                | _ -> fn.Invoke json
+            )
         
         // Generic IDictionary<K,V> interface or abstract type - use Dictionary<K,V>
         | t when (JsonHelper.implementsGeneric typedefof<IDictionary<_,_>> t) && (t.IsInterface || t.IsAbstract) ->
@@ -1114,7 +1140,12 @@ and private JsonDeserializerImpl<'A> =
             )
             
             let fn = lambda.Compile(false)
-            fn.Invoke
+
+            (fun (json: JsonValue) ->
+                match json with
+                | JsonValue.Null -> Unchecked.defaultof<'A>
+                | _ -> fn.Invoke json
+            )
 
         // IReadOnlyDictionary<K,V> implementation
         | t when JsonHelper.implementsGeneric typedefof<IReadOnlyDictionary<_,_>> t && not (JsonHelper.implementsGeneric typedefof<IDictionary<_,_>> t) ->
@@ -1137,7 +1168,12 @@ and private JsonDeserializerImpl<'A> =
             )
             
             let fn = lambda.Compile(false)
-            fn.Invoke
+
+            (fun (json: JsonValue) ->
+                match json with
+                | JsonValue.Null -> Unchecked.defaultof<'A>
+                | _ -> fn.Invoke json
+            )
         
         // Concrete implementation of IDictionary<K,V> - use custom deserializer
         | t when JsonHelper.implementsGeneric typedefof<IDictionary<_,_>> t ->
@@ -1166,7 +1202,12 @@ and private JsonDeserializerImpl<'A> =
             )
             
             let fn = lambda.Compile(false)
-            fn.Invoke
+
+            (fun (json: JsonValue) ->
+                match json with
+                | JsonValue.Null -> Unchecked.defaultof<'A>
+                | _ -> fn.Invoke json
+            )
 
         // Non-generic IDictionary without generic parameters
         | t when typeof<IDictionary>.IsAssignableFrom(t) ->
@@ -1183,7 +1224,11 @@ and private JsonDeserializerImpl<'A> =
                 )
                 
                 let fn = lambda.Compile(false)
-                fn.Invoke
+                (fun (json: JsonValue) ->
+                    match json with
+                    | JsonValue.Null -> Unchecked.defaultof<'A>
+                    | _ -> fn.Invoke json
+                )
             else
                 // Concrete non-generic dictionary type with parameterless constructor
                 let ctorInfo = t.GetConstructor([||])
@@ -1202,7 +1247,11 @@ and private JsonDeserializerImpl<'A> =
                 )
                 
                 let fn = lambda.Compile(false)
-                fn.Invoke
+                (fun (json: JsonValue) ->
+                    match json with
+                    | JsonValue.Null -> Unchecked.defaultof<'A>
+                    | _ -> fn.Invoke json
+                )
 
         // IGrouping<K,E> implementation
         | t when JsonHelper.implementsGeneric typedefof<IGrouping<_,_>> t ->
@@ -1323,7 +1372,11 @@ and private JsonDeserializerImpl<'A> =
             )
             
             let fn = lambda.Compile(false)
-            fn.Invoke
+            (fun (json: JsonValue) ->
+                match json with
+                | JsonValue.Null -> Unchecked.defaultof<'A>
+                | _ -> fn.Invoke json
+            )
 
 
         | t when JsonHelper.implementsGeneric typedefof<IEnumerable<_>> t && t <> typeof<string> ->
@@ -1388,6 +1441,7 @@ and private JsonDeserializerImpl<'A> =
 
             (fun (json: JsonValue) ->
                 match json with
+                | JsonValue.Null -> Unchecked.defaultof<'A>
                 | List _l -> standardStyleJsonFn json
                 | Object _o when json.Contains "$type" && json.Contains "$values" -> newtownsoftArrayFn json
                 | other -> failwithf "Expected JsonValue.List or Object{$type, $values} for array deserialization but got %A" other
@@ -1463,7 +1517,11 @@ and private JsonDeserializerImpl<'A> =
 
             let fn = lambda.Compile(false)
 
-            fn.Invoke
+            (fun (json: JsonValue) ->
+                match json with
+                | JsonValue.Null -> Unchecked.defaultof<'A>
+                | _ -> fn.Invoke json
+            )
 
         // F# Record Types or has a contructor with all the properties types in order.
         | t when FSharpType.IsRecord t || (let propertiesType = t.GetProperties() |> Array.map(_.PropertyType) in t.GetConstructors() |> Array.exists(fun c -> c.GetParameters() |> Array.map(_.ParameterType) = propertiesType)) ->
@@ -1551,7 +1609,11 @@ and private JsonDeserializerImpl<'A> =
             )
             
             let fn = lambda.Compile(false)
-            (fun j -> fn.Invoke j)
+            (fun (json: JsonValue) ->
+                match json with
+                | JsonValue.Null -> Unchecked.defaultof<'A>
+                | _ -> fn.Invoke json
+            )
 
         | t ->
             if t.IsAbstract then
@@ -1624,15 +1686,21 @@ and private JsonDeserializerImpl<'A> =
             
             let fn = lambda.Compile(false)
             
-
             // No need to check the $type
             if t.IsSealed then
                 (fun (json: JsonValue) ->
-                    let dict = JsonImpl.AsDictOrFail json
-                    fn.Invoke dict)
+                    match json with
+                    | JsonValue.Null -> Unchecked.defaultof<'A>
+                    | _ -> 
+                        let dict = JsonImpl.AsDictOrFail json
+                        fn.Invoke dict)
 
             else
                 (fun (json: JsonValue) ->
+                    match json with
+                    | JsonValue.Null -> Unchecked.defaultof<'A>
+                    | _ -> 
+
                     let extractedType = JsonImpl.TryGetTypeFromJson<'A> json
 
                     if extractedType <> t then
@@ -1737,12 +1805,18 @@ and private JsonSerializerImpl<'A> =
             :> obj :?> ('A -> JsonValue)
 
         | OfType string -> 
-            (fun (s: string) -> String s)
+            (fun (s: string) -> 
+                if isNull s
+                then Null
+                else String s)
             :> obj :?> ('A -> JsonValue)
 
         // For efficient storage.
         | OfType (id: byte array -> byte array) ->
-            (fun (ba: byte array) ->  String(JsonHelper.byteArrayToJSONCompatibleString ba))
+            (fun (ba: byte array) ->
+                if isNull ba
+                then Null
+                else String(JsonHelper.byteArrayToJSONCompatibleString ba))
             :> obj :?> ('A -> JsonValue)
 
         | OfType (id: byte seq -> byte seq) ->
@@ -1762,7 +1836,11 @@ and private JsonSerializerImpl<'A> =
 
             let fn = l.Compile(false)
 
-            fn.Invoke
+            (fun (o: 'A) -> 
+                if isNull o
+                then Null
+                else fn.Invoke o
+            )
 
         | t when t.IsEnum ->
             let underlyingType = Enum.GetUnderlyingType(t)
@@ -1782,8 +1860,11 @@ and private JsonSerializerImpl<'A> =
             fn.Invoke
 
         | t when typeof<JsonValue>.IsAssignableFrom(t) ->
-            (fun (v: JsonValue) -> v)
+            (fun (v: 'A) -> v :> obj :?> JsonValue)
             :> obj :?> ('A -> JsonValue)
+
+        | t when t.Name = "FSharpOption`1" ->
+            failwithf "FSharp option is not supported yet, use Nullable<>"
 
         | t when t.Name = "Nullable`1" ->
             
@@ -1821,7 +1902,12 @@ and private JsonSerializerImpl<'A> =
                     Expression.Property(p, jsonProp),
                     [|p|]
                 ).Compile(false)
-            fn.Invoke
+
+            (fun (o: 'A) -> 
+                if isNull o
+                then Null
+                else fn.Invoke o
+            )
 
         | t when JsonHelper.implementsGeneric typedefof<IReadOnlyDictionary<_,_>> t || 
                  JsonHelper.implementsGeneric typedefof<IDictionary<_,_>> t ->
@@ -1848,11 +1934,18 @@ and private JsonSerializerImpl<'A> =
     
             let fn = lambda.Compile(false)
 
-            fn.Invoke :> obj :?> ('A -> JsonValue)
+            (fun (o: 'A) -> 
+                if isNull o
+                then Null
+                else fn.Invoke o
+            )
 
             
         | t when typeof<IDictionary>.IsAssignableFrom(t) ->
             (fun (dict: 'A) ->
+                if isNull dict
+                then Null
+                else
                 let entries = new Dictionary<string, JsonValue>()
                 let dictionary = dict :> obj :?> IDictionary
                 for key in dictionary.Keys do
@@ -1879,11 +1972,16 @@ and private JsonSerializerImpl<'A> =
             let fn = lambda.Compile()
 
             (fun (collection: 'A) ->
-                fn.Invoke collection)
+                if isNull collection
+                then Null
+                else fn.Invoke collection)
             :> obj :?> ('A -> JsonValue)
 
         | t when typeof<IEnumerable>.IsAssignableFrom(t) && t <> typeof<string> ->
             (fun (collection: 'A) ->
+                if isNull collection
+                then Null
+                else
                 let items = System.Collections.Generic.List<JsonValue>()
                 let enumerable = collection :> obj :?> IEnumerable
                 for item in enumerable do

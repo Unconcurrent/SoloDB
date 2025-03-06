@@ -12,6 +12,7 @@ open Utils
 open System.Linq.Expressions
 open Microsoft.FSharp.Reflection
 open System.Runtime.Serialization
+open SoloDatabase.JsonSerializator
 
 module SQLiteTools =
     let private addParameter (command: IDbCommand) (key: string) (value: obj) =
@@ -179,6 +180,21 @@ module SQLiteTools =
                             jsonObj.[key] <- JsonSerializator.JsonValue.Serialize<obj> value
 
                     jsonObj.ToObject<'T>()
+
+            | t when t = typeof<JsonValue> ->
+                fun (reader: IDataReader) (startIndex: int) (columns: IDictionary<string, int>) -> 
+                    if columns.Count = 1 && (columns.Keys |> Seq.head).StartsWith "json_object" then
+                        JsonSerializator.JsonValue.Parse (reader.GetString(0)) :> obj :?> 'T
+                    else
+
+                    let jsonObj = JsonSerializator.JsonValue.Object(Dictionary(columns.Count))
+                    for key in columns.Keys do
+                        if startIndex <= columns.[key] then
+                            let value = reader.GetValue(columns.[key])
+                            jsonObj.[key] <- JsonSerializator.JsonValue.Serialize<obj> value
+
+                    jsonObj :> obj :?> 'T
+
             | t when FSharpType.IsRecord t ->
 
                 // Parameter declarations
