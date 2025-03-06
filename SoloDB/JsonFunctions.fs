@@ -140,7 +140,16 @@ module JsonFunctions =
                 let exc = toJson<string> row.ValueJSON
                 raise (exn exc)
 
-            let mutable obj = fromJson<'R> (JsonValue.Parse row.ValueJSON)
+            if row.ValueJSON = null then
+                Unchecked.defaultof<'R>
+            else
+
+            match JsonValue.Parse row.ValueJSON with
+            | Null when typeof<JsonValue> = typeof<'R> -> 
+                Unchecked.defaultof<'R>
+            | json ->
+
+            let mutable obj = fromJson<'R> json
             
             // An Id of -1 mean that it is an inserted object inside the IQueryable.
             if row.Id.Value <> -1 && HasTypeId<'R>.Value then

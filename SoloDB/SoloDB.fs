@@ -448,7 +448,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
 
     member this.TryGetById(id: int64) =
         use connection = connection.Get()
-        match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
+        match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
         | json when Object.ReferenceEquals(json, null) -> None
         | json -> fromSQLite<'T> json |> Some
 
@@ -460,7 +460,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.Select<'R>(select: Expression<System.Func<'T, 'R>>) =
         let selectSQL, variables = QueryTranslator.translate name select
 
-        WhereBuilder<'T, DbObjectRow, 'R>(connection, name, $"SELECT Id, {selectSQL} as ValueJSON FROM \"{name}\" ", fromSQLite<'R>, variables, id)
+        WhereBuilder<'T, DbObjectRow, 'R>(connection, name, $"SELECT Id, json_quote({selectSQL}) as ValueJSON FROM \"{name}\" ", fromSQLite<'R>, variables, id)
 
     member this.SelectUnique<'R>(select: Expression<System.Func<'T, 'R>>) =
         let selectSQL, variables = QueryTranslator.translate name select
@@ -468,7 +468,7 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         WhereBuilder<'T, 'R, 'R>(connection, name, $"SELECT DISTINCT {selectSQL} FROM \"{name}\" ", fromSQLite<'R>, variables, id)
 
     member this.Select() =
-        WhereBuilder<'T, DbObjectRow, 'T>(connection, name, $"SELECT Id, json(Value) as ValueJSON FROM \"{name}\" ", fromSQLite<'T>, Dictionary<string, obj>(), id)
+        WhereBuilder<'T, DbObjectRow, 'T>(connection, name, $"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" ", fromSQLite<'T>, Dictionary<string, obj>(), id)
 
     member this.SelectWithId() =
         WhereBuilder<'T, JsonValue, (int64 * 'T)>(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>(), id)
