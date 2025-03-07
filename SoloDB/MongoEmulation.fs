@@ -268,10 +268,6 @@ type CollectionExtensions =
     static member UpdateMany<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>, [<ParamArray>] updates: Expression<System.Action<'a>> array) =
         collection.Update(updates).Where(filter).Execute()
 
-    [<Extension>]
-    static member AsQueryable<'a>(collection: SoloDatabase.Collection<'a>) =
-        collection.Select()
-
 module private Helper =
     // Helper to create an expression from a string field name
     let internal getPropertyExpression (fieldPath: string) : Expression<Func<'T, 'TField>> =

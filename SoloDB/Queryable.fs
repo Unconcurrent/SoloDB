@@ -25,6 +25,7 @@ type internal SupportedLinqMethods =
 | LongCount
 | Where
 | Select
+| SelectMany
 | ThenBy
 | ThenByDescending
 | Order
@@ -84,6 +85,7 @@ module private QueryHelper =
         | "LongCount" -> Some LongCount
         | "Where" -> Some Where
         | "Select" -> Some Select
+        | "SelectMany" -> Some SelectMany
         | "ThenBy" -> Some ThenBy
         | "ThenByDescending" -> Some ThenByDescending
         | "OrderBy" -> Some OrderBy
@@ -278,6 +280,69 @@ module private QueryHelper =
                 builder.Append "("
                 translate builder other
                 builder.Append ")"
+
+        | SelectMany ->
+            match expression.Arguments.Count with
+            | 2 ->
+                let generics = GenericMethodArgCache.Get expression.Method
+
+                if generics.[1] (*output*) = typeof<byte> then
+                    raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit SQLite context with .AsEnumerable().")
+
+                // SelectMany with collection selector only
+                let outerVar = Utils.getRandomVarName()
+                let indexVar = Utils.getRandomVarName()
+                let collectionVar = Utils.getRandomVarName()
+                let resultVar = Utils.getRandomVarName()
+                
+                // First, we need to apply the collection selector to each element in the source sequence
+                // and preserve the original order with an index
+                builder.Append "WITH "
+                builder.Append outerVar
+                builder.Append " AS (SELECT Id, Value, ROW_NUMBER() OVER() as "
+                builder.Append indexVar
+                builder.Append " FROM ("
+                translate builder expression.Arguments.[0]
+                builder.Append ")), "
+                
+                // Then extract the collection items using the collection selector
+                builder.Append collectionVar
+                builder.Append " AS (SELECT "
+                builder.Append outerVar
+                builder.Append ".Id as OuterId, "
+                builder.Append outerVar
+                builder.Append "."
+                builder.Append indexVar
+                builder.Append " as RowIndex, "
+                
+                // Apply collection selector to get the collection value for each element
+                QueryTranslator.translateQueryable outerVar expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+                
+                builder.Append " as CollectionValue FROM "
+                builder.Append outerVar
+                builder.Append "), "
+                
+                // Create the flattened result with items from all collections
+                builder.Append resultVar
+                builder.Append " AS (SELECT "
+                builder.Append collectionVar
+                builder.Append ".OuterId as Id, "
+                builder.Append collectionVar
+                builder.Append ".RowIndex as RowIndex, "
+                builder.Append "items.value as Value, "
+                builder.Append "items.key as ItemIndex FROM "
+                builder.Append collectionVar
+                builder.Append ", json_each("
+                builder.Append collectionVar
+                builder.Append ".CollectionValue) items) "
+                
+                // Select the final result, preserving the original order
+                builder.Append "SELECT Id, Value FROM "
+                builder.Append resultVar
+                builder.Append " ORDER BY RowIndex, ItemIndex"
+                
+            | other -> 
+                failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
         | ThenBy | ThenByDescending ->
             translate builder expression.Arguments.[0]
@@ -697,6 +762,7 @@ module private QueryHelper =
             | DistinctBy
             | Where
             | Select
+            | SelectMany
             | ThenBy
             | ThenByDescending
             | OrderBy

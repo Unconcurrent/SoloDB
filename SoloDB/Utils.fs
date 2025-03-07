@@ -222,6 +222,139 @@ module Utils =
 
         sb.ToString()
 
+
+    // State machine states
+    type internal State =
+        | Valid              // Currently valid base64 sequence
+        | Invalid            // Invalid sequence
+        | PaddingOne         // Seen one padding character
+        | PaddingTwo         // Seen two padding characters (max allowed)
+
+    /// <summary>
+    /// Finds the last index of valid base64 content in a string using a state machine approach
+    /// </summary>
+    /// <param name="input">String to check for base64 content</param>
+    /// <returns>Index of the last valid base64 character, or -1 if no valid base64 found</returns>
+    let internal findLastValidBase64Index (input: string) =
+        if System.String.IsNullOrEmpty(input) then
+            -1
+        else
+            // Base64 alphabet check - optimized with lookup array
+            let isBase64Char c =
+                let code = c
+                (code >= 'A' && code <= 'Z') ||
+                (code >= 'a' && code <= 'z') ||
+                (code >= '0' && code <= '9') ||
+                c = '+' || c = '/' || c = '='
+            
+            
+            // Track the last valid position
+            let mutable lastValidPos = -1
+            // Current position in the quadruplet (base64 works in groups of 4)
+            let mutable quadPos = 0
+            // Current state
+            let mutable state = State.Valid
+                
+            for i = 0 to input.Length - 1 do
+                let c = input.[i]
+                    
+                match state with
+                | State.Valid ->
+                    if not (isBase64Char c) then
+                        // Non-base64 character found
+                        state <- State.Invalid
+                    elif c = '=' then
+                        // Padding can only appear at positions 2 or 3 in a quadruplet
+                        if quadPos = 2 then
+                            state <- State.PaddingOne
+                            lastValidPos <- i
+                        elif quadPos = 3 then
+                            state <- State.PaddingTwo
+                            lastValidPos <- i
+                        else
+                            state <- State.Invalid
+                    else
+                        lastValidPos <- i
+                        quadPos <- (quadPos + 1) % 4
+                    
+                | State.PaddingOne ->
+                    if c = '=' && quadPos = 3 then
+                        // Second padding character is only valid at position 3
+                        state <- State.PaddingTwo
+                        lastValidPos <- i
+                        quadPos <- 0  // Reset for next quadruplet
+                    else
+                        state <- State.Invalid
+                    
+                | State.PaddingTwo ->
+                    // After two padding characters, we should start a new quadruplet
+                    if isBase64Char c && c <> '=' then
+                        state <- State.Valid
+                        quadPos <- 1  // Position 0 is this character
+                        lastValidPos <- i
+                    else
+                        state <- State.Invalid
+                    
+                | State.Invalid ->
+                    // Once invalid, check if we can start a new valid sequence
+                    if isBase64Char c && c <> '=' then
+                        state <- State.Valid
+                        quadPos <- 1  // Position 0 is this character
+                        lastValidPos <- i
+                
+            // Final validation: for a complete valid base64 string, we need quadPos = 0
+            // or a valid padding situation at the end
+            match state with
+            | State.Valid when quadPos = 0 -> lastValidPos
+            | State.PaddingOne | State.PaddingTwo -> lastValidPos
+            | _ -> 
+                // If we don't end with complete quadruplet, find the last complete one
+                if lastValidPos >= 0 then
+                    let remainingChars = (lastValidPos + 1) % 4
+                    if remainingChars = 0 then
+                        lastValidPos
+                    else
+                        lastValidPos - remainingChars + 1
+                else
+                    -1
+            
+    let internal trimToValidBase64 (input: string) =
+        if System.String.IsNullOrEmpty(input) then
+            input
+        else
+            let lastValidIndex = findLastValidBase64Index input
+            
+            if lastValidIndex >= 0 then
+                if lastValidIndex = input.Length - 1 then
+                    // Already valid, no need to create a new string
+                    input
+                else
+                    // Extract only the valid part
+                    input.Substring(0, lastValidIndex + 1)
+            else
+                // No valid base64 found
+                ""
+
+    let internal sqlBase64 (data: obj) =
+        match data with
+        | null -> null
+        | :? (byte array) as bytes -> 
+            // Requirement #2: If BLOB, encode to base64 TEXT
+            System.Convert.ToBase64String(bytes) :> obj
+        | :? string as str -> 
+            // Requirement #6: Ignore leading and trailing whitespace
+            let trimmedStr = str.Trim()
+            let trimmedStr = trimToValidBase64 trimmedStr
+
+            match trimmedStr.Length with
+            | 0 ->  Array.empty<byte> :> obj
+            | _ ->
+            
+            System.Convert.FromBase64String trimmedStr :> obj
+        | _ -> 
+            // Requirement #5: Raise an error for types other than TEXT, BLOB, or NULL
+            failwith "The base64() function requires a TEXT, BLOB, or NULL argument"
+
     [<AbstractClass; Sealed>]
     type internal GenericMethodArgCache =
         static member val private cache = ConcurrentDictionary<MethodInfo, Type array>({
