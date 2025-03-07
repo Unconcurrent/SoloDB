@@ -15,6 +15,7 @@ open Microsoft.FSharp.Reflection
 open System.Web
 open System.Linq.Expressions
 open System.Linq
+open System.Numerics
 
 module private JsonHelper =
     let internal isSupportedNewtownsoftArrayType (t: Type) =
@@ -667,14 +668,59 @@ and private JsonImpl =
                
         Object entries
 
+    static member internal HashSetDeserialize<'T>(jsonArray: JsonValue) =
+        match jsonArray with
+        | List items ->
+            let result = new HashSet<'T>()
+            for item in items do
+                result.Add(JsonDeserializerImpl<'T>.Deserialize item) |> ignore
+            result
+        | other ->
+            failwithf "Expected JsonValue.List but got %A" other
+
+    // Queue deserializer
+    static member internal QueueDeserialize<'T>(jsonArray: JsonValue) =
+        match jsonArray with
+        | List items ->
+            let result = new Queue<'T>()
+            for item in items do
+                result.Enqueue(JsonDeserializerImpl<'T>.Deserialize item)
+            result
+        | other ->
+            failwithf "Expected JsonValue.List but got %A" other
+
+    // Stack deserializer
+    static member internal StackDeserialize<'T>(jsonArray: JsonValue) =
+        match jsonArray with
+        | List items ->
+            // For stack, we need to process items in reverse order to maintain order
+            let result = new Stack<'T>()
+            for i = items.Count - 1 downto 0 do
+                result.Push(JsonDeserializerImpl<'T>.Deserialize items.[i])
+            result
+        | other ->
+            failwithf "Expected JsonValue.List but got %A" other
+
+    // LinkedList deserializer
+    static member internal LinkedListDeserialize<'T>(jsonArray: JsonValue) =
+        match jsonArray with
+        | List items ->
+            let result = new LinkedList<'T>()
+            for item in items do
+                result.AddLast(JsonDeserializerImpl<'T>.Deserialize item) |> ignore
+            result
+        | other ->
+            failwithf "Expected JsonValue.List but got %A" other
+
     static member internal DictionaryDeserialize<'TKey, 'TValue when 'TKey : equality>(jsonObj: JsonValue) =
         match jsonObj with
         | Object properties ->
             let result = new Dictionary<'TKey, 'TValue>(properties.Count)
             for KeyValue(key, value) in properties do
-                let typedKey = ConvertStringTo<'TKey>.Convert key
-                let typedValue = JsonDeserializerImpl<'TValue>.Deserialize value
-                result.Add(typedKey, typedValue)
+                if key <> "$type" then
+                    let typedKey = ConvertStringTo<'TKey>.Convert key
+                    let typedValue = JsonDeserializerImpl<'TValue>.Deserialize value
+                    result.Add(typedKey, typedValue)
             result :> IDictionary<'TKey, 'TValue>
         | other ->
             failwithf "Expected JsonValue.Object but got %A" other
@@ -685,10 +731,11 @@ and private JsonImpl =
         | Object properties ->
             let dict = new Dictionary<'TKey, 'TValue>(properties.Count)
             for KeyValue(key, value) in properties do
-                let typedKey = ConvertStringTo<'TKey>.Convert key
+                if key <> "$type" then
+                    let typedKey = ConvertStringTo<'TKey>.Convert key
 
-                let typedValue = JsonDeserializerImpl<'TValue>.Deserialize value
-                dict.Add(typedKey, typedValue)
+                    let typedValue = JsonDeserializerImpl<'TValue>.Deserialize value
+                    dict.Add(typedKey, typedValue)
             dict :> IReadOnlyDictionary<'TKey, 'TValue>
         | other ->
             failwithf "Expected JsonValue.Object but got %A" other
@@ -698,8 +745,9 @@ and private JsonImpl =
         | Object properties ->
             let result = new Hashtable(properties.Count)
             for KeyValue(key, value) in properties do
-                let typedValue = JsonDeserializerImpl<obj>.Deserialize value
-                result.Add(key, typedValue)
+                if key <> "$type" then
+                    let typedValue = JsonDeserializerImpl<obj>.Deserialize value
+                    result.Add(key, typedValue)
             result :> IDictionary
         | other ->
             failwithf "Expected JsonValue.Object but got %A" other
@@ -708,9 +756,10 @@ and private JsonImpl =
         match jsonObj with
         | Object properties ->
             for KeyValue(key, value) in properties do
-                let typedKey = ConvertStringTo<'TKey>.Convert key
-                let typedValue = JsonDeserializerImpl<'TValue>.Deserialize value
-                result.Add(KeyValuePair<'TKey, 'TValue>(typedKey, typedValue))
+                if key <> "$type" then
+                    let typedKey = ConvertStringTo<'TKey>.Convert key
+                    let typedValue = JsonDeserializerImpl<'TValue>.Deserialize value
+                    result.Add(KeyValuePair<'TKey, 'TValue>(typedKey, typedValue))
             result
         | other ->
             failwithf "Expected JsonValue.Object but got %A" other
@@ -719,8 +768,9 @@ and private JsonImpl =
         match jsonObj with
         | Object properties ->
             for KeyValue(key, value) in properties do
-                let typedValue = JsonDeserializerImpl<obj>.Deserialize value
-                result.Add(key, typedValue)
+                if key <> "$type" then
+                    let typedValue = JsonDeserializerImpl<obj>.Deserialize value
+                    result.Add(key, typedValue)
             result
         | other ->
             failwithf "Expected JsonValue.Object but got %A" other
@@ -747,7 +797,7 @@ and private JsonImpl =
             
             fn.Invoke v
 
-    static member val internal SerializeByType =
+    static member val internal SerializeByTypeWithType =
         let cache = ConcurrentDictionary<Type, Func<obj, JsonValue>>()
         (fun (runtimeType: Type) (o: obj) ->
             let fn = 
@@ -757,7 +807,7 @@ and private JsonImpl =
                     let meth = 
                         typedefof<JsonSerializerImpl<_>>
                             .MakeGenericType(t)
-                            .GetMethod(nameof JsonSerializerImpl<_>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+                            .GetMethod(nameof JsonSerializerImpl<_>.SerializeWithType, BindingFlags.NonPublic ||| BindingFlags.Static)
                     
                     let fn = 
                         Expression.Lambda<Func<obj, JsonValue>>(
@@ -844,7 +894,11 @@ and private JsonDeserializerImpl<'A> =
             (fun (json: JsonValue) -> JsonImpl.DeserializeDynamic json) :> obj :?> (JsonValue -> 'A)
 
         | OfType char ->
-            (fun (json: JsonValue) -> asNumberOrParseToNumber json char char) :> obj :?> (JsonValue -> 'A)
+            (fun (json: JsonValue) -> 
+                match json with
+                | String s when s.Length = 1 && not (Char.IsDigit s.[0]) -> s.[0]
+                | _ -> asNumberOrParseToNumber json char char
+            ) :> obj :?> (JsonValue -> 'A)
 
         | OfType int8 ->
             (fun (json: JsonValue) -> asNumberOrParseToNumber json int8 int8) :> obj :?> (JsonValue -> 'A)
@@ -897,6 +951,15 @@ and private JsonDeserializerImpl<'A> =
                 | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
                 
             ) :> obj :?> (JsonValue -> 'A)
+
+        | OfType (id: bigint -> bigint) -> 
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json bigint (fun s -> BigInteger.Parse(s, NumberStyles.Any, CultureInfo.InvariantCulture))) :> obj :?> (JsonValue -> 'A)
+
+        | OfType (id: IntPtr -> IntPtr) -> 
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json (fun d -> d |> int64 |> IntPtr) (fun s -> int64 s |> IntPtr)) :> obj :?> (JsonValue -> 'A)
+
+        | OfType (id: UIntPtr -> UIntPtr) -> 
+            (fun (json: JsonValue) -> asNumberOrParseToNumber json (fun d -> d |> uint64 |> UIntPtr) (fun s -> uint64 s |> UIntPtr)) :> obj :?> (JsonValue -> 'A)
 
         | OfType (id : byte array -> byte array) ->
             (fun (json: JsonValue) -> 
@@ -1396,46 +1459,77 @@ and private JsonDeserializerImpl<'A> =
             let standardStyleJsonFn =
                 let elemType = GenericTypeArgCache.Get (t.GetInterface("IEnumerable`1") |> Option.ofObj |> Option.defaultValue t) |> Array.head
                 let jsonParam = Expression.Parameter(typeof<JsonValue>)
-            
+           
                 // Choose appropriate method based on type
-                let (methodName, instanceExpr) = 
+                let (callExpr: Expression) = 
                     if t.IsArray then
                         // For arrays use ArrayDeserialize
-                        (nameof JsonImpl.ArrayDeserialize, null)
+                        let method = typeof<JsonImpl>
+                                        .GetMethod(nameof JsonImpl.ArrayDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                                        .MakeGenericMethod(elemType)
+                        Expression.Call(method, [|jsonParam :> Expression|])
                     // Check for F# list type
                     elif t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<list<_>> then
-                        // For F# lists
-                        (nameof JsonImpl.FSharpListDeserialize, null)
+                        let method = typeof<JsonImpl>
+                                        .GetMethod(nameof JsonImpl.FSharpListDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                                        .MakeGenericMethod(elemType)
+                        Expression.Call(method, [|jsonParam :> Expression|])
+                    // Support for HashSet<T>
+                    elif t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<HashSet<_>> then
+                        let method = typeof<JsonImpl>
+                                        .GetMethod(nameof JsonImpl.HashSetDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                                        .MakeGenericMethod(elemType)
+                        Expression.Call(method, [|jsonParam :> Expression|])
+                    // Support for Queue<T>
+                    elif t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<Queue<_>> then
+                        let method = typeof<JsonImpl>
+                                        .GetMethod(nameof JsonImpl.QueueDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                                        .MakeGenericMethod(elemType)
+                        Expression.Call(method, [|jsonParam :> Expression|])
+                    // Support for Stack<T>
+                    elif t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<Stack<_>> then
+                        let method = typeof<JsonImpl>
+                                        .GetMethod(nameof JsonImpl.StackDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                                        .MakeGenericMethod(elemType)
+                        Expression.Call(method, [|jsonParam :> Expression|])
+                    // Support for LinkedList<T>
+                    elif t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<LinkedList<_>> then
+                        let method = typeof<JsonImpl>
+                                        .GetMethod(nameof JsonImpl.LinkedListDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                                        .MakeGenericMethod(elemType)
+                        Expression.Call(method, [|jsonParam :> Expression|])
                     elif typeof<IList>.IsAssignableFrom(t) && t.IsGenericType && (GenericTypeArgCache.Get t).Length = 1 then
                         // For IList types that need an instance (like List<T>)
                         if t.GetConstructor([||]) <> null then
                             // If type has parameterless constructor, create instance for IListDeserialize
                             let instance = Expression.New(t)
-                            (nameof JsonImpl.IListDeserialize, instance)
+                            let method = typeof<JsonImpl>
+                                            .GetMethod(nameof JsonImpl.IListDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                                            .MakeGenericMethod([|elemType; t|])
+                            Expression.Call(method, [|instance :> Expression; jsonParam|])
                         else
                             // If no parameterless constructor, fall back to IEnumerableDeserialize
-                            (nameof JsonImpl.IEnumerableDeserialize, null)
+                            let method = typeof<JsonImpl>
+                                            .GetMethod(nameof JsonImpl.IEnumerableDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                                            .MakeGenericMethod(elemType)
+                            Expression.Call(method, [|jsonParam :> Expression|])
                     else
-                        // For other IEnumerable types
-                        (nameof JsonImpl.IEnumerableDeserialize, null)
+                        let ienumerableType = typedefof<IEnumerable<_>>.MakeGenericType(elemType)
+                        let constructor = t.GetConstructor([|ienumerableType|])
+                        
+                        let method = typeof<JsonImpl>
+                                            .GetMethod(nameof JsonImpl.IEnumerableDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                                            .MakeGenericMethod(elemType)
+                        let expression = Expression.Call(method, [|jsonParam :> Expression|])
+
+                        if constructor = null then
+                            // No suitable constructor, use default IEnumerableDeserialize
+                            expression
+                            
+                        else
+                            // Found constructor that takes IEnumerable<elemType>
+                            Expression.New(constructor, [|expression :> Expression|])
             
-                let meth = 
-                    if methodName = nameof JsonImpl.IListDeserialize then
-                        typeof<JsonImpl>
-                            .GetMethod(methodName, BindingFlags.NonPublic ||| BindingFlags.Static)
-                            .MakeGenericMethod([|elemType; t|])
-                    else
-                        typeof<JsonImpl>
-                            .GetMethod(methodName, BindingFlags.NonPublic ||| BindingFlags.Static)
-                            .MakeGenericMethod(elemType)
-            
-                let callExpr = 
-                    if instanceExpr <> null then
-                        // For IListDeserialize which takes an instance parameter
-                        Expression.Call(meth, [|instanceExpr :> Expression; jsonParam|])
-                    else
-                        // For methods that don't need an instance
-                        Expression.Call(meth, [|jsonParam :> Expression|])
             
                 let lambda = Expression.Lambda<Func<JsonValue, 'A>>(
                     Expression.Convert(callExpr, t),
@@ -1740,7 +1834,7 @@ and private JsonSerializerImpl<'A> =
             (fun (o: obj) -> 
                 match o with
                 | null -> JsonValue.Null
-                | _ -> JsonImpl.SerializeByType (o.GetType()) o)
+                | _ -> JsonImpl.SerializeByTypeWithType (o.GetType()) o)
                 :> obj :?> 'A -> JsonValue
 
         | t when t.IsAbstract -> 
@@ -1748,7 +1842,7 @@ and private JsonSerializerImpl<'A> =
                 let o = box o
                 match o with
                 | null -> JsonValue.Null
-                | _ -> JsonImpl.SerializeByType (o.GetType()) o)
+                | _ -> JsonImpl.SerializeByTypeWithType (o.GetType()) o)
                 :> obj :?> 'A -> JsonValue
 
         | OfType bool -> 
@@ -1789,6 +1883,19 @@ and private JsonSerializerImpl<'A> =
 
         | OfType int64 -> 
             (fun (o: int64) -> Number (decimal o))
+            :> obj :?> ('A -> JsonValue)
+
+        | OfType (id: bigint -> bigint) -> 
+            (fun (o: bigint) -> Number (decimal o))
+            :> obj :?> ('A -> JsonValue)
+
+
+        | OfType (id: IntPtr -> IntPtr) -> 
+            (fun (o: IntPtr) -> Number (decimal o))
+            :> obj :?> ('A -> JsonValue)
+
+        | OfType (id: UIntPtr -> UIntPtr) -> 
+            (fun (o: UIntPtr) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
         | OfType float32 ->
@@ -2064,9 +2171,11 @@ and private JsonSerializerImpl<'A> =
                     if obj.ReferenceEquals(o, null) 
                     then Null
                     else 
+                        RuntimeHelpers.EnsureSufficientExecutionStack()
+
                         let typeOfO = o.GetType()
                         if typeOfO <> typeof<'A> then
-                            JsonImpl.SerializeByType typeOfO (box o)
+                            JsonImpl.SerializeByTypeWithType typeOfO (box o)
                         else
                             let json = fn.Invoke o
                             json)
