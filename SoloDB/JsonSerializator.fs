@@ -399,43 +399,55 @@ and JsonValue =
         and set(name: string) (jValue: JsonValue) =
             this.SetProperty (name, jValue)
 
-    static member private Jsonize value (write: string -> unit) =
-        match value with
-        | Null -> write "null" |> ignore
-        | Boolean b -> write (if b then "true" else "false") |> ignore
-        | String s -> 
-            write "\"" |> ignore
-            let escapedString = HttpUtility.JavaScriptStringEncode(s, false)
-            write escapedString |> ignore
-            write "\"" |> ignore
-        | Number n -> 
+    static member private Jsonize value (sb: StringBuilder) =
+        let inline write (x: string) =
+            sb.Append x |> ignore
+
+        let inline writeChar (x: char) =
+            sb.Append x |> ignore
+
+        let inline writeNumber (n: Decimal) =
             if Decimal.IsInteger n then 
-                write (n.ToString("F0", CultureInfo.InvariantCulture)) |> ignore
+                sb.AppendFormat(CultureInfo.InvariantCulture, "{0:F0}", n) |> ignore
             else 
-                write (n.ToString(CultureInfo.InvariantCulture)) |> ignore
+                sb.AppendFormat(CultureInfo.InvariantCulture, "{0:0.############################}", n) |> ignore
+
+        match value with
+        | Null -> write "null"
+        | Boolean b -> write (if b then "true" else "false")
+        | String s -> 
+            writeChar '\"'
+            let escapedString = HttpUtility.JavaScriptStringEncode(s, false)
+            write escapedString
+            writeChar '\"'
+        | Number n -> 
+            writeNumber n
         | List arr ->
-            write "[" |> ignore
+            writeChar '['
             let items = arr.Count
-            for i, item in arr |> Seq.indexed do
-                JsonValue.Jsonize item write
-                if i < items - 1 then write ", " |> ignore
-            write "]" |> ignore
+            for i in 0..(items - 1) do
+                let item = arr.[i]
+                JsonValue.Jsonize item sb
+                if i < items - 1 then writeChar ','
+            writeChar ']'
 
         | Object obj ->
-            write "{" |> ignore
+            writeChar '{'
             let items = obj.Count
-            for i, kvp in obj |> Seq.indexed do
-                write "\"" |> ignore
-                write kvp.Key |> ignore
-                write "\"" |> ignore
-                write ": " |> ignore
-                JsonValue.Jsonize kvp.Value write
-                if i < items - 1 then write ", " |> ignore
-            write "}" |> ignore
+            let mutable i = 0
+            for kvp in obj do
+                writeChar '\"'
+                write kvp.Key
+                writeChar '\"'
+                writeChar ':'
+                JsonValue.Jsonize kvp.Value sb
+                if i < items - 1 then writeChar ','
+                i <- i + 1
+            writeChar '}'
 
     member this.ToJsonString() =            
         let sb = new StringBuilder(128)
-        JsonValue.Jsonize this (fun text -> sb.Append text |> ignore)
+        JsonValue.Jsonize this sb
         sb.ToString()
 
     member this.Eq (other: obj) =
@@ -1724,8 +1736,11 @@ and private JsonSerializerImpl<'A> =
 
     static member val internal Serialize: 'A -> JsonValue = 
         match typeof<'A> with
-        | t when t = typeof<obj> -> 
-            (fun (o: obj) -> JsonImpl.SerializeByType (o.GetType()) o)
+        | t when t = typeof<obj> || t.IsAbstract -> 
+            (fun (o: obj) -> 
+                match o with
+                | null -> JsonValue.Null
+                | _ -> JsonImpl.SerializeByType (o.GetType()) o)
                 :> obj :?> 'A -> JsonValue
 
         | OfType bool -> 
