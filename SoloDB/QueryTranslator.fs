@@ -1,5 +1,7 @@
 ﻿namespace SoloDatabase
 
+open System.Collections
+
 module QueryTranslator =
     open System.Collections.ObjectModel
     open System.Text
@@ -741,12 +743,24 @@ module QueryTranslator =
             else sprintf "jsonb_extract(%sValue, '$.%s')" qb.TableNameDot path
 
 
-        if m.MemberName = "Length" && (m.InputType = typeof<string> || m.InputType = typeof<byte array>) then
-            qb.AppendRaw "length("
-            visit m.Expression qb
-            qb.AppendRaw ")"
+        if m.MemberName = "Length" && (* All cases below implement IEnumerable*) (m.InputType.GetInterface (typeof<IEnumerable>.FullName) <> null) then
+            if m.InputType = typeof<string> then
+                qb.AppendRaw "length("
+                visit m.Expression qb
+                qb.AppendRaw ")"
+            elif m.InputType = typeof<byte array> then
+                qb.AppendRaw "length(base64("
+                visit m.Expression qb
+                qb.AppendRaw "))"
+            elif m.InputType.GetInterface (typeof<IEnumerable>.FullName) <> null then
+                // json len
+                qb.AppendRaw "json_array_length("
+                visit m.Expression qb
+                qb.AppendRaw ")"
+
         else if m.ReturnType = typeof<int64> && m.MemberName = "Id" then
-            qb.AppendRaw $"{qb.TableNameDot}Id" |> ignore
+            qb.AppendRaw $"{qb.TableNameDot}Id " |> ignore
+
         else if m.Expression <> null && isRootParameter m.Expression then
             let jsonPath = buildJsonPath m.Expression [m.MemberName]
             match jsonPath with
@@ -757,6 +771,7 @@ module QueryTranslator =
                 let pathStr = String.concat $"." (List.map (sprintf "%s") paths)
                 qb.AppendRaw(formatAccess pathStr) |> ignore            
         else 
+
         match m.OriginalExpression with
         | None -> 
             qb.AppendRaw "jsonb_extract("

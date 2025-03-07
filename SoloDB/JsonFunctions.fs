@@ -79,7 +79,7 @@ module JsonFunctions =
     let inline internal mustIncludeTypeInformationInSerializationFn (t: Type) = 
         t.IsAbstract || not (isNull (t.GetCustomAttribute<Attributes.PolimorphicAttribute>()))
 
-    let mustIncludeTypeInformationInSerialization<'T> =
+    let internal mustIncludeTypeInformationInSerialization<'T> =
         mustIncludeTypeInformationInSerializationFn typeof<'T>
 
     let toJson<'T> o = 

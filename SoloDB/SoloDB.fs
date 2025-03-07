@@ -671,6 +671,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             connection.CreateFunction("SHA_HASH", Func<byte array, obj>(fun o -> Utils.shaHash o), true)
             connection.CreateFunction("TO_LOWER", Func<string, string>(_.ToLower(usCultureInfo)), true)
             connection.CreateFunction("TO_UPPER", Func<string, string>(_.ToUpper(usCultureInfo)), true)
+            connection.CreateFunction("base64", Func<obj, obj>(Utils.sqlBase64), true) // https://www.sqlite.org/base64.html
             connection.Execute "PRAGMA recursive_triggers = ON;" |> ignore // This must be enabled on every connection separately.
 
         let manager = new ConnectionManager(connectionString, setup)
