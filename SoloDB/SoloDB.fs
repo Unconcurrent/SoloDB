@@ -889,9 +889,10 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         if disposed then raise (ObjectDisposedException(nameof(SoloDB)))
         if name.StartsWith "SoloDB" then raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
+        use _mutex = Helper.lockTable connectionString name // To prevent a race condition where the next if statment is true for 2 threads.
+
         use connection = connectionManager.Borrow()
 
-        use _mutex = Helper.lockTable connectionString name // To prevent a race condition where the next if statment is true for 2 threads.
         if not (Helper.existsCollection name connection) then 
             let withinTransaction = connection.IsWithinTransaction()
             if not withinTransaction then connection.Execute "BEGIN;" |> ignore
