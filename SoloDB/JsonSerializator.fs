@@ -1174,60 +1174,115 @@ and private JsonDeserializerImpl<'A> =
             let tupleItemTypes = GenericTypeArgCache.Get t
             let jsonParam = Expression.Parameter(typeof<JsonValue>)
             
-            // Create expressions for each item in the tuple
-            let itemExpressions = 
-                tupleItemTypes 
-                |> Array.mapi (fun i itemType ->
-                    let itemJsonExpr = Expression.Call(
-                        jsonParam,
-                        typeof<JsonValue>.GetMethod("get_Item", [| typeof<string> |]),
-                        [| Expression.Constant(string i) :> Expression |]
-                    )
-                    
-                    let deserializeMethod = 
-                        typedefof<JsonDeserializerImpl<_>>
-                            .MakeGenericType(itemType)
-                            .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
-                    
-                    Expression.Call(deserializeMethod, itemJsonExpr)
-                )
-                |> Array.map(fun e -> e :> Expression)
-            
-            // Create tuple constructor or value tuple
-            let tupleCreateExpr =
-                if isValueTuple then
-                    // For ValueTuple, create a new struct with field initializers
-                    let ctor = t.GetConstructor(tupleItemTypes)
-                    Expression.New(ctor, itemExpressions) :> Expression
-                else
-                    // For reference Tuple, use the static Tuple.Create method
-                    let tupleCreateMethod = 
-                        match tupleItemTypes.Length with
-                        | n when n >= 1 && n <= 8 ->
-                            typeof<Tuple>.GetMethods()
-                            |> Array.find (fun m -> 
-                                m.Name = "Create" && 
-                                (GenericMethodArgCache.Get m).Length = tupleItemTypes.Length)
-                            |> fun m -> m.MakeGenericMethod(tupleItemTypes)
-                        | _ -> 
-                            // Handle TupleRest for tuples with more than 8 items
-                            failwith "Tuples with more than 8 items not implemented"
-                    
-                    Expression.Call(tupleCreateMethod, itemExpressions)
-            
-            // Compile the lambda
-            let fn = 
-                Expression.Lambda<Func<JsonValue, 'A>>(
-                    Expression.Convert(tupleCreateExpr, typeof<'A>),
-                    [| jsonParam |]
-                )
 
-            let fn = fn.Compile(false)
+            let listFunc =
+                // Create expressions for each item in the tuple
+                let itemExpressions = 
+                    tupleItemTypes 
+                    |> Array.mapi (fun i itemType ->
+                        let itemJsonExpr = Expression.Call(
+                            jsonParam,
+                            typeof<JsonValue>.GetMethod("get_Item", [| typeof<string> |]),
+                            [| Expression.Constant(string i) :> Expression |]
+                        )
+                    
+                        let deserializeMethod = 
+                            typedefof<JsonDeserializerImpl<_>>
+                                .MakeGenericType(itemType)
+                                .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+                    
+                        Expression.Call(deserializeMethod, itemJsonExpr)
+                    )
+                    |> Array.map(fun e -> e :> Expression)
+            
+                // Create tuple constructor or value tuple
+                let tupleCreateExpr =
+                    if isValueTuple then
+                        // For ValueTuple, create a new struct with field initializers
+                        let ctor = t.GetConstructor(tupleItemTypes)
+                        Expression.New(ctor, itemExpressions) :> Expression
+                    else
+                        // For reference Tuple, use the static Tuple.Create method
+                        let tupleCreateMethod = 
+                            match tupleItemTypes.Length with
+                            | n when n >= 1 && n <= 8 ->
+                                typeof<Tuple>.GetMethods()
+                                |> Array.find (fun m -> 
+                                    m.Name = "Create" && 
+                                    (GenericMethodArgCache.Get m).Length = tupleItemTypes.Length)
+                                |> fun m -> m.MakeGenericMethod(tupleItemTypes)
+                            | _ -> 
+                                // Handle TupleRest for tuples with more than 8 items
+                                failwith "Tuples with more than 8 items not implemented"
+                    
+                        Expression.Call(tupleCreateMethod, itemExpressions)
+
+                // Compile the lambda
+                let fn = 
+                    Expression.Lambda<Func<JsonValue, 'A>>(
+                        Expression.Convert(tupleCreateExpr, typeof<'A>),
+                        [| jsonParam |]
+                    )
+
+                fn.Compile(false)
+
+            let objFunc =
+                // Create expressions for each item in the tuple
+                let itemExpressions = 
+                    tupleItemTypes 
+                    |> Array.mapi (fun i itemType ->
+                        let itemJsonExpr = Expression.Call(
+                            jsonParam,
+                            typeof<JsonValue>.GetMethod("get_Item", [| typeof<string> |]),
+                            [| Expression.Constant("Item" + string (i + 1)) :> Expression |]
+                        )
+                    
+                        let deserializeMethod = 
+                            typedefof<JsonDeserializerImpl<_>>
+                                .MakeGenericType(itemType)
+                                .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+                    
+                        Expression.Call(deserializeMethod, itemJsonExpr)
+                    )
+                    |> Array.map(fun e -> e :> Expression)
+            
+                // Create tuple constructor or value tuple
+                let tupleCreateExpr =
+                    if isValueTuple then
+                        // For ValueTuple, create a new struct with field initializers
+                        let ctor = t.GetConstructor(tupleItemTypes)
+                        Expression.New(ctor, itemExpressions) :> Expression
+                    else
+                        // For reference Tuple, use the static Tuple.Create method
+                        let tupleCreateMethod = 
+                            match tupleItemTypes.Length with
+                            | n when n >= 1 && n <= 8 ->
+                                typeof<Tuple>.GetMethods()
+                                |> Array.find (fun m -> 
+                                    m.Name = "Create" && 
+                                    (GenericMethodArgCache.Get m).Length = tupleItemTypes.Length)
+                                |> fun m -> m.MakeGenericMethod(tupleItemTypes)
+                            | _ -> 
+                                // Handle TupleRest for tuples with more than 8 items
+                                failwith "Tuples with more than 8 items not implemented"
+                    
+                        Expression.Call(tupleCreateMethod, itemExpressions)
+            
+                // Compile the lambda
+                let fn = 
+                    Expression.Lambda<Func<JsonValue, 'A>>(
+                        Expression.Convert(tupleCreateExpr, typeof<'A>),
+                        [| jsonParam |]
+                    )
+
+                fn.Compile(false)
             
             (fun (json: JsonValue) ->
                 match json with
                 | JsonValue.Null -> Unchecked.defaultof<'A>
-                | _ -> fn.Invoke json
+                | JsonValue.List _ -> listFunc.Invoke json
+                | JsonValue.Object _ -> objFunc.Invoke json
+                | _ -> failwithf "Cannot deserialize into %s the value: %A" typeof<'A>.FullName (json.JsonType)
             )
         
         // Generic IDictionary<K,V> interface or abstract type - use Dictionary<K,V>
@@ -1757,6 +1812,91 @@ and private JsonDeserializerImpl<'A> =
                 | _ -> fn.Invoke json
             )
 
+        | t when t.IsValueType ->
+            let propertiesInfo = t.GetProperties()
+            let fields = t.GetFields()
+
+            let jsonDictParam = Expression.Parameter(typeof<IDictionary<string, JsonValue>>)
+            let outVar = Expression.Variable(t)
+            
+            let outVarInitilization =
+                let constr = t.GetConstructors() |> Seq.tryFind(fun c -> c.GetParameters().Length = 0 && (c.IsPublic || c.IsPrivate))
+                match constr with
+                | Some constr ->
+                    Expression.New(constr, [||]) :> Expression
+                | None ->
+                    Expression.Default t
+            
+
+            let lambda = Expression.Lambda<Func<IDictionary<string, JsonValue>, 'A>>(
+                Expression.Block(
+                [|outVar|],
+                [|
+                    Expression.Assign(outVar, outVarInitilization) :> Expression;
+
+                    for field in fields do
+                        let variableValue = Expression.Variable typeof<JsonValue>
+                        Expression.Block([|variableValue|],
+                            [|Expression.IfThen(
+                                Expression.Call(
+                                    jsonDictParam,
+                                    typeof<IDictionary<string, JsonValue>>.GetMethod("TryGetValue"),
+                                    Expression.Constant(field.Name),
+                                    variableValue
+                                ),
+                                    
+                                Expression.Assign(
+                                    Expression.Field(outVar, field), 
+                                        
+                                    Expression.Call(
+                                        typedefof<JsonDeserializerImpl<_>>
+                                            .MakeGenericType(field.FieldType)
+                                            .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static),
+                                        variableValue))
+                                    
+                                ) :> Expression
+                            |])
+
+                    for prop in propertiesInfo do
+                        if prop.CanWrite then
+                            let variableValue = Expression.Variable typeof<JsonValue>
+                            Expression.Block([|variableValue|],
+                                [|Expression.IfThen(
+                                    Expression.Call(
+                                        jsonDictParam,
+                                        typeof<IDictionary<string, JsonValue>>.GetMethod("TryGetValue"),
+                                        Expression.Constant(prop.Name),
+                                        variableValue
+                                    ),
+                                    
+                                    Expression.Assign(
+                                        Expression.Property(outVar, prop), 
+                                        
+                                        Expression.Call(
+                                            typedefof<JsonDeserializerImpl<_>>
+                                                .MakeGenericType(prop.PropertyType)
+                                                .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static),
+                                            variableValue))
+                                    
+                                    ) :> Expression
+                               |])
+
+
+                    outVar;
+                |]),
+                [|jsonDictParam|]
+            )
+            
+            let fn = lambda.Compile(false)
+            
+            // This is a struct, there is no need to check the $type
+            (fun (json: JsonValue) ->
+                match json with
+                | JsonValue.Null -> Unchecked.defaultof<'A>
+                | _ -> 
+                    let dict = JsonImpl.AsDictOrFail json
+                    fn.Invoke dict)
+
         | t ->
             if t.IsAbstract then
                 (fun (json: JsonValue) ->
@@ -2155,8 +2295,69 @@ and private JsonSerializerImpl<'A> =
                 List items)
             :> obj :?> ('A -> JsonValue)
 
+        | t when isTuple t ->
+            let tupleItemTypes = GenericTypeArgCache.Get t
+            let param = Expression.Parameter(t)
+            let outList = Expression.Variable(typeof<List<JsonValue>>)
+            
+            // Get the tuple item properties (Item1, Item2, etc.)
+            let tupleProps = 
+                [| for i in 1..tupleItemTypes.Length do
+                    t.GetProperty($"Item{i}") |] |> Array.filter(fun f -> not (isNull f))
+
+            let tupleFields = 
+                [| for i in 1..tupleItemTypes.Length do
+                    t.GetField($"Item{i}") |] |> Array.filter(fun f -> not (isNull f))
+            
+            let lambda = Expression.Lambda<Func<'A, List<JsonValue>>>(
+                Expression.Block(
+                    [|outList|],
+                    [|
+                        // Initialize list
+                        Expression.Assign(outList, Expression.New(
+                            typeof<List<JsonValue>>.GetConstructor([|typeof<int>|]),
+                            [|Expression.Constant(tupleProps.Length + tupleFields.Length) :> Expression|]
+                        )) :> Expression
+                       
+                        if t.IsValueType then
+                            for field in tupleFields do
+                                Expression.Call(outList, typeof<List<JsonValue>>.GetMethod("Add"), [|
+                                    Expression.Call(
+                                        typedefof<JsonSerializerImpl<_>>
+                                            .MakeGenericType(field.FieldType)
+                                            .GetMethod(nameof JsonSerializerImpl<obj>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static),
+                                        [|Expression.Field(param, field) :> Expression|]) :> Expression
+                                |])
+
+                        // Add each tuple element to the list
+                        for prop in tupleProps do
+                            Expression.Call(outList, typeof<List<JsonValue>>.GetMethod("Add"), [|
+                                Expression.Call(
+                                    typedefof<JsonSerializerImpl<_>>
+                                        .MakeGenericType(prop.PropertyType)
+                                        .GetMethod(nameof JsonSerializerImpl<obj>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static),
+                                    [|Expression.Property(param, prop) :> Expression|]) :> Expression
+                            |])
+                        
+                        // Return the JsonValue list
+                        outList
+                    |]
+                ),
+                [|param|]
+            )
+            let fn = lambda.Compile(false)
+
+            (fun (o: 'A) ->
+                if obj.ReferenceEquals(o, null) 
+                then Null
+                else 
+                    let jsonList = fn.Invoke o
+                    JsonValue.List jsonList
+            ) :> obj :?> ('A -> JsonValue)
         | t ->
             let props = t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance) |> Array.filter(_.CanRead)
+            let fields = t.GetFields()
+
             let param = Expression.Parameter(t)
             let outDict = Expression.Variable(typeof<Dictionary<string, JsonValue>>)
 
@@ -2174,6 +2375,20 @@ and private JsonSerializerImpl<'A> =
                             [||]
                         )) :> Expression
 
+                        // Serialize fields only if it is a struct.
+                        if t.IsValueType then
+                            for field in fields do
+                                Expression.Call(outDict, typeof<Dictionary<string, JsonValue>>.GetMethod("Add"), [|
+                                    Expression.Constant(field.Name, typeof<string>) :> Expression;
+                                    let serializeMeth = typedefof<JsonSerializerImpl<_>>
+                                                            .MakeGenericType(field.FieldType)
+                                                            .GetMethod(nameof JsonSerializerImpl<obj>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+                                    Expression.Call(
+                                        serializeMeth,
+                                         [|Expression.Field(param, field) :> Expression|])
+                                |])
+
+                        // Props have priority over fields.
                         for prop in props do
                             Expression.Call(outDict, typeof<Dictionary<string, JsonValue>>.GetMethod("Add"), [|
                                 Expression.Constant(prop.Name, typeof<string>) :> Expression;
@@ -2184,6 +2399,7 @@ and private JsonSerializerImpl<'A> =
                                     serializeMeth,
                                      [|Expression.Property(param, prop) :> Expression|])
                             |])
+
 
                         Expression.Label(returnLabel, Expression.Call(createJsonMeth, [|outDict :> Expression|]))
                     |]

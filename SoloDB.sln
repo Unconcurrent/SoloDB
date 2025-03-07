@@ -9,6 +9,8 @@ Project("{6EC3EE1D-3C4E-46DD-8F32-0CC8E7565705}") = "Tests", "..\SoloDBTests\Tes
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CSharpTests", "..\SoloDBTests\CSharpTests\CSharpTests.csproj", "{1846A323-5030-4682-8C3D-B49D3543D1DE}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BenchMaster", "..\SoloDBTests\BenchMaster\BenchMaster.csproj", "{5665ED34-0635-4DD9-98CC-E1B8C4873E17}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -27,6 +29,10 @@ Global
 		{1846A323-5030-4682-8C3D-B49D3543D1DE}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{1846A323-5030-4682-8C3D-B49D3543D1DE}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{1846A323-5030-4682-8C3D-B49D3543D1DE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5665ED34-0635-4DD9-98CC-E1B8C4873E17}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5665ED34-0635-4DD9-98CC-E1B8C4873E17}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5665ED34-0635-4DD9-98CC-E1B8C4873E17}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5665ED34-0635-4DD9-98CC-E1B8C4873E17}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
