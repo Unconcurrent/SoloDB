@@ -16,6 +16,9 @@ open System.Web
 open System.Linq.Expressions
 open System.Linq
 open System.Numerics
+open Microsoft.FSharp.NativeInterop
+
+#nowarn "9" // NativePtr stuff
 
 module private JsonHelper =
     let internal isSupportedNewtownsoftArrayType (t: Type) =
@@ -112,9 +115,9 @@ type internal Tokenizer =
     
 
     member this.ReadNext() : Token =
-        let isDigit c = Char.IsDigit c || c = '-'
-        let isInitialIdentifierChar c = Char.IsLetter c || c = '_'
-        let isIdentifierChar c = isInitialIdentifierChar c || Char.IsDigit c
+        let inline isDigitOrMinus c = Char.IsDigit c || c = '-'
+        let inline isInitialIdentifierChar c = Char.IsLetter c || c = '_'
+        let inline isIdentifierChar c = isInitialIdentifierChar c || Char.IsDigit c
 
         RuntimeHelpers.EnsureSufficientExecutionStack()
 
@@ -191,14 +194,35 @@ type internal Tokenizer =
                 if i >= input.Length then failwith "Unterminated string"
                 this.index <- i + 1
                 StringToken(sb.ToString())
-            | c when isDigit c ->
-                let sb = this.sb.Clear()
+            | c when isDigitOrMinus c ->
+                let buffer = NativePtr.stackalloc<char> 1024
+                let bufferPtr = buffer |> NativePtr.toVoidPtr
+                let mutable span = new Span<char>(bufferPtr, 1024)
+                
                 let mutable i = this.index
-                while i < input.Length && (isDigit input.[i] || input.[i] = '.' || input.[i] = 'e' || input.[i] = 'E' || input.[i] = '+') do
-                    sb.Append(input.[i]) |> ignore
+                let mutable length = 0
+                
+                while i < input.Length && 
+                      (isDigitOrMinus input.[i] || 
+                       input.[i] = '.' || 
+                       input.[i] = 'e' || 
+                       input.[i] = 'E' || 
+                       input.[i] = '+') do
+                    if length < span.Length then
+                        span[length] <- input.[i]
+                        length <- length + 1
+                    else
+                        failwith "Number too long for buffer"
                     i <- i + 1
+                
                 this.index <- i
-                let s = sb.ToString()
+                
+                #if NETSTANDARD2_1
+                let s = ReadOnlySpan<char>(bufferPtr, length)
+                #else
+                let s = System.String(buffer, 0, length)
+                #endif
+
                 NumberToken (
                     try Decimal.Parse(s, NumberStyles.Any, CultureInfo.InvariantCulture)
                     with
@@ -208,6 +232,7 @@ type internal Tokenizer =
                         else
                             Decimal.MaxValue
                 )
+
             | c when isInitialIdentifierChar c ->
                 let sb = this.sb.Clear()
                 let mutable i = this.index
@@ -446,7 +471,18 @@ and JsonValue =
                 i <- i + 1
             writeChar '}'
 
-    member this.ToJsonString() =            
+    member this.ToJsonString() =
+        match this with
+        | Null -> "null"
+        | Boolean b -> if b then "true" else "false"
+        | Number n -> 
+            if Decimal.IsInteger n then 
+                n.ToString("F0", CultureInfo.InvariantCulture)
+            else 
+                n.ToString("0.############################", CultureInfo.InvariantCulture)
+        | String s -> HttpUtility.JavaScriptStringEncode(s, true)
+        | _ ->
+
         let sb = new StringBuilder(128)
         JsonValue.Jsonize this sb
         sb.ToString()
