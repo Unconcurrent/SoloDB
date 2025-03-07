@@ -1736,8 +1736,16 @@ and private JsonSerializerImpl<'A> =
 
     static member val internal Serialize: 'A -> JsonValue = 
         match typeof<'A> with
-        | t when t = typeof<obj> || t.IsAbstract -> 
+        | t when t = typeof<obj> -> 
             (fun (o: obj) -> 
+                match o with
+                | null -> JsonValue.Null
+                | _ -> JsonImpl.SerializeByType (o.GetType()) o)
+                :> obj :?> 'A -> JsonValue
+
+        | t when t.IsAbstract -> 
+            (fun (o: 'A) ->
+                let o = box o
                 match o with
                 | null -> JsonValue.Null
                 | _ -> JsonImpl.SerializeByType (o.GetType()) o)
