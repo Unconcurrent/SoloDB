@@ -156,7 +156,7 @@ using SoloDatabase.Types;
 
 public class MyType
 {
-    public SqlId Id { get; set; }
+    public long Id { get; set; }
     public string Name { get; set; }
     public string Data { get; set; }
 }
@@ -194,17 +194,17 @@ And in F#:
 #### SoloDB
 ```fsharp
 [<CLIMutable>]
-type MyType = { Id: SqlId; Name: string; Data: string }
+type MyType = { Id: int64; Name: string; Data: string }
 
 let db = new SoloDB("./mydatabase.db")
 let collection = db.GetCollection<MyType>()
         
 // Insert a document
-let docId = collection.Insert({ Id = SqlId(0); Name = "Document 1"; Data = "Some data" })
+let docId = collection.Insert({ Id = 0; Name = "Document 1"; Data = "Some data" })
         
 // Or
         
-let data = { Id = SqlId(0); Name = "Document 1"; Data = "Some data" }
+let data = { Id = 0; Name = "Document 1"; Data = "Some data" }
 collection.Insert(data) |> ignore
 printfn "%A" data.Id // 2
         
