@@ -11,26 +11,10 @@ open FSharp.Interop.Dynamic
 [<Extension; AbstractClass; Sealed>]
 type Extensions =
     [<Extension>]
-    static member Set<'T, 'V>(this: 'T, value: 'V) : unit =
-        failwithf "This is a dummy function for the SQL builder."
-
-    [<Extension>]
     static member Like(this: string, pattern: string) =
         let regexPattern = 
             "^" + Regex.Escape(pattern).Replace("\\%", ".*").Replace("\\_", ".") + "$"
         Regex.IsMatch(this, regexPattern, RegexOptions.IgnoreCase)
-
-    [<Extension>]
-    static member Append(this: IEnumerable, value: obj) : unit = // For arrays
-        failwithf "This is a dummy function for the SQL builder."
-
-    [<Extension>]
-    static member SetAt(this: ICollection, index: int, value: obj) : unit =
-        failwithf "This is a dummy function for the SQL builder."
-
-    [<Extension>]
-    static member RemoveAt(this: ICollection, index: int) : unit =
-        failwithf "This is a dummy function for the SQL builder."
 
     [<Extension>]
     static member Any<'T>(this: ICollection<'T>, condition: Expression<Func<'T, bool>>) =

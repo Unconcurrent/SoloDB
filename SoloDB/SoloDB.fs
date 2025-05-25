@@ -6,7 +6,6 @@ open System.Linq.Expressions
 open System
 open System.Collections.Generic
 open System.Collections
-open FSharp.Interop.Dynamic
 open SoloDatabase.Types
 open System.IO
 open System.Text
@@ -19,20 +18,8 @@ open System.Runtime.CompilerServices
 open System.Reflection
 open System.Data
 open System.Globalization
-
-// For the F# compiler to allow the implicit use of
-// the .NET Expression we need to use it in a C# style class.
-[<Sealed>][<AbstractClass>] // make it static
-type internal ExpressionHelper =
-    static member inline internal get<'a, 'b>(expression: Expression<System.Func<'a, 'b>>) = expression
-
-    static member inline internal id (x: Type) =
-        let parameter = Expression.Parameter x
-        Expression.Lambda(parameter, [|parameter|])
-
-    static member inline internal eq (x: Type) (b: obj) =
-        let parameter = Expression.Parameter x
-        Expression.Lambda(Expression.Equal(parameter, Expression.Constant(b, x)), [|parameter|])
+open System.Linq
+open SoloDatabase.Attributes
 
 module internal Helper =
     let internal lockTable (connectionStr: string) (name: string) =
@@ -78,7 +65,7 @@ module internal Helper =
 
         connection.QueryFirst<int64>(queryString, parameters)
 
-    let private insertImpl<'T when 'T :> obj> (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (orReplace: bool) (getTransitiveCollection: IDbConnection -> obj) =
+    let private insertImpl<'T when 'T :> obj> (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (orReplace: bool) (collection: ISoloDBCollection<'T>) =
         let customIdGen = CustomTypeId<'T>.Value
         let existsWritebleDirectId = HasTypeId<'T>.Value
 
@@ -86,10 +73,16 @@ module internal Helper =
         match customIdGen with
         | Some x ->
             let oldId = x.GetId item
-            if x.Generator.IsEmpty oldId then
-                let collection = getTransitiveCollection connection
-                let id = x.Generator.GenerateId collection item
-                x.SetId id item
+            match x.Generator with
+            | :? SoloDatabase.Attributes.IIdGenerator as generator ->
+                if generator.IsEmpty oldId then
+                    let id = generator.GenerateId collection item
+                    x.SetId id item
+            | :? SoloDatabase.Attributes.IIdGenerator<'T> as generator ->
+                if generator.IsEmpty oldId then
+                    let id = generator.GenerateId collection item
+                    x.SetId id item
+            | other -> raise (InvalidOperationException(sprintf "Invalid Id generator type: %s" (other.GetType().ToString())))
         | None -> ()
         
         let json = if typed then toTypedJson item else toJson item
@@ -110,10 +103,10 @@ module internal Helper =
 
         id
 
-    let internal insertInner (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (collection: IDbConnection -> obj) =
+    let internal insertInner (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (collection: ISoloDBCollection<'T>) =
         insertImpl typed item connection name false collection
 
-    let internal insertOrReplaceInner (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (collection: IDbConnection -> obj) =
+    let internal insertOrReplaceInner (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (collection: ISoloDBCollection<'T>) =
         insertImpl typed item connection name true collection
 
     let internal formatName (name: string) =
@@ -192,173 +185,10 @@ module internal Helper =
     let internal collectionNameOf<'T> =
         typeof<'T>.Name |> formatName
 
-[<Struct>]
-type FinalBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sqlP: string, variablesP: Dictionary<string, obj>, select: 'Q -> 'R, postModifySQL: string -> string, limitP: uint64 option, ?offsetP: uint64, ?orderByListP: string list) =
-    member private this.SQLText = sqlP
-    member private this.SQLLimit: uint64 Option = limitP
-    member private this.SQLOffset = match offsetP with Some x -> x | None -> 0UL
-    member private this.OrderByList: string list = match orderByListP with | Some x -> x | None -> []
-    member private this.Variables = variablesP
+type internal Collection<'T>(connection: Connection, name: string, connectionString: string) as this =
+    do CustomTypeId<'T>.Value |> ignore
 
-    member private this.getQueryParameters() =
-        let variables = this.Variables
-        let variables = seq {for key in variables.Keys do KeyValuePair<string, obj>(key, variables.[key])} |> Seq.toList
-        let parameters = new Dictionary<string, obj>()
-
-        for kvp in variables do
-            parameters.Add(kvp.Key, kvp.Value)
-
-        let finalSQL = 
-            this.SQLText 
-            + (if this.OrderByList.Length > 0 then sprintf "ORDER BY %s " (this.OrderByList |> String.concat ",") else " ") 
-            + (if this.SQLLimit.IsSome then $"LIMIT {this.SQLLimit.Value} " else if this.SQLOffset > 0UL then "LIMIT -1 " else "")
-            + (if this.SQLOffset > 0UL then $"OFFSET {this.SQLOffset} " else "")
-
-        let finalSQL = postModifySQL finalSQL
-
-        let finalSQL =
-            // A patch to allow UPDATES with limits on SQLite without its native support, I can write it inside the .Update(...)
-            // function for all updates, but I belive it will slow down and complicate all other normal queries, therefore I leave it here.
-            if finalSQL.StartsWith "UPDATE" && (this.SQLLimit.IsSome || this.SQLOffset > 0UL) then
-                match finalSQL.Split ([|"WHERE"|], StringSplitOptions.RemoveEmptyEntries) with
-                | [|preWhere ; postWhere|] -> $"{preWhere} WHERE Id IN (SELECT Id FROM \"{name}\" WHERE {postWhere})"
-                | [|_noWhere|] -> 
-                    match finalSQL.Split ([|"LIMIT"|], StringSplitOptions.RemoveEmptyEntries) with
-                    | [|preLimit ; postLimit|] -> $"{preLimit} WHERE Id IN (SELECT Id FROM \"{name}\" LIMIT {postLimit})"
-                    | _other -> failwithf "The SQL transator does not support this kind of UPDATE with LIMIT."
-                | _other -> failwithf "The SQL transator does not support this kind of UPDATE with WHERE and LIMIT."
-            else
-                finalSQL
-
-        finalSQL, parameters
-
-    member this.Limit(?count: uint64) =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, this.SQLText, this.Variables, select, postModifySQL, count, this.SQLOffset, this.OrderByList)
-
-    member this.Offset(index: uint64) =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, this.SQLText, this.Variables, select, postModifySQL, this.SQLLimit, index, this.OrderByList)
-
-    member this.OrderByAsc(expression: Expression<System.Func<'T, obj>>) =
-        let orderSelector, _ = QueryTranslator.translate name expression
-        let orderSQL = sprintf "(%s) ASC" orderSelector
-
-        FinalBuilder<'T, 'Q, 'R>(connection, name, this.SQLText, this.Variables, select, postModifySQL, this.SQLLimit, this.SQLOffset, this.OrderByList @ [orderSQL])
-
-    member this.OrderByDesc(expression: Expression<System.Func<'T, obj>>) =
-        let orderSelector, _ = QueryTranslator.translate name expression
-        let orderSQL = sprintf "(%s) DESC" orderSelector
-
-        FinalBuilder<'T, 'Q, 'R>(connection, name, this.SQLText, this.Variables, select, postModifySQL, this.SQLLimit, this.SQLOffset, this.OrderByList @ [orderSQL])
-
-    member this.Enumerate() =
-        let finalSQL, parameters = this.getQueryParameters()
-        let connection = connection // Cannot access 'this.' in the following builder, because 'this.' is a struct.
-        let select = select
-
-        seq {
-            use connection = connection.Get()
-            for item in connection.Query<'Q>(finalSQL, parameters) 
-                        |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
-                        |> Seq.map select 
-                        |> Seq.filter (fun i -> not (Object.ReferenceEquals(i, null)))
-                        do
-                yield item
-        }
-
-    interface IEnumerable<'R> with
-        override this.GetEnumerator() =
-            this.Enumerate().GetEnumerator()
-
-        override this.GetEnumerator() =
-            this.Enumerate().GetEnumerator() :> IEnumerator
-       
-
-    member this.First() =        
-        let finalSQL, parameters = this.getQueryParameters()
-        use connection = connection.Get()
-        connection.QueryFirst<'Q>(finalSQL, parameters) |> select
-
-    member this.FirstOrDefault() =        
-        let finalSQL, parameters = this.getQueryParameters()
-        use connection = connection.Get()
-        connection.QueryFirstOrDefault<'Q>(finalSQL, parameters) |> select
-
-    member this.Execute() =
-        let finalSQL, parameters = this.getQueryParameters()
-        use connection = connection.Get()
-        connection.Execute(finalSQL, parameters)
-
-    member this.ExplainQueryPlan() =
-        // EXPLAIN QUERY PLAN 
-        let finalSQL, parameters = this.getQueryParameters()
-        let finalSQL = "EXPLAIN QUERY PLAN " + finalSQL
-
-        use connection = connection.Get()
-        connection.Query<obj>(finalSQL, parameters)
-        |> Seq.map(fun arr -> (arr :?> IDictionary<string, obj>).["detail"].ToString())
-        |> String.concat ";\n"
-
-    member this.ToList() =
-        Utils.CompatilibilityList<'R>(this.Enumerate())
-
-[<Struct>]
-type WhereBuilder<'T, 'Q, 'R>(connection: Connection, name: string, sql: string, select: 'Q -> 'R, vars: Dictionary<string, obj>, postModifySQL: string -> string) =
-    member this.Where(expression: Expression<System.Func<'T, bool>>) =
-        let whereSQL, newVariables = QueryTranslator.translate name expression
-        let sql = sql + sprintf "WHERE %s " whereSQL
-
-        for var in vars do
-            newVariables.Add(var.Key, var.Value)
-
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select, postModifySQL, None)
-
-    member this.Where(expression: Expression<System.Func<int64, 'T, bool>>) =
-        let whereSQL, newVariables = QueryTranslator.translate name expression
-        let sql = sql + sprintf "WHERE %s " whereSQL
-
-        for var in vars do
-            newVariables.Add(var.Key, var.Value)
-
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, newVariables, select, postModifySQL, None)
-
-    member this.WhereId(id: int64) =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql + sprintf "WHERE Id = %i " id, vars, select, postModifySQL, None)
-
-    member this.WhereId(func: Expression<System.Func<int64, bool>>) =
-        let whereSQL, newVariables = QueryTranslator.translateWithId name func 0
-        let sql = sql + sprintf "WHERE %s " whereSQL
-
-        for var in vars do
-            newVariables.Add(var.Key, var.Value)
-
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select, postModifySQL, None)
-
-    member this.OnAll() =
-        FinalBuilder<'T, 'Q, 'R>(connection, name, sql, vars, select, postModifySQL, None)
-
-    member this.Execute() =
-        this.OnAll().Execute()
-
-    member this.First() =
-        this.OnAll().First()
-
-    member this.FirstOrDefault() =        
-        this.OnAll().FirstOrDefault()
-
-    member this.ToList() =
-        Utils.CompatilibilityList<'R>(this)
-
-    interface IEnumerable<'R> with
-        override this.GetEnumerator() =
-            this.OnAll().Enumerate().GetEnumerator()
-
-        override this.GetEnumerator() =
-            this.OnAll().Enumerate().GetEnumerator() :> IEnumerator
-
-type Collection<'T>(connection: Connection, name: string, connectionString: string) =
-    // This is only because F# does not allow forward references, therefore you cannot instantiate a Collection<'T> in the Helper.insertInner,
-    // and this is the solution.
-    member val private GetTransitiveCollection = fun (connection) -> Collection<'T>(Connection.Transitive (new DirectConnection(connection)), name, connectionString) |> box
+    member val private SoloDBQueryable = SoloDBCollectionQueryable<'T, 'T>(SoloDBCollectionQueryProvider(this), Expression.Constant(RootQueryable<'T>(this))) :> IOrderedQueryable<'T>
     member val private ConnectionString = connectionString
     member val Name = name
     member val InTransaction = match connection with | Transactional _ -> true | Pooled _ -> false | Transitive _ -> true
@@ -368,54 +198,31 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
     member this.Insert (item: 'T) =
         use connection = connection.Get()
 
-        Helper.insertInner this.IncludeType item connection name this.GetTransitiveCollection
+        Helper.insertInner this.IncludeType item connection name this
 
-    /// <summary>
-    /// Will insert or replace the item in the DB based on its UNIQUE INDEXES.
-    /// </summary>
     member this.InsertOrReplace (item: 'T) =
         use connection = connection.Get()
 
-        Helper.insertOrReplaceInner this.IncludeType item connection name this.GetTransitiveCollection
+        Helper.insertOrReplaceInner this.IncludeType item connection name this
 
-    /// <summary>
-    /// This a inlined function that will cache the created transitive collection, to be used in batched context.
-    /// It will not allocate anything if the 'T will not use the function.
-    /// </summary>
-    static member inline private GetTransitiveCollectionCachingFn<'T>(this: Collection<'T>) = 
-        // If it can be needed, then create it.
-        if CustomTypeId<'T>.Value.IsSome then
-            let mutable cache: obj = null
-            fun (c) -> 
-                if cache = null then
-                    let tc = this.GetTransitiveCollection c
-                    cache <- tc
-                cache
-        else
-            // Else return a static function.
-            fun (_c) -> failwith "This function should never be called."
 
     member this.InsertBatch (items: 'T seq) =
         if this.InTransaction then
             use connection = connection.Get()
 
-            let getTransitiveCollection = Collection<'T>.GetTransitiveCollectionCachingFn this
-
             let ids = List<int64>()
             for item in items do
-                Helper.insertInner this.IncludeType item connection name getTransitiveCollection |> ids.Add
+                Helper.insertInner this.IncludeType item connection name this |> ids.Add
             ids
         else
 
         use connection = connection.Get()
         connection.Execute "BEGIN;" |> ignore
 
-        let getTransitiveCollection = Collection<'T>.GetTransitiveCollectionCachingFn this
-
         try
             let ids = List<int64>()
             for item in items do
-                Helper.insertInner this.IncludeType item connection name getTransitiveCollection |> ids.Add
+                Helper.insertInner this.IncludeType item connection name this |> ids.Add
 
             connection.Execute "COMMIT;" |> ignore
             ids
@@ -423,30 +230,23 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
             connection.Execute "ROLLBACK;" |> ignore
             reraise()
 
-    /// <summary>
-    /// Will insert or replace the items in the DB based on its UNIQUE INDEXES, throwing if the Id is non zero.
-    /// </summary>
     member this.InsertOrReplaceBatch (items: 'T seq) =
         if this.InTransaction then
             use connection = connection.Get()
 
-            let getTransitiveCollection = Collection<'T>.GetTransitiveCollectionCachingFn this
-
             let ids = List<int64>()
             for item in items do
-                Helper.insertOrReplaceInner this.IncludeType item connection name getTransitiveCollection |> ids.Add
+                Helper.insertOrReplaceInner this.IncludeType item connection name this |> ids.Add
             ids
         else
 
         use connection = connection.Get()
         connection.Execute "BEGIN;" |> ignore
         
-        let getTransitiveCollection = Collection<'T>.GetTransitiveCollectionCachingFn this
-
         try
             let ids = List<int64>()
             for item in items do
-                Helper.insertOrReplaceInner this.IncludeType item connection name getTransitiveCollection |> ids.Add
+                Helper.insertOrReplaceInner this.IncludeType item connection name this |> ids.Add
 
             connection.Execute "COMMIT;" |> ignore
             ids
@@ -465,94 +265,71 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         | None -> failwithf "There is no element with id %i" id
         | Some x -> x
 
-    member this.Select<'R>(select: Expression<System.Func<'T, 'R>>) =
-        let selectSQL, variables = QueryTranslator.translate name select
+    member this.DeleteById(id: int64) =
+        use connection = connection.Get()
+        connection.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {|id = id|})
 
-        WhereBuilder<'T, DbObjectRow, 'R>(connection, name, $"SELECT Id, json_quote({selectSQL}) as ValueJSON FROM \"{name}\" ", fromSQLite<'R>, variables, id)
+    
+    member this.TryGetById<'IdType when 'IdType : equality>(id: 'IdType) : 'T option =
+        let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>("Id") = id))
+        use connection = connection.Get()
+        match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
+        | json when Object.ReferenceEquals(json, null) -> None
+        | json -> fromSQLite<'T> json |> Some
 
-    member this.SelectUnique<'R>(select: Expression<System.Func<'T, 'R>>) =
-        let selectSQL, variables = QueryTranslator.translate name select
+    member this.GetById<'IdType when 'IdType : equality>(id: 'IdType) : 'T =
+        match this.TryGetById id with
+        | None -> failwithf "There is no element with id %A" id
+        | Some x -> x
 
-        WhereBuilder<'T, 'R, 'R>(connection, name, $"SELECT DISTINCT {selectSQL} FROM \"{name}\" ", fromSQLite<'R>, variables, id)
+    member this.DeleteById<'IdType when 'IdType : equality>(id: 'IdType) : int =
+        let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>("Id") = id))
+        use connection = connection.Get()
+        connection.Execute ($"DELETE FROM \"{name}\" WHERE {filter}", variables)
 
-    member this.Select() =
-        WhereBuilder<'T, DbObjectRow, 'T>(connection, name, $"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" ", fromSQLite<'T>, Dictionary<string, obj>(), id)
-
-    member this.SelectWithId() =
-        WhereBuilder<'T, JsonValue, (int64 * 'T)>(connection, name, $"SELECT json_object('Id', Id, 'Value', Value) FROM \"{name}\" ", fromIdJson<'T>, Dictionary<string, obj>(), id)
-
-    member this.TryFirst(func: Expression<System.Func<'T, bool>>) =
-        this.Select().Where(func).Limit(1UL).Enumerate() |> Seq.tryHead
-
-    member this.Where(f: Expression<Func<'T, bool>>) = this.Select().Where(f)
-
-    member this.ToList() = this.Select().OnAll().ToList()
-
-    member this.AsEnumerable() = this.Select().OnAll().Enumerate()
-
-    member this.Count() =
-        WhereBuilder<'T, int64, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", id, Dictionary<string, obj>(), id)
-
-    member this.CountAll() =        
-        WhereBuilder<'T, int64, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", id, Dictionary<string, obj>(), id).OnAll().First()
-
-    member this.CountAllLimit(limit: uint64) =
-        // https://stackoverflow.com/questions/1824490/how-do-you-enable-limit-for-delete-in-sqlite
-        // By default, SQLite does not support LIMIT in a COUNT statement, but there is this workaround.
-        FinalBuilder<'T, int64, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" LIMIT @limit)", Helper.createDict([|KeyValuePair("limit", limit :> obj)|]), id, id, None).First()
-
-    member this.CountWhere(func: Expression<System.Func<'T, bool>>) =
-        WhereBuilder<'T, int64, int64>(connection, name, $"SELECT COUNT(*) FROM \"{name}\" ", id, Dictionary<string, obj>(), id).Where(func).First()
-
-    member this.CountWhere(func: Expression<System.Func<'T, bool>>, limit: uint64) =
-        let whereSQL, variables = QueryTranslator.translate name func
-        variables["limit"] <- limit :> obj
-
-        FinalBuilder<'T, int64, int64>(connection, name, $"SELECT COUNT(*) FROM (SELECT Id FROM \"{name}\" WHERE {whereSQL} LIMIT @limit)", variables, id, id, None).First()
-
-    member this.Any(func) = this.CountWhere(func, 1UL) > 0L
-
-    member this.Any() = this.CountWhere((fun u -> true), 1UL) > 0L
-
-    member this.Update([<ParamArray>] expressions: Expression<System.Action<'T>> array) =
-        let variables = Dictionary<string, obj>()
-        let fullUpdateSQL = StringBuilder()
-        for expression in expressions do
-            let updateSQL, variablesToAdd = QueryTranslator.translateUpdateMode name expression
-            fullUpdateSQL.Append updateSQL |> ignore
-            for kvp in variablesToAdd do
-                variables.Add(kvp.Key, kvp.Value)
-
-        fullUpdateSQL.Remove(fullUpdateSQL.Length - 1, 1) |> ignore // Remove the ',' at the end.
-        let fullUpdateSQL = fullUpdateSQL.ToString()
-
-        WhereBuilder<'T, int64, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb_set(Value, {fullUpdateSQL})", id, variables, id)
-
-    member this.Replace(item: 'T) =
-        WhereBuilder<'T, int64, int64>(connection, name, $"UPDATE \"{name}\" SET Value = jsonb(@item)", id, Helper.createDict([|KeyValuePair("item", (if this.IncludeType then toTypedJson item else toJson item) |> box)|]), id)
-
-    /// <summary>
-    /// Will replace the item in the DB based on its Id, and if it does not have one then it will throw an InvalidOperationException.
-    /// </summary>
     member this.Update(item: 'T) =
-        let t = typeof<'T>
-        if HasTypeId<'T>.Value then
-            this.Replace(item).WhereId(item?Id |> box :?> int64).Execute() |> ignore
-        else match CustomTypeId<'T>.Value with
-             | Some customId ->
-                let id = customId.GetId (item |> box)
-                this.Replace(item).Where(fun e -> e.Dyn<obj>("Id") = id).Execute() |> ignore
-             | None ->
-                raise (InvalidOperationException $"The item's type {typeof<'T>.Name} does not have a int64 Id property or a custom Id to use in the update process.")
-        
+        let id = 
+            if HasTypeId<'T>.Value then
+                HasTypeId<'T>.Read item |> box
+            else match CustomTypeId<'T>.Value with
+                 | Some customId ->
+                    customId.GetId (item |> box)
+                 | None ->
+                    raise (InvalidOperationException $"The item's type {typeof<'T>.Name} does not have a int64 Id property or a custom Id to use in the update process.")
 
-    member this.Delete() =
-        // https://stackoverflow.com/questions/1824490/how-do-you-enable-limit-for-delete-in-sqlite
-        // By default, SQLite does not support LIMIT in a DELETE statement, but there is this workaround.
-        WhereBuilder<'T, int64, int64>(connection, name, $"DELETE FROM \"{name}\" WHERE Id IN (SELECT Id FROM \"{name}\" ", id, Dictionary<string, obj>(), fun sql -> sql + ")")
+        let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>("Id") = id))
+        variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
 
-    member this.DeleteById(id: int64) : int =
-        this.Delete().WhereId(id).Execute()
+        use connection = connection.Get()
+        let _count = connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
+
+        ()
+
+    member this.DeleteMany(filter: Expression<Func<'T, bool>>) =
+        let filter, variables = QueryTranslator.translate name filter
+
+        use connection = connection.Get()
+        connection.Execute ($"DELETE FROM \"{name}\" WHERE " + filter, variables)
+
+    member this.DeleteOne(filter: Expression<Func<'T, bool>>) =
+        let filter, variables = QueryTranslator.translate name filter
+
+        use connection = connection.Get()
+        connection.Execute ($"DELETE FROM \"{name}\" WHERE Id in (SELECT Id FROM (" + filter + ") LIMIT 1)", variables)
+
+    member this.ReplaceMany(item: 'T)(filter: Expression<Func<'T, bool>>) =
+        let filter, variables = QueryTranslator.translate name filter
+        variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+
+        use connection = connection.Get()
+        connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
+
+    member this.ReplaceOne(item: 'T)(filter: Expression<Func<'T, bool>>) =
+        let filter, variables = QueryTranslator.translate name filter
+        variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+
+        use connection = connection.Get()
+        connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM (" + filter + ") LIMIT 1)", variables)
 
     member this.EnsureIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
         use connection = connection.Get()
@@ -572,9 +349,6 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         use connection = connection.Get()
         connection.Execute(indexSQL)
         
-    /// <summary>
-    /// Will ensure that all attribute indexes will exists, even if added after the collection's creation.
-    /// </summary>
     member this.EnsureAddedAttributeIndexes() =
         // Ignore the untyped collections.
         if not (typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T>) then
@@ -593,15 +367,47 @@ type Collection<'T>(connection: Connection, name: string, connectionString: stri
         member this.Equals (other) =
             this.ConnectionString = other.ConnectionString && this.Name = other.Name
 
-[<Extension>]
-type UntypedCollectionExt =
-    [<Extension>]
-    static member InsertBatchObj(collection: Collection<JsonSerializator.JsonValue>, s: obj seq) =
-        s |> Seq.map JsonSerializator.JsonValue.SerializeWithType |> collection.InsertBatch
 
-    [<Extension>]
-    static member InsertObj(collection: Collection<JsonSerializator.JsonValue>, o: obj) =
-        o |> JsonSerializator.JsonValue.SerializeWithType |> collection.Insert
+    interface IOrderedQueryable<'T>
+
+    interface IQueryable<'T> with
+        member this.Provider = this.SoloDBQueryable.Provider
+        member this.Expression = this.SoloDBQueryable.Expression
+        member this.ElementType = typeof<'T>
+
+    interface IEnumerable<'T> with
+        member this.GetEnumerator() =
+            this.SoloDBQueryable.GetEnumerator()
+
+    interface IEnumerable with
+        member this.GetEnumerator() =
+            (this :> IEnumerable<'T>).GetEnumerator() :> IEnumerator
+
+    interface ISoloDBCollection<'T> with
+        member this.InTransaction = this.InTransaction
+        member this.IncludeType = this.IncludeType 
+        member this.Name = this.Name
+
+        member this.DropIndexIfExists(expression) = this.DropIndexIfExists(expression)
+        member this.EnsureAddedAttributeIndexes() = this.EnsureAddedAttributeIndexes()
+        member this.EnsureIndex(expression) = this.EnsureIndex(expression)
+        member this.EnsureUniqueAndIndex(expression) = this.EnsureUniqueAndIndex(expression)
+        member this.GetById(id) = this.GetById(id)
+        member this.GetById(id: 'IdType) = this.GetById<'IdType>(id)
+        member this.Insert(item) = this.Insert(item)
+        member this.InsertBatch(items) = this.InsertBatch(items)
+        member this.InsertOrReplace(item) = this.InsertOrReplace(item)
+        member this.InsertOrReplaceBatch(items) = this.InsertOrReplaceBatch(items)
+        member this.TryGetById(id) = this.TryGetById(id)
+        member this.TryGetById(id: 'IdType) = this.TryGetById<'IdType>(id)
+        member this.GetInternalConnection (): IDbConnection = this.Connection.Get()
+        member this.Delete(id: 'IdType) = this.DeleteById<'IdType>(id)
+        member this.Delete(id) = this.DeleteById(id)
+        member this.Update(item) = this.Update(item)
+        member this.DeleteMany(filter) = this.DeleteMany(filter)
+        member this.DeleteOne(filter) = this.DeleteOne(filter)
+        member this.ReplaceMany(item,filter) = this.ReplaceMany(filter)(item)
+        member this.ReplaceOne(item,filter) = this.ReplaceOne(filter)(item)
 
 type TransactionalSoloDB internal (connection: TransactionalConnection) =
     let connectionString = connection.ConnectionString
@@ -612,7 +418,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
         if not (Helper.existsCollection name connection) then 
             Helper.createTableInner<'T> name connection
             
-        Collection<'T>(Transactional connection, name, connectionString)
+        Collection<'T>(Transactional connection, name, connectionString) :> ISoloDBCollection<'T>
 
     member this.GetCollection<'T>() =
         let name = Helper.collectionNameOf<'T>
@@ -881,7 +687,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 dbSchemaVersion <- 1
 
 
-            let rez = dbConnection.Execute("PRAGMA optimize;")
+            let _rez = dbConnection.Execute("PRAGMA optimize;")
             ()
         
         new SoloDB(manager, connectionString, location)
@@ -912,7 +718,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 if not withinTransaction then connection.Execute "ROLLBACK;" |> ignore
                 reraise()
 
-        Collection<'T>(Pooled connectionManager, name, connectionString)
+        Collection<'T>(Pooled connectionManager, name, connectionString) :> ISoloDBCollection<'T>
 
     member this.GetCollection<'T>() =
         let name = Helper.collectionNameOf<'T>
@@ -1022,3 +828,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
     interface IDisposable with
         member this.Dispose() = this.Dispose()
+
+
+    static member ExplainQueryPlan(query: IQueryable<'T>) =
+        ""

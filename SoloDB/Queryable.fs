@@ -58,7 +58,7 @@ type private QueryableBuilder<'T> =
     {
         SQLiteCommand: StringBuilder
         Variables: Dictionary<string, obj>
-        Source: Collection<'T>
+        Source: ISoloDBCollection<'T>
     }
     member this.Append(text: string) =
         this.SQLiteCommand.Append text |> ignore
@@ -509,7 +509,7 @@ module private QueryHelper =
         | Any ->
             builder.Append "SELECT EXISTS(SELECT 1 FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ")) as Value "
+            builder.Append ") LIMIT 1) as Value "
 
         | Contains ->
             builder.Append "SELECT EXISTS(SELECT 1 FROM ("
@@ -758,7 +758,7 @@ module private QueryHelper =
                 -> false
         | _other -> false
 
-    let internal startTranslation (source: Collection<'T>) (expression: Expression) =
+    let internal startTranslation (source: ISoloDBCollection<'T>) (expression: Expression) =
         let builder = {
             SQLiteCommand = StringBuilder(256)
             Variables = Dictionary<string, obj>(16)
@@ -789,21 +789,21 @@ module private QueryHelper =
         builder.SQLiteCommand.ToString(), builder.Variables
 
 
-type internal SoloDBCollectionQueryProvider<'T>(source: Collection<'T>) =
+type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>) =
     interface SoloDBQueryProvider
     member internal this.ExecuteEnumetable<'Elem> (query: string) (par: obj) : IEnumerable<'Elem> =
         seq {
-            use connection = source.Connection.Get()
+            use connection = source.GetInternalConnection()
             yield! Seq.map JsonFunctions.fromSQLite<'Elem> (connection.Query<Types.DbObjectRow>(query, par))
         }
 
     interface IQueryProvider with
         member this.CreateQuery<'TResult>(expression: Expression) : IQueryable<'TResult> =
-            SoloDbCollectionQueryable<'T, 'TResult>(this, expression)
+            SoloDBCollectionQueryable<'T, 'TResult>(this, expression)
 
         member this.CreateQuery(expression: Expression) : IQueryable =
             let elementType = expression.Type.GetGenericArguments().[0]
-            let queryableType = typedefof<SoloDbCollectionQueryable<_,_>>.MakeGenericType(elementType)
+            let queryableType = typedefof<SoloDBCollectionQueryable<_,_>>.MakeGenericType(elementType)
             Activator.CreateInstance(queryableType, source, this, expression) :?> IQueryable
 
         member this.Execute(expression: Expression) : obj =
@@ -826,7 +826,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: Collection<'T>) =
                         .MakeGenericMethod(elemType)
                 m.Invoke(this, [|query; variables|]) :?> 'TResult
             | _other ->
-                use connection = source.Connection.Get()
+                use connection = source.GetInternalConnection()
                 match connection.Query<Types.DbObjectRow>(query, variables) |> Seq.tryHead with
                 | None ->
                     match expression with
@@ -836,7 +836,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: Collection<'T>) =
                 | Some row -> JsonFunctions.fromSQLite<'TResult> row
             
 
-and internal SoloDbCollectionQueryable<'I, 'T>(provider: IQueryProvider, expression: Expression) =
+and internal SoloDBCollectionQueryable<'I, 'T>(provider: IQueryProvider, expression: Expression) =
     interface IOrderedQueryable<'T>
 
     interface IQueryable<'T> with
@@ -853,7 +853,7 @@ and internal SoloDbCollectionQueryable<'I, 'T>(provider: IQueryProvider, express
         member this.GetEnumerator() =
             (this :> IEnumerable<'T>).GetEnumerator() :> IEnumerator
 
-and [<Sealed>] private RootQueryable<'T>(c: Collection<'T>) =
+and [<Sealed>] private RootQueryable<'T>(c: ISoloDBCollection<'T>) =
     member val Source = c
 
     interface IRootQueryable with
@@ -871,9 +871,3 @@ and [<Sealed>] private RootQueryable<'T>(c: Collection<'T>) =
     interface IEnumerable with
         member this.GetEnumerator() =
             Enumerable.Empty<'T>().GetEnumerator()
-
-[<Extension; AbstractClass; Sealed>]
-type QueryableExtensions =
-    [<Extension>]
-    static member AsQueryable<'A>(collection: Collection<'A>) : IQueryable<'A> =
-        SoloDbCollectionQueryable<'A, 'A>(SoloDBCollectionQueryProvider(collection), Expression.Constant(RootQueryable<'A>(collection))) :> IQueryable<'A>

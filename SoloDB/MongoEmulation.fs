@@ -12,6 +12,7 @@ open System.Runtime.InteropServices
 open System.Dynamic
 open System.Globalization
 open System.Reflection
+open System.Linq
 
 type BsonDocument (json: JsonValue) =
     new () = BsonDocument (JsonValue.New())
@@ -210,66 +211,63 @@ and internal BsonDocumentMetaObject(expression: Expression, restrictions: Bindin
 
 
 type InsertManyResult = {
-    Ids: ResizeArray<int64>
+    Ids: IList<int64>
     Count: int64
 }
+
+/// The F# compiler cannot decide which method to call.
+[<AbstractClass; Sealed>]
+type internal ProxyRef =
+    static member ReplaceOne (collection: SoloDatabase.ISoloDBCollection<'a>) (document: 'a) (filter: Expression<Func<'a, bool>>) =
+        collection.ReplaceOne (filter, document)
+
+    static member ReplaceMany (collection: SoloDatabase.ISoloDBCollection<'a>) (document: 'a) (filter: Expression<Func<'a, bool>>) =
+        collection.ReplaceMany (filter, document)
 
 [<Extension; AbstractClass; Sealed>]
 type CollectionExtensions =
     [<Extension>]
-    static member Remove<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>) : int64 =
-        collection.Delete().Where(filter).Execute()
+    static member CountDocuments<'a>(collection: SoloDatabase.ISoloDBCollection<'a>, filter: Expression<Func<'a, bool>>) : int64 =
+        collection.Where(filter).LongCount()
 
     [<Extension>]
-    static member CountDocuments<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>) : int64 =
-        collection.CountWhere(filter)
+    static member CountDocuments<'a>(collection: SoloDatabase.ISoloDBCollection<'a>) : int64 =
+        collection.LongCount()
 
     [<Extension>]
-    static member CountDocuments<'a>(collection: SoloDatabase.Collection<'a>) : int64 =
-        collection.CountAll()
-
-    [<Extension>]
-    static member FirstOrDefault(builder: SoloDatabase.FinalBuilder<'T, 'Q, 'R>) =
-        builder.Enumerate() |> Seq.tryHead |> Option.defaultWith (fun() -> Unchecked.defaultof<'R>)
-
-    [<Extension>]
-    static member Find<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>) =
-        collection.Where filter
+    static member Find<'a>(collection: SoloDatabase.ISoloDBCollection<'a>, filter: Expression<Func<'a, bool>>) =
+        collection.Where(filter)
         
     [<Extension>]
-    static member InsertOne<'a>(collection: SoloDatabase.Collection<'a>, document: 'a) =
+    static member InsertOne<'a>(collection: SoloDatabase.ISoloDBCollection<'a>, document: 'a) =
         collection.Insert document
 
     [<Extension>]
-    static member InsertMany<'a>(collection: SoloDatabase.Collection<'a>, documents: 'a seq) =
-        let result =(collection.InsertBatch documents)
+    static member InsertMany<'a>(collection: SoloDatabase.ISoloDBCollection<'a>, documents: 'a seq) =
+        let result = (collection.InsertBatch documents)
         {
             Ids = result
             Count = result.Count
         }
-        
-    [<Extension>]
-    static member ReplaceOne<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>, document: 'a) =
-        collection.Replace(document).Where(filter).Limit(1UL).Execute()
 
     [<Extension>]
-    static member DeleteOne<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>) =
-        collection.Delete().Where(filter).Limit(1UL).Execute()
+    static member ReplaceOne<'a>(collection: SoloDatabase.ISoloDBCollection<'a>, filter: Expression<Func<'a, bool>>, document: 'a) =
+        ProxyRef.ReplaceOne collection document filter
 
     [<Extension>]
-    static member DeleteMany<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>) =
-        collection.Delete().Where(filter).Execute()
+    static member ReplaceMany<'a>(collection: SoloDatabase.ISoloDBCollection<'a>, filter: Expression<Func<'a, bool>>, document: 'a) =
+        ProxyRef.ReplaceMany collection document filter
 
     [<Extension>]
-    static member UpdateOne<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>, [<ParamArray>] updates: Expression<System.Action<'a>> array) =
-        collection.Update(updates).Where(filter).Limit(1UL).Execute()
+    static member DeleteOne<'a>(collection: SoloDatabase.ISoloDBCollection<'a>, filter: Expression<Func<'a, bool>>) =
+        collection.DeleteMany(filter)
 
     [<Extension>]
-    static member UpdateMany<'a>(collection: SoloDatabase.Collection<'a>, filter: Expression<Func<'a, bool>>, [<ParamArray>] updates: Expression<System.Action<'a>> array) =
-        collection.Update(updates).Where(filter).Execute()
+    static member DeleteMany<'a>(collection: SoloDatabase.ISoloDBCollection<'a>, filter: Expression<Func<'a, bool>>) =
+        collection.DeleteMany(filter)
 
 module private Helper =
-    // Helper to create an expression from a string field name
+    /// Helper to create an expression from a string field name
     let internal getPropertyExpression (fieldPath: string) : Expression<Func<'T, 'TField>> =
         let parameter = Expression.Parameter(typeof<'T>, "x")
         let fields = fieldPath.Split('.')

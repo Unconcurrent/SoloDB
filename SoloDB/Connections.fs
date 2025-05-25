@@ -40,7 +40,6 @@ module Connections =
             // Noop
             ()
 
-
     type PooledConnection internal (connectionStr: string, manager: ConnectionManager) =
         inherit SqliteConnection(connectionStr)
 
@@ -160,8 +159,8 @@ module Connections =
                 pool.Clear()
                 ()
 
-    [<Struct>]
-    type Connection =
+    
+    and [<Struct>] Connection =
         | Pooled of pool: ConnectionManager
         | Transactional of conn: TransactionalConnection
         | Transitive of tc: IDbConnection

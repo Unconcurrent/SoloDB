@@ -12,6 +12,7 @@ open System.Buffers
 open System.Reflection
 open System.Threading
 open System.Runtime.CompilerServices
+open System.Linq.Expressions
 
 
 // FormatterServices.GetSafeUninitializedObject for 
@@ -390,6 +391,20 @@ module Utils =
         /// <summary>For compatilibility, it just calls this.Count. Gets the number of elements contained in the <see cref="T:System.Collections.Generic.List`1" />.</summary>
         /// <returns>The number of elements contained in the <see cref="T:System.Collections.Generic.List`1" />.</returns>
         member this.Length = this.Count
+
+    /// For the F# compiler to allow the implicit use of
+    /// the .NET Expression we need to use it in a C# style class.
+    [<Sealed>][<AbstractClass>] // make it static
+    type internal ExpressionHelper =
+        static member inline internal get<'a, 'b>(expression: Expression<System.Func<'a, 'b>>) = expression
+
+        static member inline internal id (x: Type) =
+            let parameter = Expression.Parameter x
+            Expression.Lambda(parameter, [|parameter|])
+
+        static member inline internal eq (x: Type) (b: obj) =
+            let parameter = Expression.Parameter x
+            Expression.Lambda(Expression.Equal(parameter, Expression.Constant(b, x)), [|parameter|])
 
     module internal SeqExt =
         let internal sequentialGroupBy keySelector (sequence: seq<'T>) =

@@ -9,72 +9,47 @@ open Utils
 open SoloDatabase.Types
 open SoloDatabase.JsonSerializator
 
+[<AbstractClass; Sealed>]
+type internal HasTypeId<'t> =
+    static member val private Properties: PropertyInfo array = typeof<'t>.GetProperties()
+    static member private IdPropertyFilter (p: PropertyInfo) = p.Name = "Id" && p.PropertyType = typeof<int64> && p.CanWrite && p.CanRead
+    static member val internal Value = 
+        HasTypeId<'t>.Properties
+        |> Array.exists HasTypeId<'t>.IdPropertyFilter
+
+    static member val internal Read =
+        match HasTypeId<'t>.Properties
+                |> Array.tryFind HasTypeId<'t>.IdPropertyFilter
+            with
+            | Some p -> 
+                let x = ParameterExpression.Parameter(typeof<'t>, "x")
+                let l = LambdaExpression.Lambda<Func<'t, int64>>(
+                    MethodCallExpression.Call(x, p.GetMethod),
+                    [x]
+                )
+                let fn = l.Compile(false)
+                fn.Invoke
+            | None -> fun (_x: 't) -> failwithf "Cannot read nonexistant Id from Type %A" typeof<'t>.FullName
+
+    static member val internal Write =
+        match HasTypeId<'t>.Properties
+                |> Array.tryFind HasTypeId<'t>.IdPropertyFilter
+            with
+            | Some p -> 
+                let x = ParameterExpression.Parameter(typeof<'t>, "x")
+                let y = ParameterExpression.Parameter(typeof<int64>, "y")
+                let l = LambdaExpression.Lambda<Action<'t, int64>>(
+                    MethodCallExpression.Call(x, p.SetMethod, y),
+                    [|x; y|]
+                )
+                let fn = l.Compile(false)
+                fun x y -> fn.Invoke(x, y)
+            | None -> fun (_x: 't) (_y: int64) -> failwithf "Cannot write nonexistant Id from Type %A" typeof<'t>.FullName
+
+
 module JsonFunctions =
     // Instead of concurrent dictionaries, we can use a static class
     // if the parameters can be represented as generic types.
-
-    [<AbstractClass; Sealed>]
-    type internal HasTypeId<'t> =
-        static member val private Properties: PropertyInfo array = typeof<'t>.GetProperties()
-        static member private IdPropertyFilter (p: PropertyInfo) = p.Name = "Id" && p.PropertyType = typeof<int64> && p.CanWrite && p.CanRead
-        static member val internal Value = 
-            HasTypeId<'t>.Properties
-            |> Array.exists HasTypeId<'t>.IdPropertyFilter
-
-        static member val internal Read =
-            match HasTypeId<'t>.Properties
-                   |> Array.tryFind HasTypeId<'t>.IdPropertyFilter
-                with
-                | Some p -> 
-                    let x = ParameterExpression.Parameter(typeof<'t>, "x")
-                    let l = LambdaExpression.Lambda<Func<'t, int64>>(
-                        MethodCallExpression.Call(x, p.GetMethod),
-                        [x]
-                    )
-                    let fn = l.Compile(false)
-                    fn.Invoke
-                | None -> fun (_x: 't) -> failwithf "Cannot read nonexistant Id from Type %A" typeof<'t>.FullName
-
-        static member val internal Write =
-            match HasTypeId<'t>.Properties
-                   |> Array.tryFind HasTypeId<'t>.IdPropertyFilter
-                with
-                | Some p -> 
-                    let x = ParameterExpression.Parameter(typeof<'t>, "x")
-                    let y = ParameterExpression.Parameter(typeof<int64>, "y")
-                    let l = LambdaExpression.Lambda<Action<'t, int64>>(
-                        MethodCallExpression.Call(x, p.SetMethod, y),
-                        [|x; y|]
-                    )
-                    let fn = l.Compile(false)
-                    fun x y -> fn.Invoke(x, y)
-                | None -> fun (_x: 't) (_y: int64) -> failwithf "Cannot write nonexistant Id from Type %A" typeof<'t>.FullName
-
-    [<AbstractClass; Sealed>]
-    type internal CustomTypeId<'t> =
-        static member val internal Value = 
-            typeof<'t>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-            |> Seq.choose(
-                fun p -> 
-                    match p.GetCustomAttribute<SoloId>(true) with
-                    | a when isNull a -> None
-                    | a -> 
-                    if not p.CanWrite then failwithf "Cannot create a generator for a non writtable parameter '%s' for type %s" p.Name typeof<'t>.FullName
-                    match a.IdGenerator with
-                    | null -> None
-                    | generator -> Some (p, generator)
-                    ) 
-            |> Seq.tryHead
-            |> Option.bind(
-                fun (p, gt) ->
-                    let instance = (Activator.CreateInstance gt) :?> IIdGenerator
-                    Some {|
-                        Generator = instance
-                        SetId = fun id o -> p.SetValue(o, id)
-                        GetId = fun o -> p.GetValue(o)
-                        IdType = p.PropertyType
-                    |}
-            )
 
     let inline internal mustIncludeTypeInformationInSerializationFn (t: Type) = 
         t.IsAbstract || not (isNull (t.GetCustomAttribute<Attributes.PolimorphicAttribute>()))
