@@ -1,4 +1,5 @@
 ﻿namespace SoloDatabase.Attributes
+open System
 
 /// <summary>
 /// If included, the DB will index this property, on: 
@@ -17,3 +18,10 @@ type IndexedAttribute(unique: bool) =
 [<System.AttributeUsage(System.AttributeTargets.Class, AllowMultiple = false); Sealed>]
 type PolimorphicAttribute() =
     inherit System.Attribute()
+
+[<Sealed>]
+[<System.AttributeUsage(System.AttributeTargets.Property, AllowMultiple = false)>]
+type SoloId(idGenerator: Type) =
+    inherit IndexedAttribute(true)
+
+    member val IdGenerator = idGenerator

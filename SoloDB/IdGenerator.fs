@@ -2,6 +2,8 @@
 
 open System
 open SoloDatabase
+open System.Reflection
+open System.Linq.Expressions
 
 #nowarn "3535"
 
@@ -13,9 +15,10 @@ type IIdGenerator =
     abstract GenerateId: obj -> obj -> obj
     abstract IsEmpty: obj -> bool
 
-[<Sealed>]
-[<System.AttributeUsage(System.AttributeTargets.Property, AllowMultiple = false)>]
-type SoloId(idGenerator: Type) =
-    inherit IndexedAttribute(true)
-
-    member val IdGenerator = idGenerator
+type IIdGenerator<'T> =
+    /// <summary>
+    /// object collection -> object document -> id
+    /// </summary>
+    abstract GenerateId: ISoloDBCollection<'T> -> 'T -> obj
+    /// old id -> bool
+    abstract IsEmpty: obj -> bool

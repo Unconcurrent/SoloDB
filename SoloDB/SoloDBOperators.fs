@@ -1,6 +1,7 @@
 ﻿namespace SoloDatabase
 
 open System.Linq.Expressions
+open System.Linq
 open System
 
 module Operators =
@@ -21,49 +22,44 @@ module Operators =
         static member withTransaction func (db: SoloDB) = db.WithTransaction func
         static member optimize (db: SoloDB) = db.Optimize()
 
-        static member ensureIndex<'T, 'R> (func: Expression<System.Func<'T, 'R>>) (collection: Collection<'T>) = collection.EnsureIndex func
-        static member tryDropIndex<'T, 'R> (func: Expression<System.Func<'T, 'R>>) (collection: Collection<'T>) = collection.DropIndexIfExists func
+        static member ensureIndex<'T, 'R> (func: Expression<System.Func<'T, 'R>>) (collection: ISoloDBCollection<'T>) = collection.EnsureIndex func
+        static member tryDropIndex<'T, 'R> (func: Expression<System.Func<'T, 'R>>) (collection: ISoloDBCollection<'T>) = collection.DropIndexIfExists func
 
-        static member countWhere<'T> (func: Expression<System.Func<'T, bool>>) = fun  (collection: Collection<'T>) -> collection.CountWhere func
-        static member count<'T> (collection: Collection<'T>) = collection.Count()
-        static member countAll<'T> (collection: Collection<'T>) = collection.CountAll()
-        static member countAllLimit<'T> (limit: uint64) (collection: Collection<'T>) = collection.CountAllLimit limit
+        static member countWhere<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: ISoloDBCollection<'T>) -> collection.Where(func).LongCount()
+        static member count<'T> (collection: ISoloDBCollection<'T>) = collection.LongCount()
+        static member countAll<'T> (collection: ISoloDBCollection<'T>) = collection.LongCount()
+        static member countAllLimit<'T> (limit: int32) (collection: ISoloDBCollection<'T>) = collection.Take(limit).LongCount()
 
-        static member insert<'T> (item: 'T) (collection: Collection<'T>) = collection.Insert item
-        static member insertBatch<'T> (items: 'T seq) (collection: Collection<'T>) = collection.InsertBatch items
+        static member insert<'T> (item: 'T) (collection: ISoloDBCollection<'T>) = collection.Insert item
+        static member insertBatch<'T> (items: 'T seq) (collection: ISoloDBCollection<'T>) = collection.InsertBatch items
 
-        static member updateF<'T> ([<ParamArray>] func: Expression<Action<'T>> array) = fun (collection: Collection<'T>) -> collection.Update func
-        static member update<'T> (item: 'T) (collection: Collection<'T>) = collection.Update item
-        static member replace<'T> (item: 'T) (collection: Collection<'T>) = collection.Replace item
+        static member update<'T> (item: 'T) (collection: ISoloDBCollection<'T>) = collection.Update item
+        static member replace<'T> (item: 'T) (collection: ISoloDBCollection<'T>) = collection.Update item
 
-        static member delete<'T> (collection: Collection<'T>) = collection.Delete()
-        static member deleteById<'T> id (collection: Collection<'T>) = collection.DeleteById id
+        static member delete<'T> (collection: ISoloDBCollection<'T>) = collection.DeleteMany(fun _ -> true)
+        static member deleteById<'T> id (collection: ISoloDBCollection<'T>) = collection.Delete id
 
-        static member select<'T, 'R> (func: Expression<System.Func<'T, 'R>>) = fun (collection: Collection<'T>) -> collection.Select func
-        static member select<'T> () = fun (collection: Collection<'T>) -> collection.Select()
-        static member selectUnique<'T, 'R> (func: Expression<System.Func<'T, 'R>>) = fun (collection: Collection<'T>) -> collection.SelectUnique func
+        static member select<'T, 'R> (func: Expression<System.Func<'T, 'R>>) = fun (collection: ISoloDBCollection<'T>) -> collection.Select func
+        static member select<'T> () = fun (collection: ISoloDBCollection<'T>) -> collection
+        static member selectUnique<'T, 'R> (func: Expression<System.Func<'T, 'R>>) = fun (collection: ISoloDBCollection<'T>) -> collection.Select(func).Distinct()
 
-        static member where<'a, 'b, 'c> (func: Expression<System.Func<'a, bool>>) = fun (builder: WhereBuilder<'a, 'b, 'c>) -> builder.Where func
-        static member whereId (func: int64) (builder: WhereBuilder<'a, 'b, 'c>) = builder.WhereId func
+        static member where<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: ISoloDBCollection<'T>) -> collection.Where func
+        static member whereId (id: int64) (builder: ISoloDBCollection<'T>) = builder.GetById id
 
-        static member limit (count: uint64) (builder: FinalBuilder<'a, 'b, 'c>) = builder.Limit count
-        static member offset (count: uint64) (builder: FinalBuilder<'a, 'b, 'c>) = builder.Offset count
+        static member limit (count: int) (builder: IQueryable<'T>) = builder.Take count
+        static member offset (count: int) (builder: IQueryable<'T>) = builder.Skip count
 
-        static member orderAsc (func: Expression<System.Func<'a, obj>>) = fun (builder: FinalBuilder<'a, 'b, 'c>) -> builder.OrderByAsc func
-        static member orderDesc (func: Expression<System.Func<'a, obj>>) = fun (builder: FinalBuilder<'a, 'b, 'c>) -> builder.OrderByDesc func
+        static member orderAsc (func: Expression<System.Func<'T, 'K>>) = fun (builder: IQueryable<'T>) -> builder.OrderBy func
+        static member orderDesc (func: Expression<System.Func<'T, 'K>>) = fun (builder: IQueryable<'T>) -> builder.OrderByDescending func
 
-        static member exec (builder: FinalBuilder<'a, 'b, 'c>) = builder.Execute()
-        static member toSeq (builder: FinalBuilder<'a, 'b, 'c>) = builder.Enumerate()
-        static member toList (builder: FinalBuilder<'a, 'b, 'c>) = builder.ToList()
+        static member explain (builder: IQueryable<'T>) = raise(NotImplementedException ())
 
-        static member explain (builder: FinalBuilder<'a, 'b, 'c>) = builder.ExplainQueryPlan()
+        static member getById (id: int64) (collection: ISoloDBCollection<'T>) = collection.GetById id
+        static member tryGetById (id: int64) (collection: ISoloDBCollection<'T>) = collection.TryGetById id
 
-        static member getById (id: int64) (collection: Collection<'T>) = collection.GetById id
-        static member tryGetById (id: int64) (collection: Collection<'T>) = collection.TryGetById id
+        static member tryFirst<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: ISoloDBCollection<'T>) -> func |> collection.Select |> Seq.tryHead
 
-        static member tryFirst<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> func |> collection.TryFirst
+        static member any<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: ISoloDBCollection<'T>) -> func |> collection.Any
 
-        static member any<'T> (func: Expression<System.Func<'T, bool>>) = fun (collection: Collection<'T>) -> func |> collection.Any
-
-        static member toSeq (collection: Collection<'T>) = collection.AsEnumerable()
-        static member toList (collection: Collection<'T>) = collection.ToList()
+        static member toSeq (collection: ISoloDBCollection<'T>) = collection.AsEnumerable()
+        static member toList (collection: ISoloDBCollection<'T>) = collection.ToList()
