@@ -33,5 +33,6 @@ type internal CustomTypeId<'t> =
                     SetId = fun id o -> p.SetValue(o, id)
                     GetId = fun o -> p.GetValue(o)
                     IdType = p.PropertyType
+                    Property = p
                 |}
         )

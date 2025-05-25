@@ -175,10 +175,10 @@ collection.Insert(data);
 Console.WriteLine("{0}", data.Id); // 2
 
 // Query all documents into a C# list
-var documents = collection.Select().ToList();
+var documents = collection.ToList();
 
 // Query the Data property, where Name starts with 'Document'
-var documentsData = collection.Select(d => d.Data).Where(d => d.Name.StartsWith("Document")).ToList();
+var documentsData = collection.Where(d => d.Name.StartsWith("Document")).Select(d => d.Data).ToList();
 
 data.Data = "Updated data";
 
@@ -186,7 +186,7 @@ data.Data = "Updated data";
 collection.Update(data);
 
 // Delete a document
-var count = collection.DeleteById(data.Id); // 1
+var count = collection.Delete(data.Id); // 1
 ```
 
 And in F#:
@@ -212,7 +212,7 @@ printfn "%A" data.Id // 2
 let documents = collection.ToList()
         
 // Query the Data property, where Name starts with 'Document'
-let documentsData = collection.Select(fun d -> d.Data).Where(fun d -> d.Name.StartsWith "Document").ToList()
+let documentsData = collection.Where(fun d -> d.Name.StartsWith "Document").Select(fun d -> d.Data).ToList()
         
 let data = {data with  Data = "Updated data"}
         
@@ -220,7 +220,7 @@ let data = {data with  Data = "Updated data"}
 collection.Update(data)
         
 // Delete a document
-let count = collection.DeleteById(data.Id) // 1
+let count = collection.Delete(data.Id) // 1
 ```
 ### Licence
 You can read the [LICENSE.txt](./LICENSE.txt).

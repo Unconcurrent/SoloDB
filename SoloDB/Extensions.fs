@@ -7,6 +7,7 @@ open System.Text.RegularExpressions
 open System.Runtime.CompilerServices
 open System.Linq.Expressions
 open FSharp.Interop.Dynamic
+open System.Reflection
 
 [<Extension; AbstractClass; Sealed>]
 type Extensions =
@@ -24,6 +25,10 @@ type Extensions =
     [<Extension>]
     static member Dyn<'T>(this: obj, property: string) : 'T = // LINQ Expressions do not support C# dynamic.
         this |> Dyn.get<'T> property
+
+    [<Extension>]
+    static member Dyn<'T>(this: obj, property: PropertyInfo) : 'T = // LINQ Expressions do not support C# dynamic.
+        property.GetValue this :?> 'T
 
     [<Extension>]
     static member Dyn(this: obj, property: string) : obj =

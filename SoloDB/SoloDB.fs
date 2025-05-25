@@ -191,7 +191,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     member val private SoloDBQueryable = SoloDBCollectionQueryable<'T, 'T>(SoloDBCollectionQueryProvider(this), Expression.Constant(RootQueryable<'T>(this))) :> IOrderedQueryable<'T>
     member val private ConnectionString = connectionString
     member val Name = name
-    member val InTransaction = match connection with | Transactional _ -> true | Pooled _ -> false | Transitive _ -> true
+    member val InTransaction = match connection with | Transactional _ | Transitive _ -> true | Pooled _ -> false
     member val IncludeType = mustIncludeTypeInformationInSerialization<'T>
     member val internal Connection = connection
 
@@ -271,7 +271,8 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 
     
     member this.TryGetById<'IdType when 'IdType : equality>(id: 'IdType) : 'T option =
-        let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>("Id") = id))
+        let idProp = CustomTypeId<'T>.Value.Value.Property
+        let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
         use connection = connection.Get()
         match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
         | json when Object.ReferenceEquals(json, null) -> None
@@ -283,23 +284,25 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         | Some x -> x
 
     member this.DeleteById<'IdType when 'IdType : equality>(id: 'IdType) : int =
-        let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>("Id") = id))
+        let idProp = CustomTypeId<'T>.Value.Value.Property
+        let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
         use connection = connection.Get()
         connection.Execute ($"DELETE FROM \"{name}\" WHERE {filter}", variables)
 
     member this.Update(item: 'T) =
-        let id = 
+        let filter, variables = 
             if HasTypeId<'T>.Value then
-                HasTypeId<'T>.Read item |> box
+                let id = HasTypeId<'T>.Read item
+                QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<int64>("Id") = id))
             else match CustomTypeId<'T>.Value with
                  | Some customId ->
-                    customId.GetId (item |> box)
+                    let id = customId.GetId (item |> box)
+                    let idProp = CustomTypeId<'T>.Value.Value.Property
+                    QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = id))
                  | None ->
                     raise (InvalidOperationException $"The item's type {typeof<'T>.Name} does not have a int64 Id property or a custom Id to use in the update process.")
 
-        let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>("Id") = id))
         variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
-
         use connection = connection.Get()
         let _count = connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
 

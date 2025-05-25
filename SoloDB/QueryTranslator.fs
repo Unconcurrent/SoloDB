@@ -565,6 +565,15 @@ module QueryTranslator =
 
             visitProperty o property m qb
 
+
+        | "Dyn" when m.Arguments.[1].Type = typeof<PropertyInfo> ->
+            let o = m.Arguments.[0]
+
+            let property = evaluateExpr<PropertyInfo> m.Arguments[1]
+            let propertyName = property.Name
+
+            visitProperty o propertyName m qb
+
         | "Dyn" ->
             let o = m.Arguments.[0]
 
