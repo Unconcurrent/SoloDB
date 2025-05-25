@@ -116,7 +116,15 @@ module private QueryHelper =
         | _ -> None
 
     let private escapeSQLiteString (input: string) : string =
-        input.Replace("'", "''")
+        input.Replace("'", "''").Replace("\0", "")
+
+    let private extractValueAsJsonIfNecesary (x: Type) =
+        let isPrimitive = QueryTranslator.isPrimitiveSQLiteType x
+
+        if isPrimitive then
+            "Value "
+        else
+            "json_extract(Value, '$') "
 
     let private readSoloDBQueryable<'T> (methodArg: Expression) =
         let failwithMsg = "Cannot concat with an IEnumerable other that another SoloDB IQueryable, on the same connection. Do do this anyway, use to AsEnumerable()."
@@ -134,9 +142,9 @@ module private QueryHelper =
 
     let private translateSource<'T> (builder: QueryableBuilder<'T>) (root: IRootQueryable) =
         let sourceName = root.SourceTableName
-        builder.Append "SELECT Id, \""
+        builder.Append "SELECT Id, jsonb_extract(\""
         builder.Append sourceName
-        builder.Append "\".Value as Value FROM \""
+        builder.Append "\".Value, '$') as Value FROM \""
         builder.Append sourceName
         builder.Append "\""
 
@@ -150,7 +158,7 @@ module private QueryHelper =
         builder.Append "("
 
         match expression.Arguments.Count with
-        | 1 -> QueryTranslator.translateQueryable "" (ExpressionHelper.get(fun x -> x)) builder.SQLiteCommand builder.Variables
+        | 1 -> QueryTranslator.translateQueryable "" (expression.Method.ReturnType |> ExpressionHelper.id) builder.SQLiteCommand builder.Variables
         | 2 -> QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
         | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
@@ -189,7 +197,7 @@ module private QueryHelper =
             // TOTAL() always returns a float, therefore we will just check for NULL
             builder.Append "SELECT COALESCE(("
             aggregateTranslator "SUM" builder expression
-            builder.Append "),0) as Value"
+            builder.Append "),0) as Value "
 
         | Average ->
             raiseIfNullAggregateTranslator "AVG" builder expression "Sequence contains no elements"
@@ -207,7 +215,7 @@ module private QueryHelper =
             builder.Append ") GROUP BY "
 
             match expression.Arguments.Count with
-            | 1 -> QueryTranslator.translateQueryable "" (ExpressionHelper.get(fun x -> x)) builder.SQLiteCommand builder.Variables
+            | 1 -> QueryTranslator.translateQueryable "" (GenericMethodArgCache.Get expression.Method |> Array.head |> ExpressionHelper.id) builder.SQLiteCommand builder.Variables
             | 2 -> QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
@@ -248,38 +256,21 @@ module private QueryHelper =
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
         | Where ->
-            match expression.Arguments.[0] with
-            | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
-                let tableName = (ce.Value :?> IRootQueryable).SourceTableName
-                builder.Append "SELECT Id, \""
-                builder.Append tableName
-                builder.Append "\".Value as Value FROM \""
-                
-                builder.Append tableName
-                builder.Append "\" WHERE "
-                QueryTranslator.translateQueryable tableName expression.Arguments.[1] builder.SQLiteCommand builder.Variables
-            | _other ->
-                builder.Append "SELECT Id, Value FROM ("
+            builder.Append "SELECT Id, Value FROM ("
 
-                translate builder expression.Arguments.[0]
+            translate builder expression.Arguments.[0]
 
-                builder.Append ") WHERE "
-                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            builder.Append ") WHERE "
+            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
 
         | Select ->
             builder.Append "SELECT Id, "
             QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
             builder.Append " as Value FROM "
-            match expression.Arguments.[0] with
-            | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
-                let tableName = (ce.Value :?> IRootQueryable).SourceTableName
-                builder.Append "\""
-                builder.Append tableName
-                builder.Append "\""
-            | other ->
-                builder.Append "("
-                translate builder other
-                builder.Append ")"
+            builder.Append "("
+            translate builder expression.Arguments.[0]
+            builder.Append ")"
+                
 
         | SelectMany ->
             match expression.Arguments.Count with
@@ -287,59 +278,35 @@ module private QueryHelper =
                 let generics = GenericMethodArgCache.Get expression.Method
 
                 if generics.[1] (*output*) = typeof<byte> then
-                    raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit SQLite context with .AsEnumerable().")
+                    raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit the SQLite context with .AsEnumerable().")
 
-                // SelectMany with collection selector only
-                let outerVar = Utils.getRandomVarName()
-                let indexVar = Utils.getRandomVarName()
-                let collectionVar = Utils.getRandomVarName()
-                let resultVar = Utils.getRandomVarName()
-                
-                // First, we need to apply the collection selector to each element in the source sequence
-                // and preserve the original order with an index
-                builder.Append "WITH "
-                builder.Append outerVar
-                builder.Append " AS (SELECT Id, Value, ROW_NUMBER() OVER() as "
-                builder.Append indexVar
-                builder.Append " FROM ("
+                let innerSourceName = Utils.getRandomVarName ()
+
+                builder.Append "SELECT "
+                builder.Append innerSourceName
+                builder.Append ".Id AS Id, json_each.Value as Value FROM ("
+
+                // Evaluate and emit the outer source query (produces Id, Value)
                 translate builder expression.Arguments.[0]
-                builder.Append ")), "
-                
-                // Then extract the collection items using the collection selector
-                builder.Append collectionVar
-                builder.Append " AS (SELECT "
-                builder.Append outerVar
-                builder.Append ".Id as OuterId, "
-                builder.Append outerVar
-                builder.Append "."
-                builder.Append indexVar
-                builder.Append " as RowIndex, "
-                
-                // Apply collection selector to get the collection value for each element
-                QueryTranslator.translateQueryable outerVar expression.Arguments.[1] builder.SQLiteCommand builder.Variables
-                
-                builder.Append " as CollectionValue FROM "
-                builder.Append outerVar
-                builder.Append "), "
-                
-                // Create the flattened result with items from all collections
-                builder.Append resultVar
-                builder.Append " AS (SELECT "
-                builder.Append collectionVar
-                builder.Append ".OuterId as Id, "
-                builder.Append collectionVar
-                builder.Append ".RowIndex as RowIndex, "
-                builder.Append "items.value as Value, "
-                builder.Append "items.key as ItemIndex FROM "
-                builder.Append collectionVar
-                builder.Append ", json_each("
-                builder.Append collectionVar
-                builder.Append ".CollectionValue) items) "
-                
-                // Select the final result, preserving the original order
-                builder.Append "SELECT Id, Value FROM "
-                builder.Append resultVar
-                builder.Append " ORDER BY RowIndex, ItemIndex"
+
+                builder.Append ") AS "
+                builder.Append innerSourceName
+                builder.Append " "
+                builder.Append "JOIN json_each(jsonb_extract("
+                builder.Append innerSourceName
+                builder.Append ".Value, '$."
+        
+                // Extract the path to the collection selector (e.g., "$.Values")
+                match expression.Arguments.[1] with
+                | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
+                    let lambda = ue.Operand :?> LambdaExpression
+                    match lambda.Body with
+                    | :? MemberExpression as me ->
+                        builder.Append me.Member.Name
+                    | _ -> failwith "Unsupported SelectMany selector structure"
+                | _ -> failwith "Invalid SelectMany structure"
+
+                builder.Append "'))"
                 
             | other -> 
                 failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
@@ -371,7 +338,8 @@ module private QueryHelper =
         | Order | OrderDescending ->
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ") ORDER BY jsonb_extract(Value, '$') "
+            builder.Append ") ORDER BY "
+            QueryTranslator.translateQueryable "" (GenericMethodArgCache.Get expression.Method |> Array.head |> ExpressionHelper.id) builder.SQLiteCommand builder.Variables
             if method = OrderDescending then
                 builder.Append "DESC "
 
@@ -416,11 +384,11 @@ module private QueryHelper =
                     let jsonText = jsonObj.ToJsonString()
                     let escapedJsonText = escapeSQLiteString jsonText
 
-                    builder.Append "jsonb('"
+                    builder.Append "jsonb_extract(jsonb('"
                     builder.Append escapedJsonText
-                    builder.Append "')"
+                    builder.Append "'), '$')"
                 else
-                    builder.Append "jsonb(NULL)"
+                    builder.Append "NULL"
 
             | 2 -> 
                 // If a default value is provided, return it when the result set is empty
@@ -430,9 +398,9 @@ module private QueryHelper =
                 let jsonText = jsonObj.ToJsonString()
                 let escapedJsonText = escapeSQLiteString jsonText
 
-                builder.Append "jsonb('"
+                builder.Append "jsonb_extract(jsonb('"
                 builder.Append escapedJsonText
-                builder.Append "')"
+                builder.Append "'), '$')"
 
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
@@ -541,20 +509,20 @@ module private QueryHelper =
         | Any ->
             builder.Append "SELECT EXISTS(SELECT 1 FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ")) as Value"
+            builder.Append ")) as Value "
 
         | Contains ->
             builder.Append "SELECT EXISTS(SELECT 1 FROM ("
             translate builder expression.Arguments.[0]
             builder.Append ") WHERE "
 
-            let value = 
+            let struct (t, value) = 
                 match expression.Arguments.[1] with
-                | :? ConstantExpression as ce -> ce.Value
+                | :? ConstantExpression as ce -> struct (ce.Type, ce.Value)
                 | other -> failwithf "Invalid Contains(...) parameter: %A" other
 
-            QueryTranslator.translateQueryable "" (ExpressionHelper.get(fun x -> x = value)) builder.SQLiteCommand builder.Variables
-            builder.Append ") as Value"
+            QueryTranslator.translateQueryable "" (ExpressionHelper.eq t value) builder.SQLiteCommand builder.Variables
+            builder.Append ") as Value "
 
         | Append ->
             translate builder expression.Arguments.[0]
@@ -574,7 +542,7 @@ module private QueryHelper =
             builder.Append "jsonb('"
             builder.Append escapedString
             builder.Append "')"
-            builder.Append " As Value"
+            builder.Append " As Value "
 
         | Concat ->
             translate builder expression.Arguments.[0]
@@ -797,12 +765,23 @@ module private QueryHelper =
             Source = source
         }
 
+        let valueDecoded = 
+            if typedefof<IQueryable>.IsAssignableFrom expression.Type then
+                extractValueAsJsonIfNecesary (GenericTypeArgCache.Get expression.Type |> Array.head)
+            else 
+                extractValueAsJsonIfNecesary expression.Type
+
+
         if doesNotReturnIdFn expression then
-            builder.Append "SELECT -1 as Id, json_quote(Value) as ValueJSON FROM ("
+            builder.Append "SELECT -1 as Id, "
+            builder.Append valueDecoded
+            builder.Append "as ValueJSON FROM ("
             translate builder expression
             builder.Append ")"
         else
-            builder.Append "SELECT Id, json_quote(Value) as ValueJSON FROM ("
+            builder.Append "SELECT Id, "
+            builder.Append valueDecoded
+            builder.Append "as ValueJSON FROM ("
             translate builder expression
             builder.Append ")"
 
@@ -832,6 +811,11 @@ type internal SoloDBCollectionQueryProvider<'T>(source: Collection<'T>) =
 
         member this.Execute<'TResult>(expression: Expression) : 'TResult =
             let query, variables = QueryHelper.startTranslation source expression
+            #if DEBUG
+            if System.Diagnostics.Debugger.IsAttached then
+                printfn "%s" query
+            #endif
+
             match typeof<'TResult> with
             | t when t.IsGenericType
                      && typedefof<IEnumerable<_>> = (typedefof<'TResult>) ->

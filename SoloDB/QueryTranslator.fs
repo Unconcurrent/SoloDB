@@ -56,6 +56,9 @@ module QueryTranslator =
             sb.Append (sprintf "@%s" name) |> ignore
         variables.[name] <- jsonValue
 
+    let internal isPrimitiveSQLiteType (x: Type) =
+        Utils.isIntegerBasedType x || Utils.isFloatBasedType x || x = typedefof<string> || x = typedefof<char> || x = typedefof<bool>
+
     type private QueryBuilder = 
         {
             StringBuilder: StringBuilder
@@ -645,7 +648,7 @@ module QueryTranslator =
         else if qb.UpdateMode then
             qb.AppendRaw $"'$'"
         else
-            if qb.JsonExtractSelfValue then
+            if qb.JsonExtractSelfValue && not (isPrimitiveSQLiteType m.Type) then
                 if qb.StringBuilder.Length = 0 
                 then qb.AppendRaw $"json_extract(json({qb.TableNameDot}Value), '$')" // To avoid returning the jsonB format instead of normal json.
                 else qb.AppendRaw $"jsonb_extract({qb.TableNameDot}Value, '$')"
@@ -799,6 +802,7 @@ module QueryTranslator =
     let internal translateQueryable (tableName: string) (expression: Expression) (sb: StringBuilder) (variables: Dictionary<string, obj>) =
         let builder = QueryBuilder.New sb variables false tableName expression -1
         visit expression builder
+        sb.Append " " |> ignore
 
     let internal translateWithId (tableName: string) (expression: Expression) idParameterIndex =
         let sb = StringBuilder()

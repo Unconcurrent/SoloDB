@@ -250,7 +250,7 @@ type internal Tokenizer =
             | c when Char.IsWhiteSpace(c) ->
                 this.index <- this.index + 1
                 this.ReadNext()
-            | _ -> failwith "Invalid JSON format"
+            | c -> failwithf "Unexpected JSON character: %c" c
         else
         EndOfInput
 
@@ -499,29 +499,16 @@ and JsonValue =
         json
         
     static member Parse (jsonString: string) =
+        if isNull jsonString then Null else
+
         let tokenizer = Tokenizer(jsonString)
         let json = tokenizer.Parse()
         json
 
-    static member Create (values: #((obj * obj) seq)) = 
+    static member Create<'key, 'a, 'enu when 'enu :> struct ('key * 'a) seq> (values: 'enu) = 
         let json = JsonValue.New()
         for (key, v) in values do
-            let key = 
-                match key with
-                | :? string as s -> s
-                | :? int16 as i -> i.ToString(CultureInfo.InvariantCulture)
-                | :? uint16 as i -> i.ToString(CultureInfo.InvariantCulture)
-                | :? int as i -> i.ToString(CultureInfo.InvariantCulture)
-                | :? uint as i -> i.ToString(CultureInfo.InvariantCulture)
-                | :? int64 as i -> i.ToString(CultureInfo.InvariantCulture)
-                | :? uint64 as i -> i.ToString(CultureInfo.InvariantCulture)
-    
-                | :? float32 as i -> i.ToString(CultureInfo.InvariantCulture)
-                | :? float as i -> i.ToString(CultureInfo.InvariantCulture)
-                | :? decimal as i -> i.ToString(CultureInfo.InvariantCulture)
-                | other -> string other
-    
-            json.[key] <- JsonSerializerImpl<obj>.Serialize v
+            json.[string key] <- JsonSerializerImpl<'a>.Serialize v
         json
 
     override this.ToString() = this.ToJsonString()
@@ -2438,7 +2425,6 @@ and internal JsonValueMetaObject(expression: Expression, restrictions: BindingRe
     
     static member val private GetPropertyMethod = typeof<JsonValue>.GetMethod("GetPropertyForBinder", BindingFlags.NonPublic ||| BindingFlags.Instance)
     static member val private SetPropertyMethod = typeof<JsonValue>.GetMethod("set_Item")
-    static member val private ToObjectMethod = typeof<JsonValue>.GetMethod("ToObject`1")
     static member val private ToStringMethod = typeof<obj>.GetMethod("ToString")
     static member val private SerializeMethod = typeof<JsonValue>.GetMethod("Serialize").MakeGenericMethod(typeof<obj>)
 
@@ -2451,17 +2437,17 @@ and internal JsonValueMetaObject(expression: Expression, restrictions: BindingRe
         let setExpression = Expression.Call(
             Expression.Convert(this.Expression, typeof<JsonValue>), 
             JsonValueMetaObject.SetPropertyMethod, 
-            Expression.Constant(binder.Name), 
-            Expression.Call(JsonValueMetaObject.SerializeMethod, value.Expression)
+            Expression.Constant(binder.Name),
+            Expression.Call(JsonValueMetaObject.SerializeMethod, Expression.Convert(value.Expression, typeof<obj>))
         )
 
-        let returnExpre = Expression.Block(setExpression, value.Expression)
+        let returnExpre = Expression.Block(setExpression, Expression.Convert(value.Expression, typeof<obj>))
 
         DynamicMetaObject(returnExpre, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
     
     /// This is used for the conversion of the JsonValue to the target type.
     override this.BindConvert(binder: ConvertBinder) : DynamicMetaObject =
-        let convertMethod = JsonValueMetaObject.ToObjectMethod.MakeGenericMethod(binder.Type)
+        let convertMethod = typeof<JsonValue>.GetMethod("ToObject", [|binder.Type|])
         let convertExpression = Expression.Call(Expression.Convert(this.Expression, typeof<JsonValue>), convertMethod)
         DynamicMetaObject(convertExpression, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
    
@@ -2491,10 +2477,10 @@ and internal JsonValueMetaObject(expression: Expression, restrictions: BindingRe
             Expression.Convert(this.Expression, typeof<JsonValue>), 
             JsonValueMetaObject.SetPropertyMethod,
             Expression.Call(indexExpr, JsonValueMetaObject.ToStringMethod),
-            Expression.Call(JsonValueMetaObject.SerializeMethod, value.Expression)
+            Expression.Call(JsonValueMetaObject.SerializeMethod, Expression.Convert(value.Expression, typeof<obj>))
         )
 
-        let returnExpre = Expression.Block(setExpression, value.Expression)
+        let returnExpre = Expression.Block(setExpression, Expression.Convert(value.Expression, typeof<obj>))
 
         DynamicMetaObject(returnExpre, BindingRestrictions.GetTypeRestriction(this.Expression, this.LimitType))
     

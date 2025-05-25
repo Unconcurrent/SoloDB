@@ -26,6 +26,14 @@ open System.Globalization
 type internal ExpressionHelper =
     static member inline internal get<'a, 'b>(expression: Expression<System.Func<'a, 'b>>) = expression
 
+    static member inline internal id (x: Type) =
+        let parameter = Expression.Parameter x
+        Expression.Lambda(parameter, [|parameter|])
+
+    static member inline internal eq (x: Type) (b: obj) =
+        let parameter = Expression.Parameter x
+        Expression.Lambda(Expression.Equal(parameter, Expression.Constant(b, x)), [|parameter|])
+
 module internal Helper =
     let internal lockTable (connectionStr: string) (name: string) =
         let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(connectionStr)}-Table-{name}")
