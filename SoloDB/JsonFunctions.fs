@@ -140,12 +140,10 @@ module JsonFunctions =
                 let exc = toJson<string> row.ValueJSON
                 raise (exn exc)
 
-            if row.ValueJSON = null then
-                Unchecked.defaultof<'R>
-            else
-
             match JsonValue.Parse row.ValueJSON with
             | Null when typeof<JsonValue> = typeof<'R> -> 
+                Unchecked.defaultof<'R>
+            | Null when typeof<'R>.IsValueType && typeof<float> <> typeof<'R> && typeof<float32> <> typeof<'R> -> 
                 Unchecked.defaultof<'R>
             | json ->
 
