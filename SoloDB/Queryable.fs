@@ -53,6 +53,7 @@ type internal SupportedLinqMethods =
 | IntersectBy
 | Cast
 | OfType
+| Aggregate
 
 type private QueryableBuilder<'T> = 
     {
@@ -113,6 +114,7 @@ module private QueryHelper =
         | "IntersectBy" -> Some IntersectBy
         | "Cast" -> Some Cast
         | "OfType" -> Some OfType
+        | "Aggregate" -> Some Aggregate
         | _ -> None
 
     let private escapeSQLiteString (input: string) : string =
@@ -142,6 +144,7 @@ module private QueryHelper =
 
     let private translateSource<'T> (builder: QueryableBuilder<'T>) (root: IRootQueryable) =
         let sourceName = root.SourceTableName
+        // On modification, also check the '| Where -> ' match below.
         builder.Append "SELECT Id, jsonb_extract(\""
         builder.Append sourceName
         builder.Append "\".Value, '$') as Value FROM \""
@@ -256,12 +259,23 @@ module private QueryHelper =
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
         | Where ->
-            builder.Append "SELECT Id, Value FROM ("
+            match expression.Arguments.[0] with
+            | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
+                let tableName = (ce.Value :?> IRootQueryable).SourceTableName
+                builder.Append "SELECT Id, jsonb_extract(\""
+                builder.Append tableName
+                builder.Append "\".Value) as Value FROM \""
+                
+                builder.Append tableName
+                builder.Append "\" WHERE "
+                QueryTranslator.translateQueryable tableName expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            | _other ->
+                builder.Append "SELECT Id, Value FROM ("
 
-            translate builder expression.Arguments.[0]
+                translate builder expression.Arguments.[0]
 
-            builder.Append ") WHERE "
-            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+                builder.Append ") WHERE "
+                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
 
         | Select ->
             builder.Append "SELECT Id, "
@@ -693,6 +707,8 @@ module private QueryHelper =
             builder.AppendVar typeName
             builder.Append " "
 
+        | Aggregate -> failwithf "Aggregate is not supported."
+
 
     and private translateConstant (builder: QueryableBuilder<'T>) (expression: ConstantExpression) =
         if typedefof<IRootQueryable>.IsAssignableFrom expression.Type then
@@ -722,6 +738,7 @@ module private QueryHelper =
             | All
             | Any
             | Contains
+            | Aggregate
                 -> true
             | Min
             | Max
@@ -758,6 +775,12 @@ module private QueryHelper =
                 -> false
         | _other -> false
 
+    let internal isAggregateExplainQuery (expression: MethodCallExpression) =
+        expression.Arguments.Count > 2 
+        && expression.Arguments.[1] :? ConstantExpression 
+        && Object.ReferenceEquals((expression.Arguments.[1] :?> ConstantExpression).Value, (QueryPlan.InputStringReference :> obj)) 
+        && expression.Arguments.[2].NodeType = ExpressionType.Quote
+
     let internal startTranslation (source: ISoloDBCollection<'T>) (expression: Expression) =
         let builder = {
             SQLiteCommand = StringBuilder(256)
@@ -770,6 +793,15 @@ module private QueryHelper =
                 extractValueAsJsonIfNecesary (GenericTypeArgCache.Get expression.Type |> Array.head)
             else 
                 extractValueAsJsonIfNecesary expression.Type
+
+        let struct (isExplainQueryPlan, expression) =
+            match expression with
+            | :? MethodCallExpression as expression when isAggregateExplainQuery expression -> 
+                struct (true, expression.Arguments.[0])
+            | _ -> struct (false, expression)
+
+        if isExplainQueryPlan then
+            builder.Append "EXPLAIN QUERY PLAN "
 
 
         if doesNotReturnIdFn expression then
@@ -811,6 +843,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>) =
 
         member this.Execute<'TResult>(expression: Expression) : 'TResult =
             let query, variables = QueryHelper.startTranslation source expression
+
             #if DEBUG
             if System.Diagnostics.Debugger.IsAttached then
                 printfn "%s" query
@@ -825,6 +858,12 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>) =
                         .GetMethod(nameof(this.ExecuteEnumetable), BindingFlags.NonPublic ||| BindingFlags.Instance)
                         .MakeGenericMethod(elemType)
                 m.Invoke(this, [|query; variables|]) :?> 'TResult
+                    // When is explain query plan.
+            | t when t = typeof<string> && (match expression with | :? MethodCallExpression as expression -> QueryHelper.isAggregateExplainQuery expression | _ -> false) ->
+                use connection = source.GetInternalConnection()
+                let result = connection.Query<{|detail: string|}>(query, variables) |> Seq.toList
+                let plan = result |> List.map(_.detail) |> String.concat ";\n"
+                plan :> obj :?> 'TResult
             | _other ->
                 use connection = source.GetInternalConnection()
                 match connection.Query<Types.DbObjectRow>(query, variables) |> Seq.tryHead with

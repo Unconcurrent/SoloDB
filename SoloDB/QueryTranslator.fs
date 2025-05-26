@@ -347,6 +347,11 @@ module QueryTranslator =
     and private visitProperty (o: Expression) (property: obj)  (m: Expression) (qb: QueryBuilder) =
         match property with
         | :? string as property ->
+            if property = "Id" && o.NodeType = ExpressionType.Parameter && (m.Type = typeof<int64> || m.Type = typeof<int32>) then
+                qb.AppendRaw qb.TableNameDot
+                qb.AppendRaw "Id "
+            else
+
             let memberAccess = {
                 Expression = o
                 MemberName = property

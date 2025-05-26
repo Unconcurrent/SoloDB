@@ -96,7 +96,7 @@ module FileStorage =
         tryGetDirectoriesWhere db "dh.FullPath = @Path" {|Path = path|} |> Seq.tryHead
 
     let rec private getOrCreateDir (db: SqliteConnection) (path: string) =
-        use l = lockPathIfNotInTransaction db path
+        use _l = lockPathIfNotInTransaction db path
 
         match tryGetDir db path with
         | Some d -> d
@@ -134,23 +134,23 @@ module FileStorage =
     let private downsetFileLength (db: SqliteConnection) (fileId: int64) (newFileLength: int64) =
         let lastChunkNumberKeep = ((float(newFileLength) / float(chunkSize)) |> Math.Ceiling |> int64) - 1L
 
-        let resultDelete = db.Execute(@"DELETE FROM SoloDBFileChunk WHERE FileId = @FileId AND Number > @LastChunkNumber",
+        let _resultDelete = db.Execute(@"DELETE FROM SoloDBFileChunk WHERE FileId = @FileId AND Number > @LastChunkNumber",
                        {| FileId = fileId; LastChunkNumber = lastChunkNumberKeep |})
 
-        let resultUpdate = db.Execute(@"UPDATE SoloDBFileHeader 
+        let _resultUpdate = db.Execute(@"UPDATE SoloDBFileHeader 
                         SET Length = @NewFileLength
                         WHERE Id = @FileId",
                        {| FileId = fileId; NewFileLength = newFileLength |})
         ()
 
     let private deleteFile (db: SqliteConnection) (file: SoloDBFileHeader) =
-        let result = db.Execute(@"DELETE FROM SoloDBFileHeader WHERE Id = @FileId",
+        let _result = db.Execute(@"DELETE FROM SoloDBFileHeader WHERE Id = @FileId",
                     {| FileId = file.Id; |})
 
         ()
 
     let private deleteDirectory (db: SqliteConnection) (dir: SoloDBDirectoryHeader) = 
-        let result = db.Execute(@"DELETE FROM SoloDBDirectoryHeader WHERE Id = @DirId",
+        let _result = db.Execute(@"DELETE FROM SoloDBDirectoryHeader WHERE Id = @DirId",
                         {| DirId = dir.Id; |})
         ()
 
