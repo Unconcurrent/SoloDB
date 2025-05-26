@@ -186,8 +186,6 @@ module internal Helper =
         typeof<'T>.Name |> formatName
 
 type internal Collection<'T>(connection: Connection, name: string, connectionString: string) as this =
-    do CustomTypeId<'T>.Value |> ignore
-
     member val private SoloDBQueryable = SoloDBCollectionQueryable<'T, 'T>(SoloDBCollectionQueryProvider(this), Expression.Constant(RootQueryable<'T>(this))) :> IOrderedQueryable<'T>
     member val private ConnectionString = connectionString
     member val Name = name
@@ -217,18 +215,21 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         else
 
         use connection = connection.Get()
+        use directConnection = new DirectConnection(connection)
+        let transientConnection = Collection((Connection.Transitive directConnection), name, connectionString)
         connection.Execute "BEGIN;" |> ignore
 
         try
             let ids = List<int64>()
             for item in items do
-                Helper.insertInner this.IncludeType item connection name this |> ids.Add
+                Helper.insertInner this.IncludeType item connection name transientConnection |> ids.Add
 
             connection.Execute "COMMIT;" |> ignore
             ids
         with ex ->
             connection.Execute "ROLLBACK;" |> ignore
             reraise()
+            
 
     member this.InsertOrReplaceBatch (items: 'T seq) =
         if this.InTransaction then
@@ -241,12 +242,14 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         else
 
         use connection = connection.Get()
+        use directConnection = new DirectConnection(connection)
+        let transientConnection = Collection((Connection.Transitive directConnection), name, connectionString)
         connection.Execute "BEGIN;" |> ignore
         
         try
             let ids = List<int64>()
             for item in items do
-                Helper.insertOrReplaceInner this.IncludeType item connection name this |> ids.Add
+                Helper.insertOrReplaceInner this.IncludeType item connection name transientConnection |> ids.Add
 
             connection.Execute "COMMIT;" |> ignore
             ids
@@ -834,4 +837,4 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
 
     static member ExplainQueryPlan(query: IQueryable<'T>) =
-        ""
+        query.Aggregate(QueryPlan.InputStringReference, (fun _a _b -> ""))

@@ -10,6 +10,7 @@ module Connections =
     open System.Threading.Tasks
     open Utils
 
+    /// Redirect all the method calls to the connection provided in the constructor, and on Dispose, it is a noop.
     type DirectConnection internal (connection: IDbConnection) =
         interface IDbConnection with
             override this.BeginTransaction() = connection.BeginTransaction()

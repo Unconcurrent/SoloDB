@@ -375,55 +375,6 @@ type FilterDefinitionBuilder<'T> () =
     static member op_Implicit(builder: FilterDefinitionBuilder<'T>) : Expression<Func<'T, bool>> =
         builder.Build()
 
-type UpdateDefinitionBuilder<'T> () =
-    let mutable updates = []
-
-    member this.Set<'TField, 'TFieldValue>(field: Expression<Func<'T, 'TField>>, value: 'TFieldValue) : UpdateDefinitionBuilder<'T> =
-        let parameter = field.Parameters.[0]
-        let body = Expression.Call(typeof<SoloDatabase.Extensions>.GetMethod("Set").MakeGenericMethod(typeof<'TField>, typeof<'TFieldValue>), [|field.Body; Expression.Constant(value)|])
-        let lambda = Expression.Lambda<Action<'T>>(body, parameter)
-        updates <- lambda :: updates
-        this
-
-    member this.UnSet<'TField>(field: Expression<Func<'T, 'TField>>) : UpdateDefinitionBuilder<'T> =
-        this.Set<'TField, obj>(field, Unchecked.defaultof<obj>)
-
-    member this.Inc<'TField>(field: Expression<Func<'T, 'TField>>, value: 'TField) : UpdateDefinitionBuilder<'T> =
-        let parameter = field.Parameters.[0]
-        let lambda = Expression.Lambda<Action<'T>>(
-            Expression.Call(typeof<SoloDatabase.Extensions>.GetMethod("Set").MakeGenericMethod(typeof<'TField>, typeof<'TField>), [|
-                field.Body;
-                if typeof<BsonDocument>.IsAssignableFrom typeof<'T> then
-                    Expression.Add(
-                        Expression.Call(field.Body, typeof<BsonDocument>.GetMethod("ToObject").MakeGenericMethod(typeof<'TField>)),
-                        Expression.Constant value)
-                if typeof<JsonValue>.IsAssignableFrom typeof<'T> then
-                    Expression.Add(
-                        Expression.Call(field.Body, typeof<JsonValue>.GetMethod("ToObject").MakeGenericMethod(typeof<'TField>)),
-                        Expression.Constant value)
-                else
-                    Expression.Add(field.Body, Expression.Constant value)
-            |]),
-            parameter
-        )
-        updates <- lambda :: updates
-        this
-
-    member this.Set<'TFieldValue>(field: string, value: 'TFieldValue) : UpdateDefinitionBuilder<'T> =
-        this.Set(Helper.getPropertyExpression field, value)
-
-    member this.UnSet<'TFieldValue>(field: string) : UpdateDefinitionBuilder<'T> =
-        this.UnSet(Helper.getPropertyExpression field)
-
-    member this.Inc<'TFieldValue>(field: string, value: 'TFieldValue) : UpdateDefinitionBuilder<'T> =
-        this.Inc(Helper.getPropertyExpression field, value)
-
-    member this.Build() : Expression<Action<'T>> array =
-        updates |> List.toArray
-
-    static member op_Implicit(builder: UpdateDefinitionBuilder<'T>) : Expression<Action<'T>> array =
-        builder.Build()
-
 type QueryDefinitionBuilder<'T>() =
     let filterBuilder = new FilterDefinitionBuilder<'T>()
 
@@ -471,7 +422,6 @@ type QueryDefinitionBuilder<'T>() =
 [<Sealed>]
 type Builders<'T> =
     static member Filter with get() = FilterDefinitionBuilder<'T> ()
-    static member Update with get() = UpdateDefinitionBuilder<'T> ()
 
     static member Query with get() = QueryDefinitionBuilder<'T> ()
 

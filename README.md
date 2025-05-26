@@ -162,7 +162,7 @@ public class MyType
 }
 
 
-let db = new SoloDB("./mydatabase.db")
+var db = new SoloDB("./mydatabase.db");
 var collection = db.GetCollection<MyType>();
 
 // Insert a document

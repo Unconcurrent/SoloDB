@@ -24,7 +24,7 @@ type internal CustomTypeId<'t> =
         |> Seq.tryHead
         |> Option.bind(
             fun (p, gt) ->
-                if gt.GetType().GetInterfaces() |> Seq.exists(fun i -> i.FullName.StartsWith "SoloDatabase.Attributes.IIdGenerator") |> not then
+                if gt.GetInterfaces() |> Seq.exists(fun i -> i.FullName.StartsWith "SoloDatabase.Attributes.IIdGenerator") |> not then
                     failwithf "Generator type for Id property (%s) does not implement the IIdGenerator or IIdGenerator<'T> interface." p.Name
 
                 let instance = (Activator.CreateInstance gt)

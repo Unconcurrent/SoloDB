@@ -77,6 +77,8 @@ module Utils =
         ExceptionDispatchInfo.Capture(e).Throw()
         Unchecked.defaultof<'a>
 
+    type internal QueryPlan =
+        static member val InputStringReference = sprintf "This is a string reference that will be used to determine in which special mode Aggregate() method will be used...%i" 435
 
     let internal isTuple (t: Type) =
         typeof<Tuple>.IsAssignableFrom t || typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "Tuple`" || t.Name.StartsWith "ValueTuple`"
@@ -88,7 +90,6 @@ module Utils =
             (this >= 'a' && this <= 'z')
 
         static member IsAsciiLetter this =
-            (this >= '0' && this <= '9') ||
             (this >= 'A' && this <= 'Z') ||
             (this >= 'a' && this <= 'z')
 
@@ -383,14 +384,6 @@ module Utils =
         static member Get(t: Type) =
             let args = GenericTypeArgCache.cache.GetOrAdd(t, (fun m -> m.GetGenericArguments()))
             args
-
-    /// <summary>For compatilibility, it just a <see cref="T:System.Collections.Generic.List`1" /> with a Length property that calls Count.</summary>
-    type CompatilibilityList<'T> internal (elements: 'T seq) =
-        inherit System.Collections.Generic.List<'T>(elements)
-    
-        /// <summary>For compatilibility, it just calls this.Count. Gets the number of elements contained in the <see cref="T:System.Collections.Generic.List`1" />.</summary>
-        /// <returns>The number of elements contained in the <see cref="T:System.Collections.Generic.List`1" />.</returns>
-        member this.Length = this.Count
 
     /// For the F# compiler to allow the implicit use of
     /// the .NET Expression we need to use it in a C# style class.
