@@ -126,7 +126,10 @@ module private QueryHelper =
         if isPrimitive then
             "Value "
         else
-            "json_extract(Value, '$') "
+            if x = typeof<obj> (*unknown type*) then
+                "CASE WHEN typeof(Value) = 'blob' THEN json_extract(Value, '$') ELSE Value END "
+            else
+                "json_extract(Value, '$') "
 
     let private readSoloDBQueryable<'T> (methodArg: Expression) =
         let failwithMsg = "Cannot concat with an IEnumerable other that another SoloDB IQueryable, on the same connection. Do do this anyway, use to AsEnumerable()."
@@ -264,7 +267,7 @@ module private QueryHelper =
                 let tableName = (ce.Value :?> IRootQueryable).SourceTableName
                 builder.Append "SELECT Id, jsonb_extract(\""
                 builder.Append tableName
-                builder.Append "\".Value) as Value FROM \""
+                builder.Append "\".Value, '$') as Value FROM \""
                 
                 builder.Append tableName
                 builder.Append "\" WHERE "
@@ -279,7 +282,7 @@ module private QueryHelper =
 
         | Select ->
             builder.Append "SELECT Id, "
-            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            QueryTranslator.translateQueryableNotExtractSelfJson "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
             builder.Append " as Value FROM "
             builder.Append "("
             translate builder expression.Arguments.[0]

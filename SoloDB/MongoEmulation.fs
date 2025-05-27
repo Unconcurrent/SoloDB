@@ -302,7 +302,7 @@ module private Helper =
 type FilterDefinitionBuilder<'T> () =
     let mutable filters = []
 
-    member this.Empty = Expression.Lambda<Func<'T, bool>>(Expression.Constant(true), Expression.Parameter(typeof<'T>, "x"))
+    member val Empty = Expression.Lambda<Func<'T, bool>>(Expression.Constant(true), Expression.Parameter(typeof<'T>, "x"))
 
     // Add an equality filter
     member this.Eq<'TField>(field: Expression<Func<'T, 'TField>>, value: 'TField) : FilterDefinitionBuilder<'T> =
