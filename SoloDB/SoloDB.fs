@@ -321,7 +321,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         let filter, variables = QueryTranslator.translate name filter
 
         use connection = connection.Get()
-        connection.Execute ($"DELETE FROM \"{name}\" WHERE Id in (SELECT Id FROM (" + filter + ") LIMIT 1)", variables)
+        connection.Execute ($"DELETE FROM \"{name}\" WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filter}) LIMIT 1)", variables)
 
     member this.ReplaceMany(item: 'T)(filter: Expression<Func<'T, bool>>) =
         let filter, variables = QueryTranslator.translate name filter
@@ -335,7 +335,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
 
         use connection = connection.Get()
-        connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM (" + filter + ") LIMIT 1)", variables)
+        connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filter}) LIMIT 1)", variables)
 
     member this.EnsureIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
         use connection = connection.Get()

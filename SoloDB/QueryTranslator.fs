@@ -662,7 +662,7 @@ module QueryTranslator =
         else if qb.UpdateMode then
             qb.AppendRaw $"'$'"
         else
-            if qb.JsonExtractSelfValue && not (isPrimitiveSQLiteType m.Type) then
+            if qb.JsonExtractSelfValue && ((not << isPrimitiveSQLiteType) m.Type || (not << String.IsNullOrWhiteSpace) qb.TableNameDot) then
                 if qb.StringBuilder.Length = 0 
                 then qb.AppendRaw $"json_extract(json({qb.TableNameDot}Value), '$')" // To avoid returning the jsonB format instead of normal json.
                 else qb.AppendRaw $"jsonb_extract({qb.TableNameDot}Value, '$')"
@@ -775,7 +775,7 @@ module QueryTranslator =
                 visit m.Expression qb
                 qb.AppendRaw ")"
 
-        else if m.ReturnType = typeof<int64> && m.MemberName = "Id" then
+        else if (m.ReturnType = typeof<int64> && m.MemberName = "Id") || (m.MemberName = "Id" && m.Expression.NodeType = ExpressionType.Parameter && m.Expression.Type.FullName = "SoloDatabase.JsonSerializator.JsonValue") then
             qb.AppendRaw $"{qb.TableNameDot}Id " |> ignore
 
         else if m.Expression <> null && isRootParameter m.Expression then
@@ -815,6 +815,11 @@ module QueryTranslator =
 
     let internal translateQueryable (tableName: string) (expression: Expression) (sb: StringBuilder) (variables: Dictionary<string, obj>) =
         let builder = QueryBuilder.New sb variables false tableName expression -1
+        visit expression builder
+        sb.Append " " |> ignore
+
+    let internal translateQueryableNotExtractSelfJson (tableName: string) (expression: Expression) (sb: StringBuilder) (variables: Dictionary<string, obj>) =
+        let builder = {(QueryBuilder.New sb variables false tableName expression -1) with JsonExtractSelfValue = false}
         visit expression builder
         sb.Append " " |> ignore
 
