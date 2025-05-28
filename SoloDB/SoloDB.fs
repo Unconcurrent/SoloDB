@@ -103,10 +103,10 @@ module internal Helper =
 
         id
 
-    let internal insertInner (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (collection: ISoloDBCollection<'T>) =
+    let inline internal insertInner (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (collection: ISoloDBCollection<'T>) =
         insertImpl typed item connection name false collection
 
-    let internal insertOrReplaceInner (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (collection: ISoloDBCollection<'T>) =
+    let inline internal insertOrReplaceInner (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (collection: ISoloDBCollection<'T>) =
         insertImpl typed item connection name true collection
 
     let internal formatName (name: string) =

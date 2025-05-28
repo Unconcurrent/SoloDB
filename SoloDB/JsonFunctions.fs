@@ -111,13 +111,12 @@ module JsonFunctions =
 
         id, value
 
-    /// Used internally, do not touch!
     let 
         #if RELEASE
         inline
         #endif
 
-        fromSQLite<'R when 'R :> obj> (row: DbObjectRow) : 'R =
+        internal fromSQLite<'R when 'R :> obj> (row: DbObjectRow) : 'R =
         let inline asR a = a :> obj :?> 'R
 
         if row :> obj = null then
