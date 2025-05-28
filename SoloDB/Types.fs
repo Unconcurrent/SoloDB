@@ -20,7 +20,7 @@ type internal DisposableMutex =
             this.mutex.Dispose()
 
 /// <summary>
-/// This is for internal use only, don't touch it you can.
+/// This is for internal use only, don't touch.
 /// </summary>
 [<CLIMutable>]
 type DbObjectRow = {
