@@ -5,7 +5,6 @@ open System
 open System.Collections.Generic
 open System.Collections
 open System.Reflection
-open Dynamitey
 open System.Dynamic
 open SoloDatabase.Utils
 open System.Text
@@ -195,9 +194,9 @@ type internal Tokenizer =
                 this.index <- i + 1
                 StringToken(sb.ToString())
             | c when isDigitOrMinus c ->
-                let buffer = NativePtr.stackalloc<char> 1024
+                let buffer = NativePtr.stackalloc<char> 128
                 let bufferPtr = buffer |> NativePtr.toVoidPtr
-                let mutable span = new Span<char>(bufferPtr, 1024)
+                let mutable span = new Span<char>(bufferPtr, 128)
                 
                 let mutable i = this.index
                 let mutable length = 0
