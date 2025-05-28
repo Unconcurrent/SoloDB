@@ -9,6 +9,7 @@ open SoloDatabase.Types
 open System.Security.Cryptography
 open SoloDatabase.Connections
 open Snappier
+open System.Runtime.InteropServices
 
 module FileStorage =
     let chunkSize = 
@@ -900,10 +901,15 @@ module FileStorage =
             use db = manager.Borrow()        
             openOrCreateFile db path
 
-        member this.WriteAt(path, offset, data, ?createIfInexistent: bool) =
-            let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
-
-            manager.WithTransaction(fun tx -> 
+        /// <summary>
+        /// Writes data to a file at a specific offset.
+        /// </summary>
+        /// <param name="path">The path to the file.</param>
+        /// <param name="offset">The zero-based byte offset in the file at which to begin writing.</param>
+        /// <param name="data">The byte array to write to the file.</param>
+        /// <param name="createIfInexistent">Specifies whether to create the file if it does not exist. Defaults to true.</param>
+        member this.WriteAt(path: string, offset: int64, data: byte[], [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool) =
+             manager.WithTransaction(fun tx -> 
                 let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
 
                 use fileStream = openFile tx file
@@ -912,10 +918,22 @@ module FileStorage =
                 ()
             )
 
-        member this.WriteAtRehash(path, offset, data: Stream, ?createIfInexistent: bool, ?rehash: bool) =
-            let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
-            let rehash = match rehash with Some x -> x | None -> true
-
+        /// <summary>
+        /// Writes data from a stream to a file at a specific offset, with UNSAFE options for creation and rehashing.
+        /// </summary>
+        /// <param name="path">The path to the file.</param>
+        /// <param name="offset">The zero-based byte offset in the file at which to begin writing.</param>
+        /// <param name="data">The stream to read data from.</param>
+        /// <param name="createIfInexistent">Specifies whether to create the file if it does not exist. Defaults to true.</param>
+        /// <param name="rehash">Specifies whether to rehash the file's contents after writing. Defaults to true.</param>
+        /// <remarks> This is an unsafe operation. </remarks>
+        member this.WriteAtRehash(
+            path: string,
+            offset: int64,
+            data: Stream,
+            [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool,
+            [<Optional; DefaultParameterValue(true)>] rehash: bool
+        ) =
             manager.WithTransaction(fun tx -> 
                 let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
 
@@ -930,19 +948,19 @@ module FileStorage =
                 ()
             )
 
-        member this.WriteAtRehash(path, offset, data: byte array, ?createIfInexistent: bool, ?rehash: bool) =
+        member this.WriteAtRehash(path: string, offset: int64, data: byte array, ?createIfInexistent: bool, ?rehash: bool) =
             use data = new MemoryStream(data)
             let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
             let rehash = match rehash with Some x -> x | None -> true
 
             this.WriteAtRehash(path, offset, data, createIfInexistent, rehash)
 
-        member this.WriteAt(path, offset, data: Stream, ?createIfInexistent: bool) =
+        member this.WriteAt(path: string, offset: int64, data: Stream, ?createIfInexistent: bool) =
             let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
 
             this.WriteAtRehash(path, offset, data, createIfInexistent)
 
-        member this.ReadAt(path, offset, len) =
+        member this.ReadAt(path: string, offset: int64, len) =
             let file = this.GetAt path
 
             use db = manager.Borrow()
