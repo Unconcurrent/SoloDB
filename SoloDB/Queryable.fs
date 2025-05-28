@@ -12,6 +12,7 @@ open System.Reflection
 open System.Text
 open JsonFunctions
 open Utils
+open SoloDatabase.JsonSerializator
 
 type internal SupportedLinqMethods =
 | Sum
@@ -126,10 +127,30 @@ module private QueryHelper =
         if isPrimitive then
             "Value "
         else
-            if x = typeof<obj> (*unknown type*) then
+            if (*unknown type*)
+               x = typeof<obj> || typeof<JsonValue>.IsAssignableFrom x then
                 "CASE WHEN typeof(Value) = 'blob' THEN json_extract(Value, '$') ELSE Value END "
             else
                 "json_extract(Value, '$') "
+
+    let private translateWhereStatement (translate: QueryableBuilder<'T> -> Expression -> unit) (builder: QueryableBuilder<'T>) (collection: Expression) (filter: Expression) =
+        match collection with
+        | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
+            let tableName = (ce.Value :?> IRootQueryable).SourceTableName
+            builder.Append "SELECT Id, jsonb_extract(\""
+            builder.Append tableName
+            builder.Append "\".Value, '$') as Value FROM \""
+                
+            builder.Append tableName
+            builder.Append "\" WHERE "
+            QueryTranslator.translateQueryable tableName filter builder.SQLiteCommand builder.Variables
+        | _other ->
+            builder.Append "SELECT Id, Value FROM ("
+
+            translate builder collection
+
+            builder.Append ") WHERE "
+            QueryTranslator.translateQueryable "" filter builder.SQLiteCommand builder.Variables
 
     let private readSoloDBQueryable<'T> (methodArg: Expression) =
         let failwithMsg = "Cannot concat with an IEnumerable other that another SoloDB IQueryable, on the same connection. Do do this anyway, use to AsEnumerable()."
@@ -252,34 +273,18 @@ module private QueryHelper =
         | LongCount ->
             builder.Append "SELECT COUNT(Id) as Value FROM ("
 
-            translate builder expression.Arguments.[0]
-            builder.Append ")"
             match expression.Arguments.Count with
-            | 1 -> () // Noop needed.
+            | 1 -> 
+                translate builder expression.Arguments.[0]
+                builder.Append ")"
             | 2 -> 
-                builder.Append "WHERE " 
-                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+                translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
+                builder.Append ")"
+
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
         | Where ->
-            match expression.Arguments.[0] with
-            | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
-                let tableName = (ce.Value :?> IRootQueryable).SourceTableName
-                builder.Append "SELECT Id, jsonb_extract(\""
-                builder.Append tableName
-                builder.Append "\".Value, '$') as Value FROM \""
-                
-                builder.Append tableName
-                builder.Append "\" WHERE "
-                QueryTranslator.translateQueryable tableName expression.Arguments.[1] builder.SQLiteCommand builder.Variables
-            | _other ->
-                builder.Append "SELECT Id, Value FROM ("
-
-                translate builder expression.Arguments.[0]
-
-                builder.Append ") WHERE "
-                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
-
+            translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
         | Select ->
             builder.Append "SELECT Id, "
             QueryTranslator.translateQueryableNotExtractSelfJson "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
@@ -526,7 +531,11 @@ module private QueryHelper =
         | Any ->
             builder.Append "SELECT EXISTS(SELECT 1 FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ") LIMIT 1) as Value "
+            builder.Append ")"
+            if expression.Arguments.Count > 1 then
+                builder.Append " WHERE "
+                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            builder.Append " LIMIT 1) as Value "
 
         | Contains ->
             builder.Append "SELECT EXISTS(SELECT 1 FROM ("
@@ -829,7 +838,9 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>) =
     member internal this.ExecuteEnumetable<'Elem> (query: string) (par: obj) : IEnumerable<'Elem> =
         seq {
             use connection = source.GetInternalConnection()
-            yield! Seq.map JsonFunctions.fromSQLite<'Elem> (connection.Query<Types.DbObjectRow>(query, par))
+            for row in connection.Query<Types.DbObjectRow>(query, par) do
+                JsonFunctions.fromSQLite<'Elem> row
+            ()
         }
 
     interface IQueryProvider with
@@ -855,7 +866,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>) =
             match typeof<'TResult> with
             | t when t.IsGenericType
                      && typedefof<IEnumerable<_>> = (typedefof<'TResult>) ->
-                let elemType = t.GetGenericArguments().[0]
+                let elemType = (GenericTypeArgCache.Get t).[0]
                 let m = 
                     typeof<SoloDBCollectionQueryProvider<'T>>
                         .GetMethod(nameof(this.ExecuteEnumetable), BindingFlags.NonPublic ||| BindingFlags.Instance)
