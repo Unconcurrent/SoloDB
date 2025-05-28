@@ -241,7 +241,7 @@ module QueryTranslator =
 
 
     let rec private visit (exp: Expression) (qb: QueryBuilder) : unit =
-        if exp.NodeType <> ExpressionType.Lambda && isFullyConstant exp && (match exp with | :? ConstantExpression as ce when ce.Value = null -> false | other -> true) then
+        if exp.NodeType <> ExpressionType.Lambda && exp.NodeType <> ExpressionType.Quote && isFullyConstant exp && (match exp with | :? ConstantExpression as ce when ce.Value = null -> false | other -> true) then
             let value = evaluateExpr<obj> exp
             qb.AppendVariable value
         else
@@ -540,7 +540,7 @@ module QueryTranslator =
             let arg1 = m.Arguments.[0]
             visit arg1 qb
         
-        | "Contains" when m.Object.Type = typeof<string> ->
+        | "Contains" when not (isNull m.Object) && m.Object.Type = typeof<string> ->
             let text = m.Object
             let what = m.Arguments.[0]
             qb.AppendRaw "instr("
@@ -549,7 +549,7 @@ module QueryTranslator =
             visit what qb |> ignore
             qb.AppendRaw ") > 0"
         
-        | "GetType" when m.Object.NodeType = ExpressionType.Parameter ->
+        | "GetType" when not (isNull m.Object) && m.Object.NodeType = ExpressionType.Parameter ->
             let o = m.Object
             qb.AppendRaw "jsonb_extract("
             visit o qb |> ignore
@@ -564,7 +564,7 @@ module QueryTranslator =
             let arg1 = m.Arguments.[0]
             visit arg1 qb
         
-        | "get_Item" when typeof<System.Collections.ICollection>.IsAssignableFrom m.Object.Type || typeof<Array>.IsAssignableFrom m.Object.Type || typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.Object.Type ->
+        | "get_Item" when not (isNull m.Object) && typeof<System.Collections.ICollection>.IsAssignableFrom m.Object.Type || typeof<Array>.IsAssignableFrom m.Object.Type || typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.Object.Type ->
             let o = m.Object
             let property = (m.Arguments.[0] :?> ConstantExpression).Value
 
@@ -609,7 +609,7 @@ module QueryTranslator =
 
             qb.AppendRaw ")"
 
-        | "StartsWith" when m.Object.Type = typeof<string> ->
+        | "StartsWith" when not (isNull m.Object) && m.Object.Type = typeof<string> ->
             let arg = m.Object
             let v = m.Arguments.[0]
 
@@ -623,7 +623,7 @@ module QueryTranslator =
             qb.AppendRaw " = "
             visit v qb
                     
-        | "EndsWith" when m.Object.Type = typeof<string> ->
+        | "EndsWith" when not (isNull m.Object) && m.Object.Type = typeof<string> ->
             let arg = m.Object
             let v = m.Arguments.[0]
 
@@ -643,6 +643,50 @@ module QueryTranslator =
         | "CastTo" ->
             let castToType = m.Method.GetGenericArguments().[0]
             castTo qb castToType m.Arguments.[0]
+
+        // Numeric and floating-point Parse methods
+        | "Parse" when
+            m.Method.DeclaringType = typeof<SByte> ||
+            m.Method.DeclaringType = typeof<Byte> ||
+            m.Method.DeclaringType = typeof<Int16> ||
+            m.Method.DeclaringType = typeof<UInt16> ||
+            m.Method.DeclaringType = typeof<Int32> ||
+            m.Method.DeclaringType = typeof<UInt32> ||
+            m.Method.DeclaringType = typeof<Int64> ||
+            m.Method.DeclaringType = typeof<UInt64> ||
+            m.Method.DeclaringType = typeof<Single> ||
+            m.Method.DeclaringType = typeof<Double> ||
+            m.Method.DeclaringType = typeof<float> ||
+            m.Method.DeclaringType = typeof<float32> ->
+
+            let arg = m.Arguments.[0]
+            let targetType =
+                match m.Method.DeclaringType with
+                | t when t = typeof<SByte> || t = typeof<Byte> || t = typeof<Int16> || t = typeof<UInt16>
+                    || t = typeof<Int32> || t = typeof<UInt32> || t = typeof<Int64> || t = typeof<UInt64> -> "INTEGER"
+                | t when t = typeof<Single> || t = typeof<Double> -> "REAL"
+                | _ -> failwithf "Unsupported Parse type: %A" m.Method.DeclaringType
+
+            qb.AppendRaw "CAST("
+            visit arg qb
+            qb.AppendRaw $" AS {targetType})"
+
+        // String.Substring support
+        | "Substring" when not (isNull m.Object) && m.Object.Type = typeof<string> ->
+            let str = m.Object
+            let start = m.Arguments.[0]
+            qb.AppendRaw "substr("
+            visit str qb
+            qb.AppendRaw ","
+            // SQLite is 1-based, .NET is 0-based
+            qb.AppendRaw "("
+            visit start qb
+            qb.AppendRaw " + 1)"
+            if m.Arguments.Count = 2 then
+                let length = m.Arguments.[1]
+                qb.AppendRaw ","
+                visit length qb
+            qb.AppendRaw ")"
 
         | _ -> 
             raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
@@ -706,16 +750,16 @@ module QueryTranslator =
         let isLeftNull =
             match b.Left with
             | :? ConstantExpression as c when c.Value = null -> true
-            | other -> false
+            | _other -> false
 
         let isRightNull =
             match b.Right with
             | :? ConstantExpression as c when c.Value = null -> true
-            | other -> false
+            | _other -> false
 
         let isAnyNull = isLeftNull || isRightNull
 
-        let left, right = if isLeftNull then (b.Right, b.Left) else (b.Left, b.Right)
+        let struct (left, right) = if isLeftNull then struct (b.Right, b.Left) else struct (b.Left, b.Right)
 
         qb.AppendRaw("(") |> ignore
         visit(left) qb |> ignore

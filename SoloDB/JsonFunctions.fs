@@ -57,14 +57,16 @@ module JsonFunctions =
     let internal mustIncludeTypeInformationInSerialization<'T> =
         mustIncludeTypeInformationInSerializationFn typeof<'T>
 
+    /// Used internally, do not touch!
     let toJson<'T> o = 
         let element = JsonValue.Serialize<'T>  o
         element.ToJsonString()
 
-    let toTypedJson<'T> o = 
+    let internal toTypedJson<'T> o = 
         let element = JsonValue.SerializeWithType<'T> o
         element.ToJsonString()
 
+    /// Used internally, do not touch!
     let toSQLJson<'T> (item: 'T) = 
         match box item with
         | :? string as s -> s :> obj, false
@@ -91,6 +93,7 @@ module JsonFunctions =
             -> element.ToObject(), false
         | other -> other.ToJsonString(), true
 
+    
     let internal fromJson<'T> (json: JsonValue) =
         match json with
         | Null when typeof<float> = typeof<'T> -> 
@@ -101,34 +104,71 @@ module JsonFunctions =
             raise (InvalidOperationException "Invalid operation on a value type.") 
         | json -> json.ToObject<'T>()    
 
+    /// Used internally, do not touch!
     let fromIdJson<'T> (element: JsonValue) =
         let id = element.["Id"].ToObject<int64>()
         let value = element.GetProperty("Value") |> fromJson<'T>
 
         id, value
 
-    let fromSQLite<'R when 'R :> obj> (input: obj) : 'R =
-        match input with
-        | :? DbObjectRow as row ->
-            // If the Id is NULL then the ValueJSON is a error message encoded in a JSON string.
-            if not row.Id.HasValue then
-                let exc = toJson<string> row.ValueJSON
-                raise (exn exc)
+    /// Used internally, do not touch!
+    let 
+        #if RELEASE
+        inline
+        #endif
 
-            match JsonValue.Parse row.ValueJSON with
-            | Null when typeof<JsonValue> = typeof<'R> -> 
-                Unchecked.defaultof<'R>
-            | Null when typeof<'R>.IsValueType && typeof<float> <> typeof<'R> && typeof<float32> <> typeof<'R> -> 
-                Unchecked.defaultof<'R>
-            | json ->
+        fromSQLite<'R when 'R :> obj> (row: DbObjectRow) : 'R =
+        let inline asR a = a :> obj :?> 'R
 
-            let mutable obj = fromJson<'R> json
+        if row :> obj = null then
+            Unchecked.defaultof<'R>
+        else
+
+        // If the Id is NULL then the ValueJSON is a error message encoded in a JSON string.
+        if not row.Id.HasValue then
+            let exc = toJson<string> row.ValueJSON
+            raise (exn exc)
             
-            // An Id of -1 mean that it is an inserted object inside the IQueryable.
-            if row.Id.Value <> -1 && HasTypeId<'R>.Value then
-                HasTypeId<'R>.Write obj row.Id.Value
-            obj
-        | :? string as input ->
-            fromJson<'R> (JsonValue.Parse input)
-        | null -> Unchecked.defaultof<'R>
-        | other -> failwithf "Input is not DbObjectRow or json string."
+        // Checking if the SQLite returned a raw string.
+        if typeof<'R> = typeof<string> then
+            row.ValueJSON :> obj :?> 'R
+        else
+
+        match typeof<'R> with
+        | OfType float when row.ValueJSON <> null -> (asR << float) row.ValueJSON
+        | OfType float32 when row.ValueJSON <> null -> (asR << float32) row.ValueJSON
+        | OfType decimal -> (asR << decimal) row.ValueJSON
+
+        | OfType int8 -> (asR << int8) row.ValueJSON
+        | OfType uint8 -> (asR << uint8) row.ValueJSON
+        | OfType int16 -> (asR << int16) row.ValueJSON
+        | OfType uint16 -> (asR << uint16) row.ValueJSON
+        | OfType int32 -> (asR << int32) row.ValueJSON
+        | OfType uint32 -> (asR << uint32) row.ValueJSON
+        | OfType int64 -> (asR << int64) row.ValueJSON
+        | OfType uint64 -> (asR << uint64) row.ValueJSON
+        | OfType nativeint -> (asR << nativeint) row.ValueJSON
+        | OfType unativeint -> (asR << unativeint) row.ValueJSON
+
+        | _ ->
+
+
+        match JsonValue.Parse row.ValueJSON with
+        | Null when typeof<JsonValue> = typeof<'R> -> 
+            Unchecked.defaultof<'R>
+        | Null when typeof<'R>.IsValueType && typeof<float> <> typeof<'R> && typeof<float32> <> typeof<'R> -> 
+            Unchecked.defaultof<'R>
+        | json when typeof<JsonValue> = typeof<'R> ->
+            let id = row.Id.Value
+            if json.JsonType = JsonValueType.Object && not (json.Contains "Id") && id >= 0 then
+                json.["Id"] <- id
+
+            json :> obj :?> 'R
+        | json ->
+
+        let mutable obj = fromJson<'R> json
+            
+        // An Id of -1 mean that it is an inserted object inside the IQueryable.
+        if row.Id.Value <> -1 && HasTypeId<'R>.Value then
+            HasTypeId<'R>.Write obj row.Id.Value
+        obj
