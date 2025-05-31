@@ -543,7 +543,7 @@ module QueryTranslator =
         | "Contains" when not (isNull m.Object) && m.Object.Type = typeof<string> ->
             let text = m.Object
             let what = m.Arguments.[0]
-            qb.AppendRaw "instr("
+            qb.AppendRaw "INSTR("
             visit text qb |> ignore
             qb.AppendRaw ","
             visit what qb |> ignore
@@ -602,7 +602,7 @@ module QueryTranslator =
                 else failwithf "Unknown such concat function: %A" m.Method
 
             let len = args.Count
-            qb.AppendRaw "concat("
+            qb.AppendRaw "CONCAT("
             for i, arg in args |> Seq.indexed do
                 visit arg qb |> ignore
                 if i + 1 < len then qb.AppendRaw ", "
@@ -675,7 +675,7 @@ module QueryTranslator =
         | "Substring" when not (isNull m.Object) && m.Object.Type = typeof<string> ->
             let str = m.Object
             let start = m.Arguments.[0]
-            qb.AppendRaw "substr("
+            qb.AppendRaw "SUBSTR("
             visit str qb
             qb.AppendRaw ","
             // SQLite is 1-based, .NET is 0-based
@@ -691,7 +691,7 @@ module QueryTranslator =
         | "GetString" when m.Arguments.Count = 2 && isNull m.Object && m.Arguments.[0].Type = typeof<string> ->
             let str = m.Arguments.[0]
             let index = m.Arguments.[1]
-            qb.AppendRaw "substr("
+            qb.AppendRaw "SUBSTR("
             visit str qb
             qb.AppendRaw ",("
             visit index qb
