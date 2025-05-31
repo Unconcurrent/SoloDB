@@ -97,9 +97,9 @@ module Utils =
         static member IsInteger (this: Decimal) =
             this = (Decimal.Floor this)
 
-    [<return: Struct>]
+    [<return: Struct; MethodImpl(MethodImplOptions.AggressiveInlining)>]
     let internal (|OfType|_|) (_typ: 'x -> 'a) (objType: Type) =
-        if typeof<'a>.IsAssignableFrom(objType) then ValueSome () else ValueNone
+        if typeof<'a>.Equals objType || typeof<'a>.IsAssignableFrom(objType) then ValueSome () else ValueNone
 
     let internal isNumber (value: obj) =
         match value with
