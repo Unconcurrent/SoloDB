@@ -314,9 +314,7 @@ module private QueryHelper =
                 builder.Append ") AS "
                 builder.Append innerSourceName
                 builder.Append " "
-                builder.Append "JOIN json_each(jsonb_extract("
-                builder.Append innerSourceName
-                builder.Append ".Value, '$."
+                
         
                 // Extract the path to the collection selector (e.g., "$.Values")
                 match expression.Arguments.[1] with
@@ -324,12 +322,20 @@ module private QueryHelper =
                     let lambda = ue.Operand :?> LambdaExpression
                     match lambda.Body with
                     | :? MemberExpression as me ->
+                        builder.Append "JOIN json_each(jsonb_extract("
+                        builder.Append innerSourceName
+                        builder.Append ".Value, '$."
                         builder.Append me.Member.Name
+                        builder.Append "'))"
+
+                    | :? ParameterExpression as _pe ->
+                        builder.Append "JOIN json_each("
+                        builder.Append innerSourceName
+                        builder.Append ".Value)"
+
                     | _ -> failwith "Unsupported SelectMany selector structure"
                 | _ -> failwith "Invalid SelectMany structure"
-
-                builder.Append "'))"
-                
+                                
             | other -> 
                 failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
@@ -787,11 +793,23 @@ module private QueryHelper =
                 -> false
         | _other -> false
 
-    let internal isAggregateExplainQuery (expression: MethodCallExpression) =
-        expression.Arguments.Count > 2 
-        && expression.Arguments.[1] :? ConstantExpression 
-        && Object.ReferenceEquals((expression.Arguments.[1] :?> ConstantExpression).Value, (QueryPlan.InputStringReference :> obj)) 
-        && expression.Arguments.[2].NodeType = ExpressionType.Quote
+    let internal isAggregateExplainQuery (expression: Expression) =
+        match expression with
+        | :? MethodCallExpression as expression ->
+            expression.Arguments.Count > 2 
+            && expression.Arguments.[1] :? ConstantExpression 
+            && Object.ReferenceEquals((expression.Arguments.[1] :?> ConstantExpression).Value, (QueryPlan.ExplainQueryPlanReference :> obj)) 
+            && expression.Arguments.[2].NodeType = ExpressionType.Quote
+        | _ -> false
+
+    let internal isGetGeneratedSQLQuery (expression: Expression) =
+        match expression with
+        | :? MethodCallExpression as expression ->
+            expression.Arguments.Count > 2 
+            && expression.Arguments.[1] :? ConstantExpression 
+            && Object.ReferenceEquals((expression.Arguments.[1] :?> ConstantExpression).Value, (QueryPlan.GetGeneratedSQLReference :> obj)) 
+            && expression.Arguments.[2].NodeType = ExpressionType.Quote
+        | _ -> false
 
     let internal startTranslation (source: ISoloDBCollection<'T>) (expression: Expression) =
         let builder = {
@@ -810,6 +828,8 @@ module private QueryHelper =
             match expression with
             | :? MethodCallExpression as expression when isAggregateExplainQuery expression -> 
                 struct (true, expression.Arguments.[0])
+            | :? MethodCallExpression as expression when isGetGeneratedSQLQuery expression -> 
+                struct (false, expression.Arguments.[0])
             | _ -> struct (false, expression)
 
         if isExplainQueryPlan then
@@ -873,11 +893,13 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>) =
                         .MakeGenericMethod(elemType)
                 m.Invoke(this, [|query; variables|]) :?> 'TResult
                     // When is explain query plan.
-            | t when t = typeof<string> && (match expression with | :? MethodCallExpression as expression -> QueryHelper.isAggregateExplainQuery expression | _ -> false) ->
+            | t when t = typeof<string> && QueryHelper.isAggregateExplainQuery expression ->
                 use connection = source.GetInternalConnection()
                 let result = connection.Query<{|detail: string|}>(query, variables) |> Seq.toList
                 let plan = result |> List.map(_.detail) |> String.concat ";\n"
                 plan :> obj :?> 'TResult
+            | t when t = typeof<string> && QueryHelper.isGetGeneratedSQLQuery expression ->
+                query :> obj :?> 'TResult
             | _other ->
                 use connection = source.GetInternalConnection()
                 match connection.Query<Types.DbObjectRow>(query, variables) |> Seq.tryHead with

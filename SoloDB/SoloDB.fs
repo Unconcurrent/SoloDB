@@ -836,5 +836,11 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         member this.Dispose() = this.Dispose()
 
 
+    /// Run the EXPLAIN QUERY PLAN on the generated SQL.
     static member ExplainQueryPlan(query: IQueryable<'T>) =
-        query.Aggregate(QueryPlan.InputStringReference, (fun _a _b -> ""))
+        // This is a hack, I do not think that it is possible to add new IQueryable methods directly.
+        query.Aggregate(QueryPlan.ExplainQueryPlanReference, (fun _a _b -> ""))
+
+    /// Returns the generated SQL.
+    static member GetSQL(query: IQueryable<'T>) =
+        query.Aggregate(QueryPlan.GetGeneratedSQLReference, (fun _a _b -> ""))
