@@ -90,7 +90,7 @@ module internal Helper =
 
         let id =
             if existsWritebleDirectId && -1L >= HasTypeId<'T>.Read item then 
-                failwithf "The Id must be either be:\n a) equal to 0, for it to be replaced by SQLite.\n b) A value greater than 0, for a specific Id to be inserted."
+                raise (InvalidOperationException "The Id must be either be:\n a) equal to 0, for it to be replaced by SQLite.\n b) A value greater than 0, for a specific Id to be inserted.")
             elif existsWritebleDirectId && 0L <> HasTypeId<'T>.Read item then 
                 // Inserting with Id
                 insertJson orReplace (Some (HasTypeId<'T>.Read item)) name json connection
@@ -130,13 +130,15 @@ module internal Helper =
                 | a -> Some(p, a)) // With its uniqueness information.
 
     let internal getIndexWhereAndName<'T, 'R> (name: string) (expression: Expression<System.Func<'T, 'R>>)  =
+        if isNull expression then raise (ArgumentNullException(nameof(expression)))
+
         let whereSQL, variables = QueryTranslator.translate name expression
         let whereSQL = whereSQL.Replace($"\"{name}\".Value", "Value") // {name}.Value is not allowed in an index.
-        if whereSQL.Contains $"\"{name}\".Id" then failwithf "The Id of a collection is always stored in an index."
-        if variables.Count > 0 then failwithf "Cannot have variables in index."
+        if whereSQL.Contains $"\"{name}\".Id" then raise (ArgumentException "The Id of a collection is always stored in an index.") 
+        if variables.Count > 0 then raise (ArgumentException "Cannot have variables in index.")
         let expressionBody = expression.Body
 
-        if QueryTranslator.isAnyConstant expressionBody then failwithf "Cannot index an outside or constant expression."
+        if QueryTranslator.isAnyConstant expressionBody then raise(InvalidOperationException "Cannot index an outside or constant expression.")
 
         let whereSQL =
             match expressionBody with
@@ -145,7 +147,7 @@ module internal Helper =
             | :? MethodCallExpression
             | :? MemberExpression ->
                 $"({whereSQL})"
-            | other -> failwithf "Cannot index an expression with type: %A" (other.GetType())
+            | other -> raise (ArgumentException (sprintf "Cannot index an expression with type: %s" (other.GetType().FullName)))
 
         let expressionStr = whereSQL.ToCharArray() |> Seq.filter(fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""
         let indexName = $"{name}_index_{expressionStr}"
@@ -205,6 +207,8 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 
 
     member this.InsertBatch (items: 'T seq) =
+        if isNull items then raise (ArgumentNullException(nameof(items)))
+
         if this.InTransaction then
             use connection = connection.Get()
 
@@ -232,6 +236,8 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
             
 
     member this.InsertOrReplaceBatch (items: 'T seq) =
+        if isNull items then raise (ArgumentNullException(nameof(items)))
+
         if this.InTransaction then
             use connection = connection.Get()
 
@@ -265,7 +271,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 
     member this.GetById(id: int64) =
         match this.TryGetById id with
-        | None -> failwithf "There is no element with id %i" id
+        | None -> raise (KeyNotFoundException (sprintf "There is no element with id '%i' inside collection '%s'" id name)) 
         | Some x -> x
 
     member this.DeleteById(id: int64) =
@@ -283,7 +289,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 
     member this.GetById<'IdType when 'IdType : equality>(id: 'IdType) : 'T =
         match this.TryGetById id with
-        | None -> failwithf "There is no element with id %A" id
+        | None -> raise (KeyNotFoundException (sprintf "There is no element with id '%A' inside collection '%s'" id name)) 
         | Some x -> x
 
     member this.DeleteById<'IdType when 'IdType : equality>(id: 'IdType) : int =
@@ -307,23 +313,27 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 
         variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
         use connection = connection.Get()
-        let _count = connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
-
+        let count = connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
+        if count <= 0 then
+            raise (KeyNotFoundException "Could not Update any entities with specified Id.")
         ()
 
     member this.DeleteMany(filter: Expression<Func<'T, bool>>) =
+        if isNull filter then raise (ArgumentNullException(nameof(filter)))
         let filter, variables = QueryTranslator.translate name filter
 
         use connection = connection.Get()
         connection.Execute ($"DELETE FROM \"{name}\" WHERE " + filter, variables)
 
     member this.DeleteOne(filter: Expression<Func<'T, bool>>) =
+        if isNull filter then raise (ArgumentNullException(nameof(filter)))
         let filter, variables = QueryTranslator.translate name filter
 
         use connection = connection.Get()
         connection.Execute ($"DELETE FROM \"{name}\" WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filter}) LIMIT 1)", variables)
 
     member this.ReplaceMany(item: 'T)(filter: Expression<Func<'T, bool>>) =
+        if isNull filter then raise (ArgumentNullException(nameof(filter)))
         let filter, variables = QueryTranslator.translate name filter
         variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
 
@@ -331,6 +341,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
 
     member this.ReplaceOne(item: 'T)(filter: Expression<Func<'T, bool>>) =
+        if isNull filter then raise (ArgumentNullException(nameof(filter)))
         let filter, variables = QueryTranslator.translate name filter
         variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
 
@@ -348,6 +359,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         Helper.ensureUniqueAndIndex name connection expression
 
     member this.DropIndexIfExists<'R>(expression: Expression<System.Func<'T, 'R>>) =
+        if isNull expression then raise (ArgumentNullException(nameof(expression)))
         let indexName, _whereSQL = Helper.getIndexWhereAndName<'T, 'R> name expression
 
         let indexSQL = $"DROP INDEX IF EXISTS \"{indexName}\""
@@ -458,11 +470,11 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
     member this.DropCollection<'T>() =
         if this.DropCollectionIfExists<'T>() = false then
             let name = Helper.collectionNameOf<'T>
-            failwithf "Collection %s does not exists." name
+            raise (KeyNotFoundException (sprintf "Collection %s does not exists." name))
 
     member this.DropCollection name =
         if this.DropCollectionIfExists name = false then
-            failwithf "Collection %s does not exists." name
+            raise (KeyNotFoundException (sprintf "Collection %s does not exists." name))
 
     member this.ListCollectionNames() =
         connection.Query<string>("SELECT Name FROM SoloDBCollections")
@@ -773,11 +785,11 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     member this.DropCollection<'T>() =
         if this.DropCollectionIfExists<'T>() = false then
             let name = Helper.collectionNameOf<'T>
-            failwithf "Collection %s does not exists." name
+            raise (KeyNotFoundException (sprintf "Collection %s does not exists." name))
 
     member this.DropCollection name =
         if this.DropCollectionIfExists name = false then
-            failwithf "Collection %s does not exists." name
+            raise (KeyNotFoundException (sprintf "Collection %s does not exists." name))
 
     member this.ListCollectionNames() =
         use dbConnection = connectionManager.Borrow()
@@ -790,7 +802,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
     member this.VacuumTo(location: string) =
         match this.DataLocation with
-        | Memory _ -> failwithf "Cannot vacuum backup from or to memory."
+        | Memory _ -> (raise << InvalidOperationException) "Cannot vacuum backup from or to memory."
         | other ->
 
         let location = Path.GetFullPath location
@@ -801,7 +813,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
     member this.Vacuum() =
         match this.DataLocation with
-        | Memory _ -> failwithf "Cannot vacuum memory databases."
+        | Memory _ -> (raise << InvalidOperationException) "Cannot vacuum memory databases."
         | other ->
 
         use dbConnection = connectionManager.Borrow()
@@ -811,15 +823,13 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         use connectionForTransaction = connectionManager.CreateForTransaction()
         try
             connectionForTransaction.Execute("BEGIN;") |> ignore
-
             let transactionalDb = new TransactionalSoloDB(connectionForTransaction)
             
-
             try
                 let ret = func.Invoke transactionalDb
                 connectionForTransaction.Execute "COMMIT;" |> ignore
                 ret
-            with ex -> 
+            with _ex -> 
                 connectionForTransaction.Execute "ROLLBACK;" |> ignore
                 reraise()
         finally connectionForTransaction.DisposeReal(true)
