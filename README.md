@@ -15,7 +15,7 @@ Imagine the power of MongoDB and SQL combined.
 - Support for polymorphic types.
 - [Reliable](https://sqlite.org/hirely.html) with a [WAL log file](https://www.sqlite.org/wal.html).
 - Support for [indexes](https://www.sqlite.org/expridx.html) for fast search.
-- Full LINQ and IQueryable support.
+- Full [LINQ](https://learn.microsoft.com/en-us/dotnet/csharp/linq/) and [IQueryable](https://learn.microsoft.com/en-us/dotnet/api/system.linq.iqueryable-1?view=net-9.0) support.
 - MongoDB inspired Custom ID Generation.
 - Direct SQL support.
 - [Open source](./LICENSE.txt).
