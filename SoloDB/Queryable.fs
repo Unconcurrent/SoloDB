@@ -682,7 +682,7 @@ module private QueryHelper =
                 translate builder expression.Arguments.[0]
             | Some t ->
             match t |> typeToName with
-            | None -> failwithf "Icompatible type from Cast<T> method."
+            | None -> failwithf "Incompatible type from Cast<T> method."
             | Some typeName -> 
 
             builder.Append "SELECT "
