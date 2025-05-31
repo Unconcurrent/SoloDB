@@ -36,6 +36,8 @@ dotnet add package SoloDB
 You can specify either a file path or an in-memory database.
 
 ```csharp
+using SoloDatabase;
+
 using var onDiskDB = new SoloDB("path/to/database.db");
 using var inMemoryDB = new SoloDB("memory:database-name");
 ```

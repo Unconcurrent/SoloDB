@@ -819,7 +819,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         use dbConnection = connectionManager.Borrow()
         dbConnection.Execute($"VACUUM;")
 
-    member this.WithTransaction<'R>(func: Func<TransactionalSoloDB, 'R>) : 'R =        
+    member this.WithTransaction<'R>(func: Func<TransactionalSoloDB, 'R>) : 'R =
         use connectionForTransaction = connectionManager.CreateForTransaction()
         try
             connectionForTransaction.Execute("BEGIN;") |> ignore
@@ -833,6 +833,9 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 connectionForTransaction.Execute "ROLLBACK;" |> ignore
                 reraise()
         finally connectionForTransaction.DisposeReal(true)
+
+    member this.WithTransaction(func: Action<TransactionalSoloDB>) : unit =
+        this.WithTransaction<unit>(fun tx -> func.Invoke tx)
 
     member this.Optimize() =
         use dbConnection = connectionManager.Borrow()
