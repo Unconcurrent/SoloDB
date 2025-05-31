@@ -10,6 +10,8 @@ open System
 type IndexedAttribute(unique: bool) =
     inherit System.Attribute()
 
+    new() = IndexedAttribute(false)
+
     member val Unique = unique
 
 /// <summary>
