@@ -8,9 +8,13 @@ open SoloDatabase
 open Utils
 open SoloDatabase.Types
 open SoloDatabase.JsonSerializator
+open System.Runtime.CompilerServices
+
 
 [<AbstractClass; Sealed>]
 type internal HasTypeId<'t> =
+    // Instead of concurrent dictionaries, we can use a static class
+    // if the parameters can be represented as generic types.
     static member val private Properties: PropertyInfo array = typeof<'t>.GetProperties()
     static member private IdPropertyFilter (p: PropertyInfo) = p.Name = "Id" && p.PropertyType = typeof<int64> && p.CanWrite && p.CanRead
     static member val internal Value = 
@@ -48,9 +52,6 @@ type internal HasTypeId<'t> =
 
 
 module JsonFunctions =
-    // Instead of concurrent dictionaries, we can use a static class
-    // if the parameters can be represented as generic types.
-
     let inline internal mustIncludeTypeInformationInSerializationFn (t: Type) = 
         t.IsAbstract || not (isNull (t.GetCustomAttribute<Attributes.PolimorphicAttribute>()))
 
@@ -117,7 +118,9 @@ module JsonFunctions =
         #endif
 
         internal fromSQLite<'R when 'R :> obj> (row: DbObjectRow) : 'R =
-        let inline asR a = a :> obj :?> 'R
+        let inline asR (a: 'a when 'a : unmanaged) = 
+            // No allocations.
+            Unsafe.As<'a, 'R>(&Unsafe.AsRef(&a))
 
         if row :> obj = null then
             Unchecked.defaultof<'R>

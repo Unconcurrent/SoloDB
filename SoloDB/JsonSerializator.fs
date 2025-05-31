@@ -1996,7 +1996,12 @@ and private JsonSerializerImpl<'A> =
             (fun (o: obj) -> 
                 match o with
                 | null -> JsonValue.Null
-                | _ -> JsonImpl.SerializeByTypeWithType (o.GetType()) o)
+                | _ -> 
+                    let t = o.GetType()
+                    if t = typeof<obj> then
+                        JsonValue.New()
+                    else
+                        JsonImpl.SerializeByTypeWithType t o)
                 :> obj :?> 'A -> JsonValue
 
         | t when t.IsAbstract -> 
