@@ -688,6 +688,15 @@ module QueryTranslator =
                 visit length qb
             qb.AppendRaw ")"
 
+        | "GetString" when m.Arguments.Count = 2 && isNull m.Object && m.Arguments.[0].Type = typeof<string> ->
+            let str = m.Arguments.[0]
+            let index = m.Arguments.[1]
+            qb.AppendRaw "substr("
+            visit str qb
+            qb.AppendRaw ",("
+            visit index qb
+            qb.AppendRaw " + 1),1)"
+
         | _ -> 
             raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 
