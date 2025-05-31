@@ -168,7 +168,7 @@ module private QueryHelper =
 
     let private translateSource<'T> (builder: QueryableBuilder<'T>) (root: IRootQueryable) =
         let sourceName = root.SourceTableName
-        // On modification, also check the '| Where -> ' match below.
+        // On modification, also check the '| Where -> ' and '| OrderBy' match below.
         builder.Append "SELECT Id, jsonb_extract(\""
         builder.Append sourceName
         builder.Append "\".Value, '$') as Value FROM \""
@@ -356,12 +356,25 @@ module private QueryHelper =
                     do expr <- (expr :?> MethodCallExpression).Arguments.[0]
                 expr
 
-            builder.Append "SELECT Id, Value FROM ("
-            translate builder innerExpression
-            builder.Append ") ORDER BY "
-            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
-            if method = OrderByDescending then
-                builder.Append "DESC "
+            match innerExpression with
+            | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
+                let tableName = (ce.Value :?> IRootQueryable).SourceTableName
+                builder.Append "SELECT Id, jsonb_extract(\""
+                builder.Append tableName
+                builder.Append "\".Value, '$') as Value FROM \""
+                
+                builder.Append tableName
+                builder.Append "\" ORDER BY  "
+                QueryTranslator.translateQueryable tableName expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+                if method = OrderByDescending then
+                    builder.Append "DESC "
+            | _other ->
+                builder.Append "SELECT Id, Value FROM ("
+                translate builder innerExpression
+                builder.Append ") ORDER BY "
+                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+                if method = OrderByDescending then
+                    builder.Append "DESC "
 
         | Order | OrderDescending ->
             builder.Append "SELECT Id, Value FROM ("
