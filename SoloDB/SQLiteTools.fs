@@ -14,25 +14,34 @@ open Microsoft.FSharp.Reflection
 open System.Runtime.Serialization
 open SoloDatabase.JsonSerializator
 open System.Collections.Concurrent
+open Microsoft.Data.Sqlite
 
 module SQLiteTools =
-    let private addParameter (command: IDbCommand) (key: string) (value: obj) =
-        let struct (value, size) = 
-            if value = null then 
-                struct (null, -1)
-            else
-            
-            match value with
-            | :? DateTimeOffset as dto ->
-                 struct (dto.ToUnixTimeMilliseconds() |> box, sizeof<int64>)
-            | _ ->
-                let valType = value.GetType()
-                if valType.Name.StartsWith "Nullable`" then
-                    if valType.GetProperty("HasValue").GetValue value = true then
-                        struct (valType.GetProperty("Value").GetValue value, -1)
-                    else struct (null, -1)
+    let private nullablePropsCache = ConcurrentDictionary<Type, struct (PropertyInfo * PropertyInfo)>()
+
+    let private getNullableProperties (nullableType: Type) =
+        nullablePropsCache.GetOrAdd(nullableType, fun t ->
+            struct (t.GetProperty("HasValue"), t.GetProperty("Value")))
+
+    let private processParameter (value: obj) =
+        match value with
+        | null -> 
+            struct (null, -1)
+        | :? DateTimeOffset as dto ->
+            struct (dto.ToUnixTimeMilliseconds() |> box, sizeof<int64>)
+        | _ ->
+            let valType = value.GetType()
+            if valType.Name.StartsWith "Nullable`" then
+                let struct (hasValueProp, valueProp) = getNullableProperties valType
+                if hasValueProp.GetValue value :?> bool then
+                    struct (valueProp.GetValue value, -1)
                 else
-                    struct (value, -1)
+                    struct (null, -1)
+            else
+                struct (value, -1)
+
+    let private addParameter (command: IDbCommand) (key: string) (value: obj) =
+        let struct (value, size) = processParameter value
 
         let par = command.CreateParameter()
         par.ParameterName <- key
@@ -43,41 +52,58 @@ module SQLiteTools =
 
         command.Parameters.Add par |> ignore
 
-    let private dynamicParameterCache = ConcurrentDictionary<Type, Action<IDbCommand, obj>>()
-    let private createCommand(this: IDbConnection)(sql: string)(parameters: obj option) =
-        let command = this.CreateCommand()
-        command.CommandText <- sql
-        match parameters with
-        | Some parameters when parameters <> null ->        
-            match parameters with
-            | :? IDictionary as dict ->
-                for key in dict.Keys do
-                    let value = dict.[key]
-                    let key = key :?> string
-                    addParameter command key value
+    let private setOrAddParameter (command: IDbCommand) (key: string) (value: obj) =
+        let struct (value, size) = processParameter value
 
-            | parameters ->
-            let fn = dynamicParameterCache.GetOrAdd(parameters.GetType(), Func<Type, Action<IDbCommand, obj>>(
+        let par = 
+            if command.Parameters.Contains key then 
+                command.Parameters.[key] :?> IDbDataParameter 
+            else 
+                let p = command.CreateParameter()
+                command.Parameters.Add p |> ignore
+                p.ParameterName <- key
+                p
+
+        par.Value <- value
+
+        if size > 0 then
+            par.Size <- size
+
+    let private dynamicParameterCache = ConcurrentDictionary<Type, Action<IDbCommand, obj, Action<IDbCommand,string,obj>>>()
+    let private processParameters processFn (command: IDbCommand) (parameters: obj) =
+        match parameters with
+        | null -> ()
+        | :? IDictionary as dict ->
+            for key in dict.Keys do
+                let value = dict.[key]
+                let key = key :?> string
+                processFn command key value
+
+        | parameters ->
+            let fn = dynamicParameterCache.GetOrAdd(parameters.GetType(), Func<Type, Action<IDbCommand, obj, Action<IDbCommand,string,obj>>>(
                 fun t ->
                     let props = t.GetProperties() |> Array.filter(_.CanRead)
                     let dbCmdPar = Expression.Parameter typeof<IDbCommand>
                     let parametersPar = Expression.Parameter typeof<obj>
-
-                    let addParameterFunc = Action<IDbCommand,string,obj>(addParameter)
+                    let actionPar = Expression.Parameter typeof<Action<IDbCommand,string,obj>>
 
                     let meth = typeof<Action<IDbCommand,string,obj>>.GetMethod "Invoke"
 
-                    let l = Expression.Lambda<Action<IDbCommand, obj>>(
+                    let l = Expression.Lambda<Action<IDbCommand, obj, Action<IDbCommand,string,obj>>>(
                                 Expression.Block([|
                                     for p in props do
-                                        Expression.Call(Expression.Constant(addParameterFunc), meth, [|dbCmdPar :> Expression; Expression.Constant(p.Name); Expression.Convert(Expression.Property(Expression.Convert(parametersPar, t), p), typeof<obj>)|]) :> Expression
+                                        Expression.Call(actionPar, meth, [|dbCmdPar :> Expression; Expression.Constant(p.Name); Expression.Convert(Expression.Property(Expression.Convert(parametersPar, t), p), typeof<obj>)|]) :> Expression
                                 |]),
-                                [|dbCmdPar; parametersPar|])
+                                [|dbCmdPar; parametersPar; actionPar|])
 
                     l.Compile(false)
             ))
-            fn.Invoke(command, parameters)
-        | _ -> ()
+            fn.Invoke(command, parameters, processFn)
+
+    let private createCommand (this: IDbConnection) (sql: string) (parameters: obj) =
+        let command = this.CreateCommand()
+        command.CommandText <- sql
+        processParameters addParameter command parameters
 
         command
 
@@ -387,59 +413,377 @@ module SQLiteTools =
                     try fn.Invoke(reader, startIndex, columns)
                     with _ex -> reraise()
 
+    let private queryCommand<'T> (command: IDbCommand) (nullableCachedDict: Dictionary<string, int>) = seq {
+        use reader = command.ExecuteReader()
+        let dict = 
+            if isNull nullableCachedDict then
+                Dictionary<string, int>(reader.FieldCount)
+            else
+                nullableCachedDict
 
-    let private queryInner<'T> this (sql: string) (parameters: obj option) = seq {
-           use command = createCommand this sql parameters
-           use reader = command.ExecuteReader()
-           let dict = Dictionary<string, int>()
+        if dict.Count = 0 then
+            for i in 0..(reader.FieldCount - 1) do
+                dict.Add(reader.GetName(i), i)
 
-           for i in 0..(reader.FieldCount - 1) do
-               dict.Add(reader.GetName(i), i)
 
-           while reader.Read() do
-               yield TypeMapper<'T>.Map reader 0 dict
-       }
+        while reader.Read() do
+            yield TypeMapper<'T>.Map reader 0 dict
+    }
+
+    let private queryInner<'T> this (sql: string) (parameters: obj) = seq {
+        use command = createCommand this sql parameters
+        yield! queryCommand<'T> command null
+    }
     
+
+    /// Redirect all the method calls to the connection provided in the constructor, and on Dispose, it is a noop.
+    type DirectConnection internal (connection: IDbConnection) =
+        member this.BeginTransaction() = connection.BeginTransaction()
+        member this.BeginTransaction (il: IsolationLevel) = connection.BeginTransaction il
+        member this.ChangeDatabase (databaseName: string) = connection.ChangeDatabase databaseName
+        member this.Close() = connection.Close()
+        member this.CreateCommand() = connection.CreateCommand()
+        member this.Open() = connection.Open()
+
+        member this.ConnectionString with get() = connection.ConnectionString and set (cs) = connection.ConnectionString <- cs
+        member this.ConnectionTimeout: int = connection.ConnectionTimeout
+        member this.Database: string = connection.Database
+        member this.State: ConnectionState = connection.State
+
+        interface IDbConnection with
+            override this.BeginTransaction() = connection.BeginTransaction()
+            override this.BeginTransaction (il: IsolationLevel) = connection.BeginTransaction il
+            override this.ChangeDatabase (databaseName: string) = connection.ChangeDatabase databaseName
+            override this.Close() = connection.Close()
+            override this.CreateCommand() = connection.CreateCommand()
+            override this.Open() = connection.Open()
+            member this.ConnectionString with get() = connection.ConnectionString and set (cs) = connection.ConnectionString <- cs
+            member this.ConnectionTimeout: int = connection.ConnectionTimeout
+            member this.Database: string = connection.Database
+            member this.State: ConnectionState = connection.State
+
+        interface IDisposable with 
+            override this.Dispose (): unit = 
+                ()
+
+        member this.DisposeReal() =
+            connection.Dispose()
+
+    type CachingDbConnectionTransaction internal (connection: CachingDbConnection, isolationLevel: IsolationLevel, deferred: bool) =
+        let mutable _connection = Some connection
+        let mutable _completed = false
+        let mutable _externalRollback = false
+    
+        // Handle isolation level mapping like in C# version
+        let actualIsolationLevel = 
+            match isolationLevel with
+            | IsolationLevel.ReadUncommitted when not deferred -> IsolationLevel.Serializable
+            | IsolationLevel.ReadCommitted
+            | IsolationLevel.RepeatableRead 
+            | IsolationLevel.Unspecified -> IsolationLevel.Serializable
+            | _ -> isolationLevel
+
+        do
+            // Set read_uncommitted pragma for ReadUncommitted isolation
+            if actualIsolationLevel = IsolationLevel.ReadUncommitted then
+                connection.Execute("PRAGMA read_uncommitted = 1;") |> ignore
+            elif actualIsolationLevel <> IsolationLevel.Serializable then
+                invalidArg "isolationLevel" $"Invalid isolation level: {actualIsolationLevel}"
+
+            // Begin transaction with appropriate mode
+            let sql = 
+                if actualIsolationLevel = IsolationLevel.Serializable && not deferred then
+                    "BEGIN IMMEDIATE;"
+                else
+                    "BEGIN;"
+            connection.Execute(sql) |> ignore
+
+        member this.Connection = _connection
+        member this.ExternalRollback = _externalRollback
+        member this.IsolationLevel = actualIsolationLevel
+
+        member this.Commit() =
+            match _connection with
+            | None -> invalidOp "Transaction completed"
+            | Some conn when _externalRollback || _completed || conn.State <> ConnectionState.Open ->
+                invalidOp "Transaction completed"
+            | Some conn ->
+                conn.Execute("COMMIT;") |> ignore
+                this.Complete()
+
+        member this.Rollback() =
+            match _connection with
+            | None -> invalidOp "Transaction completed"
+            | Some conn when _completed || conn.State <> ConnectionState.Open ->
+                invalidOp "Transaction completed"
+            | Some _ ->
+                this.RollbackInternal()
+
+        member this.Save(savepointName: string) =
+            if savepointName = null then nullArg "savepointName"
+            match _connection with
+            | None -> invalidOp "Transaction completed"
+            | Some conn when _completed || conn.State <> ConnectionState.Open ->
+                invalidOp "Transaction completed"
+            | Some conn ->
+                let escapedName = savepointName.Replace("\"", "\"\"")
+                let sql = $"SAVEPOINT \"{escapedName}\";"
+                conn.Execute(sql) |> ignore
+
+        member this.Rollback(savepointName: string) =
+            if savepointName = null then nullArg "savepointName"
+            match _connection with
+            | None -> invalidOp "Transaction completed"
+            | Some conn when _completed || conn.State <> ConnectionState.Open ->
+                invalidOp "Transaction completed"
+            | Some conn ->
+                let escapedName = savepointName.Replace("\"", "\"\"")
+                let sql = $"ROLLBACK TO SAVEPOINT \"{escapedName}\";"
+                conn.Execute(sql) |> ignore
+
+        member this.Release(savepointName: string) =
+            if savepointName = null then nullArg "savepointName"
+            match _connection with
+            | None -> invalidOp "Transaction completed"
+            | Some conn when _completed || conn.State <> ConnectionState.Open ->
+                invalidOp "Transaction completed"
+            | Some conn ->
+                let escapedName = savepointName.Replace("\"", "\"\"")
+                let sql = $"RELEASE SAVEPOINT \"{escapedName}\";"
+                conn.Execute(sql) |> ignore
+
+        member private this.Complete() =
+            if actualIsolationLevel = IsolationLevel.ReadUncommitted then
+                try
+                    _connection 
+                    |> Option.iter (fun conn -> conn.Execute("PRAGMA read_uncommitted = 0;") |> ignore)
+                with
+                | _ -> () // Ignore failure attempting to clean up
+
+            _connection <- None
+            _completed <- true
+
+        member private this.RollbackInternal() =
+            try
+                if not _externalRollback then
+                    _connection 
+                    |> Option.iter (fun conn -> conn.Execute("ROLLBACK;") |> ignore)
+            finally
+                this.Complete()
+
+        interface IDbTransaction with
+            member this.Dispose() = 
+                if not _completed then
+                    match _connection with
+                    | Some conn when conn.State = ConnectionState.Open ->
+                        this.RollbackInternal()
+                    | _ -> ()
+
+            member this.Connection 
+                with get() = match _connection with Some x -> x | None -> null
+
+            member this.IsolationLevel 
+                with get() = actualIsolationLevel
+
+            member this.Commit() = this.Commit()
+
+            member this.Rollback() = this.Rollback()
+
+
+    and CachingDbConnection internal (connection: SqliteConnection, onDispose) = 
+        inherit DirectConnection(connection)
+        let preparedCache = ConcurrentDictionary<string, {| Command: IDbCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
+        let maxCacheSize = 1000
+        let removeLock = obj()
+
+        let canCache (sql: string) =
+            not (sql.Contains "@VAR")
+            && (
+            match preparedCache.TryGetValue sql  with
+            | true, x -> not x.InUse.Value
+            | false, _ -> true
+            )
+
+        let cachedCommand (sql: string) (parameters: obj) =
+            if preparedCache.Count >= maxCacheSize then
+                lock removeLock (fun () -> 
+                    // Prevent multiple concurrent clearing.
+                    if preparedCache.Count < maxCacheSize then () else 
+
+                    let arr = preparedCache.ToArray()
+                    arr |> Array.sortInPlaceBy (fun (KeyValue(_sql, item)) -> item.CallCount.Value)
+                    for i in 1..(maxCacheSize / 4) do
+                        preparedCache.TryRemove (arr.[i].Key) |> ignore
+                        arr.[i].Value.Command.Dispose()
+                )
+
+            let item = preparedCache.GetOrAdd(sql, fun sql ->
+                let command = connection.CreateCommand()
+                command.CommandText <- sql
+                processParameters addParameter command parameters
+                command.Prepare()
+
+                {| Command = command :> IDbCommand; ColumnDict = Dictionary<string, int>(); CallCount = ref 0L; InUse = ref false |}
+            )
+
+            item.CallCount.Value <- item.CallCount.Value + 1L
+            item.InUse.Value <- true
+
+            processParameters setOrAddParameter item.Command parameters
+            struct (item.Command, item.ColumnDict, item.InUse)
+
+        member this.Inner = connection
+
+        member this.Execute(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+            match canCache sql with
+            | true ->
+                let struct (command, _columnDict, inUse) = cachedCommand sql parameters
+                try command.ExecuteNonQuery()
+                finally inUse.Value <- false
+            | false ->
+
+            use command = createCommand connection sql parameters
+            command.Prepare() // To throw all errors, not silently fail them.
+            command.ExecuteNonQuery()
+
+        member this.Query<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = seq {
+            match canCache sql with
+            | true ->
+                let struct (command, columnDict, inUse) = cachedCommand sql parameters
+                try yield! queryCommand<'T> command columnDict
+                finally inUse.Value <- false
+            | false ->
+            use command = createCommand connection sql parameters
+            yield! queryCommand<'T> command null
+        }
+
+        member this.QueryFirst<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
+            match canCache sql with
+            | true ->
+                let struct (command, columnDict, inUse) = cachedCommand sql parameters
+                try queryCommand<'T> command columnDict |> Seq.head
+                finally inUse.Value <- false
+            | false ->
+            use command = createCommand connection sql parameters
+            queryCommand<'T> command null |> Seq.head
+
+        member this.QueryFirstOrDefault<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
+            match canCache sql with
+            | true ->
+                let struct (command, columnDict, inUse) = cachedCommand sql parameters
+                try
+                    match queryCommand<'T> command columnDict |> Seq.tryHead with
+                    | Some x -> x
+                    | None -> Unchecked.defaultof<'T>
+                finally inUse.Value <- false
+
+            | false ->
+            use command = createCommand connection sql parameters
+            
+            match queryCommand<'T> command null |> Seq.tryHead with
+            | Some x -> x
+            | None -> Unchecked.defaultof<'T>
+
+        member this.Query<'T1, 'T2, 'TReturn>(sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = seq {
+            let struct (command, dict, dispose, inUse) =
+                match canCache sql with
+                | true ->
+                    let struct (command, columnDict, inUse) = cachedCommand sql parameters
+                    struct (command, columnDict, false, Some inUse)
+                | false ->
+                    struct (createCommand connection sql parameters, Dictionary<string, int>(), true, None)
+            try
+                use reader = command.ExecuteReader()
+
+                if dict.Count = 0 then
+                    for i in 0..(reader.FieldCount - 1) do
+                       dict.Add(reader.GetName(i), i)
+
+                let splitIndex = reader.GetOrdinal(splitOn)
+
+                while reader.Read() do
+                    let t1 = TypeMapper<'T1>.Map reader 0 dict
+                    let t2 = 
+                        if reader.IsDBNull(splitIndex) then Unchecked.defaultof<'T2>
+                        else TypeMapper<'T2>.Map reader splitIndex dict
+
+                    yield map.Invoke (t1, t2)
+            finally
+                match inUse with
+                | Some inUse -> inUse.Value <- false
+                | _ -> ()
+                if dispose then command.Dispose()
+        }
+
+        member this.BeginTransaction() = this.BeginTransaction(IsolationLevel.Unspecified)
+        member this.BeginTransaction(deferred: bool) = connection.BeginTransaction(IsolationLevel.Unspecified, deferred)
+        member this.BeginTransaction(isolation: IsolationLevel) = this.BeginTransaction(isolation, (isolation = IsolationLevel.ReadUncommitted))
+        member this.BeginTransaction(isolation: IsolationLevel, deferred: bool) = 
+            if this.State <> ConnectionState.Open then
+                (raise << InvalidOperationException) "BeginTransaction requires call to Open()."
+
+            new CachingDbConnectionTransaction(this, isolation, deferred)
+
+        interface IDisposable with
+            override this.Dispose (): unit = 
+                onDispose this
 
     [<Extension>]
     type IDbConnectionExtensions =
         [<Extension>]
         static member Execute(this: IDbConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
-            use command = createCommand this sql (Option.ofObj parameters)
+            match this with
+            | :? CachingDbConnection as c -> c.Execute(sql, parameters)
+            | _ ->
+            use command = createCommand this sql parameters
             command.Prepare() // To throw all errors, not silently fail them.
             command.ExecuteNonQuery()
 
         [<Extension>]
         static member Query<'T>(this: IDbConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
-            queryInner<'T> this sql (Option.ofObj parameters)
+            match this with
+            | :? CachingDbConnection as c -> c.Query<'T>(sql, parameters)
+            | _ ->
+            queryInner<'T> this sql parameters
 
         [<Extension>]
         static member QueryFirst<'T>(this: IDbConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
-            queryInner<'T> this sql (Option.ofObj parameters) |> Seq.head
+            match this with
+            | :? CachingDbConnection as c -> c.QueryFirst<'T>(sql, parameters)
+            | _ ->
+            queryInner<'T> this sql parameters |> Seq.head
 
         [<Extension>]
         static member QueryFirstOrDefault<'T>(this: IDbConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
-            match queryInner<'T> this sql (Option.ofObj parameters) |> Seq.tryHead with
+            match this with
+            | :? CachingDbConnection as c -> c.QueryFirstOrDefault<'T>(sql, parameters)
+            | _ ->
+            match queryInner<'T> this sql parameters |> Seq.tryHead with
             | Some x -> x
             | None -> Unchecked.defaultof<'T>
 
         [<Extension>]
-        static member Query<'T1, 'T2, 'TReturn>(this: IDbConnection, sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = seq {
-            use command = createCommand this sql (Some parameters)
-            use reader = command.ExecuteReader()
+        static member Query<'T1, 'T2, 'TReturn>(this: IDbConnection, sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = 
+            match this with
+            | :? CachingDbConnection as c -> c.Query<'T1, 'T2, 'TReturn>(sql, map, parameters, splitOn)
+            | _ ->
+            
+            seq {
+                use command = createCommand this sql parameters
+                use reader = command.ExecuteReader()
 
-            let dict = Dictionary<string, int>(reader.FieldCount)
+                let dict = Dictionary<string, int>(reader.FieldCount)
 
-            for i in 0..(reader.FieldCount - 1) do
-               dict.Add(reader.GetName(i), i)
+                for i in 0..(reader.FieldCount - 1) do
+                   dict.Add(reader.GetName(i), i)
 
-            let splitIndex = reader.GetOrdinal(splitOn)
+                let splitIndex = reader.GetOrdinal(splitOn)
 
-            while reader.Read() do
-                let t1 = TypeMapper<'T1>.Map reader 0 dict
-                let t2 = 
-                    if reader.IsDBNull(splitIndex) then Unchecked.defaultof<'T2>
-                    else TypeMapper<'T2>.Map reader splitIndex dict
+                while reader.Read() do
+                    let t1 = TypeMapper<'T1>.Map reader 0 dict
+                    let t2 = 
+                        if reader.IsDBNull(splitIndex) then Unchecked.defaultof<'T2>
+                        else TypeMapper<'T2>.Map reader splitIndex dict
 
-                yield map.Invoke (t1, t2)
-        }
+                    yield map.Invoke (t1, t2)
+            }
