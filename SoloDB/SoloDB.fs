@@ -492,10 +492,10 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             if source.StartsWith("memory:", StringComparison.InvariantCultureIgnoreCase) then
                 let memoryName = source.Substring "memory:".Length
                 let memoryName = memoryName.Trim()
-                sprintf "Data Source=%s;Mode=Memory;Cache=Shared" memoryName, Memory memoryName
+                sprintf "Data Source=%s;Mode=Memory;Cache=Shared;Pooling=False" memoryName, Memory memoryName
             else 
                 let source = Path.GetFullPath source
-                $"Data Source={source}", File source
+                $"Data Source={source};Pooling=False", File source
 
         let usCultureInfo = CultureInfo.GetCultureInfo("en-us")
         let setup (connection: SqliteConnection) =            
@@ -679,29 +679,14 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 COMMIT TRANSACTION;
                 "
             
-            for command in [|initTables; initTriggers; initIndexes|] do
-                use command = new SqliteCommand(command, dbConnection)
-                command.Prepare()
-                let result = command.ExecuteNonQuery()
-                ()
-            let mutable dbSchemaVersion = dbConnection.QueryFirst "PRAGMA user_version;";
+            let mutable dbSchemaVersion = dbConnection.QueryFirst<int> "PRAGMA user_version;";
 
-            // Migrations.
             if dbSchemaVersion = 0 then
-                // Modified the triggers, must recreate them.
-                dbConnection.Execute "
-                    BEGIN EXCLUSIVE;
-                    DROP TRIGGER IF EXISTS Insert_SoloDBDirectoryHeader;
-                    DROP TRIGGER IF EXISTS Update_SoloDBDirectoryHeader;
-                    DROP TRIGGER IF EXISTS Insert_SoloDBFileHeader;
-                    DROP TRIGGER IF EXISTS Update_SoloDBFileHeader;
-                    COMMIT TRANSACTION;
-                " 
-                |> ignore
-                dbConnection.Execute initTriggers
-                |> ignore
-                dbConnection.Execute "PRAGMA user_version = 1;"
-                |> ignore
+                for command in [|initTables; initTriggers; initIndexes|] do
+                    use command = new SqliteCommand(command, dbConnection.Inner)
+                    command.Prepare()
+                    ignore (command.ExecuteNonQuery())
+                ignore (dbConnection.Execute "PRAGMA user_version = 1;")
                 dbSchemaVersion <- 1
 
 
@@ -798,7 +783,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     member this.BackupTo(otherDb: SoloDB) =
         use dbConnection = connectionManager.Borrow()
         use otherConnection = otherDb.GetNewConnection()
-        dbConnection.BackupDatabase otherConnection
+        dbConnection.Inner.BackupDatabase otherConnection.Inner
 
     member this.VacuumTo(location: string) =
         match this.DataLocation with
