@@ -409,9 +409,9 @@ collection.Update(data)
 let count = collection.Delete(data.Id) // 1
 ```
 ### Licence
-You can read the [LICENSE.txt](./LICENSE.txt).
+This project is licensed under [LGPL-3.0](./LICENSE.txt), with the additional permission to distribute applications that incorporate an unmodified DLL of this library in Single-file deployment, Native AOT, and other bundling technologies that embed the library into the executable.
 
-## (FA)Q
+## FAQ
 
 ### Why create this project?
 - For fun and profit, and to have a more simple alternative to MongoDB with the reliability of SQLite.
