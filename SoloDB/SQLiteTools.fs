@@ -64,7 +64,7 @@ module SQLiteTools =
                 p.ParameterName <- key
                 p
 
-        par.Value <- value
+        par.Value <-value
 
         if size > 0 then
             par.Size <- size
@@ -590,94 +590,103 @@ module SQLiteTools =
             member this.Rollback() = this.Rollback()
 
 
-    and CachingDbConnection internal (connection: SqliteConnection, onDispose) = 
+    and CachingDbConnection internal (connection: SqliteConnection, onDispose, config: Types.SoloDBConfiguration) = 
         inherit DirectConnection(connection)
-        let preparedCache = ConcurrentDictionary<string, {| Command: IDbCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
+        let mutable preparedCache = Dictionary<string, {| Command: IDbCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
         let maxCacheSize = 1000
-        let removeLock = obj()
 
-        let canCache (sql: string) =
-            not (sql.Contains "@VAR")
-            && (
-            match preparedCache.TryGetValue sql  with
-            | true, x -> not x.InUse.Value
-            | false, _ -> true
-            )
+        let tryCachedCommand (sql: string) (parameters: obj) =
+            // @VAR variable names are randomly generated, so caching them is not possible.
+            if sql.Contains "@VAR" then ValueNone else
+            if not config.CachingEnabled then
+                ValueNone 
+            else
 
-        let cachedCommand (sql: string) (parameters: obj) =
             if preparedCache.Count >= maxCacheSize then
-                lock removeLock (fun () -> 
-                    // Prevent multiple concurrent clearing.
-                    if preparedCache.Count < maxCacheSize then () else 
+                let arr = preparedCache |> Seq.toArray 
+                arr |> Array.sortInPlaceBy (fun (KeyValue(_sql, item)) -> !item.CallCount)
 
-                    let arr = preparedCache.ToArray()
-                    arr |> Array.sortInPlaceBy (fun (KeyValue(_sql, item)) -> item.CallCount.Value)
-                    for i in 1..(maxCacheSize / 4) do
-                        preparedCache.TryRemove (arr.[i].Key) |> ignore
-                        arr.[i].Value.Command.Dispose()
-                )
+                for i in 1..(maxCacheSize / 4) do
+                    preparedCache.Remove (arr.[i].Key) |> ignore
+                    arr.[i].Value.Command.Dispose()
+                
 
-            let item = preparedCache.GetOrAdd(sql, fun sql ->
-                let command = connection.CreateCommand()
-                command.CommandText <- sql
-                processParameters addParameter command parameters
-                command.Prepare()
+            let item = 
+                match preparedCache.TryGetValue sql with
+                | true, x -> x
+                | false, _ ->
+                    let command = connection.CreateCommand()
+                    command.CommandText <- sql
+                    processParameters addParameter command parameters
+                    command.Prepare()
 
-                {| Command = command :> IDbCommand; ColumnDict = Dictionary<string, int>(); CallCount = ref 0L; InUse = ref false |}
-            )
+                    let item = {| Command = command :> IDbCommand; ColumnDict = Dictionary<string, int>(); CallCount = ref 0L; InUse = ref false |}
+                    preparedCache.[sql] <- item
+                    item
 
-            item.CallCount.Value <- item.CallCount.Value + 1L
-            item.InUse.Value <- true
+            if !item.InUse then ValueNone else
+
+            item.CallCount := !item.CallCount + 1L
+            item.InUse := true
 
             processParameters setOrAddParameter item.Command parameters
-            struct (item.Command, item.ColumnDict, item.InUse)
+            struct (item.Command, item.ColumnDict, item.InUse) |> ValueSome
 
         member this.Inner = connection
 
+        /// Clears the cache while waiting the all cached connections to not be in use.
+        member this.ClearCache() =
+            if preparedCache.Count = 0 then () else
+
+            let oldCache = preparedCache 
+            preparedCache <- Dictionary<string, {| Command: IDbCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
+
+            while oldCache.Count > 0 do
+                for KeyValue(k, v) in oldCache |> Seq.toArray do
+                    if (not !v.InUse) then
+                        v.Command.Dispose()
+                        ignore (oldCache.Remove k)
+
         member this.Execute(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
-            match canCache sql with
-            | true ->
-                let struct (command, _columnDict, inUse) = cachedCommand sql parameters
+            match tryCachedCommand sql parameters with
+            | ValueSome struct (command, _columnDict, inUse) ->
                 try command.ExecuteNonQuery()
-                finally inUse.Value <- false
-            | false ->
+                finally inUse := false
+            | ValueNone ->
 
             use command = createCommand connection sql parameters
             command.Prepare() // To throw all errors, not silently fail them.
             command.ExecuteNonQuery()
 
         member this.Query<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = seq {
-            match canCache sql with
-            | true ->
-                let struct (command, columnDict, inUse) = cachedCommand sql parameters
+            match tryCachedCommand sql parameters with
+            | ValueSome struct (command, columnDict, inUse) ->
                 try yield! queryCommand<'T> command columnDict
-                finally inUse.Value <- false
-            | false ->
+                finally inUse := false
+            | ValueNone ->
             use command = createCommand connection sql parameters
             yield! queryCommand<'T> command null
         }
 
         member this.QueryFirst<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
-            match canCache sql with
-            | true ->
-                let struct (command, columnDict, inUse) = cachedCommand sql parameters
+            match tryCachedCommand sql parameters with
+            | ValueSome struct (command, columnDict, inUse) ->
                 try queryCommand<'T> command columnDict |> Seq.head
-                finally inUse.Value <- false
-            | false ->
+                finally inUse := false
+            | ValueNone ->
             use command = createCommand connection sql parameters
             queryCommand<'T> command null |> Seq.head
 
         member this.QueryFirstOrDefault<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
-            match canCache sql with
-            | true ->
-                let struct (command, columnDict, inUse) = cachedCommand sql parameters
+            match tryCachedCommand sql parameters with
+            | ValueSome struct (command, columnDict, inUse) ->
                 try
                     match queryCommand<'T> command columnDict |> Seq.tryHead with
                     | Some x -> x
                     | None -> Unchecked.defaultof<'T>
-                finally inUse.Value <- false
+                finally inUse := false
 
-            | false ->
+            | ValueNone ->
             use command = createCommand connection sql parameters
             
             match queryCommand<'T> command null |> Seq.tryHead with
@@ -686,11 +695,10 @@ module SQLiteTools =
 
         member this.Query<'T1, 'T2, 'TReturn>(sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = seq {
             let struct (command, dict, dispose, inUse) =
-                match canCache sql with
-                | true ->
-                    let struct (command, columnDict, inUse) = cachedCommand sql parameters
+                match tryCachedCommand sql parameters with
+                | ValueSome struct (command, columnDict, inUse) ->
                     struct (command, columnDict, false, Some inUse)
-                | false ->
+                | ValueNone ->
                     struct (createCommand connection sql parameters, Dictionary<string, int>(), true, None)
             try
                 use reader = command.ExecuteReader()
@@ -710,7 +718,7 @@ module SQLiteTools =
                     yield map.Invoke (t1, t2)
             finally
                 match inUse with
-                | Some inUse -> inUse.Value <- false
+                | Some inUse -> inUse := false
                 | _ -> ()
                 if dispose then command.Dispose()
         }
