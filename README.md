@@ -341,7 +341,7 @@ collection.Insert(newDoc); // Id will be auto-generated and set on newDoc.Id
 System.Console.WriteLine($"Inserted document with ID: {newDoc.Id}");
 
 
-// If the object's Id property does not exist, then the Insert methods returns it.
+// If the Id property does not exist, then you can use the return value of Insert.
 var dataToInsert = new MyDataType { Name = "Document 2", Data = "More data" };
 var docId = collection.Insert(dataToInsert);
 System.Console.WriteLine($"Inserted document, ID from object: {docId}");
