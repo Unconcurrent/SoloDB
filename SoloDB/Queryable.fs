@@ -133,6 +133,7 @@ module private QueryHelper =
             else
                 "json_extract(Value, '$') "
 
+    /// This function is adjusted to better use indexes.
     let private translateWhereStatement (translate: QueryableBuilder<'T> -> Expression -> unit) (builder: QueryableBuilder<'T>) (collection: Expression) (filter: Expression) =
         match collection with
         | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
@@ -397,14 +398,13 @@ module private QueryHelper =
             QueryTranslator.appendVariable builder.SQLiteCommand builder.Variables (QueryTranslator.evaluateExpr<obj> expression.Arguments.[1])
 
         | First | FirstOrDefault ->
-            builder.Append "SELECT Id, Value FROM ("
-            translate builder expression.Arguments.[0]
-            builder.Append ") "
             match expression.Arguments.Count with
-            | 1 -> () // Noop needed.
+            | 1 -> 
+                builder.Append "SELECT Id, Value FROM ("
+                translate builder expression.Arguments.[0]
+                builder.Append ")"
             | 2 -> 
-                builder.Append "WHERE " 
-                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+                translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
             builder.Append " LIMIT 1 "
@@ -482,11 +482,7 @@ module private QueryHelper =
 
             match expression.Arguments.Count with
             | 1 -> translate builder expression.Arguments.[0]
-            | 2 -> 
-                builder.Append "SELECT Id, Value FROM ("
-                translate builder expression.Arguments.[0]
-                builder.Append ") WHERE " 
-                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            | 2 -> translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
             
@@ -522,39 +518,46 @@ module private QueryHelper =
             builder.Append "ELSE ("
 
             builder.Append "SELECT jsonb_object('Id', Id, 'Value', Value) FROM ("
-            translate builder expression.Arguments.[0]
+            match expression.Arguments.Count with
+            | 1 -> 
+                translate builder expression.Arguments.[0]
+            | 2 -> 
+                translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
+            | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+
             builder.Append ")"
 
             builder.Append ") END as Encoded FROM "
             builder.Append "(SELECT COUNT(*) as "
             builder.Append countVar
             builder.Append " FROM ("
-            translate builder expression.Arguments.[0]
-            builder.Append ")"
+
             match expression.Arguments.Count with
-            | 1 -> () // Noop needed.
+            | 1 -> 
+                translate builder expression.Arguments.[0]
             | 2 -> 
-                builder.Append "WHERE " 
-                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+                translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+            builder.Append ")"
             builder.Append "LIMIT 2)) WHERE Id IS NOT NULL OR Value IS NOT NULL"
 
         | All ->
-            builder.Append "SELECT COUNT(*) = (SELECT COUNT(*) FROM ("
-            translate builder expression.Arguments.[0]
-            builder.Append ")) as Value FROM ("
-            translate builder expression.Arguments.[0]
-            builder.Append ") WHERE "
-            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+            if expression.Arguments.Count = 2 then
+                builder.Append "SELECT COUNT(*) = (SELECT COUNT(*) FROM ("
+                translate builder expression.Arguments.[0]
+                builder.Append ")) as Value FROM ("
+                translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
+                builder.Append ")"
+            else
+                failwithf "Invalid All method with %i arguments" expression.Arguments.Count
 
         | Any ->
-            builder.Append "SELECT EXISTS(SELECT 1 FROM ("
-            translate builder expression.Arguments.[0]
-            builder.Append ")"
-            if expression.Arguments.Count > 1 then
-                builder.Append " WHERE "
-                QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
-            builder.Append " LIMIT 1) as Value "
+            builder.Append "(SELECT EXISTS(SELECT 1 FROM ("
+            if expression.Arguments.Count = 2 then
+                translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
+            else
+                translate builder expression.Arguments.[0]
+            builder.Append " LIMIT 1)) as Value)"
 
         | Contains ->
             builder.Append "SELECT EXISTS(SELECT 1 FROM ("
