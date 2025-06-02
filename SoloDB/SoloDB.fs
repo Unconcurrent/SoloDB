@@ -187,8 +187,12 @@ module internal Helper =
     let internal collectionNameOf<'T> =
         typeof<'T>.Name |> formatName
 
-type internal Collection<'T>(connection: Connection, name: string, connectionString: string) as this =
-    member val private SoloDBQueryable = SoloDBCollectionQueryable<'T, 'T>(SoloDBCollectionQueryProvider(this), Expression.Constant(RootQueryable<'T>(this))) :> IOrderedQueryable<'T>
+type internal SoloDBToCollectionData = {
+    ClearCacheFunction: unit -> unit
+}
+
+type internal Collection<'T>(connection: Connection, name: string, connectionString: string, parentData: SoloDBToCollectionData) as this =
+    member val private SoloDBQueryable = SoloDBCollectionQueryable<'T, 'T>(SoloDBCollectionQueryProvider(this, parentData), Expression.Constant(RootQueryable<'T>(this))) :> IOrderedQueryable<'T>
     member val private ConnectionString = connectionString
     member val Name = name
     member val InTransaction = match connection with | Transactional _ | Transitive _ -> true | Pooled _ -> false
@@ -220,7 +224,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 
         use connection = connection.Get()
         use directConnection = new DirectConnection(connection)
-        let transientConnection = Collection((Connection.Transitive directConnection), name, connectionString)
+        let transientConnection = Collection((Connection.Transitive directConnection), name, connectionString, parentData)
         connection.Execute "BEGIN;" |> ignore
 
         try
@@ -249,7 +253,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 
         use connection = connection.Get()
         use directConnection = new DirectConnection(connection)
-        let transientConnection = Collection((Connection.Transitive directConnection), name, connectionString)
+        let transientConnection = Collection((Connection.Transitive directConnection), name, connectionString, parentData)
         connection.Execute "BEGIN;" |> ignore
         
         try
@@ -436,7 +440,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
         if not (Helper.existsCollection name connection) then 
             Helper.createTableInner<'T> name connection
             
-        Collection<'T>(Transactional connection, name, connectionString) :> ISoloDBCollection<'T>
+        Collection<'T>(Transactional connection, name, connectionString, { ClearCacheFunction = ignore }) :> ISoloDBCollection<'T>
 
     member this.GetCollection<'T>() =
         let name = Helper.collectionNameOf<'T>
@@ -484,7 +488,7 @@ type internal SoloDBLocation =
 | File of filePath: string
 | Memory of name: string
 
-type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation) = 
+type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation, config: SoloDBConfiguration) = 
     let mutable disposed = false
 
     new(source: string) =
@@ -506,7 +510,9 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             connection.CreateFunction("base64", Func<obj, obj>(Utils.sqlBase64), true) // https://www.sqlite.org/base64.html
             connection.Execute "PRAGMA recursive_triggers = ON;" |> ignore // This must be enabled on every connection separately.
 
-        let manager = new ConnectionManager(connectionString, setup)
+        let defaultConfig: SoloDBConfiguration = { CachingEnabled = true }
+
+        let manager = new ConnectionManager(connectionString, setup, defaultConfig)
 
         // todo: Put it into a separate file.
         do
@@ -693,11 +699,14 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             let _rez = dbConnection.Execute("PRAGMA optimize;")
             ()
         
-        new SoloDB(manager, connectionString, location)
+        
+
+        new SoloDB(manager, connectionString, location, defaultConfig)
 
     member this.Connection = connectionManager
     member this.ConnectionString = connectionString
     member val internal DataLocation = location
+    member val Config = config
     member val FileSystem = FileSystem connectionManager
 
     member private this.GetNewConnection() = connectionManager.Borrow()
@@ -721,7 +730,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 if not withinTransaction then connection.Execute "ROLLBACK;" |> ignore
                 reraise()
 
-        Collection<'T>(Pooled connectionManager, name, connectionString) :> ISoloDBCollection<'T>
+        Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = this.ClearCache }) :> ISoloDBCollection<'T>
 
     member this.GetCollection<'T>() =
         let name = Helper.collectionNameOf<'T>
@@ -826,6 +835,18 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         use dbConnection = connectionManager.Borrow()
         dbConnection.Execute "PRAGMA optimize;"
 
+    /// Disables caching.
+    member this.DisableCaching() =
+        config.CachingEnabled <- false
+
+    /// Clears the current cache, while not disabling it.
+    member this.ClearCache() =
+        connectionManager.All |> Seq.iter _.ClearCache()
+
+    /// Enables caching.
+    member this.EnableCaching() =
+        config.CachingEnabled <- true
+
     member this.Dispose() =
         disposed <- true
         (connectionManager :> IDisposable).Dispose()
@@ -834,8 +855,15 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         member this.Dispose() = this.Dispose()
 
 
-    /// Run the EXPLAIN QUERY PLAN on the generated SQL.
+    /// <summary>Run the EXPLAIN QUERY PLAN on the generated SQL.</summary>
+    /// <remarks>Calling this function will clear the cache.</remarks>
     static member ExplainQueryPlan(query: IQueryable<'T>) =
+        match query.Provider with
+        | :? ISoloDBCollectionQueryProvider as p ->
+            match p.AdditionalData with
+            | :? SoloDBToCollectionData as data -> data.ClearCacheFunction()
+            | _ -> ()
+        | _ -> ()
         // This is a hack, I do not think that it is possible to add new IQueryable methods directly.
         query.Aggregate(QueryPlan.ExplainQueryPlanReference, (fun _a _b -> ""))
 

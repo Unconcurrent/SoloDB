@@ -302,7 +302,7 @@ module private QueryHelper =
                 if generics.[1] (*output*) = typeof<byte> then
                     raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit the SQLite context with .AsEnumerable().")
 
-                let innerSourceName = Utils.getRandomVarName ()
+                let innerSourceName = Utils.getVarName builder.SQLiteCommand.Length
 
                 builder.Append "SELECT "
                 builder.Append innerSourceName
@@ -467,7 +467,7 @@ module private QueryHelper =
                 failwithf "Because SQLite does not guarantee the order of elements without an ORDER BY, this function cannot be implemented if it is not the only one applied(in this case it sorts by Id). Use an OrderBy() with a First'OrDefault'()"
 
         | Single ->
-            let countVar = Utils.getRandomVarName()
+            let countVar = Utils.getVarName builder.SQLiteCommand.Length
 
             builder.Append "SELECT jsonb_extract(Encoded, '$.Id') as Id, jsonb_extract(Encoded, '$.Value') as Value FROM ("
 
@@ -507,7 +507,7 @@ module private QueryHelper =
             builder.Append "LIMIT 2)) WHERE Id IS NOT NULL OR Value IS NOT NULL"
 
         | SingleOrDefault ->
-            let countVar = Utils.getRandomVarName()
+            let countVar = Utils.getVarName builder.SQLiteCommand.Length
 
             builder.Append "SELECT jsonb_extract(Encoded, '$.Id') as Id, jsonb_extract(Encoded, '$.Value') as Value FROM ("
 
@@ -866,7 +866,15 @@ module private QueryHelper =
         builder.SQLiteCommand.ToString(), builder.Variables
 
 
-type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>) =
+type internal ISoloDBCollectionQueryProvider =
+    abstract member Source: obj
+    abstract member AdditionalData: obj
+
+type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, data: obj) =
+    interface ISoloDBCollectionQueryProvider with
+        override this.Source = source
+        override this.AdditionalData = data
+
     interface SoloDBQueryProvider
     member internal this.ExecuteEnumetable<'Elem> (query: string) (par: obj) : IEnumerable<'Elem> =
         seq {

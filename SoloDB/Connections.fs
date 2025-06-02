@@ -20,7 +20,7 @@ module Connections =
             // Noop
             ()
 
-    and ConnectionManager internal (connectionStr: string, setup: SqliteConnection -> unit) =
+    and ConnectionManager internal (connectionStr: string, setup: SqliteConnection -> unit, config: Types.SoloDBConfiguration) =
         let all = ConcurrentStack<CachingDbConnection>()
         let pool = ConcurrentStack<CachingDbConnection>()
         let mutable disposed = false
@@ -46,11 +46,13 @@ module Connections =
                     c.Inner.Open()
                 c
             | false, _ -> 
-                let c = new CachingDbConnection(new SqliteConnection(connectionStr), this.TakeBack)
+                let c = new CachingDbConnection(new SqliteConnection(connectionStr), this.TakeBack, config)
                 c.Inner.Open()
                 setup c.Inner
                 all.Push c
                 c
+
+        member internal this.All = all
 
         member internal this.CreateForTransaction() =
             checkDisposed()

@@ -22,54 +22,9 @@ open System.Linq.Expressions
 module Utils =
     let isNull x = Object.ReferenceEquals(x, null)
 
-    let private HexChars = [| '0'; '1'; '2'; '3'; '4'; '5'; '6'; '7'; '8'; '9'; 'A'; 'B'; 'C'; 'D'; 'E'; 'F' |]
-    let inline private writeUIntToHex (value: uint32, chars: char[], startIndex: int) =
-        chars.[startIndex + 0] <- HexChars.[(int)(value >>> 28) &&& 0xF]
-        chars.[startIndex + 1] <- HexChars.[(int)(value >>> 24) &&& 0xF]
-        chars.[startIndex + 2] <- HexChars.[(int)(value >>> 20) &&& 0xF]
-        chars.[startIndex + 3] <- HexChars.[(int)(value >>> 16) &&& 0xF]
-        chars.[startIndex + 4] <- HexChars.[(int)(value >>> 12) &&& 0xF]
-        chars.[startIndex + 5] <- HexChars.[(int)(value >>> 8) &&& 0xF]
-        chars.[startIndex + 6] <- HexChars.[(int)(value >>> 4) &&& 0xF]
-        chars.[startIndex + 7] <- HexChars.[(int)value &&& 0xF]
-
-    let private cryptoRandom = RandomNumberGenerator.Create()
-    let mutable private variableNameCounter: uint32 = UInt32.MaxValue
-    let internal getRandomVarName () =
-        ignore (Interlocked.Increment(&Unsafe.As<uint, int>(&variableNameCounter)))
-        let minLen = 4 * sizeof<uint>
-        let bytes = ArrayPool<byte>.Shared.Rent minLen
-        try
-            cryptoRandom.GetBytes bytes
-            
-            let randomUInts = MemoryMarshal.Cast<byte, uint>(Span<byte>(bytes, 0, minLen))
-            
-            // Pre-allocate a char array of exact size needed
-            let resultLength = 3 + 8 + 8 + 8 + 8 // "VAR" + 4 hex values (each uint as 8 hex chars)
-            let resultChars = ArrayPool<char>.Shared.Rent resultLength
-            
-            try
-                // Manually copy "VAR" into the result
-                resultChars.[0] <- 'V'
-                resultChars.[1] <- 'A'
-                resultChars.[2] <- 'R'
-                
-                // Convert first uint with counter addition to hex and copy to result
-                let firstVal = randomUInts.[0] + variableNameCounter
-                writeUIntToHex(firstVal, resultChars, 3)
-                
-                // Convert other uints to hex and copy to result
-                writeUIntToHex(randomUInts.[1], resultChars, 11)
-                writeUIntToHex(randomUInts.[2], resultChars, 19)
-                writeUIntToHex(randomUInts.[3], resultChars, 27)
-                
-                // Create string directly from the char array
-                new string(resultChars, 0, resultLength)
-            finally
-                ArrayPool<char>.Shared.Return(resultChars, false)
-        finally
-            ArrayPool<byte>.Shared.Return(bytes, false)
-        
+    /// Returns a deterministic variable name based on a int.
+    let internal getVarName (l: int) =
+        $"V{l}"
 
     // For the use in F# Builders, like task { .. }.
     // https://stackoverflow.com/a/72132958/9550932

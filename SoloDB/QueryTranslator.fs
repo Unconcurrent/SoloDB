@@ -49,7 +49,7 @@ module QueryTranslator =
         | _other -> 
                 
         let jsonValue, kind = toSQLJson value
-        let name = getRandomVarName ()
+        let name = getVarName sb.Length
         if kind then 
             sb.Append (sprintf "jsonb(@%s)" name) |> ignore
         else 

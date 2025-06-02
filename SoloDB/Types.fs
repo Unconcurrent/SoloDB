@@ -101,3 +101,9 @@ type internal SoloDBFileChunk = {
     Number: int64
     Data: byte array
 }
+
+type SoloDBConfiguration = internal {
+    /// The general switch to enable or disable caching.
+    /// By disabling it, any cached data will be automatically cleared.
+    mutable CachingEnabled: bool
+}
