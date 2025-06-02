@@ -52,7 +52,7 @@ public class User
     public int Age { get; set; }
 }
 
-var db = new SoloDB("memory:my-app");
+using var db = new SoloDB("memory:my-app");
 
 // Get a strongly-typed collection
 var users = db.GetCollection<User>();
@@ -87,7 +87,6 @@ public class MyCustomIdType
     public string Data { get; set; }
 }
 
-// ... in your application code
 var customIdCollection = db.GetCollection<MyCustomIdType>();
 var newItem = new MyCustomIdType { Data = "Custom ID Test" };
 customIdCollection.Insert(newItem); // newItem.Id will be populated by MyStringIdGenerator
@@ -143,7 +142,7 @@ Use the `WithTransaction` method to execute a function within a transaction.
 ```csharp
 try
 {
-    var _result = db.WithTransaction<object/* result type */>(tx => {
+    db.WithTransaction(tx => {
         var collection = tx.GetCollection<ulong>();
         // Perform operations within the transaction.
         collection.Insert(420);
@@ -333,37 +332,35 @@ public class MyDataType
 }
 
 // using var db = new SoloDB(...);
-// var db = new SoloDB("./mydatabase.db");
+
 var collection = db.GetCollection<MyDataType>();
 
 // Insert a document
 var newDoc = new MyDataType { Name = "Document 1", Data = "Some data" };
 collection.Insert(newDoc); // Id will be auto-generated and set on newDoc.Id
-long docId = newDoc.Id;
-System.Console.WriteLine($"Inserted document with ID: {docId}");
+System.Console.WriteLine($"Inserted document with ID: {newDoc.Id}");
 
 
-// Another way to insert and get the ID back if the object's Id property is not yet set
+// If the object's Id property does not exist, then the Insert methods returns it.
 var dataToInsert = new MyDataType { Name = "Document 2", Data = "More data" };
-collection.Insert(dataToInsert); // dataToInsert.Id is now populated
-System.Console.WriteLine($"Inserted document, ID from object: {dataToInsert.Id}");
+var docId = collection.Insert(dataToInsert);
+System.Console.WriteLine($"Inserted document, ID from object: {docId}");
 
 // Query all documents into a C# list
 var allDocuments = collection.ToList();
 System.Console.WriteLine($"Total documents: {allDocuments.Count}");
 
-// Query the Data property, where Name starts with 'Document'
 var documentsData = collection.Where(d => d.Name.StartsWith("Document"))
                               .Select(d => d.Data)
                               .ToList();
 
 // Update a document
-var docToUpdate = collection.GetById(dataToInsert.Id); // Retrieve the second document
+var docToUpdate = collection.GetById(docId);
 docToUpdate.Data = "Updated data for Document 2";
 collection.Update(docToUpdate);
 
 // Verify the update
-var updatedDoc = collection.GetById(dataToInsert.Id);
+var updatedDoc = collection.GetById(docId);
 System.Console.WriteLine($"Updated data: {updatedDoc.Data}"); // "Updated data for Document 2"
 
 // Delete the first document by its primary key
@@ -382,7 +379,7 @@ And a simple one in F#:
 [<CLIMutable>]
 type MyType = { Id: int64; Name: string; Data: string }
 
-let db = new SoloDB("./mydatabase.db")
+use db = new SoloDB("./mydatabase.db")
 let collection = db.GetCollection<MyType>()
         
 // Insert a document
@@ -409,9 +406,9 @@ collection.Update(data)
 let count = collection.Delete(data.Id) // 1
 ```
 ### Licence
-You can read the [LICENSE.txt](./LICENSE.txt).
+This project is licensed under [LGPL-3.0](./LICENSE.txt), with the additional permission to distribute applications that incorporate an unmodified DLL of this library in Single-file deployment, Native AOT, and other bundling technologies that embed the library into the executable.
 
-## (FA)Q
+## FAQ
 
 ### Why create this project?
 - For fun and profit, and to have a more simple alternative to MongoDB with the reliability of SQLite.
