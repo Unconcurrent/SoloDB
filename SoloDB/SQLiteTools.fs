@@ -23,12 +23,21 @@ module SQLiteTools =
         nullablePropsCache.GetOrAdd(nullableType, fun t ->
             struct (t.GetProperty("HasValue"), t.GetProperty("Value")))
 
+    [<Struct>]
+    type TrimmedArray = {
+        Array: Array
+        TrimmedLen: int
+    }
+        
+
     let private processParameter (value: obj) =
         match value with
         | null -> 
             struct (null, -1)
         | :? DateTimeOffset as dto ->
             struct (dto.ToUnixTimeMilliseconds() |> box, sizeof<int64>)
+        | :? TrimmedArray as ta ->
+            struct (ta.Array, ta.TrimmedLen)
         | _ ->
             let valType = value.GetType()
             if valType.Name.StartsWith "Nullable`" then
@@ -590,7 +599,7 @@ module SQLiteTools =
             member this.Rollback() = this.Rollback()
 
 
-    and CachingDbConnection internal (connection: SqliteConnection, onDispose, config: Types.SoloDBConfiguration) = 
+    and [<Sealed>] CachingDbConnection internal (connection: SqliteConnection, onDispose, config: Types.SoloDBConfiguration) = 
         inherit DirectConnection(connection)
         let mutable preparedCache = Dictionary<string, {| Command: IDbCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
         let maxCacheSize = 1000
