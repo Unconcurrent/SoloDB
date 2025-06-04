@@ -19,33 +19,14 @@
     <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
 	<DebugType>embedded</DebugType>
     <PackageOutputPath>$(OutputPath)</PackageOutputPath>
-    <VersionPrefix>0.1.6</VersionPrefix>
-    <LangVersion>8</LangVersion>
+    <VersionPrefix>0.1.7</VersionPrefix>
+    <LangVersion>9</LangVersion>
 	<GenerateDocumentationFile>true</GenerateDocumentationFile>
+	<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
+	<NoWarn>3370</NoWarn>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Debug|netstandard2.0|AnyCPU'">
-    <TreatWarningsAsErrors>True</TreatWarningsAsErrors>
-    <NoWarn>3370</NoWarn>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Debug|netstandard2.1|AnyCPU'">
-    <TreatWarningsAsErrors>True</TreatWarningsAsErrors>
-    <NoWarn>3370</NoWarn>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Release|netstandard2.0|AnyCPU'">
-    <TreatWarningsAsErrors>True</TreatWarningsAsErrors>
-    <NoWarn>3370</NoWarn>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Release|netstandard2.1|AnyCPU'">
-    <TreatWarningsAsErrors>True</TreatWarningsAsErrors>
-    <NoWarn>3370</NoWarn>
-  </PropertyGroup>
-
-
-  <ItemGroup>
+	<ItemGroup>
     <Compile Include="Types.fs" />
     <Compile Include="Attributes.fs" />
     <Compile Include="Utils.fs" />
@@ -89,7 +70,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Update="FSharp.Core" Version="8.0.400" />
+    <PackageReference Update="FSharp.Core" Version="9.0.300" />
   </ItemGroup>
 
 </Project>
