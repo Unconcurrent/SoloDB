@@ -223,7 +223,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         else
 
         use connection = connection.Get()
-        use directConnection = new DirectConnection(connection)
+        use directConnection = new DirectConnection(connection, true)
         let transientConnection = Collection((Connection.Transitive directConnection), name, connectionString, parentData)
         connection.Execute "BEGIN;" |> ignore
 
@@ -252,7 +252,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         else
 
         use connection = connection.Get()
-        use directConnection = new DirectConnection(connection)
+        use directConnection = new DirectConnection(connection, true)
         let transientConnection = Collection((Connection.Transitive directConnection), name, connectionString, parentData)
         connection.Execute "BEGIN;" |> ignore
         
