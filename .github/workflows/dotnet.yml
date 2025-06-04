@@ -1,12 +1,16 @@
-name: Build, Test and Upload
+name: Build and Upload
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ master ]
     paths-ignore:
-      - '**.md' # Ignore changes to markdown files for triggering the build
+      - '**.md'
+      - '.gitignore'
   pull_request:
-    branches: [ "master" ]
+    branches: [ master ]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
 
 jobs:
   build:
@@ -14,14 +18,25 @@ jobs:
     runs-on: ubuntu-latest # or self-hosted
     steps:
     - uses: actions/checkout@v4
+    
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '8.0.x'
+        dotnet-version: '9.0.x'
+        
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json', '**/*.fsproj') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
+          
     - name: Build and Restore
       run: dotnet build SoloDB -c Release
+      
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: build-artifacts-${{ matrix.runs-on }}
+        name: build-artifacts-${{ github.sha }}
         path: ./SoloDB/bin/Release/*
