@@ -435,6 +435,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
     let connectionString = connection.ConnectionString
 
     member val Connection = connection
+    member val FileSystem = FileSystem (Connection.Transactional connection)
 
     member private this.InitializeCollection<'T> name =
         if not (Helper.existsCollection name connection) then 
@@ -446,6 +447,9 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
         let name = Helper.collectionNameOf<'T>
         
         this.InitializeCollection<'T>(name)
+
+    member this.GetCollection<'T>(name) =        
+        this.InitializeCollection<'T>(Helper.formatName name)
 
     member this.GetUntypedCollection(name: string) =
         let name = name |> Helper.formatName
@@ -707,7 +711,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     member this.ConnectionString = connectionString
     member val internal DataLocation = location
     member val Config = config
-    member val FileSystem = FileSystem connectionManager
+    member val FileSystem = FileSystem (Connection.Pooled connectionManager)
 
     member private this.GetNewConnection() = connectionManager.Borrow()
         
@@ -738,7 +742,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         this.InitializeCollection<'T>(name)
 
     member this.GetCollection<'T>(name) =        
-        this.InitializeCollection<'T>(name)
+        this.InitializeCollection<'T>(Helper.formatName name)
 
     member this.GetUntypedCollection(name: string) =
         let name = name |> Helper.formatName

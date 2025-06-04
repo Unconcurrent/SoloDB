@@ -305,20 +305,6 @@ module FileStorage =
 
 
     let private writeChunkData (db: IDbConnection) (fileId: int64) (chunkNumber: int64) (data: Span<byte>) =
-        use command = db.CreateCommand()
-        command.CommandText <- "INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data)"
-        
-
-        let p = command.CreateParameter()
-        p.ParameterName <- "FileId"
-        p.Value <- fileId
-        command.Parameters.Add p |> ignore
-
-        let p = command.CreateParameter()
-        p.ParameterName <- "Number"
-        p.Value <- chunkNumber
-        command.Parameters.Add p |> ignore
-
         let arrayBuffer = Array.zeroCreate (int maxChunkStoreSize)
         let memoryBuffer = arrayBuffer.AsSpan()
         let len = 
@@ -328,15 +314,12 @@ module FileStorage =
             else
                 Snappy.Compress(data, memoryBuffer)
 
-        let p = command.CreateParameter()
-        p.ParameterName <- "Data"
-        p.Value <- arrayBuffer
-        p.Size <- len // Crop to size.
-        command.Parameters.Add p |> ignore
+        let result = db.Execute("INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data)", {|
+            FileId = fileId
+            Number = chunkNumber
+            Data = { Array = arrayBuffer; TrimmedLen = len } // Crop to size.
+        |})
 
-        command.Prepare()
-
-        let result = command.ExecuteNonQuery()
 
         if result <> 1 then failwithf "writeChunkData failed."
 
@@ -416,7 +399,7 @@ module FileStorage =
         sha1.GetHashAndReset()
 
     
-    type DbFileStream(db: IDbConnection, fileId: int64, fullPath: string, previousHash: byte array) =
+    type DbFileStream(db: Connection, fileId: int64, fullPath: string, previousHash: byte array) =
         inherit Stream()
 
         let mutable position = 0L
@@ -428,6 +411,7 @@ module FileStorage =
 
         member private this.UpdateHash() =
             if not disableHash && dirty && not dontRehash then
+                use db = db.Get()
                 let hash = calculateHash db fileId this.Length
                 if hash <> previousHash then
                     updateHashById db fileId hash
@@ -439,6 +423,7 @@ module FileStorage =
 
         override _.Length = 
             checkDisposed()
+            use db = db.Get()
             getFileLengthById db fileId
 
         override this.Position 
@@ -487,8 +472,8 @@ module FileStorage =
             else
 
             let chunkBuffer = Array.zeroCreate (int maxChunkStoreSize)
-
-            match tryGetChunkData db fileId chunkNumber (Span chunkBuffer) with
+            
+            match (use db = db.Get() in tryGetChunkData db fileId chunkNumber (Span chunkBuffer)) with
             | data when data.IsEmpty ->
                 let maxChunkNumber = (min (position + count) len) / int64 chunkSize
                 if maxChunkNumber > chunkNumber then // Try to load the other chunk if the file was sparsely allocated.
@@ -523,6 +508,9 @@ module FileStorage =
             let mutable offset = int64 0
             let mutable count = int64 buffer.Length
 
+            use db = db.Get()
+            use l = lockFileIdIfNotInTransaction db fileId
+
             while writing do
                 writing <- false
 
@@ -531,8 +519,7 @@ module FileStorage =
                 let mutable bytesToWrite = 0L
 
                 let bufferArray = Array.zeroCreate (int maxChunkStoreSize)
-                use l = lockFileIdIfNotInTransaction db fileId
-
+                
                 let chunkNumber = position / int64 chunkSize
                 let chunkOffset = position % int64 chunkSize
 
@@ -579,12 +566,14 @@ module FileStorage =
                 raise (ArgumentOutOfRangeException("Length"))
 
             dirty <- true
+            use db = db.Get()
             use l = lockFileIdIfNotInTransaction db fileId
             downsetFileLength db fileId value
             if position > value then position <- value
 
         override this.Seek(offset: int64, origin: SeekOrigin) =
             checkDisposed()
+            use db = db.Get()
             use l = lockFileIdIfNotInTransaction db fileId
             match origin with
             | SeekOrigin.Begin -> position <- offset
@@ -727,14 +716,15 @@ module FileStorage =
         | Some dir ->
         getFilesWhere db "DirectoryId = @DirectoryId" {|DirectoryId = dir.Id|} |> ResizeArray :> SoloDBFileHeader seq
 
-    let private openFile (db: IDbConnection) (file: SoloDBFileHeader) =
+    let private openFile (db: Connection) (file: SoloDBFileHeader) =
         new DbFileStream(db, file.Id, file.FullPath, file.Hash)
 
-    let private openOrCreateFile (db: IDbConnection) (path: string) =
-        let file = tryGetFileAt db path
-        let file = match file with
-                    | Some x -> x 
-                    | None -> createFileAt db path
+    let private openOrCreateFile (db: Connection) (path: string) =
+        let file = 
+            use conn = db.Get()
+            match tryGetFileAt conn path with
+            | Some x -> x 
+            | None -> createFileAt conn path
 
         new DbFileStream(db, file.Id, file.FullPath, file.Hash)
 
@@ -797,6 +787,9 @@ module FileStorage =
         | :? SqliteException as ex when ex.SqliteErrorCode = 19 (* SQLITE_CONSTRAINT *) && ex.Message.Contains "FullPath" ->
             raise (IOException("Directory or file already exists in the destination.", ex))
     
+    let private createInnerConnection tx =
+        new DirectConnection(tx) :> IDbConnection |> Transitive
+
     type BulkFileData = {
         FullPath: string
         Data: byte array
@@ -804,27 +797,26 @@ module FileStorage =
         Modified: Nullable<DateTimeOffset>
     }
 
-    type FileSystem(manager: ConnectionManager) =
+    type FileSystem(connection: Connection) =
         member this.Upload(path, stream: Stream) =
-            use db = manager.Borrow()
-            use file = openOrCreateFile db path
+            use file = openOrCreateFile connection path
             stream.CopyTo(file, int chunkSize)
             file.SetLength file.Position
 
         member this.UploadAsync(path, stream: Stream) = task {
-            use db = manager.Borrow()
-            use file = openOrCreateFile db path
+            use file = openOrCreateFile connection path
             do! stream.CopyToAsync(file, int chunkSize)
             file.SetLength file.Position
         }
 
         member this.UploadBulk(files: BulkFileData seq) =
-            manager.WithTransaction(fun tx -> 
+            connection.WithTransaction(fun tx -> 
+                let innerConnection = createInnerConnection tx
                 for file in files do
                     let fileHeader = getOrCreateFileAt tx file.FullPath
 
                     do
-                        use fileStream = openFile tx fileHeader
+                        use fileStream = openFile innerConnection fileHeader
                         fileStream.Write(file.Data, 0, file.Data.Length)
                         fileStream.SetLength file.Data.Length
                     
@@ -838,69 +830,72 @@ module FileStorage =
             )
 
         member this.ReplaceAsyncWithinTransaction(path, stream: Stream) = task {
-            return! manager.WithAsyncTransaction(fun db -> task {
-                use file = openOrCreateFile db path
+            return! connection.WithAsyncTransaction(fun tx -> task {
+                let innerConnection = createInnerConnection tx
+                use file = openOrCreateFile innerConnection path
                 do! stream.CopyToAsync(file, int chunkSize)
                 file.SetLength file.Position
             })
         }
 
         member this.Download(path, stream: Stream) =
-            use db = manager.Borrow()
-            let fileHeader = match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
-            use fileStream = openFile db fileHeader
+            
+            let fileHeader = 
+                use db = connection.Get()
+                match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
+
+            use fileStream = openFile connection fileHeader
             fileStream.CopyTo(stream, int chunkSize)
 
         member this.DownloadAsync(path, stream: Stream) = task {
-            use db = manager.Borrow()
-            let fileHeader = match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
-            use fileStream = openFile db fileHeader
+            
+            let fileHeader = 
+                use db = connection.Get()
+                match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
+
+            use fileStream = openFile connection fileHeader
             do! fileStream.CopyToAsync(stream, int chunkSize)
         }
 
         member this.GetAt path =
-            use db = manager.Borrow()
+            use db = connection.Get()
             match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
 
         member this.TryGetAt path =
-            use db = manager.Borrow()
+            use db = connection.Get()
             tryGetFileAt db path
 
         member this.GetOrCreateAt path =
-            use db = manager.Borrow()
+            use db = connection.Get()
             getOrCreateFileAt db path
 
         member this.GetDirAt path =
-            use db = manager.Borrow()
+            use db = connection.Get()
             match tryGetDir db path with | Some f -> f | None -> raise (DirectoryNotFoundException("Directory not found at: " + path))
 
         member this.TryGetDirAt path =
-            use db = manager.Borrow()
+            use db = connection.Get()
             tryGetDir db path
 
         member this.GetOrCreateDirAt path =
-            use db = manager.Borrow()
+            use db = connection.Get()
             getOrCreateDirectoryAt db path
 
         member this.Open file =
-            use db = manager.Borrow()
-            openFile db file
+            openFile connection file
 
-        member this.OpenAt path =            
+        member this.OpenAt path =
             let file = this.GetAt path
-            use db = manager.Borrow()
-            openFile db file
+            openFile connection file
 
-        member this.TryOpenAt path =            
+        member this.TryOpenAt path =
             match this.TryGetAt path with
             | None -> None
             | Some file ->
-            use db = manager.Borrow()
-            openFile db file |> Some
+            openFile connection file |> Some
 
         member this.OpenOrCreateAt path =
-            use db = manager.Borrow()        
-            openOrCreateFile db path
+            openOrCreateFile connection path
 
         /// <summary>
         /// Writes data to a file at a specific offset.
@@ -910,10 +905,11 @@ module FileStorage =
         /// <param name="data">The byte array to write to the file.</param>
         /// <param name="createIfInexistent">Specifies whether to create the file if it does not exist. Defaults to true.</param>
         member this.WriteAt(path: string, offset: int64, data: byte[], [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool) =
-             manager.WithTransaction(fun tx -> 
+             connection.WithTransaction(fun tx -> 
                 let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
+                let innerConnection = createInnerConnection tx
 
-                use fileStream = openFile tx file
+                use fileStream = openFile innerConnection file
                 fileStream.Position <- offset
                 fileStream.Write(data, 0, data.Length)
                 ()
@@ -935,10 +931,11 @@ module FileStorage =
             [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool,
             [<Optional; DefaultParameterValue(true)>] rehash: bool
         ) =
-            manager.WithTransaction(fun tx -> 
+            connection.WithTransaction(fun tx -> 
                 let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
+                let innerConnection = createInnerConnection tx
 
-                use fileStream = openFile tx file
+                use fileStream = openFile innerConnection file
                 fileStream.Position <- offset
                 data.CopyTo (fileStream, int chunkSize * 10)
                 if not rehash then
@@ -964,23 +961,22 @@ module FileStorage =
         member this.ReadAt(path: string, offset: int64, len) =
             let file = this.GetAt path
 
-            use db = manager.Borrow()
-            use fileStream = new BinaryReader(openFile db file)
+            use fileStream = new BinaryReader(openFile connection file)
             fileStream.BaseStream.Position <- offset
             fileStream.ReadBytes len
 
         member this.SetFileModificationDate(path, date) =
             let file = this.GetAt path
-            use db = manager.Borrow()
+            use db = connection.Get()
             setFileModifiedById db file.Id date
 
         member this.SetFileCreationDate(path, date) =
             let file = this.GetAt path
-            use db = manager.Borrow()
+            use db = connection.Get()
             setFileCreatedById db file.Id date
 
         member this.SetMetadata(file, key, value) =
-            use db = manager.Borrow()
+            use db = connection.Get()
             setSoloDBFileMetadata db file key value
 
         member this.SetMetadata(path, key, value) =
@@ -988,7 +984,7 @@ module FileStorage =
             this.SetMetadata(file, key, value)
 
         member this.DeleteMetadata(file, key) =
-            use db = manager.Borrow()
+            use db = connection.Get()
             deleteSoloDBFileMetadata db file key
 
         member this.DeleteMetadata(path, key) =
@@ -996,7 +992,7 @@ module FileStorage =
             this.DeleteMetadata(file, key)
 
         member this.SetDirectoryMetadata(dir, key, value) =
-            use db = manager.Borrow()
+            use db = connection.Get()
             setDirMetadata db dir key value
 
         member this.SetDirectoryMetadata(path, key, value) =
@@ -1004,7 +1000,7 @@ module FileStorage =
             this.SetDirectoryMetadata(dir, key, value)
 
         member this.DeleteDirectoryMetadata(dir, key) =
-            use db = manager.Borrow()
+            use db = connection.Get()
             deleteDirMetadata db dir key
 
         member this.DeleteDirectoryMetadata(path, key) =
@@ -1012,7 +1008,7 @@ module FileStorage =
             this.DeleteDirectoryMetadata(dir, key)
 
         member this.GetFilesByHash(hash) =
-            use db = manager.Borrow()
+            use db = connection.Get()
             getFilesByHash db hash
 
         member this.GetFileByHash(hash) =
@@ -1021,11 +1017,11 @@ module FileStorage =
             | Some f -> f
 
         member this.Delete(file) =
-            use db = manager.Borrow()
+            use db = connection.Get()
             deleteFile db file
 
         member this.Delete(dir) =
-            use db = manager.Borrow()
+            use db = connection.Get()
             deleteDirectory db dir
 
         member this.DeleteFileAt(path) =
@@ -1036,27 +1032,28 @@ module FileStorage =
             true
 
         member this.DeleteDirAt(path) =
-            use db = manager.Borrow()
+            use db = connection.Get()
             deleteDirectoryAt db path
 
         member this.ListFilesAt(path) =
-            use db = manager.Borrow()
+            use db = connection.Get()
             listFilesAt db path
 
         member this.ListDirectoriesAt(path) =
-            use db = manager.Borrow()
+            use db = connection.Get()
             listDirectoriesAt db path
 
         member this.RecursiveListEntriesAt(path) =
-            use db = manager.Borrow()
+            use db = connection.Get()
             recursiveListAllEntriesInDirectory db path   
             // If the downstream processing is slow, it can lock the DB and timeout on other's access,
             // therefore we will cache them in a List.
             |> ResizeArray 
-            :> ICollection<SoloDBEntryHeader>
+            :> IList<SoloDBEntryHeader>
 
+        // This method is not recommended, as its misuse can lock the database.
         member this.RecursiveListEntriesAtLazy(path) = seq {
-            use db = manager.Borrow()
+            use db = connection.Get()
             yield! recursiveListAllEntriesInDirectory db path
         }
 
@@ -1064,12 +1061,12 @@ module FileStorage =
             let file = this.GetAt from
             let struct (toDirPath, fileName) = getPathAndName toPath
             let dir = this.GetOrCreateDirAt toDirPath
-            use db = manager.Borrow()
+            use db = connection.Get()
             moveFile db file dir fileName
 
         member this.MoveReplaceFile(from, toPath) =
             let struct (toDirPath, fileName) = getPathAndName toPath
-            manager.WithTransaction(fun db ->
+            connection.WithTransaction(fun db ->
                 let file = match tryGetFileAt db from with | Some f -> f | None -> raise (FileNotFoundException("File not found.", from))
                 let dir = getOrCreateDirectoryAt db toDirPath
                 match tryGetFileAt db toPath with
@@ -1082,7 +1079,7 @@ module FileStorage =
 
         member this.MoveDirectory(from, toPath) =
             let struct (toDirPath, fileName) = getPathAndName toPath
-            manager.WithTransaction(fun db ->
+            connection.WithTransaction(fun db ->
                 let dirToMove = match tryGetDir db from with | Some f -> f | None -> raise (DirectoryNotFoundException("From directory not found at: " + from))
                 let toPathParent = match tryGetDir db toDirPath with | Some f -> f | None -> raise (DirectoryNotFoundException("To directory not found at: " + toDirPath))
 

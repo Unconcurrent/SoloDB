@@ -114,8 +114,28 @@ module Connections =
             | Transactional conn -> conn
             | Transitive c -> c
 
+        member this.WithTransaction(f: IDbConnection -> 'T) =
+            match this with
+            | Pooled pool -> pool.WithTransaction f
+            | Transactional conn -> 
+                f conn
+            | Transitive _conn ->
+                raise (InvalidOperationException "A Transitive Connection should never be used with a transation.")
+
+        member this.WithAsyncTransaction(f: IDbConnection -> Task<'T>) =
+            match this with
+            | Pooled pool -> 
+                pool.WithAsyncTransaction f
+            | Transactional conn -> 
+                f conn
+            | Transitive _conn -> 
+                raise (InvalidOperationException "A Transitive Connection should never be used with a transation.")
+        
+
     type IDbConnection with
         member this.IsWithinTransaction() =
             match this with
             | :? TransactionalConnection -> true
+            // All pure DirectConnection usage is inside a transaction
+            | :? DirectConnection when not (this :? CachingDbConnection) -> true
             | other -> false
