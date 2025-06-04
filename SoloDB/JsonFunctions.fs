@@ -60,15 +60,25 @@ module JsonFunctions =
 
     /// Used internally, do not touch!
     let toJson<'T> o = 
-        let element = JsonValue.Serialize<'T>  o
+        let element = JsonValue.Serialize<'T> o
+        // Remove the int64 Id property from the json format, as it is stored as a separate column.
+        if HasTypeId<'T>.Value then
+            match element with
+            | Object o -> ignore (o.Remove "Id")
+            | _ -> ()
         element.ToJsonString()
 
     let internal toTypedJson<'T> o = 
         let element = JsonValue.SerializeWithType<'T> o
+        // Remove the int64 Id property from the json format, as it is stored as a separate column.
+        if HasTypeId<'T>.Value then
+            match element with
+            | Object o -> ignore (o.Remove "Id")
+            | _ -> ()
         element.ToJsonString()
 
     /// Used internally, do not touch!
-    let toSQLJson<'T> (item: 'T) = 
+    let toSQLJson (item: obj) = 
         match box item with
         | :? string as s -> s :> obj, false
         | :? char as c -> string c :> obj, false
@@ -92,7 +102,9 @@ module JsonFunctions =
         | Number _
         | String _
             -> element.ToObject(), false
-        | other -> other.ToJsonString(), true
+        | other -> 
+            // Cannot remove the Id value from here, maybe it is needed. 
+            other.ToJsonString(), true
 
     
     let internal fromJson<'T> (json: JsonValue) =

@@ -57,7 +57,13 @@ module QueryTranslator =
         variables.[name] <- jsonValue
 
     let internal isPrimitiveSQLiteType (x: Type) =
-        Utils.isIntegerBasedType x || Utils.isFloatBasedType x || x = typedefof<string> || x = typedefof<char> || x = typedefof<bool>
+        Utils.isIntegerBasedType x || Utils.isFloatBasedType x || x = typedefof<string> || x = typedefof<char> || x = typedefof<bool> || x = typedefof<Guid>
+        || x = typedefof<Type>
+        || x = typedefof<DateTime> || x = typedefof<DateTimeOffset> || x = typedefof<DateOnly> || x = typedefof<TimeOnly> || x = typedefof<TimeSpan>
+        || x = typeof<byte array> || x = typeof<System.Collections.Generic.List<byte>> || x = typeof<byte list> || x = typeof<byte seq> 
+        || x.Name = "Nullable`1"
+        || x.IsEnum
+
 
     type private QueryBuilder = 
         {
@@ -239,6 +245,94 @@ module QueryTranslator =
             na.Expressions |> Seq.exists isFullyConstant
         | _ -> true
 
+
+    let inline private compareKnownJson (qb: QueryBuilder) (writeTarget: QueryBuilder -> unit) (targetType: Type) (knownObject: obj)  =
+        if isPrimitiveSQLiteType targetType then
+            writeTarget qb
+            qb.AppendRaw " = "
+            qb.AppendVariable knownObject
+            qb.AppendRaw ""
+        else
+            let json = JsonSerializator.JsonValue.Serialize knownObject
+
+            let mutable first = true
+            let inline writeAnd (qb: QueryBuilder) =
+                if first then
+                    first <- false
+                else
+                    qb.AppendRaw " AND "
+
+            let rec compareJson (qb: QueryBuilder) (path: string) (json: JsonSerializator.JsonValue) =
+                
+                match json with
+                | JsonSerializator.JsonValue.Null ->
+                    writeAnd qb
+                    qb.AppendRaw "jsonb_extract("
+                    writeTarget qb
+                    qb.AppendRaw ", '"
+                    qb.AppendRaw path
+                    qb.AppendRaw "') IS NULL"
+        
+                | JsonSerializator.JsonValue.Boolean b ->
+                    writeAnd qb
+                    qb.AppendRaw "jsonb_extract("
+                    writeTarget qb
+                    qb.AppendRaw ", '"
+                    qb.AppendRaw path
+                    qb.AppendRaw "') = "
+                    qb.AppendVariable b
+        
+                | JsonSerializator.JsonValue.Number n ->
+                    writeAnd qb
+                    qb.AppendRaw "jsonb_extract("
+                    writeTarget qb
+                    qb.AppendRaw ", '"
+                    qb.AppendRaw path
+                    qb.AppendRaw "') = "
+                    qb.AppendVariable n
+        
+                | JsonSerializator.JsonValue.String s ->
+                    writeAnd qb
+                    qb.AppendRaw "jsonb_extract("
+                    writeTarget qb
+                    qb.AppendRaw ", '"
+                    qb.AppendRaw path
+                    qb.AppendRaw "') = "
+                    qb.AppendVariable s
+        
+                | JsonSerializator.JsonValue.Object dict ->
+                    for KeyValue(k, v) in dict do
+                        let newPath = if path = "$" then $"$.{k}" else $"{path}.{k}"
+                        compareJson qb newPath v
+        
+                | JsonSerializator.JsonValue.List items ->
+                    writeAnd qb
+                    // For arrays, check that both arrays have the same length
+                    // and each element matches at the corresponding index
+                    qb.AppendRaw "json_array_length(jsonb_extract("
+                    writeTarget qb
+                    qb.AppendRaw ", '"
+                    qb.AppendRaw path
+                    qb.AppendRaw "')) = "
+                    qb.AppendVariable items.Count
+            
+                    for i, item in items |> Seq.indexed do
+                        let newPath = if path = "$" then $"$[{i}]" else $"{path}[{i}]"
+                        compareJson qb newPath item
+
+            match json with
+            | JsonSerializator.JsonValue.Object d ->
+                for KeyValue(k, v) in d do
+                    if k = "$type" then () else
+
+                    compareJson qb $"$.{k}" v
+            | JsonSerializator.JsonValue.List _items ->
+                compareJson qb "$" json
+            | JsonSerializator.JsonValue.Null
+            | JsonSerializator.JsonValue.Boolean _
+            | JsonSerializator.JsonValue.Number _
+            | JsonSerializator.JsonValue.String _ ->
+                compareJson qb "$" json
 
     let rec private visit (exp: Expression) (qb: QueryBuilder) : unit =
         if exp.NodeType <> ExpressionType.Lambda && exp.NodeType <> ExpressionType.Quote && isFullyConstant exp && (match exp with | :? ConstantExpression as ce when ce.Value = null -> false | other -> true) then
@@ -525,11 +619,51 @@ module QueryTranslator =
             let exprFunc = Expression.Lambda<Func<Expression>>(whereFuncExpr).Compile(true)
             let expr = exprFunc.Invoke()
             qb.AppendRaw $"EXISTS (SELECT 1 FROM json_each("
-            visit array qb |> ignore
+
+            do
+                let qb = if qb.TableNameDot = "" then {qb with TableNameDot = "o."} else qb
+                visit array qb |> ignore
+
             qb.AppendRaw ") WHERE "
             let innerQb = {qb with TableNameDot = "json_each."; JsonExtractSelfValue = false}
             visit expr innerQb |> ignore
             qb.AppendRaw ")"
+
+        
+        | "Contains" when 
+                (m.Arguments.Count = 2 && typeof<System.Collections.IEnumerable>.IsAssignableFrom(m.Arguments.[0].Type)) 
+                || (m.Arguments.Count = 1 && not (isNull m.Object) && m.Object.Type <> typeof<string> && typeof<System.Collections.IEnumerable>.IsAssignableFrom(m.Object.Type))
+                ->
+
+            let struct (array, value) = 
+                if m.Arguments.Count = 2 then
+                    struct (m.Arguments.[0], m.Arguments.[1])
+                else
+                    struct (m.Object, m.Arguments.[0])
+
+            qb.AppendRaw $"EXISTS (SELECT 1 FROM json_each("
+    
+            do
+                let qb = if qb.TableNameDot = "" then {qb with TableNameDot = "o."} else qb
+                visit array qb |> ignore
+
+            if isPrimitiveSQLiteType value.Type then
+                qb.AppendRaw ") WHERE json_each.Value = "
+                visit value qb |> ignore
+                qb.AppendRaw ")"
+            else
+                if not (isFullyConstant value) then
+                    raise (ArgumentException $"Cannot compare contains with this type of expression: {value.Type}")
+
+                let targetType = value.Type
+
+                let value = evaluateExpr<obj> value
+
+                qb.AppendRaw ") WHERE "
+
+                compareKnownJson qb (fun qb -> qb.AppendRaw "json_each.Value") targetType value
+
+                qb.AppendRaw ")"
         
         | "QuotationToLambdaExpression" ->
             let arg1 = (m.Arguments.[0] :?> MethodCallExpression)
@@ -770,6 +904,38 @@ module QueryTranslator =
 
         let struct (left, right) = if isLeftNull then struct (b.Right, b.Left) else struct (b.Left, b.Right)
 
+        let shouldUseComplex = not isAnyNull && not (isPrimitiveSQLiteType left.Type || isPrimitiveSQLiteType right.Type) && (left.Type <> typeof<obj> && right.Type <> typeof<obj>) && (isFullyConstant left || isFullyConstant right)
+        match struct (shouldUseComplex, b.NodeType) with
+        | struct (true, ExpressionType.Equal) -> 
+            qb.AppendRaw("(")
+
+            let struct (constant, expression) = 
+                if isFullyConstant left then
+                    struct (left, right)
+                else
+                    struct (right, left)
+
+            let value = evaluateExpr<obj> constant
+
+            compareKnownJson qb (fun qb -> visit expression qb) expression.Type value
+
+            qb.AppendRaw(")")
+        | struct (true, ExpressionType.NotEqual) -> 
+            qb.AppendRaw("(NOT (")
+
+            let struct (constant, expression) = 
+                if isFullyConstant left then
+                    struct (left, right)
+                else
+                    struct (right, left)
+
+            let value = evaluateExpr<obj> constant
+
+            compareKnownJson qb (fun qb -> visit expression qb) expression.Type value
+
+            qb.AppendRaw("))")
+        | _ ->
+
         qb.AppendRaw("(") |> ignore
         visit(left) qb |> ignore
         match b.NodeType with
@@ -778,7 +944,7 @@ module QueryTranslator =
         | ExpressionType.OrElse
         | ExpressionType.Or -> qb.AppendRaw(" OR ")  |> ignore
         | ExpressionType.Equal -> if isAnyNull then qb.AppendRaw(" IS ") else qb.AppendRaw(" = ")  |> ignore
-        | ExpressionType.NotEqual -> if isAnyNull then qb.AppendRaw(" IS NOT ") else  qb.AppendRaw(" <> ")  |> ignore
+        | ExpressionType.NotEqual -> if isAnyNull then qb.AppendRaw(" IS NOT ") else qb.AppendRaw(" <> ")  |> ignore
         | ExpressionType.LessThan -> qb.AppendRaw(" < ")  |> ignore
         | ExpressionType.LessThanOrEqual -> qb.AppendRaw(" <= ")  |> ignore
         | ExpressionType.GreaterThan -> qb.AppendRaw(" > ")  |> ignore

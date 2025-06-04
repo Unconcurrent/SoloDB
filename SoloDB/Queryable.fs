@@ -150,7 +150,7 @@ module private QueryHelper =
 
             translate builder collection
 
-            builder.Append ") WHERE "
+            builder.Append ") o WHERE "
             QueryTranslator.translateQueryable "" filter builder.SQLiteCommand builder.Variables
 
     let private readSoloDBQueryable<'T> (methodArg: Expression) =
@@ -193,7 +193,7 @@ module private QueryHelper =
         builder.Append ") as Value FROM ("
 
         translate builder expression.Arguments.[0]
-        builder.Append ")"
+        builder.Append ") o"
 
     and private raiseIfNullAggregateTranslator (fnName: string) (builder: QueryableBuilder<'T>) (expression: MethodCallExpression) (errorMsg: string) =
         builder.Append "SELECT "
@@ -207,7 +207,7 @@ module private QueryHelper =
 
         builder.Append "FROM ("
         aggregateTranslator fnName builder expression
-        builder.Append ")"
+        builder.Append ") o"
 
     and private serializeForCollection (value: 'T) =
         match typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T> with
@@ -240,7 +240,7 @@ module private QueryHelper =
         | Distinct ->
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ") GROUP BY "
+            builder.Append ") o GROUP BY "
 
             match expression.Arguments.Count with
             | 1 -> QueryTranslator.translateQueryable "" (GenericMethodArgCache.Get expression.Method |> Array.head |> ExpressionHelper.id) builder.SQLiteCommand builder.Variables
@@ -264,7 +264,7 @@ module private QueryHelper =
                 translate builder expression.Arguments.[0]
             
                 // Group by the key selector
-                builder.Append ") GROUP BY "
+                builder.Append ") o GROUP BY "
                 QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
 
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
@@ -286,11 +286,11 @@ module private QueryHelper =
                 | other ->
                     builder.Append "("
                     translate builder other
-                    builder.Append ")"
+                    builder.Append ") o"
             | 2 -> 
                 builder.Append "("
                 translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
-                builder.Append ")"
+                builder.Append ") o"
 
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
@@ -302,7 +302,7 @@ module private QueryHelper =
             builder.Append " as Value FROM "
             builder.Append "("
             translate builder expression.Arguments.[0]
-            builder.Append ")"
+            builder.Append ") o"
                 
 
         | SelectMany ->
@@ -382,7 +382,7 @@ module private QueryHelper =
             | _other ->
                 builder.Append "SELECT Id, Value FROM ("
                 translate builder innerExpression
-                builder.Append ") ORDER BY "
+                builder.Append ") o ORDER BY "
                 QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
                 if method = OrderByDescending then
                     builder.Append "DESC "
@@ -390,7 +390,7 @@ module private QueryHelper =
         | Order | OrderDescending ->
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ") ORDER BY "
+            builder.Append ") o ORDER BY "
             QueryTranslator.translateQueryable "" (GenericMethodArgCache.Get expression.Method |> Array.head |> ExpressionHelper.id) builder.SQLiteCommand builder.Variables
             if method = OrderDescending then
                 builder.Append "DESC "
@@ -398,13 +398,13 @@ module private QueryHelper =
         | Take ->
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ") LIMIT "
+            builder.Append ") o LIMIT "
             QueryTranslator.appendVariable builder.SQLiteCommand builder.Variables (QueryTranslator.evaluateExpr<obj> expression.Arguments.[1])
 
         | Skip ->
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ") LIMIT -1 OFFSET "
+            builder.Append ") o LIMIT -1 OFFSET "
             QueryTranslator.appendVariable builder.SQLiteCommand builder.Variables (QueryTranslator.evaluateExpr<obj> expression.Arguments.[1])
 
         | First | FirstOrDefault ->
@@ -412,7 +412,7 @@ module private QueryHelper =
             | 1 -> 
                 builder.Append "SELECT Id, Value FROM ("
                 translate builder expression.Arguments.[0]
-                builder.Append ")"
+                builder.Append ") o "
             | 2 -> 
                 translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
@@ -422,7 +422,7 @@ module private QueryHelper =
         | DefaultIfEmpty ->
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ") UNION ALL SELECT -1 as Id, "
+            builder.Append ") o UNION ALL SELECT -1 as Id, "
 
             match expression.Arguments.Count with
             | 1 -> 
@@ -457,7 +457,7 @@ module private QueryHelper =
 
             builder.Append " as Value WHERE NOT EXISTS (SELECT 1 FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append "))"
+            builder.Append ") o)"
 
         | Last | LastOrDefault ->
             // SQlite does not guarantee the order of elements without an ORDER BY,
@@ -496,7 +496,7 @@ module private QueryHelper =
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
             
-            builder.Append ")"
+            builder.Append ") o"
 
             builder.Append ") END as Encoded FROM "
             builder.Append "(SELECT COUNT(*) as "
@@ -535,7 +535,7 @@ module private QueryHelper =
                 translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
             | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
-            builder.Append ")"
+            builder.Append ") o"
 
             builder.Append ") END as Encoded FROM "
             builder.Append "(SELECT COUNT(*) as "
@@ -557,7 +557,7 @@ module private QueryHelper =
                 translate builder expression.Arguments.[0]
                 builder.Append ")) as Value FROM ("
                 translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
-                builder.Append ")"
+                builder.Append ") o "
             else
                 failwithf "Invalid All method with %i arguments" expression.Arguments.Count
 
@@ -567,12 +567,12 @@ module private QueryHelper =
                 translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
             else
                 translate builder expression.Arguments.[0]
-            builder.Append " LIMIT 1)) as Value)"
+            builder.Append " LIMIT 1) o) as Value)"
 
         | Contains ->
             builder.Append "SELECT EXISTS(SELECT 1 FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ") WHERE "
+            builder.Append ") o WHERE "
 
             let struct (t, value) = 
                 match expression.Arguments.[1] with
@@ -610,7 +610,7 @@ module private QueryHelper =
             let appendingQE = readSoloDBQueryable<'T> expression.Arguments.[1]
 
             translate builder appendingQE
-            builder.Append ")"
+            builder.Append ") o "
 
         | Except ->
             if expression.Arguments.Count <> 2 then
@@ -618,7 +618,7 @@ module private QueryHelper =
 
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ")"
+            builder.Append ") o "
 
             // Extract it, to convert it if it's binary encoded.
             builder.Append " WHERE jsonb_extract(Value, '$') NOT IN ("
@@ -627,7 +627,7 @@ module private QueryHelper =
                 builder.Append "SELECT jsonb_extract(Value, '$') FROM ("
                 let exceptingQuery = readSoloDBQueryable<'T> expression.Arguments.[1]
                 translate builder exceptingQuery
-                builder.Append ")"
+                builder.Append ") o "
 
             builder.Append ")"
 
@@ -637,7 +637,7 @@ module private QueryHelper =
 
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ")"
+            builder.Append ") o "
 
             // Extract it, to convert it if it's binary encoded.
             builder.Append " WHERE jsonb_extract(Value, '$') IN ("
@@ -646,7 +646,7 @@ module private QueryHelper =
                 builder.Append "SELECT jsonb_extract(Value, '$') FROM ("
                 let exceptingQuery = readSoloDBQueryable<'T> expression.Arguments.[1]
                 translate builder exceptingQuery
-                builder.Append ")"
+                builder.Append ") o "
 
             builder.Append ")"
 
@@ -656,7 +656,7 @@ module private QueryHelper =
             
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ")"
+            builder.Append ") o "
             
             let keySelector = expression.Arguments.[2]
             
@@ -671,7 +671,7 @@ module private QueryHelper =
 
                 let exceptingQuery = readSoloDBQueryable<'T> expression.Arguments.[1]
                 translate builder exceptingQuery
-                builder.Append ")"
+                builder.Append ") o "
             builder.Append ")"
         
         | IntersectBy ->
@@ -680,7 +680,7 @@ module private QueryHelper =
             
             builder.Append "SELECT Id, Value FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ")"
+            builder.Append ") o "
             
             let keySelector = expression.Arguments.[2]
             
@@ -694,7 +694,7 @@ module private QueryHelper =
                 builder.Append " FROM ("
                 let intersectingQuery = readSoloDBQueryable<'T> expression.Arguments.[1]
                 translate builder intersectingQuery
-                builder.Append ")"
+                builder.Append ") o "
             builder.Append ")"
 
         | Cast ->
@@ -729,7 +729,7 @@ module private QueryHelper =
             
             builder.Append "FROM ("
             translate builder expression.Arguments.[0]
-            builder.Append ")"
+            builder.Append ") o "
 
         | OfType ->
             if expression.Arguments.Count <> 1 then
@@ -747,7 +747,7 @@ module private QueryHelper =
 
             builder.Append "SELECT Id, Value FROM ("
             do translate builder expression.Arguments.[0]
-            builder.Append ") WHERE jsonb_extract(Value, '$.$type') = "
+            builder.Append ") o WHERE jsonb_extract(Value, '$.$type') = "
             builder.AppendVar typeName
             builder.Append " "
 
