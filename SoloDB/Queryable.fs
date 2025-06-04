@@ -272,13 +272,23 @@ module private QueryHelper =
         | Count
         | CountBy
         | LongCount ->
-            builder.Append "SELECT COUNT(Id) as Value FROM ("
+            builder.Append "SELECT COUNT(Id) as Value FROM "
 
             match expression.Arguments.Count with
             | 1 -> 
-                translate builder expression.Arguments.[0]
-                builder.Append ")"
+                // Only select Id from the table if possible
+                match expression.Arguments.[0] with
+                | :? ConstantExpression as ce when (ce.Value :? IRootQueryable) ->
+                    let tableName = (ce.Value :?> IRootQueryable).SourceTableName
+                    builder.Append "\""
+                    builder.Append tableName
+                    builder.Append "\""
+                | other ->
+                    builder.Append "("
+                    translate builder other
+                    builder.Append ")"
             | 2 -> 
+                builder.Append "("
                 translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
                 builder.Append ")"
 
