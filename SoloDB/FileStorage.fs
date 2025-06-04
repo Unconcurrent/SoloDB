@@ -787,8 +787,8 @@ module FileStorage =
         | :? SqliteException as ex when ex.SqliteErrorCode = 19 (* SQLITE_CONSTRAINT *) && ex.Message.Contains "FullPath" ->
             raise (IOException("Directory or file already exists in the destination.", ex))
     
-    let private createInnerConnection tx =
-        new DirectConnection(tx) :> IDbConnection |> Transitive
+    let private createInnerConnectionInTransation tx =
+        new DirectConnection(tx, true) :> IDbConnection |> Transitive
 
     type BulkFileData = {
         FullPath: string
@@ -811,7 +811,7 @@ module FileStorage =
 
         member this.UploadBulk(files: BulkFileData seq) =
             connection.WithTransaction(fun tx -> 
-                let innerConnection = createInnerConnection tx
+                let innerConnection = createInnerConnectionInTransation tx
                 for file in files do
                     let fileHeader = getOrCreateFileAt tx file.FullPath
 
@@ -831,7 +831,7 @@ module FileStorage =
 
         member this.ReplaceAsyncWithinTransaction(path, stream: Stream) = task {
             return! connection.WithAsyncTransaction(fun tx -> task {
-                let innerConnection = createInnerConnection tx
+                let innerConnection = createInnerConnectionInTransation tx
                 use file = openOrCreateFile innerConnection path
                 do! stream.CopyToAsync(file, int chunkSize)
                 file.SetLength file.Position
@@ -907,7 +907,7 @@ module FileStorage =
         member this.WriteAt(path: string, offset: int64, data: byte[], [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool) =
              connection.WithTransaction(fun tx -> 
                 let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
-                let innerConnection = createInnerConnection tx
+                let innerConnection = createInnerConnectionInTransation tx
 
                 use fileStream = openFile innerConnection file
                 fileStream.Position <- offset
@@ -933,7 +933,7 @@ module FileStorage =
         ) =
             connection.WithTransaction(fun tx -> 
                 let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
-                let innerConnection = createInnerConnection tx
+                let innerConnection = createInnerConnectionInTransation tx
 
                 use fileStream = openFile innerConnection file
                 fileStream.Position <- offset

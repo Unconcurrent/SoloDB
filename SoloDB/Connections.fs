@@ -64,26 +64,32 @@ module Connections =
         member private this.WithTransactionBorrowed(f: CachingDbConnection -> 'T) =
             use connectionForTransaction = this.Borrow()
             connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
-                
             try
-                let ret = f connectionForTransaction
-                connectionForTransaction.Execute "COMMIT;" |> ignore
-                ret
-            with ex -> 
-                connectionForTransaction.Execute "ROLLBACK;" |> ignore
-                reraise()
+                connectionForTransaction.InsideTransaction <- true
+                try
+                    let ret = f connectionForTransaction
+                    connectionForTransaction.Execute "COMMIT;" |> ignore
+                    ret
+                with ex -> 
+                    connectionForTransaction.Execute "ROLLBACK;" |> ignore
+                    reraise()
+            finally
+                connectionForTransaction.InsideTransaction <- false
 
         member private this.WithTransactionBorrowedAsync(f: CachingDbConnection -> Task<'T>) = task {
             use connectionForTransaction = this.Borrow()
             connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
-                
             try
-                let! ret = f connectionForTransaction
-                connectionForTransaction.Execute "COMMIT;" |> ignore
-                return ret
-            with ex -> 
-                connectionForTransaction.Execute "ROLLBACK;" |> ignore
-                return reraiseAnywhere ex
+                connectionForTransaction.InsideTransaction <- true
+                try
+                    let! ret = f connectionForTransaction
+                    connectionForTransaction.Execute "COMMIT;" |> ignore
+                    return ret
+                with ex -> 
+                    connectionForTransaction.Execute "ROLLBACK;" |> ignore
+                    return reraiseAnywhere ex
+            finally
+                connectionForTransaction.InsideTransaction <- false
         }
 
         member internal this.WithTransaction(f: CachingDbConnection -> 'T) =
@@ -137,5 +143,5 @@ module Connections =
             match this with
             | :? TransactionalConnection -> true
             // All pure DirectConnection usage is inside a transaction
-            | :? DirectConnection when not (this :? CachingDbConnection) -> true
+            | :? DirectConnection as dc -> dc.InsideTransaction
             | other -> false

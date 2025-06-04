@@ -446,7 +446,7 @@ module SQLiteTools =
     
 
     /// Redirect all the method calls to the connection provided in the constructor, and on Dispose, it is a noop.
-    type DirectConnection internal (connection: IDbConnection) =
+    type DirectConnection internal (connection: IDbConnection, insideTransaction: bool) =
         member this.BeginTransaction() = connection.BeginTransaction()
         member this.BeginTransaction (il: IsolationLevel) = connection.BeginTransaction il
         member this.ChangeDatabase (databaseName: string) = connection.ChangeDatabase databaseName
@@ -458,6 +458,8 @@ module SQLiteTools =
         member this.ConnectionTimeout: int = connection.ConnectionTimeout
         member this.Database: string = connection.Database
         member this.State: ConnectionState = connection.State
+
+        member val InsideTransaction = insideTransaction with get, set
 
         interface IDbConnection with
             override this.BeginTransaction() = connection.BeginTransaction()
@@ -600,7 +602,7 @@ module SQLiteTools =
 
 
     and [<Sealed>] CachingDbConnection internal (connection: SqliteConnection, onDispose, config: Types.SoloDBConfiguration) = 
-        inherit DirectConnection(connection)
+        inherit DirectConnection(connection, false)
         let mutable preparedCache = Dictionary<string, {| Command: IDbCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
         let maxCacheSize = 1000
 
