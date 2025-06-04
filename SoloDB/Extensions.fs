@@ -21,8 +21,10 @@ type Extensions =
             "^" + Regex.Escape(pattern).Replace("\\%", ".*").Replace("\\_", ".") + "$"
         Regex.IsMatch(this, regexPattern, RegexOptions.IgnoreCase)
 
+    /// <summary>
     /// This method will be translated directly into an EXISTS subquery with the `json_each` table-valued function.
     /// To be used inside queries with items that contain arrays or other supported collections.
+    /// </summary>
     /// <remarks>
     /// Example: collection.Where(x => x.Numbers.Any(x => x > 10)).LongCount();
     /// </remarks>

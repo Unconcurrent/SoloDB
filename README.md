@@ -20,7 +20,7 @@ Imagine the power of MongoDB and SQL combined.
 - Direct SQL support.
 - [Open source](./LICENSE.txt).
 - [.NET Standard 2.0 and 2.1](https://learn.microsoft.com/en-us/dotnet/standard/net-standard?tabs=net-standard-2-0)
-- Pretty well tested: 565+ of tests, but in the tradition of SQLite, we keep them private.
+- Pretty well tested: 600+ of tests, but in the tradition of SQLite, we keep them private.
 
 ## How to install
 
