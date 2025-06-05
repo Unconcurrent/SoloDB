@@ -14,7 +14,10 @@ open System.Reflection
 /// Like and Any that propagate into (LIKE) and (json_each() with a WHERE filter).
 [<Extension; AbstractClass; Sealed>]
 type Extensions =
-    /// Return the items for the groupping.
+    /// <summary>
+    /// Returns all elements contained in the specified IGrouping<'Key, 'T> as an array.
+    /// Useful for materializing grouped query results into a concrete collection.
+    /// </summary>
     [<Extension>]
     static member Items<'Key, 'T>(g: IGrouping<'Key, 'T>) =
         g |> Seq.toArray
