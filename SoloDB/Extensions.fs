@@ -14,6 +14,11 @@ open System.Reflection
 /// Like and Any that propagate into (LIKE) and (json_each() with a WHERE filter).
 [<Extension; AbstractClass; Sealed>]
 type Extensions =
+    /// Return the items for the groupping.
+    [<Extension>]
+    static member Items<'Key, 'T>(g: IGrouping<'Key, 'T>) =
+        g |> Seq.toArray
+
     /// The SQL LIKE operator, to be used in queries.
     [<Extension>]
     static member Like(this: string, pattern: string) =
