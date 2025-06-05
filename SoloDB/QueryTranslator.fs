@@ -46,8 +46,8 @@ module QueryTranslator =
         | :? int64 as i -> sprintf "%i" i |> sb.Append |> ignore
         | :? uint64 as i -> sprintf "%i" i |> sb.Append |> ignore
         | :? nativeint as i -> sprintf "%i" i |> sb.Append |> ignore
-        | _other -> 
-                
+        | _other ->
+
         let jsonValue, kind = toSQLJson value
         let name = getVarName sb.Length
         if kind then 
@@ -64,9 +64,11 @@ module QueryTranslator =
         || x.Name = "Nullable`1"
         || x.IsEnum
 
+    let internal escapeSQLiteString (input: string) : string =
+        input.Replace("'", "''").Replace("\0", "")
 
-    type private QueryBuilder = 
-        {
+    type QueryBuilder =
+        private {
             StringBuilder: StringBuilder
             Variables: Dictionary<string, obj>
             AppendVariable: obj -> unit
@@ -85,7 +87,7 @@ module QueryTranslator =
 
         override this.ToString() = this.StringBuilder.ToString()
 
-        static member New(sb: StringBuilder)(variables: Dictionary<string, obj>)(updateMode: bool)(tableName)(expression: Expression)(idIndex: int) =
+        static member internal New(sb: StringBuilder)(variables: Dictionary<string, obj>)(updateMode: bool)(tableName)(expression: Expression)(idIndex: int) =
             {
                 StringBuilder = sb
                 Variables = variables
@@ -334,7 +336,32 @@ module QueryTranslator =
             | JsonSerializator.JsonValue.String _ ->
                 compareJson qb "$" json
 
+    /// Functions called when the internal translator encounters an unknown expression.
+    /// Handlers must not modify the QueryBuilder or expression if they return false (not handled).
+    /// Handlers are evaluated in reverse order (last added, first called).
+    let unknownExpressionHandler = List<Func<QueryBuilder, Expression, bool>>(seq {
+        Func<QueryBuilder, Expression, bool>(fun _qb exp -> raise<bool> (ArgumentException (sprintf "Unhandled expression type: '%O'" exp.NodeType)))
+    })
+
+    /// Functions called before the internal translator tries to translate an expression.
+    /// Handlers must not modify the QueryBuilder or expression if they return false (not handled).
+    /// Handlers are evaluated in reverse order (last added, first called).
+    let preExpressionHandler = List<Func<QueryBuilder, Expression, bool>>(seq {
+        // No operation example.
+        Func<QueryBuilder, Expression, bool>(fun _qb _exp -> false)
+    })
+
+    let private runHandler (handler: List<Func<QueryBuilder, Expression, bool>>) (qb: QueryBuilder) (exp: Expression) =
+        let mutable index = handler.Count - 1
+        let mutable handled = false
+        while index >= 0 && not handled do
+            handled <- handler.[index].Invoke(qb, exp)
+            index <- index - 1
+        handled
+
     let rec private visit (exp: Expression) (qb: QueryBuilder) : unit =
+        if runHandler preExpressionHandler qb exp then () else
+
         if exp.NodeType <> ExpressionType.Lambda && exp.NodeType <> ExpressionType.Quote && isFullyConstant exp && (match exp with | :? ConstantExpression as ce when ce.Value = null -> false | other -> true) then
             let value = evaluateExpr<obj> exp
             qb.AppendVariable value
@@ -403,8 +430,11 @@ module QueryTranslator =
         | ExpressionType.TypeIs ->
             let exp = exp :?> TypeBinaryExpression
             visitTypeIs exp qb
+        | ExpressionType.MemberInit ->
+            visitMemberInit (exp :?> MemberInitExpression) qb
         | _ ->
-            raise (Exception(sprintf "Unhandled expression type: '%O'" exp.NodeType))
+            if not (runHandler unknownExpressionHandler qb exp) then
+                raise (ArgumentOutOfRangeException $"QueryTranslator.{nameof unknownExpressionHandler} did not handle the expression of type: {exp.NodeType}")
 
     and private visitTypeIs (exp: TypeBinaryExpression) (qb: QueryBuilder) =
         if not (mustIncludeTypeInformationInSerializationFn exp.Expression.Type) then
@@ -822,6 +852,15 @@ module QueryTranslator =
                 visit length qb
             qb.AppendRaw ")"
 
+        | "get_Chars" when m.Arguments.Count = 1 && not (isNull m.Object) && m.Object.Type = typeof<string> ->
+            let str = m.Object
+            let index = m.Arguments.[0]
+            qb.AppendRaw "SUBSTR("
+            visit str qb
+            qb.AppendRaw ",("
+            visit index qb
+            qb.AppendRaw " + 1),1)"
+
         | "GetString" when m.Arguments.Count = 2 && isNull m.Object && m.Arguments.[0].Type = typeof<string> ->
             let str = m.Arguments.[0]
             let index = m.Arguments.[1]
@@ -831,6 +870,49 @@ module QueryTranslator =
             visit index qb
             qb.AppendRaw " + 1),1)"
 
+        | "Count" when m.Arguments.Count = 1 && isNull m.Object && let t = m.Arguments.[0].Type in t.IsConstructedGenericType && t.GetGenericTypeDefinition() = typedefof<System.Linq.IGrouping<_,_>> ->
+            qb.AppendRaw $"json_array_length({qb.TableNameDot}Value, '$.Items')"
+
+        | "Items" when m.Arguments.Count = 1 && isNull m.Object && let t = m.Arguments.[0].Type in t.IsConstructedGenericType && t.GetGenericTypeDefinition() = typedefof<System.Linq.IGrouping<_,_>> ->
+            qb.AppendRaw $"jsonb_extract({qb.TableNameDot}Value, '$.Items')"
+
+        | "Invoke" when FSharp.Reflection.FSharpType.IsRecord m.Type ->
+            // This handles chained F# record construction via curried lambdas.
+            // Example: Username => Auth => Banned => FirstSeen => LastSeen => new ...(...).Invoke(...)
+            // We need to walk the chain and collect the arguments in reverse order.
+            let rec collectArgs (expr: Expression) (args: ResizeArray<struct (ParameterExpression * Expression)>) =
+                match expr with
+                | :? MethodCallExpression as mc when mc.Method.Name = "Invoke" && mc.Arguments.Count = 1 ->
+                    match mc.Object with
+                    | :? LambdaExpression as le ->
+                        args.Add(struct (le.Parameters.[0], mc.Arguments.[0]))
+                    | _ -> ()
+                    collectArgs mc.Object args
+                | :? LambdaExpression as le ->
+                    collectArgs le.Body args
+                | _ -> struct (expr, args)
+
+            let struct (recordCtorExpr, args) = collectArgs (m :> Expression) (ResizeArray())
+
+            let recordType = m.Type
+            let fields = FSharp.Reflection.FSharpType.GetRecordFields recordType
+
+            let constrArgs = (recordCtorExpr :?> NewExpression).Arguments
+
+            let args = 
+                seq {
+                    for field, arg in constrArgs |> Seq.zip fields do
+                        match arg with
+                        | :? ParameterExpression as pe ->
+                            let struct(_, correspondingExpr) = args |> Seq.find(fun struct(p, _) -> p = pe)
+                            struct (field.Name, correspondingExpr)
+                        | other -> 
+                            struct (field.Name, other)
+                } |> Seq.map(fun struct(name, expr) -> struct (name, visit expr)) |> Seq.toArray
+
+            newObject qb args
+
+            ()
         | _ -> 
             raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 
@@ -844,17 +926,17 @@ module QueryTranslator =
                 )
                 || qb.IdParameterIndex = qb.Parameters.IndexOf m // Or it is specified as an id.
                 )
-        then
-            qb.AppendRaw $"{qb.TableNameDot}Id"
-        else if qb.UpdateMode then
+            then qb.AppendRaw $"{qb.TableNameDot}Id"
+
+        elif qb.UpdateMode then
             qb.AppendRaw $"'$'"
+
+        elif qb.JsonExtractSelfValue && ((not << isPrimitiveSQLiteType) m.Type || (not << String.IsNullOrWhiteSpace) qb.TableNameDot) then
+            if qb.StringBuilder.Length = 0 
+            then qb.AppendRaw $"json_extract(json({qb.TableNameDot}Value), '$')" // To avoid returning the jsonB format instead of normal json.
+            else qb.AppendRaw $"jsonb_extract({qb.TableNameDot}Value, '$')"
         else
-            if qb.JsonExtractSelfValue && ((not << isPrimitiveSQLiteType) m.Type || (not << String.IsNullOrWhiteSpace) qb.TableNameDot) then
-                if qb.StringBuilder.Length = 0 
-                then qb.AppendRaw $"json_extract(json({qb.TableNameDot}Value), '$')" // To avoid returning the jsonB format instead of normal json.
-                else qb.AppendRaw $"jsonb_extract({qb.TableNameDot}Value, '$')"
-            else
-                qb.AppendRaw $"{qb.TableNameDot}Value"
+            qb.AppendRaw $"{qb.TableNameDot}Value"
         
 
     and private visitNot (m: UnaryExpression) (qb: QueryBuilder) =
@@ -864,6 +946,19 @@ module QueryTranslator =
     and private visitNegate (m: UnaryExpression) (qb: QueryBuilder) =
         qb.AppendRaw "-"
         visit m.Operand qb
+
+    and private newObject (qb: QueryBuilder) (memberGenerator: struct (string * (QueryBuilder -> unit)) array) =
+        qb.AppendRaw "jsonb_object("
+        let mutable index = 0
+        for struct (name, visitMember) in memberGenerator do
+            // Write the property name as a JSON key
+            qb.AppendRaw $"'{escapeSQLiteString name}',"
+            // Write the value by visiting the expression
+            visitMember qb
+            if index < memberGenerator.Length - 1 then
+                qb.AppendRaw ","
+            index <- index + 1
+        qb.AppendRaw ")"
 
     and private visitNew (m: NewExpression) (qb: QueryBuilder) =
         let t = m.Type
@@ -875,8 +970,19 @@ module QueryTranslator =
                 if m.Arguments.IndexOf arg <> m.Arguments.Count - 1 then
                     qb.AppendRaw ","
             qb.AppendRaw ")"
+        // A simple class or struct.
+        elif m.Members.Count = m.Arguments.Count then
+            let pairs = m.Arguments |> Seq.zip m.Members
+            let members = pairs |> Seq.map(fun (membr, expr) -> struct (membr.Name, fun qb -> visit expr qb)) |> Seq.toArray
+            newObject qb members
         else
             failwithf "Cannot construct new in SQL query %A" t
+
+    and private visitMemberInit (m: MemberInitExpression) (qb: QueryBuilder) =
+        newObject qb [|
+            for binding in m.Bindings |> Seq.cast<MemberAssignment> do
+                struct(binding.Member.Name, visit binding.Expression)
+        |]
 
     and private visitConvert (m: UnaryExpression) (qb: QueryBuilder) =
         if m.Type = typeof<obj> || m.Operand.Type = typeof<obj> then
@@ -979,7 +1085,7 @@ module QueryTranslator =
             else sprintf "jsonb_extract(%sValue, '$.%s')" qb.TableNameDot path
 
 
-        if m.MemberName = "Length" && (* All cases below implement IEnumerable*) (m.InputType.GetInterface (typeof<IEnumerable>.FullName) <> null) then
+        if m.MemberName = "Length" && (* All cases below implement IEnumerable*) m.InputType.GetInterface (typeof<IEnumerable>.FullName) <> null then
             if m.InputType = typeof<string> then
                 qb.AppendRaw "length("
                 visit m.Expression qb
@@ -988,16 +1094,29 @@ module QueryTranslator =
                 qb.AppendRaw "length(base64("
                 visit m.Expression qb
                 qb.AppendRaw "))"
-            elif m.InputType.GetInterface (typeof<IEnumerable>.FullName) <> null then
+            else
                 // json len
                 qb.AppendRaw "json_array_length("
                 visit m.Expression qb
                 qb.AppendRaw ")"
 
-        else if (m.ReturnType = typeof<int64> && m.MemberName = "Id") || (m.MemberName = "Id" && m.Expression.NodeType = ExpressionType.Parameter && m.Expression.Type.FullName = "SoloDatabase.JsonSerializator.JsonValue") then
+        elif m.MemberName = "Count" && m.InputType.GetInterface (typeof<IEnumerable>.FullName) <> null then
+            qb.AppendRaw "json_array_length("
+            visit m.Expression qb
+            qb.AppendRaw ")"
+
+        elif typedefof<System.Linq.IGrouping<_,_>>.IsAssignableFrom (m.InputType) then
+            match m.MemberName with
+            | "Key" -> qb.AppendRaw "jsonb_extract(Value, '$.Key')"
+            | other ->
+                qb.AppendRaw "jsonb_extract(Value, '$.Items."
+                qb.AppendRaw (escapeSQLiteString other)
+                qb.AppendRaw "')"
+
+        elif (m.ReturnType = typeof<int64> && m.MemberName = "Id") || (m.MemberName = "Id" && m.Expression.NodeType = ExpressionType.Parameter && m.Expression.Type.FullName = "SoloDatabase.JsonSerializator.JsonValue") then
             qb.AppendRaw $"{qb.TableNameDot}Id " |> ignore
 
-        else if m.Expression <> null && isRootParameter m.Expression then
+        elif m.Expression <> null && isRootParameter m.Expression then
             let jsonPath = buildJsonPath m.Expression [m.MemberName]
             match jsonPath with
             | [] -> ()

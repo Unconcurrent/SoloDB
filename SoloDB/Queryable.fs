@@ -118,9 +118,6 @@ module private QueryHelper =
         | "Aggregate" -> Some Aggregate
         | _ -> None
 
-    let private escapeSQLiteString (input: string) : string =
-        input.Replace("'", "''").Replace("\0", "")
-
     let private extractValueAsJsonIfNecesary (x: Type) =
         let isPrimitive = QueryTranslator.isPrimitiveSQLiteType x
 
@@ -202,7 +199,7 @@ module private QueryHelper =
         // And downstream the pipeline it will be checked and throwed.
         builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN NULL ELSE -1 END AS Id, "
         builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN '"
-        builder.Append (escapeSQLiteString errorMsg)
+        builder.Append (QueryTranslator.escapeSQLiteString errorMsg)
         builder.Append "' ELSE Value END AS Value "
 
         builder.Append "FROM ("
@@ -433,7 +430,7 @@ module private QueryHelper =
                     let defaultValueType = Activator.CreateInstance(genericArg)
                     let jsonObj = JsonSerializator.JsonValue.Serialize defaultValueType
                     let jsonText = jsonObj.ToJsonString()
-                    let escapedJsonText = escapeSQLiteString jsonText
+                    let escapedJsonText = QueryTranslator.escapeSQLiteString jsonText
 
                     builder.Append "jsonb_extract(jsonb('"
                     builder.Append escapedJsonText
@@ -447,7 +444,7 @@ module private QueryHelper =
                 let o = QueryTranslator.evaluateExpr<obj> expression.Arguments.[1]
                 let jsonObj = JsonSerializator.JsonValue.Serialize o
                 let jsonText = jsonObj.ToJsonString()
-                let escapedJsonText = escapeSQLiteString jsonText
+                let escapedJsonText = QueryTranslator.escapeSQLiteString jsonText
 
                 builder.Append "jsonb_extract(jsonb('"
                 builder.Append escapedJsonText
@@ -596,7 +593,7 @@ module private QueryHelper =
                 builder.Append (sprintf "%i" id)
                 builder.Append " as Id,"
 
-            let escapedString = escapeSQLiteString jsonStringElement
+            let escapedString = QueryTranslator.escapeSQLiteString jsonStringElement
             builder.Append "jsonb('"
             builder.Append escapedString
             builder.Append "')"
