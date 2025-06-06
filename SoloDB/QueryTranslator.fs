@@ -580,42 +580,6 @@ module QueryTranslator =
             visit string qb |> ignore
             qb.AppendRaw " LIKE "
             visit likeWhat qb |> ignore
-            
-        | "Set" ->
-            let oldValue = m.Arguments.[0]
-            let newValue = m.Arguments.[1]
-            visit oldValue qb |> ignore
-            qb.AppendRaw ","
-            visit newValue qb |> ignore
-            qb.AppendRaw ","
-        
-        | "Append" | "Add" ->
-            let array = m.Arguments.[0]
-            let newValue = m.Arguments.[1]
-            visit array qb |> ignore
-            qb.RollBack 1u
-            qb.AppendRaw "[#]',"
-            visit newValue qb |> ignore
-            qb.AppendRaw ","
-        
-        | "SetAt" ->
-            let array = m.Arguments.[0]
-            let index = m.Arguments.[1]
-            let newValue = m.Arguments.[2]
-            visit array qb |> ignore
-            qb.RollBack 1u
-            qb.AppendRaw $"[{index}]',"
-            visit newValue qb |> ignore
-            qb.AppendRaw ","
-        
-        | "RemoveAt" ->
-            let array = m.Arguments.[0]
-            let index = m.Arguments.[1]
-            visit array qb |> ignore
-            qb.AppendRaw $",jsonb_remove(jsonb_extract({qb.TableNameDot}Value,"
-            visit array qb |> ignore
-            qb.AppendRaw "),"
-            qb.AppendRaw $"'$[{index}]'),"
         
         | "op_Dynamic" ->
             let o = m.Arguments.[0]
@@ -777,15 +741,49 @@ module QueryTranslator =
             let arg = m.Object
             let v = m.Arguments.[0]
 
-            qb.AppendRaw "SUBSTR("
-            visit arg qb
-            qb.AppendRaw ","
-            qb.AppendRaw "1,"
-            qb.AppendRaw "LENGTH("
-            visit v qb
-            qb.AppendRaw "))"
-            qb.AppendRaw " = "
-            visit v qb
+            if isFullyConstant v then
+                let prefix = if v.Type = typeof<char> then (string << evaluateExpr<char>) v else evaluateExpr<string> v
+
+                if prefix.Length = 0 then
+                    // Always true for non-null strings
+                    qb.AppendRaw "("
+                    visit arg qb
+                    qb.AppendRaw " IS NOT NULL)"
+                else
+
+                // Compute next lexicographic string
+                let nextString (s: string) =
+                    let chars = s.ToCharArray()
+                    let rec bump i =
+                        if i < 0 then s + "\u0000"
+                        elif chars.[i] < System.Char.MaxValue then
+                            chars.[i] <- char (int chars.[i] + 1)
+                            new string(chars, 0, i + 1)
+                        else bump (i - 1)
+                    bump (chars.Length - 1)
+
+                let next = nextString prefix
+
+                // col >= 'prefix' AND col < 'next'
+                qb.AppendRaw "("
+                visit arg qb
+                qb.AppendRaw " >= "
+                qb.AppendVariable prefix
+                qb.AppendRaw " AND "
+                visit arg qb
+                qb.AppendRaw " < "
+                qb.AppendVariable next
+                qb.AppendRaw ")"
+            else
+                qb.AppendRaw "SUBSTR("
+                visit arg qb
+                qb.AppendRaw ","
+                qb.AppendRaw "1,"
+                qb.AppendRaw "LENGTH("
+                visit v qb
+                qb.AppendRaw "))"
+                qb.AppendRaw " = "
+                visit v qb
                     
         | "EndsWith" when not (isNull m.Object) && m.Object.Type = typeof<string> ->
             let arg = m.Object
