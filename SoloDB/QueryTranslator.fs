@@ -432,9 +432,21 @@ module QueryTranslator =
             visitTypeIs exp qb
         | ExpressionType.MemberInit ->
             visitMemberInit (exp :?> MemberInitExpression) qb
+        | ExpressionType.ListInit ->
+            visitListInit (exp :?> ListInitExpression) qb
         | _ ->
             if not (runHandler unknownExpressionHandler qb exp) then
                 raise (ArgumentOutOfRangeException $"QueryTranslator.{nameof unknownExpressionHandler} did not handle the expression of type: {exp.NodeType}")
+
+    and private visitListInit (exp: ListInitExpression) (qb: QueryBuilder) =
+        // json_array(...)
+        qb.AppendRaw "jsonb_array("
+        for item in exp.Initializers do
+            let element = item.Arguments |> Seq.exactlyOne
+            visit element qb
+            qb.AppendRaw ','
+        qb.RollBack 1u
+        qb.AppendRaw ')'
 
     and private visitTypeIs (exp: TypeBinaryExpression) (qb: QueryBuilder) =
         if not (mustIncludeTypeInformationInSerializationFn exp.Expression.Type) then
@@ -580,6 +592,54 @@ module QueryTranslator =
             visit string qb |> ignore
             qb.AppendRaw " LIKE "
             visit likeWhat qb |> ignore
+
+        | "Set" when qb.UpdateMode ->
+            let oldValue = m.Arguments.[0]
+            let newValue = m.Arguments.[1]
+            visit oldValue qb |> ignore
+            qb.AppendRaw ","
+            visit newValue qb |> ignore
+            qb.AppendRaw ","
+        
+        | "Append" | "Add" when qb.UpdateMode ->
+            let struct (array, newValue) =
+                if m.Arguments.Count = 2 then
+                    struct (m.Arguments.[0], m.Arguments.[1])
+                elif m.Object <> null && m.Arguments.Count = 1 then
+                    struct (m.Object, m.Arguments.[0])
+                else
+                    failwithf "Unknown Append or Add method signature."
+
+            visit array qb |> ignore
+            qb.RollBack 1u
+            qb.AppendRaw "[#]',"
+            visit newValue qb |> ignore
+            qb.AppendRaw ","
+        
+        | "SetAt" when qb.UpdateMode ->
+            let array = m.Arguments.[0]
+            let index = m.Arguments.[1]
+            let newValue = m.Arguments.[2]
+            visit array qb |> ignore
+            qb.RollBack 1u
+            qb.AppendRaw $"[{index}]',"
+            visit newValue qb |> ignore
+            qb.AppendRaw ","
+        
+        | "RemoveAt" when qb.UpdateMode ->
+            let struct (array, index) =
+                if m.Arguments.Count = 2 then
+                    struct (m.Arguments.[0], m.Arguments.[1])
+                elif m.Object <> null && m.Arguments.Count = 1 then
+                    struct (m.Object, m.Arguments.[0])
+                else
+                    failwithf "Unknown RemoveAt method signature."
+
+            visit array qb |> ignore
+            qb.AppendRaw $",jsonb_remove(jsonb_extract({qb.TableNameDot}Value,"
+            visit array qb |> ignore
+            qb.AppendRaw "),"
+            qb.AppendRaw $"'$[{index}]'),"
         
         | "op_Dynamic" ->
             let o = m.Arguments.[0]
@@ -1167,10 +1227,7 @@ module QueryTranslator =
         visit expression builder
         sb.ToString(), variables
 
-    let internal translateUpdateMode (tableName: string) (expression: Expression) =
-        let sb = StringBuilder()
-        let variables = Dictionary<string, obj>()
-        let builder = QueryBuilder.New sb variables true tableName expression -1
+    let internal translateUpdateMode (tableName: string) (expression: Expression) (fullSQL: StringBuilder) (variableDict: Dictionary<string, obj>) =
+        let builder = QueryBuilder.New fullSQL variableDict true tableName expression -1
     
         visit expression builder
-        sb.ToString(), variables

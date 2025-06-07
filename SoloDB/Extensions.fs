@@ -90,3 +90,23 @@ type Extensions =
     [<Extension>]
     static member CastTo<'T>(this: obj) : 'T =
         this :?> 'T
+
+    /// This method sets a new value to a property inside the UpdateMany method's transform expression. This should not be called inside real code.
+    [<Extension>]
+    static member Set<'T>(this: 'T, value: obj) : unit =
+        (raise << NotImplementedException) "This is a function for the SQL update builder."
+
+    /// This method appends a new value to a array-like property inside the UpdateMany method's transform expression. This should not be called inside real code.
+    [<Extension>]
+    static member Append(this: IEnumerable<'T>, value: obj) : unit = // For arrays
+        (raise << NotImplementedException) "This is a function for the SQL update builder."
+
+    /// This method sets a new value at an index to a array-like property inside the UpdateMany method's transform expression. This should not be called inside real code.
+    [<Extension>]
+    static member SetAt(this: ICollection<'T>, index: int, value: obj) : unit =
+        (raise << NotImplementedException) "This is a function for the SQL update builder."
+
+    /// This method removes value at an index to a array-like property inside the UpdateMany method's transform expression. This should not be called inside real code.
+    [<Extension>]
+    static member RemoveAt(this: ICollection<'T>, index: int) : unit =
+        (raise << NotImplementedException) "This is a function for the SQL update builder."
