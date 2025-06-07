@@ -689,6 +689,25 @@ type ISoloDBCollection<'T> =
     /// <seealso cref="Update"/>
     abstract member ReplaceOne: filter: Expression<System.Func<'T, bool>> * item: 'T -> int
 
+    /// <summary>
+    /// Performs a partial update on all entities that match the specified filter condition.
+    /// </summary>
+    /// <param name="transform">An array of lambda expressions defining the modifications to apply (e.g., <code>item.Set(value)</code> method calls).</param>
+    /// <param name="filter">A lambda expression defining the criteria for which entities to update.</param>
+    /// <returns>
+    /// The number of entities that were updated.
+    /// </returns>
+    /// <exception cref="System.ArgumentNullException">Thrown when <paramref name="transform"/> or <paramref name="filter"/> is <c>null</c>.</exception>
+    /// <exception cref="Microsoft.Data.Sqlite.SqliteException">Thrown when the update would violate a database constraint (e.g., a unique index).</exception>
+    /// <remarks>
+    /// <para>It is required to perform only one update per expression. </para>
+    /// <para>This method provides a efficient way to perform bulk partial updates. </para>
+    /// <para>The <paramref name="transform"/> actions should be <code>item.Set(value) or col.Append(value) or col.SetAt(index,value) or col.RemoveAt(index)</code> </para>
+    /// </remarks>
+    /// <seealso cref="ReplaceMany"/>
+    /// <seealso cref="Update"/>
+    abstract member UpdateMany: filter: Expression<System.Func<'T, bool>> * [<System.ParamArray>] transform: Expression<System.Action<'T>> array -> int
+
 
 
 [<Extension>]

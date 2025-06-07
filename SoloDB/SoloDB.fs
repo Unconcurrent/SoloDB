@@ -284,6 +284,53 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 
     
     member this.TryGetById<'IdType when 'IdType : equality>(id: 'IdType) : 'T option =
+        let inline asR (a: 'IdType) = Unsafe.As<'IdType, 'R>(&Unsafe.AsRef(&a))
+
+        // If someone uses the wrong TryGetById method, of the compiler uses this.
+        match typeof<'IdType> with
+        // x.Equals is faster that F#'s structural comparison (=)
+        | x when x.Equals typeof<int8> ->
+            let id: int8 = asR id
+            this.TryGetById(int64 id)
+
+        | x when x.Equals typeof<int16> ->
+            let id: int16 = asR id
+            this.TryGetById(int64 id)
+
+        | x when x.Equals typeof<int32> ->
+            let id: int32 = asR id
+            this.TryGetById(int64 id)
+
+        | x when x.Equals typeof<nativeint> ->
+            let id: nativeint = asR id
+            this.TryGetById(int64 id)
+
+        | x when x.Equals typeof<int64> ->
+            let id: int64 = asR id
+            this.TryGetById(id)
+
+        | x when x.Equals typeof<uint8> ->
+            let id: uint8 = asR id
+            this.TryGetById(int64 id)
+
+        | x when x.Equals typeof<uint16> ->
+            let id: uint16 = asR id
+            this.TryGetById(int64 id)
+
+        | x when x.Equals typeof<uint32> ->
+            let id: uint32 = asR id
+            this.TryGetById(int64 id)
+
+        | x when x.Equals typeof<unativeint> ->
+            let id: unativeint = asR id
+            this.TryGetById(int64 id)
+
+        | x when x.Equals typeof<uint64> ->
+            let id: uint64 = asR id
+            this.TryGetById(int64 id)
+
+        | _ ->
+
         let idProp = CustomTypeId<'T>.Value.Value.Property
         let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
         use connection = connection.Get()
@@ -351,6 +398,34 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 
         use connection = connection.Get()
         connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filter}) LIMIT 1)", variables)
+
+    member this.UpdateMany(transform: Expression<System.Action<'T>> array)(filter: Expression<Func<'T, bool>>) =
+        let transform = nullArgCheck (nameof transform) transform
+        let filter = nullArgCheck (nameof filter) filter
+        match transform.Length with
+        | 0 -> 0 // If no transformations provided.
+        | _ ->
+
+        let variables = Dictionary<string, obj>()
+        let fullSQL = StringBuilder()
+        let inline append (txt: string) = ignore (fullSQL.Append txt)
+        
+        append "UPDATE \""
+        append name
+        append "\" SET Value = jsonb_set(Value, "
+
+        for expression in transform do
+            QueryTranslator.translateUpdateMode name expression fullSQL variables
+
+        fullSQL.Remove(fullSQL.Length - 1, 1) |> ignore // Remove the ',' at the end.
+
+        append ")  WHERE "
+        QueryTranslator.translateQueryable name filter fullSQL variables
+
+        let fullSQL = fullSQL.ToString()
+
+        use connection = connection.Get()
+        connection.Execute (fullSQL, variables)
 
     member this.EnsureIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
         use connection = connection.Get()
@@ -430,6 +505,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         member this.DeleteOne(filter) = this.DeleteOne(filter)
         member this.ReplaceMany(item,filter) = this.ReplaceMany(filter)(item)
         member this.ReplaceOne(item,filter) = this.ReplaceOne(filter)(item)
+        member this.UpdateMany(filter, t) = this.UpdateMany(t)(filter)
 
 type TransactionalSoloDB internal (connection: TransactionalConnection) =
     let connectionString = connection.ConnectionString
