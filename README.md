@@ -22,6 +22,9 @@ Imagine the power of MongoDB and SQL combined.
 - [.NET Standard 2.0 and 2.1](https://learn.microsoft.com/en-us/dotnet/standard/net-standard?tabs=net-standard-2-0)
 - Pretty well tested: 600+ of tests, but in the tradition of SQLite, we keep them private.
 
+I wrote a detailed comparison with [LiteDB](https://github.com/litedb-org/LiteDB) — including benchmarks, API differences, and developer experience. I aimed for objectivity, but of course, it's subjective all the way down.
+[Read the article](https://unconcurrent.com/articles/SoloDBvsLiteDB.html).
+
 ## How to install
 
 #### From NuGet
