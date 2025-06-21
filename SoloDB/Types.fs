@@ -44,7 +44,6 @@ type SoloDBFileHeader = {
     Length: int64
     Created: DateTimeOffset
     Modified: DateTimeOffset
-    Hash: byte array
     Metadata: IReadOnlyDictionary<string, string>
 }
 

@@ -311,7 +311,7 @@ using (var fileStream = fs.OpenOrCreateAt("/important_data/critical.bin"))
     fileStream.Write(randomBytes, 0, 10);
 }
 var criticalFileInfo = fs.GetAt("/important_data/critical.bin");
-System.Console.WriteLine($"SoloFileStream created file with size: {criticalFileInfo.Size} and a valid hash.");
+System.Console.WriteLine($"SoloFileStream created file with size: {criticalFileInfo.Size}.");
 
 ```
 
