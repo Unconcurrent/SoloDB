@@ -458,7 +458,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
             (this :> IEquatable<Collection<'T>>).Equals other
         | other -> false
 
-    override this.GetHashCode() = hash (this)
+    override this.GetHashCode() = hash this
 
     interface IEquatable<Collection<'T>> with
         member this.Equals (other) =
@@ -594,21 +594,21 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
         let manager = new ConnectionManager(connectionString, setup, defaultConfig)
 
-        // todo: Put it into a separate file.
         do
             use dbConnection = manager.Borrow()
 
-            let initTables = "
+            let schema = "
                 PRAGMA journal_mode=wal;
                 PRAGMA page_size=16384;
                 PRAGMA recursive_triggers = ON;
+                PRAGMA foreign_keys = on;
 
                 BEGIN EXCLUSIVE;
 
-                CREATE TABLE IF NOT EXISTS SoloDBCollections (Name TEXT NOT NULL) STRICT;
+                CREATE TABLE SoloDBCollections (Name TEXT NOT NULL) STRICT;
                                 
 
-                CREATE TABLE IF NOT EXISTS SoloDBDirectoryHeader (
+                CREATE TABLE SoloDBDirectoryHeader (
                     Id INTEGER PRIMARY KEY,
                     Name TEXT NOT NULL 
                             CHECK ((length(Name) != 0 OR ParentId IS NULL) 
@@ -631,7 +631,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     UNIQUE(FullPath)
                 ) STRICT;
 
-                CREATE TABLE IF NOT EXISTS SoloDBFileHeader (
+                CREATE TABLE SoloDBFileHeader (
                     Id INTEGER PRIMARY KEY,
                     Name TEXT NOT NULL 
                             CHECK (length(Name) != 0 
@@ -654,7 +654,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     UNIQUE(DirectoryId, Name)
                 ) STRICT;
 
-                CREATE TABLE IF NOT EXISTS SoloDBFileChunk (
+                CREATE TABLE SoloDBFileChunk (
                     FileId INTEGER NOT NULL,
                     Number INTEGER NOT NULL,
                     Data BLOB NOT NULL,
@@ -662,7 +662,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     UNIQUE(FileId, Number) ON CONFLICT REPLACE
                 ) STRICT;
 
-                CREATE TABLE IF NOT EXISTS SoloDBFileMetadata (
+                CREATE TABLE SoloDBFileMetadata (
                     Id INTEGER PRIMARY KEY,
                     FileId INTEGER NOT NULL,
                     Key TEXT NOT NULL,
@@ -671,7 +671,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     FOREIGN KEY (FileId) REFERENCES SoloDBFileHeader(Id) ON DELETE CASCADE
                 ) STRICT;
 
-                CREATE TABLE IF NOT EXISTS SoloDBDirectoryMetadata (
+                CREATE TABLE SoloDBDirectoryMetadata (
                     Id INTEGER PRIMARY KEY,
                     DirectoryId INTEGER NOT NULL,
                     Key TEXT NOT NULL,
@@ -680,15 +680,10 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     FOREIGN KEY (DirectoryId) REFERENCES SoloDBDirectoryHeader(Id) ON DELETE CASCADE
                 ) STRICT;
 
-                COMMIT TRANSACTION;
-                "
-
-            let initTriggers = "
-                BEGIN EXCLUSIVE;
 
 
                 -- Trigger to update the Modified column on insert for SoloDBDirectoryHeader
-                CREATE TRIGGER IF NOT EXISTS Insert_SoloDBDirectoryHeader
+                CREATE TRIGGER Insert_SoloDBDirectoryHeader
                 AFTER INSERT ON SoloDBDirectoryHeader
                 FOR EACH ROW
                 BEGIN
@@ -699,7 +694,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 END;
                                 
                 -- Trigger to update the Modified column on update for SoloDBDirectoryHeader
-                CREATE TRIGGER IF NOT EXISTS Update_SoloDBDirectoryHeader
+                CREATE TRIGGER Update_SoloDBDirectoryHeader
                 AFTER UPDATE ON SoloDBDirectoryHeader
                 FOR EACH ROW
                 BEGIN
@@ -710,7 +705,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 END;
                                 
                 -- Trigger to update the Modified column on insert for SoloDBFileHeader
-                CREATE TRIGGER IF NOT EXISTS Insert_SoloDBFileHeader
+                CREATE TRIGGER Insert_SoloDBFileHeader
                 AFTER INSERT ON SoloDBFileHeader
                 FOR EACH ROW
                 BEGIN
@@ -719,40 +714,33 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     SET Modified = NEW.Modified
                     WHERE Id = NEW.DirectoryId AND Modified < NEW.Modified;
                 END;
-                                
+                
                 -- Trigger to update the Modified column on update for SoloDBFileHeader
-                CREATE TRIGGER IF NOT EXISTS Update_SoloDBFileHeader
+                CREATE TRIGGER Update_SoloDBFileHeader
                 AFTER UPDATE OF Hash ON SoloDBFileHeader
                 FOR EACH ROW
                 BEGIN
                     UPDATE SoloDBFileHeader
                     SET Modified = UNIXTIMESTAMP()
                     WHERE Id = NEW.Id AND Modified < UNIXTIMESTAMP();
-                                    
+                    
                     -- Update parent directory's Modified timestamp
                     UPDATE SoloDBDirectoryHeader
                     SET Modified = UNIXTIMESTAMP()
                     WHERE Id = NEW.DirectoryId AND Modified < UNIXTIMESTAMP();
-                END;                 
+                END;
 
-                COMMIT TRANSACTION;
-                "
+                CREATE INDEX SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
 
-            let initIndexes = "
-                BEGIN EXCLUSIVE;
+                CREATE INDEX SoloDBDirectoryHeaderParentIdIndex ON SoloDBDirectoryHeader(ParentId);
+                CREATE UNIQUE INDEX SoloDBDirectoryHeaderFullPathIndex ON SoloDBDirectoryHeader(FullPath);
+                CREATE UNIQUE INDEX SoloDBFileHeaderFullPathIndex ON SoloDBFileHeader(FullPath);
+                CREATE UNIQUE INDEX SoloDBDirectoryMetadataDirectoryIdAndKey ON SoloDBDirectoryMetadata(DirectoryId, Key);
 
-
-                CREATE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
-
-                CREATE INDEX IF NOT EXISTS SoloDBDirectoryHeaderParentIdIndex ON SoloDBDirectoryHeader(ParentId);
-                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBDirectoryHeaderFullPathIndex ON SoloDBDirectoryHeader(FullPath);
-                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileHeaderFullPathIndex ON SoloDBFileHeader(FullPath);
-                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBDirectoryMetadataDirectoryIdAndKey ON SoloDBDirectoryMetadata(DirectoryId, Key);
-
-                CREATE INDEX IF NOT EXISTS SoloDBFileHeaderDirectoryIdIndex ON SoloDBFileHeader(DirectoryId);
-                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileChunkFileIdAndNumberIndex ON SoloDBFileChunk(FileId, Number);
-                CREATE UNIQUE INDEX IF NOT EXISTS SoloDBFileMetadataFileIdAndKey ON SoloDBFileMetadata(FileId, Key);
-                CREATE INDEX IF NOT EXISTS SoloDBFileHashIndex ON SoloDBFileHeader(Hash);
+                CREATE INDEX SoloDBFileHeaderDirectoryIdIndex ON SoloDBFileHeader(DirectoryId);
+                CREATE UNIQUE INDEX SoloDBFileChunkFileIdAndNumberIndex ON SoloDBFileChunk(FileId, Number);
+                CREATE UNIQUE INDEX SoloDBFileMetadataFileIdAndKey ON SoloDBFileMetadata(FileId, Key);
+                CREATE INDEX SoloDBFileHashIndex ON SoloDBFileHeader(Hash);
 
                 INSERT INTO SoloDBDirectoryHeader (Name, ParentId, FullPath)
                 SELECT '', NULL, '/'
@@ -762,21 +750,48 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     WHERE ParentId IS NULL AND Name = ''
                 );
 
+                PRAGMA user_version = 1;
                 COMMIT TRANSACTION;
                 "
             
             let mutable dbSchemaVersion = dbConnection.QueryFirst<int> "PRAGMA user_version;";
+            let currentSupportedSchemaVersion = 2; // Added a check so it will not open future version of the schema.
+
+            if dbSchemaVersion > currentSupportedSchemaVersion then
+                raise (NotSupportedException $"The schema version of the current DB is {dbSchemaVersion}, but the current version is {currentSupportedSchemaVersion}. This check can be mistaken if the user modified the 'PRAGMA user_version;' pragma, in which the version is stored.")
 
             if dbSchemaVersion = 0 then
-                for command in [|initTables; initTriggers; initIndexes|] do
-                    use command = new SqliteCommand(command, dbConnection.Inner)
-                    command.Prepare()
-                    ignore (command.ExecuteNonQuery())
-                ignore (dbConnection.Execute "PRAGMA user_version = 1;")
-                dbSchemaVersion <- 1
+                use command = new SqliteCommand(schema, dbConnection.Inner)
+                // command.Prepare() // It does not work if the referenced tables are not created yet.
+                ignore (command.ExecuteNonQuery())
+                dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
+                if dbSchemaVersion = 0 then
+                    failwithf "Failure to create the schema."
+
+            if dbSchemaVersion = 1 then
+                use command = new SqliteCommand("
+                    BEGIN EXCLUSIVE;
+
+                    DROP INDEX SoloDBFileHashIndex;
+
+                    -- The update will be handled inside filestream's code.
+                    DROP TRIGGER Update_SoloDBFileHeader;
+                    ALTER TABLE SoloDBFileHeader DROP COLUMN \"Hash\";
+
+                    PRAGMA user_version = 2;
+                    PRAGMA foreign_keys = on;
+
+                    COMMIT TRANSACTION;
+                ", dbConnection.Inner)
+                command.Prepare()
+                ignore (command.ExecuteNonQuery())
+                dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
+                if dbSchemaVersion = 1 then
+                    failwithf "Failure to create the schema."
 
 
-            let _rez = dbConnection.Execute("PRAGMA optimize;")
+            // https://www.sqlite.org/pragma.html#pragma_optimize
+            let _rez = dbConnection.Execute("PRAGMA optimize=0x10002;")
             ()
         
         

@@ -19,7 +19,6 @@ module FileStorage =
     let maxChunkStoreSize = 
         chunkSize + 100L // If the compression fails.
 
-    let disableHash = false
     let disableCompression = false
     let ensureFullBufferReadInDbFileStream = true // There are some libraries that wrongly assume so.
 
@@ -158,17 +157,16 @@ module FileStorage =
 
     [<CLIMutable>]
     type SQLEntry = {
-        Level: int64; 
-        Id: int64; 
-        Type: string; 
-        Path: string; 
-        Name: string;
-        Size: int64;
-        Created: DateTimeOffset;
-        Modified: DateTimeOffset;
-        DirectoryId: Nullable<int64>;
-        Hash: byte array; // Nullable
-        MetadataKey: string;
+        Level: int64
+        Id: int64
+        Type: string
+        Path: string
+        Name: string
+        Size: int64
+        Created: DateTimeOffset
+        Modified: DateTimeOffset
+        DirectoryId: Nullable<int64>
+        MetadataKey: string
         MetadataValue: string
     }
 
@@ -219,7 +217,6 @@ module FileStorage =
                	dt.Created as Created,
                	dt.Modified as Modified,
                 dt.ParentId as DirectoryId,
-            	NULL as Hash,
                 dm.Key AS MetadataKey,
                 dm.Value AS MetadataValue
             FROM
@@ -239,7 +236,6 @@ module FileStorage =
                	fh.Created as Created,
                	fh.Modified as Modified,
                 fh.DirectoryId as DirectoryId,
-            	fh.Hash as Hash,
                 fm.Key AS MetadataKey,
                 fm.Value AS MetadataValue
             FROM
@@ -266,7 +262,6 @@ module FileStorage =
                         Length = entryData.Size;
                         Created = entryData.Created;
                         Modified = entryData.Modified;
-                        Hash = entryData.Hash;
                         Metadata = metadata;
                     }
                     SoloDBEntryHeader.File file
@@ -363,12 +358,6 @@ module FileStorage =
             previousNumber <- chunk.Number
     }
 
-    let private updateHashById (db: IDbConnection) (fileId: int64) (hash: byte array) =
-        db.Execute("UPDATE SoloDBFileHeader 
-        SET Hash = @Hash
-        WHERE Id = @FileId", {|Hash = hash; FileId = fileId|})
-        |> ignore
-
     let private setFileModifiedById (db: IDbConnection) (fileId: int64) (modified: DateTimeOffset) =
         db.Execute("UPDATE SoloDBFileHeader 
         SET Modified = @Modified
@@ -398,23 +387,44 @@ module FileStorage =
 
         sha1.GetHashAndReset()
 
+    [<Literal>]
+    let private updateModifiedTimestampSQL = @"
+        UPDATE SoloDBFileHeader
+        SET Modified = UNIXTIMESTAMP()
+        WHERE Id = @FileId AND Modified < UNIXTIMESTAMP();
+                    
+        -- Update parent directory's Modified timestamp
+        UPDATE SoloDBDirectoryHeader
+        SET Modified = UNIXTIMESTAMP()
+        WHERE Id = @DirId AND Modified < UNIXTIMESTAMP();
+    "
+
+    [<Literal>]
+    let private updateModifiedTimestampTrSQL = "BEGIN;" + updateModifiedTimestampSQL + "COMMIT TRANSACTION;"
     
-    type DbFileStream(db: Connection, fileId: int64, fullPath: string, previousHash: byte array) =
+    type DbFileStream internal (db: Connection, fileId: int64, directoryId: int64, fullPath: string) =
         inherit Stream()
 
         let mutable position = 0L
         let mutable disposed = false
         let mutable dirty = false
-        let mutable dontRehash = false
 
         let checkDisposed() = if disposed then raise (ObjectDisposedException(nameof(DbFileStream)))
 
-        member private this.UpdateHash() =
-            if not disableHash && dirty && not dontRehash then
+        member private this.UpdateModified() =
+            if dirty then
                 use db = db.Get()
-                let hash = calculateHash db fileId this.Length
-                if hash <> previousHash then
-                    updateHashById db fileId hash
+
+
+                match db.IsWithinTransaction() with
+                | true ->
+                    ignore (db.Execute (updateModifiedTimestampSQL, {|FileId = fileId; DirId = directoryId|}))
+                | false ->
+                    ignore (db.Execute (updateModifiedTimestampTrSQL, {|FileId = fileId; DirId = directoryId|}))
+
+                ()
+            
+            ()
 
 
         override _.CanRead = not disposed
@@ -441,15 +451,9 @@ module FileStorage =
         member this.FullPath =
             fullPath
 
-        member internal this.UnsafeDontRehash() =
-            dontRehash <- true
-
-        member this.GetDirty() =
-            dirty <- true
-
         override this.Flush() =         
             checkDisposed()
-            this.UpdateHash()
+            this.UpdateModified()
 
         override this.Read(buffer: byte[], offset: int, count: int) : int =
             checkDisposed()
@@ -616,7 +620,6 @@ module FileStorage =
             Modified = DateTimeOffset.Now
 
             Id = 0
-            Hash = null
             Metadata = null
         }
         let result = db.QueryFirst<SoloDBFileHeader>("INSERT INTO SoloDBFileHeader(Name, FullPath, DirectoryId, Length, Created, Modified) VALUES (@Name, @FullPath, @DirectoryId, @Length, @Created, @Modified) RETURNING *", newFile)
@@ -648,7 +651,6 @@ module FileStorage =
             Length: int64
             Created: DateTimeOffset
             Modified: DateTimeOffset
-            Hash: byte array
 
             MetaKey: string
             MetaValue: string
@@ -674,7 +676,6 @@ module FileStorage =
                 Length = file.Length
                 Created = file.Created
                 Modified = file.Modified
-                Hash = file.Hash
                 Metadata = allMetadata
             }
         )
@@ -683,9 +684,6 @@ module FileStorage =
         let struct (dirPath, name) = getPathAndName path
         let fullPath = combinePath dirPath name
         getFilesWhere db "fh.FullPath = @FullPath" {|FullPath = fullPath|} |> Seq.tryHead
-
-    let private getFilesByHash (db: IDbConnection) (hash: byte array) =
-        getFilesWhere db "fh.Hash = @Hash" {|Hash = hash|} |> ResizeArray :> ICollection<SoloDBFileHeader>
 
     let private getOrCreateFileAt (db: IDbConnection) (path: string) =
         use l = lockPathIfNotInTransaction db path
@@ -717,7 +715,7 @@ module FileStorage =
         getFilesWhere db "DirectoryId = @DirectoryId" {|DirectoryId = dir.Id|} |> ResizeArray :> SoloDBFileHeader seq
 
     let private openFile (db: Connection) (file: SoloDBFileHeader) =
-        new DbFileStream(db, file.Id, file.FullPath, file.Hash)
+        new DbFileStream(db, file.Id, file.DirectoryId, file.FullPath)
 
     let private openOrCreateFile (db: Connection) (path: string) =
         let file = 
@@ -726,7 +724,7 @@ module FileStorage =
             | Some x -> x 
             | None -> createFileAt conn path
 
-        new DbFileStream(db, file.Id, file.FullPath, file.Hash)
+        new DbFileStream(db, file.Id, file.DirectoryId, file.FullPath)
 
     let private setSoloDBFileMetadata (db: IDbConnection) (file: SoloDBFileHeader) (key: string) (value: string) =
         db.Execute("INSERT OR REPLACE INTO SoloDBFileMetadata(FileId, Key, Value) VALUES(@FileId, @Key, @Value)", {|FileId = file.Id; Key = key; Value = value|}) |> ignore
@@ -915,21 +913,19 @@ module FileStorage =
                 ()
             )
 
+
         /// <summary>
-        /// Writes data from a stream to a file at a specific offset, with UNSAFE options for creation and rehashing.
+        /// Writes data to a file at a specific offset.
         /// </summary>
         /// <param name="path">The path to the file.</param>
         /// <param name="offset">The zero-based byte offset in the file at which to begin writing.</param>
-        /// <param name="data">The stream to read data from.</param>
+        /// <param name="data">The Stream to copy to the file.</param>
         /// <param name="createIfInexistent">Specifies whether to create the file if it does not exist. Defaults to true.</param>
-        /// <param name="rehash">Specifies whether to rehash the file's contents after writing. Defaults to true.</param>
-        /// <remarks> This is an unsafe operation. </remarks>
-        member this.WriteAtRehash(
+        member this.WriteAt(
             path: string,
             offset: int64,
             data: Stream,
-            [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool,
-            [<Optional; DefaultParameterValue(true)>] rehash: bool
+            [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool
         ) =
             connection.WithTransaction(fun tx -> 
                 let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
@@ -938,25 +934,7 @@ module FileStorage =
                 use fileStream = openFile innerConnection file
                 fileStream.Position <- offset
                 data.CopyTo (fileStream, int chunkSize * 10)
-                if not rehash then
-                    fileStream.UnsafeDontRehash()
-                else if rehash && fileStream.Position = offset then
-                    // If the should rehash, but the data was empty
-                    fileStream.GetDirty() // then recalculate the hash.
-                ()
             )
-
-        member this.WriteAtRehash(path: string, offset: int64, data: byte array, ?createIfInexistent: bool, ?rehash: bool) =
-            use data = new MemoryStream(data)
-            let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
-            let rehash = match rehash with Some x -> x | None -> true
-
-            this.WriteAtRehash(path, offset, data, createIfInexistent, rehash)
-
-        member this.WriteAt(path: string, offset: int64, data: Stream, ?createIfInexistent: bool) =
-            let createIfInexistent = match createIfInexistent with Some x -> x | None -> true
-
-            this.WriteAtRehash(path, offset, data, createIfInexistent)
 
         member this.ReadAt(path: string, offset: int64, len) =
             let file = this.GetAt path
@@ -1006,15 +984,6 @@ module FileStorage =
         member this.DeleteDirectoryMetadata(path, key) =
             let dir = this.GetDirAt path
             this.DeleteDirectoryMetadata(dir, key)
-
-        member this.GetFilesByHash(hash) =
-            use db = connection.Get()
-            getFilesByHash db hash
-
-        member this.GetFileByHash(hash) =
-            match this.GetFilesByHash hash |> Seq.tryHead with
-            | None -> raise (FileNotFoundException("No file with such hash.", Utils.bytesToHex hash))
-            | Some f -> f
 
         member this.Delete(file) =
             use db = connection.Get()
