@@ -19,7 +19,7 @@
     <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
 	<DebugType>embedded</DebugType>
     <PackageOutputPath>$(OutputPath)</PackageOutputPath>
-    <VersionPrefix>0.3.0</VersionPrefix>
+    <VersionPrefix>0.3.1</VersionPrefix>
     <LangVersion>9</LangVersion>
 	<GenerateDocumentationFile>true</GenerateDocumentationFile>
 	<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
@@ -42,7 +42,6 @@
     <Compile Include="FileStorage.fs" />
     <Compile Include="Queryable.fs" />
     <Compile Include="SoloDB.fs" />
-    <Compile Include="SoloDBOperators.fs" />
     <Compile Include="MongoEmulation.fs" />
   </ItemGroup>
 
