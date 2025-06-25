@@ -1671,7 +1671,6 @@ and private JsonDeserializerImpl<'A> =
 
                 Expression.Call(m, parameters)
 
-
             let switch = 
                 Expression.Switch(
                     Expression.Call(
@@ -1692,9 +1691,29 @@ and private JsonDeserializerImpl<'A> =
                     |]
                 )
 
+            let hasIsCase (json: JsonValue) (caseIsName: string) =
+                match json.TryGetProperty caseIsName with
+                | true, Boolean true -> true
+                | _, _ -> false
+
+            let hasIsCase = Func<JsonValue, string, bool> hasIsCase
+            let hasIsCase = Expression.Constant hasIsCase :> Expression
+            let invoke = typeof<Func<JsonValue, string, bool>>.GetMethod "Invoke"
+
+            let rec getForCaseOr (cases: UnionCaseInfo list) (orElse: Expression) =
+                match cases with
+                | [] -> orElse
+                | case :: cases ->
+                    Expression.Condition(
+                        Expression.Call(hasIsCase, invoke, seq {jsonParam :> Expression; Expression.Constant $"Is{case.Name}"}), 
+                        (let c = deserializeForCase case :> Expression in c),
+                        (let other = getForCaseOr cases orElse in other))
+                
+
+            let body = getForCaseOr (unionCases |> Array.toList) switch
 
             let lambda = Expression.Lambda<Func<JsonValue, 'A>>(
-                    switch,
+                    body,
                     [|jsonParam|]
                 )
 
