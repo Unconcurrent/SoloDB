@@ -19,9 +19,6 @@ module FileStorage =
     let maxChunkStoreSize = 
         chunkSize + 100L // If the compression fails.
 
-    let disableCompression = false
-    let ensureFullBufferReadInDbFileStream = true // There are some libraries that wrongly assume so.
-
     let private combinePath a b = Path.Combine(a, b) |> _.Replace('\\', '/')
     let private combinePathArr arr = arr |> Path.Combine |> _.Replace('\\', '/')
 
@@ -291,23 +288,14 @@ module FileStorage =
         match db.QueryFirstOrDefault<byte array>(sql, {| FileId = fileId; ChunkNumber = chunkNumber |}) with
         | data when Object.ReferenceEquals(data, null) -> Span.Empty
         | data -> 
-            if disableCompression then
-                Span<byte>(data).CopyTo(buffer)
-                buffer.Slice(0, data.Length)
-            else
-                let len = Snappy.Decompress(Span<byte>(data), buffer)
-                buffer.Slice(0, len)
+            let len = Snappy.Decompress(Span<byte>(data), buffer)
+            buffer.Slice(0, len)
 
 
     let private writeChunkData (db: IDbConnection) (fileId: int64) (chunkNumber: int64) (data: Span<byte>) =
         let arrayBuffer = Array.zeroCreate (int maxChunkStoreSize)
         let memoryBuffer = arrayBuffer.AsSpan()
-        let len = 
-            if disableCompression then
-                data.CopyTo(memoryBuffer)
-                data.Length
-            else
-                Snappy.Compress(data, memoryBuffer)
+        let len = Snappy.Compress(data, memoryBuffer)
 
         let result = db.Execute("INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) VALUES (@FileId, @Number, @Data)", {|
             FileId = fileId
@@ -319,42 +307,35 @@ module FileStorage =
         if result <> 1 then failwithf "writeChunkData failed."
 
 
-    let private getStoredChunks (db: IDbConnection) (fileId: int64) =
-        use command = db.CreateCommand()
-        command.CommandText <- "SELECT Number, Data FROM SoloDBFileChunk WHERE FileId = @FileId ORDER BY Number ASC"
+    [<Struct; CLIMutable>]
+    type internal ChunkDTO = { Number: int64; Data: NativeArray.NativeArray }
 
-        let p = command.CreateParameter()
-        p.ParameterName <- "FileId"
-        p.Value <- fileId
-        command.Parameters.Add p |> ignore
-
-        seq {
-            use reader = command.ExecuteReader()
-            while reader.Read() do
-                let memoryBuffer = Array.zeroCreate (int maxChunkStoreSize)
-                let number = reader.GetInt64(0)
-                let data = reader.GetValue(1)
-                let data = data :?> byte array
-                let count = 
-                    if disableCompression then
-                        Array.Copy(data, memoryBuffer, 0)
-                        data.Length
-                    else
-                        Snappy.Decompress(data, Span<byte>(memoryBuffer))
-                struct {|Number = number; Data = memoryBuffer; Len = count|}
-                
-        }
+    let inline private getStoredChunks (db: IDbConnection) (fileId: int64) (startChunk: int64) (lastChunk: int64) =
+        db.Query<ChunkDTO>("""
+        SELECT
+          rowid,
+          Number,
+          Data
+        FROM
+          SoloDBFileChunk
+        WHERE
+          FileId = @FileId AND Number >= @StartChunk AND Number <= @EndChunk
+        ORDER BY
+          Number;
+    """, {|FileId = fileId; StartChunk = startChunk; EndChunk = lastChunk|})
         
 
-    let private emptyChunk = Array.zeroCreate<byte> (int chunkSize)
-    let private getAllChunks (db: IDbConnection) (fileId: int64) = seq {
-        let mutable previousNumber = -1L // Chunks start from 0.
-        for chunk in getStoredChunks db fileId do
-            while chunk.Number - 1L > previousNumber do
-                yield struct {|Number = previousNumber + 1L; Data = emptyChunk; Len = (int chunkSize)|}
-                previousNumber <- previousNumber + 1L
+    /// The chunks are automatically freed after iterating.
+    let private getAllCompressedChunksWithinRange (db: IDbConnection) (fileId: int64) (startChunk: int64) (lastChunk: int64) = seq {
+        let mutable previousNumber = startChunk - 1L // Chunks start from 0.
+        for chunk in getStoredChunks db fileId startChunk lastChunk do
+            try
+                while chunk.Number - 1L > previousNumber do
+                    yield {Number = previousNumber + 1L; Data = NativeArray.NativeArray.Empty }
+                    previousNumber <- previousNumber + 1L
 
-            yield chunk
+                yield chunk
+            finally chunk.Data.Dispose()
             previousNumber <- chunk.Number
     }
 
@@ -369,23 +350,6 @@ module FileStorage =
         SET Created = @Created
         WHERE Id = @FileId", {|Created = created; FileId = fileId|})
         |> ignore
-
-    let private calculateHash (db: IDbConnection) (fileId: int64) (len: int64) =
-        use sha1 = IncrementalHash.CreateHash(HashAlgorithmName.SHA1)
-        
-        for chunk in getAllChunks db fileId do
-            let data = chunk.Data
-            let struct (block, len) =
-                let currentChunkDataOffset = chunk.Number * chunkSize
-                if currentChunkDataOffset + chunkSize <= len then 
-                    struct (data, chunk.Len)
-                else 
-                    let blockReadCount = int (len - currentChunkDataOffset) // Calculate how many bytes should actually be read to not exceed the file length
-                    struct (data, blockReadCount) // Trim the chunk data to match the file's actual length
-
-            sha1.AppendData(block, 0, len)
-
-        sha1.GetHashAndReset()
 
     [<Literal>]
     let private updateModifiedTimestampSQL = @"
@@ -455,51 +419,76 @@ module FileStorage =
             checkDisposed()
             this.UpdateModified()
 
-        override this.Read(buffer: byte[], offset: int, count: int) : int =
+        #if NETSTANDARD2_1_OR_GREATER
+        override 
+        #else
+        member
+        #endif
+            this.Read(buffer: Span<byte>) =
             checkDisposed()
+
+            if buffer.IsEmpty then 0 else
+
+            use db = db.Get()
+            let len = this.Length
+            let currentPosition = position
+            let bytesToReadTotal = min (int64 buffer.Length) (len - currentPosition)
+
+            if bytesToReadTotal <= 0L then 0 else
+
+            let startChunk = currentPosition / chunkSize
+            let endChunk = (currentPosition + bytesToReadTotal - 1L) / chunkSize
+
+            let mutable bytesWrittenToBuffer = 0
+            let mutable chunkDecompressionBuffer = NativeArray.NativeArray.Empty
+
+            try
+                for chunk in getAllCompressedChunksWithinRange db fileId startChunk endChunk do
+                    let chunkStartPos = chunk.Number * chunkSize
+                    let copyFrom = max currentPosition chunkStartPos
+                    let copyTo = min (currentPosition + bytesToReadTotal) (chunkStartPos + chunkSize)
+                    let bytesToCopyInChunk = int (copyTo - copyFrom)
+
+                    if bytesToCopyInChunk > 0 then
+                        let bufferOffset = int (copyFrom - currentPosition)
+                        let destinationSpan = buffer.Slice(bufferOffset, bytesToCopyInChunk)
+
+                        // Check for sparse chunk by comparing with the static Empty property.
+                        if chunk.Data.Length = 0 then
+                            destinationSpan.Fill(0uy)
+                            bytesWrittenToBuffer <- bytesWrittenToBuffer + bytesToCopyInChunk
+                        else
+                            let offsetInChunk = int (copyFrom % chunkSize)
+                            let writtenBytes = 
+                                if offsetInChunk = 0 then
+                                    match Snappy.TryDecompress(chunk.Data.Span, destinationSpan) with
+                                    | _, 0 -> failwithf "Failed to decompress chunk."
+                                    | _, decompressedBytes when decompressedBytes <> destinationSpan.Length -> failwithf "Failed to fully decompress chunk."
+                                    | _, decompressedBytes -> decompressedBytes
+                                else
+                                    if chunkDecompressionBuffer.Length = 0 then
+                                        chunkDecompressionBuffer <- NativeArray.NativeArray.Alloc (int maxChunkStoreSize)
+
+                                    let chunkDecompressionBuffer = chunkDecompressionBuffer.Span
+                                    let decompressedBytes = Snappy.Decompress(chunk.Data.Span, chunkDecompressionBuffer)
+                                    chunkDecompressionBuffer.Slice(offsetInChunk, bytesToCopyInChunk).CopyTo(destinationSpan)
+
+                                    bytesToCopyInChunk
+
+                            bytesWrittenToBuffer <- bytesWrittenToBuffer + writtenBytes
+            finally
+                chunkDecompressionBuffer.Dispose()
+                this.Position <- currentPosition + int64 bytesWrittenToBuffer
+
+            bytesWrittenToBuffer
+
+        override this.Read(buffer: byte[], offset: int, count: int) : int =
             if buffer = null then raise (ArgumentNullException(nameof buffer))
             if offset < 0 then raise (ArgumentOutOfRangeException(nameof offset))
             if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
             if buffer.Length - offset < count then raise (ArgumentException("Invalid offset and length."))
 
-            let position = this.Position
-            let count = int64 count
-
-            let chunkNumber = position / int64 chunkSize
-            let chunkOffset = position % int64 chunkSize
-
-            let len = this.Length
-            let bytesToRead = min count (chunkSize - chunkOffset) |> min (len - position)
-
-            if bytesToRead = 0 then
-                0
-            else
-
-            let chunkBuffer = Array.zeroCreate (int maxChunkStoreSize)
-            
-            match (use db = db.Get() in tryGetChunkData db fileId chunkNumber (Span chunkBuffer)) with
-            | data when data.IsEmpty ->
-                let maxChunkNumber = (min (position + count) len) / int64 chunkSize
-                if maxChunkNumber > chunkNumber then // Try to load the other chunk if the file was sparsely allocated.
-                    let offsetToNextChunk = chunkSize - chunkOffset
-
-                    let bytesToRead = int (min (len - position) count) - int offsetToNextChunk
-                    buffer.AsSpan(offset, int offsetToNextChunk).Fill(0uy)
-
-                    this.Position <- position + offsetToNextChunk
-                    this.Read(buffer, offset + int offsetToNextChunk, bytesToRead) + int offsetToNextChunk
-                else
-                0
-            | chunkData ->
-
-            chunkData.Slice(int chunkOffset, int bytesToRead).CopyTo(buffer.AsSpan(offset))
-        
-            this.Position <- position + bytesToRead
-            let remainingBytes = count - bytesToRead
-
-            if ensureFullBufferReadInDbFileStream && remainingBytes > 0 then
-                this.Read(buffer, offset + int bytesToRead, int remainingBytes) + int bytesToRead
-            else int bytesToRead
+            this.Read(Span<byte>(buffer, offset, count))
 
         #if NETSTANDARD2_1_OR_GREATER
         override 

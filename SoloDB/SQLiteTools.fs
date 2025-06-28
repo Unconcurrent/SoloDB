@@ -15,6 +15,8 @@ open System.Runtime.Serialization
 open SoloDatabase.JsonSerializator
 open System.Collections.Concurrent
 open Microsoft.Data.Sqlite
+open System.IO
+open System.Data.Common
 
 module SQLiteTools =
     let private nullablePropsCache = ConcurrentDictionary<Type, struct (PropertyInfo * PropertyInfo)>()
@@ -116,12 +118,44 @@ module SQLiteTools =
 
         command
 
+    let private dataReaderMethods =
+        let rec getMethods (t: Type) =
+            let implements = t.GetInterfaces()
+            [
+                yield! t.GetMethods()
+                for implements in implements do
+                    yield! getMethods implements
+            ]
+        getMethods typeof<DbDataReader>
+
     type private TypeMapper<'T> =
         static member val Map = 
-            let matchMethodWithPropertyType (prop: PropertyInfo) (readerParam: Expression) (columnVar: Expression) =
+            let streamToNativeArrayFuncDisposing (s: SqliteBlob) =
+                use s = s
+                let arr = NativeArray.NativeArray.Alloc (int s.Length)
+                let mutable totalRead = 0
+
+                while totalRead < arr.Length do
+                    let read = s.Read(arr.Span)
+                    if read = 0 && totalRead < arr.Length then
+                        failwithf "Could not read the whole BLOB, readCount = %i, size = %i" totalRead arr.Length
+                    totalRead <- totalRead + read
+                arr
+
+            let streamToNativeArray = Func<SqliteBlob, NativeArray.NativeArray> streamToNativeArrayFuncDisposing
+            let streamToNativeArray = Expression.Constant streamToNativeArray
+            let streamToNativeArray = 
+                let method = typeof<Func<SqliteBlob, NativeArray.NativeArray>>.GetMethod "Invoke"
+                fun (e: Expression) ->
+                    Expression.Call (streamToNativeArray, method, [|e|])
+
+            
+
+            let matchMethodWithMemberType (prop: MemberInfo) (readerParam: Expression) (columnVar: Expression) =
                 // Get the appropriate method and conversion for each property type
                 let (getMethodName, needsConversion, conversionFunc) = 
-                    match prop.PropertyType with
+                    let t = match prop with | :? PropertyInfo as p -> p.PropertyType | :? FieldInfo as p -> p.FieldType | _ -> failwithf "Unknown member type."
+                    match t with
                     | t when t = typeof<byte> || t = typeof<int8> -> 
                         "GetByte", false, None
                     | t when t = typeof<uint8> -> 
@@ -163,6 +197,8 @@ module SQLiteTools =
                         "GetString", false, None
                     | t when t = typeof<bool> -> 
                         "GetBoolean", false, None
+                    | t when t = typeof<NativeArray.NativeArray> -> 
+                        "GetStream", true, Some (fun expr -> streamToNativeArray (Expression.TypeAs(expr, typeof<SqliteBlob>)))
                     | t when t = typeof<byte[]> -> 
                         "GetValue", true, Some (fun expr -> Expression.TypeAs(expr, typeof<byte[]>))
                     | t when t = typeof<Guid> -> 
@@ -172,13 +208,16 @@ module SQLiteTools =
                     | t when t = typeof<DateTimeOffset> -> 
                         "GetInt64", true, Some (fun (expr: Expression) -> Expression.Call(typeof<DateTimeOffset>.GetMethod("FromUnixTimeMilliseconds", [|typeof<int64>|]), expr))
                     | _ -> 
-                        "GetValue", true, Some (fun expr -> Expression.Convert(expr, prop.PropertyType))
+                        "GetValue", true, Some (fun expr -> Expression.Convert(expr, t))
 
+
+                let method = dataReaderMethods |> List.find(fun m -> m.Name = getMethodName)
+                let readerParam = Expression.TypeAs(readerParam, typeof<DbDataReader>)
 
                 // Call the appropriate method
                 let valueExpr = Expression.Call(
                     readerParam,
-                    typeof<IDataRecord>.GetMethod(getMethodName),
+                    method,
                     [| columnVar |]
                 )
 
@@ -192,40 +231,70 @@ module SQLiteTools =
 
 
             match typeof<'T> with
-            | OfType int8 -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetByte(startIndex) :> obj :?> 'T
-            | OfType uint8 -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetInt16(startIndex) |> uint8 :> obj :?> 'T
-            | OfType int16 -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetInt16(startIndex) :> obj :?> 'T
-            | OfType uint16 -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetInt32(startIndex) |> uint16 :> obj :?> 'T
-            | OfType int32 -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetInt32(startIndex) :> obj :?> 'T
-            | OfType uint32 -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetInt64(startIndex) |> uint32 :> obj :?> 'T
-            | OfType int64 -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetInt64(startIndex) :> obj :?> 'T
-            | OfType uint64 -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetInt64(startIndex) |> uint64 :> obj :?> 'T
-            | OfType float -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetDouble(startIndex) |> float :> obj :?> 'T
-            | OfType double -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetDouble(startIndex) :> obj :?> 'T
-            | OfType decimal -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetDecimal(startIndex) :> obj :?> 'T
-            | OfType string -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetString(startIndex) :> obj :?> 'T
-            | OfType bool -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetBoolean(startIndex) :> obj :?> 'T
-            | OfType (id: byte array -> byte array) -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetValue(startIndex) :?> 'T
-            | OfType (id: Guid -> Guid) -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetGuid(startIndex) :> obj :?> 'T
-            | OfType DateTime -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetDateTime(startIndex) :> obj :?> 'T
-            | OfType DateTimeOffset -> fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) -> 
-                reader.GetInt64(startIndex) |> DateTimeOffset.FromUnixTimeMilliseconds :> obj :?> 'T
+            | OfType int8 ->
+                // Box avoidance: cast the function, not the primitive to obj and then to 'T
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetByte(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType uint8 ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetInt16(startIndex) |> uint8) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType int16 ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetInt16(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType uint16 ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetInt32(startIndex) |> uint16) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType int32 ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetInt32(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType uint32 ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetInt64(startIndex) |> uint32) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType int64 ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetInt64(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType uint64 ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetInt64(startIndex) |> uint64) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType float32 ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetFloat(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType double ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetDouble(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType decimal ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetDecimal(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType string ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetString(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType bool ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetBoolean(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType (id: byte array -> byte array) ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetValue(startIndex) :?> 'T) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType (id: Guid -> Guid) ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetGuid(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType DateTime ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetDateTime(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | OfType DateTimeOffset ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    reader.GetInt64(startIndex) |> DateTimeOffset.FromUnixTimeMilliseconds) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+            | t when t = typeof<NativeArray.NativeArray> ->
+                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
+                    match reader with
+                    | :? SqliteDataReader as reader ->
+                        let stream = reader.GetStream(startIndex) :?> SqliteBlob
+                        streamToNativeArrayFuncDisposing stream
+                    | _ ->
+                        let byteArray = reader.GetValue(startIndex) :?> byte array
+                        let array = NativeArray.NativeArray.Alloc byteArray.Length
+                        byteArray.AsSpan().CopyTo(array.Span)
+                        array
+                    ) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
             | t when t = typeof<obj> ->
                 fun (reader: IDataReader) (startIndex: int) (columns: IDictionary<string, int>) -> 
                     let jsonObj = JsonSerializator.JsonValue.Object(Dictionary(columns.Count))
@@ -251,7 +320,6 @@ module SQLiteTools =
                     jsonObj :> obj :?> 'T
 
             | t when FSharpType.IsRecord t ->
-
                 // Parameter declarations
                 let readerParam = Expression.Parameter(typeof<IDataReader>, "reader")
                 let startIndexParam = Expression.Parameter(typeof<int>, "startIndex")
@@ -292,7 +360,7 @@ module SQLiteTools =
                                 )
                             ))
                                         
-                    let getValueAndDeserialize = matchMethodWithPropertyType prop readerParam columnVar
+                    let getValueAndDeserialize = matchMethodWithMemberType prop readerParam columnVar
                     
                     // Default value if property not found
                     let defaultValue = 
@@ -335,7 +403,12 @@ module SQLiteTools =
                 // Create appropriate mapper based on the type
                 let expr =
                     // Handle class types with properties
-                    let props = t.GetProperties() |> Array.filter (fun p -> p.CanWrite)
+                    let props: MemberInfo array = 
+                        let props = t.GetProperties() |> Array.filter (fun p -> p.CanWrite) |> Array.map (fun x -> x :> MemberInfo)
+                        if t.IsValueType && props.Length = 0 then
+                            t.GetFields(BindingFlags.NonPublic ||| BindingFlags.Instance) |> Array.filter (fun p -> not p.IsPrivate) |> Array.map (fun x -> x :> MemberInfo)
+                        else
+                            props
                         
                     // Variables for the expression
                     let resultVar = Expression.Variable(t, "result")
@@ -346,6 +419,8 @@ module SQLiteTools =
                     let createInstanceExpr =
                         if ctor <> null then
                             Expression.New(ctor) :> Expression
+                        elif t.IsValueType then
+                            Expression.Default t
                         else
                             // Use FormatterServices.GetSafeUninitializedObject
                             let fn = Func<'T>(fun () -> 
@@ -359,22 +434,25 @@ module SQLiteTools =
                     statements.Add(Expression.Assign(resultVar, createInstanceExpr) :> Expression)
                         
                     // Set each property from the reader
-                    for i, prop in props |> Array.indexed do
+                    for prop in props do
                         let columnVar = Expression.Variable(typeof<int>, "columnIndex")
 
-                        let finalValueExpr = matchMethodWithPropertyType prop readerParam columnVar
+                        let propName = 
+                            // for F# structs.
+                            if prop.Name.EndsWith "@" then prop.Name.TrimEnd '@' else prop.Name
+
+                        let finalValueExpr = matchMethodWithMemberType prop readerParam columnVar
 
                         let propExpr = Expression.Block(
                             [| columnVar |],
                             [|
-                                Expression.DebugInfo(Expression.SymbolDocument(prop.Name), i + 1, 1, i + 1, 2) :> Expression;
                                 // Try to get column index
                                 Expression.IfThen(
                                     Expression.Call(
                                         columnsParam,
                                         typeof<IDictionary<string, int>>.GetMethod("TryGetValue"),
                                         [
-                                            Expression.Constant(prop.Name) :> Expression;
+                                            Expression.Constant(propName) :> Expression;
                                             columnVar :> Expression
                                         ]
                                     ),
@@ -396,7 +474,11 @@ module SQLiteTools =
                                             )
                                         ),
                                         Expression.Assign(
-                                            Expression.Property(resultVar, prop),
+                                            match prop with
+                                            | :? PropertyInfo as p -> Expression.Property(resultVar, p)
+                                            | :? FieldInfo as f -> Expression.Field(resultVar, f)
+                                            | _ -> failwithf "Unknown member type."
+                                            ,
                                             finalValueExpr
                                         )
                                     )) :> Expression
