@@ -14,7 +14,7 @@ type NativeArray private (ptr: nativeptr<byte>, len: int32) =
     [<DefaultValue(false)>]
     val mutable private Disposed: bool
 
-    static member Empty = 
+    static member val Empty = 
         let mutable empty = new NativeArray(NativePtr.nullPtr, 0)
         empty.Disposed <- true
         empty

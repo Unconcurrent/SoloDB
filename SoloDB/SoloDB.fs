@@ -26,14 +26,14 @@ module internal Helper =
         let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(connectionStr)}-Table-{name}")
         mutex
 
-    let internal existsCollection (name: string) (connection: IDbConnection)  =
+    let internal existsCollection (name: string) (connection: SqliteConnection)  =
         connection.QueryFirstOrDefault<string>("SELECT Name FROM SoloDBCollections WHERE Name = @name LIMIT 1", {|name = name|}) <> null
 
-    let internal dropCollection (name: string) (connection: IDbConnection) =
+    let internal dropCollection (name: string) (connection: SqliteConnection) =
         connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name) |> ignore
         connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}) |> ignore
 
-    let private insertJson (orReplace: bool) (id: int64 option) (name: string) (json: string) (connection: IDbConnection) =
+    let private insertJson (orReplace: bool) (id: int64 option) (name: string) (json: string) (connection: SqliteConnection) =
         let includeId = id.IsSome
 
         let queryStringBuilder = StringBuilder(64 + name.Length + (if orReplace then 11 else 0) + (if includeId then 7 else 0))
@@ -65,7 +65,7 @@ module internal Helper =
 
         connection.QueryFirst<int64>(queryString, parameters)
 
-    let private insertImpl<'T when 'T :> obj> (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (orReplace: bool) (collection: ISoloDBCollection<'T>) =
+    let private insertImpl<'T when 'T :> obj> (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) (orReplace: bool) (collection: ISoloDBCollection<'T>) =
         let customIdGen = CustomTypeId<'T>.Value
         let existsWritebleDirectId = HasTypeId<'T>.Value
 
@@ -103,10 +103,10 @@ module internal Helper =
 
         id
 
-    let inline internal insertInner (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (collection: ISoloDBCollection<'T>) =
+    let inline internal insertInner (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) (collection: ISoloDBCollection<'T>) =
         insertImpl typed item connection name false collection
 
-    let inline internal insertOrReplaceInner (typed: bool) (item: 'T) (connection: IDbConnection) (name: string) (collection: ISoloDBCollection<'T>) =
+    let inline internal insertOrReplaceInner (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) (collection: ISoloDBCollection<'T>) =
         insertImpl typed item connection name true collection
 
     let internal formatName (name: string) =
@@ -153,27 +153,27 @@ module internal Helper =
         let indexName = $"{name}_index_{expressionStr}"
         indexName, whereSQL
 
-    let internal ensureIndex<'T, 'R> (collectionName: string) (conn: IDbConnection) (expression: Expression<System.Func<'T, 'R>>) =
+    let internal ensureIndex<'T, 'R> (collectionName: string) (conn: SqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
         let indexName, whereSQL = getIndexWhereAndName<'T,'R> collectionName expression
 
         let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
 
         conn.Execute(indexSQL)
 
-    let internal ensureUniqueAndIndex<'T,'R> (collectionName: string) (conn: IDbConnection) (expression: Expression<System.Func<'T, 'R>>) =
+    let internal ensureUniqueAndIndex<'T,'R> (collectionName: string) (conn: SqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
         let indexName, whereSQL = getIndexWhereAndName<'T,'R> collectionName expression
 
         let indexSQL = $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
 
         conn.Execute(indexSQL)
 
-    let internal ensureDeclaredIndexesFields<'T> (name: string) (conn: IDbConnection) =
+    let internal ensureDeclaredIndexesFields<'T> (name: string) (conn: SqliteConnection) =
         for (pi, indexed) in getIndexesFields<'T>() do
             let ensureIndexesFn = if indexed.Unique then ensureUniqueAndIndex else ensureIndex
             let _code = ensureIndexesFn name conn (ExpressionHelper.get<obj, obj>(fun row -> row.Dyn<obj>(pi.Name)))
             ()
 
-    let internal createTableInner<'T> (name: string) (conn: IDbConnection) =
+    let internal createTableInner<'T> (name: string) (conn: SqliteConnection) =
         conn.Execute($"CREATE TABLE \"{name}\" (
     	        Id INTEGER NOT NULL PRIMARY KEY UNIQUE,
     	        Value JSONB NOT NULL
@@ -223,8 +223,9 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         else
 
         use connection = connection.Get()
-        use directConnection = new DirectConnection(connection, true)
-        let transientConnection = Collection((Connection.Transitive directConnection), name, connectionString, parentData)
+        use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
+        let directConnection = Transitive connection
+        let transientConnection = Collection(directConnection, name, connectionString, parentData)
         connection.Execute "BEGIN;" |> ignore
 
         try
@@ -252,8 +253,9 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         else
 
         use connection = connection.Get()
-        use directConnection = new DirectConnection(connection, true)
-        let transientConnection = Collection((Connection.Transitive directConnection), name, connectionString, parentData)
+        use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
+        let directConnection = Transitive connection
+        let transientConnection = Collection(directConnection, name, connectionString, parentData)
         connection.Execute "BEGIN;" |> ignore
         
         try
@@ -497,7 +499,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         member this.InsertOrReplaceBatch(items) = this.InsertOrReplaceBatch(items)
         member this.TryGetById(id) = this.TryGetById(id)
         member this.TryGetById(id: 'IdType) = this.TryGetById<'IdType>(id)
-        member this.GetInternalConnection (): IDbConnection = this.Connection.Get()
+        member this.GetInternalConnection () = this.Connection.Get()
         member this.Delete(id: 'IdType) = this.DeleteById<'IdType>(id)
         member this.Delete(id) = this.DeleteById(id)
         member this.Update(item) = this.Update(item)
