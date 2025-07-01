@@ -16,6 +16,12 @@ module Connections =
         member internal this.DisposeReal(disposing) =
             base.Dispose disposing
 
+        static member private NoopDispose = { new IDisposable with override _.Dispose() = () }
+
+        interface IDisableDispose with
+            member this.DisableDispose(): IDisposable = 
+                TransactionalConnection.NoopDispose
+
         override this.Dispose(disposing) =
             // Noop
             ()
@@ -46,7 +52,7 @@ module Connections =
                     c.Inner.Open()
                 c
             | false, _ -> 
-                let c = new CachingDbConnection(new SqliteConnection(connectionStr), this.TakeBack, config)
+                let c = new CachingDbConnection(connectionStr, this.TakeBack, config)
                 c.Inner.Open()
                 setup c.Inner
                 all.Push c
@@ -112,23 +118,25 @@ module Connections =
     and [<Struct>] Connection =
         | Pooled of pool: ConnectionManager
         | Transactional of conn: TransactionalConnection
-        | Transitive of tc: IDbConnection
+        | Transitive of tc: SqliteConnection
 
-        member this.Get() : IDbConnection =
+        member this.Get() : SqliteConnection =
             match this with
             | Pooled pool -> pool.Borrow()
             | Transactional conn -> conn
             | Transitive c -> c
 
-        member this.WithTransaction(f: IDbConnection -> 'T) =
+        member this.WithTransaction(f: SqliteConnection -> 'T) =
             match this with
             | Pooled pool -> pool.WithTransaction f
             | Transactional conn -> 
                 f conn
+            | Transitive conn when conn.IsWithinTransaction() ->
+                f conn
             | Transitive _conn ->
-                raise (InvalidOperationException "A Transitive Connection should never be used with a transation.")
+                raise (InvalidOperationException "A simple Transitive Connection should never be used with a transation.")
 
-        member this.WithAsyncTransaction(f: IDbConnection -> Task<'T>) =
+        member this.WithAsyncTransaction(f: SqliteConnection -> Task<'T>) =
             match this with
             | Pooled pool -> 
                 pool.WithAsyncTransaction f
@@ -138,10 +146,10 @@ module Connections =
                 raise (InvalidOperationException "A Transitive Connection should never be used with a transation.")
         
 
-    type IDbConnection with
+    and SqliteConnection with
         member this.IsWithinTransaction() =
             match this with
             | :? TransactionalConnection -> true
             // All pure DirectConnection usage is inside a transaction
-            | :? DirectConnection as dc -> dc.InsideTransaction
-            | other -> false
+            | :? CachingDbConnection as cc -> cc.InsideTransaction
+            | _other -> false

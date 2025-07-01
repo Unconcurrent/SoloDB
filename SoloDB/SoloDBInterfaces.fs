@@ -443,7 +443,7 @@ type ISoloDBCollection<'T> =
     /// <para><strong>WARNING:</strong> This method is not intended for public usage and should be avoided.</para>
     /// </remarks>
     [<System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>]
-    abstract member GetInternalConnection: unit -> IDbConnection
+    abstract member GetInternalConnection: unit -> Microsoft.Data.Sqlite.SqliteConnection
 
     /// <summary>
     /// Updates an existing entity in the database based on its identifier.

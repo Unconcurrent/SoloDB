@@ -111,7 +111,7 @@ module SQLiteTools =
             ))
             fn.Invoke(command, parameters, processFn)
 
-    let private createCommand (this: IDbConnection) (sql: string) (parameters: obj) =
+    let private createCommand (this: SqliteConnection) (sql: string) (parameters: obj) =
         let command = this.CreateCommand()
         command.CommandText <- sql
         processParameters addParameter command parameters
@@ -525,170 +525,17 @@ module SQLiteTools =
         use command = createCommand this sql parameters
         yield! queryCommand<'T> command null
     }
+
+    type internal IDisableDispose =
+        abstract DisableDispose: unit -> IDisposable
     
-
-    /// Redirect all the method calls to the connection provided in the constructor, and on Dispose, it is a noop.
-    type DirectConnection internal (connection: IDbConnection, insideTransaction: bool) =
-        member this.BeginTransaction() = connection.BeginTransaction()
-        member this.BeginTransaction (il: IsolationLevel) = connection.BeginTransaction il
-        member this.ChangeDatabase (databaseName: string) = connection.ChangeDatabase databaseName
-        member this.Close() = connection.Close()
-        member this.CreateCommand() = connection.CreateCommand()
-        member this.Open() = connection.Open()
-
-        member this.ConnectionString with get() = connection.ConnectionString and set (cs) = connection.ConnectionString <- cs
-        member this.ConnectionTimeout: int = connection.ConnectionTimeout
-        member this.Database: string = connection.Database
-        member this.State: ConnectionState = connection.State
-
-        member val InsideTransaction = insideTransaction with get, set
-
-        interface IDbConnection with
-            override this.BeginTransaction() = connection.BeginTransaction()
-            override this.BeginTransaction (il: IsolationLevel) = connection.BeginTransaction il
-            override this.ChangeDatabase (databaseName: string) = connection.ChangeDatabase databaseName
-            override this.Close() = connection.Close()
-            override this.CreateCommand() = connection.CreateCommand()
-            override this.Open() = connection.Open()
-            member this.ConnectionString with get() = connection.ConnectionString and set (cs) = connection.ConnectionString <- cs
-            member this.ConnectionTimeout: int = connection.ConnectionTimeout
-            member this.Database: string = connection.Database
-            member this.State: ConnectionState = connection.State
-
-        interface IDisposable with 
-            override this.Dispose (): unit = 
-                ()
-
-        member this.DisposeReal() =
-            connection.Dispose()
-
-    type CachingDbConnectionTransaction internal (connection: CachingDbConnection, isolationLevel: IsolationLevel, deferred: bool) =
-        let mutable _connection = Some connection
-        let mutable _completed = false
-        let mutable _externalRollback = false
-    
-        // Handle isolation level mapping like in C# version
-        let actualIsolationLevel = 
-            match isolationLevel with
-            | IsolationLevel.ReadUncommitted when not deferred -> IsolationLevel.Serializable
-            | IsolationLevel.ReadCommitted
-            | IsolationLevel.RepeatableRead 
-            | IsolationLevel.Unspecified -> IsolationLevel.Serializable
-            | _ -> isolationLevel
-
-        do
-            // Set read_uncommitted pragma for ReadUncommitted isolation
-            if actualIsolationLevel = IsolationLevel.ReadUncommitted then
-                connection.Execute("PRAGMA read_uncommitted = 1;") |> ignore
-            elif actualIsolationLevel <> IsolationLevel.Serializable then
-                invalidArg "isolationLevel" $"Invalid isolation level: {actualIsolationLevel}"
-
-            // Begin transaction with appropriate mode
-            let sql = 
-                if actualIsolationLevel = IsolationLevel.Serializable && not deferred then
-                    "BEGIN IMMEDIATE;"
-                else
-                    "BEGIN;"
-            connection.Execute(sql) |> ignore
-
-        member this.Connection = _connection
-        member this.ExternalRollback = _externalRollback
-        member this.IsolationLevel = actualIsolationLevel
-
-        member this.Commit() =
-            match _connection with
-            | None -> invalidOp "Transaction completed"
-            | Some conn when _externalRollback || _completed || conn.State <> ConnectionState.Open ->
-                invalidOp "Transaction completed"
-            | Some conn ->
-                conn.Execute("COMMIT;") |> ignore
-                this.Complete()
-
-        member this.Rollback() =
-            match _connection with
-            | None -> invalidOp "Transaction completed"
-            | Some conn when _completed || conn.State <> ConnectionState.Open ->
-                invalidOp "Transaction completed"
-            | Some _ ->
-                this.RollbackInternal()
-
-        member this.Save(savepointName: string) =
-            if savepointName = null then nullArg "savepointName"
-            match _connection with
-            | None -> invalidOp "Transaction completed"
-            | Some conn when _completed || conn.State <> ConnectionState.Open ->
-                invalidOp "Transaction completed"
-            | Some conn ->
-                let escapedName = savepointName.Replace("\"", "\"\"")
-                let sql = $"SAVEPOINT \"{escapedName}\";"
-                conn.Execute(sql) |> ignore
-
-        member this.Rollback(savepointName: string) =
-            if savepointName = null then nullArg "savepointName"
-            match _connection with
-            | None -> invalidOp "Transaction completed"
-            | Some conn when _completed || conn.State <> ConnectionState.Open ->
-                invalidOp "Transaction completed"
-            | Some conn ->
-                let escapedName = savepointName.Replace("\"", "\"\"")
-                let sql = $"ROLLBACK TO SAVEPOINT \"{escapedName}\";"
-                conn.Execute(sql) |> ignore
-
-        member this.Release(savepointName: string) =
-            if savepointName = null then nullArg "savepointName"
-            match _connection with
-            | None -> invalidOp "Transaction completed"
-            | Some conn when _completed || conn.State <> ConnectionState.Open ->
-                invalidOp "Transaction completed"
-            | Some conn ->
-                let escapedName = savepointName.Replace("\"", "\"\"")
-                let sql = $"RELEASE SAVEPOINT \"{escapedName}\";"
-                conn.Execute(sql) |> ignore
-
-        member private this.Complete() =
-            if actualIsolationLevel = IsolationLevel.ReadUncommitted then
-                try
-                    _connection 
-                    |> Option.iter (fun conn -> conn.Execute("PRAGMA read_uncommitted = 0;") |> ignore)
-                with
-                | _ -> () // Ignore failure attempting to clean up
-
-            _connection <- None
-            _completed <- true
-
-        member private this.RollbackInternal() =
-            try
-                if not _externalRollback then
-                    _connection 
-                    |> Option.iter (fun conn -> conn.Execute("ROLLBACK;") |> ignore)
-            finally
-                this.Complete()
-
-        interface IDbTransaction with
-            member this.Dispose() = 
-                if not _completed then
-                    match _connection with
-                    | Some conn when conn.State = ConnectionState.Open ->
-                        this.RollbackInternal()
-                    | _ -> ()
-
-            member this.Connection 
-                with get() = match _connection with Some x -> x | None -> null
-
-            member this.IsolationLevel 
-                with get() = actualIsolationLevel
-
-            member this.Commit() = this.Commit()
-
-            member this.Rollback() = this.Rollback()
-
-
-    and [<Sealed>] CachingDbConnection internal (connection: SqliteConnection, onDispose, config: Types.SoloDBConfiguration) = 
-        inherit DirectConnection(connection, false)
-        let mutable preparedCache = Dictionary<string, {| Command: IDbCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
+    type [<Sealed>] CachingDbConnection internal (connectionStr: string, onDispose, config: Types.SoloDBConfiguration) = 
+        inherit SqliteConnection(connectionStr)
+        let mutable disposingDisabled = false
+        let mutable preparedCache = Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
         let maxCacheSize = 1000
 
-        let tryCachedCommand (sql: string) (parameters: obj) =
+        let tryCachedCommand (this: CachingDbConnection) (sql: string) (parameters: obj) =
             // @VAR variable names are randomly generated, so caching them is not possible.
             if sql.Contains "@VAR" then ValueNone else
             if not config.CachingEnabled then
@@ -708,12 +555,12 @@ module SQLiteTools =
                 match preparedCache.TryGetValue sql with
                 | true, x -> x
                 | false, _ ->
-                    let command = connection.CreateCommand()
+                    let command = this.CreateCommand()
                     command.CommandText <- sql
                     processParameters addParameter command parameters
                     command.Prepare()
 
-                    let item = {| Command = command :> IDbCommand; ColumnDict = Dictionary<string, int>(); CallCount = ref 0L; InUse = ref false |}
+                    let item = {| Command = command; ColumnDict = Dictionary<string, int>(); CallCount = ref 0L; InUse = ref false |}
                     preparedCache.[sql] <- item
                     item
 
@@ -725,14 +572,15 @@ module SQLiteTools =
             processParameters setOrAddParameter item.Command parameters
             struct (item.Command, item.ColumnDict, item.InUse) |> ValueSome
 
-        member this.Inner = connection
+        member internal this.Inner = this :> SqliteConnection
+        member val InsideTransaction = false with get, set
 
         /// Clears the cache while waiting the all cached connections to not be in use.
         member this.ClearCache() =
             if preparedCache.Count = 0 then () else
 
             let oldCache = preparedCache 
-            preparedCache <- Dictionary<string, {| Command: IDbCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
+            preparedCache <- Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
 
             while oldCache.Count > 0 do
                 for KeyValue(k, v) in oldCache |> Seq.toArray do
@@ -741,37 +589,57 @@ module SQLiteTools =
                         ignore (oldCache.Remove k)
 
         member this.Execute(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
-            match tryCachedCommand sql parameters with
+            match tryCachedCommand this sql parameters with
             | ValueSome struct (command, _columnDict, inUse) ->
                 try command.ExecuteNonQuery()
                 finally inUse := false
             | ValueNone ->
 
-            use command = createCommand connection sql parameters
+            use command = createCommand this sql parameters
             command.Prepare() // To throw all errors, not silently fail them.
             command.ExecuteNonQuery()
 
+        member this.OpenReader(sql: string, outReader: outref<SqliteDataReader>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+            match tryCachedCommand this sql parameters with
+            | ValueSome struct (command, _columnDict, inUse) ->
+                try
+                    let reader = command.ExecuteReader()
+                    outReader <- reader
+                    { new IDisposable with
+                          member _.Dispose() = reader.Dispose() }
+                finally inUse := false
+            | ValueNone ->
+                let command = createCommand this sql parameters
+                command.Prepare()
+                let reader = command.ExecuteReader()
+                outReader <- reader
+                { new IDisposable with
+                    member _.Dispose() = 
+                        reader.Dispose()
+                        command.Dispose()
+                }
+
         member this.Query<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = seq {
-            match tryCachedCommand sql parameters with
+            match tryCachedCommand this sql parameters with
             | ValueSome struct (command, columnDict, inUse) ->
                 try yield! queryCommand<'T> command columnDict
                 finally inUse := false
             | ValueNone ->
-            use command = createCommand connection sql parameters
+            use command = createCommand this sql parameters
             yield! queryCommand<'T> command null
         }
 
         member this.QueryFirst<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
-            match tryCachedCommand sql parameters with
+            match tryCachedCommand this sql parameters with
             | ValueSome struct (command, columnDict, inUse) ->
                 try queryCommand<'T> command columnDict |> Seq.head
                 finally inUse := false
             | ValueNone ->
-            use command = createCommand connection sql parameters
+            use command = createCommand this sql parameters
             queryCommand<'T> command null |> Seq.head
 
         member this.QueryFirstOrDefault<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
-            match tryCachedCommand sql parameters with
+            match tryCachedCommand this sql parameters with
             | ValueSome struct (command, columnDict, inUse) ->
                 try
                     match queryCommand<'T> command columnDict |> Seq.tryHead with
@@ -780,7 +648,7 @@ module SQLiteTools =
                 finally inUse := false
 
             | ValueNone ->
-            use command = createCommand connection sql parameters
+            use command = createCommand this sql parameters
             
             match queryCommand<'T> command null |> Seq.tryHead with
             | Some x -> x
@@ -788,11 +656,11 @@ module SQLiteTools =
 
         member this.Query<'T1, 'T2, 'TReturn>(sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = seq {
             let struct (command, dict, dispose, inUse) =
-                match tryCachedCommand sql parameters with
+                match tryCachedCommand this sql parameters with
                 | ValueSome struct (command, columnDict, inUse) ->
                     struct (command, columnDict, false, Some inUse)
                 | ValueNone ->
-                    struct (createCommand connection sql parameters, Dictionary<string, int>(), true, None)
+                    struct (createCommand this sql parameters, Dictionary<string, int>(), true, None)
             try
                 use reader = command.ExecuteReader()
 
@@ -816,23 +684,42 @@ module SQLiteTools =
                 if dispose then command.Dispose()
         }
 
-        member this.BeginTransaction() = this.BeginTransaction(IsolationLevel.Unspecified)
-        member this.BeginTransaction(deferred: bool) = connection.BeginTransaction(IsolationLevel.Unspecified, deferred)
-        member this.BeginTransaction(isolation: IsolationLevel) = this.BeginTransaction(isolation, (isolation = IsolationLevel.ReadUncommitted))
-        member this.BeginTransaction(isolation: IsolationLevel, deferred: bool) = 
-            if this.State <> ConnectionState.Open then
-                (raise << InvalidOperationException) "BeginTransaction requires call to Open()."
+        member this.DisposeReal() =
+            base.Dispose(true)
 
-            new CachingDbConnectionTransaction(this, isolation, deferred)
+        interface IDisableDispose with
+            member this.DisableDispose(): IDisposable = 
+                disposingDisabled <- true
+                { new IDisposable with
+                    override _.Dispose() =
+                        disposingDisabled <- false
+                        ()}
 
         interface IDisposable with
             override this.Dispose (): unit = 
-                onDispose this
+                if not disposingDisabled then
+                    onDispose this
 
     [<Extension>]
     type IDbConnectionExtensions =
         [<Extension>]
-        static member Execute(this: IDbConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+        static member OpenReader<'R>(this: SqliteConnection, sql: string, outReader: outref<DbDataReader>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+            match this with
+            | :? CachingDbConnection as c -> c.OpenReader(sql, &outReader, parameters)
+            | _ ->
+                let command = createCommand this sql parameters
+                command.Prepare()
+                let reader = command.ExecuteReader()
+                outReader <- reader
+                { new IDisposable with
+                    member _.Dispose() = 
+                        reader.Dispose()
+                        command.Dispose()
+                }
+
+
+        [<Extension>]
+        static member Execute(this: SqliteConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             match this with
             | :? CachingDbConnection as c -> c.Execute(sql, parameters)
             | _ ->
@@ -841,21 +728,21 @@ module SQLiteTools =
             command.ExecuteNonQuery()
 
         [<Extension>]
-        static member Query<'T>(this: IDbConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+        static member Query<'T>(this: SqliteConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             match this with
             | :? CachingDbConnection as c -> c.Query<'T>(sql, parameters)
             | _ ->
             queryInner<'T> this sql parameters
 
         [<Extension>]
-        static member QueryFirst<'T>(this: IDbConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
+        static member QueryFirst<'T>(this: SqliteConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
             match this with
             | :? CachingDbConnection as c -> c.QueryFirst<'T>(sql, parameters)
             | _ ->
             queryInner<'T> this sql parameters |> Seq.head
 
         [<Extension>]
-        static member QueryFirstOrDefault<'T>(this: IDbConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
+        static member QueryFirstOrDefault<'T>(this: SqliteConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
             match this with
             | :? CachingDbConnection as c -> c.QueryFirstOrDefault<'T>(sql, parameters)
             | _ ->
@@ -864,7 +751,7 @@ module SQLiteTools =
             | None -> Unchecked.defaultof<'T>
 
         [<Extension>]
-        static member Query<'T1, 'T2, 'TReturn>(this: IDbConnection, sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = 
+        static member Query<'T1, 'T2, 'TReturn>(this: SqliteConnection, sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = 
             match this with
             | :? CachingDbConnection as c -> c.Query<'T1, 'T2, 'TReturn>(sql, map, parameters, splitOn)
             | _ ->

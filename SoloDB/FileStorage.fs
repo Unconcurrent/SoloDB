@@ -6,11 +6,13 @@ open System.IO
 open Microsoft.Data.Sqlite
 open SQLiteTools
 open SoloDatabase.Types
-open System.Security.Cryptography
+open NativeArray
 open SoloDatabase.Connections
 open Snappier
 open System.Runtime.InteropServices
 open System.Data
+
+#nowarn "9"
 
 module FileStorage =
     let chunkSize = 
@@ -28,21 +30,21 @@ module FileStorage =
                  ()
     }
 
-    let private lockPathIfNotInTransaction (db: IDbConnection) (path: string) =
+    let private lockPathIfNotInTransaction (db: SqliteConnection) (path: string) =
         if db.IsWithinTransaction() then
             noopDisposer
         else
         let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(db.ConnectionString)}-Path-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(path)}")
         mutex :> IDisposable
 
-    let private lockFileIdIfNotInTransaction (db: IDbConnection) (id: int64) =
+    let private lockFileIdIfNotInTransaction (db: SqliteConnection) (id: int64) =
         if db.IsWithinTransaction() then
             noopDisposer
         else
         let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(db.ConnectionString)}-FileId-{id}")
         mutex :> IDisposable
 
-    let private fillDirectoryMetadata (db: IDbConnection) (directory: SoloDBDirectoryHeader) =
+    let private fillDirectoryMetadata (db: SqliteConnection) (directory: SoloDBDirectoryHeader) =
         let allMetadata = db.Query<Metadata>("SELECT Key, Value FROM SoloDBDirectoryMetadata WHERE DirectoryId = @DirectoryId", {|DirectoryId = directory.Id|})
         let dict = Dictionary<string, string>()
 
@@ -52,7 +54,7 @@ module FileStorage =
         {directory with Metadata = dict}
 
 
-    let private tryGetDirectoriesWhere (connection: IDbConnection) (where: string) (parameters: obj) =
+    let private tryGetDirectoriesWhere (connection: SqliteConnection) (where: string) (parameters: obj) =
         let query = $"""
             SELECT dh.*, dm.Key, dm.Value
             FROM SoloDBDirectoryHeader dh
@@ -90,10 +92,10 @@ module FileStorage =
     
         directoryDictionary.Values :> SoloDBDirectoryHeader seq
 
-    let private tryGetDir (db: IDbConnection) (path: string) =
+    let private tryGetDir (db: SqliteConnection) (path: string) =
         tryGetDirectoriesWhere db "dh.FullPath = @Path" {|Path = path|} |> Seq.tryHead
 
-    let rec private getOrCreateDir (db: IDbConnection) (path: string) =
+    let rec private getOrCreateDir (db: SqliteConnection) (path: string) =
         use _l = lockPathIfNotInTransaction db path
 
         match tryGetDir db path with
@@ -125,11 +127,11 @@ module FileStorage =
         | dir when Utils.isNull dir -> failwithf "Normally you cannot end up here, cannot find a directory that has just created: %s" path
         | dir -> dir |> fillDirectoryMetadata db
     
-    let private updateLenById (db: IDbConnection) (fileId: int64) (len: int64) =
+    let private updateLenById (db: SqliteConnection) (fileId: int64) (len: int64) =
         let result = db.Execute ("UPDATE SoloDBFileHeader SET Length = @Length WHERE Id = @Id", {|Id = fileId; Length=len|})
         if result <> 1 then failwithf "updateLen failed."
 
-    let private downsetFileLength (db: IDbConnection) (fileId: int64) (newFileLength: int64) =
+    let private downsetFileLength (db: SqliteConnection) (fileId: int64) (newFileLength: int64) =
         let lastChunkNumberKeep = ((float(newFileLength) / float(chunkSize)) |> Math.Ceiling |> int64) - 1L
 
         let _resultDelete = db.Execute(@"DELETE FROM SoloDBFileChunk WHERE FileId = @FileId AND Number > @LastChunkNumber",
@@ -141,13 +143,13 @@ module FileStorage =
                        {| FileId = fileId; NewFileLength = newFileLength |})
         ()
 
-    let private deleteFile (db: IDbConnection) (file: SoloDBFileHeader) =
+    let private deleteFile (db: SqliteConnection) (file: SoloDBFileHeader) =
         let _result = db.Execute(@"DELETE FROM SoloDBFileHeader WHERE Id = @FileId",
                     {| FileId = file.Id; |})
 
         ()
 
-    let private deleteDirectory (db: IDbConnection) (dir: SoloDBDirectoryHeader) = 
+    let private deleteDirectory (db: SqliteConnection) (dir: SoloDBDirectoryHeader) = 
         let _result = db.Execute(@"DELETE FROM SoloDBDirectoryHeader WHERE Id = @DirId",
                         {| DirId = dir.Id; |})
         ()
@@ -167,7 +169,7 @@ module FileStorage =
         MetadataValue: string
     }
 
-    let private recursiveListAllEntriesInDirectory (db: IDbConnection) (directoryFullPath: string) =
+    let private recursiveListAllEntriesInDirectory (db: SqliteConnection) (directoryFullPath: string) =
         let directoryFullPath = [|directoryFullPath|] |> combinePathArr
         let queryCommand = 
             """
@@ -279,11 +281,11 @@ module FileStorage =
         entries         
 
 
-    let private getFileLengthById (db: IDbConnection) (fileId: int64) =
+    let private getFileLengthById (db: SqliteConnection) (fileId: int64) =
         db.QueryFirst<int64>(@"SELECT Length FROM SoloDBFileHeader WHERE Id = @FileId",
                        {| FileId = fileId |})
 
-    let private tryGetChunkData (db: IDbConnection) (fileId: int64) (chunkNumber: int64) (buffer: Span<byte>) =
+    let private tryGetChunkData (db: SqliteConnection) (fileId: int64) (chunkNumber: int64) (buffer: Span<byte>) =
         let sql = "SELECT Data FROM SoloDBFileChunk WHERE FileId = @FileId AND Number = @ChunkNumber"
         match db.QueryFirstOrDefault<byte array>(sql, {| FileId = fileId; ChunkNumber = chunkNumber |}) with
         | data when Object.ReferenceEquals(data, null) -> Span.Empty
@@ -292,7 +294,7 @@ module FileStorage =
             buffer.Slice(0, len)
 
 
-    let private writeChunkData (db: IDbConnection) (fileId: int64) (chunkNumber: int64) (data: Span<byte>) =
+    let private writeChunkData (db: SqliteConnection) (fileId: int64) (chunkNumber: int64) (data: Span<byte>) =
         let arrayBuffer = Array.zeroCreate (int maxChunkStoreSize)
         let memoryBuffer = arrayBuffer.AsSpan()
         let len = Snappy.Compress(data, memoryBuffer)
@@ -310,7 +312,7 @@ module FileStorage =
     [<Struct; CLIMutable>]
     type internal ChunkDTO = { Number: int64; Data: NativeArray.NativeArray }
 
-    let inline private getStoredChunks (db: IDbConnection) (fileId: int64) (startChunk: int64) (lastChunk: int64) =
+    let inline private getStoredChunks (db: SqliteConnection) (fileId: int64) (startChunk: int64) (lastChunk: int64) =
         db.Query<ChunkDTO>("""
         SELECT
           rowid,
@@ -326,26 +328,42 @@ module FileStorage =
         
 
     /// The chunks are automatically freed after iterating.
-    let private getAllCompressedChunksWithinRange (db: IDbConnection) (fileId: int64) (startChunk: int64) (lastChunk: int64) = seq {
-        let mutable previousNumber = startChunk - 1L // Chunks start from 0.
+    let private getAllCompressedChunksWithinRange (db: SqliteConnection) (fileId: int64) (startChunk: int64) (lastChunk: int64) = seq {
+        let mutable previousNumber = startChunk - 1L // Initialize to one less than the starting chunk number.
+
+        // Iterate through the chunks that are physically stored in the database.
         for chunk in getStoredChunks db fileId startChunk lastChunk do
             try
+                // This loop identifies and fills any gaps with empty chunks
+                // that exist before the current chunk from the database.
                 while chunk.Number - 1L > previousNumber do
-                    yield {Number = previousNumber + 1L; Data = NativeArray.NativeArray.Empty }
+                    yield { Number = previousNumber + 1L; Data = NativeArray.NativeArray.Empty }
                     previousNumber <- previousNumber + 1L
 
+                // Yield the actual chunk retrieved from storage.
                 yield chunk
-            finally chunk.Data.Dispose()
+            finally
+                // Ensure the native memory is disposed of after the chunk is yielded.
+                chunk.Data.Dispose()
+        
+            // Update the tracker to the number of the chunk just processed.
             previousNumber <- chunk.Number
+
+        // This new loop rectifies the original bug.
+        // It handles all cases where the last chunks in the range are missing from the database.
+        // It continues yielding empty chunks until the requested 'lastChunk' is reached.
+        while previousNumber < lastChunk do
+            yield { Number = previousNumber + 1L; Data = NativeArray.NativeArray.Empty }
+            previousNumber <- previousNumber + 1L
     }
 
-    let private setFileModifiedById (db: IDbConnection) (fileId: int64) (modified: DateTimeOffset) =
+    let private setFileModifiedById (db: SqliteConnection) (fileId: int64) (modified: DateTimeOffset) =
         db.Execute("UPDATE SoloDBFileHeader 
         SET Modified = @Modified
         WHERE Id = @FileId", {|Modified = modified; FileId = fileId|})
         |> ignore
 
-    let private setFileCreatedById (db: IDbConnection) (fileId: int64) (created: DateTimeOffset) =
+    let private setFileCreatedById (db: SqliteConnection) (fileId: int64) (created: DateTimeOffset) =
         db.Execute("UPDATE SoloDBFileHeader 
         SET Created = @Created
         WHERE Id = @FileId", {|Created = created; FileId = fileId|})
@@ -496,50 +514,192 @@ module FileStorage =
         member
         #endif
             this.Write(buffer: ReadOnlySpan<byte>) =
+            if buffer.IsEmpty then () else
             dirty <- true
-            let mutable writing = true
-            let mutable offset = int64 0
-            let mutable count = int64 buffer.Length
 
-            use db = db.Get()
-            use l = lockFileIdIfNotInTransaction db fileId
-
-            while writing do
-                writing <- false
+            let bufferLen = buffer.Length
+            use buffer = fixed buffer
+            
+            db.WithTransaction(fun db ->
+                let buffer = ReadOnlySpan<byte>(NativeInterop.NativePtr.toVoidPtr buffer, bufferLen)
+                use uncompressedChunkBuffer = NativeArray.Alloc (int chunkSize)
+                use compressedChunkBuffer = NativeArray.Alloc (int maxChunkStoreSize)
+                let uncompressedChunkBufferSpan = uncompressedChunkBuffer.Span
+                let compressedChunkBufferSpan = compressedChunkBuffer.Span
 
                 let position = position
-                let mutable remainingBytes = 0L
-                let mutable bytesToWrite = 0L
 
-                let bufferArray = Array.zeroCreate (int maxChunkStoreSize)
+                let startChunkNumber = position / int64 chunkSize
+                let startChunkOffset = position % int64 chunkSize
+
+                let endChunkNumber = (position + int64 bufferLen) / int64 chunkSize
+                let endChunkOffset = (position + int64 bufferLen) % int64 chunkSize
                 
-                let chunkNumber = position / int64 chunkSize
-                let chunkOffset = position % int64 chunkSize
 
-                let dataBuffer = Span(bufferArray)
+                let chunks = ResizeArray(
+                    seq {
+                        let mutable currentChunkNr = startChunkNumber
 
-                let tryGetChunkDataResult = tryGetChunkData db fileId chunkNumber dataBuffer
-                let existingChunk = match tryGetChunkDataResult with data when data.IsEmpty -> dataBuffer.Slice(0, int chunkSize) | data -> data
+                        // Fetch all existing chunks within the write range
+                        let existingChunks = 
+                            db.Query<{|rowid: int64; Number: int64|}>(
+                                """SELECT rowid, Number FROM SoloDBFileChunk 
+                                   WHERE FileId = @FileId AND Number >= @StartChunk AND Number <= @EndChunk 
+                                   ORDER BY Number;""", 
+                                {| FileId = fileId; StartChunk = startChunkNumber; EndChunk = endChunkNumber |}
+                            )
 
-                let spaceInChunk = chunkSize - chunkOffset
-                bytesToWrite <- min count spaceInChunk
+                        // Iterate through the chunks that actually exist
+                        for chunk in existingChunks do
+                            // Fill in any gaps before the current existing chunk
+                            while currentChunkNr < chunk.Number do
+                                yield {| rowid = -1L; Number = currentChunkNr |}
+                                currentChunkNr <- currentChunkNr + 1L
+            
+                            // Yield the existing chunk itself
+                            yield chunk
+                            currentChunkNr <- currentChunkNr + 1L
 
-                buffer.Slice(int offset, int bytesToWrite).CopyTo(existingChunk.Slice(int chunkOffset))
+                        // This handles cases where no chunks exist or where the last chunks are missing.
+                        while currentChunkNr <= endChunkNumber do
+                            yield {| rowid = -1L; Number = currentChunkNr |}
+                            currentChunkNr <- currentChunkNr + 1L
+                    }
+                )
+                    
+                let mutable bufferConsumed = 0
 
-                writeChunkData db fileId chunkNumber existingChunk
+                for chunk in chunks do
+                    let exists = chunk.rowid <> -1
 
-                let newPosition = position + int64 bytesToWrite
+                    // CASE 1: The entire write operation occurs within this single chunk.
+                    if startChunkNumber = endChunkNumber then
+                        // This is a read-modify-write on a single chunk.
+                        if exists then
+                            // Read the existing compressed data.
+                            use blob = new SqliteBlob(db, "SoloDBFileChunk", "Data", chunk.rowid, true)
+                            let compressedSize = blob.Read compressedChunkBufferSpan
+                            // Decompress it to get the original chunk content.
+                            let _chunkSizeExpected = Snappy.Decompress(compressedChunkBufferSpan.Slice(0, compressedSize), uncompressedChunkBufferSpan)
+                            ()
+                        else
+                            // Clear the part before the data is copied.
+                            uncompressedChunkBufferSpan.Slice(0, int startChunkOffset).Clear()
+                            // Clear the part after the data is copied.
+                            let endOfWrite = int startChunkOffset + buffer.Length
+                            if endOfWrite < int chunkSize then
+                                uncompressedChunkBufferSpan.Slice(endOfWrite).Clear()
 
-                remainingBytes <- count - bytesToWrite
-                if remainingBytes > 0 then
-                    writing <- true
-                    offset <- offset + bytesToWrite
-                    count <- remainingBytes
-                else 
-                    if newPosition > this.Length then
-                        updateLenById db fileId newPosition
+                        // Overwrite the relevant portion of the uncompressed data with the input buffer.
+                        // The entire input buffer is used here.
+                        buffer.CopyTo(uncompressedChunkBufferSpan.Slice(int startChunkOffset))
+
+                        // Now, compress the modified chunk and write it back.
+                        let compressedSize = Snappy.Compress(uncompressedChunkBufferSpan, compressedChunkBufferSpan)
+                        let rowid = 
+                            db.QueryFirst<int64>(
+                                """INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) 
+                                   VALUES (@FileId, @Number, ZEROBLOB(@Size)) RETURNING rowid""", 
+                                {| FileId = fileId; Number = chunk.Number; Size = compressedSize |}
+                            )
+                        use blob = new SqliteBlob(db, "SoloDBFileChunk", "Data", rowid, false)
+                        blob.Write(compressedChunkBufferSpan.Slice(0, compressedSize))
+
+                    // CASE 2: This is the first chunk of a multi-chunk write.
+                    elif chunk.Number = startChunkNumber then
+                        // This is a partial write from startChunkOffset to the end of the chunk.
+                        if exists && startChunkOffset > 0 then
+                            use blob = new SqliteBlob(db, "SoloDBFileChunk", "Data", chunk.rowid, true)
+                            let compressedSize = blob.Read compressedChunkBufferSpan
+                            let _chunkSizeExpected = Snappy.Decompress(compressedChunkBufferSpan.Slice(0, compressedSize), uncompressedChunkBufferSpan)
+                            ()
+                        else
+                            // The rest of the chunk is guaranteed to be filled by the CopyTo operation below.
+                            uncompressedChunkBufferSpan.Slice(0, int startChunkOffset).Clear()
+
+                        // Determine how much data to write into this first chunk.
+                        let writeLen = int (chunkSize - startChunkOffset)
+        
+                        // Copy the initial part of the input buffer.
+                        buffer.Slice(0, writeLen).CopyTo(uncompressedChunkBufferSpan.Slice(int startChunkOffset))
+        
+                        // Mark this portion of the buffer as consumed.
+                        bufferConsumed <- bufferConsumed + writeLen
+
+                        // Compress the modified chunk and write it back.
+                        let compressedSize = Snappy.Compress(uncompressedChunkBufferSpan, compressedChunkBufferSpan)
+                        let rowid = 
+                            db.QueryFirst<int64>(
+                                """INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) 
+                                   VALUES (@FileId, @Number, ZEROBLOB(@Size)) RETURNING rowid""", 
+                                {| FileId = fileId; Number = chunk.Number; Size = compressedSize |}
+                            )
+                        use blob = new SqliteBlob(db, "SoloDBFileChunk", "Data", rowid, false)
+                        blob.Write(compressedChunkBufferSpan.Slice(0, compressedSize))
+
+                    // CASE 3: This is the last chunk of a multi-chunk write.
+                    elif chunk.Number = endChunkNumber then
+                        // This is a partial write from the beginning of the chunk up to endChunkOffset.
+                        if exists then
+                            use blob = new SqliteBlob(db, "SoloDBFileChunk", "Data", chunk.rowid, true)
+                            let compressedSize = blob.Read compressedChunkBufferSpan
+                            let _chunkSizeExpected = Snappy.Decompress(compressedChunkBufferSpan.Slice(0, compressedSize), uncompressedChunkBufferSpan)
+                            ()
+                        else
+                            uncompressedChunkBufferSpan.Slice(buffer.Length - bufferConsumed).Clear()
+
+                        // The data to write is the remainder of the input buffer.
+                        let dataToWrite = buffer.Slice(bufferConsumed)
+
+                        // Return early is there is no data left.
+                        if dataToWrite.IsEmpty then () 
+                        else
+                            // Copy the final part of the input buffer to the start of the chunk buffer.
+                            dataToWrite.CopyTo(uncompressedChunkBufferSpan)
+        
+                            // Compress and write back.
+                            let compressedSize = Snappy.Compress(uncompressedChunkBufferSpan, compressedChunkBufferSpan)
+                            let rowid = 
+                                db.QueryFirst<int64>(
+                                    """INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) 
+                                       VALUES (@FileId, @Number, ZEROBLOB(@Size)) RETURNING rowid""", 
+                                    {| FileId = fileId; Number = chunk.Number; Size = compressedSize |}
+                                )
+                            use blob = new SqliteBlob(db, "SoloDBFileChunk", "Data", rowid, false)
+                            blob.Write(compressedChunkBufferSpan.Slice(0, compressedSize))
+
+                    // CASE 4: This is a middle chunk that is being fully overwritten.
+                    else
+                        // This is the most efficient path: a write-only operation. No read is needed.
+                        let writeLen = min (int chunkSize) (bufferLen - bufferConsumed)
+                        let dataToWrite = buffer.Slice(bufferConsumed, writeLen)
+        
+                        // Copy the data and clear the remainder of the uncompressed buffer.
+                        dataToWrite.CopyTo(uncompressedChunkBufferSpan)
+                        if dataToWrite.Length < int chunkSize then
+                            uncompressedChunkBufferSpan.Slice(dataToWrite.Length).Clear()
+
+                        // Update the consumed counter for the next iteration.
+                        bufferConsumed <- bufferConsumed + writeLen
+
+                        // Compress and write.
+                        let compressedSize = Snappy.Compress(uncompressedChunkBufferSpan, compressedChunkBufferSpan)
+                        let rowid = 
+                            db.QueryFirst<int64>(
+                                """INSERT OR REPLACE INTO SoloDBFileChunk(FileId, Number, Data) 
+                                   VALUES (@FileId, @Number, ZEROBLOB(@Size)) RETURNING rowid""", 
+                                {| FileId = fileId; Number = chunk.Number; Size = compressedSize |}
+                            )
+                        use blob = new SqliteBlob(db, "SoloDBFileChunk", "Data", rowid, false)
+                        blob.Write(compressedChunkBufferSpan.Slice(0, compressedSize))
+
+                let newPosition = position + int64 bufferLen
+
+                if newPosition > this.Length then
+                    updateLenById db fileId newPosition
 
                 this.Position <- newPosition
+            )
 
         override this.Write(buffer: byte[], offset: int, count: int) =
             if buffer = null then raise (ArgumentNullException(nameof buffer))
@@ -577,7 +737,6 @@ module FileStorage =
             | other -> failwithf "Invalid SeekOrigin: %A" other
             position
 
-
         override this.Dispose(disposing) =
             if not disposed then 
                 this.Flush()
@@ -597,7 +756,7 @@ module FileStorage =
         let dirPath = combinePath dir name
         dirPath
 
-    let private createFileAt (db: IDbConnection) (path: string) =
+    let private createFileAt (db: SqliteConnection) (path: string) =
         let struct (dirPath, name) = getPathAndName path
         let directory = getOrCreateDir db dirPath
         let newFile = {            
@@ -615,7 +774,7 @@ module FileStorage =
 
         {result with Metadata = readOnlyDict []}
 
-    let private listDirectoriesAt (db: IDbConnection) (path: string) =
+    let private listDirectoriesAt (db: SqliteConnection) (path: string) =
         let dirPath = formatPath path
         match tryGetDir db dirPath with
         | None -> Seq.empty
@@ -624,7 +783,7 @@ module FileStorage =
         childres
 
 
-    let private getFilesWhere (connection: IDbConnection) (where: string) (parameters: obj) =
+    let private getFilesWhere (connection: SqliteConnection) (where: string) (parameters: obj) =
         let query = sprintf """
                     SELECT fh.*, fm.Key as MetaKey, fm.Value as MetaValue
                     FROM SoloDBFileHeader fh
@@ -669,12 +828,12 @@ module FileStorage =
             }
         )
 
-    let private tryGetFileAt (db: IDbConnection) (path: string) =
+    let private tryGetFileAt (db: SqliteConnection) (path: string) =
         let struct (dirPath, name) = getPathAndName path
         let fullPath = combinePath dirPath name
         getFilesWhere db "fh.FullPath = @FullPath" {|FullPath = fullPath|} |> Seq.tryHead
 
-    let private getOrCreateFileAt (db: IDbConnection) (path: string) =
+    let private getOrCreateFileAt (db: SqliteConnection) (path: string) =
         use l = lockPathIfNotInTransaction db path
 
         match tryGetFileAt db path with
@@ -682,7 +841,7 @@ module FileStorage =
         | None ->
         createFileAt db path
 
-    let private deleteDirectoryAt (db: IDbConnection) (path: string) =
+    let private deleteDirectoryAt (db: SqliteConnection) (path: string) =
         let dirPath = formatPath path
         match tryGetDir db dirPath with
         | None -> false
@@ -691,12 +850,12 @@ module FileStorage =
         deleteDirectory db dir
         true
 
-    let private getOrCreateDirectoryAt (db: IDbConnection) (path: string) = 
+    let private getOrCreateDirectoryAt (db: SqliteConnection) (path: string) = 
         let dirPath = formatPath path
         getOrCreateDir db dirPath
 
 
-    let private listFilesAt (db: IDbConnection) (path: string) : SoloDBFileHeader seq = 
+    let private listFilesAt (db: SqliteConnection) (path: string) : SoloDBFileHeader seq = 
         let dirPath = formatPath path
         match tryGetDir db dirPath with 
         | None -> Seq.empty
@@ -715,20 +874,20 @@ module FileStorage =
 
         new DbFileStream(db, file.Id, file.DirectoryId, file.FullPath)
 
-    let private setSoloDBFileMetadata (db: IDbConnection) (file: SoloDBFileHeader) (key: string) (value: string) =
+    let private setSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) (value: string) =
         db.Execute("INSERT OR REPLACE INTO SoloDBFileMetadata(FileId, Key, Value) VALUES(@FileId, @Key, @Value)", {|FileId = file.Id; Key = key; Value = value|}) |> ignore
 
-    let private deleteSoloDBFileMetadata (db: IDbConnection) (file: SoloDBFileHeader) (key: string) =
+    let private deleteSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) =
         db.Execute("DELETE FROM SoloDBFileMetadata WHERE FileId = @FileId AND Key = @Key", {|FileId = file.Id; Key = key|}) |> ignore
 
 
-    let private setDirMetadata (db: IDbConnection) (dir: SoloDBDirectoryHeader) (key: string) (value: string) =
+    let private setDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) (value: string) =
         db.Execute("INSERT OR REPLACE INTO SoloDBDirectoryMetadata(DirectoryId, Key, Value) VALUES(@DirectoryId, @Key, @Value)", {|DirectoryId = dir.Id; Key = key; Value = value|}) |> ignore
 
-    let private deleteDirMetadata (db: IDbConnection) (dir: SoloDBDirectoryHeader) (key: string) =
+    let private deleteDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) =
         db.Execute("DELETE FROM SoloDBDirectoryMetadata WHERE DirectoryId = @DirectoryId AND Key = @Key", {|DirectoryId = dir.Id; Key = key|}) |> ignore
    
-    let private moveFile (db: IDbConnection) (file: SoloDBFileHeader) (toDir: SoloDBDirectoryHeader) (newName: string) =
+    let private moveFile (db: SqliteConnection) (file: SoloDBFileHeader) (toDir: SoloDBDirectoryHeader) (newName: string) =
         let newFileFullPath = combinePath toDir.FullPath newName
         try
             db.Execute("UPDATE SoloDBFileHeader 
@@ -741,7 +900,7 @@ module FileStorage =
         | :? SqliteException as ex when ex.SqliteErrorCode = 19(*SQLITE_CONSTRAINT*) && ex.Message.Contains "SoloDBFileHeader.FullPath" ->
             raise (IOException("File already exists.", ex))
 
-    let rec private moveDirectoryMustBeWithinTransaction (db: IDbConnection) (dir: SoloDBDirectoryHeader) (newParentDir: SoloDBDirectoryHeader) (newName: string) =
+    let rec private moveDirectoryMustBeWithinTransaction (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (newParentDir: SoloDBDirectoryHeader) (newName: string) =
         // Step 1: Calculate the new path for the directory being moved
         let newDirFullPath = combinePath newParentDir.FullPath newName
     
@@ -774,9 +933,6 @@ module FileStorage =
         | :? SqliteException as ex when ex.SqliteErrorCode = 19 (* SQLITE_CONSTRAINT *) && ex.Message.Contains "FullPath" ->
             raise (IOException("Directory or file already exists in the destination.", ex))
     
-    let private createInnerConnectionInTransation tx =
-        new DirectConnection(tx, true) :> IDbConnection |> Transitive
-
     type BulkFileData = {
         FullPath: string
         Data: byte array
@@ -798,7 +954,8 @@ module FileStorage =
 
         member this.UploadBulk(files: BulkFileData seq) =
             connection.WithTransaction(fun tx -> 
-                let innerConnection = createInnerConnectionInTransation tx
+                use _disabled = (unbox<IDisableDispose> tx).DisableDispose()
+                let innerConnection = Transitive tx
                 for file in files do
                     let fileHeader = getOrCreateFileAt tx file.FullPath
 
@@ -818,7 +975,8 @@ module FileStorage =
 
         member this.ReplaceAsyncWithinTransaction(path, stream: Stream) = task {
             return! connection.WithAsyncTransaction(fun tx -> task {
-                let innerConnection = createInnerConnectionInTransation tx
+                use _disabled = (unbox<IDisableDispose> tx).DisableDispose()
+                let innerConnection = Transitive tx
                 use file = openOrCreateFile innerConnection path
                 do! stream.CopyToAsync(file, int chunkSize)
                 file.SetLength file.Position
@@ -832,7 +990,7 @@ module FileStorage =
                 match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
 
             use fileStream = openFile connection fileHeader
-            fileStream.CopyTo(stream, int chunkSize)
+            fileStream.CopyTo(stream, int chunkSize * 10)
 
         member this.DownloadAsync(path, stream: Stream) = task {
             
@@ -841,7 +999,7 @@ module FileStorage =
                 match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
 
             use fileStream = openFile connection fileHeader
-            do! fileStream.CopyToAsync(stream, int chunkSize)
+            do! fileStream.CopyToAsync(stream, int chunkSize * 10)
         }
 
         member this.GetAt path =
@@ -894,7 +1052,8 @@ module FileStorage =
         member this.WriteAt(path: string, offset: int64, data: byte[], [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool) =
              connection.WithTransaction(fun tx -> 
                 let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
-                let innerConnection = createInnerConnectionInTransation tx
+                use _disabled = (unbox<IDisableDispose> tx).DisableDispose()
+                let innerConnection = Transitive tx
 
                 use fileStream = openFile innerConnection file
                 fileStream.Position <- offset
@@ -918,7 +1077,8 @@ module FileStorage =
         ) =
             connection.WithTransaction(fun tx -> 
                 let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
-                let innerConnection = createInnerConnectionInTransation tx
+                use _disabled = (unbox<IDisableDispose> tx).DisableDispose()
+                let innerConnection = Transitive tx
 
                 use fileStream = openFile innerConnection file
                 fileStream.Position <- offset
