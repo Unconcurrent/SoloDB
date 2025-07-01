@@ -438,64 +438,74 @@ module FileStorage =
             this.UpdateModified()
 
         #if NETSTANDARD2_1_OR_GREATER
-        override 
+        override this.Read(buffer: Span<byte>) =
         #else
-        member
+        member this.Read(buffer: Span<byte>) =
         #endif
-            this.Read(buffer: Span<byte>) =
             checkDisposed()
 
+            // nothing to do on empty buffer
             if buffer.IsEmpty then 0 else
 
+            let len               = this.Length
+            let currentPosition   = position
+            let remainingBytes    = len - currentPosition
+
+            // if we're at or past the end, return 0
+            if remainingBytes <= 0L then 0 else
+
+            // compute how many bytes we'll actually read, and trim the buffer accordingly
+            let bytesToReadTotal  = int (min (int64 buffer.Length) remainingBytes)
+            let buffer            = buffer.Slice(0, bytesToReadTotal)
+
             use db = db.Get()
-            let len = this.Length
-            let currentPosition = position
-            let bytesToReadTotal = min (int64 buffer.Length) (len - currentPosition)
+            let startChunk        = currentPosition / chunkSize
+            let endChunk          = (currentPosition + int64 bytesToReadTotal - 1L) / chunkSize
 
-            if bytesToReadTotal <= 0L then 0 else
-
-            let startChunk = currentPosition / chunkSize
-            let endChunk = (currentPosition + bytesToReadTotal - 1L) / chunkSize
-
-            let mutable bytesWrittenToBuffer = 0
+            let mutable bytesWrittenToBuffer    = 0
             let mutable chunkDecompressionBuffer = NativeArray.NativeArray.Empty
 
             try
                 for chunk in getAllCompressedChunksWithinRange db fileId startChunk endChunk do
                     let chunkStartPos = chunk.Number * chunkSize
-                    let copyFrom = max currentPosition chunkStartPos
-                    let copyTo = min (currentPosition + bytesToReadTotal) (chunkStartPos + chunkSize)
-                    let bytesToCopyInChunk = int (copyTo - copyFrom)
+                    let copyFrom      = max currentPosition chunkStartPos
+                    let copyTo        = min (currentPosition + int64 bytesToReadTotal) (chunkStartPos + chunkSize)
+                    let bytesInChunk  = int (copyTo - copyFrom)
 
-                    if bytesToCopyInChunk > 0 then
-                        let bufferOffset = int (copyFrom - currentPosition)
-                        let destinationSpan = buffer.Slice(bufferOffset, bytesToCopyInChunk)
+                    if bytesInChunk > 0 then
+                        let bufferOffset    = int (copyFrom - currentPosition)
+                        let destinationSpan = buffer.Slice(bufferOffset, bytesInChunk)
 
-                        // Check for sparse chunk by comparing with the static Empty property.
                         if chunk.Data.Length = 0 then
+                            // sparse chunk: fill with zeroes
                             destinationSpan.Fill(0uy)
-                            bytesWrittenToBuffer <- bytesWrittenToBuffer + bytesToCopyInChunk
+                            bytesWrittenToBuffer <- bytesWrittenToBuffer + bytesInChunk
                         else
-                            let offsetInChunk = int (copyFrom % chunkSize)
-                            let writtenBytes = 
+                            let offsetInChunk =
+                                int (copyFrom - chunkStartPos)
+
+                            let written =
                                 if offsetInChunk = 0 then
                                     match Snappy.TryDecompress(chunk.Data.Span, destinationSpan) with
-                                    | _, 0 -> failwithf "Failed to decompress chunk."
-                                    | _, decompressedBytes when decompressedBytes <> destinationSpan.Length -> failwithf "Failed to fully decompress chunk."
-                                    | _, decompressedBytes -> decompressedBytes
+                                    | _, 0 ->
+                                        failwithf "Failed to decompress chunk #%d." chunk.Number
+                                    | _, decompressed when decompressed <> destinationSpan.Length ->
+                                        failwithf "Decompressed %d bytes but expected %d." decompressed destinationSpan.Length
+                                    | _, decompressed ->
+                                        decompressed
                                 else
+                                    // partial-chunk decompress
                                     if chunkDecompressionBuffer.Length = 0 then
                                         chunkDecompressionBuffer <- NativeArray.NativeArray.Alloc (int maxChunkStoreSize)
+                                    let decompBuf = chunkDecompressionBuffer.Span
+                                    let _ = Snappy.Decompress(chunk.Data.Span, decompBuf)
+                                    decompBuf.Slice(offsetInChunk, bytesInChunk).CopyTo(destinationSpan)
+                                    bytesInChunk
 
-                                    let chunkDecompressionBuffer = chunkDecompressionBuffer.Span
-                                    let decompressedBytes = Snappy.Decompress(chunk.Data.Span, chunkDecompressionBuffer)
-                                    chunkDecompressionBuffer.Slice(offsetInChunk, bytesToCopyInChunk).CopyTo(destinationSpan)
-
-                                    bytesToCopyInChunk
-
-                            bytesWrittenToBuffer <- bytesWrittenToBuffer + writtenBytes
+                            bytesWrittenToBuffer <- bytesWrittenToBuffer + written
             finally
                 chunkDecompressionBuffer.Dispose()
+                // advance position by the bytes we've actually written
                 this.Position <- currentPosition + int64 bytesWrittenToBuffer
 
             bytesWrittenToBuffer
@@ -712,22 +722,40 @@ module FileStorage =
             this.Write(buffer, offset, count)
             Threading.Tasks.Task.CompletedTask
 
-        override _.SetLength(value: int64) =
+        override this.SetLength(value: int64) =
             checkDisposed()
 
             if value < 0 then 
                 raise (ArgumentOutOfRangeException("Length"))
 
-            dirty <- true
-            use db = db.Get()
-            use l = lockFileIdIfNotInTransaction db fileId
-            downsetFileLength db fileId value
-            if position > value then position <- value
+            let len = this.Length
+
+            if len = value then
+                ()
+            elif len < value then
+                dirty <- true
+                let oldPos = position
+                position <- len
+                // Clear garbage data, if any.
+                let chunkOffset = position % chunkSize
+                use mem = NativeArray.NativeArray.Alloc (int chunkSize - int chunkOffset)
+                let mem = mem.Span
+                mem.Clear()
+                this.Write mem
+
+                position <- oldPos
+                use db = db.Get()
+                updateLenById db fileId value
+            else
+                dirty <- true
+                use db = db.Get()
+
+                downsetFileLength db fileId value
+                if position > value then position <- value
 
         override this.Seek(offset: int64, origin: SeekOrigin) =
             checkDisposed()
-            use db = db.Get()
-            use l = lockFileIdIfNotInTransaction db fileId
+
             match origin with
             | SeekOrigin.Begin -> position <- offset
             | SeekOrigin.Current -> position <- position + offset
