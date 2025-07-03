@@ -286,49 +286,50 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 
     
     member this.TryGetById<'IdType when 'IdType : equality>(id: 'IdType) : 'T option =
-        let inline asR (a: 'IdType) = Unsafe.As<'IdType, 'R>(&Unsafe.AsRef(&a))
+        // Use this function only if you know that 'IdType = 'R.
+        let inline genericReinterpret (a: 'IdType) = Unsafe.As<'IdType, 'R>(&Unsafe.AsRef(&a))
 
         // If someone uses the wrong TryGetById method, or the compiler uses this.
         match typeof<'IdType> with
         // x.Equals is faster that F#'s structural comparison (=)
         | x when x.Equals typeof<int8> ->
-            let id: int8 = asR id
+            let id: int8 = genericReinterpret id
             this.TryGetById(int64 id)
 
         | x when x.Equals typeof<int16> ->
-            let id: int16 = asR id
+            let id: int16 = genericReinterpret id
             this.TryGetById(int64 id)
 
         | x when x.Equals typeof<int32> ->
-            let id: int32 = asR id
+            let id: int32 = genericReinterpret id
             this.TryGetById(int64 id)
 
         | x when x.Equals typeof<nativeint> ->
-            let id: nativeint = asR id
+            let id: nativeint = genericReinterpret id
             this.TryGetById(int64 id)
 
         | x when x.Equals typeof<int64> ->
-            let id: int64 = asR id
+            let id: int64 = genericReinterpret id
             this.TryGetById(id)
 
         | x when x.Equals typeof<uint8> ->
-            let id: uint8 = asR id
+            let id: uint8 = genericReinterpret id
             this.TryGetById(int64 id)
 
         | x when x.Equals typeof<uint16> ->
-            let id: uint16 = asR id
+            let id: uint16 = genericReinterpret id
             this.TryGetById(int64 id)
 
         | x when x.Equals typeof<uint32> ->
-            let id: uint32 = asR id
+            let id: uint32 = genericReinterpret id
             this.TryGetById(int64 id)
 
         | x when x.Equals typeof<unativeint> ->
-            let id: unativeint = asR id
+            let id: unativeint = genericReinterpret id
             this.TryGetById(int64 id)
 
         | x when x.Equals typeof<uint64> ->
-            let id: uint64 = asR id
+            let id: uint64 = genericReinterpret id
             this.TryGetById(int64 id)
 
         | _ ->
@@ -346,49 +347,50 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         | Some x -> x
 
     member this.DeleteById<'IdType when 'IdType : equality>(id: 'IdType) : int =
-        let inline asR (a: 'IdType) = Unsafe.As<'IdType, 'R>(&Unsafe.AsRef(&a))
+        // Use this function only if you know that 'IdType = 'R.
+        let inline genericReinterpret (a: 'IdType) = Unsafe.As<'IdType, 'R>(&Unsafe.AsRef(&a))
 
         // If someone uses the wrong DeleteById method, or the compiler uses this.
         match typeof<'IdType> with
         // x.Equals is faster that F#'s structural comparison (=)
         | x when x.Equals typeof<int8> ->
-            let id: int8 = asR id
+            let id: int8 = genericReinterpret id
             this.DeleteById(int64 id)
 
         | x when x.Equals typeof<int16> ->
-            let id: int16 = asR id
+            let id: int16 = genericReinterpret id
             this.DeleteById(int64 id)
 
         | x when x.Equals typeof<int32> ->
-            let id: int32 = asR id
+            let id: int32 = genericReinterpret id
             this.DeleteById(int64 id)
 
         | x when x.Equals typeof<nativeint> ->
-            let id: nativeint = asR id
+            let id: nativeint = genericReinterpret id
             this.DeleteById(int64 id)
 
         | x when x.Equals typeof<int64> ->
-            let id: int64 = asR id
+            let id: int64 = genericReinterpret id
             this.DeleteById(id)
 
         | x when x.Equals typeof<uint8> ->
-            let id: uint8 = asR id
+            let id: uint8 = genericReinterpret id
             this.DeleteById(int64 id)
 
         | x when x.Equals typeof<uint16> ->
-            let id: uint16 = asR id
+            let id: uint16 = genericReinterpret id
             this.DeleteById(int64 id)
 
         | x when x.Equals typeof<uint32> ->
-            let id: uint32 = asR id
+            let id: uint32 = genericReinterpret id
             this.DeleteById(int64 id)
 
         | x when x.Equals typeof<unativeint> ->
-            let id: unativeint = asR id
+            let id: unativeint = genericReinterpret id
             this.DeleteById(int64 id)
 
         | x when x.Equals typeof<uint64> ->
-            let id: uint64 = asR id
+            let id: uint64 = genericReinterpret id
             this.DeleteById(int64 id)
 
         | _ ->
