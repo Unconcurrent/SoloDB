@@ -124,13 +124,8 @@ module JsonFunctions =
 
         id, value
 
-    let 
-        #if RELEASE
-        inline
-        #endif
-
-        internal fromSQLite<'R when 'R :> obj> (row: DbObjectRow) : 'R =
-        let inline asR (a: 'a when 'a : unmanaged) = 
+    let internal fromSQLite<'R when 'R :> obj> (row: DbObjectRow) : 'R =
+        let inline genericReinterpret (a: 'a when 'a : unmanaged) = 
             // No allocations.
             Unsafe.As<'a, 'R>(&Unsafe.AsRef(&a))
 
@@ -149,20 +144,20 @@ module JsonFunctions =
         else
 
         match typeof<'R> with
-        | OfType float when row.ValueJSON <> null -> (asR << float) row.ValueJSON
-        | OfType float32 when row.ValueJSON <> null -> (asR << float32) row.ValueJSON
-        | OfType decimal -> (asR << decimal) row.ValueJSON
+        | OfType float when row.ValueJSON <> null -> (genericReinterpret << float) row.ValueJSON
+        | OfType float32 when row.ValueJSON <> null -> (genericReinterpret << float32) row.ValueJSON
+        | OfType decimal -> (genericReinterpret << decimal) row.ValueJSON
 
-        | OfType int8 -> (asR << int8) row.ValueJSON
-        | OfType uint8 -> (asR << uint8) row.ValueJSON
-        | OfType int16 -> (asR << int16) row.ValueJSON
-        | OfType uint16 -> (asR << uint16) row.ValueJSON
-        | OfType int32 -> (asR << int32) row.ValueJSON
-        | OfType uint32 -> (asR << uint32) row.ValueJSON
-        | OfType int64 -> (asR << int64) row.ValueJSON
-        | OfType uint64 -> (asR << uint64) row.ValueJSON
-        | OfType nativeint -> (asR << nativeint) row.ValueJSON
-        | OfType unativeint -> (asR << unativeint) row.ValueJSON
+        | OfType int8 -> (genericReinterpret << int8) row.ValueJSON
+        | OfType uint8 -> (genericReinterpret << uint8) row.ValueJSON
+        | OfType int16 -> (genericReinterpret << int16) row.ValueJSON
+        | OfType uint16 -> (genericReinterpret << uint16) row.ValueJSON
+        | OfType int32 -> (genericReinterpret << int32) row.ValueJSON
+        | OfType uint32 -> (genericReinterpret << uint32) row.ValueJSON
+        | OfType int64 -> (genericReinterpret << int64) row.ValueJSON
+        | OfType uint64 -> (genericReinterpret << uint64) row.ValueJSON
+        | OfType nativeint -> (genericReinterpret << nativeint) row.ValueJSON
+        | OfType unativeint -> (genericReinterpret << unativeint) row.ValueJSON
 
         | _ ->
 
