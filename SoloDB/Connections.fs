@@ -150,6 +150,5 @@ module Connections =
         member this.IsWithinTransaction() =
             match this with
             | :? TransactionalConnection -> true
-            // All pure DirectConnection usage is inside a transaction
             | :? CachingDbConnection as cc -> cc.InsideTransaction
             | _other -> false
