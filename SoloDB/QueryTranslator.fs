@@ -2,6 +2,9 @@
 
 open System.Collections
 
+/// <summary>
+/// Contains functions to translate .NET LINQ expression trees into SQLite SQL queries.
+/// </summary>
 module QueryTranslator =
     open System.Collections.ObjectModel
     open System.Text
@@ -12,15 +15,29 @@ module QueryTranslator =
     open JsonFunctions
     open Utils
 
+    /// <summary>
+    /// Represents a member access expression in a more abstract way.
+    /// This private type simplifies handling different forms of member access.
+    /// </summary>
     type private MemberAccess = 
         {
+        /// <summary>The expression on which the member is being accessed.</summary>
         Expression: Expression
+        /// <summary>The name of the member being accessed.</summary>
         MemberName: string
+        /// <summary>The type of the input expression.</summary>
         InputType: Type
+        /// <summary>The return type of the member access.</summary>
         ReturnType: Type
+        /// <summary>The original MemberExpression, if available.</summary>
         OriginalExpression: MemberExpression option
         }
 
+        /// <summary>
+        /// Creates a MemberAccess record from a System.Linq.Expressions.MemberExpression.
+        /// </summary>
+        /// <param name="expr">The MemberExpression to convert.</param>
+        /// <returns>A new MemberAccess record.</returns>
         static member From(expr: MemberExpression) =
             {
                 Expression = expr.Expression
@@ -30,10 +47,16 @@ module QueryTranslator =
                 OriginalExpression = expr |> Some
             }
 
+    /// <summary>
+    /// Appends a value to the query as a parameter or literal, handling various primitive types and JSON serialization.
+    /// </summary>
+    /// <param name="sb">The StringBuilder to append the SQL text to.</param>
+    /// <param name="variables">The dictionary of query parameters to add the value to.</param>
+    /// <param name="value">The object value to append.</param>
     let internal appendVariable (sb: StringBuilder) (variables: #IDictionary<string, obj>) (value: obj) =
         match value with
         | :? bool as b -> 
-                sb.Append (sprintf "%i" (if b then 1 else 0)) |> ignore
+            sb.Append (sprintf "%i" (if b then 1 else 0)) |> ignore
         | _other ->
 
         match value with
@@ -56,6 +79,12 @@ module QueryTranslator =
             sb.Append (sprintf "@%s" name) |> ignore
         variables.[name] <- jsonValue
 
+    /// <summary>
+    /// Checks if a given .NET Type is considered a primitive type in the context of SQLite storage.
+    /// Primitive types are stored directly, while others are serialized as JSON.
+    /// </summary>
+    /// <param name="x">The Type to check.</param>
+    /// <returns>True if the type is a primitive SQLite type, otherwise false.</returns>
     let internal isPrimitiveSQLiteType (x: Type) =
         Utils.isIntegerBasedType x || Utils.isFloatBasedType x || x = typedefof<string> || x = typedefof<char> || x = typedefof<bool> || x = typedefof<Guid>
         || x = typedefof<Type>
@@ -64,29 +93,69 @@ module QueryTranslator =
         || x.Name = "Nullable`1"
         || x.IsEnum
 
+    /// <summary>
+    /// Escapes single quotes in a string for safe inclusion in a SQLite query.
+    /// Also removes null characters.
+    /// </summary>
+    /// <param name="input">The string to escape.</param>
+    /// <returns>The escaped string.</returns>
     let internal escapeSQLiteString (input: string) : string =
         input.Replace("'", "''").Replace("\0", "")
 
+    /// <summary>
+    /// A stateful builder for constructing a SQL query from an expression tree.
+    /// </summary>
     type QueryBuilder =
         private {
+            /// <summary>The StringBuilder holding the query text.</summary>
             StringBuilder: StringBuilder
+            /// <summary>A dictionary of parameters for the query.</summary>
             Variables: Dictionary<string, obj>
+            /// <summary>A function to append a variable to the query.</summary>
             AppendVariable: obj -> unit
+            /// <summary>A function to roll back the StringBuilder by N characters.</summary>
             RollBack: uint -> unit
+            /// <summary>Indicates if the builder is in 'update' mode, changing translation logic.</summary>
             UpdateMode: bool
+            /// <summary>The table name prefix (e.g., "MyTable.") for column access.</summary>
             TableNameDot: string
+            /// <summary>Determines if a root parameter should be wrapped in json_extract.</summary>
             JsonExtractSelfValue: bool
+            /// <summary>The parameters of the root lambda expression.</summary>
             Parameters: ReadOnlyCollection<ParameterExpression>
+            /// <summary>The index of the parameter representing the document ID.</summary>
             IdParameterIndex: int
         }
+        /// <summary>
+        /// Appends a raw string to the query being built.
+        /// </summary>
+        /// <param name="s">The string to append.</param>
         member this.AppendRaw (s: string) =
             this.StringBuilder.Append s |> ignore
 
+        /// <summary>
+        /// Appends a raw character to the query being built.
+        /// </summary>
+        /// <param name="s">The character to append.</param>
         member this.AppendRaw (s: char) =
             this.StringBuilder.Append s |> ignore
 
+        /// <summary>
+        /// Returns the generated SQL query string.
+        /// </summary>
+        /// <returns>The SQL query as a string.</returns>
         override this.ToString() = this.StringBuilder.ToString()
 
+        /// <summary>
+        /// Internal factory method to create a new QueryBuilder instance.
+        /// </summary>
+        /// <param name="sb">The StringBuilder to use.</param>
+        /// <param name="variables">The dictionary for query parameters.</param>
+        /// <param name="updateMode">Whether to operate in update mode.</param>
+        /// <param name="tableName">The name of the table being queried.</param>
+        /// <param name="expression">The root expression being translated.</param>
+        /// <param name="idIndex">The parameter index for the document ID.</param>
+        /// <returns>A new QueryBuilder instance.</returns>
         static member internal New(sb: StringBuilder)(variables: Dictionary<string, obj>)(updateMode: bool)(tableName)(expression: Expression)(idIndex: int) =
             {
                 StringBuilder = sb
@@ -106,7 +175,8 @@ module QueryTranslator =
             }
 
     /// <summary>
-    /// The Math method name and its SQLite format. $N, where N in 1..9, are arguments.
+    /// A private dictionary mapping .NET Math method names and arities to their corresponding SQLite function formats.
+    /// $N, where N is 1-based, represents the arguments.
     /// </summary>
     let private mathFunctionTransformation = 
         let arr = [|
@@ -174,6 +244,13 @@ module QueryTranslator =
         |> Array.append fSharpFormatedArray
         |> readOnlyDict
 
+    /// <summary>
+    /// Evaluates a LINQ expression that is expected to be constant, returning its value.
+    /// It first tries a direct cast for ConstantExpression and falls back to compiling and invoking for others.
+    /// </summary>
+    /// <typeparam name="'O">The expected return type.</typeparam>
+    /// <param name="e">The expression to evaluate.</param>
+    /// <returns>The result of the expression evaluation.</returns>
     let internal evaluateExpr<'O> (e: Expression) =
         match e with
         | :? ConstantExpression as ce ->
@@ -182,12 +259,22 @@ module QueryTranslator =
         let exprFunc = Expression.Lambda<Func<'O>>(UnaryExpression.Convert(e, typeof<'O>)).Compile(true)
         exprFunc.Invoke()
 
+    /// <summary>
+    /// Recursively checks if an expression originates from a root ParameterExpression.
+    /// </summary>
+    /// <param name="expr">The expression to check.</param>
+    /// <returns>True if the expression's root is a ParameterExpression.</returns>
     let rec private isRootParameter (expr: Expression) : bool =
         match expr with
         | :? ParameterExpression -> true
         | :? MemberExpression as inner -> isRootParameter inner.Expression
         | _ -> false
 
+    /// <summary>
+    /// Recursively attempts to find the root ConstantExpression of a member access chain.
+    /// </summary>
+    /// <param name="expr">The expression to check.</param>
+    /// <returns>Some ConstantExpression if found, otherwise None.</returns>
     let rec private tryRootConstant (expr: Expression) : ConstantExpression option =
         match expr with
         | :? ConstantExpression as e -> Some e
@@ -195,6 +282,12 @@ module QueryTranslator =
         | _ -> None
             
 
+    /// <summary>
+    /// Recursively checks if an entire expression tree is constant (i.e., contains no ParameterExpressions).
+    /// Such expressions can be pre-evaluated locally.
+    /// </summary>
+    /// <param name="expr">The expression to check.</param>
+    /// <returns>True if the expression is fully constant.</returns>
     let rec isFullyConstant (expr: Expression) : bool =
         match expr with
         | :? ParameterExpression -> false
@@ -220,6 +313,11 @@ module QueryTranslator =
         | null -> true
         | _ -> false
 
+    /// <summary>
+    /// Recursively checks if any part of an expression tree is a constant.
+    /// </summary>
+    /// <param name="expr">The expression to check.</param>
+    /// <returns>True if any node in the expression is a ConstantExpression.</returns>
     let rec isAnyConstant (expr: Expression) : bool =
         match expr with
         | :? IndexExpression as ie -> isAnyConstant ie.Object
@@ -248,7 +346,16 @@ module QueryTranslator =
         | _ -> true
 
 
-    let inline private compareKnownJson (qb: QueryBuilder) (writeTarget: QueryBuilder -> unit) (targetType: Type) (knownObject: obj)  =
+    /// <summary>
+    /// Generates SQL to compare a database value with a known .NET object.
+    /// For primitive types, it performs a direct comparison.
+    /// For complex types, it serializes the object to JSON and generates a deep comparison using jsonb_extract.
+    /// </summary>
+    /// <param name="qb">The query builder.</param>
+    /// <param name="writeTarget">A function that writes the SQL for the database-side value (e.g., a column name).</param>
+    /// <param name="targetType">The .NET type of the target value.</param>
+    /// <param name="knownObject">The .NET object to compare against.</param>
+    let inline private compareKnownJson (qb: QueryBuilder) (writeTarget: QueryBuilder -> unit) (targetType: Type) (knownObject: obj) =
         if isPrimitiveSQLiteType targetType then
             writeTarget qb
             qb.AppendRaw " = "
@@ -336,21 +443,34 @@ module QueryTranslator =
             | JsonSerializator.JsonValue.String _ ->
                 compareJson qb "$" json
 
-    /// Functions called when the internal translator encounters an unknown expression.
-    /// Handlers must not modify the QueryBuilder or expression if they return false (not handled).
+    /// <summary>
+    /// A list of functions to handle unknown expression types.
+    /// Handlers are called when the main translator encounters an expression it doesn't recognize.
+    /// They must not modify the QueryBuilder or expression if they return false (indicating not handled).
     /// Handlers are evaluated in reverse order (last added, first called).
+    /// </summary>
     let unknownExpressionHandler = List<Func<QueryBuilder, Expression, bool>>(seq {
         Func<QueryBuilder, Expression, bool>(fun _qb exp -> raise<bool> (ArgumentException (sprintf "Unhandled expression type: '%O'" exp.NodeType)))
     })
 
-    /// Functions called before the internal translator tries to translate an expression.
-    /// Handlers must not modify the QueryBuilder or expression if they return false (not handled).
+    /// <summary>
+    /// A list of functions called before the main translator attempts to translate an expression.
+    /// This allows for overriding default translation behavior.
+    /// Handlers must not modify the QueryBuilder or expression if they return false (indicating not handled).
     /// Handlers are evaluated in reverse order (last added, first called).
+    /// </summary>
     let preExpressionHandler = List<Func<QueryBuilder, Expression, bool>>(seq {
         // No operation example.
         Func<QueryBuilder, Expression, bool>(fun _qb _exp -> false)
     })
 
+    /// <summary>
+    /// Executes a list of handlers for a given expression until one of them returns true.
+    /// </summary>
+    /// <param name="handler">The list of handler functions.</param>
+    /// <param name="qb">The query builder.</param>
+    /// <param name="exp">The expression to handle.</param>
+    /// <returns>True if a handler processed the expression, otherwise false.</returns>
     let private runHandler (handler: List<Func<QueryBuilder, Expression, bool>>) (qb: QueryBuilder) (exp: Expression) =
         let mutable index = handler.Count - 1
         let mutable handled = false
@@ -359,15 +479,23 @@ module QueryTranslator =
             index <- index - 1
         handled
 
+    /// <summary>
+    /// The main recursive visitor function that traverses the expression tree.
+    /// It dispatches to specific visit methods based on the expression's NodeType.
+    /// </summary>
+    /// <param name="exp">The expression to visit and translate.</param>
+    /// <param name="qb">The query builder state.</param>
     let rec private visit (exp: Expression) (qb: QueryBuilder) : unit =
         if runHandler preExpressionHandler qb exp then () else
 
+        // If the expression is fully constant, evaluate it and append as a variable.
         if exp.NodeType <> ExpressionType.Lambda && exp.NodeType <> ExpressionType.Quote && isFullyConstant exp && (match exp with | :? ConstantExpression as ce when ce.Value = null -> false | other -> true) then
             let value = evaluateExpr<obj> exp
             qb.AppendVariable value
         else
 
         match exp.NodeType with
+        // Binary operators
         | ExpressionType.And
         | ExpressionType.AndAlso
         | ExpressionType.Or
@@ -385,11 +513,13 @@ module QueryTranslator =
         | ExpressionType.Divide
         | ExpressionType.Modulo ->
             visitBinary (exp :?> BinaryExpression) qb
+        // Unary operators
         | ExpressionType.Not ->
             visitNot (exp :?> UnaryExpression) qb
         | ExpressionType.Negate
         | ExpressionType.NegateChecked ->
             visitNegate (exp :?> UnaryExpression) qb
+        // Core expression types
         | ExpressionType.Lambda ->
             visitLambda (exp :?> LambdaExpression) qb
         | ExpressionType.Call ->
@@ -434,10 +564,14 @@ module QueryTranslator =
             visitMemberInit (exp :?> MemberInitExpression) qb
         | ExpressionType.ListInit ->
             visitListInit (exp :?> ListInitExpression) qb
+        // Fallback for unhandled types
         | _ ->
             if not (runHandler unknownExpressionHandler qb exp) then
                 raise (ArgumentOutOfRangeException $"QueryTranslator.{nameof unknownExpressionHandler} did not handle the expression of type: {exp.NodeType}")
 
+    /// <summary>
+    /// Translates a ListInitExpression into a jsonb_array(...) function call.
+    /// </summary>
     and private visitListInit (exp: ListInitExpression) (qb: QueryBuilder) =
         // json_array(...)
         qb.AppendRaw "jsonb_array("
@@ -448,6 +582,9 @@ module QueryTranslator =
         qb.RollBack 1u
         qb.AppendRaw ')'
 
+    /// <summary>
+    /// Translates a TypeBinaryExpression (TypeIs) into a check on the '$type' property of a JSON object.
+    /// </summary>
     and private visitTypeIs (exp: TypeBinaryExpression) (qb: QueryBuilder) =
         if not (mustIncludeTypeInformationInSerializationFn exp.Expression.Type) then
             failwithf "Cannot translate TypeIs expression, because the DB will not store its type information for %A" exp.Type
@@ -463,6 +600,9 @@ module QueryTranslator =
         | Some typeName ->
         qb.AppendVariable typeName
 
+    /// <summary>
+    /// Translates a ConditionalExpression (if/then/else) into a SQL CASE WHEN ... THEN ... ELSE ... END statement.
+    /// </summary>
     and private visitIfElse (conditionalExp: ConditionalExpression) (qb: QueryBuilder) =
         qb.AppendRaw "CASE WHEN "
         visit conditionalExp.Test qb
@@ -472,6 +612,9 @@ module QueryTranslator =
         visit conditionalExp.IfFalse qb
         qb.AppendRaw " END"
 
+    /// <summary>
+    /// Translates an array or list index access into a jsonb_extract call with a JSON path.
+    /// </summary>
     and private arrayIndex (array: Expression) (index: Expression) (qb: QueryBuilder) : unit =
         qb.AppendRaw "jsonb_extract("
         visit array qb |> ignore
@@ -480,7 +623,10 @@ module QueryTranslator =
         qb.AppendRaw "]')"
         ()
 
-    and private visitProperty (o: Expression) (property: obj)  (m: Expression) (qb: QueryBuilder) =
+    /// <summary>
+    /// Translates a property access into a jsonb_extract call or a direct column access for 'Id'.
+    /// </summary>
+    and private visitProperty (o: Expression) (property: obj) (m: Expression) (qb: QueryBuilder) =
         match property with
         | :? string as property ->
             if property = "Id" && o.NodeType = ExpressionType.Parameter && (m.Type = typeof<int64> || m.Type = typeof<int32>) then
@@ -509,6 +655,9 @@ module QueryTranslator =
 
         | _other -> failwithf "Unable to translate property access."
 
+    /// <summary>
+    /// Wraps an expression in a SQL CAST operation.
+    /// </summary>
     and private castTo (qb: QueryBuilder) (castToType: Type) (o: Expression) =
         let typ =
             match castToType with
@@ -542,6 +691,10 @@ module QueryTranslator =
         qb.AppendRaw typ
         qb.AppendRaw ")"
 
+    /// <summary>
+    /// Translates a call to a method in the System.Math class using the mathFunctionTransformation map.
+    /// </summary>
+    /// <returns>True if the method was a known math function and was translated, otherwise false.</returns>
     and private visitMathMethod (m: MethodCallExpression) (qb: QueryBuilder) =
         match mathFunctionTransformation.TryGetValue ((m.Arguments.Count, m.Method.Name)) with
         | false, _ -> false
@@ -561,7 +714,10 @@ module QueryTranslator =
                     qb.AppendRaw c
             true
 
-    and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =     
+    /// <summary>
+    /// Translates a MethodCallExpression into its corresponding SQL function or operation.
+    /// </summary>
+    and private visitMethodCall (m: MethodCallExpression) (qb: QueryBuilder) =    
         match visitMathMethod m qb with
         | true -> ()
         | false ->
@@ -778,14 +934,14 @@ module QueryTranslator =
 
             visitProperty o property m qb
 
-        | "Concat" when m.Type = typeof<string> ->            
+        | "Concat" when m.Type = typeof<string> ->          
             let len = m.Arguments.Count
 
             let args =
                 if len = 1 && typeof<IEnumerable<string>>.IsAssignableFrom m.Arguments.[0].Type && m.Arguments.[0].NodeType = ExpressionType.NewArrayInit then
                     let array = m.Arguments.[0] :?> NewArrayExpression
                     array.Expressions
-                else if len > 1 then            
+                else if len > 1 then          
                     m.Arguments
                 else failwithf "Unknown such concat function: %A" m.Method
 
@@ -974,9 +1130,15 @@ module QueryTranslator =
         | _ -> 
             raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 
+    /// <summary>
+    /// Translates a LambdaExpression by visiting its body.
+    /// </summary>
     and private visitLambda (m: LambdaExpression) (qb: QueryBuilder) =
         visit(m.Body) qb
 
+    /// <summary>
+    /// Translates a ParameterExpression. This typically represents the root document or an ID.
+    /// </summary>
     and private visitParameter (m: ParameterExpression) (qb: QueryBuilder) =
         if m.Type = typeof<int64> // Check if it is an id type.
             && ((qb.Parameters.IndexOf m = 0 // For the .SelectWithId function, it is always at index 0,
@@ -997,14 +1159,25 @@ module QueryTranslator =
             qb.AppendRaw $"{qb.TableNameDot}Value"
         
 
+    /// <summary>
+    /// Translates a UnaryExpression with NodeType 'Not' into a SQL NOT operator.
+    /// </summary>
     and private visitNot (m: UnaryExpression) (qb: QueryBuilder) =
         qb.AppendRaw "NOT "
         visit m.Operand qb
 
+    /// <summary>
+    /// Translates a UnaryExpression with NodeType 'Negate' or 'NegateChecked' into a SQL unary minus.
+    /// </summary>
     and private visitNegate (m: UnaryExpression) (qb: QueryBuilder) =
         qb.AppendRaw "-"
         visit m.Operand qb
 
+    /// <summary>
+    /// Translates the creation of a new object into a jsonb_object(...) function call.
+    /// </summary>
+    /// <param name="qb">The query builder.</param>
+    /// <param name="memberGenerator">An array of tuples containing member names and functions to write their values.</param>
     and private newObject (qb: QueryBuilder) (memberGenerator: struct (string * (QueryBuilder -> unit)) array) =
         qb.AppendRaw "jsonb_object("
         let mutable index = 0
@@ -1018,6 +1191,9 @@ module QueryTranslator =
             index <- index + 1
         qb.AppendRaw ")"
 
+    /// <summary>
+    /// Translates a NewExpression, typically for creating an anonymous type, a tuple, or a simple class instance.
+    /// </summary>
     and private visitNew (m: NewExpression) (qb: QueryBuilder) =
         let t = m.Type
 
@@ -1036,19 +1212,30 @@ module QueryTranslator =
         else
             failwithf "Cannot construct new in SQL query %A" t
 
+    /// <summary>
+    /// Translates a MemberInitExpression (object initializer syntax) into a jsonb_object call.
+    /// </summary>
     and private visitMemberInit (m: MemberInitExpression) (qb: QueryBuilder) =
         newObject qb [|
             for binding in m.Bindings |> Seq.cast<MemberAssignment> do
                 struct(binding.Member.Name, visit binding.Expression)
         |]
 
+    /// <summary>
+    /// Translates a Convert or Cast expression. If converting to/from obj, it's a no-op. Otherwise, it generates a CAST.
+    /// </summary>
     and private visitConvert (m: UnaryExpression) (qb: QueryBuilder) =
         if m.Type = typeof<obj> || m.Operand.Type = typeof<obj> then
             visit(m.Operand) qb
         else 
         castTo qb m.Type m.Operand
 
+    /// <summary>
+    /// Translates a BinaryExpression into its corresponding SQL operator.
+    /// Handles null comparisons (IS NULL / IS NOT NULL) and complex type equality.
+    /// </summary>
     and private visitBinary (b: BinaryExpression) (qb: QueryBuilder) =
+        // Handle string concatenation
         if b.NodeType = ExpressionType.Add && (b.Left.Type = typeof<string> || b.Right.Type = typeof<string>) then
             let expr = Expression.Call(typeof<String>.GetMethod("Concat", [|typeof<string seq>|]), Expression.NewArrayInit(typeof<string>, [|b.Left; b.Right|]))
             visit expr qb
@@ -1106,12 +1293,12 @@ module QueryTranslator =
         | ExpressionType.And
         | ExpressionType.AndAlso -> qb.AppendRaw(" AND ") |> ignore
         | ExpressionType.OrElse
-        | ExpressionType.Or -> qb.AppendRaw(" OR ")  |> ignore
-        | ExpressionType.Equal -> if isAnyNull then qb.AppendRaw(" IS ") else qb.AppendRaw(" = ")  |> ignore
-        | ExpressionType.NotEqual -> if isAnyNull then qb.AppendRaw(" IS NOT ") else qb.AppendRaw(" <> ")  |> ignore
-        | ExpressionType.LessThan -> qb.AppendRaw(" < ")  |> ignore
-        | ExpressionType.LessThanOrEqual -> qb.AppendRaw(" <= ")  |> ignore
-        | ExpressionType.GreaterThan -> qb.AppendRaw(" > ")  |> ignore
+        | ExpressionType.Or -> qb.AppendRaw(" OR ") |> ignore
+        | ExpressionType.Equal -> if isAnyNull then qb.AppendRaw(" IS ") else qb.AppendRaw(" = ") |> ignore
+        | ExpressionType.NotEqual -> if isAnyNull then qb.AppendRaw(" IS NOT ") else qb.AppendRaw(" <> ") |> ignore
+        | ExpressionType.LessThan -> qb.AppendRaw(" < ") |> ignore
+        | ExpressionType.LessThanOrEqual -> qb.AppendRaw(" <= ") |> ignore
+        | ExpressionType.GreaterThan -> qb.AppendRaw(" > ") |> ignore
         | ExpressionType.GreaterThanOrEqual -> qb.AppendRaw(" >= ") |> ignore
 
         | ExpressionType.Add -> qb.AppendRaw(" + ") |> ignore
@@ -1121,14 +1308,21 @@ module QueryTranslator =
         | ExpressionType.Modulo -> qb.AppendRaw(" % ") |> ignore
         | _ -> raise (NotSupportedException(sprintf "The binary operator %O is not supported" b.NodeType))
         visit(right) qb |> ignore
-        qb.AppendRaw(")")  |> ignore        
+        qb.AppendRaw(")") |> ignore       
 
+    /// <summary>
+    /// Translates a ConstantExpression into a SQL literal (NULL) or a query parameter.
+    /// </summary>
     and private visitConstant (c: ConstantExpression) (qb: QueryBuilder) =
         match c.Value with
-        | null -> qb.AppendRaw("NULL")  |> ignore
+        | null -> qb.AppendRaw("NULL") |> ignore
         | _ ->
             qb.AppendVariable(c.Value) |> ignore        
 
+    /// <summary>
+    /// Translates a MemberExpression, handling property and field access.
+    /// It builds a JSON path for nested properties.
+    /// </summary>
     and private visitMemberAccess (m: MemberAccess) (qb: QueryBuilder) =
         let rec buildJsonPath (expr: Expression) (accum: string list) : string list =
             match expr with
@@ -1182,7 +1376,7 @@ module QueryTranslator =
                 qb.AppendRaw(formatAccess single) |> ignore
             | paths ->
                 let pathStr = String.concat $"." (List.map (sprintf "%s") paths)
-                qb.AppendRaw(formatAccess pathStr) |> ignore            
+                qb.AppendRaw(formatAccess pathStr) |> ignore          
         else 
 
         match m.OriginalExpression with
@@ -1201,6 +1395,13 @@ module QueryTranslator =
             raise (NotSupportedException(sprintf "The member access '%O' is not supported" m.Member.Name))
             
 
+    /// <summary>
+    /// Translates a LINQ expression into a SQL string and a dictionary of parameters.
+    /// This is a primary public entry point for the translator.
+    /// </summary>
+    /// <param name="tableName">The name of the table to query.</param>
+    /// <param name="expression">The LINQ expression to translate.</param>
+    /// <returns>A tuple containing the generated SQL string and a dictionary of parameters.</returns>
     let translate (tableName: string) (expression: Expression) =
         let sb = StringBuilder()
         let variables = Dictionary<string, obj>()
@@ -1209,16 +1410,37 @@ module QueryTranslator =
         visit expression builder
         sb.ToString(), variables
 
+    /// <summary>
+    /// Internal function to translate a part of a queryable expression.
+    /// </summary>
+    /// <param name="tableName">The name of the table.</param>
+    /// <param name="expression">The expression to translate.</param>
+    /// <param name="sb">The StringBuilder to append to.</param>
+    /// <param name="variables">The dictionary of parameters.</param>
     let internal translateQueryable (tableName: string) (expression: Expression) (sb: StringBuilder) (variables: Dictionary<string, obj>) =
         let builder = QueryBuilder.New sb variables false tableName expression -1
         visit expression builder
         sb.Append " " |> ignore
 
+    /// <summary>
+    /// Internal function similar to translateQueryable, but prevents wrapping the root parameter in json_extract.
+    /// </summary>
+    /// <param name="tableName">The name of the table.</param>
+    /// <param name="expression">The expression to translate.</param>
+    /// <param name="sb">The StringBuilder to append to.</param>
+    /// <param name="variables">The dictionary of parameters.</param>
     let internal translateQueryableNotExtractSelfJson (tableName: string) (expression: Expression) (sb: StringBuilder) (variables: Dictionary<string, obj>) =
         let builder = {(QueryBuilder.New sb variables false tableName expression -1) with JsonExtractSelfValue = false}
         visit expression builder
         sb.Append " " |> ignore
 
+    /// <summary>
+    /// Internal function to translate an expression that involves the document ID, using a specific parameter index for the ID.
+    /// </summary>
+    /// <param name="tableName">The name of the table.</param>
+    /// <param name="expression">The expression to translate.</param>
+    /// <param name="idParameterIndex">The index of the parameter that represents the ID.</param>
+    /// <returns>A tuple containing the generated SQL string and a dictionary of parameters.</returns>
     let internal translateWithId (tableName: string) (expression: Expression) idParameterIndex =
         let sb = StringBuilder()
         let variables = Dictionary<string, obj>()
@@ -1227,6 +1449,13 @@ module QueryTranslator =
         visit expression builder
         sb.ToString(), variables
 
+    /// <summary>
+    /// Internal function to translate an expression in "update" mode, which generates SQL fragments for jsonb_set or jsonb_insert.
+    /// </summary>
+    /// <param name="tableName">The name of the table.</param>
+    /// <param name="expression">The expression to translate.</param>
+    /// <param name="fullSQL">The StringBuilder for the SQL command.</param>
+    /// <param name="variableDict">The dictionary for parameters.</param>
     let internal translateUpdateMode (tableName: string) (expression: Expression) (fullSQL: StringBuilder) (variableDict: Dictionary<string, obj>) =
         let builder = QueryBuilder.New fullSQL variableDict true tableName expression -1
     

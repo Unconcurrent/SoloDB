@@ -18,20 +18,42 @@ open Microsoft.Data.Sqlite
 open System.IO
 open System.Data.Common
 
+/// <summary>
+/// Provides utility functions and extension methods for interacting with SQLite,
+/// including parameter processing, command creation, and object mapping.
+/// </summary>
 module SQLiteTools =
+    /// <summary>
+    /// Caches PropertyInfo for Nullable types' 'HasValue' and 'Value' properties for performance.
+    /// </summary>
     let private nullablePropsCache = ConcurrentDictionary<Type, struct (PropertyInfo * PropertyInfo)>()
 
+    /// <summary>
+    /// Retrieves the 'HasValue' and 'Value' properties for a given Nullable type from the cache or via reflection.
+    /// </summary>
+    /// <param name="nullableType">The Nullable type.</param>
+    /// <returns>A struct tuple containing the PropertyInfo for HasValue and Value.</returns>
     let private getNullableProperties (nullableType: Type) =
         nullablePropsCache.GetOrAdd(nullableType, fun t ->
             struct (t.GetProperty("HasValue"), t.GetProperty("Value")))
 
+    /// <summary>
+    /// A private struct to pass an array along with its effective length, for BLOB operations.
+    /// </summary>
     [<Struct>]
     type TrimmedArray = {
+        /// <summary>The underlying array.</summary>
         Array: Array
+        /// <summary>The number of valid bytes in the array.</summary>
         TrimmedLen: int
     }
         
 
+    /// <summary>
+    /// Processes a parameter value before it's added to a DB command, handling nulls, DateTimeOffset, and Nullable types.
+    /// </summary>
+    /// <param name="value">The input parameter value.</param>
+    /// <returns>A struct tuple containing the processed value and its size if applicable.</returns>
     let private processParameter (value: obj) =
         match value with
         | null -> 
@@ -51,6 +73,12 @@ module SQLiteTools =
             else
                 struct (value, -1)
 
+    /// <summary>
+    /// Creates and adds a new IDbDataParameter to a command.
+    /// </summary>
+    /// <param name="command">The command to add the parameter to.</param>
+    /// <param name="key">The name of the parameter.</param>
+    /// <param name="value">The value of the parameter.</param>
     let private addParameter (command: IDbCommand) (key: string) (value: obj) =
         let struct (value, size) = processParameter value
 
@@ -63,6 +91,12 @@ module SQLiteTools =
 
         command.Parameters.Add par |> ignore
 
+    /// <summary>
+    /// Updates an existing parameter or adds a new one if it doesn't exist. Used for cached commands.
+    /// </summary>
+    /// <param name="command">The command to update.</param>
+    /// <param name="key">The name of the parameter.</param>
+    /// <param name="value">The value of the parameter.</param>
     let private setOrAddParameter (command: IDbCommand) (key: string) (value: obj) =
         let struct (value, size) = processParameter value
 
@@ -80,7 +114,17 @@ module SQLiteTools =
         if size > 0 then
             par.Size <- size
 
+    /// <summary>
+    /// Caches compiled lambda expressions for dynamically processing anonymous-type parameters.
+    /// </summary>
     let private dynamicParameterCache = ConcurrentDictionary<Type, Action<IDbCommand, obj, Action<IDbCommand,string,obj>>>()
+    
+    /// <summary>
+    /// Processes parameters from an object (either an IDictionary or an anonymous type) and adds them to a command.
+    /// </summary>
+    /// <param name="processFn">The function to use for adding/setting a parameter (e.g., addParameter).</param>
+    /// <param name="command">The command to add parameters to.</param>
+    /// <param name="parameters">The parameter object (IDictionary or anonymous type).</param>
     let private processParameters processFn (command: IDbCommand) (parameters: obj) =
         match parameters with
         | null -> ()
@@ -111,6 +155,13 @@ module SQLiteTools =
             ))
             fn.Invoke(command, parameters, processFn)
 
+    /// <summary>
+    /// Creates an IDbCommand with the given SQL and parameters.
+    /// </summary>
+    /// <param name="this">The connection to create the command on.</param>
+    /// <param name="sql">The SQL command text.</param>
+    /// <param name="parameters">The parameters for the command.</param>
+    /// <returns>A new IDbCommand.</returns>
     let private createCommand (this: SqliteConnection) (sql: string) (parameters: obj) =
         let command = this.CreateCommand()
         command.CommandText <- sql
@@ -118,6 +169,9 @@ module SQLiteTools =
 
         command
 
+    /// <summary>
+    /// Lazily gets all methods from DbDataReader and its interfaces for later use in the TypeMapper.
+    /// </summary>
     let private dataReaderMethods =
         let rec getMethods (t: Type) =
             let implements = t.GetInterfaces()
@@ -128,8 +182,34 @@ module SQLiteTools =
             ]
         getMethods typeof<DbDataReader>
 
+    /// <summary>
+    /// A private helper type that provides a cached, compiled function for mapping an IDataReader record to an instance of type 'T.
+    /// </summary>
+    /// <typeparam name="'T">The target type to map to.</typeparam>
     type private TypeMapper<'T> =
-        static member val Map = 
+        /// <summary>
+        /// A statically cached, compiled function that maps a data reader row to an object of type 'T.
+        /// This is the core of the object mapping functionality. For primitive types, it uses a direct,
+        /// non-reflective function. For complex reference and value types (classes, records, structs),
+        /// it dynamically builds and compiles a LINQ Expression tree on first use to create a highly
+        /// optimized mapper. This mapper populates the properties and fields of a new 'T instance
+        /// from the columns in the IDataReader.
+        /// </summary>
+        /// <typeparam name="'T">The target type to which the data reader row will be mapped.</typeparam>
+        /// <returns>
+        /// A compiled and cached function that takes an IDataReader, a starting column index, 
+        /// and a column-to-index dictionary, and returns a populated instance of 'T.
+        /// </returns>
+        static member val Map =             
+            /// <summary>
+            /// Reads all bytes from a SqliteBlob stream into a new NativeArray.NativeArray,
+            /// ensuring the blob stream is properly disposed of afterward.
+            /// </summary>
+            /// <param name="s">The SqliteBlob stream to read from. This stream will be disposed of by the function.</param>
+            /// <returns>A new NativeArray.NativeArray containing all the bytes from the stream.</returns>
+            /// <remarks>
+            /// This function will throw an exception if the stream ends prematurely before the entire allocated array can be filled.
+            /// </remarks>
             let streamToNativeArrayFuncDisposing (s: SqliteBlob) =
                 use s = s
                 let arr = NativeArray.NativeArray.Alloc (int s.Length)
@@ -141,16 +221,26 @@ module SQLiteTools =
                         failwithf "Could not read the whole BLOB, readCount = %i, size = %i" totalRead arr.Length
                     totalRead <- totalRead + read
                 arr
-
-            let streamToNativeArray = Func<SqliteBlob, NativeArray.NativeArray> streamToNativeArrayFuncDisposing
-            let streamToNativeArray = Expression.Constant streamToNativeArray
+                            
             let streamToNativeArray = 
                 let method = typeof<Func<SqliteBlob, NativeArray.NativeArray>>.GetMethod "Invoke"
+                let stna = Expression.Constant (Func<SqliteBlob, NativeArray.NativeArray> streamToNativeArrayFuncDisposing)
                 fun (e: Expression) ->
-                    Expression.Call (streamToNativeArray, method, [|e|])
+                    Expression.Call (stna, method, [|e|])
 
             
-
+            /// <summary>
+            /// Dynamically builds a LINQ Expression to read a value from an IDataReader for a specific member (property or field).
+            /// It selects the appropriate 'Get' method (e.g., GetInt32, GetString) from the reader based on the member's type
+            /// and applies any necessary type conversions.
+            /// </summary>
+            /// <param name="prop">The MemberInfo (PropertyInfo or FieldInfo) of the target object to be populated.</param>
+            /// <param name="readerParam">The Expression representing the IDataReader parameter in the lambda.</param>
+            /// <param name="columnVar">The Expression representing the variable that will hold the column index.</param>
+            /// <returns>
+            /// A LINQ Expression that, when compiled and executed, will read and correctly type the value 
+            /// from the data reader for the specified member.
+            /// </returns>
             let matchMethodWithMemberType (prop: MemberInfo) (readerParam: Expression) (columnVar: Expression) =
                 // Get the appropriate method and conversion for each property type
                 let (getMethodName, needsConversion, conversionFunc) = 
@@ -359,7 +449,7 @@ module SQLiteTools =
                                     Expression.Constant(false)
                                 )
                             ))
-                                        
+                                    
                     let getValueAndDeserialize = matchMethodWithMemberType prop readerParam columnVar
                     
                     // Default value if property not found
@@ -484,7 +574,7 @@ module SQLiteTools =
                                     )) :> Expression
                             |]
                         )
-                            
+                        
                         statements.Add(propExpr)
                         
                     // Return the result
@@ -504,6 +594,13 @@ module SQLiteTools =
                     try fn.Invoke(reader, startIndex, columns)
                     with _ex -> reraise()
 
+    /// <summary>
+    /// Executes a command and maps the resulting data reader to a sequence of objects of type 'T.
+    /// </summary>
+    /// <typeparam name="'T">The type to map the results to.</typeparam>
+    /// <param name="command">The command to execute.</param>
+    /// <param name="nullableCachedDict">An optional dictionary to cache column ordinals.</param>
+    /// <returns>A sequence of 'T objects.</returns>
     let private queryCommand<'T> (command: IDbCommand) (nullableCachedDict: Dictionary<string, int>) = seq {
         use reader = command.ExecuteReader()
         let dict = 
@@ -521,14 +618,34 @@ module SQLiteTools =
             yield TypeMapper<'T>.Map reader 0 dict
     }
 
+    /// <summary>
+    /// A private helper function that creates a command and queries the database.
+    /// </summary>
+    /// <typeparam name="'T">The type to map the results to.</typeparam>
+    /// <param name="this">The connection to use.</param>
+    /// <param name="sql">The SQL query string.</param>
+    /// <param name="parameters">The parameters for the query.</param>
+    /// <returns>A sequence of 'T objects.</returns>
     let private queryInner<'T> this (sql: string) (parameters: obj) = seq {
         use command = createCommand this sql parameters
         yield! queryCommand<'T> command null
     }
 
+    /// <summary>
+    /// Internal interface to allow temporary disabling of the Dispose method on a connection.
+    /// </summary>
     type internal IDisableDispose =
+        /// <summary>
+        /// Disables disposal and returns an IDisposable that re-enables it when disposed.
+        /// </summary>
         abstract DisableDispose: unit -> IDisposable
     
+    /// <summary>
+    /// A sealed wrapper around SqliteConnection that adds command caching capabilities.
+    /// </summary>
+    /// <param name="connectionStr">The connection string.</param>
+    /// <param name="onDispose">A callback function to execute on disposal.</param>
+    /// <param name="config">The database configuration.</param>
     type [<Sealed>] CachingDbConnection internal (connectionStr: string, onDispose, config: Types.SoloDBConfiguration) = 
         inherit SqliteConnection(connectionStr)
         let mutable disposingDisabled = false
@@ -542,6 +659,7 @@ module SQLiteTools =
                 ValueNone 
             else
 
+            // Delete from cache 1/4 of the least used commands.
             if preparedCache.Count >= maxCacheSize then
                 let arr = preparedCache |> Seq.toArray 
                 arr |> Array.sortInPlaceBy (fun (KeyValue(_sql, item)) -> !item.CallCount)
@@ -572,10 +690,14 @@ module SQLiteTools =
             processParameters setOrAddParameter item.Command parameters
             struct (item.Command, item.ColumnDict, item.InUse) |> ValueSome
 
+        /// <summary>The underlying SqliteConnection.</summary>
         member internal this.Inner = this :> SqliteConnection
+        /// <summary>Indicates if the connection is currently part of a transaction.</summary>
         member val InsideTransaction = false with get, set
 
-        /// Clears the cache while waiting the all cached connections to not be in use.
+        /// <summary>
+        /// Clears the prepared statement cache, waiting for any in-use commands to be released.
+        /// </summary>
         member this.ClearCache() =
             if preparedCache.Count = 0 then () else
 
@@ -588,6 +710,10 @@ module SQLiteTools =
                         v.Command.Dispose()
                         ignore (oldCache.Remove k)
 
+        /// <summary>Executes a non-query SQL command, utilizing the cache if possible.</summary>
+        /// <param name="sql">The SQL command text.</param>
+        /// <param name="parameters">The parameters for the command.</param>
+        /// <returns>The number of rows affected.</returns>
         member this.Execute(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             match tryCachedCommand this sql parameters with
             | ValueSome struct (command, _columnDict, inUse) ->
@@ -599,6 +725,11 @@ module SQLiteTools =
             command.Prepare() // To throw all errors, not silently fail them.
             command.ExecuteNonQuery()
 
+        /// <summary>Opens a data reader, utilizing the cache if possible.</summary>
+        /// <param name="sql">The SQL query text.</param>
+        /// <param name="outReader">The output SqliteDataReader.</param>
+        /// <param name="parameters">The parameters for the query.</param>
+        /// <returns>An IDisposable to manage the lifetime of the reader and command.</returns>
         member this.OpenReader(sql: string, outReader: outref<SqliteDataReader>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             match tryCachedCommand this sql parameters with
             | ValueSome struct (command, _columnDict, inUse) ->
@@ -606,7 +737,7 @@ module SQLiteTools =
                     let reader = command.ExecuteReader()
                     outReader <- reader
                     { new IDisposable with
-                          member _.Dispose() = reader.Dispose() }
+                        member _.Dispose() = reader.Dispose() }
                 finally inUse := false
             | ValueNone ->
                 let command = createCommand this sql parameters
@@ -619,6 +750,11 @@ module SQLiteTools =
                         command.Dispose()
                 }
 
+        /// <summary>Executes a query and maps the results to a sequence of 'T, utilizing the cache if possible.</summary>
+        /// <typeparam name="'T">The type to map results to.</typeparam>
+        /// <param name="sql">The SQL query text.</param>
+        /// <param name="parameters">The parameters for the query.</param>
+        /// <returns>A sequence of 'T objects.</returns>
         member this.Query<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = seq {
             match tryCachedCommand this sql parameters with
             | ValueSome struct (command, columnDict, inUse) ->
@@ -629,6 +765,11 @@ module SQLiteTools =
             yield! queryCommand<'T> command null
         }
 
+        /// <summary>Executes a query and returns the first result, utilizing the cache if possible.</summary>
+        /// <typeparam name="'T">The type to map the result to.</typeparam>
+        /// <param name="sql">The SQL query text.</param>
+        /// <param name="parameters">The parameters for the query.</param>
+        /// <returns>The first 'T object from the result set.</returns>
         member this.QueryFirst<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
             match tryCachedCommand this sql parameters with
             | ValueSome struct (command, columnDict, inUse) ->
@@ -638,6 +779,11 @@ module SQLiteTools =
             use command = createCommand this sql parameters
             queryCommand<'T> command null |> Seq.head
 
+        /// <summary>Executes a query and returns the first result, or a default value if the sequence is empty, utilizing the cache if possible.</summary>
+        /// <typeparam name="'T">The type to map the result to.</typeparam>
+        /// <param name="sql">The SQL query text.</param>
+        /// <param name="parameters">The parameters for the query.</param>
+        /// <returns>The first 'T object from the result set, or default.</returns>
         member this.QueryFirstOrDefault<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
             match tryCachedCommand this sql parameters with
             | ValueSome struct (command, columnDict, inUse) ->
@@ -654,6 +800,15 @@ module SQLiteTools =
             | Some x -> x
             | None -> Unchecked.defaultof<'T>
 
+        /// <summary>Executes a multi-mapping query, utilizing the cache if possible.</summary>
+        /// <typeparam name="'T1">The type of the first object.</typeparam>
+        /// <typeparam name="'T2">The type of the second object.</typeparam>
+        /// <typeparam name="'TReturn">The return type after mapping.</typeparam>
+        /// <param name="sql">The SQL query text.</param>
+        /// <param name="map">The function to map the two objects to the return type.</param>
+        /// <param name="parameters">The parameters for the query.</param>
+        /// <param name="splitOn">The column name to split the results on.</param>
+        /// <returns>A sequence of 'TReturn objects.</returns>
         member this.Query<'T1, 'T2, 'TReturn>(sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = seq {
             let struct (command, dict, dispose, inUse) =
                 match tryCachedCommand this sql parameters with
@@ -666,7 +821,7 @@ module SQLiteTools =
 
                 if dict.Count = 0 then
                     for i in 0..(reader.FieldCount - 1) do
-                       dict.Add(reader.GetName(i), i)
+                        dict.Add(reader.GetName(i), i)
 
                 let splitIndex = reader.GetOrdinal(splitOn)
 
@@ -684,6 +839,9 @@ module SQLiteTools =
                 if dispose then command.Dispose()
         }
 
+        /// <summary>
+        /// Performs the actual disposal of the base connection.
+        /// </summary>
         member this.DisposeReal() =
             base.Dispose(true)
 
@@ -700,8 +858,14 @@ module SQLiteTools =
                 if not disposingDisabled then
                     onDispose this
 
+    /// <summary>
+    /// Provides extension methods for IDbConnection for executing queries.
+    /// </summary>
     [<Extension>]
     type IDbConnectionExtensions =
+        /// <summary>
+        /// Extension method to open a data reader.
+        /// </summary>
         [<Extension>]
         static member OpenReader<'R>(this: SqliteConnection, sql: string, outReader: outref<DbDataReader>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             match this with
@@ -718,6 +882,9 @@ module SQLiteTools =
                 }
 
 
+        /// <summary>
+        /// Extension method to execute a non-query command.
+        /// </summary>
         [<Extension>]
         static member Execute(this: SqliteConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             match this with
@@ -727,6 +894,9 @@ module SQLiteTools =
             command.Prepare() // To throw all errors, not silently fail them.
             command.ExecuteNonQuery()
 
+        /// <summary>
+        /// Extension method to execute a query and map the results to a sequence of 'T.
+        /// </summary>
         [<Extension>]
         static member Query<'T>(this: SqliteConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             match this with
@@ -734,6 +904,9 @@ module SQLiteTools =
             | _ ->
             queryInner<'T> this sql parameters
 
+        /// <summary>
+        /// Extension method to execute a query and return the first result.
+        /// </summary>
         [<Extension>]
         static member QueryFirst<'T>(this: SqliteConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
             match this with
@@ -741,6 +914,9 @@ module SQLiteTools =
             | _ ->
             queryInner<'T> this sql parameters |> Seq.head
 
+        /// <summary>
+        /// Extension method to execute a query and return the first result, or a default value if the sequence is empty.
+        /// </summary>
         [<Extension>]
         static member QueryFirstOrDefault<'T>(this: SqliteConnection, sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
             match this with
@@ -750,6 +926,9 @@ module SQLiteTools =
             | Some x -> x
             | None -> Unchecked.defaultof<'T>
 
+        /// <summary>
+        /// Extension method for executing a multi-mapping query.
+        /// </summary>
         [<Extension>]
         static member Query<'T1, 'T2, 'TReturn>(this: SqliteConnection, sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = 
             match this with
@@ -763,7 +942,7 @@ module SQLiteTools =
                 let dict = Dictionary<string, int>(reader.FieldCount)
 
                 for i in 0..(reader.FieldCount - 1) do
-                   dict.Add(reader.GetName(i), i)
+                    dict.Add(reader.GetName(i), i)
 
                 let splitIndex = reader.GetOrdinal(splitOn)
 
