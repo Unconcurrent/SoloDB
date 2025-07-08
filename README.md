@@ -1,421 +1,372 @@
 # SoloDB
 
-SoloDB is a light, fast and robust NoSQL and SQL embedded .NET database built on top of SQLite using the [JSONB](https://sqlite.org/jsonb.html) data type.
+SoloDB is a high-performance, lightweight, and robust embedded .NET database that elegantly combines the power of a NoSQL document store with the reliability of SQL. Built directly on top of SQLite and its native [JSONB](https://sqlite.org/jsonb.html) support, SoloDB offers a serverless, feature-rich experience, combining a simple [MongoDB](https://www.mongodb.com/)-like API with full LINQ support for expressive, strongly-typed queries.
 
-## Features
+It is designed for developers who need a fast, reliable, and easy-to-use database solution without the overhead of a separate server. It's perfect for desktop applications, mobile apps (via .NET MAUI), and small to medium-sized web applications.
 
-Imagine the power of MongoDB and SQL combined.
+I wrote a detailed comparison with a popular alternative, [LiteDB](https://github.com/litedb-org/LiteDB) — including benchmarks, API differences, and developer experience. [Read the article here](https://unconcurrent.com/articles/SoloDBvsLiteDB.html).
 
-- [SQLite](https://sqlite.org/) at the core.
-- Serverless, it is a .NET library.
-- Simple API, similar to MongoDB, see the [below](#usage).
-- Thread safe using a connection pool.
-- [ACID](https://www.sqlite.org/transactional.html) with [full transaction support](#transactions).
-- File System for large files storage.
-- Support for polymorphic types.
-- [Reliable](https://sqlite.org/hirely.html) with a [WAL log file](https://www.sqlite.org/wal.html).
-- Support for [indexes](https://www.sqlite.org/expridx.html) for fast search.
-- Full [LINQ](https://learn.microsoft.com/en-us/dotnet/csharp/linq/) and [IQueryable](https://learn.microsoft.com/en-us/dotnet/api/system.linq.iqueryable-1?view=net-9.0) support.
-- MongoDB inspired Custom ID Generation.
-- Direct SQL support.
-- [Open source](./LICENSE.txt).
-- [.NET Standard 2.0 and 2.1](https://learn.microsoft.com/en-us/dotnet/standard/net-standard?tabs=net-standard-2-0)
-- Pretty well tested: 600+ of tests, but in the tradition of SQLite, we keep them private.
+## Table of Contents
 
-I wrote a detailed comparison with [LiteDB](https://github.com/litedb-org/LiteDB) — including benchmarks, API differences, and developer experience. I aimed for objectivity, but of course, it's subjective all the way down.
-[Read the article](https://unconcurrent.com/articles/SoloDBvsLiteDB.html).
+- [Core Features](#core-features)
+- [Why SoloDB?](#why-solodb)
+- [Installation](#installation)
+- [Getting Started: A 60-Second Guide](#getting-started-a-60-second-guide)
+- [Usage and Examples](#usage-and-examples)
+  - [Initializing the Database](#initializing-the-database)
+  - [Working with Collections](#working-with-collections)
+  - [Indexing for Performance](#indexing-for-performance)
+  - [Atomic Transactions](#atomic-transactions)
+  - [Storing Polymorphic Data](#storing-polymorphic-data)
+  - [Custom ID Generation](#custom-id-generation)
+  - [Integrated File Storage](#integrated-file-storage)
+  - [Direct SQL Access](#direct-sql-access)
+  - [F# Example](#f-example)
+- [Database Management](#database-management)
+  - [Backups](#backups)
+  - [Optimization](#optimization)
+- [License](#license)
+- [FAQ](#faq)
 
-## How to install
+## Core Features
 
-#### From NuGet
-```cmd
+SoloDB is packed with features that provide a seamless and powerful developer experience.
+
+- **SQLite Core**: Leverages the world's most deployed database engine, ensuring rock-solid stability, performance, and reliability.
+- **Serverless Architecture**: As a .NET library, it runs in-process with your application. No separate server or configuration is required.
+- **Hybrid NoSQL & SQL**: Store and query schemaless JSON documents with a familiar object-oriented API, or drop down to raw SQL for complex queries.
+- **Full LINQ Support**: Use the full power of LINQ and IQueryable<T> to build expressive, strongly-typed queries against your data.
+- **ACID Transactions**: Guarantees atomicity, consistency, isolation, and durability for all operations, thanks to SQLite's transactional nature.
+- **Expressive Indexing**: Create unique or non-unique indexes on document properties for lightning-fast queries, using simple attributes.
+- **Integrated File Storage**: A robust, hierarchical file system API (similar to System.IO) for storing and managing large files and binary data directly within the database.
+- **Polymorphic Collections**: Store objects of different derived types within a single collection and query them by their base or concrete type.
+- **Thread-Safe**: A built-in connection pool ensures safe, concurrent access from multiple threads.
+- **Customizable ID Generation**: Use the default long primary key, or implement your own custom ID generation strategy (e.g., string, Guid).
+- **.NET Standard 2.0 & 2.1**: Broad compatibility with .NET Framework, .NET Core, and modern .NET runtimes.
+- **Open Source**: Licensed under the permissive LGPL-3.0.
+
+## Why SoloDB?
+
+In a world of countless database solutions, SoloDB was created to fill a specific niche: to provide a simple, modern, and powerful alternative to document databases like MongoDB, but with the unmatched reliability and zero-configuration nature of SQLite. It's for developers who love the flexibility of NoSQL but don't want to sacrifice the transactional integrity and robustness of a traditional SQL database.
+
+## Installation
+
+Install SoloDB directly from the NuGet Package Manager.
+
+```bash
 dotnet add package SoloDB
 ```
 
-## Usage
+## Getting Started: A 60-Second Guide
+
+Here is a complete example to get you up and running instantly.
+
+```csharp
+using SoloDatabase;
+using SoloDatabase.Attributes;
+
+// 1. Initialize the database (on-disk or in-memory)
+using var db = new SoloDB("my_app_data.db");
+
+// 2. Get a strongly-typed collection
+var users = db.GetCollection<User>();
+
+// 3. Insert some data
+var user = new User 
+{ 
+    Name = "John Doe", 
+    Email = "john.doe@example.com", 
+    CreatedAt = DateTime.UtcNow 
+};
+users.Insert(user);
+Console.WriteLine($"Inserted user with auto-generated ID: {user.Id}");
+
+// 4. Query your data with LINQ
+var foundUser = users.FirstOrDefault(u => u.Email == "john.doe@example.com");
+if (foundUser != null)
+{
+    Console.WriteLine($"Found user: {foundUser.Name}");
+
+    // 6. Update a document
+    foundUser.Name = "Johnathan Doe";
+    users.Update(foundUser);
+    Console.WriteLine("User has been updated.");
+}
+
+// 5. Delete a document
+users.Delete(user.Id);
+Console.WriteLine($"User deleted. Final count: {users.Count()}");
+
+// Define your data model
+public class User
+{
+    // A 'long Id' property is automatically used as the primary key.
+    public long Id { get; set; }
+
+    [Indexed] // Create an index on the 'Email' property for fast lookups.
+    public string Email { get; set; }
+    public string Name { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+```
+
+## Usage and Examples
 
 ### Initializing the Database
 
-You can specify either a file path or an in-memory database.
+You can create a database on disk for persistence or in-memory for temporary data and testing.
 
 ```csharp
 using SoloDatabase;
 
+// Create or open a database file on disk
 using var onDiskDB = new SoloDB("path/to/database.db");
-using var inMemoryDB = new SoloDB("memory:database-name");
+
+// Create a named, shareable in-memory database
+using var sharedMemoryDB = new SoloDB("memory:my-shared-db");
 ```
-### Creating and Accessing Collections
+
+### Working with Collections
+
+A collection is a container for your documents, analogous to a table in SQL.
 
 ```csharp
-public class User
-{
-// Any int64 'Id' property is automatically synced with the SQLite's primary key.
-    public long Id { get; set; }
-    public string Name { get; set; }
-    public int Age { get; set; }
-}
+// Get a strongly-typed collection. This is the recommended approach.
+var products = db.GetCollection<Product>();
 
-using var db = new SoloDB("memory:my-app");
+// Get an untyped collection for dynamic scenarios.
+var untypedProducts = db.GetUntypedCollection("Product");
 
-// Get a strongly-typed collection
-var users = db.GetCollection<User>();
-
-// Get an untyped collection (useful for dynamic scenarios)
-var untypedUsers = db.GetUntypedCollection("User");
+public class Product { /* ... */ }
 ```
 
-### Custom ID Generation
+### Indexing for Performance
 
-```csharp
-using SoloDatabase.Attributes;
-using SoloDatabase.Types;
-using System.Linq;
-
-public class MyStringIdGenerator : IIdGenerator<MyCustomIdType>
-{
-    public object GenerateId(ISoloDBCollection<MyCustomIdType> col, MyCustomIdType item)
-    {
-        var lastItem = col.OrderByDescending(x => long.Parse(x.Id)).FirstOrDefault();
-        long maxId = (lastItem == null) ? 0 : long.Parse(lastItem.Id);
-        return (maxId + 1).ToString();
-    }
-
-    public bool IsEmpty(object id) => string.IsNullOrEmpty(id as string);
-}
-
-public class MyCustomIdType
-{
-    [SoloId(typeof(MyStringIdGenerator))]
-    public string Id { get; set; }
-    public string Data { get; set; }
-}
-
-var customIdCollection = db.GetCollection<MyCustomIdType>();
-var newItem = new MyCustomIdType { Data = "Custom ID Test" };
-customIdCollection.Insert(newItem); // newItem.Id will be populated by MyStringIdGenerator
-System.Console.WriteLine($"Generated ID: {newItem.Id}");
-```
-
-### Indexing Documents
+Create indexes on properties to dramatically speed up query performance. Simply add the [Indexed] attribute to your model.
 
 ```csharp
 using SoloDatabase.Attributes;
 
 public class IndexedProduct
 {
-    public long Id { get; set; } // Implicitly indexed by SoloDB
+    public long Id { get; set; } // The primary key is always indexed.
 
-    [Indexed(/* unique = */ true)] // Create a unique index on SKU
+    [Indexed(unique: true)] // Create a unique index to enforce SKU uniqueness.
     public string SKU { get; set; }
 
-    [Indexed(false)] // Create a non-unique index on Category
+    [Indexed] // Create a non-unique index for fast category lookups.
     public string Category { get; set; }
     public decimal Price { get; set; }
 }
 
-// ...
 var products = db.GetCollection<IndexedProduct>();
-products.Insert(new IndexedProduct { SKU = "BOOK-123", Category = "Books", Price = 29.99m });
 
-// Verify unique index constraint. This will throw a unique constraint violation exception.
-try
-{
-    products.Insert(new IndexedProduct { SKU = "BOOK-123", Category = "Fiction", Price = 19.99m });
-}
-catch (Microsoft.Data.Sqlite.SqliteException ex)
-{
-    System.Console.WriteLine($"Successfully caught expected exception: {ex.Message}");
-}
-
-// Test querying with indexes
-var book = products.FirstOrDefault(p => p.SKU == "BOOK-123");
-System.Console.WriteLine($"Found book with SKU BOOK-123: Price {book.Price}");
-
-
-products.Insert(new IndexedProduct { SKU = "BOOK-456", Category = "Books", Price = 14.99m });
-var booksInCategory = products.Where(p => p.Category == "Books").ToList();
-System.Console.WriteLine($"Found {booksInCategory.Count} books in the 'Books' category.");
-
+// This query will be very fast, using the index on 'Category'.
+var books = products.Where(p => p.Category == "Books").ToList();
 ```
 
-### Transactions
+### Atomic Transactions
 
-Use the `WithTransaction` method to execute a function within a transaction.
+For operations that must either fully complete or not at all, use WithTransaction. If an exception is thrown inside the delegate, all database changes are automatically rolled back.
 
 ```csharp
 try
 {
     db.WithTransaction(tx => {
-        var collection = tx.GetCollection<ulong>();
-        // Perform operations within the transaction.
-        collection.Insert(420);
-        throw new System.OperationCanceledException("Simulating a rollback."); // Simulate a fail.
-    });
-} catch (System.OperationCanceledException) {}
+        var accounts = tx.GetCollection<Account>();
+        var fromAccount = accounts.GetById(1);
+        var toAccount = accounts.GetById(2);
 
-System.Console.WriteLine($"Collection exists after rollback: {db.CollectionExists<ulong>()}"); // False
+        fromAccount.Balance -= 100;
+        toAccount.Balance += 100;
+
+        accounts.Update(fromAccount);
+        accounts.Update(toAccount);
+        
+        // If something fails here, both updates will be reverted.
+        // throw new InvalidOperationException("Simulating a failure!");
+    });
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"Transaction failed and was rolled back: {ex.Message}");
+}
 ```
 
-### Polymorphic Types
+### Storing Polymorphic Data
+
+Store different but related object types in the same collection. SoloDB automatically handles serialization and deserialization.
+
 ```csharp
 public abstract class Shape
 {
     public long Id { get; set; }
     public string Color { get; set; }
-    public abstract double CalculateArea();
 }
+public class Circle : Shape { public double Radius { get; set; } }
+public class Rectangle : Shape { public double Width { get; set; } public double Height { get; set; } }
 
-public class Circle : Shape
-{
-    public double Radius { get; set; }
-    public override double CalculateArea() => System.Math.PI * Radius * Radius;
-}
-
-public class Rectangle : Shape
-{
-    public double Width { get; set; }
-    public double Height { get; set; }
-    public override double CalculateArea() => Width * Height;
-}
-
-// ...
-var shapes = db.GetCollection<Shape>(); // Store as the base type 'Shape'
-
+// Store all shapes in one collection
+var shapes = db.GetCollection<Shape>();
 shapes.Insert(new Circle { Color = "Red", Radius = 5.0 });
 shapes.Insert(new Rectangle { Color = "Blue", Width = 4.0, Height = 6.0 });
 
-// Get all circles
+// You can query for specific derived types using OfType<T>()
 var circles = shapes.OfType<Circle>().ToList();
-foreach (var circle in circles)
-{
-    System.Console.WriteLine($"Red Circle - Radius: {circle.Radius}, Area: {circle.CalculateArea()}");
-}
+Console.WriteLine($"Found {circles.Count} circle(s).");
+```
 
-// Get all shapes with Color "Blue"
-var blueShapes = shapes.Where(s => s.Color == "Blue").ToList();
-foreach (var shape in blueShapes)
+### Custom ID Generation
+
+While the default long auto-incrementing ID is sufficient for most cases, you can define your own ID types and generation logic.
+
+```csharp
+using SoloDatabase.Attributes;
+
+// 1. Define a custom ID generator
+public class GuidIdGenerator : IIdGenerator<MyObject>
 {
-    if (shape is Rectangle rect)
+    public object GenerateId(ISoloDBCollection<MyObject> collection, MyObject item)
     {
-        System.Console.WriteLine($"Blue Rectangle - Width: {rect.Width}, Height: {rect.Height}, Area: {rect.CalculateArea()}");
+        return Guid.NewGuid().ToString("N");
     }
+
+    public bool IsEmpty(object id) => string.IsNullOrEmpty(id as string);
 }
 
+// 2. Define the model with the custom ID
+public class MyObject
+{
+    [SoloId(typeof(GuidIdGenerator))]
+    public string Id { get; set; }
+    public string Data { get; set; }
+}
+
+// 3. Use it
+var collection = db.GetCollection<MyObject>();
+var newItem = new MyObject { Data = "Custom ID Test" };
+collection.Insert(newItem); // newItem.Id is now populated with a GUID string.
+Console.WriteLine($"Generated ID: {newItem.Id}");
 ```
 
+### Integrated File Storage
 
-### Direct SQLite access using the build-in SoloDatabase.SQLiteTools.IDbConnectionExtensions.
+SoloDB includes a powerful file storage system for managing binary data, large documents, or any kind of file.
 
 ```csharp
-using static SoloDatabase.SQLiteTools.IDbConnectionExtensions;
-...
+using System.Text;
 
+var fs = db.FileSystem;
+var content = "This is the content of my file.";
+var contentBytes = Encoding.UTF8.GetBytes(content);
+
+// Upload data from a stream
+using (var stream = new MemoryStream(contentBytes))
+{
+    fs.Upload("/reports/report-2024.txt", stream);
+}
+
+// Set custom metadata
+fs.SetMetadata("/reports/report-2024.txt", "Author", "Ruslan");
+
+// Download the file
+using (var targetStream = new MemoryStream())
+{
+    fs.Download("/reports/report-2024.txt", targetStream);
+    targetStream.Position = 0;
+    string downloadedContent = new StreamReader(targetStream).ReadToEnd();
+    Console.WriteLine($"Downloaded content: {downloadedContent}");
+}
+
+// Check if a file exists
+bool exists = fs.Exists("/reports/report-2024.txt"); // true
+
+// Delete a file
+fs.DeleteFileAt("/reports/report-2024.txt");
+```
+
+### Direct SQL Access
+
+For complex scenarios not easily covered by LINQ, you can execute raw SQL commands directly.
+
+```csharp
 using var pooledConnection = db.Connection.Borrow();
-pooledConnection.Execute(
-    "CREATE TABLE Users (Id INTEGER PRIMARY KEY, Name TEXT, Age INTEGER)");
 
-var insertSql = "INSERT INTO Users (Name, Age) VALUES (@Name, @Age) RETURNING Id;";
-var userId = pooledConnection.QueryFirst<long>(insertSql, new { Name = "John Doe", Age = 30 });
+// Execute a command that doesn't return data
+pooledConnection.Execute("UPDATE Product SET Price = Price * 1.1 WHERE Category = 'Electronics'");
 
-Assert.IsTrue(userId > 0, "Failed to insert new user and get a valid ID.");
+// Execute a query and map the first result to a value
+var highestPrice = pooledConnection.QueryFirst<decimal>("SELECT MAX(Price) FROM Product");
 
-var queriedAge = pooledConnection.QueryFirst<int>("SELECT Age FROM Users WHERE Name = 'John Doe'");
-Assert.AreEqual(30, queriedAge);
+// Execute a query and map results to objects
+var cheapProducts = pooledConnection.Query<Product>("SELECT * FROM Product WHERE Price < @MaxPrice", new { MaxPrice = 10.0 });
 ```
 
+### F# Example
 
-### Backing Up the Database
+SoloDB works seamlessly with F#.
 
-You can create a backup of the database using the [`BackupTo`](https://www.sqlite.org/backup.html) or [`VacuumTo`](https://www.sqlite.org/lang_vacuum.html#vacuuminto) methods.
+```fsharp
+open SoloDatabase
+open System.Linq
+
+[<CLIMutable>]
+type MyFSharpType = { Id: int64; Name: string; Data: string }
+
+use db = new SoloDB("fsharp_demo.db")
+let collection = db.GetCollection<MyFSharpType>()
+        
+// Insert a document
+let data = { Id = 0L; Name = "F# Document"; Data = "Some data" }
+collection.Insert(data) |> ignore
+printfn "Inserted document with ID: %d" data.Id
+        
+// Query all documents into an F# list
+let documents = collection.ToList()
+printfn "Found %d documents" documents.Count
+        
+// Update a document
+let updatedData = { data with Data = "Updated F# data" }
+collection.Update(updatedData)
+        
+// Delete a document
+let deleteCount = collection.Delete(data.Id)
+printfn "Deleted %d document(s)" deleteCount
+```
+
+## Database Management
+
+### Backups
+
+Create live backups of your database without interrupting application operations.
 
 ```csharp
-db.BackupTo(otherDb);
-db.VacuumTo("path/to/backup.db");
+// Back up to another SoloDB instance
+using var backupDb = new SoloDB("path/to/backup.db");
+db.BackupTo(backupDb);
+
+// Or vacuum the database into a new, clean file
+db.VacuumTo("path/to/optimized_backup.db");
 ```
 
+### Optimization
 
-### Optimizing the Database
-
-The [`Optimize`](https://www.sqlite.org/pragma.html#pragma_optimize) method can optimize the database using statistically information, it runs automatically on startup.
+You can ask SQLite to analyze the database and potentially improve query plans. This runs automatically at startup but can also be triggered manually.
 
 ```csharp
 db.Optimize();
 ```
-### File storage
 
-```csharp
-using SoloDatabase;
-using SoloDatabase.FileStorage;
-using System.IO;
-using System.Text;
+## License
 
-var fs = db.FileSystem;
-var randomBytes = new byte[256];
-System.Random.Shared.NextBytes(randomBytes);
+This project is licensed under the GNU Lesser General Public License v3.0 (LGPL-3.0).
 
-// Create a directory and set metadata
-var directory = fs.GetOrCreateDirAt("/my_documents/reports");
-fs.SetDirectoryMetadata(directory, "Sensitivity", "Confidential");
-var dirInfo = fs.GetDirAt("/my_documents/reports");
-System.Console.WriteLine($"Directory '/my_documents/reports' metadata 'Sensitivity': {dirInfo.Metadata["Sensitivity"]}");
-
-// Upload a file and set metadata
-string filePath = "/my_documents/reports/annual_report.txt";
-using (var ms = new System.IO.MemoryStream(System.Text.Encoding.UTF8.GetBytes("This is a test report.")))
-{
-    fs.Upload(filePath, ms);
-}
-fs.SetMetadata(filePath, "Author", "Jane Doe");
-fs.SetFileCreationDate(filePath, System.DateTimeOffset.UtcNow.AddDays(-7));
-var fileInfo = fs.GetAt(filePath);
-System.Console.WriteLine($"File '{fileInfo.Name}' author: {fileInfo.Metadata["Author"]}");
-
-// Write at a specific offset (sparse file)
-string sparseFilePath = "/my_documents/sparse_file.dat";
-fs.WriteAt(sparseFilePath, 1024 * 1024, randomBytes); // Write at 1MB offset
-var readData = fs.ReadAt(sparseFilePath, 1024 * 1024, randomBytes.Length);
-System.Console.WriteLine($"Sparse file write/read successful: {System.Linq.Enumerable.SequenceEqual(randomBytes, readData)}");
-
-// Download file content
-using (var targetStream = new System.IO.MemoryStream())
-{
-    fs.Download(filePath, targetStream);
-    targetStream.Position = 0;
-    string content = new System.IO.StreamReader(targetStream).ReadToEnd();
-    System.Console.WriteLine($"Downloaded content: {content}");
-}
-
-// Recursively list entries
-var entries = fs.RecursiveListEntriesAt("/my_documents");
-System.Console.WriteLine($"Found {entries.Count} entries recursively under /my_documents.");
-
-// Move a file to a new location (and rename it)
-fs.MoveFile(filePath, "/archive/annual_report_2023.txt");
-bool originalExists = fs.Exists(filePath); // false
-bool newExists = fs.Exists("/archive/annual_report_2023.txt"); // true
-System.Console.WriteLine($"Original file exists after move: {originalExists}. New file exists: {newExists}");
-
-// Bulk upload multiple files
-var bulkFiles = new System.Collections.Generic.List<SoloDatabase.FileStorage.BulkFileData>
-{
-    // The constructor allows setting path, data, and optional timestamps.
-    new("/bulk_uploads/file1.log", System.Text.Encoding.UTF8.GetBytes("Log entry 1"), null, null),
-    new("/bulk_uploads/images/pic.jpg", randomBytes, null, null)
-};
-fs.UploadBulk(bulkFiles);
-System.Console.WriteLine($"Bulk upload successful. File exists: {fs.Exists("/bulk_uploads/images/pic.jpg")}");
-
-// Use SoloFileStream for controlled writing
-using (var fileStream = fs.OpenOrCreateAt("/important_data/critical.bin"))
-{
-    fileStream.Write(randomBytes, 0, 10);
-}
-var criticalFileInfo = fs.GetAt("/important_data/critical.bin");
-System.Console.WriteLine($"SoloFileStream created file with size: {criticalFileInfo.Size}.");
-
-```
-
-
-### Example Usage
-
-Here is an example of how to use SoloDB to manage a collection of documents in C#:
-
-#### SoloDB
-```csharp
-using SoloDatabase;
-using SoloDatabase.Attributes;
-using System.Linq;
-
-public class MyDataType
-{
-    public long Id { get; set; }
-    [Indexed(/* unique = */ false)]
-    public string Name { get; set; }
-    public string Data { get; set; }
-}
-
-// using var db = new SoloDB(...);
-
-var collection = db.GetCollection<MyDataType>();
-
-// Insert a document
-var newDoc = new MyDataType { Name = "Document 1", Data = "Some data" };
-collection.Insert(newDoc); // Id will be auto-generated and set on newDoc.Id
-System.Console.WriteLine($"Inserted document with ID: {newDoc.Id}");
-
-
-// If the Id property does not exist, then you can use the return value of Insert.
-var dataToInsert = new MyDataType { Name = "Document 2", Data = "More data" };
-var docId = collection.Insert(dataToInsert);
-System.Console.WriteLine($"Inserted document, ID from object: {docId}");
-
-// Query all documents into a C# list
-var allDocuments = collection.ToList();
-System.Console.WriteLine($"Total documents: {allDocuments.Count}");
-
-var documentsData = collection.Where(d => d.Name.StartsWith("Document"))
-                              .Select(d => d.Data)
-                              .ToList();
-
-// Update a document
-var docToUpdate = collection.GetById(docId);
-docToUpdate.Data = "Updated data for Document 2";
-collection.Update(docToUpdate);
-
-// Verify the update
-var updatedDoc = collection.GetById(docId);
-System.Console.WriteLine($"Updated data: {updatedDoc.Data}"); // "Updated data for Document 2"
-
-// Delete the first document by its primary key
-int deleteCount = collection.Delete(docId); 
-System.Console.WriteLine($"Documents deleted: {deleteCount}"); // 1
-
-// Verify the final count
-System.Console.WriteLine($"Final document count: {collection.Count()}"); // 1
-
-```
-
-And a simple one in F#:
-
-#### SoloDB
-```fsharp
-[<CLIMutable>]
-type MyType = { Id: int64; Name: string; Data: string }
-
-use db = new SoloDB("./mydatabase.db")
-let collection = db.GetCollection<MyType>()
-        
-// Insert a document
-let docId = collection.Insert({ Id = 0; Name = "Document 1"; Data = "Some data" })
-        
-// Or
-        
-let data = { Id = 0; Name = "Document 1"; Data = "Some data" }
-collection.Insert(data) |> ignore
-printfn "%A" data.Id // 2
-        
-// Query all documents into a F# list
-let documents = collection.ToList()
-        
-// Query the Data property, where Name starts with 'Document'
-let documentsData = collection.Where(fun d -> d.Name.StartsWith "Document").Select(fun d -> d.Data).ToList()
-        
-let data = {data with  Data = "Updated data"}
-        
-// Update a document
-collection.Update(data)
-        
-// Delete a document
-let count = collection.Delete(data.Id) // 1
-```
-### Licence
-This project is licensed under [LGPL-3.0](./LICENSE.txt), with the additional permission to distribute applications that incorporate an unmodified DLL of this library in Single-file deployment, Native AOT, and other bundling technologies that embed the library into the executable.
+In addition, special permission is granted to distribute applications that incorporate an unmodified DLL of this library in Single-file deployments, Native AOT builds, and other bundling technologies that embed the library directly into the executable file. This ensures you can use modern .NET deployment strategies without violating the license.
 
 ## FAQ
 
 ### Why create this project?
-- For fun and profit, and to have a more simple alternative to MongoDB with the reliability of SQLite.
 
-##### Footnote
+For fun, for profit, and to create a simpler, more integrated alternative to document databases like MongoDB, while retaining the unparalleled reliability and simplicity of SQLite.
 
-###### API is subject to change.
+API is subject to change.

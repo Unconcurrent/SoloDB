@@ -1361,6 +1361,26 @@ module FileStorage =
             tryGetFileAt db path
 
         /// <summary>
+        /// Checks if a file or directory exists at the specified path.
+        /// </summary>
+        /// <param name="path">The full path of the file or directory.</param>
+        /// <returns>True if an entry exists at the path, otherwise false.</returns>
+        member this.Exists(path: string) =
+            use db = connection.Get()
+            // This query checks for the existence of the path in either the file or directory headers table.
+            // SELECT EXISTS is highly efficient as the database engine can stop processing as soon as a match is found.
+            let sql = """
+                SELECT EXISTS (
+                    SELECT 1 FROM SoloDBFileHeader WHERE FullPath = @Path
+                    UNION ALL
+                    SELECT 1 FROM SoloDBDirectoryHeader WHERE FullPath = @Path
+                )
+                """
+            // formatPath ensures consistent path formatting before querying.
+            let formattedPath = formatPath path
+            db.QueryFirst<bool>(sql, {| Path = formattedPath |})
+
+        /// <summary>
         /// Gets the header information for a file at the specified path, creating it if it does not exist.
         /// </summary>
         /// <param name="path">The full path of the file.</param>
