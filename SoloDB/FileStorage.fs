@@ -1367,8 +1367,6 @@ module FileStorage =
         /// <returns>True if an entry exists at the path, otherwise false.</returns>
         member this.Exists(path: string) =
             use db = connection.Get()
-            // This query checks for the existence of the path in either the file or directory headers table.
-            // SELECT EXISTS is highly efficient as the database engine can stop processing as soon as a match is found.
             let sql = """
                 SELECT EXISTS (
                     SELECT 1 FROM SoloDBFileHeader WHERE FullPath = @Path
@@ -1376,7 +1374,6 @@ module FileStorage =
                     SELECT 1 FROM SoloDBDirectoryHeader WHERE FullPath = @Path
                 )
                 """
-            // formatPath ensures consistent path formatting before querying.
             let formattedPath = formatPath path
             db.QueryFirst<bool>(sql, {| Path = formattedPath |})
 
