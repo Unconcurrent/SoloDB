@@ -1339,7 +1339,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// </summary>
     member this.Optimize() =
         use dbConnection = connectionManager.Borrow()
-        dbConnection.Execute "PRAGMA optimize;"
+        dbConnection.Execute "PRAGMA optimize;" |> ignore
 
     /// <summary>
     /// Disables the in-memory cache of prepared SQL commands for all connections.
