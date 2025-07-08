@@ -14,6 +14,9 @@ open JsonFunctions
 open Utils
 open SoloDatabase.JsonSerializator
 
+/// <summary>
+/// An internal discriminated union that enumerates the LINQ methods supported by the query translator.
+/// </summary>
 type internal SupportedLinqMethods =
 | Sum
 | Average
@@ -56,24 +59,44 @@ type internal SupportedLinqMethods =
 | OfType
 | Aggregate
 
+/// <summary>
+/// A private, mutable builder used to construct an SQL query from a LINQ expression tree.
+/// </summary>
+/// <remarks>This type holds the state of the translation process, including the SQL command being built and any parameters.</remarks>
 type private QueryableBuilder<'T> = 
     {
+        /// <summary>The StringBuilder that accumulates the generated SQL string.</summary>
         SQLiteCommand: StringBuilder
+        /// <summary>A dictionary of parameters to be passed to the SQLite command.</summary>
         Variables: Dictionary<string, obj>
+        /// <summary>The source collection that the query operates on.</summary>
         Source: ISoloDBCollection<'T>
     }
+    /// <summary>Appends a string to the current SQL command.</summary>
     member this.Append(text: string) =
         this.SQLiteCommand.Append text |> ignore
 
+    /// <summary>Adds a variable to the parameters dictionary and appends its placeholder to the SQL command.</summary>
     member this.AppendVar(variable: obj) =
         QueryTranslator.appendVariable this.SQLiteCommand this.Variables variable
 
 // Translation validation helpers.
+/// <summary>A marker interface for the SoloDB query provider.</summary>
 type private SoloDBQueryProvider = interface end
+/// <summary>A marker interface for the root of a queryable expression, identifying the source table.</summary>
 type private IRootQueryable =
+    /// <summary>Gets the name of the source database table for the query.</summary>
     abstract member SourceTableName: string
 
+/// <summary>
+/// Contains private helper functions for translating LINQ expression trees to SQL.
+/// </summary>
 module private QueryHelper =
+    /// <summary>
+    /// Parses a method name string into a <c>SupportedLinqMethods</c> option.
+    /// </summary>
+    /// <param name="methodName">The name of the LINQ method.</param>
+    /// <returns>A Some value if the method is supported, otherwise None.</returns>
     let private parseSupportedMethod (methodName: string) : SupportedLinqMethods option =
         match methodName with
         | "Sum" -> Some Sum
@@ -118,6 +141,11 @@ module private QueryHelper =
         | "Aggregate" -> Some Aggregate
         | _ -> None
 
+    /// <summary>
+    /// Determines the appropriate SQL to select a value, extracting it from JSON if the type is not a primitive SQLite type.
+    /// </summary>
+    /// <param name="x">The .NET type of the value being selected.</param>
+    /// <returns>An SQL string snippet for selecting the value.</returns>
     let private extractValueAsJsonIfNecesary (x: Type) =
         let isPrimitive = QueryTranslator.isPrimitiveSQLiteType x
 
@@ -130,7 +158,13 @@ module private QueryHelper =
             else
                 "json_extract(Value, '$') "
 
-    /// This function is adjusted to better use indexes.
+    /// <summary>
+    /// Translates a 'Where' clause, optimizing the SQL by applying the filter directly to the source table if possible.
+    /// </summary>
+    /// <param name="translate">The main translation function to recursively call for the source collection.</param>
+    /// <param name="builder">The query builder instance.</param>
+    /// <param name="collection">The expression representing the source collection.</param>
+    /// <param name="filter">The expression representing the where predicate.</param>
     let private translateWhereStatement (translate: QueryableBuilder<'T> -> Expression -> unit) (builder: QueryableBuilder<'T>) (collection: Expression) (filter: Expression) =
         match collection with
         | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
@@ -138,7 +172,7 @@ module private QueryHelper =
             builder.Append "SELECT Id, jsonb_extract(\""
             builder.Append tableName
             builder.Append "\".Value, '$') as Value FROM \""
-                
+            
             builder.Append tableName
             builder.Append "\" WHERE "
             QueryTranslator.translateQueryable tableName filter builder.SQLiteCommand builder.Variables
@@ -150,6 +184,11 @@ module private QueryHelper =
             builder.Append ") o WHERE "
             QueryTranslator.translateQueryable "" filter builder.SQLiteCommand builder.Variables
 
+    /// <summary>
+    /// Extracts the expression for a collection that is an argument to a set-based method like Concat or Except.
+    /// </summary>
+    /// <param name="methodArg">The method argument expression.</param>
+    /// <returns>The expression representing the queryable collection.</returns>
     let private readSoloDBQueryable<'T> (methodArg: Expression) =
         let failwithMsg = "Cannot concat with an IEnumerable other that another SoloDB IQueryable, on the same connection. Do do this anyway, use to AsEnumerable()."
         match methodArg with
@@ -164,6 +203,11 @@ module private QueryHelper =
             mcl
         | _other -> failwith failwithMsg
 
+    /// <summary>
+    /// Translates the root source of a query into the initial 'SELECT ... FROM ...' statement.
+    /// </summary>
+    /// <param name="builder">The query builder instance.</param>
+    /// <param name="root">The root queryable object.</param>
     let private translateSource<'T> (builder: QueryableBuilder<'T>) (root: IRootQueryable) =
         let sourceName = root.SourceTableName
         // On modification, also check the '| Where -> ' and '| OrderBy' match below.
@@ -173,10 +217,21 @@ module private QueryHelper =
         builder.Append sourceName
         builder.Append "\""
 
+    /// <summary>
+    /// Evaluates a root expression and translates it into the initial 'SELECT ... FROM ...' statement.
+    /// </summary>
+    /// <param name="builder">The query builder instance.</param>
+    /// <param name="rootExpr">The expression representing the root of the query.</param>
     let private translateSourceExpr<'T> (builder: QueryableBuilder<'T>) (rootExpr: Expression) =
         let root = QueryTranslator.evaluateExpr<IRootQueryable> rootExpr
         translateSource builder root
 
+    /// <summary>
+    /// Recursively translates a LINQ expression tree into an SQL query.
+    /// This is the main dispatcher for the translation process.
+    /// </summary>
+    /// <param name="builder">The query builder instance that accumulates the SQL and parameters.</param>
+    /// <param name="expression">The expression to translate.</param>
     let rec private aggregateTranslator (fnName: string) (builder: QueryableBuilder<'T>) (expression: MethodCallExpression) =
         builder.Append "SELECT "
         builder.Append fnName
@@ -192,6 +247,14 @@ module private QueryHelper =
         translate builder expression.Arguments.[0]
         builder.Append ") o"
 
+    /// <summary>
+    /// Wraps an aggregate function translator to handle cases where the source sequence is empty, which would result in a NULL from SQL.
+    /// This function generates SQL to return a specific error message that can be caught and thrown as an exception, mimicking .NET behavior.
+    /// </summary>
+    /// <param name="fnName">The name of the SQL aggregate function (e.g., "AVG", "MIN").</param>
+    /// <param name="builder">The query builder instance.</param>
+    /// <param name="expression">The LINQ method call expression for the aggregate.</param>
+    /// <param name="errorMsg">The error message to return if the aggregation result is NULL.</param>
     and private raiseIfNullAggregateTranslator (fnName: string) (builder: QueryableBuilder<'T>) (expression: MethodCallExpression) (errorMsg: string) =
         builder.Append "SELECT "
         // In this case NULL is an invalid operation, therefore to emulate the .NET behavior 
@@ -206,12 +269,22 @@ module private QueryHelper =
         aggregateTranslator fnName builder expression
         builder.Append ") o"
 
+    /// <summary>
+    /// Serializes a document object to a JSON string, determining whether to include full type information based on the object's type.
+    /// </summary>
+    /// <param name="value">The object to serialize.</param>
+    /// <returns>A tuple containing the JSON string and a boolean indicating if the type has a direct 'Id' property.</returns>
     and private serializeForCollection (value: 'T) =
         match typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T> with
         | true -> JsonSerializator.JsonValue.SerializeWithType value
         | false -> JsonSerializator.JsonValue.Serialize value
         |> _.ToJsonString(), HasTypeId<'T>.Value
 
+    /// <summary>
+    /// Translates a <c>MethodCallExpression</c> by parsing the method name and dispatching to the appropriate translation logic.
+    /// </summary>
+    /// <param name="builder">The query builder instance.</param>
+    /// <param name="expression">The method call expression to translate.</param>
     and private translateCall (builder: QueryableBuilder<'T>) (expression: MethodCallExpression) =
         match parseSupportedMethod expression.Method.Name with
         | None -> failwithf "Queryable method not implemented: %s" expression.Method.Name
@@ -300,8 +373,7 @@ module private QueryHelper =
             builder.Append "("
             translate builder expression.Arguments.[0]
             builder.Append ") o"
-                
-
+            
         | SelectMany ->
             match expression.Arguments.Count with
             | 2 ->
@@ -323,7 +395,7 @@ module private QueryHelper =
                 builder.Append innerSourceName
                 builder.Append " "
                 
-        
+
                 // Extract the path to the collection selector (e.g., "$.Values")
                 match expression.Arguments.[1] with
                 | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
@@ -343,7 +415,7 @@ module private QueryHelper =
 
                     | _ -> failwith "Unsupported SelectMany selector structure"
                 | _ -> failwith "Invalid SelectMany structure"
-                                
+                        
             | other -> 
                 failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
 
@@ -359,9 +431,9 @@ module private QueryHelper =
             let innerExpression = 
                 let mutable expr = expression.Arguments.[0]
                 while match expr with
-                        | :? MethodCallExpression as mce -> match mce.Method.Name with "Order" |  "OrderDescending" | "OrderBy" | "OrderByDescending" | "ThenBy" | "ThenByDescending" -> true | _other -> false
-                        | _other -> false 
-                    do expr <- (expr :?> MethodCallExpression).Arguments.[0]
+                      | :? MethodCallExpression as mce -> match mce.Method.Name with "Order" |  "OrderDescending" | "OrderBy" | "OrderByDescending" | "ThenBy" | "ThenByDescending" -> true | _other -> false
+                      | _other -> false 
+                      do expr <- (expr :?> MethodCallExpression).Arguments.[0]
                 expr
 
             match innerExpression with
@@ -751,12 +823,22 @@ module private QueryHelper =
         | Aggregate -> failwithf "Aggregate is not supported."
 
 
+    /// <summary>
+    /// Translates a <c>ConstantExpression</c>. If it's the root of the query, it generates the initial SELECT. Otherwise, it's treated as a parameter.
+    /// </summary>
+    /// <param name="builder">The query builder instance.</param>
+    /// <param name="expression">The constant expression to translate.</param>
     and private translateConstant (builder: QueryableBuilder<'T>) (expression: ConstantExpression) =
         if typedefof<IRootQueryable>.IsAssignableFrom expression.Type then
             translateSourceExpr builder expression
         else
             QueryTranslator.translateQueryable "" expression builder.SQLiteCommand builder.Variables
 
+    /// <summary>
+    /// The main recursive function that walks the expression tree and translates it to SQL. It dispatches to more specific translation functions based on the expression node type.
+    /// </summary>
+    /// <param name="builder">The query builder instance that accumulates the SQL and parameters.</param>
+    /// <param name="expression">The expression to translate.</param>
     and private translate (builder: QueryableBuilder<'T>) (expression: Expression) =
         match expression.NodeType with
         | ExpressionType.Call ->
@@ -765,6 +847,11 @@ module private QueryHelper =
             translateConstant builder (expression :?> ConstantExpression)
         | other -> failwithf "Could not translate Queryable expression of type: %A" other
 
+    /// <summary>
+    /// Determines if a given LINQ expression corresponds to a method that does not return the document ID (e.g., aggregate functions).
+    /// </summary>
+    /// <param name="expression">The expression to check.</param>
+    /// <returns>True if the method is an aggregate that doesn't return an ID; otherwise, false.</returns>
     let internal doesNotReturnIdFn (expression: Expression) =
         match expression with
         | :? MethodCallExpression as mce ->
@@ -816,6 +903,11 @@ module private QueryHelper =
                 -> false
         | _other -> false
 
+    /// <summary>
+    /// Checks if an Aggregate expression is a special call to ExplainQueryPlan.
+    /// </summary>
+    /// <param name="expression">The expression to check.</param>
+    /// <returns>True if it's an ExplainQueryPlan call, otherwise false.</returns>
     let internal isAggregateExplainQuery (expression: Expression) =
         match expression with
         | :? MethodCallExpression as expression ->
@@ -825,6 +917,11 @@ module private QueryHelper =
             && expression.Arguments.[2].NodeType = ExpressionType.Quote
         | _ -> false
 
+    /// <summary>
+    /// Checks if an Aggregate expression is a special call to GetSQL.
+    /// </summary>
+    /// <param name="expression">The expression to check.</param>
+    /// <returns>True if it's a GetSQL call, otherwise false.</returns>
     let internal isGetGeneratedSQLQuery (expression: Expression) =
         match expression with
         | :? MethodCallExpression as expression ->
@@ -834,6 +931,12 @@ module private QueryHelper =
             && expression.Arguments.[2].NodeType = ExpressionType.Quote
         | _ -> false
 
+    /// <summary>
+    /// Initiates the translation of a LINQ expression tree to an SQL query string and a dictionary of parameters.
+    /// </summary>
+    /// <param name="source">The source collection of the query.</param>
+    /// <param name="expression">The LINQ expression to translate.</param>
+    /// <returns>A tuple containing the generated SQL string and the dictionary of parameters.</returns>
     let internal startTranslation (source: ISoloDBCollection<'T>) (expression: Expression) =
         let builder = {
             SQLiteCommand = StringBuilder(256)
@@ -876,10 +979,20 @@ module private QueryHelper =
         builder.SQLiteCommand.ToString(), builder.Variables
 
 
+/// <summary>
+/// An internal interface defining the contract for a SoloDB query provider.
+/// </summary>
 type internal ISoloDBCollectionQueryProvider =
+    /// <summary>Gets the source collection object.</summary>
     abstract member Source: obj
+    /// <summary>Gets additional data passed from the parent database instance.</summary>
     abstract member AdditionalData: obj
 
+/// <summary>
+/// The internal implementation of <c>IQueryProvider</c> for SoloDB collections.
+/// </summary>
+/// <param name="source">The source collection.</param>
+/// <param name="data">Additional data, such as cache clearing functions.</param>
 type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, data: obj) =
     interface ISoloDBCollectionQueryProvider with
         override this.Source = source
@@ -923,7 +1036,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         .GetMethod(nameof(this.ExecuteEnumetable), BindingFlags.NonPublic ||| BindingFlags.Instance)
                         .MakeGenericMethod(elemType)
                 m.Invoke(this, [|query; variables|]) :?> 'TResult
-                    // When is explain query plan.
+                // When is explain query plan.
             | t when t = typeof<string> && QueryHelper.isAggregateExplainQuery expression ->
                 use connection = source.GetInternalConnection()
                 let result = connection.Query<{|detail: string|}>(query, variables) |> Seq.toList
@@ -941,7 +1054,11 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                     | _other -> failwithf "Sequence contains no elements"
                 | Some row -> JsonFunctions.fromSQLite<'TResult> row
             
-
+/// <summary>
+/// The internal implementation of <c>IQueryable</c> and <c>IOrderedQueryable</c> for SoloDB collections.
+/// </summary>
+/// <param name="provider">The query provider that created this queryable.</param>
+/// <param name="expression">The expression tree representing the query.</param>
 and internal SoloDBCollectionQueryable<'I, 'T>(provider: IQueryProvider, expression: Expression) =
     interface IOrderedQueryable<'T>
 
@@ -959,6 +1076,10 @@ and internal SoloDBCollectionQueryable<'I, 'T>(provider: IQueryProvider, express
         member this.GetEnumerator() =
             (this :> IEnumerable<'T>).GetEnumerator() :> IEnumerator
 
+/// <summary>
+/// A private, sealed class representing the root of a query, which is always a collection.
+/// </summary>
+/// <param name="c">The source collection.</param>
 and [<Sealed>] private RootQueryable<'T>(c: ISoloDBCollection<'T>) =
     member val Source = c
 
