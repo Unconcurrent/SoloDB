@@ -160,30 +160,57 @@ module private QueryHelper =
 
     /// <summary>
     /// Translates a 'Where' clause, optimizing the SQL by applying the filter directly to the source table if possible.
+    /// Optimizes consecutive Where clauses by combining them with AND operators.
     /// </summary>
     /// <param name="translate">The main translation function to recursively call for the source collection.</param>
     /// <param name="builder">The query builder instance.</param>
     /// <param name="collection">The expression representing the source collection.</param>
     /// <param name="filter">The expression representing the where predicate.</param>
     let private translateWhereStatement (translate: QueryableBuilder<'T> -> Expression -> unit) (builder: QueryableBuilder<'T>) (collection: Expression) (filter: Expression) =
-        match collection with
+    
+        // Helper function to collect all consecutive Where filters
+        let rec collectWhereFilters (expr: Expression) (filters: Expression list) =
+            match expr with
+            | :? MethodCallExpression as mce when mce.Method.Name = "Where" && mce.Arguments.Count = 2 ->
+                // This is another Where clause, collect its filter and continue
+                let newFilter = mce.Arguments.[1]
+                collectWhereFilters mce.Arguments.[0] (newFilter :: filters)
+            | other ->
+                // Not a Where clause, this is our base collection
+                other, filters
+    
+        // Collect all consecutive Where filters
+        let baseCollection, allFilters = collectWhereFilters collection [filter]
+    
+        match baseCollection with
         | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
+            // Root collection - generate optimized query with all filters
             let tableName = (ce.Value :?> IRootQueryable).SourceTableName
             builder.Append "SELECT Id, jsonb_extract(\""
             builder.Append tableName
             builder.Append "\".Value, '$') as Value FROM \""
-            
             builder.Append tableName
             builder.Append "\" WHERE "
-            QueryTranslator.translateQueryable tableName filter builder.SQLiteCommand builder.Variables
+        
+            // Generate all filters with AND between them
+            allFilters
+            |> List.iteri (fun i filterExpr ->
+                if i > 0 then builder.Append " AND "
+                QueryTranslator.translateQueryable tableName filterExpr builder.SQLiteCommand builder.Variables
+            )
+        
         | _other ->
+            // Not root collection - generate subquery with all filters
             builder.Append "SELECT Id, Value FROM ("
-
-            translate builder collection
-
+            translate builder baseCollection
             builder.Append ") o WHERE "
-            QueryTranslator.translateQueryable "" filter builder.SQLiteCommand builder.Variables
-
+        
+            // Generate all filters with AND between them
+            allFilters
+            |> List.iteri (fun i filterExpr ->
+                if i > 0 then builder.Append " AND "
+                QueryTranslator.translateQueryable "" filterExpr builder.SQLiteCommand builder.Variables
+            )
     /// <summary>
     /// Extracts the expression for a collection that is an argument to a set-based method like Concat or Except.
     /// </summary>
