@@ -19,7 +19,7 @@
     <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
 	<DebugType>embedded</DebugType>
     <PackageOutputPath>$(OutputPath)</PackageOutputPath>
-    <VersionPrefix>0.4.1</VersionPrefix>
+    <VersionPrefix>0.4.2</VersionPrefix>
     <LangVersion>9</LangVersion>
 	<GenerateDocumentationFile>true</GenerateDocumentationFile>
 	<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
