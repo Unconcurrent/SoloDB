@@ -64,7 +64,7 @@ module SQLiteTools =
             struct (ta.Array, ta.TrimmedLen)
         | _ ->
             let valType = value.GetType()
-            if valType.Name.StartsWith "Nullable`" then
+            if not (valType.IsArray) && valType.Name.StartsWith "Nullable`" then
                 let struct (hasValueProp, valueProp) = getNullableProperties valType
                 if hasValueProp.GetValue value :?> bool then
                     struct (valueProp.GetValue value, -1)

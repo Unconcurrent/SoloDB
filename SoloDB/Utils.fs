@@ -37,7 +37,8 @@ module Utils =
         static member val GetGeneratedSQLReference = sprintf "This is a string reference that will be used to determine in which special mode Aggregate() method will be used...%i" 436
 
     let internal isTuple (t: Type) =
-        typeof<Tuple>.IsAssignableFrom t || typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "Tuple`" || t.Name.StartsWith "ValueTuple`"
+        not t.IsArray &&
+        (typeof<Tuple>.IsAssignableFrom t || typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "Tuple`" || t.Name.StartsWith "ValueTuple`")
 
     type System.Char with
         static member IsAsciiLetterOrDigit this =
