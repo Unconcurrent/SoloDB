@@ -87,26 +87,25 @@ type private PreprocessedOrder = {
     Descending: bool
 }
 
-/// <summary>
-/// Represents a terminal operation that consumes the query sequence.
-/// </summary>
-type private TerminalOperation = {
-    Method: SupportedLinqMethods
-    Expressions: Expression array
-    OriginalMethod: MethodInfo
+type private SQLSelector =
+| Expression of Expression
+| Raw of (string -> StringBuilder -> Dictionary<string, obj> -> unit)
+
+type private UsedSQLStatements = {
+    /// May be more than 1, they will be concatinated together with (...) AND (...) SQL structure.
+    Filters: Expression ResizeArray
+    Orders: PreprocessedOrder ResizeArray
+    mutable Selector: SQLSelector option
+    // These will account for the fact that in SQLite, the OFFSET clause cannot be used independently without the LIMIT clause.
+    mutable Skip: Expression option
+    mutable Take: Expression option
+    UnionAll: (string -> StringBuilder -> Dictionary<string, obj> -> unit) ResizeArray
+    TableName: string
 }
 
-type private UsedSQLStatements = 
-    {
-        /// May be more than 1, they will be concatinated together with (...) AND (...) SQL structure.
-        Filters: Expression ResizeArray
-        Orders: PreprocessedOrder ResizeArray
-        mutable Selector: Expression option
-        // These will account for the fact that in SQLite, the OFFSET clause cannot be used independently without the LIMIT clause.
-        mutable Skip: Expression option
-        mutable Take: Expression option
-        TableName: string
-    }
+type private SQLSubquery =
+    | Simple of UsedSQLStatements
+    | Complex of (struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInnerWith: unit -> unit; TableName: string|} -> unit)
 
 
 /// <summary>
@@ -115,35 +114,26 @@ type private UsedSQLStatements =
 /// <remarks>This type holds the state of the translation process, including the SQL command being built and any parameters.</remarks>
 type private QueryableBuilder<'T> = 
     {
-        /// <summary>The StringBuilder that accumulates the generated SQL string.</summary>
+        /// The StringBuilder that accumulates the generated SQL string.
         SQLiteCommand: StringBuilder
-        /// <summary>A dictionary of parameters to be passed to the SQLite command.</summary>
+        /// A dictionary of parameters to be passed to the SQLite command.
         Variables: Dictionary<string, obj>
-        /// <summary>The source collection that the query operates on.</summary>
+        /// The source collection that the query operates on.
         Source: ISoloDBCollection<'T>
         /// This list will be using to know if it is necessary to create another SQLite subquery to finish the translation, by checking if all the available slots have been used.
-        UsedStatements: ResizeArray<UsedSQLStatements>
-        /// <summary>Holds the terminal operation, if any, found at the end of the query chain.</summary>
-        mutable TerminalOperation: TerminalOperation option
+        TypedSubqueries: ResizeArray<SQLSubquery>
     }
     /// <summary>Appends a string to the current SQL command.</summary>
     member this.Append(text: string) =
-        ignore (this.SQLiteCommand.Append text)
-        this
-
-    /// <summary>Appends a string to the current SQL command.</summary>
-    member this.AppendF(text: string) =
         ignore (this.SQLiteCommand.Append text)
 
     /// <summary>Appends a StringBuilder to the current SQL command.</summary>
     member this.Append(text: StringBuilder) =
         ignore (this.SQLiteCommand.Append text)
-        this
 
     /// <summary>Adds a variable to the parameters dictionary and appends its placeholder to the SQL command.</summary>
     member this.AppendVar(variable: obj) =
         ignore (QueryTranslator.appendVariable this.SQLiteCommand this.Variables variable)
-        this
 
 /// <summary>
 /// Contains private helper functions for translating LINQ expression trees to SQL.
@@ -216,15 +206,114 @@ module private QueryHelper =
                 "json_extract(Value, '$') "
 
     let emptySQLStatement () =
-            { Filters = ResizeArray(); Orders = ResizeArray(); Selector = None; Skip = None; Take = None; TableName = "" }
+        { Filters = ResizeArray(4); Orders = ResizeArray(1); Selector = None; Skip = None; Take = None; TableName = ""; UnionAll = ResizeArray(0) }
 
-    let addSelectionSensibleFilter (statements: ResizeArray<UsedSQLStatements>) (filter: Expression) =
-        match statements.Last().Selector with
-        | Some _ -> 
-            statements.Add { emptySQLStatement () with Filters = ResizeArray [ filter ] }
-        | None ->
-            // If we don't have a selector, we can just add the filter to the current statement
-            statements.Last().Filters.Add filter
+    let addFilter (statements: ResizeArray<SQLSubquery>) (filter: Expression) =
+        let last = statements.Last()
+        match last with
+        | Simple last ->
+            match last.Selector with
+            | Some _ -> 
+                (statements.Add << Simple) { emptySQLStatement () with Filters = ResizeArray [ filter ] }
+            | None ->
+                // If we don't have a selector, we can just add the filter to the current statement
+                last.Filters.Add filter
+        | Complex _ ->
+            (statements.Add << Simple) { emptySQLStatement () with Filters = ResizeArray [ filter ] }
+
+    let addSelector (statements: ResizeArray<SQLSubquery>) (selector: SQLSelector) =
+        let last = statements.Last()
+        match last with
+        | Simple last ->
+            match last.Selector with
+            | Some _ -> 
+                (statements.Add << Simple) { emptySQLStatement () with Selector = Some selector }
+            | None ->
+                last.Selector <- Some selector
+        | Complex _ ->
+            (statements.Add << Simple) { emptySQLStatement () with Selector = Some selector }
+
+    let addComplex (statements: ResizeArray<SQLSubquery>) (writeFunc: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInnerWith: unit -> unit; TableName: string|} -> unit) =
+        statements.Add (Complex writeFunc)
+
+    /// <summary>
+    /// Recursively translates a LINQ expression tree into an SQL query.
+    /// This is the main dispatcher for the translation process.
+    /// </summary>
+    /// <param name="builder">The query builder instance that accumulates the SQL and parameters.</param>
+    /// <param name="expression">The expression to translate.</param>
+    let private aggregateTranslator (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) =
+        addSelector queries (Raw (fun tableName builder vars ->
+            builder.Append fnName |> ignore
+            builder.Append "(" |> ignore
+
+            match args.Length with
+            | 0 -> QueryTranslator.translateQueryable tableName (method.ReturnType |> ExpressionHelper.id) builder vars
+            | 1 -> QueryTranslator.translateQueryable tableName args.[0] builder vars
+            | other -> failwithf "Invalid number of arguments in %s: %A" method.Name other
+
+            builder.Append ") " |> ignore
+        ))
+
+    let private zeroIfNullAggregateTranslator (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) =
+        addSelector queries (Raw (fun tableName builder vars ->
+            builder.Append "COALESCE(" |> ignore
+            builder.Append fnName |> ignore
+            builder.Append "(" |> ignore
+
+            match args.Length with
+            | 0 -> QueryTranslator.translateQueryable tableName (method.ReturnType |> ExpressionHelper.id) builder vars
+            | 1 -> QueryTranslator.translateQueryable tableName args.[0] builder vars
+            | other -> failwithf "Invalid number of arguments in %s: %A" method.Name other
+
+            builder.Append "),0) " |> ignore
+        ))
+
+    /// <summary>
+    /// Extracts the expression for a collection that is an argument to a set-based method like Concat or Except.
+    /// </summary>
+    /// <param name="methodArg">The method argument expression.</param>
+    /// <returns>The expression representing the queryable collection.</returns>
+    let private readSoloDBQueryable<'T> (methodArg: Expression) =
+        let failwithMsg = "Cannot concat with an IEnumerable other that another SoloDB IQueryable, on the same connection. Do do this anyway, use to AsEnumerable()."
+        match methodArg with
+        | :? ConstantExpression as ce -> 
+            match QueryTranslator.evaluateExpr<IEnumerable> ce with
+            | :? IQueryable<'T> as appendingQuery when (match appendingQuery.Provider with :? SoloDBQueryProvider -> true | _other -> false) ->
+                appendingQuery.Expression
+            | :? IRootQueryable as rq ->
+                Expression.Constant(rq, typeof<IRootQueryable>)
+            | _other -> failwith failwithMsg
+        | :? MethodCallExpression as mcl ->
+            mcl
+        | _other -> failwith failwithMsg
+
+    let private addUnionAll (queries: SQLSubquery ResizeArray) (fn: string -> StringBuilder -> Dictionary<string, obj> -> unit) =
+        match queries.Last() with
+        | Simple last ->
+            last.UnionAll.Add fn
+        | Complex _ ->
+            queries.Add (Simple { emptySQLStatement () with UnionAll = ResizeArray [ fn ] })
+
+    /// <summary>
+    /// Wraps an aggregate function translator to handle cases where the source sequence is empty, which would result in a NULL from SQL.
+    /// This function generates SQL to return a specific error message that can be caught and thrown as an exception, mimicking .NET behavior.
+    /// </summary>
+    /// <param name="fnName">The name of the SQL aggregate function (e.g., "AVG", "MIN").</param>
+    /// <param name="builder">The query builder instance.</param>
+    /// <param name="expression">The LINQ method call expression for the aggregate.</param>
+    /// <param name="errorMsg">The error message to return if the aggregation result is NULL.</param>
+    let private raiseIfNullAggregateTranslator (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) (errorMsg: string) =
+        aggregateTranslator fnName queries method args
+        addSelector queries (Raw (fun tableName builder vars ->
+            // In this case NULL is an invalid operation, therefore to emulate the .NET behavior 
+            // of throwing an exception we return the Id = NULL, and Value = {exception message}
+            // And downstream the pipeline it will be checked and throwed.
+            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN NULL ELSE -1 END AS Id, " |> ignore
+            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN '" |> ignore
+            builder.Append (QueryTranslator.escapeSQLiteString errorMsg) |> ignore
+            builder.Append "' ELSE Value END AS Value " |> ignore
+        ))
 
     /// <summary>
     /// Preprocesses an expression tree into a <see cref="PreprocessedQuery"/> structure,
@@ -244,6 +333,14 @@ module private QueryHelper =
             RootQuery (ce.Value :?> IRootQueryable)
         | e -> raise (NotSupportedException(sprintf "Cannot preprocess expression of type %A: %A" e.NodeType e))
 
+    let private serializeForCollection (value: 'T) =
+        struct (
+            match typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T> with
+            | true -> JsonSerializator.JsonValue.SerializeWithType value
+            | false -> JsonSerializator.JsonValue.Serialize value
+            |> _.ToJsonString(), HasTypeId<'T>.Value
+        )
+
     /// Appends WHERE, ORDER BY, LIMIT/OFFSET directly to the main builder.
     let private writeClauses
         (builder: QueryableBuilder<'T>)
@@ -259,7 +356,6 @@ module private QueryHelper =
                 // write predicates straight into the main command
                 QueryTranslator.translateQueryable contextTable f builder.SQLiteCommand builder.Variables
             )
-            |> ignore
 
         // ORDER BY
         if statement.Orders.Count <> 0 then
@@ -270,7 +366,6 @@ module private QueryHelper =
                 QueryTranslator.translateQueryable contextTable o.Selector builder.SQLiteCommand builder.Variables
                 if o.Descending then builder.Append(" DESC") |> ignore
             )
-            |> ignore
 
         // LIMIT / OFFSET
         match statement.Take, statement.Skip with
@@ -287,502 +382,681 @@ module private QueryHelper =
             builder.AppendVar(QueryTranslator.evaluateExpr<obj> skip) |> ignore
         | None, None -> ()
 
-    let private collectPreprocessedQuery (statements: UsedSQLStatements ResizeArray) (terminalOperation: TerminalOperation option outref) (pq: PreprocessedQuery) =
-        // Walk and collect “layers” + detect a terminal op.
-        statements.Add (emptySQLStatement ())
+        if statement.UnionAll.Count <> 0 then
+            // If there are UNION ALL statements, we need to append them to the main command.
+            builder.Append(" UNION ALL ") |> ignore
+            statement.UnionAll
+            |> Seq.iteri (fun j unionAll ->
+                if j > 0 then builder.Append(" UNION ALL ") |> ignore
+                unionAll contextTable builder.SQLiteCommand builder.Variables
+            )
+            |> ignore
 
-        let rec collect (q: PreprocessedQuery) : struct (string * TerminalOperation option) =
+    let rec private collectPreprocessedQuery<'T> (builder: QueryableBuilder<'T>) (pq: PreprocessedQuery) =
+        let statements = builder.TypedSubqueries
+        statements.Add (emptySQLStatement () |> Simple)
+
+        let rec collect (q: PreprocessedQuery) :string =
             match q with
-            | RootQuery rq -> struct (rq.SourceTableName, None)
+            | RootQuery rq -> rq.SourceTableName
             | Method m ->
-                let struct (tableName, op) = collect m.InnerQuery
-                let mutable terminalOperation = op
+                let tableName = collect m.InnerQuery             
 
-                let current = statements.Last()
+                let inline simpleCurrent() =
+                    match statements.Last() with
+                    | Simple s -> s
+                    | Complex _ ->
+                        let n = emptySQLStatement ()
+                        statements.Add (Simple n)
+                        n
+
+                let inline ifSelectorNewStatement() =
+                    match statements.Last() with
+                    | Simple current ->
+                        match current.Selector with
+                        | Some _ ->
+                            let n = emptySQLStatement ()
+                            statements.Add (Simple n)
+                            n
+                        | None ->
+                            current
+                    | Complex _ ->
+                        let n = emptySQLStatement ()
+                        statements.Add (Simple n)
+                        n
+
                 match m.Value with
-                | Where -> current.Filters.Add m.Expressions.[0]
+                | Where -> 
+                    addFilter statements m.Expressions.[0]
                 | Select ->
-                    match current.Selector with
-                    | Some _ ->
-                        statements.Add({ emptySQLStatement () with Selector = Some m.Expressions.[0] })
-                    | None ->
-                        current.Selector <- Some m.Expressions.[0]
+                    addSelector statements (Expression m.Expressions.[0])
                 | OrderBy | Order ->
+                    let current = ifSelectorNewStatement()
                     current.Orders.Clear()
                     current.Orders.Add({ Selector = m.Expressions.[0]; Descending = false })
                 | OrderByDescending | OrderDescending ->
+                    let current = ifSelectorNewStatement()
                     current.Orders.Clear()
                     current.Orders.Add({ Selector = m.Expressions.[0]; Descending = true })
                 | ThenBy ->
+                    let current = simpleCurrent()
                     current.Orders.Add({ Selector = m.Expressions.[0]; Descending = false })
                 | ThenByDescending ->
+                    let current = simpleCurrent()
                     current.Orders.Add({ Selector = m.Expressions.[0]; Descending = true })
                 | Skip ->
+                    let current = simpleCurrent()
                     match current.Skip with
-                    | Some _ -> statements.Add({ emptySQLStatement () with Skip = Some m.Expressions.[0] })
+                    | Some _ -> statements.Add(Simple { emptySQLStatement () with Skip = Some m.Expressions.[0] })
                     | None   -> current.Skip <- Some m.Expressions.[0]
                 | Take ->
+                    let current = simpleCurrent()
                     match current.Take with
-                    | Some _ -> statements.Add({ emptySQLStatement () with Take = Some m.Expressions.[0] })
+                    | Some _ -> statements.Add(Simple { emptySQLStatement () with Take = Some m.Expressions.[0] })
                     | None   -> current.Take <- Some m.Expressions.[0]
-                // terminal set
-                | Sum | Average | Min | Max | Distinct | DistinctBy | Count | CountBy | LongCount
-                | SelectMany | First | FirstOrDefault | DefaultIfEmpty | Last | LastOrDefault
-                | Single | SingleOrDefault | All | Any | Contains | Append | Concat | GroupBy
-                | Except | ExceptBy | Intersect | IntersectBy | Cast | OfType | Aggregate ->
-                    terminalOperation <- Some { Method = m.Value; Expressions = m.Expressions; OriginalMethod = m.OriginalMethod }
 
-                struct (tableName, terminalOperation)
+                | Sum ->
+                    // SUM() return NULL if all elements are NULL, TOTAL() return 0.0.
+                    // TOTAL() always returns a float, therefore we will just check for NULL
+                    zeroIfNullAggregateTranslator "SUM" statements m.OriginalMethod m.Expressions
 
-        let struct (tn, tOp) = collect pq
-        statements.[0] <- {statements.[0] with TableName = tn}
-        terminalOperation <- tOp
+                | Average ->
+                    raiseIfNullAggregateTranslator "AVG" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
 
-    let private writeLayers
+                | Min ->
+                    raiseIfNullAggregateTranslator "MIN" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
+
+                | Max ->
+                    raiseIfNullAggregateTranslator "MAX" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
+                
+                | Distinct 
+                | DistinctBy ->
+                    (*
+                    Here is the old code:
+                    builder.Append "SELECT Id, Value FROM ("
+                    translate builder expression.Arguments.[0]
+                    builder.Append ") o GROUP BY "
+
+                    match expression.Arguments.Count with
+                    | 1 -> QueryTranslator.translateQueryable "" (GenericMethodArgCache.Get expression.Method |> Array.head |> ExpressionHelper.id) builder.SQLiteCommand builder.Variables
+                    | 2 -> QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+                    | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+                    *)
+                    addComplex statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInnerWith: unit -> unit; TableName: string|}) ->
+                        builder.Command.Append "SELECT Id, Value FROM (" |> ignore
+                        builder.WriteInnerWith()
+                        builder.Command.Append ") o GROUP BY " |> ignore
+                        match m.Expressions.Length with
+                        | 0 -> QueryTranslator.translateQueryable builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
+                        | 1 -> QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                    )
+
+                | GroupBy ->
+                    addComplex statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInnerWith: unit -> unit; TableName: string|}) ->
+                        builder.Command.Append "SELECT -1 as Id, json_object('Key', " |> ignore
+                        QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                        // Create an array of all items with the same key
+                        builder.Command.Append ", 'Items', json_group_array(Value)) as Value FROM (" |> ignore
+                        builder.WriteInnerWith()
+                        // Group by the key selector
+                        builder.Command.Append ") o GROUP BY " |> ignore
+                        QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                    )
+
+                | Count
+                | CountBy
+                | LongCount ->
+                    (*
+                    builder.Append "SELECT COUNT(Id) as Value FROM "
+
+                    match expression.Arguments.Count with
+                    | 1 -> 
+                        // Only select Id from the table if possible
+                        match expression.Arguments.[0] with
+                        | :? ConstantExpression as ce when (ce.Value :? IRootQueryable) ->
+                            let tableName = (ce.Value :?> IRootQueryable).SourceTableName
+                            builder.Append "\""
+                            builder.Append tableName
+                            builder.Append "\""
+                        | other ->
+                            builder.Append "("
+                            translate builder other
+                            builder.Append ") o"
+                    | 2 -> 
+                        builder.Append "("
+                        translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
+                        builder.Append ") o"
+
+                    | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+                    *)
+
+                    addComplex statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInnerWith: unit -> unit; TableName: string|}) ->
+                        builder.Command.Append "SELECT COUNT(Id) as Value FROM " |> ignore
+                        match m.Expressions.Length with
+                        | 0 -> 
+                            // Only select Id from the table if possible
+                            match m.Expressions.[0] with
+                            | :? ConstantExpression as ce when (ce.Value :? IRootQueryable) ->
+                                let tableName = (ce.Value :?> IRootQueryable).SourceTableName
+                                builder.Command.Append "\"" |> ignore
+                                builder.Command.Append tableName |> ignore
+                                builder.Command.Append "\"" |> ignore
+                            | other ->
+                                builder.Command.Append "(" |> ignore
+                                builder.WriteInnerWith()
+                                builder.Command.Append ") o" |> ignore
+                        | 1 -> 
+                            builder.Command.Append "(" |> ignore
+                            QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                            builder.Command.Append ") o" |> ignore
+                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                    )
+                
+                
+                | SelectMany ->
+                    (*
+                    Old code:
+                    match expression.Arguments.Count with
+                    | 2 ->
+                        let generics = GenericMethodArgCache.Get expression.Method
+
+                        if generics.[1] (*output*) = typeof<byte> then
+                            raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit the SQLite context with .AsEnumerable().")
+
+                        let innerSourceName = Utils.getVarName builder.SQLiteCommand.Length
+
+                        builder.Append "SELECT "
+                        builder.Append innerSourceName
+                        builder.Append ".Id AS Id, json_each.Value as Value FROM ("
+
+                        // Evaluate and emit the outer source query (produces Id, Value)
+                        translate builder expression.Arguments.[0]
+
+                        builder.Append ") AS "
+                        builder.Append innerSourceName
+                        builder.Append " "
+            
+
+                        // Extract the path to the collection selector (e.g., "$.Values")
+                        match expression.Arguments.[1] with
+                        | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
+                            let lambda = ue.Operand :?> LambdaExpression
+                            match lambda.Body with
+                            | :? MemberExpression as me ->
+                                builder.Append "JOIN json_each(jsonb_extract("
+                                builder.Append innerSourceName
+                                builder.Append ".Value, '$."
+                                builder.Append me.Member.Name
+                                builder.Append "'))"
+
+                            | :? ParameterExpression as _pe ->
+                                builder.Append "JOIN json_each("
+                                builder.Append innerSourceName
+                                builder.Append ".Value)"
+
+                            | _ -> failwith "Unsupported SelectMany selector structure"
+                        | _ -> failwith "Invalid SelectMany structure"
+                    
+                    | other -> 
+                        failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+                                *)
+
+                    addComplex statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInnerWith: unit -> unit; TableName: string|}) ->
+                        match m.Expressions.Length with
+                        | 1 ->
+                            let generics = GenericMethodArgCache.Get m.OriginalMethod
+                            if generics.[1] (*output*) = typeof<byte> then
+                                raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit the SQLite context with .AsEnumerable().")
+                            let innerSourceName = Utils.getVarName builder.Command.Length
+                            builder.Command.Append "SELECT " |> ignore
+                            builder.Command.Append innerSourceName |> ignore
+                            builder.Command.Append ".Id AS Id, json_each.Value as Value FROM (" |> ignore
+                            // Evaluate and emit the outer source query (produces Id, Value)
+                            QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                            builder.Command.Append ") AS " |> ignore
+                            builder.Command.Append innerSourceName |> ignore
+                            builder.Command.Append " " |> ignore
+                            // Extract the path to the collection selector (e.g., "$.Values")
+                            match m.Expressions.[1] with
+                            | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
+                                let lambda = ue.Operand :?> LambdaExpression
+                                match lambda.Body with
+                                | :? MemberExpression as me ->
+                                    builder.Command.Append "JOIN json_each(jsonb_extract(" |> ignore
+                                    builder.Command.Append innerSourceName |> ignore
+                                    builder.Command.Append ".Value, '$." |> ignore
+                                    builder.Command.Append me.Member.Name |> ignore
+                                    builder.Command.Append "'))" |> ignore
+                                | :? ParameterExpression as _pe ->
+                                    builder.Command.Append "JOIN json_each(" |> ignore
+                                    builder.Command.Append innerSourceName |> ignore
+                                    builder.Command.Append ".Value)" |> ignore
+                                | _ -> failwith "Unsupported SelectMany selector structure"
+                            | _ -> failwith "Invalid SelectMany structure"
+                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                    )
+                
+                | Single | SingleOrDefault
+                | First | FirstOrDefault ->
+                    (*match expression.Arguments.Count with
+                    | 1 -> 
+                        builder.Append "SELECT Id, Value FROM ("
+                        translate builder expression.Arguments.[0]
+                        builder.Append ") o "
+                    | 2 -> 
+                        translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
+                    | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+
+                    builder.Append " LIMIT 1 "*)
+                    
+                    let current = simpleCurrent()
+                    let constant1 = Expression.Constant(1, typeof<int>)
+                    match current.Take with
+                    | Some _ -> statements.Add(Simple { emptySQLStatement () with Take = Some constant1 })
+                    | None   -> current.Take <- Some constant1
+
+
+                | DefaultIfEmpty ->
+                    (*builder.Append "SELECT Id, Value FROM ("
+                    translate builder expression.Arguments.[0]
+                    builder.Append ") o UNION ALL SELECT -1 as Id, "
+
+                    match expression.Arguments.Count with
+                    | 1 -> 
+                        // If no default value is provided, then provide .NET's default.
+
+                        let genericArg = (GenericMethodArgCache.Get expression.Method).[0]
+                        if genericArg.IsValueType then
+                            let defaultValueType = Activator.CreateInstance(genericArg)
+                            let jsonObj = JsonSerializator.JsonValue.Serialize defaultValueType
+                            let jsonText = jsonObj.ToJsonString()
+                            let escapedJsonText = QueryTranslator.escapeSQLiteString jsonText
+
+                            builder.Append "jsonb_extract(jsonb('"
+                            builder.Append escapedJsonText
+                            builder.Append "'), '$')"
+                        else
+                            builder.Append "NULL"
+
+                    | 2 -> 
+                        // If a default value is provided, return it when the result set is empty
+            
+                        let o = QueryTranslator.evaluateExpr<obj> expression.Arguments.[1]
+                        let jsonObj = JsonSerializator.JsonValue.Serialize o
+                        let jsonText = jsonObj.ToJsonString()
+                        let escapedJsonText = QueryTranslator.escapeSQLiteString jsonText
+
+                        builder.Append "jsonb_extract(jsonb('"
+                        builder.Append escapedJsonText
+                        builder.Append "'), '$')"
+
+                    | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+
+                    builder.Append " as Value WHERE NOT EXISTS (SELECT 1 FROM ("
+                    translate builder expression.Arguments.[0]
+                    builder.Append ") o)"*)
+
+                    addComplex statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInnerWith: unit -> unit; TableName: string|}) ->
+                        builder.Command.Append "SELECT Id, Value FROM (" |> ignore
+                        builder.WriteInnerWith()
+                        builder.Command.Append ") o UNION ALL SELECT -1 as Id, " |> ignore
+                        match m.Expressions.Length with
+                        | 0 -> 
+                            // If no default value is provided, then provide .NET's default.
+                            let genericArg = (GenericMethodArgCache.Get m.OriginalMethod).[0]
+                            if genericArg.IsValueType then
+                                let defaultValueType = Activator.CreateInstance(genericArg)
+                                let jsonObj = JsonSerializator.JsonValue.Serialize defaultValueType
+                                let jsonText = jsonObj.ToJsonString()
+                                let escapedJsonText = QueryTranslator.escapeSQLiteString jsonText
+                                builder.Command.Append "jsonb_extract(jsonb('" |> ignore
+                                builder.Command.Append escapedJsonText |> ignore
+                                builder.Command.Append "'), '$') " |> ignore
+                            else
+                                builder.Command.Append "NULL " |> ignore
+                        | 1 -> 
+                            // If a default value is provided, return it when the result set is empty
+            
+                            let o = QueryTranslator.evaluateExpr<obj> m.Expressions.[0]
+                            let jsonObj = JsonSerializator.JsonValue.Serialize o
+                            let jsonText = jsonObj.ToJsonString()
+                            let escapedJsonText = QueryTranslator.escapeSQLiteString jsonText
+                            builder.Command.Append "jsonb_extract(jsonb('" |> ignore
+                            builder.Command.Append escapedJsonText |> ignore
+                            builder.Command.Append "'), '$') " |> ignore
+                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                        builder.Command.Append " WHERE NOT EXISTS (SELECT 1 FROM (" |> ignore
+                        builder.WriteInnerWith()
+                        builder.Command.Append ") o)" |> ignore
+                    )
+                
+                | Last | LastOrDefault ->
+                    (*// SQlite does not guarantee the order of elements without an ORDER BY,
+                    // ensure that it is the only one, or throw an explanatory exception.
+                    match expression.Arguments.[0] with
+                    | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
+                        translate builder expression.Arguments.[0]
+                        match expression.Arguments.Count with
+                        | 1 -> () // Noop needed.
+                        | 2 -> 
+                            builder.Append "WHERE " 
+                            QueryTranslator.translateQueryable "" expression.Arguments.[1] builder.SQLiteCommand builder.Variables
+                        | other -> failwithf "Invalid number of arguments in %s: %A" expression.Method.Name other
+
+                        builder.Append "ORDER BY Id DESC LIMIT 1 "
+                    | _other ->
+                        failwithf "Because SQLite does not guarantee the order of elements without an ORDER BY, this function cannot be implemented if it is not the only one applied(in this case it sorts by Id). Use an OrderBy() with a First'OrDefault'()"
+                        *)
+                    match m.Expressions.Length with
+                    | 0 -> () // If no arguments are provided, we assume the last element is the one with the highest Id.
+                    | 1 ->
+                        addFilter statements m.Expressions.[0]
+                    | other -> failwithf "Invalid number of arguments in %A: %A" m.Value other
+
+                    let current = simpleCurrent()
+                    let constant1 = Expression.Constant(1, typeof<int>)
+                    match current.Take with
+                    | Some _ -> statements.Add(Simple { emptySQLStatement () with Take = Some constant1 })
+                    | None   -> current.Take <- Some constant1
+
+                (*Old All and Any:
+                | All ->
+        if expression.Arguments.Count = 2 then
+            builder.Append "SELECT COUNT(*) = (SELECT COUNT(*) FROM ("
+            translate builder expression.Arguments.[0]
+            builder.Append ")) as Value FROM ("
+            translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
+            builder.Append ") o "
+        else
+            failwithf "Invalid All method with %i arguments" expression.Arguments.Count
+
+    | Any ->
+        builder.Append "(SELECT EXISTS(SELECT 1 FROM ("
+        if expression.Arguments.Count = 2 then
+            translateWhereStatement translate builder expression.Arguments.[0] expression.Arguments.[1]
+        else
+            translate builder expression.Arguments.[0]
+        builder.Append " LIMIT 1) o) as Value)"*)
+
+                | All ->
+                    addComplex statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInnerWith: unit -> unit; TableName: string|}) ->
+                        builder.Command.Append "SELECT COUNT(*) = (SELECT COUNT(*) FROM (" |> ignore
+                        builder.WriteInnerWith()
+                        builder.Command.Append ")) as Value FROM (" |> ignore
+                        match m.Expressions.Length with
+                        | 0 -> QueryTranslator.translateQueryable builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
+                        | 1 -> QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                        builder.Command.Append ") o " |> ignore
+                    )
+
+                | Any ->
+                    addComplex statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInnerWith: unit -> unit; TableName: string|}) ->
+                        builder.Command.Append "(SELECT EXISTS(SELECT 1 FROM (" |> ignore
+                        match m.Expressions.Length with
+                        | 0 -> QueryTranslator.translateQueryable builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
+                        | 1 -> QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                        builder.Command.Append " LIMIT 1) o) as Value)" |> ignore
+                    )
+
+
+                | Contains ->
+                    let struct (t, value) = 
+                        match m.Expressions.[0] with
+                        | :? ConstantExpression as ce -> struct (ce.Type, ce.Value)
+                        | other -> failwithf "Invalid Contains(...) parameter: %A" other
+
+                    let filter = (ExpressionHelper.eq t value)
+                    addFilter statements filter
+
+                    addComplex statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInnerWith: unit -> unit; TableName: string|}) ->
+                        builder.Command.Append "(SELECT EXISTS(SELECT 1 FROM (" |> ignore
+                        match m.Expressions.Length with
+                        | 0 -> QueryTranslator.translateQueryable builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
+                        | 1 -> QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                        builder.Command.Append " LIMIT 1) o) as Value)" |> ignore
+                    )
+                
+                | Append ->
+                    (*Old code:
+                        translate builder expression.Arguments.[0]
+                        builder.Append " UNION ALL "
+                        builder.Append "SELECT "
+                        let appendingObj = QueryTranslator.evaluateExpr<'T> expression.Arguments.[1]
+                        let jsonStringElement, hasId = serializeForCollection appendingObj
+                        match hasId with
+                        | false ->
+                            builder.Append "-1 as Id,"
+                        | true ->
+                            let id = HasTypeId<'T>.Read appendingObj
+                            builder.Append (sprintf "%i" id)
+                            builder.Append " as Id,"
+
+                        let escapedString = QueryTranslator.escapeSQLiteString jsonStringElement
+                        builder.Append "jsonb('"
+                        builder.Append escapedString
+                        builder.Append "')"
+                        builder.Append " As Value "
+                    *)
+
+                    addUnionAll statements (fun tableName builder vars ->
+                        builder.Append "SELECT " |> ignore
+                        let appendingObj = QueryTranslator.evaluateExpr<'T> m.Expressions.[0]
+                        let struct (jsonStringElement, hasId) = serializeForCollection appendingObj
+                        match hasId with
+                        | false ->
+                            builder.Append "-1 as Id," |> ignore
+                        | true ->
+                            let id = HasTypeId<'T>.Read appendingObj
+                            builder.Append (sprintf "%i" id) |> ignore
+                            builder.Append " as Id," |> ignore
+
+                        let escapedString = QueryTranslator.escapeSQLiteString jsonStringElement
+                        builder.Append "jsonb('" |> ignore
+                        builder.Append escapedString |> ignore
+                        builder.Append "')" |> ignore
+                        builder.Append " As Value " |> ignore
+                    )
+                
+                
+                | Concat ->
+                    // Left side is the current pipeline; append the right side as UNION ALL.
+                    addUnionAll statements (fun _tableName sb vars ->
+                        sb.Append "SELECT Id, Value FROM (" |> ignore
+                        let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
+                        preprocessAndCollect rhs |> writeLayers builder
+                        sb.Append ") o " |> ignore
+                    )
+
+                | Except ->
+                    // Project left, remove rows whose JSON value appears in the right.
+                    addComplex statements (fun ctx ->
+                        ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
+                        ctx.WriteInnerWith()
+                        ctx.Command.Append ") o WHERE jsonb_extract(Value, '$') NOT IN (" |> ignore
+
+                        ctx.Command.Append "SELECT jsonb_extract(Value, '$') FROM (" |> ignore
+                        let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
+                        preprocessAndCollect rhs |> writeLayers builder
+                        ctx.Command.Append ") o )" |> ignore
+                    )
+
+                | Intersect ->
+                    // Keep only rows whose JSON value appears in the right.
+                    addComplex statements (fun ctx ->
+                        ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
+                        ctx.WriteInnerWith()
+                        ctx.Command.Append ") o WHERE jsonb_extract(Value, '$') IN (" |> ignore
+
+                        ctx.Command.Append "SELECT jsonb_extract(Value, '$') FROM (" |> ignore
+                        let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
+                        preprocessAndCollect rhs |> writeLayers builder
+                        ctx.Command.Append ") o )" |> ignore
+                    )
+
+                | ExceptBy ->
+                    // Arguments: other, keySelector
+                    if m.Expressions.Length <> 2 then failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length
+                    let keySelE = m.Expressions.[1]
+                    addComplex statements (fun ctx ->
+                        ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
+                        ctx.WriteInnerWith()
+                        ctx.Command.Append ") o WHERE " |> ignore
+                        QueryTranslator.translateQueryable ctx.TableName keySelE ctx.Command ctx.Vars
+                        ctx.Command.Append " NOT IN (" |> ignore
+
+                        ctx.Command.Append "SELECT " |> ignore
+                        QueryTranslator.translateQueryable ctx.TableName keySelE ctx.Command ctx.Vars
+                        ctx.Command.Append " FROM (" |> ignore
+                        let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
+                        preprocessAndCollect rhs |> writeLayers builder
+                        ctx.Command.Append ") o )" |> ignore
+                    )
+
+                | IntersectBy ->
+                    // Arguments: other, keySelector
+                    if m.Expressions.Length <> 2 then failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length
+                    let keySelE = m.Expressions.[1]
+                    addComplex statements (fun ctx ->
+                        ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
+                        ctx.WriteInnerWith()
+                        ctx.Command.Append ") o WHERE " |> ignore
+                        QueryTranslator.translateQueryable ctx.TableName keySelE ctx.Command ctx.Vars
+                        ctx.Command.Append " IN (" |> ignore
+
+                        ctx.Command.Append "SELECT " |> ignore
+                        QueryTranslator.translateQueryable ctx.TableName keySelE ctx.Command ctx.Vars
+                        ctx.Command.Append " FROM (" |> ignore
+                        let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
+                        preprocessAndCollect rhs |> writeLayers builder
+                        ctx.Command.Append ") o )" |> ignore
+                    )
+
+                // --- Type filtering / casting over polymorphic payloads ---
+                | Cast ->
+                    // Cast<TTarget>() with polymorphic guard & diagnostic messages.
+                    if m.Expressions.Length <> 0 then failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length
+                    match GenericMethodArgCache.Get m.OriginalMethod |> Array.tryHead with
+                    | None -> failwith "Invalid type from Cast<T> method."
+                    | Some t when typeof<JsonSerializator.JsonValue>.IsAssignableFrom t ->
+                        // No-op cast: just keep pipeline as-is (i.e., do nothing here).
+                        ()
+                    | Some t ->
+                        match t |> typeToName with
+                        | None -> failwith "Incompatible type from Cast<T> method."
+                        | Some typeName ->
+                            addComplex statements (fun ctx ->
+                                ctx.Command.Append "SELECT " |> ignore
+                                // Id: preserve only if type info present and matches; else NULL
+                                ctx.Command.Append "CASE WHEN jsonb_extract(Value, '$.$type') IS NULL THEN NULL " |> ignore
+                                ctx.Command.Append "WHEN jsonb_extract(Value, '$.$type') <> " |> ignore
+                                QueryTranslator.appendVariable ctx.Command ctx.Vars typeName
+                                ctx.Command.Append " THEN NULL ELSE Id END AS Id, " |> ignore
+
+                                // Value: propagate or attach error string
+                                ctx.Command.Append "CASE " |> ignore
+                                ctx.Command.Append "WHEN jsonb_extract(Value, '$.$type') IS NULL THEN json_quote('The type of item is not stored in the database, if you want to include it, then add the Polimorphic attribute to the type and reinsert all elements.') " |> ignore
+                                ctx.Command.Append "WHEN jsonb_extract(Value, '$.$type') <> " |> ignore
+                                QueryTranslator.appendVariable ctx.Command ctx.Vars typeName
+                                ctx.Command.Append " THEN json_quote('Unable to cast object to the specified type, because the types are different.') " |> ignore
+                                ctx.Command.Append "ELSE Value END AS Value FROM (" |> ignore
+                                ctx.WriteInnerWith()
+                                ctx.Command.Append ") o " |> ignore
+                            )
+
+                | OfType ->
+                    if m.Expressions.Length <> 0 then failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length
+                    match GenericMethodArgCache.Get m.OriginalMethod |> Array.tryHead with
+                    | None -> failwith "Invalid type from OfType<T> method."
+                    | Some t when typeof<JsonSerializator.JsonValue>.IsAssignableFrom t ->
+                        // No-op filter to JsonValue
+                        ()
+                    | Some t ->
+                        match t |> typeToName with
+                        | None -> failwith "Incompatible type from OfType<T> method."
+                        | Some typeName ->
+                            addComplex statements (fun ctx ->
+                                ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
+                                ctx.WriteInnerWith()
+                                ctx.Command.Append ") o WHERE jsonb_extract(Value, '$.$type') = " |> ignore
+                                QueryTranslator.appendVariable ctx.Command ctx.Vars typeName
+                                ctx.Command.Append " " |> ignore
+                            )
+
+                | Aggregate ->
+                    failwithf "Aggregate is not supported."
+
+                tableName
+
+        let tn = collect pq
+        match statements.[0] with
+        | Simple s ->
+            statements.[0] <- Simple {s with TableName = tn}
+        | Complex _ ->
+            ()
+
+    and private preprocessAndCollect expression =
+        let statements = ResizeArray<SQLSubquery>()
+        preprocessQuery expression
+        |> collectPreprocessedQuery statements
+        statements
+
+    and private writeLayers
         (builder: QueryableBuilder<'T>)
-        (layers: UsedSQLStatements ResizeArray)
+        (layers: SQLSubquery ResizeArray)
         =
 
         let layerCount = layers.Count
 
         let rec writeLayer (i: int) =
             let layer = layers.[i]
-            match layer.Selector with
-            | Some selector ->
-                builder.AppendF "SELECT Id, "
-                QueryTranslator.translateQueryable layer.TableName selector builder.SQLiteCommand builder.Variables
-                builder.AppendF "AS Value "
-            | None ->
-                builder.AppendF "SELECT Id, Value "
-            builder.AppendF "FROM "
-            if i = 0 then
-                builder.AppendF layer.TableName
-            else
-                builder.AppendF "("
-                writeLayer (i - 1)
-                builder.AppendF ")"
+            match layer with
+            | Simple layer ->
+                match layer.Selector with
+                | Some (Expression selector) ->
+                    builder.Append "SELECT Id, "
+                    QueryTranslator.translateQueryable layer.TableName selector builder.SQLiteCommand builder.Variables
+                    builder.Append "AS Value "
+                | Some (Raw func) ->
+                    builder.Append "SELECT Id, "
+                    func layer.TableName builder.SQLiteCommand builder.Variables
+                    builder.Append "AS Value "
+                | None ->
+                    builder.Append "SELECT Id, Value "
+                builder.Append "FROM "
+                if i = 0 then
+                    builder.Append layer.TableName
+                else
+                    builder.Append "("
+                    writeLayer (i - 1)
+                    builder.Append ")"
 
-            writeClauses builder layer layer.TableName
+                writeClauses builder layer layer.TableName
+            | Complex writeFunc ->
+                let tableName =
+                    if i = 0 then
+                        builder.Source.Name
+                    else
+                        ""
+
+                writeFunc {|
+                    Command = builder.SQLiteCommand
+                    Vars = builder.Variables
+                    WriteInnerWith = fun () -> writeLayer (i - 1)
+                    TableName = tableName
+                |}
 
         writeLayer (layerCount - 1)
 
-    let private serializeForCollection (value: 'T) =
-        match typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T> with
-        | true -> JsonSerializator.JsonValue.SerializeWithType value
-        | false -> JsonSerializator.JsonValue.Serialize value
-        |> _.ToJsonString(), HasTypeId<'T>.Value
 
-    let rec private translateFlattenedQuery (builder: QueryableBuilder<'T>) (pq: PreprocessedQuery) =
+    and private translateFlattenedQuery<'T> (builder: QueryableBuilder<'T>) (pq: PreprocessedQuery) =
         // Collect layers + possible terminal
-        collectPreprocessedQuery builder.UsedStatements &builder.TerminalOperation pq
-
-        let layers = builder.UsedStatements
-
-        // --- local helpers for terminal ops ---
-
-        // Render current layers as SELECT ... FROM ... with all collected WHERE/ORDER/LIMIT/OFFSET
-        let inline writeBase () = writeLayers builder layers
-        let inline writeBaseWith f = 
-            f layers
-            writeLayers builder layers
-
-        // Render current layers wrapped as "( ... ) o"
-        let inline writeBaseAsSubquery () =
-            builder.AppendF "(" |> ignore
-            writeBase ()
-            builder.AppendF ") o" |> ignore
-
-        let inline writeBaseAsSubqueryWith f =
-            f layers
-            builder.AppendF "(" |> ignore
-            writeBase ()
-            builder.AppendF ") o" |> ignore
-
-        // Render an external IQueryable (expression) as "( ... ) o"
-        let writeExternalAsSubquery (expr: Expression) =
-            let extLayers = ResizeArray<UsedSQLStatements>()
-            let mutable _noop : TerminalOperation option = None
-            collectPreprocessedQuery extLayers &_noop (preprocessQuery expr)
-            builder.AppendF "(" |> ignore
-            writeLayers builder extLayers
-            builder.AppendF ") o" |> ignore
-
-        // Aggregate helpers
-        let emitAggregate (sqlFn: string) (selectorOpt: Expression option) (coalesceZero: bool) =
-            if coalesceZero && sqlFn = "SUM" then
-                builder.AppendF "SELECT COALESCE((" |> ignore
-            else
-                builder.AppendF "SELECT " |> ignore
-
-            builder.AppendF sqlFn |> ignore
-            builder.AppendF "(" |> ignore
-            match selectorOpt with
-            | Some sel -> QueryTranslator.translateQueryable "" sel builder.SQLiteCommand builder.Variables
-            | None     -> QueryTranslator.translateQueryable "" (ExpressionHelper.id typeof<'T>) builder.SQLiteCommand builder.Variables
-            builder.AppendF ")" |> ignore
-
-            if coalesceZero && sqlFn = "SUM" then builder.AppendF "),0" |> ignore
-            builder.AppendF " as Value FROM " |> ignore
-            writeBaseAsSubquery ()
-
-        let emitRaiseIfNullAggregate (sqlFn: string) (selectorOpt: Expression option) (errMsg: string) =
-            builder.AppendF "SELECT CASE WHEN jsonb_extract(Value, '$') IS NULL THEN NULL ELSE -1 END AS Id, " |> ignore
-            builder.AppendF "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN '" |> ignore
-            builder.AppendF (QueryTranslator.escapeSQLiteString errMsg) |> ignore
-            builder.AppendF "' ELSE Value END AS Value FROM (" |> ignore
-            emitAggregate sqlFn selectorOpt false
-            builder.AppendF ") o" |> ignore
-
-        // For DISTINCT and DISTINCT BY
-        let emitDistinct (keySelectorOpt: Expression option) =
-            builder.AppendF "SELECT Id, Value FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") o GROUP BY " |> ignore
-            match keySelectorOpt with
-            | Some ks -> QueryTranslator.translateQueryable "" ks builder.SQLiteCommand builder.Variables
-            | None    -> QueryTranslator.translateQueryable "" (ExpressionHelper.id typeof<'T>) builder.SQLiteCommand builder.Variables
-
-        // COUNT family
-        let emitCountWithOptionalPredicate (predicateOpt: Expression option) =
-            builder.AppendF "SELECT COUNT(Id) as Value FROM " |> ignore
-            match predicateOpt with
-            | None ->
-                // Fast path if the top is a bare table — the layers already contain the table+clauses;
-                // we still keep the subquery form to be uniform.
-                writeBaseAsSubquery ()
-            | Some pred ->
-                builder.AppendF "(" |> ignore
-                writeBase ()
-                builder.AppendF ") o WHERE " |> ignore
-                QueryTranslator.translateQueryable "" pred builder.SQLiteCommand builder.Variables
-
-        // WHERE wrapper for “predicate overloads” (First/Single/Any/All/Contains…)
-        let emitSelectIdValueWithOptionalWhere (predicateOpt: Expression option) =
-            builder.AppendF "SELECT Id, Value FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") o " |> ignore
-            match predicateOpt with
-            | None -> ()
-            | Some p ->
-                builder.AppendF "WHERE " |> ignore
-                QueryTranslator.translateQueryable "" p builder.SQLiteCommand builder.Variables
-
-        // Single/SingleOrDefault scaffolding
-        let emitSingleLike (predicateOpt: Expression option) (emptyAsError: bool) =
-            let countVar = Utils.getVarName builder.SQLiteCommand.Length
-            builder.AppendF "SELECT jsonb_extract(Encoded, '$.Id') as Id, jsonb_extract(Encoded, '$.Value') as Value FROM (" |> ignore
-
-            builder.AppendF "SELECT CASE WHEN " |> ignore
-            builder.AppendF countVar |> ignore
-            builder.AppendF " = 0 THEN " |> ignore
-            if emptyAsError then
-                builder.AppendF "(SELECT jsonb_object('Id', NULL, 'Value', '\"Sequence contains no elements\"')) " |> ignore
-            else
-                builder.AppendF "(SELECT 0 WHERE 0) " |> ignore
-
-            builder.AppendF "WHEN " |> ignore
-            builder.AppendF countVar |> ignore
-            builder.AppendF " > 1 THEN (SELECT jsonb_object('Id', NULL, 'Value', '\"Sequence contains more than one matching element\"')) ELSE (" |> ignore
-
-            builder.AppendF "SELECT jsonb_object('Id', Id, 'Value', Value) FROM (" |> ignore
-            emitSelectIdValueWithOptionalWhere predicateOpt
-            builder.AppendF ") o" |> ignore
-
-            builder.AppendF ") END as Encoded FROM (" |> ignore
-            builder.AppendF "SELECT COUNT(*) as " |> ignore
-            builder.AppendF countVar |> ignore
-            builder.AppendF " FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") " |> ignore
-            match predicateOpt with
-            | None -> ()
-            | Some p ->
-                builder.AppendF "WHERE " |> ignore
-                QueryTranslator.translateQueryable "" p builder.SQLiteCommand builder.Variables
-            builder.AppendF " LIMIT 2) ) WHERE Id IS NOT NULL OR Value IS NOT NULL" |> ignore
-
-        match builder.TerminalOperation with
-        | None ->
-            // No terminal op — just write the chain
-            writeLayers builder layers
-        | Some terminalOperation ->
-        match terminalOperation.Method with
-        // --- Aggregates ---
-        | Sum      -> emitAggregate "SUM" (terminalOperation.Expressions |> Array.tryItem 0) true
-        | Average  -> emitRaiseIfNullAggregate "AVG" (terminalOperation.Expressions |> Array.tryItem 0) "Sequence contains no elements"
-        | Min      -> emitRaiseIfNullAggregate "MIN" (terminalOperation.Expressions |> Array.tryItem 0) "Sequence contains no elements"
-        | Max      -> emitRaiseIfNullAggregate "MAX" (terminalOperation.Expressions |> Array.tryItem 0) "Sequence contains no elements"
-
-        // --- Distinct / DistinctBy ---
-        | Distinct ->
-            // no selector: group by element identity
-            emitDistinct None
-        | DistinctBy ->
-            // selector is Expressions.[0]
-            emitDistinct (terminalOperation.Expressions |> Array.tryItem 0)
-
-        // --- Count family ---
-        | Count | CountBy | LongCount ->
-            // optional predicate in Expressions.[0]
-            emitCountWithOptionalPredicate (terminalOperation.Expressions |> Array.tryItem 0)
-
-        // --- First / FirstOrDefault ---
-        | First
-        | FirstOrDefault ->
-            emitSelectIdValueWithOptionalWhere (terminalOperation.Expressions |> Array.tryItem 0)
-            builder.AppendF " LIMIT 1 " |> ignore
-
-        // --- DefaultIfEmpty ---
-        | DefaultIfEmpty ->
-            builder.AppendF "SELECT Id, Value FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") o UNION ALL SELECT -1 as Id, " |> ignore
-            match terminalOperation.Expressions |> Array.tryItem 0 with
-            | None ->
-                // default(T)
-                let t = typeof<'T>
-                if t.IsValueType then
-                    let dv = Activator.CreateInstance t
-                    let jv = JsonSerializator.JsonValue.Serialize dv
-                    let js = jv.ToJsonString() |> QueryTranslator.escapeSQLiteString
-                    builder.AppendF "jsonb_extract(jsonb('" |> ignore
-                    builder.AppendF js |> ignore
-                    builder.AppendF "'), '$')" |> ignore
-                else
-                    builder.AppendF "NULL" |> ignore
-            | Some providedDefault ->
-                let o = QueryTranslator.evaluateExpr<obj> providedDefault
-                let jv = JsonSerializator.JsonValue.Serialize o
-                let js = jv.ToJsonString() |> QueryTranslator.escapeSQLiteString
-                builder.AppendF "jsonb_extract(jsonb('" |> ignore
-                builder.AppendF js |> ignore
-                builder.AppendF "'), '$')" |> ignore
-            builder.AppendF " as Value WHERE NOT EXISTS (" |> ignore
-            builder.AppendF "SELECT 1 FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") o)" |> ignore
-
-        // --- Last / LastOrDefault (only if no prior ordering ops exist, same constraint as old code) ---
-        | Last
-        | LastOrDefault ->
-            // Enforce: no composed ORDER BY unless it’s a bare root; mirror old behavior
-            if layers.Count <> 1 then
-                raise (InvalidOperationException "Because SQLite does not guarantee ordering without ORDER BY, Last*() can only be used directly on the root (it then sorts by Id). Use OrderBy(...).First'OrDefault'() instead.")
-            // render base root
-            builder.AppendF "SELECT Id, Value FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") o " |> ignore
-            match terminalOperation.Expressions |> Array.tryItem 0 with
-            | None -> ()
-            | Some p ->
-                builder.AppendF "WHERE " |> ignore
-                QueryTranslator.translateQueryable "" p builder.SQLiteCommand builder.Variables
-            builder.AppendF " ORDER BY Id DESC LIMIT 1 " |> ignore
-
-        // --- Single / SingleOrDefault ---
-        | Single ->
-            emitSingleLike (terminalOperation.Expressions |> Array.tryItem 0) true
-        | SingleOrDefault ->
-            emitSingleLike (terminalOperation.Expressions |> Array.tryItem 0) false
-
-        // --- All ---
-        | All ->
-            match terminalOperation.Expressions |> Array.tryItem 0 with
-            | None -> raise (InvalidOperationException "All(...) requires a predicate.")
-            | Some p ->
-                builder.AppendF "SELECT COUNT(*) = (SELECT COUNT(*) FROM (" |> ignore
-                writeBase ()
-                builder.AppendF ")) as Value FROM (" |> ignore
-                writeBaseWith (fun l -> addSelectionSensibleFilter l p)
-                builder.AppendF ")"
-
-        // --- Any ---
-        | Any ->
-            builder.AppendF "(SELECT EXISTS(SELECT 1 FROM (" |> ignore
-            match terminalOperation.Expressions |> Array.tryItem 0 with
-            | None ->
-                writeBase ()
-            | Some p ->
-                builder.AppendF "SELECT Id, Value FROM (" |> ignore
-                writeBase ()
-                builder.AppendF ") o WHERE " |> ignore
-                QueryTranslator.translateQueryable "" p builder.SQLiteCommand builder.Variables
-            builder.AppendF " LIMIT 1) o) as Value)" |> ignore
-
-        // --- Contains ---
-        | Contains ->
-            let struct (t, v) =
-                match terminalOperation.Expressions |> Array.tryItem 0 with
-                | Some (:? ConstantExpression as ce) -> struct (ce.Type, ce.Value)
-                | other -> failwithf "Invalid Contains(...) parameter: %A" other
-            builder.AppendF "SELECT EXISTS(SELECT 1 FROM ("
-            writeBaseWith (fun l -> addSelectionSensibleFilter l (ExpressionHelper.eq t v))
-            builder.AppendF ") o"
-            builder.AppendF ") as Value "
-
-        // --- Append ---
-        | Append ->
-            builder.AppendF "SELECT Id, Value FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") o UNION ALL SELECT " |> ignore
-            let appendingObj = QueryTranslator.evaluateExpr<'T> (terminalOperation.Expressions.[0])
-            let jsonStringElement, hasId = serializeForCollection appendingObj
-            if not hasId then
-                builder.AppendF "-1 as Id," |> ignore
-            else
-                let id = HasTypeId<'T>.Read appendingObj
-                builder.AppendF (string id) |> ignore
-                builder.AppendF " as Id," |> ignore
-            let escaped = QueryTranslator.escapeSQLiteString jsonStringElement
-            builder.AppendF "jsonb('" |> ignore
-            builder.AppendF escaped |> ignore
-            builder.AppendF "') as Value " |> ignore
-
-        // --- Concat ---
-        | Concat ->
-            builder.AppendF "SELECT Id, Value FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") o UNION ALL SELECT Id, Value FROM " |> ignore
-            let other = terminalOperation.Expressions.[0]
-            writeExternalAsSubquery other
-            builder.AppendF " " |> ignore
-
-        // --- GroupBy<TSource,TKey>(..., keySelector) -> { Key, Items[] } ---
-        | GroupBy ->
-            let keySelector =
-                match terminalOperation.Expressions |> Array.tryItem 0 with
-                | Some k -> k
-                | None -> failwith "GroupBy requires a key selector."
-            builder.AppendF "SELECT -1 as Id, jsonb_object('Key', " |> ignore
-            QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
-            builder.AppendF ", 'Items', jsonb_group_array(Value)) as Value FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") o GROUP BY " |> ignore
-            QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
-
-        // --- Except / Intersect (value equality against jsonb_extract(Value,'$')) ---
-        | Except ->
-            let other = terminalOperation.Expressions.[0]
-            builder.AppendF "SELECT Id, Value FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") o WHERE jsonb_extract(Value, '$') NOT IN (" |> ignore
-            builder.AppendF "SELECT jsonb_extract(Value, '$') FROM (" |> ignore
-            writeExternalAsSubquery other
-            builder.AppendF ") o )" |> ignore
-
-        | Intersect ->
-            let other = terminalOperation.Expressions.[0]
-            builder.AppendF "SELECT Id, Value FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") o WHERE jsonb_extract(Value, '$') IN (" |> ignore
-            builder.AppendF "SELECT jsonb_extract(Value, '$') FROM (" |> ignore
-            writeExternalAsSubquery other
-            builder.AppendF ") o )" |> ignore
-
-        // --- ExceptBy / IntersectBy (…, other, keySelector) ---
-        | ExceptBy ->
-            if terminalOperation.Expressions.Length <> 2 then failwith "ExceptBy expects (other, keySelector)."
-            let other, keySelector = terminalOperation.Expressions.[0], terminalOperation.Expressions.[1]
-            builder.AppendF "SELECT Id, Value FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") o WHERE " |> ignore
-            QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
-            builder.AppendF " NOT IN (" |> ignore
-            builder.AppendF "SELECT " |> ignore
-            QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
-            builder.AppendF " FROM (" |> ignore
-            writeExternalAsSubquery other
-            builder.AppendF ") o )" |> ignore
-
-        | IntersectBy ->
-            if terminalOperation.Expressions.Length <> 2 then failwith "IntersectBy expects (other, keySelector)."
-            let other, keySelector = terminalOperation.Expressions.[0], terminalOperation.Expressions.[1]
-            builder.AppendF "SELECT Id, Value FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") o WHERE " |> ignore
-            QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
-            builder.AppendF " IN (" |> ignore
-            builder.AppendF "SELECT " |> ignore
-            QueryTranslator.translateQueryable "" keySelector builder.SQLiteCommand builder.Variables
-            builder.AppendF " FROM (" |> ignore
-            writeExternalAsSubquery other
-            builder.AppendF ") o )" |> ignore
-
-        // --- Cast / OfType ---
-        | Cast ->
-            match GenericMethodArgCache.Get terminalOperation.OriginalMethod |> Array.tryHead with
-            | None -> failwith "Cast<T>: missing generic type."
-            | Some t when typeof<JsonSerializator.JsonValue>.IsAssignableFrom t ->
-                // trivial pass-through
-                writeBase ()
-            | Some t ->
-                match t |> typeToName with
-                | None -> failwith "Cast<T>: incompatible type."
-                | Some typeName ->
-                    builder.AppendF "SELECT " |> ignore
-                    builder.AppendF "CASE WHEN jsonb_extract(Value, '$.$type') IS NULL THEN NULL " |> ignore
-                    builder.AppendF "WHEN jsonb_extract(Value, '$.$type') <> " |> ignore
-                    builder.AppendVar typeName |> ignore
-                    builder.AppendF " THEN NULL ELSE Id END AS Id, " |> ignore
-
-                    builder.AppendF "CASE WHEN jsonb_extract(Value, '$.$type') IS NULL THEN json_quote('The type of item is not stored in the database, if you want to include it, then add the Polimorphic attribute to the type and reinsert all elements.') " |> ignore
-                    builder.AppendF "WHEN jsonb_extract(Value, '$.$type') <> " |> ignore
-                    builder.AppendVar typeName |> ignore
-                    builder.AppendF " THEN json_quote('Unable to cast object to the specified type, because the types are different.') ELSE Value END AS Value FROM (" |> ignore
-                    writeBase ()
-                    builder.AppendF ") o " |> ignore
-
-        | OfType ->
-            match GenericMethodArgCache.Get terminalOperation.OriginalMethod |> Array.tryHead with
-            | None -> failwith "OfType<T>: missing generic type."
-            | Some t when typeof<JsonSerializator.JsonValue>.IsAssignableFrom t ->
-                writeBase ()
-            | Some t ->
-                match t |> typeToName with
-                | None -> failwith "OfType<T>: incompatible type."
-                | Some typeName ->
-                    builder.AppendF "SELECT Id, Value FROM (" |> ignore
-                    writeBase ()
-                    builder.AppendF ") o WHERE jsonb_extract(Value, '$.$type') = " |> ignore
-                    builder.AppendVar typeName |> ignore
-                    builder.AppendF " " |> ignore
-
-        // --- SelectMany (sequence-producing but treated here as terminal in your enum) ---
-        | SelectMany ->
-            // Expect one selector: x => x.Prop or x => x
-            let innerName = Utils.getVarName builder.SQLiteCommand.Length
-            builder.AppendF "SELECT " |> ignore
-            builder.AppendF innerName |> ignore
-            builder.AppendF ".Id AS Id, json_each.Value as Value FROM (" |> ignore
-            writeBase ()
-            builder.AppendF ") AS " |> ignore
-            builder.AppendF innerName |> ignore
-            builder.AppendF " " |> ignore
-            match terminalOperation.Expressions |> Array.tryItem 0 with
-            | Some (:? UnaryExpression as ue) when (ue.Operand :? LambdaExpression) ->
-                let lambda = ue.Operand :?> LambdaExpression
-                match lambda.Body with
-                | :? MemberExpression as me ->
-                    builder.AppendF "JOIN json_each(jsonb_extract(" |> ignore
-                    builder.AppendF innerName |> ignore
-                    builder.AppendF ".Value, '$." |> ignore
-                    builder.AppendF me.Member.Name |> ignore
-                    builder.AppendF "'))" |> ignore
-                | :? ParameterExpression ->
-                    builder.AppendF "JOIN json_each(" |> ignore
-                    builder.AppendF innerName |> ignore
-                    builder.AppendF ".Value)" |> ignore
-                | _ -> failwith "Unsupported SelectMany selector structure"
-            | _ -> failwith "Invalid SelectMany structure"
-
-        // --- Aggregate (not supported) ---
-        | Aggregate -> failwith "Aggregate is not supported."
-
-        // These should never be considered terminals here
-        | Where | Select | ThenBy | ThenByDescending | OrderBy | Order | OrderDescending
-        | OrderByDescending | Take | Skip ->
-            (raise << InvalidOperationException) "Terminal operations that are not aggregates should not be here."
-
+        collectPreprocessedQuery<'T> builder.TypedSubqueries pq
+        let layers = builder.TypedSubqueries
+        writeLayers builder layers
     
     /// <summary>
     /// Determines if a given LINQ expression corresponds to a method that does not return the document ID (e.g., aggregate functions).
@@ -879,8 +1153,7 @@ module private QueryHelper =
             SQLiteCommand = StringBuilder(256)
             Variables = Dictionary<string, obj>(16)
             Source = source
-            UsedStatements = ResizeArray()
-            TerminalOperation = None
+            TypedSubqueries = ResizeArray()
         }
 
         let valueDecoded = 
@@ -898,25 +1171,25 @@ module private QueryHelper =
             | _ -> struct (false, expression)
 
         if isExplainQueryPlan then
-            builder.AppendF "EXPLAIN QUERY PLAN "
+            builder.Append "EXPLAIN QUERY PLAN "
 
 
         let pq = preprocessQuery expression
 
         if doesNotReturnIdFn expression then
-            builder.AppendF "SELECT -1 as Id, "
-            builder.AppendF valueDecoded
-            builder.AppendF "as ValueJSON FROM ("
+            builder.Append "SELECT -1 as Id, "
+            builder.Append valueDecoded
+            builder.Append "as ValueJSON FROM ("
             // translate builder expression
             translateFlattenedQuery builder pq
-            builder.AppendF ")"
+            builder.Append ")"
         else
-            builder.AppendF "SELECT Id, "
-            builder.AppendF valueDecoded
-            builder.AppendF "as ValueJSON FROM ("
+            builder.Append "SELECT Id, "
+            builder.Append valueDecoded
+            builder.Append "as ValueJSON FROM ("
             // translate builder expression
             translateFlattenedQuery builder pq
-            builder.AppendF ")"
+            builder.Append ")"
 
 
         builder.SQLiteCommand.ToString(), builder.Variables
@@ -990,13 +1263,46 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                     query :> obj :?> 'TResult
                 | _other ->
                     use connection = source.GetInternalConnection()
-                    match connection.Query<Types.DbObjectRow>(query, variables) |> Seq.tryHead with
-                    | None ->
+                    let methodName = 
                         match expression with
-                        | :? MethodCallExpression as mce when let name = mce.Method.Name in name.EndsWith "OrDefault" ->
-                            Unchecked.defaultof<'TResult>
-                        | _other -> failwithf "Sequence contains no elements"
-                    | Some row -> JsonFunctions.fromSQLite<'TResult> row
+                        | :? MethodCallExpression as mce -> mce.Method.Name
+                        | _ -> "Execute"
+
+                    // Add Single, First, and the OrDefault Variant here.
+                    let query = connection.Query<Types.DbObjectRow>(query, variables)
+
+                    match methodName with
+                    | "Single" ->
+                        query.Single() |> JsonFunctions.fromSQLite<'TResult>
+                    | "SingleOrDefault" ->
+                        // Emulate query.SingleOrDefault()
+                        use enumerator = query.GetEnumerator()
+                        match enumerator.MoveNext() with
+                        | false -> Unchecked.defaultof<'TResult>
+                        | true -> 
+                            let prevElement = enumerator.Current
+                            match enumerator.MoveNext() with
+                            | true -> failwithf "Sequence contains more than one element"
+                            | false -> 
+                                // Only one element was found, return it.
+                                JsonFunctions.fromSQLite<'TResult> prevElement
+
+                    | "First" ->
+                        query.First() |> JsonFunctions.fromSQLite<'TResult>
+                    | "FirstOrDefault" ->
+                        match query |> Seq.tryHead with
+                        | None -> Unchecked.defaultof<'TResult>
+                        | Some row -> JsonFunctions.fromSQLite<'TResult> row
+
+                    | methodName when methodName.EndsWith("OrDefault", StringComparison.Ordinal) ->
+                        match query |> Seq.tryHead with
+                        | None -> Unchecked.defaultof<'TResult>
+                        | Some row -> JsonFunctions.fromSQLite<'TResult> row
+                    | _ ->
+                        match query |> Seq.tryHead with
+                        | None -> failwithf "Sequence contains no elements"
+                        | Some row -> JsonFunctions.fromSQLite<'TResult> row
+                    
             with _ex ->
                 reraise()
             
