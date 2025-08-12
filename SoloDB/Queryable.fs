@@ -83,7 +83,7 @@ type private PreprocessedQuery =
 /// </summary>
 type private PreprocessedOrder = { 
     OrderingRule: Expression;
-    Descending: bool
+    mutable Descending: bool
 }
 
 type private SQLSelector =
@@ -139,7 +139,7 @@ type private QueryableBuilder =
 
     /// <summary>Adds a variable to the parameters dictionary and appends its placeholder to the SQL command.</summary>
     member this.AppendVar(variable: obj) =
-        ignore (QueryTranslator.appendVariable this.SQLiteCommand this.Variables variable)
+        QueryTranslator.appendVariable this.SQLiteCommand this.Variables variable
 
 
 /// <summary>
@@ -212,8 +212,44 @@ module private QueryHelper =
             else
                 "json_extract(Value, '$') "
 
-    let emptySQLStatement () =
+    let rec private isIdentityLambda (expr: Expression) =
+        match expr with
+        // Unwrap the quote node if present
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote ->
+            isIdentityLambda ue.Operand
+        // Check if it's a lambda
+        | :? LambdaExpression as lambda ->
+            match lambda.Body with
+            | :? ParameterExpression as bodyParam ->
+                Object.ReferenceEquals(bodyParam, lambda.Parameters.[0])
+            | _ -> false
+        | _ -> false
+
+    let private emptySQLStatement () =
         { Filters = ResizeArray(4); Orders = ResizeArray(1); Selector = None; Skip = None; Take = None; TableName = ""; UnionAll = ResizeArray(0) }
+
+    let inline private simpleCurrent (statements: ResizeArray<SQLSubquery>) =
+        match statements.Last() with
+        | Simple s -> s
+        | Complex _ ->
+            let n = emptySQLStatement ()
+            statements.Add (Simple n)
+            n
+
+    let inline private ifSelectorNewStatement (statements: ResizeArray<SQLSubquery>) =
+        match statements.Last() with
+        | Simple current ->
+            match current.Selector with
+            | Some _ ->
+                let n = emptySQLStatement ()
+                statements.Add (Simple n)
+                n
+            | None ->
+                current
+        | Complex _ ->
+            let n = emptySQLStatement ()
+            statements.Add (Simple n)
+            n
 
     let addFilter (statements: ResizeArray<SQLSubquery>) (filter: Expression) =
         let last = statements.Last()
@@ -221,43 +257,33 @@ module private QueryHelper =
             (statements.Add << Simple) { emptySQLStatement () with Filters = ResizeArray [ filter ] }
 
         match last with
-        | Simple last when last.Selector.IsNone && last.UnionAll.Count = 0 ->
-            // If we don't have a selector, we can just add the filter to the current statement
+        | Simple last when last.Selector.IsNone && last.UnionAll.Count = 0 && last.Skip.IsNone && last.Take.IsNone ->
             last.Filters.Add filter
         | _ ->
             addNewQuery ()
 
     let addOrder (statements: ResizeArray<SQLSubquery>) (ordering: Expression) (descending: bool) =
-        let inline ifSelectorNewStatement() =
-            match statements.Last() with
-            | Simple current ->
-                match current.Selector with
-                | Some _ ->
-                    let n = emptySQLStatement ()
-                    statements.Add (Simple n)
-                    n
-                | None ->
-                    current
-            | Complex _ ->
-                let n = emptySQLStatement ()
-                statements.Add (Simple n)
-                n
-
-        let current = ifSelectorNewStatement()
+        let current = ifSelectorNewStatement statements
         current.Orders.Clear()
         current.Orders.Add({ OrderingRule = ordering; Descending = descending })
 
     let addSelector (statements: ResizeArray<SQLSubquery>) (selector: SQLSelector) =
         let last = statements.Last()
         match last with
-        | Simple last ->
+        | Simple last when last.UnionAll.Count = 0 ->
             match last.Selector with
             | Some _ -> 
                 (statements.Add << Simple) { emptySQLStatement () with Selector = Some selector }
             | None ->
                 last.Selector <- Some selector
-        | Complex _ ->
+        | _ ->
             (statements.Add << Simple) { emptySQLStatement () with Selector = Some selector }
+
+    let addTake (statements: ResizeArray<SQLSubquery>) (e: Expression) =
+        let current = simpleCurrent statements
+        match current.Take with
+        | Some e2 -> current.Take <- Some (ExpressionHelper.min e2 e)
+        | None   -> current.Take <- Some e
 
     /// The Complex subquery will be the last subquery processes, it has the WriteInner function to place the inner subqueries where necesary.
     let addComplexFinal (statements: ResizeArray<SQLSubquery>) (writeFunc: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|} -> unit) =
@@ -433,38 +459,17 @@ module private QueryHelper =
             match q with
             | RootQuery rq -> tableName <- rq.SourceTableName
             | Method m ->
-                let inline simpleCurrent() =
-                    match statements.Last() with
-                    | Simple s -> s
-                    | Complex _ ->
-                        let n = emptySQLStatement ()
-                        statements.Add (Simple n)
-                        n
-
-                let inline ifSelectorNewStatement() =
-                    match statements.Last() with
-                    | Simple current ->
-                        match current.Selector with
-                        | Some _ ->
-                            let n = emptySQLStatement ()
-                            statements.Add (Simple n)
-                            n
-                        | None ->
-                            current
-                    | Complex _ ->
-                        let n = emptySQLStatement ()
-                        statements.Add (Simple n)
-                        n
+                let inline simpleCurrent() = simpleCurrent statements
 
                 match m.Value with
                 | Where -> 
                     addFilter statements m.Expressions.[0]
                 | Select ->
                     addSelector statements (Expression m.Expressions.[0])
-                | OrderBy | Order ->
-                    addOrder statements m.Expressions.[0] false
-                | OrderByDescending | OrderDescending ->
-                    addOrder statements m.Expressions.[0] true
+                | Order | OrderDescending ->
+                    addOrder statements (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) (m.Value = OrderDescending)
+                | OrderBy | OrderByDescending  ->
+                    addOrder statements m.Expressions.[0] (m.Value = OrderByDescending)
                 | ThenBy ->
                     let current = simpleCurrent()
                     current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = false })
@@ -477,10 +482,7 @@ module private QueryHelper =
                     | Some _ -> statements.Add(Simple { emptySQLStatement () with Skip = Some m.Expressions.[0] })
                     | None   -> current.Skip <- Some m.Expressions.[0]
                 | Take ->
-                    let current = simpleCurrent()
-                    match current.Take with
-                    | Some _ -> statements.Add(Simple { emptySQLStatement () with Take = Some m.Expressions.[0] })
-                    | None   -> current.Take <- Some m.Expressions.[0]
+                    addTake statements m.Expressions.[0]
 
                 | Sum ->
                     // SUM() return NULL if all elements are NULL, TOTAL() return 0.0.
@@ -527,7 +529,7 @@ module private QueryHelper =
                         builder.Command.Append "SELECT COUNT(Id) as Value FROM " |> ignore
                         builder.Command.Append "(" |> ignore
                         builder.WriteInner()
-                        builder.Command.Append ") o" |> ignore
+                        builder.Command.Append ") o " |> ignore
 
                         match m.Expressions.Length with
                         | 0 -> ()
@@ -550,12 +552,12 @@ module private QueryHelper =
                             builder.Command.Append innerSourceName |> ignore
                             builder.Command.Append ".Id AS Id, json_each.Value as Value FROM (" |> ignore
                             // Evaluate and emit the outer source query (produces Id, Value)
-                            QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                            builder.WriteInner()
                             builder.Command.Append ") AS " |> ignore
                             builder.Command.Append innerSourceName |> ignore
                             builder.Command.Append " " |> ignore
                             // Extract the path to the collection selector (e.g., "$.Values")
-                            match m.Expressions.[1] with
+                            match m.Expressions.[0] with
                             | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
                                 let lambda = ue.Operand :?> LambdaExpression
                                 match lambda.Body with
@@ -576,12 +578,21 @@ module private QueryHelper =
                 
                 | Single | SingleOrDefault
                 | First | FirstOrDefault ->
-                    let current = simpleCurrent()
-                    let constant1 = Expression.Constant(1, typeof<int>)
-                    match current.Take with
-                    | Some _ -> statements.Add(Simple { emptySQLStatement () with Take = Some constant1 })
-                    | None   -> current.Take <- Some constant1
+                    match m.Expressions.Length with
+                    | 0 -> ()
+                    | 1 ->
+                        match m.Expressions.[0] with
+                        | :? LambdaExpression as expr -> addFilter statements expr
+                        | expr when typeof<Expression>.IsAssignableFrom expr.Type -> addFilter statements expr
+                        | _ -> failwith "SingleOrDefault and FirstOrDefault are not supported with a default Value argument."
+                    | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
 
+                    let limit =
+                        match m.Value with
+                        | Single | SingleOrDefault -> 2
+                        | _ -> 1
+
+                    addTake statements (ExpressionHelper.constant limit)
 
                 | DefaultIfEmpty ->
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
@@ -626,13 +637,13 @@ module private QueryHelper =
                         addFilter statements m.Expressions.[0]
                     | other -> failwithf "Invalid number of arguments in %A: %A" m.Value other
 
-                    addOrder statements (ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id"))) true
-
-                    let current = simpleCurrent()
-                    let constant1 = Expression.Constant(1, typeof<int>)
-                    match current.Take with
-                    | Some _ -> statements.Add(Simple { emptySQLStatement () with Take = Some constant1 })
-                    | None   -> current.Take <- Some constant1
+                    match statements.Last() with
+                    | Simple x when x.Orders.Count <> 0 ->
+                        for order in x.Orders do
+                            order.Descending <- not order.Descending
+                    | _ ->
+                        addOrder statements (ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id"))) true
+                    addTake statements (ExpressionHelper.constant 1)
 
                 | All ->
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
@@ -649,16 +660,17 @@ module private QueryHelper =
                     )
 
                 | Any ->
+                    match m.Expressions.Length with
+                    | 0 -> ()
+                    | 1 -> addFilter statements m.Expressions.[0]
+                    | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+
+                    addTake statements (ExpressionHelper.constant 1)
+
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "(SELECT EXISTS(SELECT 1 FROM (" |> ignore
-                        match m.Expressions.Length with
-                        | 0 -> QueryTranslator.translateQueryable builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
-                        | 1 -> QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
-                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
-                        builder.Command.Append " LIMIT 1) o) as Value) " |> ignore
-                        builder.Command.Append "FROM (" |> ignore
+                        builder.Command.Append "SELECT -1 As Id, EXISTS(SELECT 1 FROM (" |> ignore
                         builder.WriteInner()
-                        builder.Command.Append ")" |> ignore
+                        builder.Command.Append ")) as Value" |> ignore
                     )
 
 
@@ -670,45 +682,48 @@ module private QueryHelper =
 
                     let filter = (ExpressionHelper.eq t value)
                     addFilter statements filter
+                    addTake statements (ExpressionHelper.constant 1)
 
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "(SELECT EXISTS(SELECT 1 FROM (" |> ignore
-                        match m.Expressions.Length with
-                        | 0 -> QueryTranslator.translateQueryable builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
-                        | 1 -> QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
-                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
-                        builder.Command.Append " LIMIT 1) o) as Value) " |> ignore
-                        builder.Command.Append "FROM (" |> ignore
+                        builder.Command.Append "SELECT -1 As Id, EXISTS(SELECT 1 FROM (" |> ignore
                         builder.WriteInner()
-                        builder.Command.Append ")" |> ignore
+                        builder.Command.Append ")) as Value" |> ignore
                     )
                 
                 | Append ->
                     addUnionAll statements (fun tableName builder vars ->
                         builder.Append "SELECT " |> ignore
                         let appendingObj = QueryTranslator.evaluateExpr<'T> m.Expressions.[0]
-                        let struct (jsonStringElement, hasId) = serializeForCollection appendingObj
-                        match hasId with
-                        | false ->
-                            builder.Append "-1 as Id," |> ignore
-                        | true ->
-                            let id = HasTypeId<'T>.Read appendingObj
-                            builder.Append (sprintf "%i" id) |> ignore
-                            builder.Append " as Id," |> ignore
 
-                        let escapedString = QueryTranslator.escapeSQLiteString jsonStringElement
-                        builder.Append "jsonb('" |> ignore
-                        builder.Append escapedString |> ignore
-                        builder.Append "')" |> ignore
-                        builder.Append " As Value " |> ignore
+                        match QueryTranslator.isPrimitiveSQLiteType typeof<'T> with
+                        | false ->
+                            let struct (jsonStringElement, hasId) = serializeForCollection appendingObj
+                            match hasId with
+                            | false ->
+                                builder.Append "-1 as Id," |> ignore
+                            | true ->
+                                let id = HasTypeId<'T>.Read appendingObj
+                                builder.Append (sprintf "%i" id) |> ignore
+                                builder.Append " as Id," |> ignore
+
+                            let escapedString = QueryTranslator.escapeSQLiteString jsonStringElement
+                            builder.Append "jsonb_extract('" |> ignore
+                            builder.Append escapedString |> ignore
+                            builder.Append "', '$')" |> ignore
+                            builder.Append " As Value " |> ignore
+                        | true ->
+                            QueryTranslator.appendVariable builder vars appendingObj
+                            builder.Append " As Value " |> ignore
                     )
                 
                 
                 | Concat ->
                     // Left side is the current pipeline; append the right side as UNION ALL.
                     addUnionAll statements (fun _tableName sb vars ->
-                        sb.Append "SELECT Id, Value FROM (" |> ignore
                         let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
+                        sb.Append "SELECT Id, " |> ignore
+                        sb.Append (extractValueAsJsonIfNecesary (rhs.Type)) |> ignore
+                        sb.Append "As Value FROM (" |> ignore
 
                         translateQuery {
                             Subqueries = ResizeArray<SQLSubquery>()
@@ -726,8 +741,10 @@ module private QueryHelper =
                         ctx.WriteInner()
                         ctx.Command.Append ") o WHERE jsonb_extract(Value, '$') NOT IN (" |> ignore
 
-                        ctx.Command.Append "SELECT jsonb_extract(Value, '$') FROM (" |> ignore
                         let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
+                        ctx.Command.Append "SELECT " |> ignore
+                        ctx.Command.Append "jsonb_extract(Value, '$') " |> ignore
+                        ctx.Command.Append "As Value FROM (" |> ignore
 
                         translateQuery {
                             Subqueries = ResizeArray<SQLSubquery>()
@@ -745,8 +762,11 @@ module private QueryHelper =
                         ctx.WriteInner()
                         ctx.Command.Append ") o WHERE jsonb_extract(Value, '$') IN (" |> ignore
 
-                        ctx.Command.Append "SELECT jsonb_extract(Value, '$') FROM (" |> ignore
                         let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
+                        ctx.Command.Append "SELECT " |> ignore
+                        ctx.Command.Append "jsonb_extract(Value, '$') " |> ignore
+                        ctx.Command.Append "As Value FROM (" |> ignore
+
                         translateQuery {
                             Subqueries = ResizeArray<SQLSubquery>()
                             SQLiteCommand = ctx.Command
@@ -758,8 +778,8 @@ module private QueryHelper =
 
                 | ExceptBy ->
                     // Arguments: other, keySelector
-                    if m.Expressions.Length <> 2 then failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length
-                    let keySelE = m.Expressions.[1]
+                    if m.Expressions.Length <> 2 then failwithf "Invalid number of arguments, expected 2, in %s: %A" m.OriginalMethod.Name m.Expressions.Length
+                    let keySelE =  m.Expressions.[1]
                     addComplexFinal statements (fun ctx ->
                         ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
                         ctx.WriteInner()
@@ -768,9 +788,13 @@ module private QueryHelper =
                         ctx.Command.Append " NOT IN (" |> ignore
 
                         ctx.Command.Append "SELECT " |> ignore
-                        QueryTranslator.translateQueryable ctx.TableName keySelE ctx.Command ctx.Vars
-                        ctx.Command.Append " FROM (" |> ignore
                         let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
+                        match keySelE with
+                        | keySelE when isIdentityLambda keySelE ->
+                            ctx.Command.Append (extractValueAsJsonIfNecesary (rhs.Type)) |> ignore
+                        | _ -> QueryTranslator.translateQueryable ctx.TableName keySelE ctx.Command ctx.Vars
+                        ctx.Command.Append "As Value FROM (" |> ignore
+                        
                         translateQuery {
                             Subqueries = ResizeArray<SQLSubquery>()
                             SQLiteCommand = ctx.Command
@@ -782,7 +806,7 @@ module private QueryHelper =
 
                 | IntersectBy ->
                     // Arguments: other, keySelector
-                    if m.Expressions.Length <> 2 then failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length
+                    if m.Expressions.Length <> 2 then failwithf "Invalid number of arguments, expected 2, in %s: %A" m.OriginalMethod.Name m.Expressions.Length
                     let keySelE = m.Expressions.[1]
                     addComplexFinal statements (fun ctx ->
                         ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
@@ -792,9 +816,13 @@ module private QueryHelper =
                         ctx.Command.Append " IN (" |> ignore
 
                         ctx.Command.Append "SELECT " |> ignore
-                        QueryTranslator.translateQueryable ctx.TableName keySelE ctx.Command ctx.Vars
-                        ctx.Command.Append " FROM (" |> ignore
                         let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
+                        match keySelE with
+                        | keySelE when isIdentityLambda keySelE ->
+                            ctx.Command.Append (extractValueAsJsonIfNecesary (rhs.Type)) |> ignore
+                        | _ -> QueryTranslator.translateQueryable ctx.TableName keySelE ctx.Command ctx.Vars
+                        ctx.Command.Append "As Value FROM (" |> ignore
+                        
 
                         translateQuery {
                             Subqueries = ResizeArray<SQLSubquery>()
@@ -916,7 +944,9 @@ module private QueryHelper =
 
                 builder.Append "FROM " |> ignore
                 if i = 0 then
-                    builder.Append layer.TableName |> ignore
+                    builder.Append "\""
+                    builder.Append layer.TableName
+                    builder.Append "\""
                 else
                     builder.Append "(" |> ignore
                     writeLayer (i - 1)
