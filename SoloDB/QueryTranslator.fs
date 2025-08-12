@@ -54,26 +54,16 @@ module QueryTranslator =
     /// <param name="variables">The dictionary of query parameters to add the value to.</param>
     /// <param name="value">The object value to append.</param>
     let internal appendVariable (sb: StringBuilder) (variables: #IDictionary<string, obj>) (value: obj) =
-        match value with
-        | :? bool as b -> 
-            sb.Append (sprintf "%i" (if b then 1 else 0)) |> ignore
-        | _other ->
+        let value =
+            match value with
+            | :? bool as b -> 
+                box (if b then 1 else 0)
+            | _other ->
+                value
 
-        match value with
-        | :? int8 as i -> sprintf "%i" i |> sb.Append |> ignore
-        | :? uint8 as i -> sprintf "%i" i |> sb.Append |> ignore
-        | :? int16 as i -> sprintf "%i" i |> sb.Append |> ignore
-        | :? uint16 as i -> sprintf "%i" i |> sb.Append |> ignore
-        | :? int32 as i -> sprintf "%i" i |> sb.Append |> ignore
-        | :? uint32 as i -> sprintf "%i" i |> sb.Append |> ignore
-        | :? int64 as i -> sprintf "%i" i |> sb.Append |> ignore
-        | :? uint64 as i -> sprintf "%i" i |> sb.Append |> ignore
-        | :? nativeint as i -> sprintf "%i" i |> sb.Append |> ignore
-        | _other ->
-
-        let jsonValue, kind = toSQLJson value
+        let jsonValue, shouldEncode = toSQLJson value
         let name = getVarName sb.Length
-        if kind then 
+        if shouldEncode then 
             sb.Append (sprintf "jsonb(@%s)" name) |> ignore
         else 
             sb.Append (sprintf "@%s" name) |> ignore
@@ -619,7 +609,10 @@ module QueryTranslator =
         qb.AppendRaw "jsonb_extract("
         visit array qb |> ignore
         qb.AppendRaw ", '$["
-        visit index qb |> ignore
+        match index with
+        | :? ConstantExpression as ce when ce.Type.IsPrimitive ->
+            qb.AppendRaw (string ce.Value)
+        | _other -> failwithf "The index of the array must always be a constant value."
         qb.AppendRaw "]')"
         ()
 

@@ -89,6 +89,13 @@ module JsonFunctions =
         | :? int16 as x -> x :> obj, false
         | :? int32 as x -> x :> obj, false
         | :? int64 as x -> x :> obj, false
+        | :? nativeint as x -> x :> obj, false
+
+        | :? uint8 as x -> x :> obj, false
+        | :? uint16 as x -> x :> obj, false
+        | :? uint32 as x -> x :> obj, false
+        | :? uint64 as x -> x :> obj, false
+        | :? unativeint as x -> x :> obj, false
 
         | :? float32 as x -> x :> obj, false
         | :? float as x -> x :> obj, false
