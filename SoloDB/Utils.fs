@@ -356,6 +356,18 @@ module Utils =
             let parameter = Expression.Parameter x
             Expression.Lambda(Expression.Equal(parameter, Expression.Constant(b, x)), [|parameter|])
 
+        static member inline internal min (e1: Expression) (e2: Expression) =
+            // Produces an expression tree representing min(e1, e2) using LessThan
+            Expression.Condition(
+                Expression.LessThan(e1, e2),
+                e1,
+                e2
+            )
+
+        static member inline internal constant<'T> (x: 'T) =
+            // Returns a strongly-typed constant expression for value x
+            Expression.Constant(x, typeof<'T>)
+
     module internal SeqExt =
         let internal sequentialGroupBy keySelector (sequence: seq<'T>) =
             seq {
