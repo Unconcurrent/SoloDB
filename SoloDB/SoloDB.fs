@@ -807,6 +807,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
     /// <param name="name">The name of the collection.</param>
     /// <returns>True if the collection exists, otherwise false.</returns>
     member this.CollectionExists name =
+        let name = Helper.formatName name
         Helper.existsCollection name connection
 
     /// <summary>
@@ -824,6 +825,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
     /// <param name="name">The name of the collection to drop.</param>
     /// <returns>True if the collection was dropped, false if it did not exist.</returns>
     member this.DropCollectionIfExists name =
+        let name = Helper.formatName name
         use _mutex = Helper.lockTable connectionString name
 
         if Helper.existsCollection name connection then
@@ -1215,7 +1217,8 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <param name="name">The name of the collection to drop.</param>
     /// <returns>True if the collection was dropped, false if it did not exist.</returns>
     member this.DropCollectionIfExists name =
-        use mutex = Helper.lockTable connectionString name
+        let name = Helper.formatName name
+        use _mutex = Helper.lockTable connectionString name
 
         use connection = connectionManager.Borrow()
 
