@@ -76,6 +76,78 @@ module private JsonHelper =
     let internal JSONStringToByteArray(s: string) =
         Convert.FromBase64String s
 
+    /// Try-parse a ReadOnlySpan<char> as a base-16 (hex) Int32.
+    /// Accepts optional '+' or '-' sign, optional "0x"/"0X" prefix.
+    /// Returns true + sets `result` on success; returns false and leaves `result` unspecified on failure.
+    let internal tryParseHex (span: ReadOnlySpan<char>, result: byref<int>) : bool =
+        // trim leading whitespace
+        let mutable i = 0
+        let len = span.Length
+        let mutable j = len - 1
+
+        // optional sign
+        let mutable negative = false
+        if span.[i] = '-' then
+            negative <- true
+            i <- i + 1
+        elif span.[i] = '+' then
+            i <- i + 1
+
+        // optional 0x/0X prefix
+        if i + 1 <= j && span.[i] = '0' && (span.[i + 1] = 'x' || span.[i + 1] = 'X') then
+            i <- i + 2
+
+        if i > j then false else
+
+        // parse digits
+        let mutable acc = 0u
+        let mutable k = i
+        let mutable ok = true
+        while k <= j && ok do
+            let ch = span.[k]
+            let digit =
+                if ch >= '0' && ch <= '9' then int ch - int '0'
+                elif ch >= 'a' && ch <= 'f' then 10 + int ch - int 'a'
+                elif ch >= 'A' && ch <= 'F' then 10 + int ch - int 'A'
+                else -1
+            if digit < 0 then
+                // invalid character
+                result <- 0
+                ok <- false
+            else
+                acc <- acc * 16u + uint32 digit
+
+            k <- k + 1
+
+        if not ok then false else
+
+        // produce final signed result
+        if negative then
+            if acc <= 0x7FFFFFFFu then
+                result <- - (int acc)
+                true
+            elif acc = 0x80000000u then
+                result <- Int32.MinValue
+                true
+            else
+                result <- 0
+                false
+        else
+            if acc <= 0x7FFFFFFFu then
+                result <- int acc
+                true
+            else
+                // positive overflow
+                result <- 0
+                false
+
+    /// Parse and throw on failure.
+    let internal parseHex (span: ReadOnlySpan<char>) : int =
+        let mutable v = 0
+        if tryParseHex(span, &v) then v
+        else
+            raise (FormatException("Input is not a valid 32-bit hexadecimal integer."))
+
 /// <summary>
 /// Represents the different types of tokens that can be found in a JSON string.
 /// </summary>
@@ -199,24 +271,26 @@ type JsonValueType =
 /// </summary>
 [<Struct>]
 type internal Tokenizer =
-    /// <summary>The input JSON string to tokenize.</summary>
-    val mutable input: string
-    /// <summary>The current position within the input string.</summary>
-    val mutable index: int
-    /// <summary>A reusable StringBuilder for parsing strings.</summary>
-    val private sb: StringBuilder
+    {
+        /// <summary>The input JSON string to tokenize.</summary>
+        input: string
+        /// <summary>The current position within the input string.</summary>
+        mutable index: int
+        /// <summary>A reusable StringBuilder for parsing strings.</summary>
+        sb: StringBuilder
+    }
 
     /// <summary>
     /// Initializes a new Tokenizer with the specified source string.
     /// </summary>
     /// <param name="source">The JSON string to tokenize.</param>
-    new(source: string) = { input = source; index = 0; sb = System.Text.StringBuilder() }
+    static member internal From(source: string) = { input = source; index = 0; sb = System.Text.StringBuilder() }
     
     /// <summary>
     /// Reads the next token from the input string and advances the index.
     /// </summary>
     /// <returns>The next Token from the stream.</returns>
-    member this.ReadNext() : Token =
+    member private this.ReadNext() : Token =
         let inline isDigitOrMinus c = Char.IsDigit c || c = '-'
         let inline isInitialIdentifierChar c = Char.IsLetter c || c = '_'
         let inline isIdentifierChar c = isInitialIdentifierChar c || Char.IsDigit c
@@ -265,28 +339,29 @@ type internal Tokenizer =
                         | 'u'  ->
                             // Parse the first Unicode escape sequence
                             if i + 4 < input.Length then
-                                let unicodeSeq1 = input.Substring(i + 1, 4)
-                                let unicodeVal1 = Convert.ToInt32(unicodeSeq1, 16)
-                                let mutable unicodeChar = char unicodeVal1
-                                i <- i + 4
-                                
-                                // Handle surrogate pairs if necessary
-                                if Char.IsHighSurrogate(unicodeChar) then
+                                // parse first \uXXXX (starting at i+1)
+                                let code1 = JsonHelper.parseHex (input.AsSpan(i + 1, 4))
+                                let ch1 = char code1
+                                i <- i + 4  // consumed the 4 hex digits
+
+                                if Char.IsHighSurrogate(ch1) then
+                                    // expect: \uXXXX (high) then sequence: \ u XXXX (low)
+                                    // current i points to the last hex digit of the first \u; we need to check the next characters
                                     if i + 6 < input.Length && input.[i + 1] = '\\' && input.[i + 2] = 'u' then
-                                        let unicodeSeq2 = input.Substring(i + 3, 4)
-                                        let unicodeVal2 = Convert.ToInt32(unicodeSeq2, 16)
-                                        let lowSurrogate = char unicodeVal2
-                                        if Char.IsLowSurrogate(lowSurrogate) then
-                                            let fullCodePoint = Char.ConvertToUtf32(unicodeChar, lowSurrogate)
-                                            let fullUnicodeChar = Char.ConvertFromUtf32(fullCodePoint)
-                                            sb.Append(fullUnicodeChar) |> ignore
-                                            i <- i + 6 // Move past the low surrogate and escape sequence
+                                        let code2 = JsonHelper.parseHex (input.AsSpan(i + 3, 4))
+                                        let ch2 = char code2
+                                        if Char.IsLowSurrogate(ch2) then
+                                            // append both halves directly (no allocation)
+                                            sb.Append(ch1) |> ignore
+                                            sb.Append(ch2) |> ignore
+                                            i <- i + 6  // consumed: '\' 'u' and 4 hex digits for the low surrogate
                                         else
                                             failwith "Invalid low surrogate"
                                     else
                                         failwith "Expected low surrogate after high surrogate"
                                 else
-                                    sb.Append(unicodeChar) |> ignore
+                                    // BMP character — append single char
+                                    sb.Append(ch1) |> ignore
                             else
                                 failwith "Invalid Unicode escape sequence"
                         | other -> failwithf "Invalid escape sequence: '%c'" other
@@ -296,11 +371,7 @@ type internal Tokenizer =
                 if i >= input.Length then failwith "Unterminated string"
                 this.index <- i + 1
                 StringToken(sb.ToString())
-            | c when isDigitOrMinus c ->
-                let buffer = NativePtr.stackalloc<char> 128
-                let bufferPtr = buffer |> NativePtr.toVoidPtr
-                let mutable span = new Span<char>(bufferPtr, 128)
-                
+            | c when isDigitOrMinus c ->                
                 let mutable i = this.index
                 let mutable length = 0
                 
@@ -310,20 +381,16 @@ type internal Tokenizer =
                          input.[i] = 'e' || 
                          input.[i] = 'E' || 
                          input.[i] = '+') do
-                    if length < span.Length then
-                        span[length] <- input.[i]
-                        length <- length + 1
-                    else
-                        failwith "Number too long for buffer"
+                    length <- length + 1
                     i <- i + 1
                 
-                this.index <- i
-                
                 #if NETSTANDARD2_1
-                let s = ReadOnlySpan<char>(bufferPtr, length)
+                let s = input.AsSpan(this.index, length)
                 #else
-                let s = System.String(buffer, 0, length)
+                let s = input.Substring(this.index, length)
                 #endif
+
+                this.index <- i
 
                 NumberToken (
                     try Decimal.Parse(s, NumberStyles.Any, CultureInfo.InvariantCulture)
@@ -336,23 +403,54 @@ type internal Tokenizer =
                 )
 
             | c when isInitialIdentifierChar c ->
-                let sb = this.sb.Clear()
-                let mutable i = this.index
-                while i < input.Length && isIdentifierChar input.[i] do
-                    sb.Append(input.[i]) |> ignore
-                    i <- i + 1
-                let txt = sb.ToString()
-                this.index <- i
-                match txt with
-                | "null"
-                | "NULL" -> NullToken
-                | "true" -> BooleanToken(true)
-                | "false" -> BooleanToken(false)
-                | other -> StringToken other // Non standard, but used.
+                let inline fallback (input: string) (index: int) (sb: StringBuilder) =
+                    let sb = sb.Clear()
+                    let mutable i = index
+                    while i < input.Length && isIdentifierChar input.[i] do
+                        sb.Append(input.[i]) |> ignore
+                        i <- i + 1
+
+                    let txt = sb.ToString()
+                    
+                    // F#'s refs restrictions
+                    struct (match txt with
+                            | "null"
+                            | "NULL" -> NullToken
+                            | "true" -> BooleanToken(true)
+                            | "false" -> BooleanToken(false)
+                            // Non standard. 
+                            | other -> StringToken other
+                            , i)
+
+
+                if this.index + 4 <= input.Length then
+                    // We know that all identifiers are at least 4 chars long
+                    match input.AsSpan(this.index, 4) with
+                    | x when x.Equals ("null".AsSpan(), StringComparison.Ordinal) && (this.index + 4 = input.Length || (not << isIdentifierChar) input.[this.index + 4]) -> 
+                        this.index <- this.index + 4
+                        NullToken
+                    | x when x.Equals ("NULL".AsSpan(), StringComparison.Ordinal) && (this.index + 4 = input.Length || (not << isIdentifierChar) input.[this.index + 4]) -> 
+                        this.index <- this.index + 4
+                        NullToken
+                    | x when x.Equals ("true".AsSpan(), StringComparison.Ordinal) && (this.index + 4 = input.Length || (not << isIdentifierChar) input.[this.index + 4]) -> 
+                        this.index <- this.index + 4
+                        BooleanToken true
+                    | x when x.Equals ("fals".AsSpan(), StringComparison.Ordinal) 
+                             && this.index + 4 < input.Length 
+                             && input.[this.index + 4] = 'e' 
+                             && (this.index + 5 = input.Length || (not << isIdentifierChar) input.[this.index + 5]) 
+                             -> 
+                        this.index <- this.index + 5
+                        BooleanToken false
+                    | _ ->
+                        match fallback input this.index this.sb with struct (x, i) -> this.index <- i; x
+                else 
+                    match fallback input this.index this.sb with struct (x, i) -> this.index <- i; x
+                
             | c when Char.IsWhiteSpace(c) ->
                 this.index <- this.index + 1
                 this.ReadNext()
-            | c -> failwithf "Unexpected JSON character: %c" c
+            | c -> failwithf "Unexpected JSON character: %c, index = %i" c this.index
         else
             EndOfInput
 
@@ -394,7 +492,9 @@ type internal Tokenizer =
     /// </summary>
     /// <returns>The parsed JsonValue.</returns>
     member private this.ParseTokens() =
-        this.ParseTokensOr(fun t -> failwithf "Malformed JSON at: %A" t) |> _.Value
+        match this.ParseTokensOr(fun _t -> None) with
+        | Some x -> x
+        | None -> failwithf "Could not parse the token at index = %i." this.index
     
     /// <summary>
     /// Recursively parses the members (key-value pairs) of a JSON object.
@@ -729,7 +829,7 @@ and JsonValue =
     static member Parse (jsonString: string) =
         if isNull jsonString then Null else
 
-        let tokenizer = Tokenizer(jsonString)
+        let tokenizer = Tokenizer.From jsonString
         let json = tokenizer.Parse()
         json
 
