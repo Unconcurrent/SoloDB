@@ -1,4 +1,4 @@
-# SoloDB
+# SoloDB - A Document Database With Full LINQ Support
 
 SoloDB is a high-performance, lightweight, and robust embedded .NET database that elegantly combines the power of a NoSQL document store with the reliability of SQL. Built directly on top of SQLite and its native [JSONB](https://sqlite.org/jsonb.html) support, SoloDB offers a serverless, feature-rich experience, combining a simple [MongoDB](https://www.mongodb.com/)-like API with full LINQ support for expressive, strongly-typed queries.
 
