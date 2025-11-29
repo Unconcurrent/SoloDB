@@ -1,6 +1,6 @@
 # SoloDB
 
-SoloDB is a high-performance, lightweight, and robust embedded .NET database that elegantly combines the power of a NoSQL document store with the reliability of SQL. Built directly on top of SQLite and its native [JSONB](https://sqlite.org/jsonb.html) support, SoloDB offers a serverless, feature-rich experience, combining a simple [MongoDB](https://www.mongodb.com/)-like API with full LINQ support for expressive, strongly-typed queries.
+[SoloDB](https://solodb.org/) is a high-performance, lightweight, and robust embedded .NET database that elegantly combines the power of a NoSQL document store with the reliability of SQL. Built directly on top of SQLite and its native [JSONB](https://sqlite.org/jsonb.html) support, SoloDB offers a serverless, feature-rich experience, combining a simple [MongoDB](https://www.mongodb.com/)-like API with full LINQ support for expressive, strongly-typed queries.
 
 It is designed for developers who need a fast, reliable, and easy-to-use database solution without the overhead of a separate server. It's perfect for desktop applications, mobile apps (via .NET MAUI), and small to medium-sized web applications.
 
@@ -44,6 +44,7 @@ SoloDB is packed with features that provide a seamless and powerful developer ex
 - **Customizable ID Generation**: Use the default long primary key, or implement your own custom ID generation strategy (e.g., string, Guid).
 - **.NET Standard 2.0 & 2.1**: Broad compatibility with .NET Framework, .NET Core, and modern .NET runtimes.
 - **Open Source**: Licensed under the permissive LGPL-3.0.
+- **Documentation**: See the [official documentation](https://solodb.org/docs.html) for detailed guides.
 
 ## Why SoloDB?
 
@@ -362,6 +363,8 @@ db.Optimize();
 This project is licensed under the GNU Lesser General Public License v3.0 (LGPL-3.0).
 
 In addition, special permission is granted to distribute applications that incorporate an unmodified DLL of this library in Single-file deployments, Native AOT builds, and other bundling technologies that embed the library directly into the executable file. This ensures you can use modern .NET deployment strategies without violating the license.
+
+Full license details are available [here](https://solodb.org/legal.html).
 
 ## FAQ
 
