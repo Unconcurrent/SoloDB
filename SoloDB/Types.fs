@@ -106,3 +106,25 @@ type SoloDBConfiguration = internal {
     /// By disabling it, any cached data will be automatically cleared.
     mutable CachingEnabled: bool
 }
+
+/// <summary>
+/// Specifies the field to sort by when listing files or directories.
+/// </summary>
+type SortField =
+    /// <summary>Sort by name (case-insensitive).</summary>
+    | Name = 0
+    /// <summary>Sort by file size (only applicable to files; directories treated as 0).</summary>
+    | Size = 1
+    /// <summary>Sort by creation date.</summary>
+    | Created = 2
+    /// <summary>Sort by modification date.</summary>
+    | Modified = 3
+
+/// <summary>
+/// Specifies the sort direction.
+/// </summary>
+type SortDirection =
+    /// <summary>Sort in ascending order (A-Z, smallest first, oldest first).</summary>
+    | Ascending = 0
+    /// <summary>Sort in descending order (Z-A, largest first, newest first).</summary>
+    | Descending = 1
