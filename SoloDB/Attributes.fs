@@ -72,3 +72,12 @@ type SoloId(idGenerator: Type) =
     /// Gets the <see cref="System.Type"/> of the custom ID generator to be used for this primary key.
     /// </summary>
     member val IdGenerator = idGenerator
+
+namespace System.Runtime.CompilerServices
+
+open System
+
+[<AttributeUsage(AttributeTargets.All, AllowMultiple = false)>]
+[<Sealed>]
+type IsReadOnlyAttribute() =
+    inherit System.Attribute()

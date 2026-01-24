@@ -5,6 +5,11 @@ open System.Runtime.CompilerServices
 open System.Linq
 open System.Data
 
+type ISoloDBEvents =
+    abstract member OnInserting<'T>: (*collectionInstance: *) ISoloDBCollection<'T> -> (*item: *) Lazy<'T> -> unit
+    abstract member OnUpdating<'T>: (*collectionInstance: *) ISoloDBCollection<'T> -> (*oldItem: *) Lazy<'T> -> (*newItem: *) Lazy<'T> -> unit
+    abstract member OnDeleting<'T>: (*collectionInstance: *) ISoloDBCollection<'T> -> (*item: *) Lazy<'T> -> unit
+
 /// <summary>
 /// Represents a typed collection within a SoloDB database instance that supports LINQ querying and CRUD operations.
 /// </summary>
@@ -15,7 +20,7 @@ open System.Data
 /// Supports polymorphic storage when <typeparamref name="T"/> is an abstract class or interface.
 /// </remarks>
 /// <seealso cref="IOrderedQueryable{T}"/>
-type ISoloDBCollection<'T> =
+and ISoloDBCollection<'T> =
     inherit IOrderedQueryable<'T>
 
     /// <summary>

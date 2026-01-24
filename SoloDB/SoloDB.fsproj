@@ -35,6 +35,7 @@
     <Compile Include="JsonSerializator.fs" />
     <Compile Include="JsonFunctions.fs" />
     <Compile Include="SQLiteTools.fs" />
+    <Compile Include="RawSqliteFunctions.fs" />
     <Compile Include="SoloDBInterfaces.fs" />
     <Compile Include="IdGenerator.fs" />
     <Compile Include="CustomTypeId.fs" />
