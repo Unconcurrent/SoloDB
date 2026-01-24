@@ -1108,7 +1108,23 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 ignore (command.ExecuteNonQuery())
                 dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
                 if dbSchemaVersion = 1 then
-                    failwithf "Failure to create the schema."
+                    failwithf "Failure to migrate schema."
+
+            (*todo: if dbSchemaVersion = 2 then
+                use command = new SqliteCommand("
+                    BEGIN EXCLUSIVE;
+
+                    PRAGMA user_version = 3;
+
+
+
+                    COMMIT TRANSACTION;
+                ", dbConnection.Inner)
+                command.Prepare()
+                ignore (command.ExecuteNonQuery())
+                dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
+                if dbSchemaVersion = 2 then
+                    failwithf "Failure to migrate schema."*)
 
 
             // https://www.sqlite.org/pragma.html#pragma_optimize
