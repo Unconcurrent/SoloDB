@@ -81,3 +81,8 @@ open System
 [<Sealed>]
 type IsReadOnlyAttribute() =
     inherit System.Attribute()
+
+[<AttributeUsage(AttributeTargets.All, AllowMultiple = false)>]
+[<Sealed>]
+type IsByRefLikeAttribute() =
+    inherit System.Attribute()

@@ -314,10 +314,17 @@ type internal SqliteConnectionRawExtensions =
                 delegate_function_scalar(fun ctx _userData args ->
                     lock lockObj (fun () ->
                         try
-                            let mutable wrappedCtx = { Context = ctx }
-                            for i = 0 to args.Length - 1 do
-                                cachedArgs.[i] <- { Value = args.[i] }
-                            func.Invoke(&wrappedCtx, ReadOnlySpan(cachedArgs))
+                            try
+                                let mutable wrappedCtx = { Context = ctx }
+                                for i = 0 to args.Length - 1 do
+                                    cachedArgs.[i] <- { Value = args.[i] }
+                                func.Invoke(&wrappedCtx, ReadOnlySpan(cachedArgs))
+                            with ex ->
+                                raw.sqlite3_result_error(ctx, ex.Message)
+                                match ex with
+                                | :? SqliteException as sqlEx ->
+                                    raw.sqlite3_result_error_code(ctx, sqlEx.SqliteErrorCode)
+                                | _ -> ()
                         finally
                             Array.Clear(cachedArgs, 0, cachedArgs.Length)
                     )
@@ -329,13 +336,20 @@ type internal SqliteConnectionRawExtensions =
                 delegate_function_scalar(fun ctx _userData args ->
                     lock lockObj (fun () ->
                         try
-                            let mutable wrappedCtx = { Context = ctx }
-                            // Resize array if needed
-                            if cachedArgs.Length < args.Length then
-                                cachedArgs <- Array.zeroCreate<SqliteRawValue> args.Length
-                            for i = 0 to args.Length - 1 do
-                                cachedArgs.[i] <- { Value = args.[i] }
-                            func.Invoke(&wrappedCtx, ReadOnlySpan(cachedArgs, 0, args.Length))
+                            try
+                                let mutable wrappedCtx = { Context = ctx }
+                                // Resize array if needed
+                                if cachedArgs.Length < args.Length then
+                                    cachedArgs <- Array.zeroCreate<SqliteRawValue> args.Length
+                                for i = 0 to args.Length - 1 do
+                                    cachedArgs.[i] <- { Value = args.[i] }
+                                func.Invoke(&wrappedCtx, ReadOnlySpan(cachedArgs, 0, args.Length))
+                            with ex ->
+                                raw.sqlite3_result_error(ctx, ex.Message)
+                                match ex with
+                                | :? SqliteException as sqlEx ->
+                                    raw.sqlite3_result_error_code(ctx, sqlEx.SqliteErrorCode)
+                                | _ -> ()
                         finally
                             Array.Clear(cachedArgs, 0, min args.Length cachedArgs.Length)
                     )
@@ -374,8 +388,15 @@ type internal SqliteConnectionRawExtensions =
 
         let nativeFunc: delegate_function_scalar =
             delegate_function_scalar(fun ctx _userData _args ->
-                let mutable wrappedCtx = { Context = ctx }
-                func.Invoke(&wrappedCtx)
+                try
+                    let mutable wrappedCtx = { Context = ctx }
+                    func.Invoke(&wrappedCtx)
+                with ex ->
+                    raw.sqlite3_result_error(ctx, ex.Message)
+                    match ex with
+                    | :? SqliteException as sqlEx ->
+                        raw.sqlite3_result_error_code(ctx, sqlEx.SqliteErrorCode)
+                    | _ -> ()
             )
 
         DelegateRegistry.register db name (box (func, nativeFunc)) connection
@@ -406,9 +427,16 @@ type internal SqliteConnectionRawExtensions =
 
         let nativeFunc: delegate_function_scalar =
             delegate_function_scalar(fun ctx _userData args ->
-                let mutable wrappedCtx = { Context = ctx }
-                let arg0 = { Value = args.[0] }
-                func.Invoke(&wrappedCtx, &arg0)
+                try
+                    let mutable wrappedCtx = { Context = ctx }
+                    let arg0 = { Value = args.[0] }
+                    func.Invoke(&wrappedCtx, &arg0)
+                with ex ->
+                    raw.sqlite3_result_error(ctx, ex.Message)
+                    match ex with
+                    | :? SqliteException as sqlEx ->
+                        raw.sqlite3_result_error_code(ctx, sqlEx.SqliteErrorCode)
+                    | _ -> ()
             )
 
         DelegateRegistry.register db name (box (func, nativeFunc)) connection
@@ -439,10 +467,17 @@ type internal SqliteConnectionRawExtensions =
 
         let nativeFunc: delegate_function_scalar =
             delegate_function_scalar(fun ctx _userData args ->
-                let mutable wrappedCtx = { Context = ctx }
-                let arg0 = { Value = args.[0] }
-                let arg1 = { Value = args.[1] }
-                func.Invoke(&wrappedCtx, &arg0, &arg1)
+                try
+                    let mutable wrappedCtx = { Context = ctx }
+                    let arg0 = { Value = args.[0] }
+                    let arg1 = { Value = args.[1] }
+                    func.Invoke(&wrappedCtx, &arg0, &arg1)
+                with ex ->
+                    raw.sqlite3_result_error(ctx, ex.Message)
+                    match ex with
+                    | :? SqliteException as sqlEx ->
+                        raw.sqlite3_result_error_code(ctx, sqlEx.SqliteErrorCode)
+                    | _ -> ()
             )
 
         DelegateRegistry.register db name (box (func, nativeFunc)) connection
@@ -473,11 +508,18 @@ type internal SqliteConnectionRawExtensions =
 
         let nativeFunc: delegate_function_scalar =
             delegate_function_scalar(fun ctx _userData args ->
-                let mutable wrappedCtx = { Context = ctx }
-                let arg0 = { Value = args.[0] }
-                let arg1 = { Value = args.[1] }
-                let arg2 = { Value = args.[2] }
-                func.Invoke(&wrappedCtx, &arg0, &arg1, &arg2)
+                try
+                    let mutable wrappedCtx = { Context = ctx }
+                    let arg0 = { Value = args.[0] }
+                    let arg1 = { Value = args.[1] }
+                    let arg2 = { Value = args.[2] }
+                    func.Invoke(&wrappedCtx, &arg0, &arg1, &arg2)
+                with ex ->
+                    raw.sqlite3_result_error(ctx, ex.Message)
+                    match ex with
+                    | :? SqliteException as sqlEx ->
+                        raw.sqlite3_result_error_code(ctx, sqlEx.SqliteErrorCode)
+                    | _ -> ()
             )
 
         DelegateRegistry.register db name (box (func, nativeFunc)) connection

@@ -1158,8 +1158,10 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
 
             try
                 match typeof<'TResult> with
-                | t when t.IsGenericType
-                         && typedefof<IEnumerable<_>> = (typedefof<'TResult>) ->
+                | t when t.IsGenericType && typeof<IEnumerable<'T>>.Equals typeof<'TResult> ->
+                    let result = this.ExecuteEnumetable<'T> query variables
+                    result :> obj :?> 'TResult
+                | t when t.IsGenericType && typedefof<IEnumerable<_>>.Equals typedefof<'TResult> ->
                     let elemType = (GenericTypeArgCache.Get t).[0]
                     let m = 
                         typeof<SoloDBCollectionQueryProvider<'T>>

@@ -27,11 +27,15 @@
   </PropertyGroup>
 
 	<ItemGroup>
+    <Compile Include="Hashing.fs" />
+    <Compile Include="CowByteSpanMap.fs" />
     <Compile Include="NativeArray.fs" />
-    <Compile Include="Types.fs" />
     <Compile Include="Attributes.fs" />
+    <Compile Include="Types.fs" />
     <Compile Include="Utils.fs" />
     <Compile Include="Extensions.fs" />
+    <Compile Include="JsonHelper.fs" />
+    <Compile Include="JsonLexer.fs" />
     <Compile Include="JsonSerializator.fs" />
     <Compile Include="JsonFunctions.fs" />
     <Compile Include="SQLiteTools.fs" />
@@ -42,6 +46,7 @@
     <Compile Include="QueryTranslator.fs" />
     <Compile Include="Connections.fs" />
     <Compile Include="FileStorage.fs" />
+    <Compile Include="SoloDBEvents.fs" />
     <Compile Include="Queryable.fs" />
     <Compile Include="SoloDB.fs" />
     <Compile Include="MongoEmulation.fs" />
