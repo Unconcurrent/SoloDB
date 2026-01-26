@@ -4,11 +4,36 @@ open System.Linq.Expressions
 open System.Runtime.CompilerServices
 open System.Linq
 open System.Data
+open SoloDatabase.Types
+open System
+open Microsoft.Data.Sqlite
 
-type ISoloDBEvents =
-    abstract member OnInserting<'T>: (*collectionInstance: *) ISoloDBCollection<'T> -> (*item: *) Lazy<'T> -> unit
-    abstract member OnUpdating<'T>: (*collectionInstance: *) ISoloDBCollection<'T> -> (*oldItem: *) Lazy<'T> -> (*newItem: *) Lazy<'T> -> unit
-    abstract member OnDeleting<'T>: (*collectionInstance: *) ISoloDBCollection<'T> -> (*item: *) Lazy<'T> -> unit
+type SoloDBEventsResult =
+| EventHandled
+| RemoveHandler
+
+
+type ISoloDBEventsContext<'T> =
+    abstract member CollectionInstance: ISoloDBCollection<'T>
+    abstract member Read: byref<SoloDBLazyItem<'T>> -> byref<'T>
+
+and InsertingHandlerSystem = delegate of conn: SqliteConnection * jsonB: ReadOnlySpan<byte> -> SoloDBEventsResult
+and InsertingHandler<'T> = delegate of ctx: ISoloDBEventsContext<'T> * item: byref<SoloDBLazyItem<'T>> -> SoloDBEventsResult
+and DeletingHandler<'T> = delegate of ctx: ISoloDBEventsContext<'T> * item: byref<SoloDBLazyItem<'T>> -> SoloDBEventsResult
+and UpdatingHandler<'T> = delegate of ctx: ISoloDBEventsContext<'T> * oldItem: byref<SoloDBLazyItem<'T>> * newItem: byref<SoloDBLazyItem<'T>> -> SoloDBEventsResult
+
+and ISoloDBEvents =
+    abstract member OnInserting: collectionName: ReadOnlySpan<byte> * handler: InsertingHandlerSystem-> unit
+
+and ISoloDBCollectionEvents<'T> =
+    abstract member OnInserting<'T>: handler: InsertingHandler<'T> -> unit
+(*    abstract member OnDeleting<'T>: handler: DeletingHandler<'T> -> unit
+    abstract member OnUpdating<'T>: handler: UpdatingHandler<'T> -> unit
+
+    abstract member Unregister<'T>: handler: InsertingHandler<'T> -> unit
+    abstract member Unregister<'T>: handler: DeletingHandler<'T> -> unit
+    abstract member Unregister<'T>: handler: UpdatingHandler<'T> -> unit*)
+    
 
 /// <summary>
 /// Represents a typed collection within a SoloDB database instance that supports LINQ querying and CRUD operations.

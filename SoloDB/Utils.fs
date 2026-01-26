@@ -117,6 +117,17 @@ module Utils =
         then Some fullname
         else None
 
+    let internal formatName (name: string) =
+        String(name.ToCharArray() |> Array.filter(fun c -> Char.IsLetterOrDigit c || c = '_')) // Anti SQL injection
+
+    let internal collectionNameOf<'T> =
+        let formattedName = typeof<'T>.Name |> formatName
+        fun () -> formattedName
+
+    let internal collectionNameOfBytes<'T> =
+        let formattedName = collectionNameOf<'T>() |> Encoding.UTF8.GetBytes
+        fun () -> formattedName
+
     let private nameToTypeCache = ConcurrentDictionary<string, Type>()
 
     let internal nameToType (typeName: string) = 

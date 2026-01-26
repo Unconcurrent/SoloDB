@@ -160,7 +160,7 @@ module internal Helper =
     /// <param name="name">The raw collection name.</param>
     /// <returns>A sanitized name containing only letters, digits, and underscores.</returns>
     let internal formatName (name: string) =
-        String(name.ToCharArray() |> Array.filter(fun c -> Char.IsLetterOrDigit c || c = '_')) // Anti SQL injection
+        Utils.formatName (name)
 
     /// <summary>
     /// Creates a Dictionary from a sequence of KeyValuePairs.
@@ -263,7 +263,7 @@ module internal Helper =
     /// Internal DTO to pass data from the main DB instance to collection instances.
     /// </summary>
     let internal collectionNameOf<'T> =
-        typeof<'T>.Name |> formatName
+        Utils.collectionNameOf<'T>()
 
 type internal SoloDBToCollectionData = {
     /// <summary>
@@ -882,7 +882,7 @@ type internal SoloDBLocation =
 /// The main database class, representing a single SQLite database file or in-memory instance.
 /// Provides access to collections and file system storage.
 /// </summary>
-type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation, config: SoloDBConfiguration) = 
+type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation, config: SoloDBConfiguration, eventSystem: EventSystem) = 
     let mutable disposed = false
 
     /// <summary>
@@ -902,12 +902,15 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 let source = Path.GetFullPath source
                 $"Data Source={source};Pooling=False", File source
 
+        let eventSystem = EventSystem ()
+
         let usCultureInfo = CultureInfo.GetCultureInfo("en-us")
         let setup (connection: SqliteConnection) =          
             connection.CreateFunction("UNIXTIMESTAMP", Func<int64>(fun () -> DateTimeOffset.Now.ToUnixTimeMilliseconds()), false)
             connection.CreateFunction("SHA_HASH", Func<byte array, obj>(fun o -> Utils.shaHash o), true)
             connection.CreateFunction("TO_LOWER", Func<string, string>(_.ToLower(usCultureInfo)), true)
             connection.CreateFunction("TO_UPPER", Func<string, string>(_.ToUpper(usCultureInfo)), true)
+            eventSystem.CreateFunctions(connection)
             connection.CreateFunction("base64", Func<obj, obj>(Utils.sqlBase64), true) // https://www.sqlite.org/base64.html
             connection.Execute "PRAGMA recursive_triggers = ON;" |> ignore // This must be enabled on every connection separately.
 
@@ -1133,7 +1136,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         
         
 
-        new SoloDB(manager, connectionString, location, defaultConfig)
+        new SoloDB(manager, connectionString, location, defaultConfig, eventSystem)
 
     /// <summary>
     /// Gets the underlying connection manager for the database.
@@ -1155,6 +1158,8 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// Gets an API for interacting with the virtual file system within the database.
     /// </summary>
     member val FileSystem = FileSystem (Connection.Pooled connectionManager)
+
+    member val internal Events = eventSystem
 
     member private this.GetNewConnection() = connectionManager.Borrow()
         

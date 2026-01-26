@@ -91,10 +91,15 @@ type Extensions =
     static member CastTo<'T>(this: obj) : 'T =
         this :?> 'T
 
+    // There is a bug with the VS 2022 IntelliSense / Code completion showing only this method on generic byref structs
+    #if (RELEASE || TESTS)
+
     /// This method sets a new value to a property inside the UpdateMany method's transform expression. This should not be called inside real code.
     [<Extension>]
     static member Set<'T>(this: 'T, value: obj) : unit =
         (raise << NotImplementedException) "This is a function for the SQL update builder."
+
+    #endif
 
     /// This method appends a new value to a array-like property inside the UpdateMany method's transform expression. This should not be called inside real code.
     [<Extension>]

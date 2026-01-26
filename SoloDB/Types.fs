@@ -3,6 +3,8 @@
 open System
 open System.Threading
 open System.Collections.Generic
+open System.Runtime.CompilerServices
+open System.Runtime.InteropServices
 
 type internal DisposableMutex =
     val mutex: Mutex
@@ -128,3 +130,17 @@ type SortDirection =
     | Ascending = 0
     /// <summary>Sort in descending order (Z-A, largest first, newest first).</summary>
     | Descending = 1
+
+
+[<Struct; IsByRefLike; StructLayout(LayoutKind.Sequential)>]
+type SoloDBLazyItem<'T> =
+    // If jsonB <> null then value is None
+    // If jsonB = null then value is Some
+    val mutable internal valueUnsafe: 'T
+    val mutable internal jsonB: ReadOnlySpan<byte>
+
+    internal new (valueUnsafe: 'T, jsonB: ReadOnlySpan<byte>) =
+        { valueUnsafe = valueUnsafe
+          jsonB = jsonB }
+
+    member inline internal this.HasValue () = this.jsonB.IsEmpty
