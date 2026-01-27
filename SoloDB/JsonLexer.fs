@@ -418,7 +418,7 @@ module internal JsonParser =
         isDigitOrMinusByte b || b = '.'B || b = 'e'B || b = 'E'B || b = '+'B
 
     let inline isAsciiIdentifierStart (b: byte) =
-        (b >= 'A'B && b <= 'Z'B) || (b >= 'a'B && b <= 'z'B) || b = '_'B
+        (b >= 'A'B && b <= 'Z'B) || (b >= 'a'B && b <= 'z'B) || b = '_'B || b = '$'B
 
     let inline getUnicodeCategory (codePoint: int) =
         #if NETSTANDARD2_1
@@ -433,7 +433,7 @@ module internal JsonParser =
 
 
     let inline isIdentifierStartCodePoint (codePoint: int) =
-        if codePoint = int '_' then true else
+        if codePoint = int '_' || codePoint = int '$' then true else
         match getUnicodeCategory codePoint with
         | UnicodeCategory.UppercaseLetter
         | UnicodeCategory.LowercaseLetter
@@ -444,7 +444,7 @@ module internal JsonParser =
         | _ -> false
 
     let inline isIdentifierCharCodePoint (codePoint: int) =
-        if codePoint = int '_' then true else
+        if codePoint = int '_' || codePoint = int '$' || codePoint = 0x200C || codePoint = 0x200D then true else
         match getUnicodeCategory codePoint with
         | UnicodeCategory.UppercaseLetter
         | UnicodeCategory.LowercaseLetter
@@ -477,14 +477,71 @@ module internal JsonParser =
         let mutable finished = false
 
         while i < ctx.codeUnitLength && not finished do
-            let struct (cp, consumed) = ctx.reader.DecodeCodePointAt(ctx.input, i)
-            let ok = if first then isIdentifierStartCodePoint cp else isIdentifierCharCodePoint cp
-            if not ok then
-                finished <- true
-            else
-                appendCodePoint sb cp
-                i <- i + consumed
-                first <- false
+            match ctx.reader.TryPeekAsciiByte(ctx.input, i) with
+            | ValueSome '\\'B ->
+                if i + 1 >= ctx.codeUnitLength then
+                    failwith "Invalid identifier escape sequence"
+                match ctx.reader.TryPeekAsciiByte(ctx.input, i + 1) with
+                | ValueSome 'u'B ->
+                    let mutable codePoint = 0
+                    let mutable consumed = 0
+                    if i + 2 < ctx.codeUnitLength && ctx.reader.TryPeekAsciiByte(ctx.input, i + 2) = ValueSome '{'B then
+                        let mutable j = i + 3
+                        let mutable hasDigit = false
+                        let mutable closed = false
+                        while j < ctx.codeUnitLength && not closed do
+                            match ctx.reader.TryPeekAsciiByte(ctx.input, j) with
+                            | ValueSome '}'B ->
+                                closed <- true
+                                j <- j + 1
+                            | ValueSome h ->
+                                let digit =
+                                    if h >= '0'B && h <= '9'B then int h - int '0'B
+                                    elif h >= 'a'B && h <= 'f'B then 10 + int h - int 'a'B
+                                    elif h >= 'A'B && h <= 'F'B then 10 + int h - int 'A'B
+                                    else -1
+                                if digit < 0 then
+                                    failwith "Invalid identifier escape sequence"
+                                hasDigit <- true
+                                let next = (codePoint <<< 4) ||| digit
+                                if next > 0x10FFFF then failwith "Invalid Unicode escape sequence"
+                                codePoint <- next
+                                j <- j + 1
+                            | ValueNone ->
+                                failwith "Invalid identifier escape sequence"
+
+                        if not closed || not hasDigit then
+                            failwith "Invalid identifier escape sequence"
+                        consumed <- j - i
+                    else
+                        match ctx.reader.TryReadHex4(ctx.input, i + 2) with
+                        | ValueSome cp ->
+                            codePoint <- cp
+                            consumed <- 6
+                        | ValueNone ->
+                            failwith "Invalid identifier escape sequence"
+
+                    if codePoint >= 0xD800 && codePoint <= 0xDFFF then
+                        failwith "Invalid Unicode escape sequence"
+
+                    let ok = if first then isIdentifierStartCodePoint codePoint else isIdentifierCharCodePoint codePoint
+                    if not ok then
+                        failwith "Invalid identifier escape sequence"
+
+                    appendCodePoint sb codePoint
+                    i <- i + consumed
+                    first <- false
+                | _ ->
+                    failwith "Invalid identifier escape sequence"
+            | _ ->
+                let struct (cp, consumed) = ctx.reader.DecodeCodePointAt(ctx.input, i)
+                let ok = if first then isIdentifierStartCodePoint cp else isIdentifierCharCodePoint cp
+                if not ok then
+                    finished <- true
+                else
+                    appendCodePoint sb cp
+                    i <- i + consumed
+                    first <- false
 
         let txt = sb.ToString()
 
@@ -525,34 +582,75 @@ module internal JsonParser =
                     | 'n'B  -> sb.Append('\n') |> ignore; i <- i + 2
                     | 'r'B  -> sb.Append('\r') |> ignore; i <- i + 2
                     | 't'B  -> sb.Append('\t') |> ignore; i <- i + 2
+                    | 'v'B  -> sb.Append('\u000B') |> ignore; i <- i + 2
+                    | '0'B  ->
+                        match ctx.reader.TryPeekAsciiByte(ctx.input, i + 2) with
+                        | ValueSome d when d >= '0'B && d <= '9'B ->
+                            failwith "Invalid \\0 escape sequence"
+                        | _ ->
+                            sb.Append('\u0000') |> ignore
+                            i <- i + 2
                     | 'u'B  ->
-                        match ctx.reader.TryReadHex4(ctx.input, i + 2) with
-                        | ValueSome code1 ->
-                            i <- i + 6
-                            if code1 >= 0xD800 && code1 <= 0xDBFF then
-                                if i + 1 < ctx.codeUnitLength then
-                                    match ctx.reader.TryPeekAsciiByte(ctx.input, i) with
-                                    | ValueSome '\\'B when (ctx.reader.TryPeekAsciiByte(ctx.input, i + 1) = ValueSome 'u'B) ->
-                                        match ctx.reader.TryReadHex4(ctx.input, i + 2) with
-                                        | ValueSome code2 when code2 >= 0xDC00 && code2 <= 0xDFFF ->
-                                            let codePoint =
-                                                0x10000 +
-                                                ((code1 - 0xD800) <<< 10) +
-                                                (code2 - 0xDC00)
-                                            appendCodePoint sb codePoint
-                                            i <- i + 6
+                        if i + 2 < ctx.codeUnitLength && ctx.reader.TryPeekAsciiByte(ctx.input, i + 2) = ValueSome '{'B then
+                            let mutable j = i + 3
+                            let mutable codePoint = 0
+                            let mutable hasDigit = false
+                            let mutable closed = false
+                            while j < ctx.codeUnitLength && not closed do
+                                match ctx.reader.TryPeekAsciiByte(ctx.input, j) with
+                                | ValueSome '}'B ->
+                                    closed <- true
+                                    j <- j + 1
+                                | ValueSome h ->
+                                    let digit =
+                                        if h >= '0'B && h <= '9'B then int h - int '0'B
+                                        elif h >= 'a'B && h <= 'f'B then 10 + int h - int 'a'B
+                                        elif h >= 'A'B && h <= 'F'B then 10 + int h - int 'A'B
+                                        else -1
+                                    if digit < 0 then
+                                        failwith "Invalid Unicode escape sequence"
+                                    hasDigit <- true
+                                    let next = (codePoint <<< 4) ||| digit
+                                    if next > 0x10FFFF then failwith "Invalid Unicode escape sequence"
+                                    codePoint <- next
+                                    j <- j + 1
+                                | ValueNone ->
+                                    failwith "Invalid Unicode escape sequence"
+
+                            if not closed || not hasDigit then
+                                failwith "Invalid Unicode escape sequence"
+                            if codePoint >= 0xD800 && codePoint <= 0xDFFF then
+                                failwith "Invalid Unicode escape sequence"
+                            appendCodePoint sb codePoint
+                            i <- j
+                        else
+                            match ctx.reader.TryReadHex4(ctx.input, i + 2) with
+                            | ValueSome code1 ->
+                                i <- i + 6
+                                if code1 >= 0xD800 && code1 <= 0xDBFF then
+                                    if i + 1 < ctx.codeUnitLength then
+                                        match ctx.reader.TryPeekAsciiByte(ctx.input, i) with
+                                        | ValueSome '\\'B when (ctx.reader.TryPeekAsciiByte(ctx.input, i + 1) = ValueSome 'u'B) ->
+                                            match ctx.reader.TryReadHex4(ctx.input, i + 2) with
+                                            | ValueSome code2 when code2 >= 0xDC00 && code2 <= 0xDFFF ->
+                                                let codePoint =
+                                                    0x10000 +
+                                                    ((code1 - 0xD800) <<< 10) +
+                                                    (code2 - 0xDC00)
+                                                appendCodePoint sb codePoint
+                                                i <- i + 6
+                                            | _ ->
+                                                failwith "Invalid low surrogate"
                                         | _ ->
-                                            failwith "Invalid low surrogate"
-                                    | _ ->
+                                            failwith "Expected low surrogate after high surrogate"
+                                    else
                                         failwith "Expected low surrogate after high surrogate"
+                                elif code1 >= 0xDC00 && code1 <= 0xDFFF then
+                                    failwith "Unexpected low surrogate"
                                 else
-                                    failwith "Expected low surrogate after high surrogate"
-                            elif code1 >= 0xDC00 && code1 <= 0xDFFF then
-                                failwith "Unexpected low surrogate"
-                            else
-                                appendCodePoint sb code1
-                        | ValueNone ->
-                            failwith "Invalid Unicode escape sequence"
+                                    appendCodePoint sb code1
+                            | ValueNone ->
+                                failwith "Invalid Unicode escape sequence"
                     | 'x'B ->
                         let inline hexValue (b: byte) =
                             if b >= '0'B && b <= '9'B then int b - int '0'B
@@ -582,7 +680,13 @@ module internal JsonParser =
                     | other ->
                         failwithf "Invalid escape sequence: '%c'" (char other)
                 | ValueNone ->
-                    failwith "Invalid escape sequence"
+                    if i + 1 >= ctx.codeUnitLength then
+                        failwith "Invalid escape sequence"
+                    let struct (cp, consumed) = ctx.reader.DecodeCodePointAt(ctx.input, i + 1)
+                    if cp = 0x2028 || cp = 0x2029 then
+                        i <- i + 1 + consumed
+                    else
+                        failwith "Invalid escape sequence"
             | ValueSome b ->
                 sb.Append(char b) |> ignore
                 i <- i + 1
@@ -659,7 +763,15 @@ module internal JsonParser =
                                     | _ -> failwith "Invalid signed literal"
                                 )
                         | _ ->
-                            ()
+                            let struct (tok, nextIndex) = parseIdentifierFallback &ctx (ctx.codeUnitIndex + 1)
+                            match tok with
+                            | NumberToken num when nextIndex > ctx.codeUnitIndex + 1 && not (isIdentifierCharAt &ctx nextIndex) ->
+                                ctx.codeUnitIndex <- nextIndex
+                                let signed =
+                                    if num = Decimal.MaxValue then (if negative then Decimal.MinValue else Decimal.MaxValue)
+                                    else num
+                                tokenOpt <- ValueSome (NumberToken signed)
+                            | _ -> ()
 
                     match tokenOpt with
                     | ValueSome tok -> tok
@@ -733,6 +845,10 @@ module internal JsonParser =
                                 with :? OverflowException ->
                                     if negative then Decimal.MinValue else Decimal.MaxValue
                             )
+
+                | '\\'B ->
+                    match parseIdentifierFallback &ctx ctx.codeUnitIndex with
+                    | struct (tok, i) -> ctx.codeUnitIndex <- i; tok
 
                 | _ when isAsciiIdentifierStart b ->
                     match ctx.reader.TryMatchCommonLiterals(ctx.input, ctx.codeUnitIndex) with
