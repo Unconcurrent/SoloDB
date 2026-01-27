@@ -18,6 +18,7 @@ open System.Linq
 open System.Numerics
 
 #nowarn "9" // NativePtr stuff
+#nowarn "51" // voidptr of a stack var
 
 /// <summary>
 /// Defines the type of a JsonValue, for use in C#.
@@ -150,16 +151,10 @@ type JsonValue =
 
     static member private HashCore (value: JsonValue) : int =
         let inline hashDecimal (n: decimal) =
-            #if NETSTANDARD2_1
             let mutable nMutable = n
-            let span = MemoryMarshal.AsBytes (MemoryMarshal.CreateReadOnlySpan(&nMutable, 1))
-            SoloDatabase.Hashing.xxHash64 span 0UL
-            #else
-            let bits = Decimal.GetBits n
-            let bytes = Array.zeroCreate<byte> 16
-            Buffer.BlockCopy(bits, 0, bytes, 0, 16)
-            SoloDatabase.Hashing.xxHash64 (ReadOnlySpan<byte>(bytes)) 0UL
-            #endif
+            let span = ReadOnlySpan<byte>((NativeInterop.NativePtr.toVoidPtr &&nMutable), sizeof<decimal>)
+            SoloDatabase.Hashing.xxHash64 (span) 0UL
+
 
         let inline hashString (s: string) =
             SoloDatabase.Hashing.xxHash64Chars (s.AsSpan()) 0UL
@@ -399,7 +394,7 @@ type JsonValue =
             let mutable i = 0
             for kvp in obj do
                 writeChar '\"'
-                write kvp.Key
+                write (HttpUtility.JavaScriptStringEncode(kvp.Key, false))
                 writeChar '\"'
                 writeChar ':'
                 JsonValue.Jsonize kvp.Value sb
