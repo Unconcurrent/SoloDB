@@ -844,14 +844,14 @@ and private JsonImpl =
         let entries = 
             match dictionary with
             | :? IReadOnlyDictionary<'key, 'value> as dictionary ->
-                let entries = new Dictionary<string, JsonValue>(dictionary.Count)
+                let entries = JsonHelper.newDefaultDict<JsonValue>()
                 for key in dictionary.Keys do
                     let value = dictionary.[key]
                     let key = string key
                     entries.Add(key, JsonSerializerImpl<'value>.Serialize value)
                 entries
             | :? IDictionary<'key, 'value> as dictionary ->
-                let entries = new Dictionary<string, JsonValue>(dictionary.Count)
+                let entries = JsonHelper.newDefaultDict<JsonValue>()
                 for key in dictionary.Keys do
                     let value = dictionary.[key]
                     let key = string key
@@ -2541,7 +2541,7 @@ and private JsonSerializerImpl<'A> =
                 if isNull dict
                 then Null
                 else
-                let entries = new Dictionary<string, JsonValue>()
+                let entries = JsonHelper.newDefaultDict<JsonValue>()
                 let dictionary = dict :> obj :?> IDictionary
                 for key in dictionary.Keys do
                     let keyStr = key.ToString()
@@ -2648,10 +2648,17 @@ and private JsonSerializerImpl<'A> =
             let fields = t.GetFields()
 
             let param = Expression.Parameter(t)
-            let outDict = Expression.Variable(typeof<Dictionary<string, JsonValue>>)
+            let outDict = Expression.Variable(typeof<IDictionary<string, JsonValue>>)
 
             let createJsonMeth = typeof<JsonImpl>
                                     .GetMethod((nameof JsonImpl.CreateJsonObj), BindingFlags.NonPublic ||| BindingFlags.Static)
+
+            let newDefaultDictDelegate = Func<IDictionary<string, JsonValue>>(fun () -> JsonHelper.newDefaultDict())
+            let newDictMethInstance = Expression.Constant(newDefaultDictDelegate)
+
+            let newDictMeth = typeof<Func<IDictionary<string, JsonValue>>>.GetMethod "Invoke"
+
+            let dictAddMeth = typeof<IDictionary<string, JsonValue>>.GetMethod("Add")
 
             let returnLabel = Expression.Label(typeof<JsonValue>, "Return")
 
@@ -2659,15 +2666,12 @@ and private JsonSerializerImpl<'A> =
                 Expression.Block(
                     [|outDict|],
                     [|
-                        Expression.Assign(outDict, Expression.New(
-                            typeof<Dictionary<string, JsonValue>>.GetConstructor([||]),
-                            [||]
-                        )) :> Expression
+                        Expression.Assign(outDict, Expression.Call(newDictMethInstance, newDictMeth)) :> Expression
 
                         // Serialize fields only if it is a struct.
                         if t.IsValueType then
                             for field in fields do
-                                Expression.Call(outDict, typeof<Dictionary<string, JsonValue>>.GetMethod("Add"), [|
+                                Expression.Call(outDict, dictAddMeth, [|
                                     Expression.Constant(field.Name, typeof<string>) :> Expression;
                                     let serializeMeth = typedefof<JsonSerializerImpl<_>>
                                                             .MakeGenericType(field.FieldType)
@@ -2679,7 +2683,7 @@ and private JsonSerializerImpl<'A> =
 
                         // Props have priority over fields.
                         for prop in props do
-                            Expression.Call(outDict, typeof<Dictionary<string, JsonValue>>.GetMethod("Add"), [|
+                            Expression.Call(outDict, dictAddMeth, [|
                                 Expression.Constant(prop.Name, typeof<string>) :> Expression;
                                 let serializeMeth = typedefof<JsonSerializerImpl<_>>
                                                         .MakeGenericType(prop.PropertyType)
