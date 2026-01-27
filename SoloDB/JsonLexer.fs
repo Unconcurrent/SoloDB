@@ -1121,9 +1121,9 @@ module internal JsonParser =
         finally ctx.codeUnitIndex <- savedIndex
 
     let rec private parseMembers<'T, 'R when 'R : struct and 'R :> IJsonReader>
-        (ctx: byref<ParserContext<'T, 'R>>) (dict: Dictionary<string, 'T>) =
+        (ctx: byref<ParserContext<'T, 'R>>) (dict: IDictionary<string, 'T>) =
         match readNext &ctx with
-        | CloseBrace -> dict :> IDictionary<string, 'T>
+        | CloseBrace -> dict
         | token ->
             let keyOpt =
                 match token with
@@ -1144,18 +1144,18 @@ module internal JsonParser =
                 dict.[key] <- value
 
                 match readNext &ctx with
-                | CloseBrace -> dict :> IDictionary<string, 'T>
+                | CloseBrace -> dict
                 | Comma ->
                     match peek &ctx with
                     | CloseBrace ->
                         ignore (readNext &ctx)
-                        dict :> IDictionary<string, 'T>
+                        dict
                     | _ -> parseMembers &ctx dict
                 | _ -> failwith "Malformed json."
 
     and private parseObject<'T, 'R when 'R : struct and 'R :> IJsonReader>
         (ctx: byref<ParserContext<'T, 'R>>) : IDictionary<string, 'T> =
-        let dict = Dictionary<string, 'T>()
+        let dict = JsonHelper.newDefaultDict<'T>()
         parseMembers &ctx dict
 
     and private parseElements<'T, 'R when 'R : struct and 'R :> IJsonReader>

@@ -19,10 +19,10 @@ module internal VectorBPlusTreeMap =
     // ----------------------------- hashing / compares -----------------------------
 
     let inline private hashChars (s: ReadOnlySpan<char>) : uint32 =
-        Hashing.xxHash32Chars s 0u
+        Hashing.fnvFastChars s
 
     let inline private hashString (s: string) : uint32 =
-        Hashing.xxHash32Chars (s.AsSpan()) 0u
+        Hashing.fnvFastCharsStr s
 
     let inline private ordinalEqualsSpan (a: string) (b: ReadOnlySpan<char>) : bool =
         a.AsSpan().SequenceEqual(b)
@@ -89,7 +89,7 @@ module internal VectorBPlusTreeMap =
     /// - Large mode: B+Tree keyed by (hash(UTF-16 bytes), ordinal key)
     /// Not thread-safe.
     [<Sealed>]
-    type internal SmallVectorBPlusTreeMap<'TValue> internal (?smallThreshold:int, ?maxKeysPerNode:int) =
+    type internal SmallVectorBPlusTreeMap<'TValue> internal ([<Optional>] ?smallThreshold:int, [<Optional>] ?maxKeysPerNode:int) =
         let smallThreshold = defaultArg smallThreshold 32
         let maxKeysPerNode = defaultArg maxKeysPerNode 32
         do
@@ -106,7 +106,7 @@ module internal VectorBPlusTreeMap =
 
         // ----------------------------- small vector -----------------------------
 
-        let mutable small : Entry<'TValue>[] = Array.empty
+        let mutable small : Entry<'TValue>[] = Array.zeroCreate 16
         let mutable smallCount = 0
 
         [<MethodImpl(MethodImplOptions.AggressiveInlining)>]

@@ -14,6 +14,9 @@ open System.Runtime.CompilerServices
 /// Contains helper functions for JSON serialization and deserialization.
 /// </summary>
 module private JsonHelper =
+    let internal newDefaultDict<'Value>() : IDictionary<string, 'Value> =
+        Dictionary<string, 'Value>() :> IDictionary<string, 'Value>
+
     /// <summary>
     /// Checks if a given type is an array type supported for Newtownsoft-style serialization (e.g., arrays of primitives, strings, DateTime).
     /// </summary>

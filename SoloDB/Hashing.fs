@@ -159,3 +159,19 @@ module private Hashing =
     let internal xxHash64Chars (data: ReadOnlySpan<char>) (seed:uint64) : uint64 =
         xxHash64 (MemoryMarshal.AsBytes data) seed
 
+    [<Literal>]
+    let internal fnvPrimeA32Bit = 16777619u
+
+    let inline internal fnvFastChars (text: ReadOnlySpan<char>) =
+        let mutable hash = fnvPrimeA32Bit
+        for i = 0 to text.Length - 1 do
+            let ch = text[i]
+            hash <- (hash ^^^ uint32 ch) * fnvPrimeA32Bit;
+        hash
+
+    let inline internal fnvFastCharsStr (text: string) =
+        let mutable hash = fnvPrimeA32Bit
+        for i = 0 to text.Length - 1 do
+            let ch = text[i]
+            hash <- (hash ^^^ uint32 ch) * fnvPrimeA32Bit;
+        hash
