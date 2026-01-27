@@ -106,26 +106,23 @@ type JsonValue =
             (valueCompare: JsonValue -> JsonValue -> int)
             : int =
 
-            let mutable bufA = Unchecked.defaultof<SoloDatabase.Stack128<KeyValuePair<string, JsonValue>>>
-            let mutable bufB = Unchecked.defaultof<SoloDatabase.Stack128<KeyValuePair<string, JsonValue>>>
+            let mutable bufA = Unchecked.defaultof<SoloDatabase.InternalStack128<KeyValuePair<string, JsonValue>>>
+            let mutable bufB = Unchecked.defaultof<SoloDatabase.InternalStack128<KeyValuePair<string, JsonValue>>>
 
-            let arrA = bufA.AsSpanLen(n)
-            let arrB = bufB.AsSpanLen(n)
-                    
             let mutable i = 0
             for kv in a do
-                arrA[i] <- kv
+                bufA.set_Item (i, kv)
                 i <- i + 1
 
             i <- 0
             for kv in b do
-                arrB[i] <- kv
+                bufB.set_Item (i, kv)
                 i <- i + 1
 
-            SoloDatabase.Sort.heapSort arrA (JsonHelper.kvpKeyCmp<JsonValue>())
-            SoloDatabase.Sort.heapSort arrB (JsonHelper.kvpKeyCmp<JsonValue>())
+            SoloDatabase.Sort.heapSortStack128 &bufA n KvpComparison<JsonValue>.KvpKeyCmp
+            SoloDatabase.Sort.heapSortStack128 &bufB n KvpComparison<JsonValue>.KvpKeyCmp
 
-            JsonHelper.compareObjectsCore<JsonValue> (n, arrA, arrB, valueCompare)
+            JsonHelper.compareObjectsCoreStack128 (n, &bufA, &bufB, valueCompare)
 
         let compareObjectsHeap
             (n: int)
@@ -134,12 +131,9 @@ type JsonValue =
             (valueCompare: JsonValue -> JsonValue -> int)
             : int =
 
-            let mutable bufA = Array.zeroCreate<KeyValuePair<string, JsonValue>> n
-            let mutable bufB = Array.zeroCreate<KeyValuePair<string, JsonValue>> n
-
-            let arrA = bufA.AsSpan(0, n)
-            let arrB = bufB.AsSpan(0, n)
-                    
+            let mutable arrA = Array.zeroCreate<KeyValuePair<string, JsonValue>> n
+            let mutable arrB = Array.zeroCreate<KeyValuePair<string, JsonValue>> n
+                                
             let mutable i = 0
             for kv in a do
                 arrA[i] <- kv
@@ -150,10 +144,10 @@ type JsonValue =
                 arrB[i] <- kv
                 i <- i + 1
 
-            SoloDatabase.Sort.heapSort arrA (JsonHelper.kvpKeyCmp<JsonValue>())
-            SoloDatabase.Sort.heapSort arrB (JsonHelper.kvpKeyCmp<JsonValue>())
+            Array.Sort(arrA, KvpComparison<JsonValue>.KvpKeyCmp)
+            Array.Sort(arrB, KvpComparison<JsonValue>.KvpKeyCmp)
 
-            JsonHelper.compareObjectsCore<JsonValue> (n, arrA, arrB, valueCompare)
+            JsonHelper.compareObjectsCoreArray (n, arrA, arrB, valueCompare)
 
         let compareObjects
             (depth: int)

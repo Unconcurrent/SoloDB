@@ -196,6 +196,13 @@ type internal Utf8Reader =
                 ValueNone
 
         member _.ParseNumber(input: ReadOnlySpan<byte>, startIndex: int, length: int) =
+            let mutable output = 0.0m
+            let mutable bytesRead = 0
+            let ok = System.Buffers.Text.Utf8Parser.TryParse(input.Slice(startIndex, length), &output, &bytesRead, 'e')
+            if ok then
+                output
+            else
+
             let numberText =
                 #if NETSTANDARD2_1
                 Encoding.UTF8.GetString(input.Slice(startIndex, length))
