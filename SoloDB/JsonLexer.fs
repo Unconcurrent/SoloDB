@@ -77,6 +77,197 @@ module internal JsonLexerConstants =
     let packedInfiUtf16 = MemoryMarshal.Read<uint64>(MemoryMarshal.AsBytes("Infi".AsSpan()))
     let packedNityUtf16 = MemoryMarshal.Read<uint64>(MemoryMarshal.AsBytes("nity".AsSpan()))
 
+module internal Utf16Helpers =
+    [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
+    let inline utf16CharLength (input: ReadOnlySpan<byte>) =
+        input.Length >>> 1
+
+    [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
+    let inline readUtf16Char (input: ReadOnlySpan<byte>) (charIndex: int) =
+        let byteIndex = charIndex <<< 1
+        MemoryMarshal.Read<char>(input.Slice(byteIndex, 2))
+
+module internal NumberParsing =
+    let pow10 =
+        [|
+            1M
+            10M
+            100M
+            1000M
+            10000M
+            100000M
+            1000000M
+            10000000M
+            100000000M
+            1000000000M
+            10000000000M
+            100000000000M
+            1000000000000M
+            10000000000000M
+            100000000000000M
+            1000000000000000M
+            10000000000000000M
+            100000000000000000M
+            1000000000000000000M
+            10000000000000000000M
+            100000000000000000000M
+            1000000000000000000000M
+            10000000000000000000000M
+            100000000000000000000000M
+            1000000000000000000000000M
+            10000000000000000000000000M
+            100000000000000000000000000M
+            1000000000000000000000000000M
+            10000000000000000000000000000M
+        |]
+
+    [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
+    let inline isDigitByte (b: byte) =
+        b >= '0'B && b <= '9'B
+
+    [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
+    let inline isDigitChar (c: char) =
+        c >= '0' && c <= '9'
+
+    let inline scaleUp (value: decimal) (exp: int) =
+        let mutable v = value
+        let mutable e = exp
+        while e > 0 do
+            let step = if e > 28 then 28 else e
+            v <- v * pow10.[step]
+            e <- e - step
+        v
+
+    let inline scaleDown (value: decimal) (exp: int) =
+        let mutable v = value
+        let mutable e = exp
+        while e > 0 do
+            let step = if e > 28 then 28 else e
+            v <- v / pow10.[step]
+            e <- e - step
+        v
+
+    let parseDecimalAsciiBytes (span: ReadOnlySpan<byte>) =
+        let len = span.Length
+        if len = 0 then raise (FormatException "Invalid number")
+
+        let mutable i = 0
+        let mutable sign = 1
+        let b0 = span.[0]
+        if b0 = '-'B then
+            sign <- -1
+            i <- 1
+        elif b0 = '+'B then
+            i <- 1
+
+        let mutable value = 0M
+        let mutable intDigits = 0
+        while i < len && isDigitByte span.[i] do
+            value <- value * 10M + decimal (int span.[i] - int '0'B)
+            intDigits <- intDigits + 1
+            i <- i + 1
+
+        let mutable fracDigits = 0
+        if i < len && span.[i] = '.'B then
+            i <- i + 1
+            while i < len && isDigitByte span.[i] do
+                value <- value * 10M + decimal (int span.[i] - int '0'B)
+                fracDigits <- fracDigits + 1
+                i <- i + 1
+
+        if intDigits = 0 && fracDigits = 0 then
+            raise (FormatException "Invalid number")
+
+        let mutable exp = 0
+        let mutable expSign = 1
+        if i < len && (span.[i] = 'e'B || span.[i] = 'E'B) then
+            i <- i + 1
+            if i >= len then raise (FormatException "Invalid number")
+            if span.[i] = '+'B || span.[i] = '-'B then
+                expSign <- if span.[i] = '-'B then -1 else 1
+                i <- i + 1
+            if i >= len then raise (FormatException "Invalid number")
+            let mutable expDigits = 0
+            while i < len && isDigitByte span.[i] do
+                exp <- (exp * 10) + int (span.[i] - '0'B)
+                expDigits <- expDigits + 1
+                i <- i + 1
+            if expDigits = 0 then raise (FormatException "Invalid number")
+            exp <- exp * expSign
+
+        if i <> len then raise (FormatException "Invalid number")
+
+        let mutable scale = fracDigits - exp
+        let mutable result = value
+        if scale > 0 then
+            result <- scaleDown result scale
+        elif scale < 0 then
+            result <- scaleUp result (-scale)
+
+        if sign < 0 then -result else result
+
+    let parseDecimalAsciiUtf16 (input: ReadOnlySpan<byte>) (startIndex: int) (length: int) =
+        let endIndex = startIndex + length
+        if length <= 0 then raise (FormatException "Invalid number")
+
+        let mutable i = startIndex
+        let mutable sign = 1
+        let c0 = Utf16Helpers.readUtf16Char input i
+        if c0 = '-' then
+            sign <- -1
+            i <- i + 1
+        elif c0 = '+' then
+            i <- i + 1
+
+        let mutable value = 0M
+        let mutable intDigits = 0
+        while i < endIndex && isDigitChar (Utf16Helpers.readUtf16Char input i) do
+            value <- value * 10M + decimal (int (Utf16Helpers.readUtf16Char input i) - int '0')
+            intDigits <- intDigits + 1
+            i <- i + 1
+
+        let mutable fracDigits = 0
+        if i < endIndex && Utf16Helpers.readUtf16Char input i = '.' then
+            i <- i + 1
+            while i < endIndex && isDigitChar (Utf16Helpers.readUtf16Char input i) do
+                value <- value * 10M + decimal (int (Utf16Helpers.readUtf16Char input i) - int '0')
+                fracDigits <- fracDigits + 1
+                i <- i + 1
+
+        if intDigits = 0 && fracDigits = 0 then
+            raise (FormatException "Invalid number")
+
+        let mutable exp = 0
+        let mutable expSign = 1
+        if i < endIndex then
+            let eChar = Utf16Helpers.readUtf16Char input i
+            if eChar = 'e' || eChar = 'E' then
+                i <- i + 1
+                if i >= endIndex then raise (FormatException "Invalid number")
+                let signChar = Utf16Helpers.readUtf16Char input i
+                if signChar = '+' || signChar = '-' then
+                    expSign <- if signChar = '-' then -1 else 1
+                    i <- i + 1
+                if i >= endIndex then raise (FormatException "Invalid number")
+                let mutable expDigits = 0
+                while i < endIndex && isDigitChar (Utf16Helpers.readUtf16Char input i) do
+                    exp <- (exp * 10) + int (Utf16Helpers.readUtf16Char input i) - int '0'
+                    expDigits <- expDigits + 1
+                    i <- i + 1
+                if expDigits = 0 then raise (FormatException "Invalid number")
+                exp <- exp * expSign
+
+        if i <> endIndex then raise (FormatException "Invalid number")
+
+        let mutable scale = fracDigits - exp
+        let mutable result = value
+        if scale > 0 then
+            result <- scaleDown result scale
+        elif scale < 0 then
+            result <- scaleUp result (-scale)
+
+        if sign < 0 then -result else result
+
 [<Struct>]
 type internal Utf8Reader =
     interface IJsonReader with
@@ -196,28 +387,33 @@ type internal Utf8Reader =
                 ValueNone
 
         member _.ParseNumber(input: ReadOnlySpan<byte>, startIndex: int, length: int) =
+            let slice = input.Slice(startIndex, length)
+
+            if slice.IsEmpty then raise (FormatException "Invalid number")
+
             let mutable output = 0.0m
             let mutable bytesRead = 0
-            let ok = System.Buffers.Text.Utf8Parser.TryParse(input.Slice(startIndex, length), &output, &bytesRead, 'e')
-            if ok then
-                output
-            else
+            let mutable parsed = false
 
-            let numberText =
-                #if NETSTANDARD2_1
-                Encoding.UTF8.GetString(input.Slice(startIndex, length))
-                #else
-                Encoding.UTF8.GetString(input.Slice(startIndex, length).ToArray())
-                #endif
-            Decimal.Parse(numberText, NumberStyles.Any, CultureInfo.InvariantCulture)
+            let spanToParse =
+                if slice.[0] = '+'B then
+                    slice.Slice(1)
+                else
+                    slice
+
+            if not spanToParse.IsEmpty then
+                let ok = System.Buffers.Text.Utf8Parser.TryParse(spanToParse, &output, &bytesRead)
+                parsed <- ok && bytesRead = spanToParse.Length
+
+            if parsed then output else NumberParsing.parseDecimalAsciiBytes slice
 
 [<Struct>]
 type internal Utf16Reader =
     interface IJsonReader with
         member _.TryPeekAsciiByte(input: ReadOnlySpan<byte>, codeUnitIndex: int) =
-            let chars = MemoryMarshal.Cast<byte, char>(input)
-            if codeUnitIndex < chars.Length then
-                let ch = chars.[codeUnitIndex]
+            let byteIndex = codeUnitIndex <<< 1
+            if byteIndex + 1 < input.Length then
+                let ch = Utf16Helpers.readUtf16Char input codeUnitIndex
                 if ch <= '\u007F' then ValueSome (byte ch) else ValueNone
             else
                 ValueNone
@@ -260,46 +456,62 @@ type internal Utf16Reader =
                 else
                     ValueNone
             else
-                let chars = MemoryMarshal.Cast<byte, char>(inputUtf16)
-                if charIndex >= chars.Length then
+                let charsLength = Utf16Helpers.utf16CharLength inputUtf16
+                if charIndex >= charsLength then
                     ValueNone
                 else
-                    let c0 = chars.[charIndex]
+                    let c0 = Utf16Helpers.readUtf16Char inputUtf16 charIndex
                     if c0 = 'n' || c0 = 't' || c0 = 'f' || c0 = 'N' || c0 = 'I' then
                         if c0 = 'I' then
-                            if charIndex + 7 < chars.Length then
+                            if charIndex + 7 < charsLength then
                                 let ok =
-                                    chars.[charIndex] = 'I' &&
-                                    chars.[charIndex + 1] = 'n' &&
-                                    chars.[charIndex + 2] = 'f' &&
-                                    chars.[charIndex + 3] = 'i' &&
-                                    chars.[charIndex + 4] = 'n' &&
-                                    chars.[charIndex + 5] = 'i' &&
-                                    chars.[charIndex + 6] = 't' &&
-                                    chars.[charIndex + 7] = 'y'
+                                    Utf16Helpers.readUtf16Char inputUtf16 (charIndex) = 'I' &&
+                                    Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 1) = 'n' &&
+                                    Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 2) = 'f' &&
+                                    Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 3) = 'i' &&
+                                    Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 4) = 'n' &&
+                                    Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 5) = 'i' &&
+                                    Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 6) = 't' &&
+                                    Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 7) = 'y'
                                 if ok then ValueSome (struct (CommonLiteral.Infinity, 8)) else ValueNone
                             else
                                 ValueNone
                         elif c0 = 'N' then
-                            if charIndex + 3 <= chars.Length then
-                                if chars.[charIndex] = 'N' && chars.[charIndex + 1] = 'U' && chars.[charIndex + 2] = 'L' && chars.[charIndex + 3] = 'L' then
+                            if charIndex + 3 <= charsLength then
+                                if Utf16Helpers.readUtf16Char inputUtf16 (charIndex) = 'N' &&
+                                   Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 1) = 'U' &&
+                                   Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 2) = 'L' &&
+                                   Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 3) = 'L' then
                                     ValueSome (struct (CommonLiteral.NullUpper, 4))
-                                elif charIndex + 2 < chars.Length && chars.[charIndex + 1] = 'a' && chars.[charIndex + 2] = 'N' then
+                                elif charIndex + 2 < charsLength &&
+                                     Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 1) = 'a' &&
+                                     Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 2) = 'N' then
                                     ValueSome (struct (CommonLiteral.NaN, 3))
                                 else
                                     ValueNone
-                            elif charIndex + 2 < chars.Length && chars.[charIndex + 1] = 'a' && chars.[charIndex + 2] = 'N' then
+                            elif charIndex + 2 < charsLength &&
+                                 Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 1) = 'a' &&
+                                 Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 2) = 'N' then
                                 ValueSome (struct (CommonLiteral.NaN, 3))
                             else
                                 ValueNone
                         else
-                            if charIndex + 3 < chars.Length then
-                                if chars.[charIndex] = 'n' && chars.[charIndex + 1] = 'u' && chars.[charIndex + 2] = 'l' && chars.[charIndex + 3] = 'l' then
+                            if charIndex + 3 < charsLength then
+                                if Utf16Helpers.readUtf16Char inputUtf16 (charIndex) = 'n' &&
+                                   Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 1) = 'u' &&
+                                   Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 2) = 'l' &&
+                                   Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 3) = 'l' then
                                     ValueSome (struct (CommonLiteral.Null, 4))
-                                elif chars.[charIndex] = 't' && chars.[charIndex + 1] = 'r' && chars.[charIndex + 2] = 'u' && chars.[charIndex + 3] = 'e' then
+                                elif Utf16Helpers.readUtf16Char inputUtf16 (charIndex) = 't' &&
+                                     Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 1) = 'r' &&
+                                     Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 2) = 'u' &&
+                                     Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 3) = 'e' then
                                     ValueSome (struct (CommonLiteral.True, 4))
-                                elif chars.[charIndex] = 'f' && chars.[charIndex + 1] = 'a' && chars.[charIndex + 2] = 'l' && chars.[charIndex + 3] = 's' then
-                                    if charIndex + 4 < chars.Length && chars.[charIndex + 4] = 'e' then
+                                elif Utf16Helpers.readUtf16Char inputUtf16 (charIndex) = 'f' &&
+                                     Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 1) = 'a' &&
+                                     Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 2) = 'l' &&
+                                     Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 3) = 's' then
+                                    if charIndex + 4 < charsLength && Utf16Helpers.readUtf16Char inputUtf16 (charIndex + 4) = 'e' then
                                         ValueSome (struct (CommonLiteral.False, 5))
                                     else
                                         ValueNone
@@ -311,12 +523,12 @@ type internal Utf16Reader =
                         ValueNone
 
         member _.DecodeCodePointAt(input: ReadOnlySpan<byte>, codeUnitIndex: int) =
-            let chars = MemoryMarshal.Cast<byte, char>(input)
-            let ch = chars.[codeUnitIndex]
+            let ch = Utf16Helpers.readUtf16Char input codeUnitIndex
             if Char.IsHighSurrogate(ch) then
-                if codeUnitIndex + 1 >= chars.Length then
+                let charsLength = Utf16Helpers.utf16CharLength input
+                if codeUnitIndex + 1 >= charsLength then
                     failwith "Invalid high surrogate at end of input"
-                let ch2 = chars.[codeUnitIndex + 1]
+                let ch2 = Utf16Helpers.readUtf16Char input (codeUnitIndex + 1)
                 if not (Char.IsLowSurrogate ch2) then
                     failwith "Invalid low surrogate after high surrogate"
                 let codePoint =
@@ -336,12 +548,12 @@ type internal Utf16Reader =
                 elif ch >= 'A' && ch <= 'F' then 10 + int ch - int 'A'
                 else -1
 
-            let chars = MemoryMarshal.Cast<byte, char>(input)
-            if hexStartIndex + 4 <= chars.Length then
-                let d0 = hexValue chars.[hexStartIndex]
-                let d1 = hexValue chars.[hexStartIndex + 1]
-                let d2 = hexValue chars.[hexStartIndex + 2]
-                let d3 = hexValue chars.[hexStartIndex + 3]
+            let charsLength = Utf16Helpers.utf16CharLength input
+            if hexStartIndex + 4 <= charsLength then
+                let d0 = hexValue (Utf16Helpers.readUtf16Char input hexStartIndex)
+                let d1 = hexValue (Utf16Helpers.readUtf16Char input (hexStartIndex + 1))
+                let d2 = hexValue (Utf16Helpers.readUtf16Char input (hexStartIndex + 2))
+                let d3 = hexValue (Utf16Helpers.readUtf16Char input (hexStartIndex + 3))
                 if d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0 then
                     ValueNone
                 else
@@ -350,14 +562,7 @@ type internal Utf16Reader =
                 ValueNone
 
         member _.ParseNumber(input: ReadOnlySpan<byte>, startIndex: int, length: int) =
-            let chars = MemoryMarshal.Cast<byte, char>(input)
-            #if NETSTANDARD2_1
-            let numberSpan = chars.Slice(startIndex, length)
-            Decimal.Parse(numberSpan, NumberStyles.Any, CultureInfo.InvariantCulture)
-            #else
-            let numberText = chars.Slice(startIndex, length).ToString()
-            Decimal.Parse(numberText, NumberStyles.Any, CultureInfo.InvariantCulture)
-            #endif
+            NumberParsing.parseDecimalAsciiUtf16 input startIndex length
 
 /// Tokenizer state + the value factory API
 [<Struct; IsByRefLike>]
@@ -832,11 +1037,6 @@ module internal JsonParser =
                                 while idx < ctx.codeUnitLength && not finished && not overflow do
                                     match ctx.reader.TryPeekAsciiByte(ctx.input, idx) with
                                     | ValueSome ch ->
-                                        if ch = 'e'B || ch = 'E'B then
-                                            match ctx.reader.TryPeekAsciiByte(ctx.input, idx + 1) with
-                                            | ValueSome next when next = '+'B || next = '-'B || (next >= '0'B && next <= '9'B) ->
-                                                failwith "Invalid hex literal"
-                                            | _ -> ()
                                         let digit =
                                             if ch >= '0'B && ch <= '9'B then int ch - int '0'B
                                             elif ch >= 'a'B && ch <= 'f'B then 10 + int ch - int 'a'B
