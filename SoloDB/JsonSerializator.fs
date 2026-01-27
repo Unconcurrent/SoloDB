@@ -307,6 +307,24 @@ type JsonValue =
         Obj = Object
     }
 
+    static member val private JsonUtf16SpanParser = JsonParser.fromUtf16Span {
+        Null = fun() -> Null
+        Bool = Boolean
+        Str = String
+        Num = Number
+        Arr = List
+        Obj = Object
+    }
+
+    static member val private JsonUtf8SpanParser = JsonParser.fromUtf8Span {
+        Null = fun() -> Null
+        Bool = Boolean
+        Str = String
+        Num = Number
+        Arr = List
+        Obj = Object
+    }
+
     /// <summary>
     /// Parses a JSON string into a JsonValue.
     /// </summary>
@@ -318,6 +336,24 @@ type JsonValue =
         let mutable tokenizerCtx = JsonValue.JsonStrParser.Invoke jsonString
         let json = JsonParser.parse &tokenizerCtx
         json
+
+    /// <summary>
+    /// Parses a JSON UTF-16 character span into a JsonValue.
+    /// </summary>
+    /// <param name="jsonSpan">The JSON input span.</param>
+    /// <returns>The parsed JsonValue.</returns>
+    static member Parse (jsonSpan: ReadOnlySpan<char>) =
+        let mutable tokenizerCtx = JsonValue.JsonUtf16SpanParser.Invoke jsonSpan
+        JsonParser.parse &tokenizerCtx
+
+    /// <summary>
+    /// Parses a JSON UTF-8 byte span into a JsonValue.
+    /// </summary>
+    /// <param name="jsonSpan">The UTF-8 JSON input span.</param>
+    /// <returns>The parsed JsonValue.</returns>
+    static member Parse (jsonSpan: ReadOnlySpan<byte>) =
+        let mutable tokenizerCtx = JsonValue.JsonUtf8SpanParser.Invoke jsonSpan
+        JsonParser.parseUtf8 &tokenizerCtx
 
     /// <summary>
     /// Creates a new JsonValue.Object from a sequence of key-value pairs with strongly typed values.

@@ -46,7 +46,7 @@ type CowByteSpanMap<'TValue>() =
             CowByteSpanMap.TryGetBinary(localEntries, key, &value)
 
     [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
-    static member inline private TryGetLinear(entries: CowUtf8SpanMapEntry<'TValue>[], key: ReadOnlySpan<byte>, value: byref<'TValue>) : bool =
+    static member private TryGetLinear(entries: CowUtf8SpanMapEntry<'TValue>[], key: ReadOnlySpan<byte>, value: byref<'TValue>) : bool =
         let h = Hashing.xxHash32 key 0u
         let mutable i = 0
         let mutable found = false
@@ -66,7 +66,7 @@ type CowByteSpanMap<'TValue>() =
             false
 
     [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
-    static member inline private TryGetBinary(entries: CowUtf8SpanMapEntry<'TValue>[], key: ReadOnlySpan<byte>, value: byref<'TValue>) : bool =
+    static member private TryGetBinary(entries: CowUtf8SpanMapEntry<'TValue>[], key: ReadOnlySpan<byte>, value: byref<'TValue>) : bool =
         let mutable found = false
         let idx = CowByteSpanMap.BinarySearch(entries, key, &found)
         if found then
