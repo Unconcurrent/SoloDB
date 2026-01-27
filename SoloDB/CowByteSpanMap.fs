@@ -16,7 +16,6 @@ type CowUtf8SpanMapEntry<'TValue> =
 type CowByteSpanMapValueFactory<'TValue> = delegate of ReadOnlySpan<byte> -> 'TValue
 
 type CowByteSpanMap<'TValue>() =
-    // Tune for your workload:
     [<Literal>]
     let LinearReadThreshold = 64
 
