@@ -148,6 +148,31 @@ module internal VectorBPlusTreeMap =
         let lowerBoundLeafStr (leaf: Leaf<'TValue>) (h:uint32) (key: string) : int =
             lowerBoundLeafSpan leaf h (key.AsSpan())
 
+        let getMinKeyFromNode (node: Node) : struct(uint32 * string) =
+            let mutable n = node
+            while not n.IsLeaf do
+                let inode = n :?> Internal
+                let child = inode.Children[0]
+                if isNull child then invalidOp "Internal node has null child."
+                n <- child
+            let leaf = n :?> Leaf<'TValue>
+            if leaf.Count <= 0 then invalidOp "Leaf has no keys."
+            struct(leaf.Hashes[0], leaf.Keys[0])
+
+        let updateMinUpwards (parents: Internal[]) (childIx: nativeptr<int>) (level: int) (node: Node) =
+            let struct(minH, minK) = getMinKeyFromNode node
+            let mutable lvl = level
+            let mutable done' = false
+            while not done' && lvl >= 0 do
+                let ci = NativePtr.get childIx lvl
+                let parent = parents[lvl]
+                if ci > 0 then
+                    parent.Hashes[ci - 1] <- minH
+                    parent.Keys[ci - 1] <- minK
+                    done' <- true
+                else
+                    lvl <- lvl - 1
+
         // ----------------------------- tree lookup -----------------------------
 
         let treeTryGetValue (key: ReadOnlySpan<char>) (value: byref<'TValue>) : bool =
@@ -191,7 +216,9 @@ module internal VectorBPlusTreeMap =
             inode.Count <- inode.Count + 1
 
         let splitInternal (inode: Internal) : struct(uint32 * string * Internal) =
-            // inode.Count is the number of separator keys (can be maxKeysPerNode+1 here)
+            if inode.Count > maxKeysPerNode then
+                invalidOp "Internal node is overfull."
+            // inode.Count is the number of separator keys
             let totalKeys = inode.Count
             // split around the actual key count
             let mid = totalKeys / 2
@@ -219,6 +246,61 @@ module internal VectorBPlusTreeMap =
 
             // shrink left to keys [0..mid-1], children [0..mid]
             inode.Count <- mid
+
+            struct(promoHash, promoKey, right)
+
+        let splitInternalAndInsert (inode: Internal) (childIndex:int) (sepHash:uint32) (sepKey:string) (rightChild: Node) : struct(uint32 * string * Internal) =
+            // Insert separator into a full internal by using temporary buffers, then split.
+            if inode.Count <> maxKeysPerNode then
+                invalidOp "splitInternalAndInsert requires a full internal node."
+
+            let totalKeys = inode.Count + 1
+            let totalChildren = totalKeys + 1
+
+            let tempHashes = Array.zeroCreate<uint32> totalKeys
+            let tempKeys = Array.zeroCreate<string> totalKeys
+            let tempChildren = Array.zeroCreate<Node> totalChildren
+
+            // children with insertion
+            for i = 0 to childIndex do
+                tempChildren[i] <- inode.Children[i]
+            tempChildren[childIndex + 1] <- rightChild
+            for i = childIndex + 1 to inode.Count do
+                tempChildren[i + 1] <- inode.Children[i]
+
+            // keys with insertion
+            for i = 0 to childIndex - 1 do
+                tempHashes[i] <- inode.Hashes[i]
+                tempKeys[i] <- inode.Keys[i]
+            tempHashes[childIndex] <- sepHash
+            tempKeys[childIndex] <- sepKey
+            for i = childIndex to inode.Count - 1 do
+                tempHashes[i + 1] <- inode.Hashes[i]
+                tempKeys[i + 1] <- inode.Keys[i]
+
+            let mid = totalKeys / 2
+            let rightKeyCount = totalKeys - (mid + 1)
+
+            let right = Internal(maxKeysPerNode)
+
+            // left (into inode)
+            for i = 0 to mid - 1 do
+                inode.Hashes[i] <- tempHashes[i]
+                inode.Keys[i] <- tempKeys[i]
+            for i = 0 to mid do
+                inode.Children[i] <- tempChildren[i]
+            inode.Count <- mid
+
+            // right
+            for i = 0 to rightKeyCount - 1 do
+                right.Hashes[i] <- tempHashes[mid + 1 + i]
+                right.Keys[i] <- tempKeys[mid + 1 + i]
+                right.Children[i] <- tempChildren[mid + 1 + i]
+            right.Children[rightKeyCount] <- tempChildren[mid + 1 + rightKeyCount]
+            right.Count <- rightKeyCount
+
+            let promoHash = tempHashes[mid]
+            let promoKey = tempKeys[mid]
 
             struct(promoHash, promoKey, right)
 
@@ -269,6 +351,7 @@ module internal VectorBPlusTreeMap =
             // descent
             let mutable n = ensureSome root
             while not n.IsLeaf do
+                if sp >= parents.Length then invalidOp "B+Tree depth exceeds parent stack capacity."
                 let inode = n :?> Internal
                 let ci = findChildIndex inode h (key.AsSpan())
                 parents[sp] <- inode
@@ -294,10 +377,14 @@ module internal VectorBPlusTreeMap =
                 if leaf.Count < maxKeysPerNode then
                     insertIntoLeafNoSplit leaf idx h key value
                     count <- count + 1
+                    if idx = 0 && sp > 0 then
+                        updateMinUpwards parents childIx (sp - 1) (leaf :> Node)
                     true
                 else
                     let struct(rightLeaf, sepHash, sepKey) = splitLeafAndInsert leaf idx h key value
                     count <- count + 1
+                    if idx = 0 && sp > 0 then
+                        updateMinUpwards parents childIx (sp - 1) (leaf :> Node)
 
                     // propagate split up using stack
                     let mutable promoHash = sepHash
@@ -320,11 +407,11 @@ module internal VectorBPlusTreeMap =
                         else
                             let parent = parents[level - 1]
                             let ci = NativePtr.get childIx (level - 1)
-                            insertSeparatorIntoInternal parent ci promoHash promoKey rightNode
-                            if parent.Count <= maxKeysPerNode then
+                            if parent.Count < maxKeysPerNode then
+                                insertSeparatorIntoInternal parent ci promoHash promoKey rightNode
                                 done' <- true
                             else
-                                let struct(ph, pk, rightInternal) = splitInternal parent
+                                let struct(ph, pk, rightInternal) = splitInternalAndInsert parent ci promoHash promoKey rightNode
                                 promoHash <- ph
                                 promoKey <- pk
                                 rightNode <- rightInternal :> Node
@@ -338,6 +425,7 @@ module internal VectorBPlusTreeMap =
             // Remove a child pointer and its associated separator.
             // If childIndex == 0: remove Children[0], and remove Key[0] (minimal key of old child1 becomes minimal of new child1).
             // Else: remove Children[childIndex], and remove Key[childIndex-1].
+            if inode.Count <= 0 then invalidOp "Internal node is empty."
             let mutable keyRemoveIndex = if childIndex = 0 then 0 else childIndex - 1
 
             // Shift children left
@@ -370,6 +458,7 @@ module internal VectorBPlusTreeMap =
             // descent
             let mutable n = ensureSome root
             while not n.IsLeaf do
+                if sp >= parents.Length then invalidOp "B+Tree depth exceeds parent stack capacity."
                 let inode = n :?> Internal
                 let ci = findChildIndex inode h key
                 parents[sp] <- inode
@@ -404,11 +493,7 @@ module internal VectorBPlusTreeMap =
 
                 // fix parent separator if we removed the first key and leaf still has entries
                 if idx = 0 && leaf.Count > 0 && sp > 0 then
-                    let parent = parents.[sp - 1]
-                    let ci = NativePtr.get childIx (sp - 1)
-                    if ci > 0 then
-                        parent.Hashes[ci - 1] <- leaf.Hashes[0]
-                        parent.Keys[ci - 1]   <- leaf.Keys[0]
+                    updateMinUpwards parents childIx (sp - 1) (leaf :> Node)
 
                 // if leaf became empty: unlink and remove from parent; collapse empty internal nodes
                 if leaf.Count = 0 then
@@ -432,6 +517,8 @@ module internal VectorBPlusTreeMap =
                         let parent = parents[sp - 1]
                         let ci = NativePtr.get childIx (sp - 1)
                         removeChildFromInternal parent ci
+                        if ci = 0 && parent.Count > 0 && sp > 1 then
+                            updateMinUpwards parents childIx (sp - 2) (parent :> Node)
 
                         // collapse upwards if a parent becomes empty (Count=0 => one child)
                         let mutable level = sp - 1
@@ -452,7 +539,10 @@ module internal VectorBPlusTreeMap =
                                 // non-root internal with single child: replace it in its parent
                                 let p = parents[level - 1]
                                 let ci2 = NativePtr.get childIx (level - 1)
-                                p.Children[ci2] <- inode.Children[0]
+                                let child = inode.Children[0]
+                                if isNull child then invalidOp "Internal node has null child."
+                                p.Children[ci2] <- child
+                                updateMinUpwards parents childIx (level - 1) child
                                 // also remove a separator if the structure now has redundant node:
                                 // (We keep it minimal: we do not remove extra keys beyond the empty-node removal already done.)
                                 level <- level - 1
