@@ -45,12 +45,37 @@ type internal JsonValueParserApi<'T> =
         Obj    : IDictionary<string, 'T> -> 'T
     }
 
+[<Struct>]
+type internal CommonLiteral =
+    | Null
+    | NullUpper
+    | True
+    | False
+    | Infinity
+    | NaN
+
 type internal IJsonReader =
     abstract member TryPeekAsciiByte : ReadOnlySpan<byte> * int -> ValueOption<byte>
-    abstract member TryReadingPackedAsciiWord4 : ReadOnlySpan<byte> * int -> ValueOption<uint32>
+    abstract member TryMatchCommonLiterals : ReadOnlySpan<byte> * int -> ValueOption<struct (CommonLiteral * int)>
     abstract member DecodeCodePointAt : ReadOnlySpan<byte> * int -> struct (int * int)
     abstract member TryReadHex4 : ReadOnlySpan<byte> * int -> ValueOption<int>
     abstract member ParseNumber : ReadOnlySpan<byte> * int * int -> decimal
+
+module internal JsonLexerConstants =
+    let packedNull = MemoryMarshal.Read<uint32>("null"B.AsSpan())
+    let packedNULL = MemoryMarshal.Read<uint32>("NULL"B.AsSpan())
+    let packedTrue = MemoryMarshal.Read<uint32>("true"B.AsSpan())
+    let packedFals = MemoryMarshal.Read<uint32>("fals"B.AsSpan())
+    let packedNaN = MemoryMarshal.Read<uint32>(ReadOnlySpan<byte>([| 'N'B; 'a'B; 'N'B; 0uy |]))
+    let packedInfinity = MemoryMarshal.Read<uint64>("Infinity"B.AsSpan())
+    let packedNullUtf16 = MemoryMarshal.Read<uint64>(MemoryMarshal.AsBytes("null".AsSpan()))
+    let packedNullUpperUtf16 = MemoryMarshal.Read<uint64>(MemoryMarshal.AsBytes("NULL".AsSpan()))
+    let packedTrueUtf16 = MemoryMarshal.Read<uint64>(MemoryMarshal.AsBytes("true".AsSpan()))
+    let packedFalsUtf16 = MemoryMarshal.Read<uint64>(MemoryMarshal.AsBytes("fals".AsSpan()))
+    let packedNaNUtf16 =
+        MemoryMarshal.Read<uint64>(ReadOnlySpan<byte>([| byte 'N'; 0uy; byte 'a'; 0uy; byte 'N'; 0uy; 0uy; 0uy |]))
+    let packedInfiUtf16 = MemoryMarshal.Read<uint64>(MemoryMarshal.AsBytes("Infi".AsSpan()))
+    let packedNityUtf16 = MemoryMarshal.Read<uint64>(MemoryMarshal.AsBytes("nity".AsSpan()))
 
 [<Struct>]
 type internal Utf8Reader =
@@ -62,12 +87,50 @@ type internal Utf8Reader =
             else
                 ValueNone
 
-        member _.TryReadingPackedAsciiWord4(input: ReadOnlySpan<byte>, codeUnitIndex: int) =
-            if codeUnitIndex + 4 <= input.Length then
-                let word = MemoryMarshal.Read<uint32>(input.Slice(codeUnitIndex, 4))
-                if (word &&& 0x80808080u) = 0u then ValueSome word else ValueNone
-            else
+        member _.TryMatchCommonLiterals(input: ReadOnlySpan<byte>, codeUnitIndex: int) =
+            if codeUnitIndex >= input.Length then
                 ValueNone
+            else
+                let b0 = input.[codeUnitIndex]
+                if b0 = 'n'B || b0 = 't'B || b0 = 'f'B || b0 = 'N'B || b0 = 'I'B then
+                    if b0 = 'I'B then
+                        if codeUnitIndex + 8 <= input.Length then
+                            let word = MemoryMarshal.Read<uint64>(input.Slice(codeUnitIndex, 8))
+                            if word = JsonLexerConstants.packedInfinity then ValueSome (struct (CommonLiteral.Infinity, 8)) else ValueNone
+                        else
+                            ValueNone
+                    elif b0 = 'N'B then
+                        if codeUnitIndex + 4 <= input.Length then
+                            let word = MemoryMarshal.Read<uint32>(input.Slice(codeUnitIndex, 4))
+                            if word = JsonLexerConstants.packedNULL then ValueSome (struct (CommonLiteral.NullUpper, 4))
+                            elif word &&& 0x00FFFFFFu = JsonLexerConstants.packedNaN then ValueSome (struct (CommonLiteral.NaN, 3))
+                            else ValueNone
+                        elif codeUnitIndex + 3 <= input.Length then
+                            if input.[codeUnitIndex] = 'N'B && input.[codeUnitIndex + 1] = 'a'B && input.[codeUnitIndex + 2] = 'N'B then
+                                ValueSome (struct (CommonLiteral.NaN, 3))
+                            else
+                                ValueNone
+                        else
+                            ValueNone
+                    else
+                        if codeUnitIndex + 4 <= input.Length then
+                            let word = MemoryMarshal.Read<uint32>(input.Slice(codeUnitIndex, 4))
+                            if (word &&& 0x80808080u) = 0u then
+                                if word = JsonLexerConstants.packedNull then ValueSome (struct (CommonLiteral.Null, 4))
+                                elif word = JsonLexerConstants.packedTrue then ValueSome (struct (CommonLiteral.True, 4))
+                                elif word = JsonLexerConstants.packedFals then
+                                    if codeUnitIndex + 5 <= input.Length && input.[codeUnitIndex + 4] = 'e'B then
+                                        ValueSome (struct (CommonLiteral.False, 5))
+                                    else
+                                        ValueNone
+                                else
+                                    ValueNone
+                            else
+                                ValueNone
+                        else
+                            ValueNone
+                else
+                    ValueNone
 
         member _.DecodeCodePointAt(input: ReadOnlySpan<byte>, codeUnitIndex: int) =
             let len = input.Length
@@ -152,51 +215,93 @@ type internal Utf16Reader =
             else
                 ValueNone
 
-        member _.TryReadingPackedAsciiWord4(inputUtf16: ReadOnlySpan<byte>, charIndex: int) =
+        member _.TryMatchCommonLiterals(inputUtf16: ReadOnlySpan<byte>, charIndex: int) =
             // charIndex is in UTF-16 code units (chars)
             let byteIndex = charIndex <<< 1
 
-            if byteIndex + 8 <= inputUtf16.Length then
-                if BitConverter.IsLittleEndian then
-                    // Read 8 bytes = 4 UTF-16LE code units
-                    let x = MemoryMarshal.Read<uint64>(inputUtf16.Slice(byteIndex, 8))
-
-                    // ASCII in UTF-16: each 16-bit unit must have bits 7..15 cleared (<= 0x007F)
-                    if (x &&& 0xFF80FF80FF80FF80UL) = 0UL then
-                        let b0 = byte x
-                        let b1 = byte (x >>> 16)
-                        let b2 = byte (x >>> 32)
-                        let b3 = byte (x >>> 48)
-
-                        let word =
-                            (uint32 b0) |||
-                            ((uint32 b1) <<< 8) |||
-                            ((uint32 b2) <<< 16) |||
-                            ((uint32 b3) <<< 24)
-
-                        ValueSome word
-                    else
-                        ValueNone
-                else
-                    let chars = MemoryMarshal.Cast<byte, char>(inputUtf16)
-                    if charIndex + 4 <= chars.Length then
-                        let c0 = chars.[charIndex]
-                        let c1 = chars.[charIndex + 1]
-                        let c2 = chars.[charIndex + 2]
-                        let c3 = chars.[charIndex + 3]
-                        if c0 <= '\u007F' && c1 <= '\u007F' && c2 <= '\u007F' && c3 <= '\u007F' then
-                            let word =
-                                (uint32 (byte c0)) |||
-                                ((uint32 (byte c1)) <<< 8) |||
-                                ((uint32 (byte c2)) <<< 16) |||
-                                ((uint32 (byte c3)) <<< 24)
-                            ValueSome word
-                        else
-                            ValueNone
-                    else
-                        ValueNone
-            else
+            if byteIndex >= inputUtf16.Length then
                 ValueNone
+            elif BitConverter.IsLittleEndian then
+                if byteIndex + 8 <= inputUtf16.Length then
+                    let x = MemoryMarshal.Read<uint64>(inputUtf16.Slice(byteIndex, 8))
+                    if (x &&& 0xFF80FF80FF80FF80UL) <> 0UL then
+                        ValueNone
+                    else
+                        if x = JsonLexerConstants.packedNullUtf16 then ValueSome (struct (CommonLiteral.Null, 4))
+                        elif x = JsonLexerConstants.packedNullUpperUtf16 then ValueSome (struct (CommonLiteral.NullUpper, 4))
+                        elif x = JsonLexerConstants.packedTrueUtf16 then ValueSome (struct (CommonLiteral.True, 4))
+                        elif x = JsonLexerConstants.packedFalsUtf16 then
+                            if byteIndex + 10 <= inputUtf16.Length then
+                                let eWord = MemoryMarshal.Read<uint16>(inputUtf16.Slice(byteIndex + 8, 2))
+                                if eWord = uint16 'e' then ValueSome (struct (CommonLiteral.False, 5)) else ValueNone
+                            else
+                                ValueNone
+                        elif byteIndex + 16 <= inputUtf16.Length then
+                            let x2 = MemoryMarshal.Read<uint64>(inputUtf16.Slice(byteIndex + 8, 8))
+                            if x = JsonLexerConstants.packedInfiUtf16 && x2 = JsonLexerConstants.packedNityUtf16 then
+                                ValueSome (struct (CommonLiteral.Infinity, 8))
+                            else
+                                if x &&& 0x0000FFFFFFFFFFFFUL = JsonLexerConstants.packedNaNUtf16 then
+                                    ValueSome (struct (CommonLiteral.NaN, 3))
+                                else
+                                    ValueNone
+                        else
+                            if x &&& 0x0000FFFFFFFFFFFFUL = JsonLexerConstants.packedNaNUtf16 then
+                                ValueSome (struct (CommonLiteral.NaN, 3))
+                            else
+                                ValueNone
+                else
+                    ValueNone
+            else
+                let chars = MemoryMarshal.Cast<byte, char>(inputUtf16)
+                if charIndex >= chars.Length then
+                    ValueNone
+                else
+                    let c0 = chars.[charIndex]
+                    if c0 = 'n' || c0 = 't' || c0 = 'f' || c0 = 'N' || c0 = 'I' then
+                        if c0 = 'I' then
+                            if charIndex + 7 < chars.Length then
+                                let ok =
+                                    chars.[charIndex] = 'I' &&
+                                    chars.[charIndex + 1] = 'n' &&
+                                    chars.[charIndex + 2] = 'f' &&
+                                    chars.[charIndex + 3] = 'i' &&
+                                    chars.[charIndex + 4] = 'n' &&
+                                    chars.[charIndex + 5] = 'i' &&
+                                    chars.[charIndex + 6] = 't' &&
+                                    chars.[charIndex + 7] = 'y'
+                                if ok then ValueSome (struct (CommonLiteral.Infinity, 8)) else ValueNone
+                            else
+                                ValueNone
+                        elif c0 = 'N' then
+                            if charIndex + 3 <= chars.Length then
+                                if chars.[charIndex] = 'N' && chars.[charIndex + 1] = 'U' && chars.[charIndex + 2] = 'L' && chars.[charIndex + 3] = 'L' then
+                                    ValueSome (struct (CommonLiteral.NullUpper, 4))
+                                elif charIndex + 2 < chars.Length && chars.[charIndex + 1] = 'a' && chars.[charIndex + 2] = 'N' then
+                                    ValueSome (struct (CommonLiteral.NaN, 3))
+                                else
+                                    ValueNone
+                            elif charIndex + 2 < chars.Length && chars.[charIndex + 1] = 'a' && chars.[charIndex + 2] = 'N' then
+                                ValueSome (struct (CommonLiteral.NaN, 3))
+                            else
+                                ValueNone
+                        else
+                            if charIndex + 3 < chars.Length then
+                                if chars.[charIndex] = 'n' && chars.[charIndex + 1] = 'u' && chars.[charIndex + 2] = 'l' && chars.[charIndex + 3] = 'l' then
+                                    ValueSome (struct (CommonLiteral.Null, 4))
+                                elif chars.[charIndex] = 't' && chars.[charIndex + 1] = 'r' && chars.[charIndex + 2] = 'u' && chars.[charIndex + 3] = 'e' then
+                                    ValueSome (struct (CommonLiteral.True, 4))
+                                elif chars.[charIndex] = 'f' && chars.[charIndex + 1] = 'a' && chars.[charIndex + 2] = 'l' && chars.[charIndex + 3] = 's' then
+                                    if charIndex + 4 < chars.Length && chars.[charIndex + 4] = 'e' then
+                                        ValueSome (struct (CommonLiteral.False, 5))
+                                    else
+                                        ValueNone
+                                else
+                                    ValueNone
+                            else
+                                ValueNone
+                    else
+                        ValueNone
 
         member _.DecodeCodePointAt(input: ReadOnlySpan<byte>, codeUnitIndex: int) =
             let chars = MemoryMarshal.Cast<byte, char>(input)
@@ -304,7 +409,7 @@ module internal JsonParser =
             sb.Append(char low) |> ignore
 
     let inline isJsonWhitespaceByte (b: byte) =
-        b = ' 'B || b = '\t'B || b = '\n'B || b = '\r'B
+        b = ' 'B || b = '\t'B || b = '\n'B || b = '\r'B || b = '\u000B'B || b = '\u000C'B
 
     let inline isDigitOrMinusByte (b: byte) =
         b = '-'B || (b >= '0'B && b <= '9'B)
@@ -353,11 +458,6 @@ module internal JsonParser =
         | UnicodeCategory.SpacingCombiningMark -> true
         | _ -> false
 
-    let private packedNull = MemoryMarshal.Read<uint32>("null"B.AsSpan())
-    let private packedNULL = MemoryMarshal.Read<uint32>("NULL"B.AsSpan())
-    let private packedTrue = MemoryMarshal.Read<uint32>("true"B.AsSpan())
-    let private packedFals = MemoryMarshal.Read<uint32>("fals"B.AsSpan())
-
     let inline private isIdentifierCharAt<'T, 'R when 'R : struct and 'R :> IJsonReader>
         (ctx: byref<ParserContext<'T, 'R>>) (probeCodeUnitIndex: int) =
         if probeCodeUnitIndex >= ctx.codeUnitLength then
@@ -393,6 +493,8 @@ module internal JsonParser =
             | "null" | "NULL" -> NullToken
             | "true" -> BooleanToken true
             | "false" -> BooleanToken false
+            | "Infinity" -> NumberToken Decimal.MaxValue
+            | "NaN" -> NumberToken Decimal.Zero
             // Non-standard: treat as bare identifier string token
             | other -> StringToken other
             , i
@@ -451,6 +553,32 @@ module internal JsonParser =
                                 appendCodePoint sb code1
                         | ValueNone ->
                             failwith "Invalid Unicode escape sequence"
+                    | 'x'B ->
+                        let inline hexValue (b: byte) =
+                            if b >= '0'B && b <= '9'B then int b - int '0'B
+                            elif b >= 'a'B && b <= 'f'B then 10 + int b - int 'a'B
+                            elif b >= 'A'B && b <= 'F'B then 10 + int b - int 'A'B
+                            else -1
+                        if i + 3 >= ctx.codeUnitLength then
+                            failwith "Invalid hex escape sequence"
+                        match ctx.reader.TryPeekAsciiByte(ctx.input, i + 2), ctx.reader.TryPeekAsciiByte(ctx.input, i + 3) with
+                        | ValueSome h1, ValueSome h2 ->
+                            let d1 = hexValue h1
+                            let d2 = hexValue h2
+                            if d1 < 0 || d2 < 0 then
+                                failwith "Invalid hex escape sequence"
+                            let code = (d1 <<< 4) ||| d2
+                            sb.Append(char code) |> ignore
+                            i <- i + 4
+                        | _ ->
+                            failwith "Invalid hex escape sequence"
+                    | '\n'B ->
+                        i <- i + 2
+                    | '\r'B ->
+                        if i + 2 < ctx.codeUnitLength && ctx.reader.TryPeekAsciiByte(ctx.input, i + 2) = ValueSome '\n'B then
+                            i <- i + 3
+                        else
+                            i <- i + 2
                     | other ->
                         failwithf "Invalid escape sequence: '%c'" (char other)
                 | ValueNone ->
@@ -484,43 +612,139 @@ module internal JsonParser =
                 | ':'B -> ctx.codeUnitIndex <- ctx.codeUnitIndex + 1; Colon
                 | '"'B | '\''B as quote ->
                     readString &ctx quote
-                | _ when isDigitOrMinusByte b ->
+                | '/'B ->
+                    match ctx.reader.TryPeekAsciiByte(ctx.input, ctx.codeUnitIndex + 1) with
+                    | ValueSome '/'B ->
+                        ctx.codeUnitIndex <- ctx.codeUnitIndex + 2
+                        let mutable i = ctx.codeUnitIndex
+                        let mutable finished = false
+                        while i < ctx.codeUnitLength && not finished do
+                            match ctx.reader.TryPeekAsciiByte(ctx.input, i) with
+                            | ValueSome '\n'B
+                            | ValueSome '\r'B ->
+                                finished <- true
+                            | _ -> i <- i + 1
+                        ctx.codeUnitIndex <- i
+                        readNext &ctx
+                    | ValueSome '*'B ->
+                        ctx.codeUnitIndex <- ctx.codeUnitIndex + 2
+                        let mutable i = ctx.codeUnitIndex
+                        let mutable closed = false
+                        while i + 1 < ctx.codeUnitLength && not closed do
+                            match ctx.reader.TryPeekAsciiByte(ctx.input, i), ctx.reader.TryPeekAsciiByte(ctx.input, i + 1) with
+                            | ValueSome '*'B, ValueSome '/'B ->
+                                closed <- true
+                                i <- i + 2
+                            | _ -> i <- i + 1
+                        if not closed then failwith "Unterminated comment"
+                        ctx.codeUnitIndex <- i
+                        readNext &ctx
+                    | _ ->
+                        failwithf "Unexpected JSON character: %c, index = %i" (char b) ctx.codeUnitIndex
+                | '+'B | '-'B | '.'B | '0'B | '1'B | '2'B | '3'B | '4'B | '5'B | '6'B | '7'B | '8'B | '9'B ->
                     let startIndex = ctx.codeUnitIndex
-                    let negative = b = '-'B
                     let mutable i = startIndex
+                    let negative = b = '-'B
+                    let mutable tokenOpt = ValueNone
 
-                    let mutable finished = false
-                    while i < ctx.codeUnitLength && not finished do
-                        match ctx.reader.TryPeekAsciiByte(ctx.input, i) with
-                        | ValueSome nb when isNumberCharByte nb -> i <- i + 1
-                        | _ -> finished <- true
+                    if b = '+'B || b = '-'B then
+                        match ctx.reader.TryMatchCommonLiterals(ctx.input, ctx.codeUnitIndex + 1) with
+                        | ValueSome struct (lit, len) when not (isIdentifierCharAt &ctx (ctx.codeUnitIndex + 1 + len)) ->
+                            ctx.codeUnitIndex <- ctx.codeUnitIndex + 1 + len
+                            tokenOpt <-
+                                ValueSome (
+                                    match lit with
+                                    | CommonLiteral.Infinity -> NumberToken (if negative then Decimal.MinValue else Decimal.MaxValue)
+                                    | CommonLiteral.NaN -> NumberToken Decimal.Zero
+                                    | _ -> failwith "Invalid signed literal"
+                                )
+                        | _ ->
+                            ()
 
-                    let length = i - startIndex
-                    ctx.codeUnitIndex <- i
+                    match tokenOpt with
+                    | ValueSome tok -> tok
+                    | ValueNone ->
+                        if ctx.codeUnitIndex = startIndex then
+                            let mutable hexStartIndex = -1
+                            let mutable hexNegative = false
 
-                    NumberToken(
-                        try ctx.reader.ParseNumber(ctx.input, startIndex, length)
-                        with :? OverflowException ->
-                            if negative then Decimal.MinValue else Decimal.MaxValue
-                    )
+                            if b = '+'B || b = '-'B then
+                                match ctx.reader.TryPeekAsciiByte(ctx.input, startIndex + 1) with
+                                | ValueSome '0'B ->
+                                    match ctx.reader.TryPeekAsciiByte(ctx.input, startIndex + 2) with
+                                    | ValueSome 'x'B
+                                    | ValueSome 'X'B ->
+                                        hexStartIndex <- startIndex + 1
+                                        hexNegative <- b = '-'B
+                                    | _ -> ()
+                                | _ -> ()
+                            elif b = '0'B then
+                                match ctx.reader.TryPeekAsciiByte(ctx.input, startIndex + 1) with
+                                | ValueSome 'x'B
+                                | ValueSome 'X'B ->
+                                    hexStartIndex <- startIndex
+                                    hexNegative <- false
+                                | _ -> ()
+
+                            if hexStartIndex >= 0 then
+                                let mutable idx = hexStartIndex + 2
+                                if idx >= ctx.codeUnitLength then failwith "Invalid hex literal"
+                                let mutable acc = 0UL
+                                let mutable hasDigit = false
+                                let mutable overflow = false
+                                let mutable finished = false
+                                while idx < ctx.codeUnitLength && not finished && not overflow do
+                                    match ctx.reader.TryPeekAsciiByte(ctx.input, idx) with
+                                    | ValueSome ch ->
+                                        let digit =
+                                            if ch >= '0'B && ch <= '9'B then int ch - int '0'B
+                                            elif ch >= 'a'B && ch <= 'f'B then 10 + int ch - int 'a'B
+                                            elif ch >= 'A'B && ch <= 'F'B then 10 + int ch - int 'A'B
+                                            else -1
+                                        if digit < 0 then
+                                            finished <- true
+                                        else
+                                            hasDigit <- true
+                                            let next = acc * 16UL + uint64 digit
+                                            if next < acc then overflow <- true else acc <- next
+                                            idx <- idx + 1
+                                    | _ ->
+                                        finished <- true
+
+                                if not hasDigit then failwith "Invalid hex literal"
+                                ctx.codeUnitIndex <- idx
+                                let value = if overflow then Decimal.MaxValue else decimal acc
+                                tokenOpt <- ValueSome (if hexNegative then NumberToken(-value) else NumberToken(value))
+
+                        match tokenOpt with
+                        | ValueSome tok -> tok
+                        | ValueNone ->
+                            let mutable finished = false
+                            while i < ctx.codeUnitLength && not finished do
+                                match ctx.reader.TryPeekAsciiByte(ctx.input, i) with
+                                | ValueSome nb when isNumberCharByte nb -> i <- i + 1
+                                | _ -> finished <- true
+
+                            let length = i - startIndex
+                            ctx.codeUnitIndex <- i
+
+                            NumberToken(
+                                try ctx.reader.ParseNumber(ctx.input, startIndex, length)
+                                with :? OverflowException ->
+                                    if negative then Decimal.MinValue else Decimal.MaxValue
+                            )
 
                 | _ when isAsciiIdentifierStart b ->
-                    match ctx.reader.TryReadingPackedAsciiWord4(ctx.input, ctx.codeUnitIndex) with
-                    | ValueSome word when word = packedNull && not (isIdentifierCharAt &ctx (ctx.codeUnitIndex + 4)) ->
-                        ctx.codeUnitIndex <- ctx.codeUnitIndex + 4
-                        NullToken
-                    | ValueSome word when word = packedNULL && not (isIdentifierCharAt &ctx (ctx.codeUnitIndex + 4)) ->
-                        ctx.codeUnitIndex <- ctx.codeUnitIndex + 4
-                        NullToken
-                    | ValueSome word when word = packedTrue && not (isIdentifierCharAt &ctx (ctx.codeUnitIndex + 4)) ->
-                        ctx.codeUnitIndex <- ctx.codeUnitIndex + 4
-                        BooleanToken true
-                    | ValueSome word when word = packedFals &&
-                                          ctx.codeUnitIndex + 4 < ctx.codeUnitLength &&
-                                          (ctx.reader.TryPeekAsciiByte(ctx.input, ctx.codeUnitIndex + 4) = ValueSome 'e'B) &&
-                                          not (isIdentifierCharAt &ctx (ctx.codeUnitIndex + 5)) ->
-                        ctx.codeUnitIndex <- ctx.codeUnitIndex + 5
-                        BooleanToken false
+                    match ctx.reader.TryMatchCommonLiterals(ctx.input, ctx.codeUnitIndex) with
+                    | ValueSome struct (lit, len) when not (isIdentifierCharAt &ctx (ctx.codeUnitIndex + len)) ->
+                        ctx.codeUnitIndex <- ctx.codeUnitIndex + len
+                        match lit with
+                        | CommonLiteral.Null
+                        | CommonLiteral.NullUpper -> NullToken
+                        | CommonLiteral.True -> BooleanToken true
+                        | CommonLiteral.False -> BooleanToken false
+                        | CommonLiteral.Infinity -> NumberToken Decimal.MaxValue
+                        | CommonLiteral.NaN -> NumberToken Decimal.Zero
                     | _ ->
                         match parseIdentifierFallback &ctx ctx.codeUnitIndex with
                         | struct (tok, i) -> ctx.codeUnitIndex <- i; tok
