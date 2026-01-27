@@ -196,34 +196,40 @@ type JsonValue =
         let inline hashDecimal (n: decimal) =
             let mutable nMutable = n
             let span = ReadOnlySpan<byte>((NativeInterop.NativePtr.toVoidPtr &&nMutable), sizeof<decimal>)
-            SoloDatabase.Hashing.xxHash64 (span) 0UL
+            SoloDatabase.Hashing.xxHash32 (span) 0u
 
 
         let inline hashString (s: string) =
-            SoloDatabase.Hashing.xxHash64Chars (s.AsSpan()) 0UL
+            SoloDatabase.Hashing.xxHash32Chars (s.AsSpan()) 0u
 
-        let rec hashValue (v: JsonValue) : uint64 =
+        let inline hashU32WithSeed (seed: uint32) (value: uint32) =
+            let mutable v = value
+            let span = ReadOnlySpan<byte>((NativeInterop.NativePtr.toVoidPtr &&v), sizeof<uint32>)
+            SoloDatabase.Hashing.xxHash32 (span) seed
+
+        let rec hashValue (v: JsonValue) : uint32 =
             match v with
-            | Null -> 0UL
-            | Boolean b -> if b then 1UL else 0UL
+            | Null -> 0u
+            | Boolean b -> if b then 1u else 0u
             | String s -> hashString s
             | Number n -> hashDecimal n
             | List items ->
-                let mutable h = 1469598103934665603UL
+                let mutable h = 0u
                 for i = 0 to items.Count - 1 do
                     let hv = hashValue items.[i]
-                    h <- (h ^^^ hv) * 1099511628211UL
+                    h <- hashU32WithSeed h hv
                 h
             | Object obj ->
-                let mutable h = 0UL
+                let mutable h = 0u
                 for kvp in obj do
                     let hk = hashString kvp.Key
                     let hv = hashValue kvp.Value
-                    h <- h ^^^ (hk + (hv <<< 1) + 0x9E3779B97F4A7C15UL)
-                h ^^^ uint64 obj.Count
+                    let entry = hashU32WithSeed (hashU32WithSeed 0u hk) hv
+                    h <- h ^^^ entry
+                h ^^^ hashU32WithSeed 0u (uint32 obj.Count)
 
-        let h64 = hashValue value
-        int (h64 ^^^ (h64 >>> 32))
+        let h32 = hashValue value
+        int h32
 
     override this.Equals(other: obj) =
         match other with
