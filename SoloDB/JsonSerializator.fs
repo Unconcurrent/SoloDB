@@ -10,6 +10,7 @@ open SoloDatabase.Utils
 open System.Text
 open System.Globalization
 open System.Runtime.CompilerServices
+open System.Runtime.InteropServices
 open Microsoft.FSharp.Reflection
 open System.Web
 open System.Linq.Expressions
@@ -40,6 +41,7 @@ type JsonValueType =
 /// Represents a JSON value, which can be a null, boolean, string, number, list, or object.
 /// This is a discriminated union that forms the core of the JSON representation.
 /// </summary>
+[<CustomEquality; CustomComparison>]
 type JsonValue =
     /// <summary>Represents a JSON null value.</summary>
     | Null
@@ -53,6 +55,160 @@ type JsonValue =
     | List of IList<JsonValue>
     /// <summary>Represents a JSON object, a dictionary from string keys to JsonValue instances.</summary>
     | Object of IDictionary<string, JsonValue>
+
+    static member private EqualsCore (left: JsonValue) (right: JsonValue) : bool =
+        let rec equals (l: JsonValue) (r: JsonValue) =
+            match l, r with
+            | Null, Null -> true
+            | Boolean a, Boolean b -> a = b
+            | String a, String b -> StringComparer.Ordinal.Equals(a, b)
+            | Number a, Number b -> a = b
+            | List a, List b ->
+                if a.Count <> b.Count then false
+                else
+                    let rec loop i =
+                        if i = a.Count then true
+                        elif equals a.[i] b.[i] then loop (i + 1)
+                        else false
+                    loop 0
+            | Object a, Object b ->
+                if a.Count <> b.Count then false
+                else
+                    use e = a.GetEnumerator()
+                    let rec loop () =
+                        if e.MoveNext() then
+                            let kvp = e.Current
+                            match b.TryGetValue(kvp.Key) with
+                            | true, value when equals kvp.Value value -> loop ()
+                            | _ -> false
+                        else
+                            true
+                    loop ()
+            | _ -> false
+
+        equals left right
+
+    static member private CompareCore (left: JsonValue) (right: JsonValue) : int =
+        let inline typeOrder (v: JsonValue) =
+            match v with
+            | Null -> 0
+            | Boolean _ -> 1
+            | Number _ -> 2
+            | String _ -> 3
+            | List _ -> 4
+            | Object _ -> 5
+
+        let rec compareValues (l: JsonValue) (r: JsonValue) =
+            let tl = typeOrder l
+            let tr = typeOrder r
+            if tl <> tr then
+                compare tl tr
+            else
+                match l, r with
+                | Null, Null -> 0
+                | Boolean a, Boolean b -> compare a b
+                | Number a, Number b -> a.CompareTo b
+                | String a, String b -> StringComparer.Ordinal.Compare(a, b)
+                | List a, List b ->
+                    let minCount = if a.Count < b.Count then a.Count else b.Count
+                    let rec loop i =
+                        if i = minCount then
+                            compare a.Count b.Count
+                        else
+                            let c = compareValues a.[i] b.[i]
+                            if c = 0 then loop (i + 1) else c
+                    loop 0
+                | Object a, Object b ->
+                    let countCompare = compare a.Count b.Count
+                    if countCompare <> 0 then countCompare
+                    else
+                        let arrA = Array.zeroCreate<KeyValuePair<string, JsonValue>>(a.Count)
+                        let arrB = Array.zeroCreate<KeyValuePair<string, JsonValue>>(b.Count)
+                        let mutable i = 0
+                        for kvp in a do
+                            arrA[i] <- kvp
+                            i <- i + 1
+                        i <- 0
+                        for kvp in b do
+                            arrB[i] <- kvp
+                            i <- i + 1
+                        let comparer = Comparison<KeyValuePair<string, JsonValue>> (fun x y -> StringComparer.Ordinal.Compare(x.Key, y.Key))
+                        Array.Sort(arrA, comparer)
+                        Array.Sort(arrB, comparer)
+                        let rec loop idx =
+                            if idx = arrA.Length then 0
+                            else
+                                let keyCompare = StringComparer.Ordinal.Compare(arrA[idx].Key, arrB[idx].Key)
+                                if keyCompare <> 0 then keyCompare
+                                else
+                                    let valueCompare = compareValues arrA[idx].Value arrB[idx].Value
+                                    if valueCompare = 0 then loop (idx + 1) else valueCompare
+                        loop 0
+                | _ -> 0
+
+        compareValues left right
+
+    static member private HashCore (value: JsonValue) : int =
+        let inline hashDecimal (n: decimal) =
+            #if NETSTANDARD2_1
+            let mutable nMutable = n
+            let span = MemoryMarshal.AsBytes (MemoryMarshal.CreateReadOnlySpan(&nMutable, 1))
+            SoloDatabase.Hashing.xxHash64 span 0UL
+            #else
+            let bits = Decimal.GetBits n
+            let bytes = Array.zeroCreate<byte> 16
+            Buffer.BlockCopy(bits, 0, bytes, 0, 16)
+            SoloDatabase.Hashing.xxHash64 (ReadOnlySpan<byte>(bytes)) 0UL
+            #endif
+
+        let inline hashString (s: string) =
+            SoloDatabase.Hashing.xxHash64Chars (s.AsSpan()) 0UL
+
+        let rec hashValue (v: JsonValue) : uint64 =
+            match v with
+            | Null -> 0UL
+            | Boolean b -> if b then 1UL else 0UL
+            | String s -> hashString s
+            | Number n -> hashDecimal n
+            | List items ->
+                let mutable h = 1469598103934665603UL
+                for i = 0 to items.Count - 1 do
+                    let hv = hashValue items.[i]
+                    h <- (h ^^^ hv) * 1099511628211UL
+                h
+            | Object obj ->
+                let mutable h = 0UL
+                for kvp in obj do
+                    let hk = hashString kvp.Key
+                    let hv = hashValue kvp.Value
+                    h <- h ^^^ (hk + (hv <<< 1) + 0x9E3779B97F4A7C15UL)
+                h ^^^ uint64 obj.Count
+
+        let h64 = hashValue value
+        int (h64 ^^^ (h64 >>> 32))
+
+    override this.Equals(other: obj) =
+        match other with
+        | :? JsonValue as json -> JsonValue.EqualsCore this json
+        | _ -> false
+
+    override this.GetHashCode() =
+        JsonValue.HashCore this
+
+    interface IEquatable<JsonValue> with
+        member this.Equals(other: JsonValue) =
+            JsonValue.EqualsCore this other
+
+    interface IComparable with
+        member this.CompareTo(other: obj) =
+            match other with
+            | null -> JsonValue.CompareCore this Null
+            | :? JsonValue as json -> JsonValue.CompareCore this json
+            | _ -> invalidArg "other" "Object is not a JsonValue."
+
+    interface IComparable<JsonValue> with
+        member this.CompareTo(other: JsonValue) =
+            JsonValue.CompareCore this other
 
     /// <summary>
     /// Serializes a given object of type 'T into a JsonValue.
@@ -353,7 +509,7 @@ type JsonValue =
     /// <returns>The parsed JsonValue.</returns>
     static member Parse (jsonSpan: ReadOnlySpan<byte>) =
         let mutable tokenizerCtx = JsonValue.JsonUtf8SpanParser.Invoke jsonSpan
-        JsonParser.parseUtf8 &tokenizerCtx
+        JsonParser.parse &tokenizerCtx
 
     /// <summary>
     /// Creates a new JsonValue.Object from a sequence of key-value pairs with strongly typed values.
