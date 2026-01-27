@@ -6,6 +6,9 @@ open System.Collections
 open System.Reflection
 open System.Linq
 open System.Collections.Generic
+open System.Runtime.CompilerServices
+
+#nowarn "9"
 
 /// <summary>
 /// Contains helper functions for JSON serialization and deserialization.
@@ -137,31 +140,48 @@ module private JsonHelper =
             raise (FormatException("Input is not a valid 32-bit hexadecimal integer."))
 
 
-    let kvpKeyCmp<'J> =
-        let cached = Comparison<KeyValuePair<string, 'J>>(fun x y ->
-            StringComparer.Ordinal.Compare(x.Key, y.Key))
-        fun () -> cached
-
-    let inline compareObjectsCore<'J>
+    let compareObjectsCoreArray<'J>
         (n: int,
-        arrA: Span<KeyValuePair<string, 'J>>,
-        arrB: Span<KeyValuePair<string, 'J>>,
-        valueCompare: 'J -> 'J -> int)
+         a: KeyValuePair<string,'J> array,
+         b: KeyValuePair<string,'J> array,
+         valueCompare: 'J -> 'J -> int)
         : int =
-
 
         let mutable idx = 0
         let mutable res = 0
         while res = 0 && idx < n do
-            let kc = StringComparer.Ordinal.Compare(arrA[idx].Key, arrB[idx].Key)
-            if kc <> 0 then
-                res <- kc
+            let aa = a[idx]
+            let bb = b[idx]
+            let kc = StringComparer.Ordinal.Compare(aa.Key, bb.Key)
+            if kc <> 0 then res <- kc
             else
-                let vc = valueCompare arrA[idx].Value arrB[idx].Value
+                let vc = valueCompare aa.Value bb.Value
                 if vc <> 0 then res <- vc
             idx <- idx + 1
         res
 
+    let compareObjectsCoreStack128<'J>
+        (n: int,
+         a: byref<SoloDatabase.InternalStack128<KeyValuePair<string,'J>>>,
+         b: byref<SoloDatabase.InternalStack128<KeyValuePair<string,'J>>>,
+         valueCompare: 'J -> 'J -> int)
+        : int =
+
+        let mutable idx = 0
+        let mutable res = 0
+        while res = 0 && idx < n do
+            let ra = SoloDatabase.InternalStack128.GetRef(&a, idx)
+            let rb = SoloDatabase.InternalStack128.GetRef(&b, idx)
+            let kc = StringComparer.Ordinal.Compare(ra.Key, rb.Key)
+            if kc <> 0 then res <- kc
+            else
+                let vc = valueCompare ra.Value rb.Value
+                if vc <> 0 then res <- vc
+            idx <- idx + 1
+        res
+
+type internal KvpComparison<'J> =
+    static member val KvpKeyCmp = Comparison<KeyValuePair<string, 'J>>(fun x y -> StringComparer.Ordinal.Compare(x.Key, y.Key))
 
 /// <summary>
 /// Represents a grouping of items by a key, implementing IGrouping.

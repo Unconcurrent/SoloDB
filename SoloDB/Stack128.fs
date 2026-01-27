@@ -6,7 +6,8 @@ open System
 
 
 [<Struct; StructLayout(LayoutKind.Sequential)>]
-type internal Stack128<'T> =
+// <summary >Internal only, do not touch </summary>
+type internal InternalStack128<'T> =
     // 128 contiguous fields
     val mutable V000 : 'T
     val mutable V001 : 'T
@@ -138,16 +139,16 @@ type internal Stack128<'T> =
     val mutable V127 : 'T
 
     [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
-    static member GetRef (s: byref<Stack128<'T>>, index: int) : byref<'T> =
+    static member GetRef (s: byref<InternalStack128<'T>>, index: int) : byref<'T> =
 #if DEBUG
         if uint32 index >= 128u then invalidArg (nameof index) "Stack128 index out of range."
 #endif
         // contiguous field block starting at V000
         &Unsafe.Add(&s.V000, index)
 
-    [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
-    member this.AsSpanLen (length: int) : Span<'T> =
-#if DEBUG
-        if uint32 length > 128u then invalidArg (nameof length) "Stack128 length out of range."
-#endif
-        Span<'T>(Unsafe.AsPointer<Stack128<'T>>(&this), 128)
+    // Enables: stack[0] (read) and stack[0] <- v (write)
+    member s.Item
+        with [<MethodImpl(MethodImplOptions.AggressiveInlining)>] get (index: int) : 'T =
+            Unsafe.ReadUnaligned<'T>(&Unsafe.As(&InternalStack128.GetRef(&s, index)))
+        and  [<MethodImpl(MethodImplOptions.AggressiveInlining)>] set (index: int) (value: 'T) =
+            InternalStack128.GetRef(&s, index) <- value
