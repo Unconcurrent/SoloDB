@@ -28,9 +28,11 @@
 
 	<ItemGroup>
     <Compile Include="Hashing.fs" />
+    <Compile Include="Sort.fs" />
     <Compile Include="CowByteSpanMap.fs" />
     <Compile Include="NativeArray.fs" />
     <Compile Include="Attributes.fs" />
+    <Compile Include="Local128.fs" />
     <Compile Include="Types.fs" />
     <Compile Include="Utils.fs" />
     <Compile Include="Extensions.fs" />

@@ -5,6 +5,7 @@ open System
 open System.Collections
 open System.Reflection
 open System.Linq
+open System.Collections.Generic
 
 /// <summary>
 /// Contains helper functions for JSON serialization and deserialization.
@@ -134,6 +135,32 @@ module private JsonHelper =
         if tryParseHex(span, &v) then v
         else
             raise (FormatException("Input is not a valid 32-bit hexadecimal integer."))
+
+
+    let kvpKeyCmp<'J> =
+        let cached = Comparison<KeyValuePair<string, 'J>>(fun x y ->
+            StringComparer.Ordinal.Compare(x.Key, y.Key))
+        fun () -> cached
+
+    let inline compareObjectsCore<'J>
+        (n: int,
+        arrA: Span<KeyValuePair<string, 'J>>,
+        arrB: Span<KeyValuePair<string, 'J>>,
+        valueCompare: 'J -> 'J -> int)
+        : int =
+
+
+        let mutable idx = 0
+        let mutable res = 0
+        while res = 0 && idx < n do
+            let kc = StringComparer.Ordinal.Compare(arrA[idx].Key, arrB[idx].Key)
+            if kc <> 0 then
+                res <- kc
+            else
+                let vc = valueCompare arrA[idx].Value arrB[idx].Value
+                if vc <> 0 then res <- vc
+            idx <- idx + 1
+        res
 
 
 /// <summary>

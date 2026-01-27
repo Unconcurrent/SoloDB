@@ -99,11 +99,85 @@ type JsonValue =
             | List _ -> 4
             | Object _ -> 5
 
-        let rec compareValues (l: JsonValue) (r: JsonValue) =
+        let compareObjectsStack
+            (n: int)
+            (a: IDictionary<string, JsonValue>)
+            (b: IDictionary<string, JsonValue>)
+            (valueCompare: JsonValue -> JsonValue -> int)
+            : int =
+
+            let mutable bufA = Unchecked.defaultof<SoloDatabase.Stack128<KeyValuePair<string, JsonValue>>>
+            let mutable bufB = Unchecked.defaultof<SoloDatabase.Stack128<KeyValuePair<string, JsonValue>>>
+
+            let arrA = bufA.AsSpanLen(n)
+            let arrB = bufB.AsSpanLen(n)
+                    
+            let mutable i = 0
+            for kv in a do
+                arrA[i] <- kv
+                i <- i + 1
+
+            i <- 0
+            for kv in b do
+                arrB[i] <- kv
+                i <- i + 1
+
+            SoloDatabase.Sort.heapSort arrA (JsonHelper.kvpKeyCmp<JsonValue>())
+            SoloDatabase.Sort.heapSort arrB (JsonHelper.kvpKeyCmp<JsonValue>())
+
+            JsonHelper.compareObjectsCore<JsonValue> (n, arrA, arrB, valueCompare)
+
+        let compareObjectsHeap
+            (n: int)
+            (a: IDictionary<string, JsonValue>)
+            (b: IDictionary<string, JsonValue>)
+            (valueCompare: JsonValue -> JsonValue -> int)
+            : int =
+
+            let mutable bufA = Array.zeroCreate<KeyValuePair<string, JsonValue>> n
+            let mutable bufB = Array.zeroCreate<KeyValuePair<string, JsonValue>> n
+
+            let arrA = bufA.AsSpan(0, n)
+            let arrB = bufB.AsSpan(0, n)
+                    
+            let mutable i = 0
+            for kv in a do
+                arrA[i] <- kv
+                i <- i + 1
+
+            i <- 0
+            for kv in b do
+                arrB[i] <- kv
+                i <- i + 1
+
+            SoloDatabase.Sort.heapSort arrA (JsonHelper.kvpKeyCmp<JsonValue>())
+            SoloDatabase.Sort.heapSort arrB (JsonHelper.kvpKeyCmp<JsonValue>())
+
+            JsonHelper.compareObjectsCore<JsonValue> (n, arrA, arrB, valueCompare)
+
+        let compareObjects
+            (depth: int)
+            (a: IDictionary<string, JsonValue>)
+            (b: IDictionary<string, JsonValue>)
+            (valueCompare: JsonValue -> JsonValue -> int)
+            : int =
+
+            let n = a.Count
+            let countCompare = compare n b.Count
+            if countCompare <> 0 then countCompare
+            else
+                let useStack = n <= 128 && depth < 64
+
+                if useStack then
+                    compareObjectsStack n a b valueCompare
+                else
+                    compareObjectsHeap n a b valueCompare
+                
+
+        let rec compareValues (depth: int) (l: JsonValue) (r: JsonValue) =
             let tl = typeOrder l
             let tr = typeOrder r
-            if tl <> tr then
-                compare tl tr
+            if tl <> tr then compare tl tr
             else
                 match l, r with
                 | Null, Null -> 0
@@ -113,41 +187,16 @@ type JsonValue =
                 | List a, List b ->
                     let minCount = if a.Count < b.Count then a.Count else b.Count
                     let rec loop i =
-                        if i = minCount then
-                            compare a.Count b.Count
+                        if i = minCount then compare a.Count b.Count
                         else
-                            let c = compareValues a.[i] b.[i]
+                            let c = compareValues (depth + 1) a[i] b[i]
                             if c = 0 then loop (i + 1) else c
                     loop 0
                 | Object a, Object b ->
-                    let countCompare = compare a.Count b.Count
-                    if countCompare <> 0 then countCompare
-                    else
-                        let arrA = Array.zeroCreate<KeyValuePair<string, JsonValue>>(a.Count)
-                        let arrB = Array.zeroCreate<KeyValuePair<string, JsonValue>>(b.Count)
-                        let mutable i = 0
-                        for kvp in a do
-                            arrA[i] <- kvp
-                            i <- i + 1
-                        i <- 0
-                        for kvp in b do
-                            arrB[i] <- kvp
-                            i <- i + 1
-                        let comparer = Comparison<KeyValuePair<string, JsonValue>> (fun x y -> StringComparer.Ordinal.Compare(x.Key, y.Key))
-                        Array.Sort(arrA, comparer)
-                        Array.Sort(arrB, comparer)
-                        let rec loop idx =
-                            if idx = arrA.Length then 0
-                            else
-                                let keyCompare = StringComparer.Ordinal.Compare(arrA[idx].Key, arrB[idx].Key)
-                                if keyCompare <> 0 then keyCompare
-                                else
-                                    let valueCompare = compareValues arrA[idx].Value arrB[idx].Value
-                                    if valueCompare = 0 then loop (idx + 1) else valueCompare
-                        loop 0
+                    compareObjects (depth + 1) a b (fun x y -> compareValues (depth + 1) x y)
                 | _ -> 0
 
-        compareValues left right
+        compareValues 0 left right
 
     static member private HashCore (value: JsonValue) : int =
         let inline hashDecimal (n: decimal) =

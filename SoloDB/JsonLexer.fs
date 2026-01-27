@@ -411,6 +411,13 @@ module internal JsonParser =
     let inline isJsonWhitespaceByte (b: byte) =
         b = ' 'B || b = '\t'B || b = '\n'B || b = '\r'B || b = '\u000B'B || b = '\u000C'B
 
+    let inline isJsonWhitespaceCodePoint (codePoint: int) =
+        match codePoint with
+        | 0x0009 | 0x000A | 0x000B | 0x000C | 0x000D
+        | 0x0020 | 0x00A0 | 0x1680 | 0x180E | 0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000 | 0xFEFF -> true
+        | cp when cp >= 0x2000 && cp <= 0x200A -> true
+        | _ -> false
+
     let inline isDigitOrMinusByte (b: byte) =
         b = '-'B || (b >= '0'B && b <= '9'B)
 
@@ -552,7 +559,6 @@ module internal JsonParser =
             | "false" -> BooleanToken false
             | "Infinity" -> NumberToken Decimal.MaxValue
             | "NaN" -> NumberToken Decimal.Zero
-            // Non-standard: treat as bare identifier string token
             | other -> StringToken other
             , i
         )
@@ -688,10 +694,14 @@ module internal JsonParser =
                     else
                         failwith "Invalid escape sequence"
             | ValueSome b ->
+                if b = '\n'B || b = '\r'B then
+                    failwith "Unterminated string"
                 sb.Append(char b) |> ignore
                 i <- i + 1
             | ValueNone ->
                 let struct (cp, consumed) = ctx.reader.DecodeCodePointAt(ctx.input, i)
+                if cp = 0x2028 || cp = 0x2029 then
+                    failwith "Unterminated string"
                 appendCodePoint sb cp
                 i <- i + consumed
 
@@ -727,7 +737,14 @@ module internal JsonParser =
                             | ValueSome '\n'B
                             | ValueSome '\r'B ->
                                 finished <- true
-                            | _ -> i <- i + 1
+                            | ValueSome _ ->
+                                i <- i + 1
+                            | ValueNone ->
+                                let struct (cp, consumed) = ctx.reader.DecodeCodePointAt(ctx.input, i)
+                                if cp = 0x2028 || cp = 0x2029 then
+                                    finished <- true
+                                else
+                                    i <- i + consumed
                         ctx.codeUnitIndex <- i
                         readNext &ctx
                     | ValueSome '*'B ->
@@ -808,6 +825,11 @@ module internal JsonParser =
                                 while idx < ctx.codeUnitLength && not finished && not overflow do
                                     match ctx.reader.TryPeekAsciiByte(ctx.input, idx) with
                                     | ValueSome ch ->
+                                        if ch = 'e'B || ch = 'E'B then
+                                            match ctx.reader.TryPeekAsciiByte(ctx.input, idx + 1) with
+                                            | ValueSome next when next = '+'B || next = '-'B || (next >= '0'B && next <= '9'B) ->
+                                                failwith "Invalid hex literal"
+                                            | _ -> ()
                                         let digit =
                                             if ch >= '0'B && ch <= '9'B then int ch - int '0'B
                                             elif ch >= 'a'B && ch <= 'f'B then 10 + int ch - int 'a'B
@@ -873,8 +895,11 @@ module internal JsonParser =
                     failwithf "Unexpected JSON character: %c, index = %i" (char b) ctx.codeUnitIndex
 
             | ValueNone ->
-                let struct (cp, _consumed) = ctx.reader.DecodeCodePointAt(ctx.input, ctx.codeUnitIndex)
-                if isIdentifierStartCodePoint cp then
+                let struct (cp, consumed) = ctx.reader.DecodeCodePointAt(ctx.input, ctx.codeUnitIndex)
+                if isJsonWhitespaceCodePoint cp then
+                    ctx.codeUnitIndex <- ctx.codeUnitIndex + consumed
+                    readNext &ctx
+                elif isIdentifierStartCodePoint cp then
                     match parseIdentifierFallback &ctx ctx.codeUnitIndex with
                     | struct (tok, i) -> ctx.codeUnitIndex <- i; tok
                 else
@@ -892,17 +917,34 @@ module internal JsonParser =
         (ctx: byref<ParserContext<'T, 'R>>) (dict: Dictionary<string, 'T>) =
         match readNext &ctx with
         | CloseBrace -> dict :> IDictionary<string, 'T>
-        | StringToken key ->
-            let colon = readNext &ctx
-            if colon <> Colon then failwith "Malformed json."
+        | token ->
+            let keyOpt =
+                match token with
+                | StringToken s -> ValueSome s
+                | NullToken -> ValueSome "null"
+                | BooleanToken true -> ValueSome "true"
+                | BooleanToken false -> ValueSome "false"
+                | _ -> ValueNone
 
-            let value = parse &ctx
-            dict.[key] <- value
-            parseMembers &ctx dict
-        | Comma ->
-            parseMembers &ctx dict
-        | _ ->
-            failwith "Invalid object syntax"
+            match keyOpt with
+            | ValueNone ->
+                failwith "Invalid object syntax"
+            | ValueSome key ->
+                let colon = readNext &ctx
+                if colon <> Colon then failwith "Malformed json."
+
+                let value = parse &ctx
+                dict.[key] <- value
+
+                match readNext &ctx with
+                | CloseBrace -> dict :> IDictionary<string, 'T>
+                | Comma ->
+                    match peek &ctx with
+                    | CloseBrace ->
+                        ignore (readNext &ctx)
+                        dict :> IDictionary<string, 'T>
+                    | _ -> parseMembers &ctx dict
+                | _ -> failwith "Malformed json."
 
     and private parseObject<'T, 'R when 'R : struct and 'R :> IJsonReader>
         (ctx: byref<ParserContext<'T, 'R>>) : IDictionary<string, 'T> =
