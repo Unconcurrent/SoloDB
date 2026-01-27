@@ -5,6 +5,17 @@ open System.Runtime.CompilerServices
 open System.Runtime.InteropServices
 
 module private Hashing =
+    [<Literal>]
+    let P1 = 2654435761u
+    [<Literal>]
+    let P2 = 2246822519u
+    [<Literal>]
+    let P3 = 3266489917u
+    [<Literal>]
+    let P4 = 668265263u
+    [<Literal>]
+    let P5 = 374761393u
+
     let inline private rotl (x:uint32) (r:int) : uint32 =
         (x <<< r) ||| (x >>> (32 - r))
 
@@ -18,28 +29,14 @@ module private Hashing =
         Unsafe.ReadUnaligned<uint64>(&Unsafe.AsRef(&s.[offset]))
 
     let inline private round (acc:uint32) (input:uint32) : uint32 =
-        let P1 = 2654435761u
-        let P2 = 2246822519u
         let acc = acc + input * P2
         let acc = rotl acc 13
         acc * P1
 
     let inline private merge (acc:uint32) (v:uint32) : uint32 =
-        let P1 = 2654435761u
-        let P4 = 668265263u
         let acc = acc ^^^ (round 0u v)
         acc * P1 + P4
 
-    [<Literal>]
-    let P1 = 2654435761u
-    [<Literal>]
-    let P2 = 2246822519u
-    [<Literal>]
-    let P3 = 3266489917u
-    [<Literal>]
-    let P4 = 668265263u
-    [<Literal>]
-    let P5 = 374761393u
 
     let internal xxHash32 (data: ReadOnlySpan<byte>) (seed:uint32) : uint32 =
         let len = data.Length

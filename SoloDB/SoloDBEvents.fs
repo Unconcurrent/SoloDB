@@ -1,5 +1,6 @@
 ﻿namespace SoloDatabase
 
+open CowByteSpanMap
 open Connections
 open SoloDatabase.RawSqliteFunctions
 open Microsoft.Data.Sqlite
