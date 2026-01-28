@@ -13,9 +13,19 @@ open System.Runtime.CompilerServices
 /// <summary>
 /// Contains helper functions for JSON serialization and deserialization.
 /// </summary>
-module private JsonHelper =
+module internal JsonHelper =
+    let mutable private useFastDefaultDict = false
+
+    let internal setUseFastDefaultDict (value: bool) =
+        useFastDefaultDict <- value
+
+    let internal getUseFastDefaultDict () = useFastDefaultDict
+
     let internal newDefaultDict<'Value>() : IDictionary<string, 'Value> =
-        Dictionary<string, 'Value>() :> IDictionary<string, 'Value>
+        if useFastDefaultDict then
+            SoloDatabase.FastStringDictionary.FastDict<'Value>(0) :> IDictionary<string, 'Value>
+        else
+            Dictionary<string, 'Value>() :> IDictionary<string, 'Value>
 
     /// <summary>
     /// Checks if a given type is an array type supported for Newtownsoft-style serialization (e.g., arrays of primitives, strings, DateTime).
