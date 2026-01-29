@@ -162,6 +162,13 @@ module private Hashing =
     [<Literal>]
     let internal fnvPrimeA32Bit = 16777619u
 
+    let inline internal fnvFast (data: ReadOnlySpan<byte>) =
+        let mutable hash = fnvPrimeA32Bit
+        for i = 0 to data.Length - 1 do
+            let ch = data[i]
+            hash <- (hash ^^^ uint32 ch) * fnvPrimeA32Bit;
+        hash
+
     let inline internal fnvFastChars (text: ReadOnlySpan<char>) =
         let mutable hash = fnvPrimeA32Bit
         for i = 0 to text.Length - 1 do

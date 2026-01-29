@@ -45,11 +45,21 @@ module internal Helper =
         connection.QueryFirstOrDefault<string>("SELECT Name FROM SoloDBCollections WHERE Name = @name LIMIT 1", {|name = name|}) <> null
 
     /// <summary>
+    /// Drops the update trigger associated with a collection table, if it exists.
+    /// </summary>
+    /// <param name="name">The name of the collection whose trigger should be dropped.</param>
+    /// <param name="conn">The active SQLite connection.</param>
+    let internal dropTriggersForTable (name: string) (conn: SqliteConnection) =
+        let triggerName = $"SoloDB_Update_{name}"
+        conn.Execute($"DROP TRIGGER IF EXISTS \"{triggerName}\"") |> ignore
+
+    /// <summary>
     /// Drops a collection's table and removes its metadata entry.
     /// </summary>
     /// <param name="name">The name of the collection to drop.</param>
     /// <param name="connection">The active SQLite connection.</param>
     let internal dropCollection (name: string) (connection: SqliteConnection) =
+        dropTriggersForTable name connection
         connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name) |> ignore
         connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}) |> ignore
 
@@ -246,14 +256,43 @@ module internal Helper =
             ()
 
     /// <summary>
+    /// Returns the SQL that creates the update trigger for a collection table.
+    /// </summary>
+    /// <param name="name">The name of the collection.</param>
+    let internal getSQLForTriggersForTable (name: string) =
+        let triggerName = $"SoloDB_Update_{name}"
+        $"""
+            CREATE TRIGGER IF NOT EXISTS "{triggerName}"
+            BEFORE UPDATE ON "{name}"
+            FOR EACH ROW
+            WHEN SHOULD_HANDLE_UPDATING('{name}') = 1
+            BEGIN
+                SELECT CASE
+                    WHEN ON_UPDATING_HANDLER('{name}', json(OLD.Value), json(NEW.Value)) = 0 THEN NULL
+                    ELSE RAISE(ROLLBACK, 'SoloDB updating handler failed')
+                END;
+            END;
+        """
+
+    /// <summary>
+    /// Creates update triggers for a collection table.
+    /// </summary>
+    /// <param name="name">The name of the collection.</param>
+    /// <param name="conn">The active SQLite connection.</param>
+    let internal createTriggersForTable (name: string) (conn: SqliteConnection) =
+        conn.Execute(getSQLForTriggersForTable name) |> ignore
+
+
+    /// <summary>
     /// Creates a new table for a collection, including its metadata entry and declared indexes.
     /// </summary>
     let internal createTableInner<'T> (name: string) (conn: SqliteConnection) =
         conn.Execute($"CREATE TABLE \"{name}\" (
                         Id INTEGER NOT NULL PRIMARY KEY UNIQUE,
                         Value JSONB NOT NULL
-                    );", {|name = name|}) |> ignore
-        conn.Execute("INSERT INTO SoloDBCollections(Name) VALUES (@name)", {|name = name|}) |> ignore
+                    );") |> ignore
+        conn.Execute("INSERT INTO SoloDBCollections(Name) VALUES (@name);", {|name = name|}) |> ignore
+        createTriggersForTable name conn |> ignore
 
         // Ignore the untyped collections.
         if not (typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T>) then
@@ -270,6 +309,8 @@ type internal SoloDBToCollectionData = {
     /// A function that, when called, clears the database connection cache.
     /// </summary>
     ClearCacheFunction: unit -> unit
+
+    EventSystem: EventSystem
 }
 
 /// <summary>
@@ -288,8 +329,11 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     member val InTransaction = match connection with | Transactional _ | Transitive _ -> true | Pooled _ -> false
     /// <summary>Gets a value indicating whether type information should be included during serialization for documents in this collection.</summary>
     member val IncludeType = mustIncludeTypeInformationInSerialization<'T>
+
+    member val Events = CollectionEventSystem<'T>(name, parentData.EventSystem, fun directConnection -> Collection(Transitive directConnection, name, connectionString, parentData))
+
     /// <summary>Gets the internal connection provider for this collection.</summary>
-    member val internal Connection = connection
+    member val internal Connection = connection    
 
     /// <summary>
     /// Inserts a new document into the collection.
@@ -727,6 +771,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         member this.InTransaction = this.InTransaction
         member this.IncludeType = this.IncludeType 
         member this.Name = this.Name
+        member this.Events = this.Events
 
         member this.DropIndexIfExists(expression) = this.DropIndexIfExists(expression)
         member this.EnsureAddedAttributeIndexes() = this.EnsureAddedAttributeIndexes()
@@ -754,7 +799,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 /// Represents a database context within an explicit transaction. All operations are part of the same transaction.
 /// </summary>
 /// <param name="connection">The transactional connection.</param>
-type TransactionalSoloDB internal (connection: TransactionalConnection) =
+type TransactionalSoloDB internal (connection: TransactionalConnection, parentData: SoloDBToCollectionData) =
     let connectionString = connection.ConnectionString
 
     /// <summary>
@@ -770,7 +815,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
         if not (Helper.existsCollection name connection) then 
             Helper.createTableInner<'T> name connection
             
-        Collection<'T>(Transactional connection, name, connectionString, { ClearCacheFunction = ignore }) :> ISoloDBCollection<'T>
+        Collection<'T>(Transactional connection, name, connectionString, { ClearCacheFunction = ignore; EventSystem = parentData.EventSystem }) :> ISoloDBCollection<'T>
 
     /// <summary>
     /// Gets a collection of a specified type, using the type's name as the collection name. Creates the collection if it doesn't exist.
@@ -868,15 +913,16 @@ type TransactionalSoloDB internal (connection: TransactionalConnection) =
     member this.ListCollectionNames() =
         connection.Query<string>("SELECT Name FROM SoloDBCollections")
 
-[<Struct>]
+
 /// <summary>
 /// Represents the storage location of a SoloDB database.
 /// </summary>
+[<Struct>]
 type internal SoloDBLocation =
-| /// <summary>The database is stored in a physical file.</summary>
-  File of filePath: string
-| /// <summary>The database is stored in-memory.</summary>
-  Memory of name: string
+/// <summary>The database is stored in a physical file.</summary>
+| File of filePath: string
+/// <summary>The database is stored in-memory.</summary>
+| Memory of name: string
 
 /// <summary>
 /// The main database class, representing a single SQLite database file or in-memory instance.
@@ -1079,7 +1125,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 "
             
             let mutable dbSchemaVersion = dbConnection.QueryFirst<int> "PRAGMA user_version;";
-            let currentSupportedSchemaVersion = 2; // Added a check so it will not open future version of the schema.
+            let currentSupportedSchemaVersion = 3; // Added a check so it will not open future version of the schema.
 
             if dbSchemaVersion > currentSupportedSchemaVersion then
                 raise (NotSupportedException $"The schema version of the current DB is {dbSchemaVersion}, but the current version is {currentSupportedSchemaVersion}. This check can be mistaken if the user modified the 'PRAGMA user_version;' pragma, in which the version is stored.")
@@ -1113,13 +1159,19 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 if dbSchemaVersion = 1 then
                     failwithf "Failure to migrate schema."
 
-            (*todo: if dbSchemaVersion = 2 then
-                use command = new SqliteCommand("
+            if dbSchemaVersion = 2 then
+                let triggerSql =
+                    dbConnection.Query<string>("SELECT Name FROM SoloDBCollections")
+                    |> Seq.map (fun name -> $"DROP TRIGGER IF EXISTS \"SoloDB_Update_{name}\";\n{Helper.getSQLForTriggersForTable name}")
+                    |> String.concat "\n"
+
+                use command = new SqliteCommand($"
                     BEGIN EXCLUSIVE;
 
+                    {triggerSql}
+
                     PRAGMA user_version = 3;
-
-
+                    PRAGMA foreign_keys = on;
 
                     COMMIT TRANSACTION;
                 ", dbConnection.Inner)
@@ -1127,8 +1179,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 ignore (command.ExecuteNonQuery())
                 dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
                 if dbSchemaVersion = 2 then
-                    failwithf "Failure to migrate schema."*)
-
+                    failwithf "Failure to migrate schema."
 
             // https://www.sqlite.org/pragma.html#pragma_optimize
             let _rez = dbConnection.Execute("PRAGMA optimize=0x10002;")
@@ -1182,7 +1233,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 if not withinTransaction then connection.Execute "ROLLBACK;" |> ignore
                 reraise()
 
-        Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = this.ClearCache }) :> ISoloDBCollection<'T>
+        Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = this.ClearCache; EventSystem = this.Events }) :> ISoloDBCollection<'T>
 
     /// <summary>
     /// Gets a collection of a specified type, using the type's name as the collection name. Creates the collection if it doesn't exist.
@@ -1339,7 +1390,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         use connectionForTransaction = connectionManager.CreateForTransaction()
         try
             connectionForTransaction.Execute("BEGIN;") |> ignore
-            let transactionalDb = new TransactionalSoloDB(connectionForTransaction)
+            let transactionalDb = new TransactionalSoloDB(connectionForTransaction, { ClearCacheFunction = ignore; EventSystem = this.Events })
             
             try
                 let ret = func.Invoke transactionalDb

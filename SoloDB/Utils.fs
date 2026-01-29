@@ -1,5 +1,12 @@
 ﻿namespace SoloDatabase
 
+open System.Runtime.CompilerServices
+
+[<assembly: InternalsVisibleTo("Tests")>]
+[<assembly: InternalsVisibleTo("CSharpTests")>]
+[<assembly: InternalsVisibleTo("BenchMaster")>]
+do ()
+
 open System
 open System.Collections.Generic
 open System.Collections.Concurrent
@@ -11,7 +18,6 @@ open System.Runtime.InteropServices
 open System.Buffers
 open System.Reflection
 open System.Threading
-open System.Runtime.CompilerServices
 open System.Linq.Expressions
 
 
@@ -404,3 +410,26 @@ module Utils =
                             yield currentList :> IList<'T>
                             looping <- false
             }
+
+
+    type ReentrantSpinLock() =
+        let mutable ownerTid = 0
+        let mutable recursion = 0
+
+        member _.Enter() =
+            let tid = Thread.CurrentThread.ManagedThreadId
+            if Volatile.Read(&ownerTid) = tid then
+                recursion <- recursion + 1
+            else
+                // acquire
+                while Interlocked.CompareExchange(&ownerTid, tid, 0) <> 0 do
+                    if not (Thread.Yield()) then Thread.SpinWait(20)
+                recursion <- 1
+
+        member _.Exit() =
+            let tid = Thread.CurrentThread.ManagedThreadId
+            if Volatile.Read(&ownerTid) <> tid then
+                invalidOp "Exit from non-owner thread"
+            recursion <- recursion - 1
+            if recursion = 0 then
+                Volatile.Write(&ownerTid, 0)

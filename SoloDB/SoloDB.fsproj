@@ -34,7 +34,6 @@
     <Compile Include="Attributes.fs" />
     <Compile Include="Stack128.fs" />
     <Compile Include="Sort.fs" />
-    <Compile Include="FastDict.fs" />
     <Compile Include="Types.fs" />
     <Compile Include="Utils.fs" />
     <Compile Include="Extensions.fs" />

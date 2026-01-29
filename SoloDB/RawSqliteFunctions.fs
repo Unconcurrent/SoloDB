@@ -1,12 +1,6 @@
 namespace SoloDatabase.RawSqliteFunctions
 
 open System.Runtime.CompilerServices
-
-[<assembly: InternalsVisibleTo("Tests")>]
-[<assembly: InternalsVisibleTo("CSharpTests")>]
-[<assembly: InternalsVisibleTo("BenchMaster")>]
-do ()
-
 open System
 open System.Data
 open System.Runtime.InteropServices
@@ -88,10 +82,9 @@ type SqliteRawValue =
     /// Gets the value as a zero-copy UTF-8 ReadOnlySpan.
     /// WARNING: Only valid during the callback! Do not store the span.
     /// </summary>
-    member this.GetTextSpan() : ReadOnlySpan<byte> =
-        // sqlite3_value_text returns utf8z which wraps a pointer
-        // We can get the span via blob access for text too
-        raw.sqlite3_value_blob(this.Value)
+    member this.GetBlobPointer() : nativeptr<byte> =
+        // sqlite3_value_text returns utf8` which wraps a pointer
+        Unsafe.AsPointer(&Unsafe.AsRef(&raw.sqlite3_value_blob(this.Value).GetPinnableReference())) |> NativeInterop.NativePtr.ofVoidPtr
 
     /// <summary>
     /// Gets the value as a byte array (copies the data).

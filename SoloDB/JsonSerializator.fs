@@ -543,6 +543,8 @@ type JsonValue =
     /// <param name="jsonSpan">The JSON input span.</param>
     /// <returns>The parsed JsonValue.</returns>
     static member Parse (jsonSpan: ReadOnlySpan<char>) =
+        if jsonSpan.IsEmpty then invalidArg (nameof jsonSpan) "Argument is empty" else
+
         let mutable tokenizerCtx = JsonValue.JsonUtf16SpanParser.Invoke jsonSpan
         JsonParser.parse &tokenizerCtx
 
@@ -552,8 +554,46 @@ type JsonValue =
     /// <param name="jsonSpan">The UTF-8 JSON input span.</param>
     /// <returns>The parsed JsonValue.</returns>
     static member Parse (jsonSpan: ReadOnlySpan<byte>) =
+        if jsonSpan.IsEmpty then invalidArg (nameof jsonSpan) "Argument is empty" else
+
         let mutable tokenizerCtx = JsonValue.JsonUtf8SpanParser.Invoke jsonSpan
         JsonParser.parse &tokenizerCtx
+
+    /// <summary>
+    /// Parses a JSON string into a 'T.
+    /// </summary>
+    /// <param name="jsonString">The JSON string to parse.</param>
+    /// <returns>The parsed 'T.</returns>
+    static member ParseInto<'T> (jsonString: string): 'T =
+        if isNull jsonString then Unchecked.defaultof<'T> else
+
+        let mutable tokenizerCtx = JsonValue.JsonStrParser.Invoke jsonString
+        let json = JsonParser.parse &tokenizerCtx
+        json.ToObject<'T>()
+
+    /// <summary>
+    /// Parses a JSON UTF-16 character span into a 'T.
+    /// </summary>
+    /// <param name="jsonSpan">The JSON input span.</param>
+    /// <returns>The parsed 'T.</returns>
+    static member ParseInto<'T> (jsonSpan: ReadOnlySpan<char>): 'T =
+        if jsonSpan.IsEmpty then invalidArg (nameof jsonSpan) "Argument is empty" else
+
+        let mutable tokenizerCtx = JsonValue.JsonUtf16SpanParser.Invoke jsonSpan
+        let json = JsonParser.parse &tokenizerCtx
+        json.ToObject<'T>()
+
+    /// <summary>
+    /// Parses a JSON UTF-8 byte span into a 'T.
+    /// </summary>
+    /// <param name="jsonSpan">The UTF-8 JSON input span.</param>
+    /// <returns>The parsed 'T.</returns>
+    static member ParseInto<'T> (jsonSpan: ReadOnlySpan<byte>): 'T =
+        if jsonSpan.IsEmpty then invalidArg (nameof jsonSpan) "Argument is empty" else
+
+        let mutable tokenizerCtx = JsonValue.JsonUtf8SpanParser.Invoke jsonSpan
+        let json = JsonParser.parse &tokenizerCtx
+        json.ToObject<'T>()
 
     /// <summary>
     /// Creates a new JsonValue.Object from a sequence of key-value pairs with strongly typed values.
