@@ -418,12 +418,23 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     /// <summary>Gets the name of the collection.</summary>
     member val Name = name
     /// <summary>Gets a value indicating whether the collection is operating within a transaction.</summary>
-    member val InTransaction = match connection with | Transactional _ | Transitive _ -> true | Pooled _ -> false
+    member val InTransaction =
+        match connection with
+        | Transactional _ | Transitive _ -> true
+        | Guarded (_, inner) ->
+            match inner with
+            | Transactional _ | Transitive _ -> true
+            | _ -> false
+        | Pooled _ -> false
     /// <summary>Gets a value indicating whether type information should be included during serialization for documents in this collection.</summary>
     member val IncludeType = mustIncludeTypeInformationInSerialization<'T>
 
     /// <summary>Gets the event registration API for this collection.</summary>
-    member val Events = CollectionEventSystem<'T>(name, parentData.EventSystem, fun directConnection -> Collection(Transitive directConnection, name, connectionString, parentData))
+    member val Events =
+        CollectionEventSystem<'T>(
+            name,
+            parentData.EventSystem,
+            fun directConnection guard -> Collection(Guarded(guard, Transitive directConnection), name, connectionString, parentData))
 
     /// <summary>Gets the internal connection provider for this collection.</summary>
     member val internal Connection = connection    

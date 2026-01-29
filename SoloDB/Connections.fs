@@ -203,13 +203,15 @@ module Connections =
     /// A discriminated union that represents the different types of database connections available within the system.
     /// This allows for abstracting over whether a connection is from a pool or part of an explicit transaction.
     /// </summary>
-    and [<Struct>] Connection =
+    and Connection =
         /// <summary>A connection sourced from a connection pool.</summary>
         | Pooled of pool: ConnectionManager
         /// <summary>A dedicated, non-disposing connection for an ongoing transaction.</summary>
         | Transactional of conn: TransactionalConnection
         /// <summary>A raw, pass-through connection, typically for internal operations.</summary>
         | Transitive of tc: SqliteConnection
+        /// <summary>A connection guarded by a validity check.</summary>
+        | Guarded of guard: (unit -> unit) * inner: Connection
 
         /// <summary>
         /// Gets an active <see cref="SqliteConnection"/> based on the connection type.
@@ -221,6 +223,9 @@ module Connections =
             | Pooled pool -> pool.Borrow()
             | Transactional conn -> conn
             | Transitive c -> c
+            | Guarded (guard, inner) ->
+                guard()
+                inner.Get()
 
         /// <summary>
         /// Executes a synchronous function within a transaction. The behavior depends on the connection type.
@@ -237,6 +242,9 @@ module Connections =
                 f conn
             | Transitive _conn ->
                 raise (InvalidOperationException "A simple Transitive Connection should never be used with a transation.")
+            | Guarded (guard, inner) ->
+                guard()
+                inner.WithTransaction f
 
         /// <summary>
         /// Executes an asynchronous function within a transaction. The behavior depends on the connection type.
@@ -252,6 +260,9 @@ module Connections =
                 f conn
             | Transitive _conn -> 
                 raise (InvalidOperationException "A Transitive Connection should never be used with a transation.")
+            | Guarded (guard, inner) ->
+                guard()
+                inner.WithAsyncTransaction f
         
     /// <summary>
     /// Extends the <see cref="SqliteConnection"/> class with helper methods.
