@@ -408,22 +408,63 @@ type internal SoloDBToCollectionData = {
 /// Caches event-context database resources to avoid repeated allocations and redundant metadata queries.
 /// </summary>
 type internal EventDbCache(connectionString: string, directConnection: SqliteConnection, guardedConnection: Connection, parentData: SoloDBToCollectionData, knownCollectionName: string) =
+    let knownCollectionName = Helper.formatName knownCollectionName
     let mutable knownCollectionExists = true
-    let mutable cachedCollection: obj = null
-    let mutable cachedCollectionName = knownCollectionName
-    let mutable cachedCollectionType = typeof<obj>
+    let maxCachedCollections = 4
+    let cachedCollections = Array.zeroCreate<obj> maxCachedCollections
+    let cachedCollectionNames = Array.zeroCreate<string> maxCachedCollections
+    let cachedCollectionTypes = Array.zeroCreate<Type> maxCachedCollections
+    let mutable cachedCount = 0
     let mutable cachedFileSystem: IFileSystem | null = null
 
     member private this.TryGetCached<'U>(collectionName: string) =
-        not (isNull cachedCollection)
-        && cachedCollectionName = collectionName
-        && cachedCollectionType = typeof<'U>
+        let targetType = typeof<'U>
+        let mutable found = Unchecked.defaultof<ISoloDBCollection<'U> | null>
+        let mutable i = 0
+        while isNull found && i < cachedCount do
+            let cached = cachedCollections.[i]
+            if not (isNull cached) && cachedCollectionNames.[i] = collectionName && cachedCollectionTypes.[i] = targetType then
+                found <- cached :?> ISoloDBCollection<'U>
+            i <- i + 1
+        if isNull found then None else Some found
 
     member private this.InvalidateIfCached(collectionName: string) =
-        if not (isNull cachedCollection) && cachedCollectionName = collectionName then
-            cachedCollection <- null
-            cachedCollectionName <- knownCollectionName
-            cachedCollectionType <- typeof<obj>
+        for i in 0 .. cachedCount - 1 do
+            let cached = cachedCollections.[i]
+            if not (isNull cached) && cachedCollectionNames.[i] = collectionName then
+                cachedCollections.[i] <- null
+                cachedCollectionNames.[i] <- null
+                cachedCollectionTypes.[i] <- null
+
+    member private this.TryStoreCached<'U>(collectionName: string) (collection: ISoloDBCollection<'U>) =
+        let targetType = typeof<'U>
+        let mutable slot = -1
+        let mutable i = 0
+        while slot < 0 && i < cachedCount do
+            if isNull cachedCollections.[i] then
+                slot <- i
+            i <- i + 1
+
+        if slot < 0 && cachedCount < maxCachedCollections then
+            slot <- cachedCount
+            cachedCount <- cachedCount + 1
+
+        if slot >= 0 then
+            cachedCollections.[slot] <- collection :> obj
+            cachedCollectionNames.[slot] <- collectionName
+            cachedCollectionTypes.[slot] <- targetType
+            true
+        else false
+
+    member private this.IsCachedName(collectionName: string) =
+        let mutable found = false
+        let mutable i = 0
+        while not found && i < cachedCount do
+            let cached = cachedCollections.[i]
+            if not (isNull cached) && cachedCollectionNames.[i] = collectionName then
+                found <- true
+            i <- i + 1
+        found
 
     member private this.EnsureExists<'U>(collectionName: string) =
         if collectionName = knownCollectionName then
@@ -444,44 +485,25 @@ type internal EventDbCache(connectionString: string, directConnection: SqliteCon
         if collectionName.StartsWith "SoloDB" then
             raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
-        if this.TryGetCached<'U>(collectionName) then
-            cachedCollection :?> ISoloDBCollection<'U>
-        else
+        match this.TryGetCached<'U>(collectionName) with
+        | Some cached -> cached
+        | None ->
             this.EnsureExists<'U>(collectionName)
             let collection = Collection<'U>(guardedConnection, collectionName, connectionString, parentData) :> ISoloDBCollection<'U>
-            cachedCollection <- collection :> obj
-            cachedCollectionName <- collectionName
-            cachedCollectionType <- typeof<'U>
+            this.TryStoreCached<'U>(collectionName) collection |> ignore
             collection
 
     member this.CollectionExists(collectionName: string) =
         let collectionName = Helper.formatName collectionName
         if collectionName = knownCollectionName && knownCollectionExists then true
-        elif not (isNull cachedCollection) && cachedCollectionName = collectionName then true
+        elif this.IsCachedName(collectionName) then true
         else Helper.existsCollection collectionName directConnection
 
     member this.DropCollectionIfExists(collectionName: string) =
-        let collectionName = Helper.formatName collectionName
-        if collectionName = knownCollectionName then
-            if knownCollectionExists then
-                Helper.dropCollection collectionName directConnection
-                knownCollectionExists <- false
-                this.InvalidateIfCached collectionName
-                true
-            else false
-        elif not (isNull cachedCollection) && cachedCollectionName = collectionName then
-            Helper.dropCollection collectionName directConnection
-            this.InvalidateIfCached collectionName
-            true
-        elif Helper.existsCollection collectionName directConnection then
-            Helper.dropCollection collectionName directConnection
-            this.InvalidateIfCached collectionName
-            true
-        else false
+        raise (InvalidOperationException "Dropping collections is not supported from event handlers.")
 
     member this.DropCollection(collectionName: string) =
-        if this.DropCollectionIfExists collectionName = false then
-            raise (KeyNotFoundException (sprintf "Collection %s does not exists." collectionName))
+        raise (InvalidOperationException "Dropping collections is not supported from event handlers.")
 
 /// <summary>
 /// Represents a collection of documents of type 'T stored in the database. Provides methods for CRUD operations, indexing, and LINQ querying.
