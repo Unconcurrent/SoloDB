@@ -494,29 +494,54 @@ type internal EventSystem internal () =
 /// <summary>
 /// Provides cached access to item event data for a single handler invocation.
 /// </summary>
-type internal SoloDBItemEventContext<'T> internal (createCollection: SqliteConnection -> ISoloDBCollection<'T>) =
+type internal SoloDBItemEventContext<'T> internal (createCollection: SqliteConnection -> (unit -> unit) -> ISoloDBCollection<'T>) =
     let mutable currentSqliteConnection = Unchecked.defaultof<SqliteConnection>
     let mutable currentCollection = Unchecked.defaultof<ISoloDBCollection<'T> | null>
     let mutable previousSession = -1L
     let mutable json = struct (NativePtr.nullPtr<byte>, 0)
     let mutable item: 'T = Unchecked.defaultof<'T>
+    let mutable disposed = true
+    let disposedMessage = "The event context collection can only be used during the handler execution."
+    let mutable disableDisposeHandle: IDisposable = null
+
+    member private this.ThrowIfDisposed() =
+        if disposed then
+            raise (ObjectDisposedException("EventContextCollection", disposedMessage))
 
     /// <summary>
     /// Initializes the context for the given SQLite trigger invocation.
     /// </summary>
-    member this.Reset (connection, session: int64, jsonBytes: nativeptr<byte>, jsonSize: int) =
+    member this.Reset (connection: SqliteConnection, session: int64, jsonBytes: nativeptr<byte>, jsonSize: int) =
+        disposed <- false
+        if not (isNull disableDisposeHandle) then
+            disableDisposeHandle.Dispose()
+            disableDisposeHandle <- null
+        match (connection :> obj) with
+        | :? SQLiteTools.IDisableDispose as disable -> disableDisposeHandle <- disable.DisableDispose()
+        | _ -> ()
         if previousSession <> session then
             previousSession <- session
             currentCollection <- null
             currentSqliteConnection <- connection
             json <- struct (jsonBytes, jsonSize)
 
+    /// <summary>
+    /// Marks the context as disposed after handler execution.
+    /// </summary>
+    member this.MarkDisposed() =
+        disposed <- true
+        if not (isNull disableDisposeHandle) then
+            disableDisposeHandle.Dispose()
+            disableDisposeHandle <- null
+
     interface ISoloDBItemEventContext<'T> with
         member this.CollectionInstance: ISoloDBCollection<'T> = 
-            if isNull currentCollection then currentCollection <- createCollection currentSqliteConnection
+            this.ThrowIfDisposed()
+            if isNull currentCollection then currentCollection <- createCollection currentSqliteConnection this.ThrowIfDisposed
             currentCollection
 
         member this.ReadItem(): 'T =
+            this.ThrowIfDisposed()
             let struct (ptr, len) = json
             if len <> 0 then
                 let span = ReadOnlySpan<byte>(NativePtr.toVoidPtr ptr, len)
@@ -528,7 +553,7 @@ type internal SoloDBItemEventContext<'T> internal (createCollection: SqliteConne
 /// <summary>
 /// Provides cached access to update event data for a single handler invocation.
 /// </summary>
-type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteConnection -> ISoloDBCollection<'T>) =
+type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteConnection -> (unit -> unit) -> ISoloDBCollection<'T>) =
     let mutable currentSqliteConnection = Unchecked.defaultof<SqliteConnection>
     let mutable currentCollection = Unchecked.defaultof<ISoloDBCollection<'T> | null>
     let mutable previousSession = -1L
@@ -537,11 +562,25 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
 
     let mutable itemOld: 'T = Unchecked.defaultof<'T>
     let mutable itemNew: 'T = Unchecked.defaultof<'T>
+    let mutable disposed = true
+    let disposedMessage = "The event context collection can only be used during the handler execution."
+    let mutable disableDisposeHandle: IDisposable = null
+
+    member private this.ThrowIfDisposed() =
+        if disposed then
+            raise (ObjectDisposedException("EventContextCollection", disposedMessage))
 
     /// <summary>
     /// Initializes the context for the given SQLite trigger invocation.
     /// </summary>
-    member this.Reset (connection, session: int64, jsonOldBytes: nativeptr<byte>, jsonOldSize: int, jsonNewBytes: nativeptr<byte>, jsonNewSize: int) =
+    member this.Reset (connection: SqliteConnection, session: int64, jsonOldBytes: nativeptr<byte>, jsonOldSize: int, jsonNewBytes: nativeptr<byte>, jsonNewSize: int) =
+        disposed <- false
+        if not (isNull disableDisposeHandle) then
+            disableDisposeHandle.Dispose()
+            disableDisposeHandle <- null
+        match (connection :> obj) with
+        | :? SQLiteTools.IDisableDispose as disable -> disableDisposeHandle <- disable.DisableDispose()
+        | _ -> ()
         if previousSession <> session then
             previousSession <- session
             currentCollection <- null
@@ -551,12 +590,23 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
             itemOld <- Unchecked.defaultof<'T>
             itemNew <- Unchecked.defaultof<'T>
 
+    /// <summary>
+    /// Marks the context as disposed after handler execution.
+    /// </summary>
+    member this.MarkDisposed() =
+        disposed <- true
+        if not (isNull disableDisposeHandle) then
+            disableDisposeHandle.Dispose()
+            disableDisposeHandle <- null
+
     interface ISoloDBUpdatingEventContext<'T> with
         member this.CollectionInstance: ISoloDBCollection<'T> = 
-            if isNull currentCollection then currentCollection <- createCollection currentSqliteConnection
+            this.ThrowIfDisposed()
+            if isNull currentCollection then currentCollection <- createCollection currentSqliteConnection this.ThrowIfDisposed
             currentCollection
 
         member this.ReadOldItem(): 'T =
+            this.ThrowIfDisposed()
             let struct (ptr, len) = jsonOld
             if len <> 0 then
                 let span = ReadOnlySpan<byte>(NativePtr.toVoidPtr ptr, len)
@@ -566,6 +616,7 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
             itemOld
 
         member this.ReadNewItem(): 'T =
+            this.ThrowIfDisposed()
             let struct (ptr, len) = jsonNew
             if len <> 0 then
                 let span = ReadOnlySpan<byte>(NativePtr.toVoidPtr ptr, len)
@@ -577,7 +628,7 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
 /// <summary>
 /// Collection-scoped event system for registering and unregistering handlers.
 /// </summary>
-type internal CollectionEventSystem<'T> internal (collectionName: string, eventSystem: EventSystem, createCollection: SqliteConnection -> ISoloDBCollection<'T>) =
+type internal CollectionEventSystem<'T> internal (collectionName: string, eventSystem: EventSystem, createCollection: SqliteConnection -> (unit -> unit) -> ISoloDBCollection<'T>) =
     let insertingHandlerMap = Dictionary<InsertingHandler<'T>, ResizeArray<InsertingHandlerSystem>>(HashIdentity.Reference)
     let deletingHandlerMap = Dictionary<DeletingHandler<'T>, ResizeArray<DeletingHandlerSystem>>(HashIdentity.Reference)
     let updatingHandlerMap = Dictionary<UpdatingHandler<'T>, ResizeArray<UpdatingHandlerSystem>>(HashIdentity.Reference)
@@ -619,6 +670,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                             ctx.Reset (conn, session, jsonPtr, json.Length)
                             handler.Invoke ctx
                         finally
+                            ctx.MarkDisposed()
                             ctxs.Push ctx
 
                     if result = RemoveHandler then
@@ -675,6 +727,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                             ctx.Reset (conn, session, jsonPtr, json.Length)
                             handler.Invoke ctx
                         finally
+                            ctx.MarkDisposed()
                             ctxs.Push ctx
 
                     if result = RemoveHandler then
@@ -728,6 +781,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                             ctx.Reset (conn, session, jsonOld, jsonOldSize, jsonNew, jsonNewSize)
                             handler.Invoke ctx
                         finally
+                            ctx.MarkDisposed()
                             ctxs.Push ctx
 
                     if result = RemoveHandler then
@@ -784,6 +838,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                             ctx.Reset (conn, session, jsonPtr, json.Length)
                             handler.Invoke ctx
                         finally
+                            ctx.MarkDisposed()
                             ctxs.Push ctx
 
                     if result = RemoveHandler then
@@ -840,6 +895,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                             ctx.Reset (conn, session, jsonPtr, json.Length)
                             handler.Invoke ctx
                         finally
+                            ctx.MarkDisposed()
                             ctxs.Push ctx
 
                     if result = RemoveHandler then
@@ -893,6 +949,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                             ctx.Reset (conn, session, jsonOld, jsonOldSize, jsonNew, jsonNewSize)
                             handler.Invoke ctx
                         finally
+                            ctx.MarkDisposed()
                             ctxs.Push ctx
 
                     if result = RemoveHandler then
