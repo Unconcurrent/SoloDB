@@ -13,21 +13,29 @@ type SoloDBEventsResult =
 | RemoveHandler
 
 
-type ISoloDBEventsContext<'T> =
+type ISoloDBUpdatingEventContext<'T> =
     abstract member CollectionInstance: ISoloDBCollection<'T>
-    abstract member Read: byref<SoloDBLazyItem<'T>> -> byref<'T>
+    abstract member ReadOldItem: unit -> 'T
+    abstract member ReadNewItem: unit -> 'T
 
-and InsertingHandlerSystem = delegate of conn: SqliteConnection * jsonB: ReadOnlySpan<byte> -> SoloDBEventsResult
-and InsertingHandler<'T> = delegate of ctx: ISoloDBEventsContext<'T> * item: byref<SoloDBLazyItem<'T>> -> SoloDBEventsResult
-and DeletingHandler<'T> = delegate of ctx: ISoloDBEventsContext<'T> * item: byref<SoloDBLazyItem<'T>> -> SoloDBEventsResult
-and UpdatingHandler<'T> = delegate of ctx: ISoloDBEventsContext<'T> * oldItem: byref<SoloDBLazyItem<'T>> * newItem: byref<SoloDBLazyItem<'T>> -> SoloDBEventsResult
+and ISoloDBItemEventContext<'T> =
+    abstract member CollectionInstance: ISoloDBCollection<'T>
+    abstract member ReadItem: unit -> 'T
 
-and ISoloDBEvents =
-    abstract member OnInserting: collectionName: ReadOnlySpan<byte> * handler: InsertingHandlerSystem-> unit
+and InsertingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * json: ReadOnlySpan<byte> -> SoloDBEventsResult
+and DeletingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * json: ReadOnlySpan<byte> -> SoloDBEventsResult
+and UpdatingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * jsonOld: nativeptr<byte> * jsonOldSize: int * jsonNew: nativeptr<byte> * jsonNewSize: int -> SoloDBEventsResult
+
+
+and InsertingHandler<'T> = delegate of ctx: ISoloDBItemEventContext<'T> -> SoloDBEventsResult
+and DeletingHandler<'T> = delegate of ctx: ISoloDBItemEventContext<'T> -> SoloDBEventsResult
+and UpdatingHandler<'T> = delegate of ctx: ISoloDBUpdatingEventContext<'T> -> SoloDBEventsResult
+
 
 and ISoloDBCollectionEvents<'T> =
-    abstract member OnInserting<'T>: handler: InsertingHandler<'T> -> unit
-(*    abstract member OnDeleting<'T>: handler: DeletingHandler<'T> -> unit
+    abstract member OnUpdating<'T>: handler: UpdatingHandler<'T> -> unit
+(*    abstract member OnInserting<'T>: handler: InsertingHandler<'T> -> unit
+    abstract member OnDeleting<'T>: handler: DeletingHandler<'T> -> unit
     abstract member OnUpdating<'T>: handler: UpdatingHandler<'T> -> unit
 
     abstract member Unregister<'T>: handler: InsertingHandler<'T> -> unit
@@ -99,6 +107,9 @@ and ISoloDBCollection<'T> =
     /// </code>
     /// </example>
     abstract member IncludeType: bool with get
+
+    // todo: add comment
+    abstract member Events: ISoloDBCollectionEvents<'T>
 
     /// <summary>
     /// Inserts a new entity into the collection and returns the auto-generated unique identifier.

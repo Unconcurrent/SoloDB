@@ -6,6 +6,7 @@ open System.Runtime.InteropServices
 open System.Threading
 
 module internal CowByteSpanMap =
+    let inline private hashFunction x = Hashing.fnvFast x
 
     [<Struct>]
     type private CowUtf8SpanMapEntry<'TValue> =
@@ -48,7 +49,7 @@ module internal CowByteSpanMap =
 
         [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
         static member private TryGetLinear(entries: CowUtf8SpanMapEntry<'TValue>[], key: ReadOnlySpan<byte>, value: byref<'TValue>) : bool =
-            let h = Hashing.xxHash32 key 0u
+            let h = hashFunction key
             let mutable i = 0
             let mutable found = false
 
@@ -84,7 +85,7 @@ module internal CowByteSpanMap =
                 if not (Thread.Yield ()) then Thread.SpinWait(1)
             try
                 let cur = entries
-                let hash = Hashing.xxHash32 key 0u
+                let hash = hashFunction key
 
                 let mutable found = false
                 let idx = CowByteSpanMap.BinarySearch(cur, key, &found)
@@ -111,7 +112,7 @@ module internal CowByteSpanMap =
                 if not (Thread.Yield ()) then Thread.SpinWait(1)
             try
                 let cur = entries
-                let hash = Hashing.xxHash32 key 0u
+                let hash = hashFunction key
 
                 let mutable found = false
                 let idx = CowByteSpanMap.BinarySearch(cur, key, &found)
@@ -154,7 +155,7 @@ module internal CowByteSpanMap =
                         cur[idx].Value
                     else
                         let created = factory.Invoke(key)
-                        let hash = Hashing.xxHash32 key 0u
+                        let hash = hashFunction key
                         let newKey = key.ToArray()
                         let next = Array.zeroCreate<CowUtf8SpanMapEntry<'TValue>> (cur.Length + 1)
 
@@ -200,6 +201,10 @@ module internal CowByteSpanMap =
                         true
             finally
                 Volatile.Write(&writeLock, 0)
+
+        member this.Remove(key: ReadOnlySpan<byte>) : bool =
+            let mutable v = Unchecked.defaultof<'TValue>
+            this.TryRemove(key, &v)
 
         // ---------------- Sorted search (lexicographic) ----------------
         static member private BinarySearch(entries: CowUtf8SpanMapEntry<'TValue>[], key: ReadOnlySpan<byte>, found: byref<bool>) : int =
