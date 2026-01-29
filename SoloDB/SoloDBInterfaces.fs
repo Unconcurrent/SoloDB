@@ -70,13 +70,21 @@ and UpdatingHandler<'T> = delegate of ctx: ISoloDBUpdatingEventContext<'T> -> So
 /// </summary>
 and ISoloDBCollectionEvents<'T> =
     /// <summary>
+    /// Registers a handler invoked before an item insert.
+    /// </summary>
+    abstract member OnInserting: handler: InsertingHandler<'T> -> unit
+    /// <summary>
     /// Registers a handler invoked before an item update.
     /// </summary>
-    abstract member OnUpdating<'T>: handler: UpdatingHandler<'T> -> unit
+    abstract member OnUpdating: handler: UpdatingHandler<'T> -> unit
+    /// <summary>
+    /// Unregisters a previously registered insert handler.
+    /// </summary>
+    abstract member Unregister: handler: InsertingHandler<'T> -> unit
     /// <summary>
     /// Unregisters a previously registered update handler.
     /// </summary>
-    abstract member Unregister<'T>: handler: UpdatingHandler<'T> -> unit
+    abstract member Unregister: handler: UpdatingHandler<'T> -> unit
 (*    abstract member OnInserting<'T>: handler: InsertingHandler<'T> -> unit
     abstract member OnDeleting<'T>: handler: DeletingHandler<'T> -> unit
     abstract member OnUpdating<'T>: handler: UpdatingHandler<'T> -> unit

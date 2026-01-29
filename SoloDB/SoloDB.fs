@@ -261,7 +261,22 @@ module internal Helper =
     /// <param name="name">The name of the collection.</param>
     let internal getSQLForTriggersForTable (name: string) =
         let triggerName = $"SoloDB_Update_{name}"
+        let insertTriggerName = $"SoloDB_Insert_{name}"
         $"""
+            CREATE TRIGGER IF NOT EXISTS "{insertTriggerName}"
+            BEFORE INSERT ON "{name}"
+            FOR EACH ROW
+            WHEN SHOULD_HANDLE_INSERTING('{name}') = 1
+            BEGIN
+                SELECT CASE
+                    WHEN message IS NULL THEN NULL
+                    ELSE RAISE(ABORT, message)
+                END
+                FROM (
+                    SELECT ON_INSERTING_HANDLER('{name}', json(NEW.Value)) AS message
+                );
+            END;
+
             CREATE TRIGGER IF NOT EXISTS "{triggerName}"
             BEFORE UPDATE ON "{name}"
             FOR EACH ROW
@@ -1155,7 +1170,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 "
             
             let mutable dbSchemaVersion = dbConnection.QueryFirst<int> "PRAGMA user_version;";
-            let currentSupportedSchemaVersion = 3; // Added a check so it will not open future version of the schema.
+            let currentSupportedSchemaVersion = 4; // Added a check so it will not open future version of the schema.
 
             if dbSchemaVersion > currentSupportedSchemaVersion then
                 raise (NotSupportedException $"The schema version of the current DB is {dbSchemaVersion}, but the current version is {currentSupportedSchemaVersion}. This check can be mistaken if the user modified the 'PRAGMA user_version;' pragma, in which the version is stored.")
@@ -1192,7 +1207,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             if dbSchemaVersion = 2 then
                 let triggerSql =
                     dbConnection.Query<string>("SELECT Name FROM SoloDBCollections")
-                    |> Seq.map (fun name -> $"DROP TRIGGER IF EXISTS \"SoloDB_Update_{name}\";\n{Helper.getSQLForTriggersForTable name}")
+                    |> Seq.map (fun name -> $"DROP TRIGGER IF EXISTS \"SoloDB_Update_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Insert_{name}\";\n{Helper.getSQLForTriggersForTable name}")
                     |> String.concat "\n"
 
                 use command = new SqliteCommand($"
@@ -1209,6 +1224,28 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 ignore (command.ExecuteNonQuery())
                 dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
                 if dbSchemaVersion = 2 then
+                    failwithf "Failure to migrate schema."
+
+            if dbSchemaVersion = 3 then
+                let triggerSql =
+                    dbConnection.Query<string>("SELECT Name FROM SoloDBCollections")
+                    |> Seq.map (fun name -> $"DROP TRIGGER IF EXISTS \"SoloDB_Update_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Insert_{name}\";\n{Helper.getSQLForTriggersForTable name}")
+                    |> String.concat "\n"
+
+                use command = new SqliteCommand($"
+                    BEGIN EXCLUSIVE;
+
+                    {triggerSql}
+
+                    PRAGMA user_version = 4;
+                    PRAGMA foreign_keys = on;
+
+                    COMMIT TRANSACTION;
+                ", dbConnection.Inner)
+                command.Prepare()
+                ignore (command.ExecuteNonQuery())
+                dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
+                if dbSchemaVersion = 3 then
                     failwithf "Failure to migrate schema."
 
             // https://www.sqlite.org/pragma.html#pragma_optimize
