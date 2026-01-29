@@ -12,6 +12,10 @@ module Connections =
     open System.Collections.Concurrent
     open System.Threading.Tasks
     open Utils
+    open System.IO
+
+
+
 
     /// <summary>
     /// Represents a specialized <see cref="SqliteConnection"/> whose <c>Dispose</c> method is a no-op.

@@ -24,6 +24,8 @@ open System.Text
 /// </summary>
 type internal EventSystem internal () =
     let mutable sessionIndex = 0L
+    let disableDisposeCounts = Dictionary<SqliteConnection, int>(HashIdentity.Reference)
+    let disableDisposeHandles = Dictionary<SqliteConnection, IDisposable>(HashIdentity.Reference)
     member val internal GlobalLock = ReentrantSpinLock()
     member val internal InsertingHandlerMapping = CowByteSpanMap<ResizeArray<InsertingHandlerSystem>>()
     member val internal DeletingHandlerMapping = CowByteSpanMap<ResizeArray<DeletingHandlerSystem>>()
@@ -31,6 +33,30 @@ type internal EventSystem internal () =
     member val internal InsertedHandlerMapping = CowByteSpanMap<ResizeArray<InsertingHandlerSystem>>()
     member val internal DeletedHandlerMapping = CowByteSpanMap<ResizeArray<DeletingHandlerSystem>>()
     member val internal UpdatedHandlerMapping = CowByteSpanMap<ResizeArray<UpdatingHandlerSystem>>()
+
+    member private this.AcquireDisableDispose (connection: SqliteConnection) =
+        match (connection :> obj) with
+        | :? SQLiteTools.IDisableDispose as disable ->
+            let mutable count = 0
+            if disableDisposeCounts.TryGetValue(connection, &count) then
+                disableDisposeCounts.[connection] <- count + 1
+            else
+                disableDisposeCounts.[connection] <- 1
+                disableDisposeHandles.[connection] <- disable.DisableDispose()
+        | _ -> ()
+
+    member private this.ReleaseDisableDispose (connection: SqliteConnection) =
+        let mutable count = 0
+        if disableDisposeCounts.TryGetValue(connection, &count) then
+            if count <= 1 then
+                disableDisposeCounts.Remove(connection) |> ignore
+                match disableDisposeHandles.TryGetValue(connection) with
+                | true, handle ->
+                    disableDisposeHandles.Remove(connection) |> ignore
+                    handle.Dispose()
+                | _ -> ()
+            else
+                disableDisposeCounts.[connection] <- count - 1
 
     /// <summary>
     /// Registers SQLite scalar functions used by the event triggers.
@@ -69,6 +95,7 @@ type internal EventSystem internal () =
 
             try 
                 this.GlobalLock.Enter()
+                this.AcquireDisableDispose connection
 
                 let session = Interlocked.Increment &sessionIndex
 
@@ -102,6 +129,7 @@ type internal EventSystem internal () =
                             ignore (this.InsertingHandlerMapping.Remove nameUtf8)
 
             finally
+                this.ReleaseDisableDispose connection
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -143,6 +171,7 @@ type internal EventSystem internal () =
 
             try 
                 this.GlobalLock.Enter()
+                this.AcquireDisableDispose connection
 
                 let session = Interlocked.Increment &sessionIndex
 
@@ -176,6 +205,7 @@ type internal EventSystem internal () =
                             ignore (this.DeletingHandlerMapping.Remove nameUtf8)
 
             finally
+                this.ReleaseDisableDispose connection
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -222,6 +252,7 @@ type internal EventSystem internal () =
 
             try 
                 this.GlobalLock.Enter()
+                this.AcquireDisableDispose connection
 
                 let session = Interlocked.Increment &sessionIndex
 
@@ -255,6 +286,7 @@ type internal EventSystem internal () =
                             ignore (this.UpdatingHandlerMapping.Remove nameUtf8)
 
             finally
+                this.ReleaseDisableDispose connection
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -296,6 +328,7 @@ type internal EventSystem internal () =
 
             try 
                 this.GlobalLock.Enter()
+                this.AcquireDisableDispose connection
 
                 let session = Interlocked.Increment &sessionIndex
 
@@ -329,6 +362,7 @@ type internal EventSystem internal () =
                             ignore (this.InsertedHandlerMapping.Remove nameUtf8)
 
             finally
+                this.ReleaseDisableDispose connection
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -370,6 +404,7 @@ type internal EventSystem internal () =
 
             try 
                 this.GlobalLock.Enter()
+                this.AcquireDisableDispose connection
 
                 let session = Interlocked.Increment &sessionIndex
 
@@ -403,6 +438,7 @@ type internal EventSystem internal () =
                             ignore (this.DeletedHandlerMapping.Remove nameUtf8)
 
             finally
+                this.ReleaseDisableDispose connection
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -449,6 +485,7 @@ type internal EventSystem internal () =
 
             try 
                 this.GlobalLock.Enter()
+                this.AcquireDisableDispose connection
 
                 let session = Interlocked.Increment &sessionIndex
 
@@ -482,6 +519,7 @@ type internal EventSystem internal () =
                             ignore (this.UpdatedHandlerMapping.Remove nameUtf8)
 
             finally
+                this.ReleaseDisableDispose connection
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -502,7 +540,6 @@ type internal SoloDBItemEventContext<'T> internal (createCollection: SqliteConne
     let mutable item: 'T = Unchecked.defaultof<'T>
     let mutable disposed = true
     let disposedMessage = "The event context collection can only be used during the handler execution."
-    let mutable disableDisposeHandle: IDisposable = null
 
     member private this.ThrowIfDisposed() =
         if disposed then
@@ -513,12 +550,6 @@ type internal SoloDBItemEventContext<'T> internal (createCollection: SqliteConne
     /// </summary>
     member this.Reset (connection: SqliteConnection, session: int64, jsonBytes: nativeptr<byte>, jsonSize: int) =
         disposed <- false
-        if not (isNull disableDisposeHandle) then
-            disableDisposeHandle.Dispose()
-            disableDisposeHandle <- null
-        match (connection :> obj) with
-        | :? SQLiteTools.IDisableDispose as disable -> disableDisposeHandle <- disable.DisableDispose()
-        | _ -> ()
         if previousSession <> session then
             previousSession <- session
             currentCollection <- null
@@ -530,9 +561,6 @@ type internal SoloDBItemEventContext<'T> internal (createCollection: SqliteConne
     /// </summary>
     member this.MarkDisposed() =
         disposed <- true
-        if not (isNull disableDisposeHandle) then
-            disableDisposeHandle.Dispose()
-            disableDisposeHandle <- null
 
     interface ISoloDBItemEventContext<'T> with
         member this.CollectionInstance: ISoloDBCollection<'T> = 
@@ -564,7 +592,6 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
     let mutable itemNew: 'T = Unchecked.defaultof<'T>
     let mutable disposed = true
     let disposedMessage = "The event context collection can only be used during the handler execution."
-    let mutable disableDisposeHandle: IDisposable = null
 
     member private this.ThrowIfDisposed() =
         if disposed then
@@ -575,12 +602,6 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
     /// </summary>
     member this.Reset (connection: SqliteConnection, session: int64, jsonOldBytes: nativeptr<byte>, jsonOldSize: int, jsonNewBytes: nativeptr<byte>, jsonNewSize: int) =
         disposed <- false
-        if not (isNull disableDisposeHandle) then
-            disableDisposeHandle.Dispose()
-            disableDisposeHandle <- null
-        match (connection :> obj) with
-        | :? SQLiteTools.IDisableDispose as disable -> disableDisposeHandle <- disable.DisableDispose()
-        | _ -> ()
         if previousSession <> session then
             previousSession <- session
             currentCollection <- null
@@ -595,9 +616,6 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
     /// </summary>
     member this.MarkDisposed() =
         disposed <- true
-        if not (isNull disableDisposeHandle) then
-            disableDisposeHandle.Dispose()
-            disableDisposeHandle <- null
 
     interface ISoloDBUpdatingEventContext<'T> with
         member this.CollectionInstance: ISoloDBCollection<'T> = 

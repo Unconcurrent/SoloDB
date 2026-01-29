@@ -717,13 +717,15 @@ module SQLiteTools =
         member this.Execute(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             match tryCachedCommand this sql parameters with
             | ValueSome struct (command, _columnDict, inUse) ->
-                try command.ExecuteNonQuery()
-                finally inUse := false
+                try
+                    command.ExecuteNonQuery()
+                finally
+                    inUse := false
             | ValueNone ->
 
-            use command = createCommand this sql parameters
-            command.Prepare() // To throw all errors, not silently fail them.
-            command.ExecuteNonQuery()
+                use command = createCommand this sql parameters
+                command.Prepare() // To throw all errors, not silently fail them.
+                command.ExecuteNonQuery()
 
         /// <summary>Opens a data reader, utilizing the cache if possible.</summary>
         /// <param name="sql">The SQL query text.</param>
@@ -773,11 +775,13 @@ module SQLiteTools =
         member this.QueryFirst<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = 
             match tryCachedCommand this sql parameters with
             | ValueSome struct (command, columnDict, inUse) ->
-                try queryCommand<'T> command columnDict |> Seq.head
-                finally inUse := false
+                try
+                    queryCommand<'T> command columnDict |> Seq.head
+                finally
+                    inUse := false
             | ValueNone ->
-            use command = createCommand this sql parameters
-            queryCommand<'T> command null |> Seq.head
+                use command = createCommand this sql parameters
+                queryCommand<'T> command null |> Seq.head
 
         /// <summary>Executes a query and returns the first result, or a default value if the sequence is empty, utilizing the cache if possible.</summary>
         /// <typeparam name="'T">The type to map the result to.</typeparam>
