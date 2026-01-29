@@ -268,9 +268,12 @@ module internal Helper =
             WHEN SHOULD_HANDLE_UPDATING('{name}') = 1
             BEGIN
                 SELECT CASE
-                    WHEN ON_UPDATING_HANDLER('{name}', json(OLD.Value), json(NEW.Value)) = 0 THEN NULL
-                    ELSE RAISE(ROLLBACK, 'SoloDB updating handler failed')
-                END;
+                    WHEN message IS NULL THEN NULL
+                    ELSE RAISE(ABORT, message)
+                END
+                FROM (
+                    SELECT ON_UPDATING_HANDLER('{name}', json(OLD.Value), json(NEW.Value)) AS message
+                );
             END;
         """
 
@@ -966,6 +969,29 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
         do
             use dbConnection = manager.Borrow()
+
+            /// Parses the SQLite version string and returns a comparable Version value.
+            let parseSqliteVersion (versionText: string) =
+                let parts =
+                    try
+                        versionText.Split([| '.' |], StringSplitOptions.RemoveEmptyEntries)
+                        |> Seq.truncate 3
+                        |> Seq.map Int32.Parse
+                        |> ResizeArray
+                    with e ->
+                        failwithf "Could not parse the SQLite version string: %s" e.Message
+
+                let major = if parts.Count > 0 then parts.[0] else failwithf "Could not parse the SQLite version string."
+                let minor = if parts.Count > 1 then parts.[1] else failwithf "Could not parse the SQLite version string."
+                let patch = if parts.Count > 2 then parts.[2] else failwithf "Could not parse the SQLite version string."
+                Version(major, minor, patch)
+
+            let sqliteVersionText = dbConnection.QueryFirst<string> "SELECT sqlite_version();"
+            let sqliteVersion = parseSqliteVersion sqliteVersionText
+            let minimumSqliteVersion = Version(3, 47, 0)
+
+            if sqliteVersion < minimumSqliteVersion then
+                raise (NotSupportedException $"SQLite version {sqliteVersionText} is too old. SoloDB requires SQLite 3.47.0 or newer because trigger RAISE() error messages use SQL expressions and other required features such as JSONB.")
 
             let schema = "
                 PRAGMA journal_mode=wal;
