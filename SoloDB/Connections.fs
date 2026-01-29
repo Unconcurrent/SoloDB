@@ -14,9 +14,6 @@ module Connections =
     open Utils
     open System.IO
 
-
-
-
     /// <summary>
     /// Represents a specialized <see cref="SqliteConnection"/> whose <c>Dispose</c> method is a no-op.
     /// This is used to pass a connection to a user-defined transaction block without it being closed prematurely.

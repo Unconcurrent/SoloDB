@@ -124,7 +124,15 @@ module Utils =
         else None
 
     let internal formatName (name: string) =
-        String(name.ToCharArray() |> Array.filter(fun c -> Char.IsLetterOrDigit c || c = '_')) // Anti SQL injection
+        let inline charOk (c: char) = Char.IsLetterOrDigit c || c = '_'
+        let mutable allOk = true
+        for i = 0 to name.Length - 1 do
+            allOk <- allOk && charOk (name.[i])
+
+        if allOk then 
+            name
+        else
+            String(name.ToCharArray() |> Array.filter(fun c -> charOk c)) // Anti SQL injection
 
     let internal collectionNameOf<'T> =
         let formattedName = typeof<'T>.Name |> formatName
