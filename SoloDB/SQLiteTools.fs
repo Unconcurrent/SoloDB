@@ -632,11 +632,11 @@ module SQLiteTools =
     }
 
     /// <summary>
-    /// Internal interface to allow temporary disabling of the Dispose method on a connection.
+    /// Internal interface to allow temporary, nestable disabling of the Dispose method on a connection.
     /// </summary>
     type internal IDisableDispose =
         /// <summary>
-        /// Disables disposal and returns an IDisposable that re-enables it when disposed.
+        /// Increments the dispose-disable counter and returns an IDisposable that decrements it.
         /// </summary>
         abstract DisableDispose: unit -> IDisposable
     
@@ -649,6 +649,7 @@ module SQLiteTools =
     type [<Sealed>] CachingDbConnection internal (connectionStr: string, onDispose, config: Types.SoloDBConfiguration) = 
         inherit SqliteConnection(connectionStr)
         let mutable disposingDisabled = false
+        let mutable disposeDisableCount = 0
         let mutable preparedCache = Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
         let maxCacheSize = 1000
 
@@ -851,10 +852,14 @@ module SQLiteTools =
 
         interface IDisableDispose with
             member this.DisableDispose(): IDisposable = 
+                disposeDisableCount <- disposeDisableCount + 1
                 disposingDisabled <- true
                 { new IDisposable with
                     override _.Dispose() =
-                        disposingDisabled <- false
+                        disposeDisableCount <- disposeDisableCount - 1
+                        if disposeDisableCount <= 0 then
+                            disposeDisableCount <- 0
+                            disposingDisabled <- false
                         ()}
 
         interface IDisposable with
