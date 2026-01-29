@@ -112,7 +112,6 @@ module internal Helper =
                 jsonText = json
             |}
 
-
         connection.QueryFirst<int64>(queryString, parameters)
 
     /// <summary>
