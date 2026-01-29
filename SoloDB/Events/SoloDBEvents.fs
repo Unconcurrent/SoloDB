@@ -69,8 +69,19 @@ type internal EventSystem internal () =
             let mutable handlerFailureMessage = defaultMessage
 
             let mutable disableHandle: IDisposable = null
+            let mutable restoreTransactionState = false
+            let mutable previousTransactionState = false
+            let mutable cachedConnection = Unchecked.defaultof<SQLiteTools.CachingDbConnection>
             try 
                 this.GlobalLock.Enter()
+                match (connection :> obj) with
+                | :? SQLiteTools.CachingDbConnection as cachingConn ->
+                    cachedConnection <- cachingConn
+                    previousTransactionState <- cachingConn.InsideTransaction
+                    if not previousTransactionState then
+                        cachingConn.InsideTransaction <- true
+                        restoreTransactionState <- true
+                | _ -> ()
                 match (connection :> obj) with
                 | :? SQLiteTools.IDisableDispose as disable -> disableHandle <- disable.DisableDispose()
                 | _ -> ()
@@ -109,6 +120,8 @@ type internal EventSystem internal () =
             finally
                 if not (isNull disableHandle) then
                     disableHandle.Dispose()
+                if restoreTransactionState then
+                    cachedConnection.InsideTransaction <- previousTransactionState
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -149,8 +162,19 @@ type internal EventSystem internal () =
             let mutable handlerFailureMessage = defaultMessage
 
             let mutable disableHandle: IDisposable = null
+            let mutable restoreTransactionState = false
+            let mutable previousTransactionState = false
+            let mutable cachedConnection = Unchecked.defaultof<SQLiteTools.CachingDbConnection>
             try 
                 this.GlobalLock.Enter()
+                match (connection :> obj) with
+                | :? SQLiteTools.CachingDbConnection as cachingConn ->
+                    cachedConnection <- cachingConn
+                    previousTransactionState <- cachingConn.InsideTransaction
+                    if not previousTransactionState then
+                        cachingConn.InsideTransaction <- true
+                        restoreTransactionState <- true
+                | _ -> ()
                 match (connection :> obj) with
                 | :? SQLiteTools.IDisableDispose as disable -> disableHandle <- disable.DisableDispose()
                 | _ -> ()
@@ -189,6 +213,8 @@ type internal EventSystem internal () =
             finally
                 if not (isNull disableHandle) then
                     disableHandle.Dispose()
+                if restoreTransactionState then
+                    cachedConnection.InsideTransaction <- previousTransactionState
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -234,8 +260,19 @@ type internal EventSystem internal () =
             let mutable handlerFailureMessage = defaultMessage
 
             let mutable disableHandle: IDisposable = null
+            let mutable restoreTransactionState = false
+            let mutable previousTransactionState = false
+            let mutable cachedConnection = Unchecked.defaultof<SQLiteTools.CachingDbConnection>
             try 
                 this.GlobalLock.Enter()
+                match (connection :> obj) with
+                | :? SQLiteTools.CachingDbConnection as cachingConn ->
+                    cachedConnection <- cachingConn
+                    previousTransactionState <- cachingConn.InsideTransaction
+                    if not previousTransactionState then
+                        cachingConn.InsideTransaction <- true
+                        restoreTransactionState <- true
+                | _ -> ()
                 match (connection :> obj) with
                 | :? SQLiteTools.IDisableDispose as disable -> disableHandle <- disable.DisableDispose()
                 | _ -> ()
@@ -274,6 +311,8 @@ type internal EventSystem internal () =
             finally
                 if not (isNull disableHandle) then
                     disableHandle.Dispose()
+                if restoreTransactionState then
+                    cachedConnection.InsideTransaction <- previousTransactionState
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -314,8 +353,19 @@ type internal EventSystem internal () =
             let mutable handlerFailureMessage = defaultMessage
 
             let mutable disableHandle: IDisposable = null
+            let mutable restoreTransactionState = false
+            let mutable previousTransactionState = false
+            let mutable cachedConnection = Unchecked.defaultof<SQLiteTools.CachingDbConnection>
             try 
                 this.GlobalLock.Enter()
+                match (connection :> obj) with
+                | :? SQLiteTools.CachingDbConnection as cachingConn ->
+                    cachedConnection <- cachingConn
+                    previousTransactionState <- cachingConn.InsideTransaction
+                    if not previousTransactionState then
+                        cachingConn.InsideTransaction <- true
+                        restoreTransactionState <- true
+                | _ -> ()
                 match (connection :> obj) with
                 | :? SQLiteTools.IDisableDispose as disable -> disableHandle <- disable.DisableDispose()
                 | _ -> ()
@@ -354,6 +404,8 @@ type internal EventSystem internal () =
             finally
                 if not (isNull disableHandle) then
                     disableHandle.Dispose()
+                if restoreTransactionState then
+                    cachedConnection.InsideTransaction <- previousTransactionState
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -394,8 +446,19 @@ type internal EventSystem internal () =
             let mutable handlerFailureMessage = defaultMessage
 
             let mutable disableHandle: IDisposable = null
+            let mutable restoreTransactionState = false
+            let mutable previousTransactionState = false
+            let mutable cachedConnection = Unchecked.defaultof<SQLiteTools.CachingDbConnection>
             try 
                 this.GlobalLock.Enter()
+                match (connection :> obj) with
+                | :? SQLiteTools.CachingDbConnection as cachingConn ->
+                    cachedConnection <- cachingConn
+                    previousTransactionState <- cachingConn.InsideTransaction
+                    if not previousTransactionState then
+                        cachingConn.InsideTransaction <- true
+                        restoreTransactionState <- true
+                | _ -> ()
                 match (connection :> obj) with
                 | :? SQLiteTools.IDisableDispose as disable -> disableHandle <- disable.DisableDispose()
                 | _ -> ()
@@ -434,6 +497,8 @@ type internal EventSystem internal () =
             finally
                 if not (isNull disableHandle) then
                     disableHandle.Dispose()
+                if restoreTransactionState then
+                    cachedConnection.InsideTransaction <- previousTransactionState
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -479,8 +544,19 @@ type internal EventSystem internal () =
             let mutable handlerFailureMessage = defaultMessage
 
             let mutable disableHandle: IDisposable = null
+            let mutable restoreTransactionState = false
+            let mutable previousTransactionState = false
+            let mutable cachedConnection = Unchecked.defaultof<SQLiteTools.CachingDbConnection>
             try 
                 this.GlobalLock.Enter()
+                match (connection :> obj) with
+                | :? SQLiteTools.CachingDbConnection as cachingConn ->
+                    cachedConnection <- cachingConn
+                    previousTransactionState <- cachingConn.InsideTransaction
+                    if not previousTransactionState then
+                        cachingConn.InsideTransaction <- true
+                        restoreTransactionState <- true
+                | _ -> ()
                 match (connection :> obj) with
                 | :? SQLiteTools.IDisableDispose as disable -> disableHandle <- disable.DisableDispose()
                 | _ -> ()
@@ -519,6 +595,8 @@ type internal EventSystem internal () =
             finally
                 if not (isNull disableHandle) then
                     disableHandle.Dispose()
+                if restoreTransactionState then
+                    cachedConnection.InsideTransaction <- previousTransactionState
                 this.GlobalLock.Exit()
 
             if handlerFailed then
