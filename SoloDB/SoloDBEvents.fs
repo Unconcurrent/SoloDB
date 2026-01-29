@@ -150,6 +150,7 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
             itemNew
 
 type internal CollectionEventSystem<'T> internal (collectionName: string, eventSystem: EventSystem, createCollection: SqliteConnection -> ISoloDBCollection<'T>) =
+    let handlerMap = Dictionary<UpdatingHandler<'T>, ResizeArray<UpdatingHandlerSystem>>(HashIdentity.Reference)
     interface ISoloDBCollectionEvents<'T> with
         member this.OnUpdating(handler: UpdatingHandler<'T>): unit =
             let collectionNameBytes = Encoding.UTF8.GetBytes collectionName
@@ -159,17 +160,66 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                 eventSystem.GlobalLock.Enter()
 
                 let ctxs = ConcurrentStack<SoloDBUpdatingEventContext<'T>>()
-                let _added = list.Add(UpdatingHandlerSystem(fun conn session jsonOld jsonOldSize jsonNew jsonNewSize -> 
+                let mutable sysHandlerRef = Unchecked.defaultof<UpdatingHandlerSystem>
+
+                let removeFromMap () =
+                    match handlerMap.TryGetValue handler with
+                    | true, handlers ->
+                        handlers.Remove sysHandlerRef |> ignore
+                        if handlers.Count = 0 then
+                            handlerMap.Remove handler |> ignore
+                    | _ -> ()
+
+                let sysHandler = UpdatingHandlerSystem(fun conn session jsonOld jsonOldSize jsonNew jsonNewSize -> 
                     let mutable ctx = Unchecked.defaultof<SoloDBUpdatingEventContext<'T> | null>
                     if not (ctxs.TryPop(&ctx)) then
                         ctx <- SoloDBUpdatingEventContext<'T>(createCollection)
 
-                    try 
-                        ctx.Reset (conn, session, jsonOld, jsonOldSize, jsonNew, jsonNewSize)
+                    let result =
+                        try 
+                            ctx.Reset (conn, session, jsonOld, jsonOldSize, jsonNew, jsonNewSize)
+                            handler.Invoke ctx
+                        finally
+                            ctxs.Push ctx
 
-                        handler.Invoke ctx
-                    finally ctxs.Push ctx
-                    ))
+                    if result = RemoveHandler then
+                        removeFromMap ()
+
+                    result
+                    )
+
+                sysHandlerRef <- sysHandler
+
+                let _added = list.Add(sysHandler)
+
+                match handlerMap.TryGetValue handler with
+                | true, handlers -> handlers.Add sysHandler
+                | false, _ ->
+                    let handlers = ResizeArray()
+                    handlers.Add sysHandler
+                    handlerMap.[handler] <- handlers
                 ()
+            finally
+                eventSystem.GlobalLock.Exit()
+
+        member this.Unregister(handler: UpdatingHandler<'T>): unit =
+            let collectionNameBytes = Encoding.UTF8.GetBytes collectionName
+            try
+                eventSystem.GlobalLock.Enter()
+
+                let mutable list = Unchecked.defaultof<ResizeArray<UpdatingHandlerSystem>>
+                if eventSystem.UpdatingHandlerMapping.TryGetValue(collectionNameBytes, &list) then
+                    match handlerMap.TryGetValue handler with
+                    | true, handlers ->
+                        for sysHandler in handlers do
+                            for i = list.Count - 1 downto 0 do
+                                if Object.ReferenceEquals(list.[i], sysHandler) then
+                                    list.RemoveAt i
+
+                        handlerMap.Remove handler |> ignore
+
+                        if list.Count = 0 then
+                            ignore (eventSystem.UpdatingHandlerMapping.Remove collectionNameBytes)
+                    | false, _ -> ()
             finally
                 eventSystem.GlobalLock.Exit()
