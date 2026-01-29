@@ -24,8 +24,6 @@ open System.Text
 /// </summary>
 type internal EventSystem internal () =
     let mutable sessionIndex = 0L
-    let disableDisposeCounts = Dictionary<SqliteConnection, int>(HashIdentity.Reference)
-    let disableDisposeHandles = Dictionary<SqliteConnection, IDisposable>(HashIdentity.Reference)
     member val internal GlobalLock = ReentrantSpinLock()
     member val internal InsertingHandlerMapping = CowByteSpanMap<ResizeArray<InsertingHandlerSystem>>()
     member val internal DeletingHandlerMapping = CowByteSpanMap<ResizeArray<DeletingHandlerSystem>>()
@@ -34,29 +32,6 @@ type internal EventSystem internal () =
     member val internal DeletedHandlerMapping = CowByteSpanMap<ResizeArray<DeletingHandlerSystem>>()
     member val internal UpdatedHandlerMapping = CowByteSpanMap<ResizeArray<UpdatingHandlerSystem>>()
 
-    member private this.AcquireDisableDispose (connection: SqliteConnection) =
-        match (connection :> obj) with
-        | :? SQLiteTools.IDisableDispose as disable ->
-            let mutable count = 0
-            if disableDisposeCounts.TryGetValue(connection, &count) then
-                disableDisposeCounts.[connection] <- count + 1
-            else
-                disableDisposeCounts.[connection] <- 1
-                disableDisposeHandles.[connection] <- disable.DisableDispose()
-        | _ -> ()
-
-    member private this.ReleaseDisableDispose (connection: SqliteConnection) =
-        let mutable count = 0
-        if disableDisposeCounts.TryGetValue(connection, &count) then
-            if count <= 1 then
-                disableDisposeCounts.Remove(connection) |> ignore
-                match disableDisposeHandles.TryGetValue(connection) with
-                | true, handle ->
-                    disableDisposeHandles.Remove(connection) |> ignore
-                    handle.Dispose()
-                | _ -> ()
-            else
-                disableDisposeCounts.[connection] <- count - 1
 
     /// <summary>
     /// Registers SQLite scalar functions used by the event triggers.
@@ -93,9 +68,12 @@ type internal EventSystem internal () =
             let defaultMessage = "SoloDB inserting handler failed"
             let mutable handlerFailureMessage = defaultMessage
 
+            let mutable disableHandle: IDisposable = null
             try 
                 this.GlobalLock.Enter()
-                this.AcquireDisableDispose connection
+                match (connection :> obj) with
+                | :? SQLiteTools.IDisableDispose as disable -> disableHandle <- disable.DisableDispose()
+                | _ -> ()
 
                 let session = Interlocked.Increment &sessionIndex
 
@@ -129,7 +107,8 @@ type internal EventSystem internal () =
                             ignore (this.InsertingHandlerMapping.Remove nameUtf8)
 
             finally
-                this.ReleaseDisableDispose connection
+                if not (isNull disableHandle) then
+                    disableHandle.Dispose()
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -169,9 +148,12 @@ type internal EventSystem internal () =
             let defaultMessage = "SoloDB deleting handler failed"
             let mutable handlerFailureMessage = defaultMessage
 
+            let mutable disableHandle: IDisposable = null
             try 
                 this.GlobalLock.Enter()
-                this.AcquireDisableDispose connection
+                match (connection :> obj) with
+                | :? SQLiteTools.IDisableDispose as disable -> disableHandle <- disable.DisableDispose()
+                | _ -> ()
 
                 let session = Interlocked.Increment &sessionIndex
 
@@ -205,7 +187,8 @@ type internal EventSystem internal () =
                             ignore (this.DeletingHandlerMapping.Remove nameUtf8)
 
             finally
-                this.ReleaseDisableDispose connection
+                if not (isNull disableHandle) then
+                    disableHandle.Dispose()
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -250,9 +233,12 @@ type internal EventSystem internal () =
             let defaultMessage = "SoloDB updating handler failed"
             let mutable handlerFailureMessage = defaultMessage
 
+            let mutable disableHandle: IDisposable = null
             try 
                 this.GlobalLock.Enter()
-                this.AcquireDisableDispose connection
+                match (connection :> obj) with
+                | :? SQLiteTools.IDisableDispose as disable -> disableHandle <- disable.DisableDispose()
+                | _ -> ()
 
                 let session = Interlocked.Increment &sessionIndex
 
@@ -286,7 +272,8 @@ type internal EventSystem internal () =
                             ignore (this.UpdatingHandlerMapping.Remove nameUtf8)
 
             finally
-                this.ReleaseDisableDispose connection
+                if not (isNull disableHandle) then
+                    disableHandle.Dispose()
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -326,9 +313,12 @@ type internal EventSystem internal () =
             let defaultMessage = "SoloDB inserted handler failed"
             let mutable handlerFailureMessage = defaultMessage
 
+            let mutable disableHandle: IDisposable = null
             try 
                 this.GlobalLock.Enter()
-                this.AcquireDisableDispose connection
+                match (connection :> obj) with
+                | :? SQLiteTools.IDisableDispose as disable -> disableHandle <- disable.DisableDispose()
+                | _ -> ()
 
                 let session = Interlocked.Increment &sessionIndex
 
@@ -362,7 +352,8 @@ type internal EventSystem internal () =
                             ignore (this.InsertedHandlerMapping.Remove nameUtf8)
 
             finally
-                this.ReleaseDisableDispose connection
+                if not (isNull disableHandle) then
+                    disableHandle.Dispose()
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -402,9 +393,12 @@ type internal EventSystem internal () =
             let defaultMessage = "SoloDB deleted handler failed"
             let mutable handlerFailureMessage = defaultMessage
 
+            let mutable disableHandle: IDisposable = null
             try 
                 this.GlobalLock.Enter()
-                this.AcquireDisableDispose connection
+                match (connection :> obj) with
+                | :? SQLiteTools.IDisableDispose as disable -> disableHandle <- disable.DisableDispose()
+                | _ -> ()
 
                 let session = Interlocked.Increment &sessionIndex
 
@@ -438,7 +432,8 @@ type internal EventSystem internal () =
                             ignore (this.DeletedHandlerMapping.Remove nameUtf8)
 
             finally
-                this.ReleaseDisableDispose connection
+                if not (isNull disableHandle) then
+                    disableHandle.Dispose()
                 this.GlobalLock.Exit()
 
             if handlerFailed then
@@ -483,9 +478,12 @@ type internal EventSystem internal () =
             let defaultMessage = "SoloDB updated handler failed"
             let mutable handlerFailureMessage = defaultMessage
 
+            let mutable disableHandle: IDisposable = null
             try 
                 this.GlobalLock.Enter()
-                this.AcquireDisableDispose connection
+                match (connection :> obj) with
+                | :? SQLiteTools.IDisableDispose as disable -> disableHandle <- disable.DisableDispose()
+                | _ -> ()
 
                 let session = Interlocked.Increment &sessionIndex
 
@@ -519,7 +517,8 @@ type internal EventSystem internal () =
                             ignore (this.UpdatedHandlerMapping.Remove nameUtf8)
 
             finally
-                this.ReleaseDisableDispose connection
+                if not (isNull disableHandle) then
+                    disableHandle.Dispose()
                 this.GlobalLock.Exit()
 
             if handlerFailed then
