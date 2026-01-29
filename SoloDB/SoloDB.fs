@@ -45,13 +45,24 @@ module internal Helper =
         connection.QueryFirstOrDefault<string>("SELECT Name FROM SoloDBCollections WHERE Name = @name LIMIT 1", {|name = name|}) <> null
 
     /// <summary>
-    /// Drops the update trigger associated with a collection table, if it exists.
+    /// Drops all event triggers associated with a collection table, if they exist.
     /// </summary>
     /// <param name="name">The name of the collection whose trigger should be dropped.</param>
     /// <param name="conn">The active SQLite connection.</param>
     let internal dropTriggersForTable (name: string) (conn: SqliteConnection) =
-        let triggerName = $"SoloDB_Update_{name}"
-        conn.Execute($"DROP TRIGGER IF EXISTS \"{triggerName}\"") |> ignore
+        let updateTriggerName = $"SoloDB_Update_{name}"
+        let insertTriggerName = $"SoloDB_Insert_{name}"
+        let deleteTriggerName = $"SoloDB_Delete_{name}"
+        let updatedTriggerName = $"SoloDB_Updated_{name}"
+        let insertedTriggerName = $"SoloDB_Inserted_{name}"
+        let deletedTriggerName = $"SoloDB_Deleted_{name}"
+
+        conn.Execute($"DROP TRIGGER IF EXISTS \"{updateTriggerName}\"") |> ignore
+        conn.Execute($"DROP TRIGGER IF EXISTS \"{insertTriggerName}\"") |> ignore
+        conn.Execute($"DROP TRIGGER IF EXISTS \"{deleteTriggerName}\"") |> ignore
+        conn.Execute($"DROP TRIGGER IF EXISTS \"{updatedTriggerName}\"") |> ignore
+        conn.Execute($"DROP TRIGGER IF EXISTS \"{insertedTriggerName}\"") |> ignore
+        conn.Execute($"DROP TRIGGER IF EXISTS \"{deletedTriggerName}\"") |> ignore
 
     /// <summary>
     /// Drops a collection's table and removes its metadata entry.
@@ -256,12 +267,16 @@ module internal Helper =
             ()
 
     /// <summary>
-    /// Returns the SQL that creates the update trigger for a collection table.
+    /// Returns the SQL that creates the event triggers for a collection table.
     /// </summary>
     /// <param name="name">The name of the collection.</param>
     let internal getSQLForTriggersForTable (name: string) =
         let triggerName = $"SoloDB_Update_{name}"
         let insertTriggerName = $"SoloDB_Insert_{name}"
+        let deleteTriggerName = $"SoloDB_Delete_{name}"
+        let updatedTriggerName = $"SoloDB_Updated_{name}"
+        let insertedTriggerName = $"SoloDB_Inserted_{name}"
+        let deletedTriggerName = $"SoloDB_Deleted_{name}"
         $"""
             CREATE TRIGGER IF NOT EXISTS "{insertTriggerName}"
             BEFORE INSERT ON "{name}"
@@ -288,6 +303,62 @@ module internal Helper =
                 END
                 FROM (
                     SELECT ON_UPDATING_HANDLER('{name}', json(OLD.Value), json(NEW.Value)) AS message
+                );
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS "{deleteTriggerName}"
+            BEFORE DELETE ON "{name}"
+            FOR EACH ROW
+            WHEN SHOULD_HANDLE_DELETING('{name}') = 1
+            BEGIN
+                SELECT CASE
+                    WHEN message IS NULL THEN NULL
+                    ELSE RAISE(ABORT, message)
+                END
+                FROM (
+                    SELECT ON_DELETING_HANDLER('{name}', json(OLD.Value)) AS message
+                );
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS "{insertedTriggerName}"
+            AFTER INSERT ON "{name}"
+            FOR EACH ROW
+            WHEN SHOULD_HANDLE_INSERTED('{name}') = 1
+            BEGIN
+                SELECT CASE
+                    WHEN message IS NULL THEN NULL
+                    ELSE RAISE(ABORT, message)
+                END
+                FROM (
+                    SELECT ON_INSERTED_HANDLER('{name}', json(NEW.Value)) AS message
+                );
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS "{updatedTriggerName}"
+            AFTER UPDATE ON "{name}"
+            FOR EACH ROW
+            WHEN SHOULD_HANDLE_UPDATED('{name}') = 1
+            BEGIN
+                SELECT CASE
+                    WHEN message IS NULL THEN NULL
+                    ELSE RAISE(ABORT, message)
+                END
+                FROM (
+                    SELECT ON_UPDATED_HANDLER('{name}', json(OLD.Value), json(NEW.Value)) AS message
+                );
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS "{deletedTriggerName}"
+            AFTER DELETE ON "{name}"
+            FOR EACH ROW
+            WHEN SHOULD_HANDLE_DELETED('{name}') = 1
+            BEGIN
+                SELECT CASE
+                    WHEN message IS NULL THEN NULL
+                    ELSE RAISE(ABORT, message)
+                END
+                FROM (
+                    SELECT ON_DELETED_HANDLER('{name}', json(OLD.Value)) AS message
                 );
             END;
         """
@@ -1170,7 +1241,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 "
             
             let mutable dbSchemaVersion = dbConnection.QueryFirst<int> "PRAGMA user_version;";
-            let currentSupportedSchemaVersion = 4; // Added a check so it will not open future version of the schema.
+            let currentSupportedSchemaVersion = 3; // Added a check so it will not open future version of the schema.
 
             if dbSchemaVersion > currentSupportedSchemaVersion then
                 raise (NotSupportedException $"The schema version of the current DB is {dbSchemaVersion}, but the current version is {currentSupportedSchemaVersion}. This check can be mistaken if the user modified the 'PRAGMA user_version;' pragma, in which the version is stored.")
@@ -1207,7 +1278,8 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             if dbSchemaVersion = 2 then
                 let triggerSql =
                     dbConnection.Query<string>("SELECT Name FROM SoloDBCollections")
-                    |> Seq.map (fun name -> $"DROP TRIGGER IF EXISTS \"SoloDB_Update_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Insert_{name}\";\n{Helper.getSQLForTriggersForTable name}")
+                    |> Seq.map (fun name ->
+                        $"DROP TRIGGER IF EXISTS \"SoloDB_Update_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Insert_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Delete_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Updated_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Inserted_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Deleted_{name}\";\n{Helper.getSQLForTriggersForTable name}")
                     |> String.concat "\n"
 
                 use command = new SqliteCommand($"
@@ -1224,28 +1296,6 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 ignore (command.ExecuteNonQuery())
                 dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
                 if dbSchemaVersion = 2 then
-                    failwithf "Failure to migrate schema."
-
-            if dbSchemaVersion = 3 then
-                let triggerSql =
-                    dbConnection.Query<string>("SELECT Name FROM SoloDBCollections")
-                    |> Seq.map (fun name -> $"DROP TRIGGER IF EXISTS \"SoloDB_Update_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Insert_{name}\";\n{Helper.getSQLForTriggersForTable name}")
-                    |> String.concat "\n"
-
-                use command = new SqliteCommand($"
-                    BEGIN EXCLUSIVE;
-
-                    {triggerSql}
-
-                    PRAGMA user_version = 4;
-                    PRAGMA foreign_keys = on;
-
-                    COMMIT TRANSACTION;
-                ", dbConnection.Inner)
-                command.Prepare()
-                ignore (command.ExecuteNonQuery())
-                dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
-                if dbSchemaVersion = 3 then
                     failwithf "Failure to migrate schema."
 
             // https://www.sqlite.org/pragma.html#pragma_optimize
