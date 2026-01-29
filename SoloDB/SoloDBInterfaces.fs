@@ -8,32 +8,74 @@ open SoloDatabase.Types
 open System
 open Microsoft.Data.Sqlite
 
+/// <summary>
+/// Represents the outcome of an event handler invocation.
+/// </summary>
+/// <remarks>
+/// Returning <see cref="RemoveHandler"/> unregisters the handler after it runs.
+/// </remarks>
 type SoloDBEventsResult =
 | EventHandled
 | RemoveHandler
 
 
+/// <summary>
+/// Provides access to the old and new versions of an item during an update event.
+/// </summary>
 type ISoloDBUpdatingEventContext<'T> =
+    /// <summary>
+    /// Gets the collection instance associated with the event.
+    /// </summary>
     abstract member CollectionInstance: ISoloDBCollection<'T>
+    /// <summary>
+    /// Reads the item state before the update.
+    /// </summary>
     abstract member ReadOldItem: unit -> 'T
+    /// <summary>
+    /// Reads the item state after the update.
+    /// </summary>
     abstract member ReadNewItem: unit -> 'T
 
+/// <summary>
+/// Provides access to the item during a single-item event (insert/delete).
+/// </summary>
 and ISoloDBItemEventContext<'T> =
+    /// <summary>
+    /// Gets the collection instance associated with the event.
+    /// </summary>
     abstract member CollectionInstance: ISoloDBCollection<'T>
+    /// <summary>
+    /// Reads the item associated with the event.
+    /// </summary>
     abstract member ReadItem: unit -> 'T
 
+/// <summary>Internal delegate for insert events.</summary>
 and InsertingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * json: ReadOnlySpan<byte> -> SoloDBEventsResult
+/// <summary>Internal delegate for delete events.</summary>
 and DeletingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * json: ReadOnlySpan<byte> -> SoloDBEventsResult
+/// <summary>Internal delegate for update events.</summary>
 and UpdatingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * jsonOld: nativeptr<byte> * jsonOldSize: int * jsonNew: nativeptr<byte> * jsonNewSize: int -> SoloDBEventsResult
 
 
+/// <summary>Handler delegate for insert events.</summary>
 and InsertingHandler<'T> = delegate of ctx: ISoloDBItemEventContext<'T> -> SoloDBEventsResult
+/// <summary>Handler delegate for delete events.</summary>
 and DeletingHandler<'T> = delegate of ctx: ISoloDBItemEventContext<'T> -> SoloDBEventsResult
+/// <summary>Handler delegate for update events.</summary>
 and UpdatingHandler<'T> = delegate of ctx: ISoloDBUpdatingEventContext<'T> -> SoloDBEventsResult
 
 
+/// <summary>
+/// Exposes collection-level event registration APIs.
+/// </summary>
 and ISoloDBCollectionEvents<'T> =
+    /// <summary>
+    /// Registers a handler invoked before an item update.
+    /// </summary>
     abstract member OnUpdating<'T>: handler: UpdatingHandler<'T> -> unit
+    /// <summary>
+    /// Unregisters a previously registered update handler.
+    /// </summary>
     abstract member Unregister<'T>: handler: UpdatingHandler<'T> -> unit
 (*    abstract member OnInserting<'T>: handler: InsertingHandler<'T> -> unit
     abstract member OnDeleting<'T>: handler: DeletingHandler<'T> -> unit
@@ -109,7 +151,9 @@ and ISoloDBCollection<'T> =
     /// </example>
     abstract member IncludeType: bool with get
 
-    // todo: add comment
+    /// <summary>
+    /// Gets the event registration API for this collection.
+    /// </summary>
     abstract member Events: ISoloDBCollectionEvents<'T>
 
     /// <summary>
