@@ -405,13 +405,92 @@ type internal SoloDBToCollectionData = {
 }
 
 /// <summary>
+/// Caches event-context database resources to avoid repeated allocations and redundant metadata queries.
+/// </summary>
+type internal EventDbCache(connectionString: string, directConnection: SqliteConnection, guardedConnection: Connection, parentData: SoloDBToCollectionData, knownCollectionName: string) =
+    let mutable knownCollectionExists = true
+    let mutable cachedCollection: obj = null
+    let mutable cachedCollectionName = knownCollectionName
+    let mutable cachedCollectionType = typeof<obj>
+    let mutable cachedFileSystem: IFileSystem | null = null
+
+    member private this.TryGetCached<'U>(collectionName: string) =
+        not (isNull cachedCollection)
+        && cachedCollectionName = collectionName
+        && cachedCollectionType = typeof<'U>
+
+    member private this.InvalidateIfCached(collectionName: string) =
+        if not (isNull cachedCollection) && cachedCollectionName = collectionName then
+            cachedCollection <- null
+            cachedCollectionName <- knownCollectionName
+            cachedCollectionType <- typeof<obj>
+
+    member private this.EnsureExists<'U>(collectionName: string) =
+        if collectionName = knownCollectionName then
+            if not knownCollectionExists then
+                if not (Helper.existsCollection collectionName directConnection) then
+                    Helper.createTableInner<'U> collectionName directConnection
+                knownCollectionExists <- true
+        else if not (Helper.existsCollection collectionName directConnection) then
+            Helper.createTableInner<'U> collectionName directConnection
+
+    member this.FileSystem =
+        if isNull cachedFileSystem then
+            cachedFileSystem <- (FileSystem guardedConnection :> IFileSystem)
+        cachedFileSystem
+
+    member this.GetCollection<'U>(collectionName: string) =
+        let collectionName = Helper.formatName collectionName
+        if collectionName.StartsWith "SoloDB" then
+            raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
+
+        if this.TryGetCached<'U>(collectionName) then
+            cachedCollection :?> ISoloDBCollection<'U>
+        else
+            this.EnsureExists<'U>(collectionName)
+            let collection = Collection<'U>(guardedConnection, collectionName, connectionString, parentData) :> ISoloDBCollection<'U>
+            cachedCollection <- collection :> obj
+            cachedCollectionName <- collectionName
+            cachedCollectionType <- typeof<'U>
+            collection
+
+    member this.CollectionExists(collectionName: string) =
+        let collectionName = Helper.formatName collectionName
+        if collectionName = knownCollectionName && knownCollectionExists then true
+        elif not (isNull cachedCollection) && cachedCollectionName = collectionName then true
+        else Helper.existsCollection collectionName directConnection
+
+    member this.DropCollectionIfExists(collectionName: string) =
+        let collectionName = Helper.formatName collectionName
+        if collectionName = knownCollectionName then
+            if knownCollectionExists then
+                Helper.dropCollection collectionName directConnection
+                knownCollectionExists <- false
+                this.InvalidateIfCached collectionName
+                true
+            else false
+        elif not (isNull cachedCollection) && cachedCollectionName = collectionName then
+            Helper.dropCollection collectionName directConnection
+            this.InvalidateIfCached collectionName
+            true
+        elif Helper.existsCollection collectionName directConnection then
+            Helper.dropCollection collectionName directConnection
+            this.InvalidateIfCached collectionName
+            true
+        else false
+
+    member this.DropCollection(collectionName: string) =
+        if this.DropCollectionIfExists collectionName = false then
+            raise (KeyNotFoundException (sprintf "Collection %s does not exists." collectionName))
+
+/// <summary>
 /// Represents a collection of documents of type 'T stored in the database. Provides methods for CRUD operations, indexing, and LINQ querying.
 /// </summary>
 /// <param name="connection">The connection provider.</param>
 /// <param name="name">The name of the collection (table name).</param>
 /// <param name="connectionString">The database connection string.</param>
 /// <param name="parentData">Data from the parent SoloDB instance.</param>
-type internal Collection<'T>(connection: Connection, name: string, connectionString: string, parentData: SoloDBToCollectionData) as this =
+and internal Collection<'T>(connection: Connection, name: string, connectionString: string, parentData: SoloDBToCollectionData) as this =
     member val private SoloDBQueryable = SoloDBCollectionQueryable<'T, 'T>(SoloDBCollectionQueryProvider(this, parentData), Expression.Constant(RootQueryable<'T>(this))) :> IOrderedQueryable<'T>
     member val private ConnectionString = connectionString
     /// <summary>Gets the name of the collection.</summary>
@@ -430,10 +509,42 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 
     /// <summary>Gets the event registration API for this collection.</summary>
     member val Events =
+        let createDb (directConnection: SqliteConnection) (guard: unit -> unit) : ISoloDB =
+            let guardedConnection = Guarded(guard, Transitive directConnection)
+            let cache = EventDbCache(connectionString, directConnection, guardedConnection, parentData, name)
+
+            { new ISoloDB with
+                member _.ConnectionString = connectionString
+                member _.FileSystem = cache.FileSystem
+                member _.GetCollection<'U>() =
+                    cache.GetCollection<'U>(Helper.collectionNameOf<'U>)
+                member _.GetCollection<'U>(collectionName: string) =
+                    cache.GetCollection<'U>(collectionName)
+                member _.GetUntypedCollection(collectionName: string) =
+                    cache.GetCollection<JsonSerializator.JsonValue>(collectionName)
+                member _.CollectionExists(collectionName: string) =
+                    cache.CollectionExists(collectionName)
+                member _.CollectionExists<'U>() =
+                    cache.CollectionExists(Helper.collectionNameOf<'U>)
+                member _.DropCollectionIfExists(collectionName: string) =
+                    cache.DropCollectionIfExists(collectionName)
+                member _.DropCollectionIfExists<'U>() =
+                    cache.DropCollectionIfExists(Helper.collectionNameOf<'U>)
+                member _.DropCollection(collectionName: string) =
+                    cache.DropCollection(collectionName)
+                member _.DropCollection<'U>() =
+                    cache.DropCollection(Helper.collectionNameOf<'U>)
+                member _.ListCollectionNames() =
+                    directConnection.Query<string>("SELECT Name FROM SoloDBCollections")
+                member _.Optimize() =
+                    directConnection.Execute "PRAGMA optimize;" |> ignore
+                member _.Dispose() = ()
+            }
+
         CollectionEventSystem<'T>(
             name,
             parentData.EventSystem,
-            fun directConnection guard -> Collection(Guarded(guard, Transitive directConnection), name, connectionString, parentData))
+            createDb)
 
     /// <summary>Gets the internal connection provider for this collection.</summary>
     member val internal Connection = connection    
@@ -910,9 +1021,13 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
     /// </summary>
     member val Connection = connection
     /// <summary>
+    /// Gets the SQLite connection string used by this transactional context.
+    /// </summary>
+    member val ConnectionString = connectionString
+    /// <summary>
     /// Gets a file system instance that operates within the current transaction.
     /// </summary>
-    member val FileSystem = FileSystem (Connection.Transactional connection)
+    member val FileSystem: IFileSystem = FileSystem (Connection.Transactional connection) :> IFileSystem
 
     member private this.InitializeCollection<'T> name =
         if not (Helper.existsCollection name connection) then 
@@ -1015,6 +1130,28 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
     /// <returns>A sequence of collection names.</returns>
     member this.ListCollectionNames() =
         connection.Query<string>("SELECT Name FROM SoloDBCollections")
+
+    /// <summary>
+    /// Asks the SQLite engine to run analysis to optimize query plans within the current transaction.
+    /// </summary>
+    member this.Optimize() =
+        connection.Execute "PRAGMA optimize;" |> ignore
+
+    interface ISoloDB with
+        member this.ConnectionString = this.ConnectionString
+        member this.FileSystem = this.FileSystem
+        member this.GetCollection<'T>() = this.GetCollection<'T>()
+        member this.GetCollection<'T>(name) = this.GetCollection<'T>(name)
+        member this.GetUntypedCollection(name) = this.GetUntypedCollection(name)
+        member this.CollectionExists(name) = this.CollectionExists(name)
+        member this.CollectionExists<'T>() = this.CollectionExists<'T>()
+        member this.DropCollectionIfExists(name) = this.DropCollectionIfExists(name)
+        member this.DropCollectionIfExists<'T>() = this.DropCollectionIfExists<'T>()
+        member this.DropCollection(name) = this.DropCollection(name)
+        member this.DropCollection<'T>() = this.DropCollection<'T>()
+        member this.ListCollectionNames() = this.ListCollectionNames()
+        member this.Optimize() = this.Optimize()
+        member this.Dispose() = ()
 
 
 /// <summary>
@@ -1335,7 +1472,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <summary>
     /// Gets an API for interacting with the virtual file system within the database.
     /// </summary>
-    member val FileSystem = FileSystem (Connection.Pooled connectionManager)
+    member val FileSystem: IFileSystem = FileSystem (Connection.Pooled connectionManager) :> IFileSystem
 
     /// <summary>Gets the internal event system for this database instance.</summary>
     member val internal Events = eventSystem
@@ -1571,6 +1708,21 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
     interface IDisposable with
         member this.Dispose() = this.Dispose()
+
+    interface ISoloDB with
+        member this.ConnectionString = this.ConnectionString
+        member this.FileSystem = this.FileSystem
+        member this.GetCollection<'T>() = this.GetCollection<'T>()
+        member this.GetCollection<'T>(name) = this.GetCollection<'T>(name)
+        member this.GetUntypedCollection(name) = this.GetUntypedCollection(name)
+        member this.CollectionExists(name) = this.CollectionExists(name)
+        member this.CollectionExists<'T>() = this.CollectionExists<'T>()
+        member this.DropCollectionIfExists(name) = this.DropCollectionIfExists(name)
+        member this.DropCollectionIfExists<'T>() = this.DropCollectionIfExists<'T>()
+        member this.DropCollection(name) = this.DropCollection(name)
+        member this.DropCollection<'T>() = this.DropCollection<'T>()
+        member this.ListCollectionNames() = this.ListCollectionNames()
+        member this.Optimize() = this.Optimize()
 
 
     /// <summary>

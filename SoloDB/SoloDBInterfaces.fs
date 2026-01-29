@@ -4,6 +4,10 @@ open System.Linq.Expressions
 open System.Runtime.CompilerServices
 open System.Linq
 open System.Data
+open System.IO
+open System.Collections.Generic
+open System.Runtime.InteropServices
+open System.Threading.Tasks
 open SoloDatabase.Types
 open System
 open Microsoft.Data.Sqlite
@@ -24,9 +28,16 @@ type SoloDBEventsResult =
 /// </summary>
 type ISoloDBUpdatingEventContext<'T> =
     /// <summary>
-    /// Gets the collection instance associated with the event.
+    /// Gets the database instance associated with the event.
     /// </summary>
-    abstract member CollectionInstance: ISoloDBCollection<'T>
+    /// <remarks>
+    /// This database instance is scoped to the current trigger execution and becomes invalid after the handler returns.
+    /// </remarks>
+    abstract member Database: ISoloDB
+    /// <summary>
+    /// Gets the name of the collection that triggered this event.
+    /// </summary>
+    abstract member CollectionName: string
     /// <summary>
     /// Reads the item state before the update.
     /// </summary>
@@ -41,9 +52,16 @@ type ISoloDBUpdatingEventContext<'T> =
 /// </summary>
 and ISoloDBItemEventContext<'T> =
     /// <summary>
-    /// Gets the collection instance associated with the event.
+    /// Gets the database instance associated with the event.
     /// </summary>
-    abstract member CollectionInstance: ISoloDBCollection<'T>
+    /// <remarks>
+    /// This database instance is scoped to the current trigger execution and becomes invalid after the handler returns.
+    /// </remarks>
+    abstract member Database: ISoloDB
+    /// <summary>
+    /// Gets the name of the collection that triggered this event.
+    /// </summary>
+    abstract member CollectionName: string
     /// <summary>
     /// Reads the item associated with the event.
     /// </summary>
@@ -841,6 +859,425 @@ and ISoloDBCollection<'T> =
     /// <seealso cref="Update"/>
     abstract member UpdateMany: filter: Expression<System.Func<'T, bool>> * [<System.ParamArray>] transform: Expression<System.Action<'T>> array -> int
 
+
+
+/// <summary>
+/// Defines the public API for the SoloDB virtual file system.
+/// </summary>
+and IFileSystem =
+    /// <summary>
+    /// Uploads a stream to a file at the specified path. If the file exists, it is overwritten. If it does not exist, it is created.
+    /// </summary>
+    /// <param name="path">The full path of the file.</param>
+    /// <param name="stream">The stream containing the file data to upload.</param>
+    abstract member Upload: path: string * stream: Stream -> unit
+    /// <summary>
+    /// Asynchronously uploads a stream to a file at the specified path. If the file exists, it is overwritten. If it does not exist, it is created.
+    /// </summary>
+    /// <param name="path">The full path of the file.</param>
+    /// <param name="stream">The stream containing the file data to upload.</param>
+    abstract member UploadAsync: path: string * stream: Stream -> Task<unit>
+    /// <summary>
+    /// Uploads a sequence of files in a single transaction. This is more efficient for uploading many small files.
+    /// </summary>
+    /// <param name="files">A sequence of <c>BulkFileData</c> records representing the files to upload.</param>
+    abstract member UploadBulk: files: BulkFileData seq -> unit
+    /// <summary>
+    /// Asynchronously replaces a file's content from a stream within a single transaction.
+    /// </summary>
+    /// <param name="path">The path of the file to replace.</param>
+    /// <param name="stream">The stream with the new content.</param>
+    abstract member ReplaceAsyncWithinTransaction: path: string * stream: Stream -> Task<unit>
+    /// <summary>
+    /// Downloads a file from the specified path and writes its content to the provided stream.
+    /// </summary>
+    /// <param name="path">The full path of the file to download.</param>
+    /// <param name="stream">The stream to which the file content will be written.</param>
+    /// <exception cref="FileNotFoundException">Thrown if the file does not exist at the specified path.</exception>
+    abstract member Download: path: string * stream: Stream -> unit
+    /// <summary>
+    /// Asynchronously downloads a file from the specified path and writes its content to the provided stream.
+    /// </summary>
+    /// <param name="path">The full path of the file to download.</param>
+    /// <param name="stream">The stream to which the file content will be written.</param>
+    /// <exception cref="FileNotFoundException">Thrown if the file does not exist at the specified path.</exception>
+    abstract member DownloadAsync: path: string * stream: Stream -> Task<unit>
+    /// <summary>
+    /// Gets the header information for a file at the specified path.
+    /// </summary>
+    /// <param name="path">The full path of the file.</param>
+    /// <returns>The <c>SoloDBFileHeader</c> for the file.</returns>
+    /// <exception cref="FileNotFoundException">Thrown if the file does not exist at the specified path.</exception>
+    abstract member GetAt: path: string -> SoloDBFileHeader
+    /// <summary>
+    /// Tries to get the header information for a file at the specified path.
+    /// </summary>
+    /// <param name="path">The full path of the file.</param>
+    /// <returns>An option containing the <c>SoloDBFileHeader</c> if the file exists, otherwise None.</returns>
+    abstract member TryGetAt: path: string -> SoloDBFileHeader option
+    /// <summary>
+    /// Checks if a file or directory exists at the specified path.
+    /// </summary>
+    /// <param name="path">The full path of the file or directory.</param>
+    /// <returns>True if an entry exists at the path, otherwise false.</returns>
+    abstract member Exists: path: string -> bool
+    /// <summary>
+    /// Gets the header information for a file at the specified path, creating it if it does not exist.
+    /// </summary>
+    /// <param name="path">The full path of the file.</param>
+    /// <returns>The <c>SoloDBFileHeader</c> for the file.</returns>
+    abstract member GetOrCreateAt: path: string -> SoloDBFileHeader
+    /// <summary>
+    /// Gets the header information for a directory at the specified path.
+    /// </summary>
+    /// <param name="path">The full path of the directory.</param>
+    /// <returns>The <c>SoloDBDirectoryHeader</c> for the directory.</returns>
+    /// <exception cref="DirectoryNotFoundException">Thrown if the directory does not exist at the specified path.</exception>
+    abstract member GetDirAt: path: string -> SoloDBDirectoryHeader
+    /// <summary>
+    /// Tries to get the header information for a directory at the specified path.
+    /// </summary>
+    /// <param name="path">The full path of the directory.</param>
+    /// <returns>An option containing the <c>SoloDBDirectoryHeader</c> if the directory exists, otherwise None.</returns>
+    abstract member TryGetDirAt: path: string -> SoloDBDirectoryHeader option
+    /// <summary>
+    /// Gets the header information for a directory at the specified path, creating it if it does not exist.
+    /// </summary>
+    /// <param name="path">The full path of the directory.</param>
+    /// <returns>The <c>SoloDBDirectoryHeader</c> for the directory.</returns>
+    abstract member GetOrCreateDirAt: path: string -> SoloDBDirectoryHeader
+    /// <summary>
+    /// Opens a file stream for a given file header.
+    /// </summary>
+    /// <param name="file">The file header of the file to open.</param>
+    /// <returns>A readable and writable <c>Stream</c> for the file.</returns>
+    abstract member Open: file: SoloDBFileHeader -> FileStorageCore.DbFileStream
+    /// <summary>
+    /// Opens a file stream for a file at the specified path.
+    /// </summary>
+    /// <param name="path">The full path of the file to open.</param>
+    /// <returns>A readable and writable <c>Stream</c> for the file.</returns>
+    /// <exception cref="FileNotFoundException">Thrown if the file does not exist at the specified path.</exception>
+    abstract member OpenAt: path: string -> FileStorageCore.DbFileStream
+    /// <summary>
+    /// Tries to open a file stream for a file at the specified path.
+    /// </summary>
+    /// <param name="path">The full path of the file to open.</param>
+    /// <returns>An option containing the <c>Stream</c> if the file exists, otherwise None.</returns>
+    abstract member TryOpenAt: path: string -> FileStorageCore.DbFileStream option
+    /// <summary>
+    /// Opens a file stream for a file at the specified path, creating the file if it does not exist.
+    /// </summary>
+    /// <param name="path">The full path of the file to open or create.</param>
+    /// <returns>A readable and writable <c>Stream</c> for the file.</returns>
+    abstract member OpenOrCreateAt: path: string -> FileStorageCore.DbFileStream
+    /// <summary>
+    /// Writes data to a file at a specific offset.
+    /// </summary>
+    /// <param name="path">The path to the file.</param>
+    /// <param name="offset">The zero-based byte offset in the file at which to begin writing.</param>
+    /// <param name="data">The byte array to write to the file.</param>
+    /// <param name="createIfInexistent">Specifies whether to create the file if it does not exist. Defaults to true.</param>
+    abstract member WriteAt: path: string * offset: int64 * data: byte[] * [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool -> unit
+    /// <summary>
+    /// Writes data to a file at a specific offset.
+    /// </summary>
+    /// <param name="path">The path to the file.</param>
+    /// <param name="offset">The zero-based byte offset in the file at which to begin writing.</param>
+    /// <param name="data">The Stream to copy to the file.</param>
+    /// <param name="createIfInexistent">Specifies whether to create the file if it does not exist. Defaults to true.</param>
+    abstract member WriteAt: path: string * offset: int64 * data: Stream * [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool -> unit
+    /// <summary>
+    /// Reads a specified number of bytes from a file at a given offset.
+    /// </summary>
+    /// <param name="path">The full path of the file.</param>
+    /// <param name="offset">The zero-based byte offset in the file at which to begin reading.</param>
+    /// <param name="len">The number of bytes to read.</param>
+    /// <returns>A byte array containing the data read from the file.</returns>
+    abstract member ReadAt: path: string * offset: int64 * len: int -> byte[]
+    /// <summary>
+    /// Sets the modification date of a file.
+    /// </summary>
+    /// <param name="path">The path of the file.</param>
+    /// <param name="date">The new modification date.</param>
+    abstract member SetFileModificationDate: path: string * date: DateTimeOffset -> unit
+    /// <summary>
+    /// Sets the creation date of a file.
+    /// </summary>
+    /// <param name="path">The path of the file.</param>
+    /// <param name="date">The new creation date.</param>
+    abstract member SetFileCreationDate: path: string * date: DateTimeOffset -> unit
+    /// <summary>
+    /// Sets a metadata key-value pair for a file.
+    /// </summary>
+    /// <param name="file">The file header.</param>
+    /// <param name="key">The metadata key.</param>
+    /// <param name="value">The metadata value.</param>
+    abstract member SetMetadata: file: SoloDBFileHeader * key: string * value: string -> unit
+    /// <summary>
+    /// Sets a metadata key-value pair for a file at a given path.
+    /// </summary>
+    /// <param name="path">The path of the file.</param>
+    /// <param name="key">The metadata key.</param>
+    /// <param name="value">The metadata value.</param>
+    abstract member SetMetadata: path: string * key: string * value: string -> unit
+    /// <summary>
+    /// Deletes a metadata key from a file.
+    /// </summary>
+    /// <param name="file">The file header.</param>
+    /// <param name="key">The metadata key to delete.</param>
+    abstract member DeleteMetadata: file: SoloDBFileHeader * key: string -> unit
+    /// <summary>
+    /// Deletes a metadata key from a file at a given path.
+    /// </summary>
+    /// <param name="path">The path of the file.</param>
+    /// <param name="key">The metadata key to delete.</param>
+    abstract member DeleteMetadata: path: string * key: string -> unit
+    /// <summary>
+    /// Sets a metadata key-value pair for a directory.
+    /// </summary>
+    /// <param name="dir">The directory header.</param>
+    /// <param name="key">The metadata key.</param>
+    /// <param name="value">The metadata value.</param>
+    abstract member SetDirectoryMetadata: dir: SoloDBDirectoryHeader * key: string * value: string -> unit
+    /// <summary>
+    /// Sets a metadata key-value pair for a directory at a given path.
+    /// </summary>
+    /// <param name="path">The path of the directory.</param>
+    /// <param name="key">The metadata key.</param>
+    /// <param name="value">The metadata value.</param>
+    abstract member SetDirectoryMetadata: path: string * key: string * value: string -> unit
+    /// <summary>
+    /// Deletes a metadata key from a directory.
+    /// </summary>
+    /// <param name="dir">The directory header.</param>
+    /// <param name="key">The metadata key to delete.</param>
+    abstract member DeleteDirectoryMetadata: dir: SoloDBDirectoryHeader * key: string -> unit
+    /// <summary>
+    /// Deletes a metadata key from a directory at a given path.
+    /// </summary>
+    /// <param name="path">The path of the directory.</param>
+    /// <param name="key">The metadata key to delete.</param>
+    abstract member DeleteDirectoryMetadata: path: string * key: string -> unit
+    /// <summary>
+    /// Deletes a file.
+    /// </summary>
+    /// <param name="file">The header of the file to delete.</param>
+    abstract member Delete: file: SoloDBFileHeader -> unit
+    /// <summary>
+    /// Deletes a directory. This will fail if the directory is not empty.
+    /// </summary>
+    /// <param name="dir">The header of the directory to delete.</param>
+    abstract member Delete: dir: SoloDBDirectoryHeader -> unit
+    /// <summary>
+    /// Deletes a file at the specified path.
+    /// </summary>
+    /// <param name="path">The path of the file to delete.</param>
+    /// <returns>True if the file was deleted, false if it did not exist.</returns>
+    abstract member DeleteFileAt: path: string -> bool
+    /// <summary>
+    /// Deletes a directory at the specified path. This will fail if the directory is not empty.
+    /// </summary>
+    /// <param name="path">The path of the directory to delete.</param>
+    /// <returns>True if the directory was deleted, false if it did not exist.</returns>
+    abstract member DeleteDirAt: path: string -> bool
+    /// <summary>
+    /// Lists all files directly within the specified directory path.
+    /// </summary>
+    /// <param name="path">The path of the directory.</param>
+    /// <returns>A sequence of file headers.</returns>
+    abstract member ListFilesAt: path: string -> SoloDBFileHeader seq
+    /// <summary>
+    /// Lists all subdirectories directly within the specified directory path.
+    /// </summary>
+    /// <param name="path">The path of the directory.</param>
+    /// <returns>A sequence of directory headers.</returns>
+    abstract member ListDirectoriesAt: path: string -> SoloDBDirectoryHeader seq
+    /// <summary>
+    /// Lists files in a directory with pagination and sorting.
+    /// </summary>
+    /// <param name="path">The path of the directory.</param>
+    /// <param name="sortBy">The field to sort by.</param>
+    /// <param name="sortDir">The sort direction.</param>
+    /// <param name="limit">Maximum number of files to return.</param>
+    /// <param name="offset">Number of files to skip.</param>
+    /// <returns>A tuple of (files list, total count).</returns>
+    abstract member ListFilesAtPaginated: path: string * sortBy: SortField * sortDir: SortDirection * limit: int * offset: int -> IList<SoloDBFileHeader> * int64
+    /// <summary>
+    /// Lists subdirectories with pagination and sorting.
+    /// </summary>
+    /// <param name="path">The path of the parent directory.</param>
+    /// <param name="sortBy">The field to sort by.</param>
+    /// <param name="sortDir">The sort direction.</param>
+    /// <param name="limit">Maximum number of directories to return.</param>
+    /// <param name="offset">Number of directories to skip.</param>
+    /// <returns>A tuple of (directories list, total count).</returns>
+    abstract member ListDirectoriesAtPaginated: path: string * sortBy: SortField * sortDir: SortDirection * limit: int * offset: int -> IList<SoloDBDirectoryHeader> * int64
+    /// <summary>
+    /// Lists directory entries (directories first, then files) with pagination and sorting.
+    /// </summary>
+    /// <param name="path">The path of the directory.</param>
+    /// <param name="sortBy">The field to sort by.</param>
+    /// <param name="sortDir">The sort direction.</param>
+    /// <param name="limit">Maximum number of entries to return.</param>
+    /// <param name="offset">Number of entries to skip.</param>
+    /// <returns>A tuple of (entries list, directory count, file count).</returns>
+    abstract member ListEntriesAtPaginated: path: string * sortBy: SortField * sortDir: SortDirection * limit: int * offset: int -> IList<SoloDBEntryHeader> * int64 * int64
+    /// <summary>
+    /// Recursively lists all entries (files and directories) starting from the specified path. The result is buffered into a list.
+    /// </summary>
+    /// <param name="path">The starting path.</param>
+    /// <returns>A list of all entries.</returns>
+    abstract member RecursiveListEntriesAt: path: string -> IList<SoloDBEntryHeader>
+    /// <summary>
+    /// Lazily and recursively lists all entries (files and directories) starting from the specified path.
+    /// This method is not recommended for long-running operations as it can hold the database connection open.
+    /// </summary>
+    /// <param name="path">The starting path.</param>
+    /// <returns>A lazy sequence of all entries.</returns>
+    abstract member RecursiveListEntriesAtLazy: path: string -> SoloDBEntryHeader seq
+    /// <summary>
+    /// Moves a file from a source path to a destination path.
+    /// </summary>
+    /// <param name="from">The source path of the file.</param>
+    /// <param name="toPath">The destination path for the file.</param>
+    /// <exception cref="IOException">Thrown if a file already exists at the destination.</exception>
+    abstract member MoveFile: from: string * toPath: string -> unit
+    /// <summary>
+    /// Moves a file from a source path to a destination path, replacing the destination file if it exists.
+    /// </summary>
+    /// <param name="from">The source path of the file.</param>
+    /// <param name="toPath">The destination path for the file.</param>
+    abstract member MoveReplaceFile: from: string * toPath: string -> unit
+    /// <summary>
+    /// Moves a directory from a source path to a destination path. All contents are moved recursively.
+    /// </summary>
+    /// <param name="from">The source path of the directory.</param>
+    /// <param name="toPath">The destination path for the directory.</param>
+    /// <exception cref="IOException">Thrown if a file or directory already exists at the destination.</exception>
+    abstract member MoveDirectory: from: string * toPath: string -> unit
+
+
+/// <summary>
+/// Represents the common, transaction-safe surface area shared by both <see cref="SoloDB"/> and <see cref="TransactionalSoloDB"/>.
+/// </summary>
+/// <remarks>
+/// This interface intentionally excludes administrative and global operations that are not valid within an active transaction
+/// (for example, backup or vacuum operations). It is designed to be safe to pass into event callbacks and other APIs that must
+/// work both inside and outside of explicit transactions.
+/// </remarks>
+and ISoloDB =
+    inherit IDisposable
+
+    /// <summary>
+    /// Gets the SQLite connection string used by this database instance.
+    /// </summary>
+    /// <remarks>
+    /// For transactional contexts, this reflects the underlying transactional connection string. It does not imply that a new
+    /// connection will be created; it is the string used by the owning connection manager.
+    /// </remarks>
+    abstract member ConnectionString: string
+
+    /// <summary>
+    /// Gets the file system API associated with this database instance.
+    /// </summary>
+    /// <remarks>
+    /// In a transactional context, all operations are scoped to the current transaction and will be committed or rolled back
+    /// together with other database operations.
+    /// </remarks>
+    abstract member FileSystem: IFileSystem
+
+    /// <summary>
+    /// Gets a typed collection using the document type name as the collection name.
+    /// Creates the collection if it does not exist.
+    /// </summary>
+    /// <remarks>
+    /// The collection name is derived from the type name and is normalized according to SoloDB naming rules.
+    /// </remarks>
+    abstract member GetCollection<'T> : unit -> ISoloDBCollection<'T>
+
+    /// <summary>
+    /// Gets a typed collection using a custom collection name.
+    /// Creates the collection if it does not exist.
+    /// </summary>
+    /// <remarks>
+    /// The provided name is validated and normalized. A <c>SoloDB*</c> prefix is reserved and rejected.
+    /// </remarks>
+    abstract member GetCollection<'T> : name: string -> ISoloDBCollection<'T>
+
+    /// <summary>
+    /// Gets a collection that stores untyped JSON values.
+    /// Creates the collection if it does not exist.
+    /// </summary>
+    /// <remarks>
+    /// This collection stores <see cref="JsonSerializator.JsonValue"/> documents and is useful for schemaless or dynamic data.
+    /// </remarks>
+    abstract member GetUntypedCollection : name: string -> ISoloDBCollection<JsonSerializator.JsonValue>
+
+    /// <summary>
+    /// Returns true if a collection with the specified name exists.
+    /// </summary>
+    /// <remarks>
+    /// This call does not create the collection and does not modify the database state.
+    /// </remarks>
+    abstract member CollectionExists : name: string -> bool
+
+    /// <summary>
+    /// Returns true if a collection for the specified type exists.
+    /// </summary>
+    /// <remarks>
+    /// This call does not create the collection and does not modify the database state.
+    /// </remarks>
+    abstract member CollectionExists<'T> : unit -> bool
+
+    /// <summary>
+    /// Drops a collection by name if it exists and returns true if it was dropped.
+    /// </summary>
+    /// <remarks>
+    /// This removes the collection table and its associated indexes and triggers.
+    /// </remarks>
+    abstract member DropCollectionIfExists : name: string -> bool
+
+    /// <summary>
+    /// Drops a collection for the specified type if it exists and returns true if it was dropped.
+    /// </summary>
+    /// <remarks>
+    /// This removes the collection table and its associated indexes and triggers.
+    /// </remarks>
+    abstract member DropCollectionIfExists<'T> : unit -> bool
+
+    /// <summary>
+    /// Drops a collection by name or throws if it does not exist.
+    /// </summary>
+    /// <remarks>
+    /// This removes the collection table and its associated indexes and triggers.
+    /// </remarks>
+    abstract member DropCollection : name: string -> unit
+
+    /// <summary>
+    /// Drops a collection for the specified type or throws if it does not exist.
+    /// </summary>
+    /// <remarks>
+    /// This removes the collection table and its associated indexes and triggers.
+    /// </remarks>
+    abstract member DropCollection<'T> : unit -> unit
+
+    /// <summary>
+    /// Lists all collection names in the database.
+    /// </summary>
+    /// <remarks>
+    /// The returned names are the logical SoloDB collection names, not raw SQLite table names.
+    /// </remarks>
+    abstract member ListCollectionNames : unit -> seq<string>
+
+    /// <summary>
+    /// Asks the SQLite engine to run analysis and optimization for query planning.
+    /// </summary>
+    /// <remarks>
+    /// This is safe to call in both transactional and non-transactional contexts. It invokes SQLite's
+    /// <c>PRAGMA optimize</c> on the underlying connection.
+    /// </remarks>
+    abstract member Optimize : unit -> unit
 
 
 [<Extension>]

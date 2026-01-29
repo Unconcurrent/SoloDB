@@ -60,6 +60,18 @@ type SoloDBDirectoryHeader = {
     Metadata: IReadOnlyDictionary<string, string>
 }
 
+[<CLIMutable>]
+type BulkFileData = {
+    /// <summary>The full path where the file should be stored.</summary>
+    FullPath: string
+    /// <summary>The binary content of the file.</summary>
+    Data: byte array
+    /// <summary>Optional. The creation timestamp to set for the file.</summary>
+    Created: Nullable<DateTimeOffset>
+    /// <summary>Optional. The modification timestamp to set for the file.</summary>
+    Modified: Nullable<DateTimeOffset>
+}
+
 [<Struct>]
 type SoloDBEntryHeader = 
     | File of file: SoloDBFileHeader

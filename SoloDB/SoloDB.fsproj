@@ -43,11 +43,12 @@
     <Compile Include="JsonFunctions.fs" />
     <Compile Include="SQLiteTools.fs" />
     <Compile Include="RawSqliteFunctions.fs" />
+    <Compile Include="Connections.fs" />
+    <Compile Include="FileStorage.Core.fs" />
     <Compile Include="SoloDBInterfaces.fs" />
     <Compile Include="IdGenerator.fs" />
     <Compile Include="CustomTypeId.fs" />
     <Compile Include="QueryTranslator.fs" />
-    <Compile Include="Connections.fs" />
     <Compile Include="FileStorage.fs" />
     <Compile Include="Events\SoloDBEvents.fs" />
     <Compile Include="Queryable.fs" />

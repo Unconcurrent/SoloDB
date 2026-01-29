@@ -531,18 +531,18 @@ type internal EventSystem internal () =
 /// <summary>
 /// Provides cached access to item event data for a single handler invocation.
 /// </summary>
-type internal SoloDBItemEventContext<'T> internal (createCollection: SqliteConnection -> (unit -> unit) -> ISoloDBCollection<'T>) =
+type internal SoloDBItemEventContext<'T> internal (collectionName: string, createDb: SqliteConnection -> (unit -> unit) -> ISoloDB) =
     let mutable currentSqliteConnection = Unchecked.defaultof<SqliteConnection>
-    let mutable currentCollection = Unchecked.defaultof<ISoloDBCollection<'T> | null>
+    let mutable currentDb = Unchecked.defaultof<ISoloDB | null>
     let mutable previousSession = -1L
     let mutable json = struct (NativePtr.nullPtr<byte>, 0)
     let mutable item: 'T = Unchecked.defaultof<'T>
     let mutable disposed = true
-    let disposedMessage = "The event context collection can only be used during the handler execution."
+    let disposedMessage = "The event context database can only be used during the handler execution."
 
     member private this.ThrowIfDisposed() =
         if disposed then
-            raise (ObjectDisposedException("EventContextCollection", disposedMessage))
+            raise (ObjectDisposedException("EventContextDatabase", disposedMessage))
 
     /// <summary>
     /// Initializes the context for the given SQLite trigger invocation.
@@ -551,7 +551,7 @@ type internal SoloDBItemEventContext<'T> internal (createCollection: SqliteConne
         disposed <- false
         if previousSession <> session then
             previousSession <- session
-            currentCollection <- null
+            currentDb <- null
             currentSqliteConnection <- connection
             json <- struct (jsonBytes, jsonSize)
 
@@ -562,10 +562,13 @@ type internal SoloDBItemEventContext<'T> internal (createCollection: SqliteConne
         disposed <- true
 
     interface ISoloDBItemEventContext<'T> with
-        member this.CollectionInstance: ISoloDBCollection<'T> = 
+        member this.Database: ISoloDB =
             this.ThrowIfDisposed()
-            if isNull currentCollection then currentCollection <- createCollection currentSqliteConnection this.ThrowIfDisposed
-            currentCollection
+            if isNull currentDb then currentDb <- createDb currentSqliteConnection this.ThrowIfDisposed
+            currentDb
+
+        member this.CollectionName: string =
+            collectionName
 
         member this.ReadItem(): 'T =
             this.ThrowIfDisposed()
@@ -580,9 +583,9 @@ type internal SoloDBItemEventContext<'T> internal (createCollection: SqliteConne
 /// <summary>
 /// Provides cached access to update event data for a single handler invocation.
 /// </summary>
-type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteConnection -> (unit -> unit) -> ISoloDBCollection<'T>) =
+type internal SoloDBUpdatingEventContext<'T> internal (collectionName: string, createDb: SqliteConnection -> (unit -> unit) -> ISoloDB) =
     let mutable currentSqliteConnection = Unchecked.defaultof<SqliteConnection>
-    let mutable currentCollection = Unchecked.defaultof<ISoloDBCollection<'T> | null>
+    let mutable currentDb = Unchecked.defaultof<ISoloDB | null>
     let mutable previousSession = -1L
     let mutable jsonOld = struct (NativePtr.nullPtr<byte>, 0)
     let mutable jsonNew = struct (NativePtr.nullPtr<byte>, 0)
@@ -590,11 +593,11 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
     let mutable itemOld: 'T = Unchecked.defaultof<'T>
     let mutable itemNew: 'T = Unchecked.defaultof<'T>
     let mutable disposed = true
-    let disposedMessage = "The event context collection can only be used during the handler execution."
+    let disposedMessage = "The event context database can only be used during the handler execution."
 
     member private this.ThrowIfDisposed() =
         if disposed then
-            raise (ObjectDisposedException("EventContextCollection", disposedMessage))
+            raise (ObjectDisposedException("EventContextDatabase", disposedMessage))
 
     /// <summary>
     /// Initializes the context for the given SQLite trigger invocation.
@@ -603,7 +606,7 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
         disposed <- false
         if previousSession <> session then
             previousSession <- session
-            currentCollection <- null
+            currentDb <- null
             currentSqliteConnection <- connection
             jsonOld <- struct (jsonOldBytes, jsonOldSize)
             jsonNew <- struct (jsonNewBytes, jsonNewSize)
@@ -617,10 +620,13 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
         disposed <- true
 
     interface ISoloDBUpdatingEventContext<'T> with
-        member this.CollectionInstance: ISoloDBCollection<'T> = 
+        member this.Database: ISoloDB =
             this.ThrowIfDisposed()
-            if isNull currentCollection then currentCollection <- createCollection currentSqliteConnection this.ThrowIfDisposed
-            currentCollection
+            if isNull currentDb then currentDb <- createDb currentSqliteConnection this.ThrowIfDisposed
+            currentDb
+
+        member this.CollectionName: string =
+            collectionName
 
         member this.ReadOldItem(): 'T =
             this.ThrowIfDisposed()
@@ -645,7 +651,7 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
 /// <summary>
 /// Collection-scoped event system for registering and unregistering handlers.
 /// </summary>
-type internal CollectionEventSystem<'T> internal (collectionName: string, eventSystem: EventSystem, createCollection: SqliteConnection -> (unit -> unit) -> ISoloDBCollection<'T>) =
+type internal CollectionEventSystem<'T> internal (collectionName: string, eventSystem: EventSystem, createDb: SqliteConnection -> (unit -> unit) -> ISoloDB) =
     let insertingHandlerMap = Dictionary<InsertingHandler<'T>, ResizeArray<InsertingHandlerSystem>>(HashIdentity.Reference)
     let deletingHandlerMap = Dictionary<DeletingHandler<'T>, ResizeArray<DeletingHandlerSystem>>(HashIdentity.Reference)
     let updatingHandlerMap = Dictionary<UpdatingHandler<'T>, ResizeArray<UpdatingHandlerSystem>>(HashIdentity.Reference)
@@ -677,7 +683,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                 let sysHandler = InsertingHandlerSystem(fun conn session json ->
                     let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
                     if not (ctxs.TryPop(&ctx)) then
-                        ctx <- SoloDBItemEventContext<'T>(createCollection)
+                        ctx <- SoloDBItemEventContext<'T>(collectionName, createDb)
 
                     let jsonPtr =
                         if json.IsEmpty then NativePtr.nullPtr<byte>
@@ -734,7 +740,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                 let sysHandler = DeletingHandlerSystem(fun conn session json ->
                     let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
                     if not (ctxs.TryPop(&ctx)) then
-                        ctx <- SoloDBItemEventContext<'T>(createCollection)
+                        ctx <- SoloDBItemEventContext<'T>(collectionName, createDb)
 
                     let jsonPtr =
                         if json.IsEmpty then NativePtr.nullPtr<byte>
@@ -791,7 +797,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                 let sysHandler = UpdatingHandlerSystem(fun conn session jsonOld jsonOldSize jsonNew jsonNewSize -> 
                     let mutable ctx = Unchecked.defaultof<SoloDBUpdatingEventContext<'T> | null>
                     if not (ctxs.TryPop(&ctx)) then
-                        ctx <- SoloDBUpdatingEventContext<'T>(createCollection)
+                        ctx <- SoloDBUpdatingEventContext<'T>(collectionName, createDb)
 
                     let result =
                         try 
@@ -845,7 +851,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                 let sysHandler = InsertingHandlerSystem(fun conn session json ->
                     let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
                     if not (ctxs.TryPop(&ctx)) then
-                        ctx <- SoloDBItemEventContext<'T>(createCollection)
+                        ctx <- SoloDBItemEventContext<'T>(collectionName, createDb)
 
                     let jsonPtr =
                         if json.IsEmpty then NativePtr.nullPtr<byte>
@@ -902,7 +908,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                 let sysHandler = DeletingHandlerSystem(fun conn session json ->
                     let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
                     if not (ctxs.TryPop(&ctx)) then
-                        ctx <- SoloDBItemEventContext<'T>(createCollection)
+                        ctx <- SoloDBItemEventContext<'T>(collectionName, createDb)
 
                     let jsonPtr =
                         if json.IsEmpty then NativePtr.nullPtr<byte>
@@ -959,7 +965,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                 let sysHandler = UpdatingHandlerSystem(fun conn session jsonOld jsonOldSize jsonNew jsonNewSize -> 
                     let mutable ctx = Unchecked.defaultof<SoloDBUpdatingEventContext<'T> | null>
                     if not (ctxs.TryPop(&ctx)) then
-                        ctx <- SoloDBUpdatingEventContext<'T>(createCollection)
+                        ctx <- SoloDBUpdatingEventContext<'T>(collectionName, createDb)
 
                     let result =
                         try 
