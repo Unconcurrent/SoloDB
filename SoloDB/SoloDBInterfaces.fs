@@ -34,6 +34,7 @@ and UpdatingHandler<'T> = delegate of ctx: ISoloDBUpdatingEventContext<'T> -> So
 
 and ISoloDBCollectionEvents<'T> =
     abstract member OnUpdating<'T>: handler: UpdatingHandler<'T> -> unit
+    abstract member Unregister<'T>: handler: UpdatingHandler<'T> -> unit
 (*    abstract member OnInserting<'T>: handler: InsertingHandler<'T> -> unit
     abstract member OnDeleting<'T>: handler: DeletingHandler<'T> -> unit
     abstract member OnUpdating<'T>: handler: UpdatingHandler<'T> -> unit

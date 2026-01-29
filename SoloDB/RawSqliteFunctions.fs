@@ -66,6 +66,13 @@ type SqliteRawValue =
         raw.sqlite3_value_blob(this.Value)
 
     /// <summary>
+    /// Gets the value as a zero-copy UTF-8 ReadOnlySpan.
+    /// WARNING: Only valid during the callback! Do not store the span.
+    /// </summary>
+    member this.GetTextSpan() : ReadOnlySpan<byte> =
+        raw.sqlite3_value_blob(this.Value)
+
+    /// <summary>
     /// Gets the byte length of a BLOB or TEXT value.
     /// </summary>
     member this.GetByteCount() : int =

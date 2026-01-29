@@ -92,7 +92,7 @@ type Extensions =
         this :?> 'T
 
     // There is a bug with the VS 2022 IntelliSense / Code completion showing only this method on generic byref structs
-    #if (RELEASE || false)
+    #if (RELEASE || !false)
 
     /// This method sets a new value to a property inside the UpdateMany method's transform expression. This should not be called inside real code.
     [<Extension>]

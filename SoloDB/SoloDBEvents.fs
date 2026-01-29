@@ -47,7 +47,7 @@ type internal EventSystem internal () =
             let exists = this.UpdatingHandlerMapping.TryGetValue(nameUtf8, &handlers)
 
             match exists with
-            | false -> sqliteCtx.SetInt32 0
+            | false -> sqliteCtx.SetNull()
             | true ->
             
             let oldUtf8Size = jsonOld.GetByteCount()
@@ -57,6 +57,7 @@ type internal EventSystem internal () =
             let newUtf8 = jsonNew.GetBlobPointer()
 
             let mutable handlerFailed = false
+            let mutable handlerFailureMessage = ""
 
             try 
                 this.GlobalLock.Enter()
@@ -78,8 +79,9 @@ type internal EventSystem internal () =
                             try
                                 if h.Invoke(connection, session, oldUtf8, oldUtf8Size, newUtf8, newUtf8Size) = RemoveHandler then
                                     NativePtr.set handlersToRemove i true
-                            with _ex ->
+                            with ex ->
                                 handlerFailed <- true
+                                handlerFailureMessage <- ex.Message
                         i <- i + 1
                 finally
                     if not (NativePtr.isNullPtr handlersToRemove) then
@@ -93,7 +95,14 @@ type internal EventSystem internal () =
             finally
                 this.GlobalLock.Exit()
 
-            sqliteCtx.SetInt32(if handlerFailed then 1 else 0)
+            if handlerFailed then
+                let msg =
+                    if String.IsNullOrWhiteSpace handlerFailureMessage then
+                        "SoloDB updating handler failed"
+                    else handlerFailureMessage
+                sqliteCtx.SetText msg
+            else
+                sqliteCtx.SetNull()
         ))
         ()
 
@@ -114,6 +123,8 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
             currentSqliteConnection <- connection
             jsonOld <- struct (jsonOldBytes, jsonOldSize)
             jsonNew <- struct (jsonNewBytes, jsonNewSize)
+            itemOld <- Unchecked.defaultof<'T>
+            itemNew <- Unchecked.defaultof<'T>
 
     interface ISoloDBUpdatingEventContext<'T> with
         member this.CollectionInstance: ISoloDBCollection<'T> = 
