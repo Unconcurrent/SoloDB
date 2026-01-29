@@ -313,6 +313,9 @@ type internal SoloDBToCollectionData = {
     /// </summary>
     ClearCacheFunction: unit -> unit
 
+    /// <summary>
+    /// The event system used by collections created from this SoloDB instance.
+    /// </summary>
     EventSystem: EventSystem
 }
 
@@ -333,6 +336,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     /// <summary>Gets a value indicating whether type information should be included during serialization for documents in this collection.</summary>
     member val IncludeType = mustIncludeTypeInformationInSerialization<'T>
 
+    /// <summary>Gets the event registration API for this collection.</summary>
     member val Events = CollectionEventSystem<'T>(name, parentData.EventSystem, fun directConnection -> Collection(Transitive directConnection, name, connectionString, parentData))
 
     /// <summary>Gets the internal connection provider for this collection.</summary>
@@ -1236,6 +1240,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// </summary>
     member val FileSystem = FileSystem (Connection.Pooled connectionManager)
 
+    /// <summary>Gets the internal event system for this database instance.</summary>
     member val internal Events = eventSystem
 
     member private this.GetNewConnection() = connectionManager.Borrow()

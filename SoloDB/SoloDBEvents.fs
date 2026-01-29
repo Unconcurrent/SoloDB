@@ -18,11 +18,17 @@ open System.Text
 
 #nowarn "9"
 
+/// <summary>
+/// Internal event system that hosts SQLite functions and handler mappings.
+/// </summary>
 type internal EventSystem internal () =
     let mutable sessionIndex = 0L
     member val internal GlobalLock = ReentrantSpinLock()
     member val internal UpdatingHandlerMapping = CowByteSpanMap<ResizeArray<UpdatingHandlerSystem>>()
 
+    /// <summary>
+    /// Registers SQLite scalar functions used by the event triggers.
+    /// </summary>
     member this.CreateFunctions(connection: SqliteConnection) =
         connection.CreateRawFunction("SHOULD_HANDLE_UPDATING", RawScalarFunc1(fun sqliteCtx sqliteCollectionName ->
             if not sqliteCollectionName.IsText then invalidArg (nameof sqliteCollectionName) "The first argument of SHOULD_HANDLE_UPDATING must be a string"
@@ -106,6 +112,9 @@ type internal EventSystem internal () =
         ))
         ()
 
+/// <summary>
+/// Provides cached access to update event data for a single handler invocation.
+/// </summary>
 type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteConnection -> ISoloDBCollection<'T>) =
     let mutable currentSqliteConnection = Unchecked.defaultof<SqliteConnection>
     let mutable currentCollection = Unchecked.defaultof<ISoloDBCollection<'T> | null>
@@ -116,6 +125,9 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
     let mutable itemOld: 'T = Unchecked.defaultof<'T>
     let mutable itemNew: 'T = Unchecked.defaultof<'T>
 
+    /// <summary>
+    /// Initializes the context for the given SQLite trigger invocation.
+    /// </summary>
     member this.Reset (connection, session: int64, jsonOldBytes: nativeptr<byte>, jsonOldSize: int, jsonNewBytes: nativeptr<byte>, jsonNewSize: int) =
         if previousSession <> session then
             previousSession <- session
@@ -149,9 +161,15 @@ type internal SoloDBUpdatingEventContext<'T> internal (createCollection: SqliteC
 
             itemNew
 
+/// <summary>
+/// Collection-scoped event system for registering and unregistering handlers.
+/// </summary>
 type internal CollectionEventSystem<'T> internal (collectionName: string, eventSystem: EventSystem, createCollection: SqliteConnection -> ISoloDBCollection<'T>) =
     let handlerMap = Dictionary<UpdatingHandler<'T>, ResizeArray<UpdatingHandlerSystem>>(HashIdentity.Reference)
     interface ISoloDBCollectionEvents<'T> with
+        /// <summary>
+        /// Registers a handler for update events on this collection.
+        /// </summary>
         member this.OnUpdating(handler: UpdatingHandler<'T>): unit =
             let collectionNameBytes = Encoding.UTF8.GetBytes collectionName
             let list = eventSystem.UpdatingHandlerMapping.GetOrAdd(collectionNameBytes, CowByteSpanMapValueFactory(fun _span -> ResizeArray()))
@@ -202,6 +220,9 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
             finally
                 eventSystem.GlobalLock.Exit()
 
+        /// <summary>
+        /// Unregisters a previously registered update handler.
+        /// </summary>
         member this.Unregister(handler: UpdatingHandler<'T>): unit =
             let collectionNameBytes = Encoding.UTF8.GetBytes collectionName
             try
