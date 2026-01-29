@@ -64,6 +64,13 @@ and DeletingHandler<'T> = delegate of ctx: ISoloDBItemEventContext<'T> -> SoloDB
 /// <summary>Handler delegate for update events.</summary>
 and UpdatingHandler<'T> = delegate of ctx: ISoloDBUpdatingEventContext<'T> -> SoloDBEventsResult
 
+/// <summary>Handler delegate for after-insert events.</summary>
+and InsertedHandler<'T> = delegate of ctx: ISoloDBItemEventContext<'T> -> SoloDBEventsResult
+/// <summary>Handler delegate for after-delete events.</summary>
+and DeletedHandler<'T> = delegate of ctx: ISoloDBItemEventContext<'T> -> SoloDBEventsResult
+/// <summary>Handler delegate for after-update events.</summary>
+and UpdatedHandler<'T> = delegate of ctx: ISoloDBUpdatingEventContext<'T> -> SoloDBEventsResult
+
 
 /// <summary>
 /// Exposes collection-level event registration APIs.
@@ -74,17 +81,49 @@ and ISoloDBCollectionEvents<'T> =
     /// </summary>
     abstract member OnInserting: handler: InsertingHandler<'T> -> unit
     /// <summary>
+    /// Registers a handler invoked before an item delete.
+    /// </summary>
+    abstract member OnDeleting: handler: DeletingHandler<'T> -> unit
+    /// <summary>
     /// Registers a handler invoked before an item update.
     /// </summary>
     abstract member OnUpdating: handler: UpdatingHandler<'T> -> unit
+    /// <summary>
+    /// Registers a handler invoked after an item insert.
+    /// </summary>
+    abstract member OnInserted: handler: InsertedHandler<'T> -> unit
+    /// <summary>
+    /// Registers a handler invoked after an item delete.
+    /// </summary>
+    abstract member OnDeleted: handler: DeletedHandler<'T> -> unit
+    /// <summary>
+    /// Registers a handler invoked after an item update.
+    /// </summary>
+    abstract member OnUpdated: handler: UpdatedHandler<'T> -> unit
     /// <summary>
     /// Unregisters a previously registered insert handler.
     /// </summary>
     abstract member Unregister: handler: InsertingHandler<'T> -> unit
     /// <summary>
+    /// Unregisters a previously registered delete handler.
+    /// </summary>
+    abstract member Unregister: handler: DeletingHandler<'T> -> unit
+    /// <summary>
     /// Unregisters a previously registered update handler.
     /// </summary>
     abstract member Unregister: handler: UpdatingHandler<'T> -> unit
+    /// <summary>
+    /// Unregisters a previously registered after-insert handler.
+    /// </summary>
+    abstract member Unregister: handler: InsertedHandler<'T> -> unit
+    /// <summary>
+    /// Unregisters a previously registered after-delete handler.
+    /// </summary>
+    abstract member Unregister: handler: DeletedHandler<'T> -> unit
+    /// <summary>
+    /// Unregisters a previously registered after-update handler.
+    /// </summary>
+    abstract member Unregister: handler: UpdatedHandler<'T> -> unit
 (*    abstract member OnInserting<'T>: handler: InsertingHandler<'T> -> unit
     abstract member OnDeleting<'T>: handler: DeletingHandler<'T> -> unit
     abstract member OnUpdating<'T>: handler: UpdatingHandler<'T> -> unit
