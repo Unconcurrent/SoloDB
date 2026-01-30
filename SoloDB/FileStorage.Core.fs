@@ -19,12 +19,14 @@ module FileStorageCore =
     /// <summary>
     /// Defines the chunk size for file storage, approximating a SQLite page size.
     /// </summary>
+    [<Literal>]
     let chunkSize = 
         16384L // 16KB, aprox. a SQLite page size.
 
     /// <summary>
     /// Defines the maximum size allocated for storing compressed chunks.  Slightly larger than the chunk size to accommodate potential compression failures.
     /// </summary>
+    [<Literal>]
     let maxChunkStoreSize = 
         chunkSize + 100L // If the compression fails.
 

@@ -16,6 +16,9 @@ open FileStorageCore
 #nowarn "9"
 
 module FileStorage =
+    // For backward compatibility
+    type DbFileStream = FileStorageCore.DbFileStream
+
     /// <summary>
     /// Splits a file path into its directory path and file name. Normalizes separators to '/'.
     /// </summary>
