@@ -49,7 +49,7 @@ type IndexedAttribute(unique: bool) =
 /// </para>
 /// </summary>
 [<AttributeUsage(AttributeTargets.Class, AllowMultiple = false); Sealed>]
-type PolimorphicAttribute() =
+type PolymorphicAttribute() =
     inherit Attribute()
 
 /// <summary>
