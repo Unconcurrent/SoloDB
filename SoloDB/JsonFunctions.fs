@@ -53,7 +53,7 @@ type internal HasTypeId<'t> =
 
 module JsonFunctions =
     let inline internal mustIncludeTypeInformationInSerializationFn (t: Type) = 
-        t.IsAbstract || not (isNull (t.GetCustomAttribute<Attributes.PolimorphicAttribute>()))
+        t.IsAbstract || not (isNull (t.GetCustomAttribute<Attributes.PolymorphicAttribute>()))
 
     let internal mustIncludeTypeInformationInSerialization<'T> =
         mustIncludeTypeInformationInSerializationFn typeof<'T>

@@ -856,7 +856,7 @@ module private QueryHelper =
 
                                 // Value: propagate or attach error string
                                 ctx.Command.Append "CASE " |> ignore
-                                ctx.Command.Append "WHEN jsonb_extract(Value, '$.$type') IS NULL THEN json_quote('The type of item is not stored in the database, if you want to include it, then add the Polimorphic attribute to the type and reinsert all elements.') " |> ignore
+                                ctx.Command.Append "WHEN jsonb_extract(Value, '$.$type') IS NULL THEN json_quote('The type of item is not stored in the database, if you want to include it, then add the Polymorphic attribute to the type and reinsert all elements.') " |> ignore
                                 ctx.Command.Append "WHEN jsonb_extract(Value, '$.$type') <> " |> ignore
                                 QueryTranslator.appendVariable ctx.Command ctx.Vars typeName
                                 ctx.Command.Append " THEN json_quote('Unable to cast object to the specified type, because the types are different.') " |> ignore
