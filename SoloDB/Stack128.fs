@@ -140,9 +140,9 @@ type internal InternalStack128<'T> =
 
     [<MethodImpl(MethodImplOptions.AggressiveInlining)>]
     static member GetRef (s: byref<InternalStack128<'T>>, index: int) : byref<'T> =
-#if DEBUG
         if uint32 index >= 128u then invalidArg (nameof index) "Stack128 index out of range."
-#endif
+        let a = 1
+
         // contiguous field block starting at V000
         &Unsafe.Add(&s.V000, index)
 

@@ -23,7 +23,6 @@ open System.Numerics
 /// <summary>
 /// Defines the type of a JsonValue, for use in C#.
 /// </summary>
-[<Struct>]
 type JsonValueType =
     /// <summary>A null value.</summary>
     | Null = 1uy

@@ -640,7 +640,7 @@ module internal JsonParser =
         (b >= 'A'B && b <= 'Z'B) || (b >= 'a'B && b <= 'z'B) || b = '_'B || b = '$'B
 
     let inline getUnicodeCategory (codePoint: int) =
-        #if NETSTANDARD2_1
+        #if NETSTANDARD2_1_OR_GREATER
         CharUnicodeInfo.GetUnicodeCategory(codePoint)
         #else
         if codePoint <= 0xFFFF then
