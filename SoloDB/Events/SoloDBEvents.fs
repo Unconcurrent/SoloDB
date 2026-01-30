@@ -123,8 +123,11 @@ type internal EventSystem internal () =
                                 NativePtr.initBlock handlersToRemove 0uy (uint32 handlersToRemoveCount * uint32 sizeof<bool>)
 
                             try
-                                if h.Invoke(connection, session, newSpan) = RemoveHandler then
-                                    NativePtr.set handlersToRemove i true
+                                match h.Invoke(connection, session, newSpan): (SoloDBEventsResult | null) with
+                                | EventHandled
+                                // Someone will definitely return null from C#.
+                                | null -> ()
+                                | RemoveHandler -> NativePtr.set handlersToRemove i true
                             with ex ->
                                 let finalEx =
                                     match buildLockedException ex with
