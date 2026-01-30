@@ -664,6 +664,11 @@ type internal SoloDBItemEventContext<'T> internal (collectionName: string, creat
     let mutable disposed = true
     let disposedMessage = "The event context database can only be used during the handler execution."
 
+    member private this.ReadDB() =
+        this.ThrowIfDisposed()
+        if isNull currentDb then currentDb <- createDb currentSqliteConnection this.ThrowIfDisposed
+        currentDb
+
     member private this.ThrowIfDisposed() =
         if disposed then
             raise (ObjectDisposedException("EventContextDatabase", disposedMessage))
@@ -686,15 +691,10 @@ type internal SoloDBItemEventContext<'T> internal (collectionName: string, creat
         disposed <- true
 
     interface ISoloDBItemEventContext<'T> with
-        member this.Database: ISoloDB =
-            this.ThrowIfDisposed()
-            if isNull currentDb then currentDb <- createDb currentSqliteConnection this.ThrowIfDisposed
-            currentDb
-
         member this.CollectionName: string =
             collectionName
 
-        member this.ReadItem(): 'T =
+        member this.Item with get(): 'T =
             this.ThrowIfDisposed()
             let struct (ptr, len) = json
             if len <> 0 then
@@ -703,6 +703,23 @@ type internal SoloDBItemEventContext<'T> internal (collectionName: string, creat
                 json <- struct (NativePtr.nullPtr<byte>, 0)
 
             item
+
+    interface ISoloDB with
+        member this.ConnectionString: string = this.ReadDB().ConnectionString
+        member this.FileSystem: IFileSystem = this.ReadDB().FileSystem
+        member this.GetCollection<'A> () = this.ReadDB().GetCollection<'A> ()
+        member this.GetCollection<'A> (name: string) = this.ReadDB().GetCollection<'A> (name)
+        member this.GetUntypedCollection (name) = this.ReadDB().GetUntypedCollection(name)
+        member this.CollectionExists (name) = this.ReadDB().CollectionExists (name)
+        member this.CollectionExists<'A> () = this.ReadDB().CollectionExists<'A> ()
+        member this.DropCollectionIfExists (name) = this.ReadDB().DropCollectionIfExists (name)
+        member this.DropCollectionIfExists<'A> () = this.ReadDB().DropCollectionIfExists<'A> () 
+        member this.DropCollection (name) = this.ReadDB().DropCollection (name)
+        member this.DropCollection<'A> () = this.ReadDB().DropCollection<'A> ()
+        member this.ListCollectionNames () = this.ReadDB().ListCollectionNames ()
+        member this.Optimize () = this.ReadDB().Optimize ()
+        member this.Dispose () = this.ReadDB().Dispose ()
+        
 
 /// <summary>
 /// Provides cached access to update event data for a single handler invocation.
@@ -718,6 +735,11 @@ type internal SoloDBUpdatingEventContext<'T> internal (collectionName: string, c
     let mutable itemNew: 'T = Unchecked.defaultof<'T>
     let mutable disposed = true
     let disposedMessage = "The event context database can only be used during the handler execution."
+
+    member private this.ReadDB() =
+        this.ThrowIfDisposed()
+        if isNull currentDb then currentDb <- createDb currentSqliteConnection this.ThrowIfDisposed
+        currentDb
 
     member private this.ThrowIfDisposed() =
         if disposed then
@@ -744,15 +766,10 @@ type internal SoloDBUpdatingEventContext<'T> internal (collectionName: string, c
         disposed <- true
 
     interface ISoloDBUpdatingEventContext<'T> with
-        member this.Database: ISoloDB =
-            this.ThrowIfDisposed()
-            if isNull currentDb then currentDb <- createDb currentSqliteConnection this.ThrowIfDisposed
-            currentDb
-
         member this.CollectionName: string =
             collectionName
 
-        member this.ReadOldItem(): 'T =
+        member this.OldItem with get(): 'T =
             this.ThrowIfDisposed()
             let struct (ptr, len) = jsonOld
             if len <> 0 then
@@ -762,7 +779,7 @@ type internal SoloDBUpdatingEventContext<'T> internal (collectionName: string, c
 
             itemOld
 
-        member this.ReadNewItem(): 'T =
+        member this.Item with get(): 'T =
             this.ThrowIfDisposed()
             let struct (ptr, len) = jsonNew
             if len <> 0 then
@@ -771,6 +788,22 @@ type internal SoloDBUpdatingEventContext<'T> internal (collectionName: string, c
                 jsonNew <- struct (NativePtr.nullPtr<byte>, 0)
 
             itemNew
+
+    interface ISoloDB with
+        member this.ConnectionString: string = this.ReadDB().ConnectionString
+        member this.FileSystem: IFileSystem = this.ReadDB().FileSystem
+        member this.GetCollection<'A> () = this.ReadDB().GetCollection<'A> ()
+        member this.GetCollection<'A> (name: string) = this.ReadDB().GetCollection<'A> (name)
+        member this.GetUntypedCollection (name) = this.ReadDB().GetUntypedCollection(name)
+        member this.CollectionExists (name) = this.ReadDB().CollectionExists (name)
+        member this.CollectionExists<'A> () = this.ReadDB().CollectionExists<'A> ()
+        member this.DropCollectionIfExists (name) = this.ReadDB().DropCollectionIfExists (name)
+        member this.DropCollectionIfExists<'A> () = this.ReadDB().DropCollectionIfExists<'A> () 
+        member this.DropCollection (name) = this.ReadDB().DropCollection (name)
+        member this.DropCollection<'A> () = this.ReadDB().DropCollection<'A> ()
+        member this.ListCollectionNames () = this.ReadDB().ListCollectionNames ()
+        member this.Optimize () = this.ReadDB().Optimize ()
+        member this.Dispose () = this.ReadDB().Dispose ()
 
 /// <summary>
 /// Collection-scoped event system for registering and unregistering handlers.
@@ -807,7 +840,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                 let sysHandler = InsertingHandlerSystem(fun conn session json ->
                     let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
                     if not (ctxs.TryPop(&ctx)) then
-                        ctx <- SoloDBItemEventContext<'T>(collectionName, createDb)
+                        ctx <- new SoloDBItemEventContext<'T>(collectionName, createDb)
 
                     let jsonPtr =
                         if json.IsEmpty then NativePtr.nullPtr<byte>
@@ -864,7 +897,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                 let sysHandler = DeletingHandlerSystem(fun conn session json ->
                     let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
                     if not (ctxs.TryPop(&ctx)) then
-                        ctx <- SoloDBItemEventContext<'T>(collectionName, createDb)
+                        ctx <- new SoloDBItemEventContext<'T>(collectionName, createDb)
 
                     let jsonPtr =
                         if json.IsEmpty then NativePtr.nullPtr<byte>
@@ -921,7 +954,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                 let sysHandler = UpdatingHandlerSystem(fun conn session jsonOld jsonOldSize jsonNew jsonNewSize -> 
                     let mutable ctx = Unchecked.defaultof<SoloDBUpdatingEventContext<'T> | null>
                     if not (ctxs.TryPop(&ctx)) then
-                        ctx <- SoloDBUpdatingEventContext<'T>(collectionName, createDb)
+                        ctx <- new SoloDBUpdatingEventContext<'T>(collectionName, createDb)
 
                     let result =
                         try 
@@ -975,7 +1008,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                 let sysHandler = InsertingHandlerSystem(fun conn session json ->
                     let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
                     if not (ctxs.TryPop(&ctx)) then
-                        ctx <- SoloDBItemEventContext<'T>(collectionName, createDb)
+                        ctx <- new SoloDBItemEventContext<'T>(collectionName, createDb)
 
                     let jsonPtr =
                         if json.IsEmpty then NativePtr.nullPtr<byte>
@@ -1032,7 +1065,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                 let sysHandler = DeletingHandlerSystem(fun conn session json ->
                     let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
                     if not (ctxs.TryPop(&ctx)) then
-                        ctx <- SoloDBItemEventContext<'T>(collectionName, createDb)
+                        ctx <- new SoloDBItemEventContext<'T>(collectionName, createDb)
 
                     let jsonPtr =
                         if json.IsEmpty then NativePtr.nullPtr<byte>
@@ -1089,7 +1122,7 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                 let sysHandler = UpdatingHandlerSystem(fun conn session jsonOld jsonOldSize jsonNew jsonNewSize -> 
                     let mutable ctx = Unchecked.defaultof<SoloDBUpdatingEventContext<'T> | null>
                     if not (ctxs.TryPop(&ctx)) then
-                        ctx <- SoloDBUpdatingEventContext<'T>(collectionName, createDb)
+                        ctx <- new SoloDBUpdatingEventContext<'T>(collectionName, createDb)
 
                     let result =
                         try 

@@ -154,7 +154,7 @@ module FileStorage =
         createFileAt db path
 
     /// <summary>
-    /// Deletes a directory at the specified path if it's empty.
+    /// Deletes a directory recursively at the specified path
     /// </summary>
     /// <param name="db">The SQLite connection.</param>
     /// <param name="path">The path of the directory to delete.</param>
@@ -847,10 +847,6 @@ module FileStorage =
             use db = connection.Get()
             deleteFile db file
 
-        /// <summary>
-        /// Deletes a directory. This will fail if the directory is not empty.
-        /// </summary>
-        /// <param name="dir">The header of the directory to delete.</param>
         member this.Delete(dir) =
             use db = connection.Get()
             deleteDirectory db dir
@@ -867,11 +863,6 @@ module FileStorage =
             this.Delete file
             true
 
-        /// <summary>
-        /// Deletes a directory at the specified path. This will fail if the directory is not empty.
-        /// </summary>
-        /// <param name="path">The path of the directory to delete.</param>
-        /// <returns>True if the directory was deleted, false if it did not exist.</returns>
         member this.DeleteDirAt(path) =
             use db = connection.Get()
             deleteDirectoryAt db path

@@ -530,7 +530,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member val IncludeType = mustIncludeTypeInformationInSerialization<'T>
 
     /// <summary>Gets the event registration API for this collection.</summary>
-    member val Events =
+    member val private Events: ISoloDBCollectionEvents<'T> =
         let createDb (directConnection: SqliteConnection) (guard: unit -> unit) : ISoloDB =
             let guardedConnection = Guarded(guard, Transitive directConnection)
             let cache = EventDbCache(connectionString, directConnection, guardedConnection, parentData, name)
@@ -975,6 +975,79 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
             use conn = connection.Get()
             Helper.ensureDeclaredIndexesFields<'T> name conn
 
+    /// <summary>
+    /// Registers a handler invoked before an item insert.
+    /// </summary>
+    member this.OnInserting(handler) =
+        this.Events.OnInserting(handler)
+
+    /// <summary>
+    /// Registers a handler invoked before an item delete.
+    /// </summary>
+    member this.OnDeleting(handler) =
+        this.Events.OnDeleting(handler)
+
+    /// <summary>
+    /// Registers a handler invoked before an item update.
+    /// </summary>
+    member this.OnUpdating(handler) =
+        this.Events.OnUpdating(handler)
+
+    /// <summary>
+    /// Registers a handler invoked after an item insert.
+    /// </summary>
+    member this.OnInserted(handler) =
+        this.Events.OnInserted(handler)
+
+    /// <summary>
+    /// Registers a handler invoked after an item delete.
+    /// </summary>
+    member this.OnDeleted(handler) =
+        this.Events.OnDeleted(handler)
+
+    /// <summary>
+    /// Registers a handler invoked after an item update.
+    /// </summary>
+    member this.OnUpdated(handler) =
+        this.Events.OnUpdated(handler)
+
+    /// <summary>
+    /// Unregisters a previously registered insert handler.
+    /// </summary>
+    member this.Unregister(handler: InsertingHandler<'T>) =
+        this.Events.Unregister(handler)
+
+    /// <summary>
+    /// Unregisters a previously registered delete handler.
+    /// </summary>
+    member this.Unregister(handler: DeletingHandler<'T>) =
+        this.Events.Unregister(handler)
+
+    /// <summary>
+    /// Unregisters a previously registered update handler.
+    /// </summary>
+    member this.Unregister(handler: UpdatingHandler<'T>) =
+        this.Events.Unregister(handler)
+
+    /// <summary>
+    /// Unregisters a previously registered after-insert handler.
+    /// </summary>
+    member this.Unregister(handler: InsertedHandler<'T>) =
+        this.Events.Unregister(handler)
+
+    /// <summary>
+    /// Unregisters a previously registered after-delete handler.
+    /// </summary>
+    member this.Unregister(handler: DeletedHandler<'T>) =
+        this.Events.Unregister(handler)
+
+    /// <summary>
+    /// Unregisters a previously registered after-update handler.
+    /// </summary>
+    member this.Unregister(handler: UpdatedHandler<'T>) =
+        this.Events.Unregister(handler)
+
+
     override this.Equals(other) = 
         match other with
         | :? Collection<'T> as other ->
@@ -1007,7 +1080,6 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         member this.InTransaction = this.InTransaction
         member this.IncludeType = this.IncludeType 
         member this.Name = this.Name
-        member this.Events = this.Events
 
         member this.DropIndexIfExists(expression) = this.DropIndexIfExists(expression)
         member this.EnsureAddedAttributeIndexes() = this.EnsureAddedAttributeIndexes()
@@ -1030,6 +1102,44 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         member this.ReplaceMany(item,filter) = this.ReplaceMany(filter)(item)
         member this.ReplaceOne(item,filter) = this.ReplaceOne(filter)(item)
         member this.UpdateMany(filter, t) = this.UpdateMany(t)(filter)
+
+    interface ISoloDBCollectionEvents<'T> with
+        member this.OnInserting handler =
+            this.OnInserting handler
+
+        member this.OnDeleting handler =
+            this.OnDeleting handler
+
+        member this.OnUpdating handler =
+            this.OnUpdating handler
+
+        member this.OnInserted handler =
+            this.OnInserted handler
+
+        member this.OnDeleted handler =
+            this.OnDeleted handler
+
+        member this.OnUpdated handler =
+            this.OnUpdated handler
+
+        member this.Unregister (handler: InsertingHandler<'T>) =
+            this.Unregister handler
+
+        member this.Unregister (handler: DeletingHandler<'T>) =
+            this.Unregister handler
+
+        member this.Unregister (handler: UpdatingHandler<'T>) =
+            this.Unregister handler
+
+        member this.Unregister (handler: InsertedHandler<'T>) =
+            this.Unregister handler
+
+        member this.Unregister (handler: DeletedHandler<'T>) =
+            this.Unregister handler
+
+        member this.Unregister (handler: UpdatedHandler<'T>) =
+            this.Unregister handler
+
 
 /// <summary>
 /// Represents a database context within an explicit transaction. All operations are part of the same transaction.

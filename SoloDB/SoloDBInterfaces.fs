@@ -27,37 +27,27 @@ type SoloDBEventsResult =
 /// Provides access to the old and new versions of an item during an update event.
 /// </summary>
 type ISoloDBUpdatingEventContext<'T> =
-    /// <summary>
-    /// Gets the database instance associated with the event.
-    /// </summary>
-    /// <remarks>
-    /// This database instance is scoped to the current trigger execution and becomes invalid after the handler returns.
-    /// </remarks>
-    abstract member Database: ISoloDB
+    inherit ISoloDB
+
     /// <summary>
     /// Gets the name of the collection that triggered this event.
     /// </summary>
     abstract member CollectionName: string
     /// <summary>
-    /// Reads the item state before the update.
+    /// Reads the old item state before the update.
     /// </summary>
-    abstract member ReadOldItem: unit -> 'T
+    abstract member OldItem: 'T with get
     /// <summary>
-    /// Reads the item state after the update.
+    /// Reads the new item state after the update.
     /// </summary>
-    abstract member ReadNewItem: unit -> 'T
+    abstract member Item: 'T with get
 
 /// <summary>
 /// Provides access to the item during a single-item event (insert/delete).
 /// </summary>
 and ISoloDBItemEventContext<'T> =
-    /// <summary>
-    /// Gets the database instance associated with the event.
-    /// </summary>
-    /// <remarks>
-    /// This database instance is scoped to the current trigger execution and becomes invalid after the handler returns.
-    /// </remarks>
-    abstract member Database: ISoloDB
+    inherit ISoloDB
+
     /// <summary>
     /// Gets the name of the collection that triggered this event.
     /// </summary>
@@ -65,7 +55,7 @@ and ISoloDBItemEventContext<'T> =
     /// <summary>
     /// Reads the item associated with the event.
     /// </summary>
-    abstract member ReadItem: unit -> 'T
+    abstract member Item: 'T with get
 
 /// <summary>Internal delegate for insert events.</summary>
 and InsertingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * json: ReadOnlySpan<byte> -> SoloDBEventsResult
@@ -142,13 +132,6 @@ and ISoloDBCollectionEvents<'T> =
     /// Unregisters a previously registered after-update handler.
     /// </summary>
     abstract member Unregister: handler: UpdatedHandler<'T> -> unit
-(*    abstract member OnInserting<'T>: handler: InsertingHandler<'T> -> unit
-    abstract member OnDeleting<'T>: handler: DeletingHandler<'T> -> unit
-    abstract member OnUpdating<'T>: handler: UpdatingHandler<'T> -> unit
-
-    abstract member Unregister<'T>: handler: InsertingHandler<'T> -> unit
-    abstract member Unregister<'T>: handler: DeletingHandler<'T> -> unit
-    abstract member Unregister<'T>: handler: UpdatingHandler<'T> -> unit*)
     
 
 /// <summary>
@@ -163,6 +146,7 @@ and ISoloDBCollectionEvents<'T> =
 /// <seealso cref="IOrderedQueryable{T}"/>
 and ISoloDBCollection<'T> =
     inherit IOrderedQueryable<'T>
+    inherit ISoloDBCollectionEvents<'T>
 
     /// <summary>
     /// Gets the name of the collection within the database.
@@ -215,11 +199,6 @@ and ISoloDBCollection<'T> =
     /// </code>
     /// </example>
     abstract member IncludeType: bool with get
-
-    /// <summary>
-    /// Gets the event registration API for this collection.
-    /// </summary>
-    abstract member Events: ISoloDBCollectionEvents<'T>
 
     /// <summary>
     /// Inserts a new entity into the collection and returns the auto-generated unique identifier.
@@ -1065,7 +1044,7 @@ and IFileSystem =
     /// <param name="file">The header of the file to delete.</param>
     abstract member Delete: file: SoloDBFileHeader -> unit
     /// <summary>
-    /// Deletes a directory. This will fail if the directory is not empty.
+    /// Deletes a directory recursively, including files.
     /// </summary>
     /// <param name="dir">The header of the directory to delete.</param>
     abstract member Delete: dir: SoloDBDirectoryHeader -> unit
@@ -1076,7 +1055,7 @@ and IFileSystem =
     /// <returns>True if the file was deleted, false if it did not exist.</returns>
     abstract member DeleteFileAt: path: string -> bool
     /// <summary>
-    /// Deletes a directory at the specified path. This will fail if the directory is not empty.
+    /// Deletes a directory recursively at the specified path, including files.
     /// </summary>
     /// <param name="path">The path of the directory to delete.</param>
     /// <returns>True if the directory was deleted, false if it did not exist.</returns>
