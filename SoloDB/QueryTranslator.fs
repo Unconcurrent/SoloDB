@@ -1,6 +1,7 @@
 ﻿namespace SoloDatabase
 
 open System.Collections
+open System.Runtime.InteropServices
 
 /// <summary>
 /// Contains functions to translate .NET LINQ expression trees into SQLite SQL queries.
@@ -433,6 +434,116 @@ module QueryTranslator =
             | JsonSerializator.JsonValue.String _ ->
                 compareJson qb "$" json
 
+    [<return: Struct>]
+    let internal (|OfShape0|_|) (_retType: ('any1 -> 'T) | null) (_objType: ('any2 -> 'O) | null) (name: string) (m: MethodCallExpression) =
+        if m.Method.Name = name && (isNull _retType || typeof<'T>.IsAssignableFrom m.Type) then
+            let ret =
+                if not (isNull m.Object) then
+                    // Instance method: target is m.Object
+                    ValueSome struct (m.Object, m.Arguments, 0)
+                elif m.Arguments.Count > 0 then
+                    // Static/Extension method: target is first arg
+                    ValueSome struct (m.Arguments.[0], m.Arguments, 1)
+                else
+                    ValueNone
+
+            let ret = 
+                match ret with
+                | ValueSome struct (o, _, _) when isNull _objType || typeof<'O>.IsAssignableFrom o.Type -> ret
+                | _ -> ValueNone
+
+            match ret with
+            | ValueSome struct (o, _, _) -> ValueSome o
+            | _ -> ValueNone
+        else
+            ValueNone
+
+    [<return: Struct>]
+    let internal (|OfShape1|_|) (_retType: ('any1 -> 'T) | null) (_objType: ('any2 -> 'O) | null) (name: string) (_argType: (unit -> 'A) | null) (m: MethodCallExpression) =
+        if m.Method.Name = name && (isNull _retType || typeof<'T>.IsAssignableFrom m.Type) then
+            let ret =
+                if not (isNull m.Object) then
+                    // Instance method: target is m.Object, args are m.Arguments
+                    ValueSome struct (m.Object, m.Arguments, 0)
+                elif m.Arguments.Count > 0 then
+                    // Static/Extension method: target is first arg, rest are args
+                    ValueSome struct (m.Arguments.[0], m.Arguments, 1)
+                else
+                    ValueNone
+
+            let ret = 
+                match ret with
+                | ValueSome struct (o, _, _) when isNull _objType || typeof<'O>.IsAssignableFrom o.Type -> ret
+                | _ -> ValueNone
+
+            let ret =
+                match ret with
+                | ValueSome struct (o, args, argsIndex) when args.Count > argsIndex && (isNull _argType || typeof<'A>.IsAssignableFrom args.[argsIndex].Type) ->
+                        ValueSome struct (o, args.[argsIndex])
+                | _ -> ValueNone
+
+            ret
+        else
+            ValueNone
+
+    [<return: Struct>]
+    let internal (|OfShape2|_|) (_retType: ('any1 -> 'T) | null) (_objType: ('any2 -> 'O) | null) (name: string) (_arg1Type: (unit -> 'A) | null) (_arg2Type: (unit -> 'B) | null) (m: MethodCallExpression) =
+        if m.Method.Name = name && (isNull _retType || typeof<'T>.IsAssignableFrom m.Type) then
+            let ret =
+                if not (isNull m.Object) then
+                    ValueSome struct (m.Object, m.Arguments, 0)
+                elif m.Arguments.Count > 0 then
+                    ValueSome struct (m.Arguments.[0], m.Arguments, 1)
+                else
+                    ValueNone
+
+            let ret = 
+                match ret with
+                | ValueSome struct (o, _, _) when isNull _objType || typeof<'O>.IsAssignableFrom o.Type -> ret
+                | _ -> ValueNone
+
+            match ret with
+            | ValueSome struct (o, args, argsIndex) when args.Count > argsIndex + 1 
+                && (isNull _arg1Type || typeof<'A>.IsAssignableFrom args.[argsIndex].Type) 
+                && (isNull _arg2Type || typeof<'B>.IsAssignableFrom args.[argsIndex + 1].Type) ->
+                    ValueSome struct (o, args.[argsIndex], args.[argsIndex + 1])
+            | _ -> ValueNone
+        else
+            ValueNone
+
+    [<return: Struct>]
+    let internal (|OfShape3|_|) (_retType: ('any1 -> 'T) | null) (_objType: ('any2 -> 'O) | null) (name: string) (_arg1Type: (unit -> 'A) | null) (_arg2Type: (unit -> 'B) | null) (_arg3Type: (unit -> 'C) | null) (m: MethodCallExpression) =
+        if m.Method.Name = name && (isNull _retType || typeof<'T>.IsAssignableFrom m.Type) then
+            let ret =
+                if not (isNull m.Object) then
+                    ValueSome struct (m.Object, m.Arguments, 0)
+                elif m.Arguments.Count > 0 then
+                    ValueSome struct (m.Arguments.[0], m.Arguments, 1)
+                else
+                    ValueNone
+
+            let ret = 
+                match ret with
+                | ValueSome struct (o, _, _) when isNull _objType || typeof<'O>.IsAssignableFrom o.Type -> ret
+                | _ -> ValueNone
+
+            match ret with
+            | ValueSome struct (o, args, argsIndex) when args.Count > argsIndex + 2
+                && (isNull _arg1Type || typeof<'A>.IsAssignableFrom args.[argsIndex].Type) 
+                && (isNull _arg2Type || typeof<'B>.IsAssignableFrom args.[argsIndex + 1].Type)
+                && (isNull _arg3Type || typeof<'C>.IsAssignableFrom args.[argsIndex + 2].Type) ->
+                    ValueSome struct (o, args.[argsIndex], args.[argsIndex + 1], args.[argsIndex + 2])
+            | _ -> ValueNone
+        else
+            ValueNone
+
+    // You cannot use the generic's "<" or ">" chars inside match's case
+    let inline private OfIEnum () = Unchecked.defaultof<IEnumerable>
+    let inline private OfString () = Unchecked.defaultof<string>
+    let inline private OfType () = Unchecked.defaultof<Type>
+    let inline private OfPropInfo () = Unchecked.defaultof<PropertyInfo>
+    let inline private OfValueType () = Unchecked.defaultof<ValueType>
+
     /// <summary>
     /// A list of functions to handle unknown expression types.
     /// Handlers are called when the main translator encounters an expression it doesn't recognize.
@@ -479,7 +590,7 @@ module QueryTranslator =
         if runHandler preExpressionHandler qb exp then () else
 
         // If the expression is fully constant, evaluate it and append as a variable.
-        if exp.NodeType <> ExpressionType.Lambda && exp.NodeType <> ExpressionType.Quote && isFullyConstant exp && (match exp with | :? ConstantExpression as ce when ce.Value = null -> false | other -> true) then
+        if exp.NodeType <> ExpressionType.Lambda && exp.NodeType <> ExpressionType.Quote && isFullyConstant exp && (match exp with | :? ConstantExpression as ce when ce.Value = null -> false | _other -> true) then
             let value = evaluateExpr<obj> exp
             qb.AppendVariable value
         else
@@ -714,86 +825,80 @@ module QueryTranslator =
         match visitMathMethod m qb with
         | true -> ()
         | false ->
-        match m.Method.Name with
-        | "ToLower" ->
-            let value = m.Object
+        
+        let containsImpl (_m: MethodCallExpression) (qb: QueryBuilder) array (value: Expression) =
+            qb.AppendRaw $"EXISTS (SELECT 1 FROM json_each("
+
+            do
+                let qb = if qb.TableNameDot = "" then {qb with TableNameDot = "o."} else qb
+                visit array qb |> ignore
+
+            if isPrimitiveSQLiteType value.Type then
+                qb.AppendRaw ") WHERE json_each.Value = "
+                visit value qb |> ignore
+                qb.AppendRaw ")"
+            else
+                if not (isFullyConstant value) then
+                    raise (ArgumentException $"Cannot translate contains with this type of expression: {value.Type}")
+
+                let targetType = value.Type
+                let value = evaluateExpr<obj> value
+
+                qb.AppendRaw ") WHERE "
+                compareKnownJson qb (fun qb -> qb.AppendRaw "json_each.Value") targetType value
+                qb.AppendRaw ")"
+
+        match m with
+        | OfShape0 null null "ToLower" value ->
             // User defined function to also support non ASCII.
             qb.AppendRaw "TO_LOWER("
             visit value qb
             qb.AppendRaw ")"
 
-        | "ToUpper" ->
-            let value = m.Object
+        | OfShape0 null null "ToUpper" value ->
             // User defined function to also support non ASCII.
             qb.AppendRaw "TO_UPPER("
             visit value qb
             qb.AppendRaw ")"
 
-        | "GetArray" ->
-            let array = m.Arguments.[0]
-            let index = m.Arguments.[1]
-
+        | OfShape1 null null "GetArray" null (array, index) ->
             arrayIndex array index qb
-            
-        | "Like" ->
-            let string = m.Arguments.[0]
-            let likeWhat = m.Arguments.[1]
+        
+        | OfShape1 null null "Like" null (string, likeWhat) ->
             visit string qb |> ignore
             qb.AppendRaw " LIKE "
             visit likeWhat qb |> ignore
 
-        | "Set" when qb.UpdateMode ->
-            let oldValue = m.Arguments.[0]
-            let newValue = m.Arguments.[1]
+        | OfShape1 null null "Set" null (oldValue, newValue) when qb.UpdateMode ->
             visit oldValue qb |> ignore
             qb.AppendRaw ","
             visit newValue qb |> ignore
             qb.AppendRaw ","
-        
-        | "Append" | "Add" when qb.UpdateMode ->
-            let struct (array, newValue) =
-                if m.Arguments.Count = 2 then
-                    struct (m.Arguments.[0], m.Arguments.[1])
-                elif m.Object <> null && m.Arguments.Count = 1 then
-                    struct (m.Object, m.Arguments.[0])
-                else
-                    failwithf "Unknown Append or Add method signature."
-
+    
+        | OfShape1 null null "Append" null (array, newValue)
+        | OfShape1 null null "Add" null (array, newValue) when qb.UpdateMode ->
             visit array qb |> ignore
             qb.RollBack 1u
             qb.AppendRaw "[#]',"
             visit newValue qb |> ignore
             qb.AppendRaw ","
-        
-        | "SetAt" when qb.UpdateMode ->
-            let array = m.Arguments.[0]
-            let index = m.Arguments.[1]
-            let newValue = m.Arguments.[2]
+    
+        | OfShape2 null null "SetAt" null null (array, index, newValue) when qb.UpdateMode ->
             visit array qb |> ignore
             qb.RollBack 1u
             qb.AppendRaw $"[{index}]',"
             visit newValue qb |> ignore
             qb.AppendRaw ","
-        
-        | "RemoveAt" when qb.UpdateMode ->
-            let struct (array, index) =
-                if m.Arguments.Count = 2 then
-                    struct (m.Arguments.[0], m.Arguments.[1])
-                elif m.Object <> null && m.Arguments.Count = 1 then
-                    struct (m.Object, m.Arguments.[0])
-                else
-                    failwithf "Unknown RemoveAt method signature."
-
+    
+        | OfShape1 null null "RemoveAt" null (array, index) when qb.UpdateMode ->
             visit array qb |> ignore
             qb.AppendRaw $",jsonb_remove(jsonb_extract({qb.TableNameDot}Value,"
             visit array qb |> ignore
             qb.AppendRaw "),"
             qb.AppendRaw $"'$[{index}]'),"
-        
-        | "op_Dynamic" ->
-            let o = m.Arguments.[0]
-            let property = (m.Arguments.[1] :?> ConstantExpression).Value
-
+    
+        | OfShape1 null null "op_Dynamic" null (o, propExpr) ->
+            let property = (propExpr |> unbox<ConstantExpression>).Value
             match property with
             | :? string as property ->
                 let memberAccess = {
@@ -815,10 +920,9 @@ module QueryTranslator =
                 }
                 visitMemberAccess memberAccess qb
 
-            | other -> failwithf "Unable to translate property access."
-        | "Any" ->
-            let array = m.Arguments.[0]
-            let whereFuncExpr = m.Arguments.[1]
+            | _ -> failwithf "Unable to translate property access."
+
+        | OfShape1 null null "Any" null (array, whereFuncExpr) ->
             let exprFunc = Expression.Lambda<Func<Expression>>(whereFuncExpr).Compile(true)
             let expr = exprFunc.Invoke()
             qb.AppendRaw $"EXISTS (SELECT 1 FROM json_each("
@@ -831,105 +935,62 @@ module QueryTranslator =
             let innerQb = {qb with TableNameDot = "json_each."; JsonExtractSelfValue = false}
             visit expr innerQb |> ignore
             qb.AppendRaw ")"
-
-        
-        | "Contains" when 
-                (m.Arguments.Count = 2 && typeof<System.Collections.IEnumerable>.IsAssignableFrom(m.Arguments.[0].Type)) 
-                || (m.Arguments.Count = 1 && not (isNull m.Object) && m.Object.Type <> typeof<string> && typeof<System.Collections.IEnumerable>.IsAssignableFrom(m.Object.Type))
-                ->
-
-            let struct (array, value) = 
-                if m.Arguments.Count = 2 then
-                    struct (m.Arguments.[0], m.Arguments.[1])
-                else
-                    struct (m.Object, m.Arguments.[0])
-
-            qb.AppendRaw $"EXISTS (SELECT 1 FROM json_each("
-    
-            do
-                let qb = if qb.TableNameDot = "" then {qb with TableNameDot = "o."} else qb
-                visit array qb |> ignore
-
-            if isPrimitiveSQLiteType value.Type then
-                qb.AppendRaw ") WHERE json_each.Value = "
-                visit value qb |> ignore
-                qb.AppendRaw ")"
-            else
-                if not (isFullyConstant value) then
-                    raise (ArgumentException $"Cannot compare contains with this type of expression: {value.Type}")
-
-                let targetType = value.Type
-
-                let value = evaluateExpr<obj> value
-
-                qb.AppendRaw ") WHERE "
-
-                compareKnownJson qb (fun qb -> qb.AppendRaw "json_each.Value") targetType value
-
-                qb.AppendRaw ")"
-        
-        | "QuotationToLambdaExpression" ->
-            let arg1 = (m.Arguments.[0] :?> MethodCallExpression)
-            let arg2 = arg1.Arguments.[0]
-            visit arg2 qb
-        
-        | "op_Implicit" ->
-            let arg1 = m.Arguments.[0]
-            visit arg1 qb
-        
-        | "Contains" when not (isNull m.Object) && m.Object.Type = typeof<string> ->
-            let text = m.Object
-            let what = m.Arguments.[0]
+                
+        | OfShape1 null OfString "Contains" null (text, what) ->
             qb.AppendRaw "INSTR("
             visit text qb |> ignore
             qb.AppendRaw ","
             visit what qb |> ignore
             qb.AppendRaw ") > 0"
-        
-        | "GetType" when not (isNull m.Object) && m.Object.NodeType = ExpressionType.Parameter ->
-            let o = m.Object
+
+        | OfShape1 null OfIEnum "Contains" null (array, value) ->
+            containsImpl m qb array value
+
+        | OfShape1 bool OfValueType "Contains" null (ros, value) when ros.Type.Name = "ReadOnlySpan`1" ->
+            containsImpl m qb ros value
+    
+        | OfShape0 null null "QuotationToLambdaExpression" arg1 ->
+             // arg1 is technically the target "o" in OfShape0 logic for static methods
+             let arg1 = (arg1 :?> MethodCallExpression)
+             let arg2 = arg1.Arguments.[0]
+             visit arg2 qb
+    
+        | OfShape0 null null "op_Implicit" arg1 ->
+            visit arg1 qb
+    
+        | OfShape0 null null "GetType" o when o.NodeType = ExpressionType.Parameter ->
             qb.AppendRaw "jsonb_extract("
             visit o qb |> ignore
             qb.AppendRaw $",'$.$type')"
-        
-        | "TypeOf" when m.Type = typeof<Type> ->
+    
+        | OfShape0 (OfType) null "TypeOf" _ ->
             let t = m.Method.Invoke(null, Array.empty) :?> Type
             let name = match t |> typeToName with Some x -> x | None -> ""
             qb.AppendVariable name
-        
-        | "NewSqlId" ->
-            let arg1 = m.Arguments.[0]
+    
+        | OfShape0 null null "NewSqlId" arg1 ->
             visit arg1 qb
-        
-        | "get_Item" when not (isNull m.Object) && typeof<System.Collections.ICollection>.IsAssignableFrom m.Object.Type || typeof<Array>.IsAssignableFrom m.Object.Type || typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.Object.Type ->
-            let o = m.Object
-            let property = (m.Arguments.[0] :?> ConstantExpression).Value
-
+    
+        | OfShape1 null null "get_Item" null (o, propExpr) when typeof<System.Collections.ICollection>.IsAssignableFrom o.Type || typeof<Array>.IsAssignableFrom o.Type || typeof<JsonSerializator.JsonValue>.IsAssignableFrom o.Type ->
+            let property = (propExpr |> unbox<ConstantExpression>).Value
             visitProperty o property m qb
 
-
-        | "Dyn" when m.Arguments.[1].Type = typeof<PropertyInfo> ->
-            let o = m.Arguments.[0]
-
-            let property = evaluateExpr<PropertyInfo> m.Arguments[1]
+        | OfShape1 null null "Dyn" (OfPropInfo) (o, propExpr) ->
+            let property = evaluateExpr<PropertyInfo> propExpr
             let propertyName = property.Name
-
             visitProperty o propertyName m qb
 
-        | "Dyn" ->
-            let o = m.Arguments.[0]
-
+        | OfShape1 null null "Dyn" null (o, propExpr) ->
             let property =
-                match m.Arguments[1].Type with
+                match propExpr.Type with
                 | t when t = typeof<string> || isIntegerBasedType t ->
-                    evaluateExpr<obj> m.Arguments.[1]
+                    evaluateExpr<obj> propExpr
                 | _other -> failwithf "Cannot access dynamic property of %A" o
 
             visitProperty o property m qb
 
-        | "Concat" when m.Type = typeof<string> ->          
+        | OfShape0 (OfString) null "Concat" _ ->          
             let len = m.Arguments.Count
-
             let args =
                 if len = 1 && typeof<IEnumerable<string>>.IsAssignableFrom m.Arguments.[0].Type && m.Arguments.[0].NodeType = ExpressionType.NewArrayInit then
                     let array = m.Arguments.[0] :?> NewArrayExpression
@@ -946,10 +1007,7 @@ module QueryTranslator =
 
             qb.AppendRaw ")"
 
-        | "StartsWith" when not (isNull m.Object) && m.Object.Type = typeof<string> ->
-            let arg = m.Object
-            let v = m.Arguments.[0]
-
+        | OfShape1 null OfString "StartsWith" null (arg, v) ->
             if isFullyConstant v then
                 let prefix = if v.Type = typeof<char> then (string << evaluateExpr<char>) v else evaluateExpr<string> v
 
@@ -959,30 +1017,29 @@ module QueryTranslator =
                     visit arg qb
                     qb.AppendRaw " IS NOT NULL)"
                 else
+                    // Compute next lexicographic string
+                    let nextString (s: string) =
+                        let chars = s.ToCharArray()
+                        let rec bump i =
+                            if i < 0 then s + "\u0000"
+                            elif chars.[i] < System.Char.MaxValue then
+                                chars.[i] <- char (int chars.[i] + 1)
+                                new string(chars, 0, i + 1)
+                            else bump (i - 1)
+                        bump (chars.Length - 1)
 
-                // Compute next lexicographic string
-                let nextString (s: string) =
-                    let chars = s.ToCharArray()
-                    let rec bump i =
-                        if i < 0 then s + "\u0000"
-                        elif chars.[i] < System.Char.MaxValue then
-                            chars.[i] <- char (int chars.[i] + 1)
-                            new string(chars, 0, i + 1)
-                        else bump (i - 1)
-                    bump (chars.Length - 1)
+                    let next = nextString prefix
 
-                let next = nextString prefix
-
-                // col >= 'prefix' AND col < 'next'
-                qb.AppendRaw "("
-                visit arg qb
-                qb.AppendRaw " >= "
-                qb.AppendVariable prefix
-                qb.AppendRaw " AND "
-                visit arg qb
-                qb.AppendRaw " < "
-                qb.AppendVariable next
-                qb.AppendRaw ")"
+                    // col >= 'prefix' AND col < 'next'
+                    qb.AppendRaw "("
+                    visit arg qb
+                    qb.AppendRaw " >= "
+                    qb.AppendVariable prefix
+                    qb.AppendRaw " AND "
+                    visit arg qb
+                    qb.AppendRaw " < "
+                    qb.AppendVariable next
+                    qb.AppendRaw ")"
             else
                 qb.AppendRaw "SUBSTR("
                 visit arg qb
@@ -993,11 +1050,8 @@ module QueryTranslator =
                 qb.AppendRaw "))"
                 qb.AppendRaw " = "
                 visit v qb
-                    
-        | "EndsWith" when not (isNull m.Object) && m.Object.Type = typeof<string> ->
-            let arg = m.Object
-            let v = m.Arguments.[0]
-
+                
+        | OfShape1 null OfString "EndsWith" null (arg, v) ->
             qb.AppendRaw "SUBSTR("
             visit arg qb
             qb.AppendRaw ","
@@ -1007,16 +1061,16 @@ module QueryTranslator =
             qb.AppendRaw " = "
             visit v qb
 
-        | "ToObject" when typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.Method.DeclaringType || m.Method.DeclaringType.FullName = "SoloDatabase.MongoDB.BsonDocument" ->
+        | OfShape0 null null "ToObject" o when typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.Method.DeclaringType || m.Method.DeclaringType.FullName = "SoloDatabase.MongoDB.BsonDocument" ->
             let castToType = m.Method.GetGenericArguments().[0]
-            castTo qb castToType m.Object
+            castTo qb castToType o
 
-        | "CastTo" ->
+        | OfShape0 null null "CastTo" arg ->
             let castToType = m.Method.GetGenericArguments().[0]
-            castTo qb castToType m.Arguments.[0]
+            castTo qb castToType arg
 
         // Numeric and floating-point Parse methods
-        | "Parse" when
+        | OfShape0 null null "Parse" arg when
             m.Method.DeclaringType = typeof<SByte> ||
             m.Method.DeclaringType = typeof<Byte> ||
             m.Method.DeclaringType = typeof<Int16> ||
@@ -1030,7 +1084,6 @@ module QueryTranslator =
             m.Method.DeclaringType = typeof<float> ||
             m.Method.DeclaringType = typeof<float32> ->
 
-            let arg = m.Arguments.[0]
             let targetType =
                 match m.Method.DeclaringType with
                 | t when t = typeof<SByte> || t = typeof<Byte> || t = typeof<Int16> || t = typeof<UInt16>
@@ -1043,9 +1096,7 @@ module QueryTranslator =
             qb.AppendRaw $" AS {targetType})"
 
         // String.Substring support
-        | "Substring" when not (isNull m.Object) && m.Object.Type = typeof<string> ->
-            let str = m.Object
-            let start = m.Arguments.[0]
+        | OfShape2 null OfString "Substring" null null (str, start, length) ->
             qb.AppendRaw "SUBSTR("
             visit str qb
             qb.AppendRaw ","
@@ -1053,37 +1104,41 @@ module QueryTranslator =
             qb.AppendRaw "("
             visit start qb
             qb.AppendRaw " + 1)"
-            if m.Arguments.Count = 2 then
-                let length = m.Arguments.[1]
-                qb.AppendRaw ","
-                visit length qb
+            qb.AppendRaw ","
+            visit length qb
             qb.AppendRaw ")"
 
-        | "get_Chars" when m.Arguments.Count = 1 && not (isNull m.Object) && m.Object.Type = typeof<string> ->
-            let str = m.Object
-            let index = m.Arguments.[0]
+        | OfShape1 null OfString "Substring" null (str, start) ->
+            qb.AppendRaw "SUBSTR("
+            visit str qb
+            qb.AppendRaw ","
+            // SQLite is 1-based, .NET is 0-based
+            qb.AppendRaw "("
+            visit start qb
+            qb.AppendRaw " + 1)"
+            qb.AppendRaw ")"
+
+        | OfShape1 null OfString "get_Chars" null (str, index) ->
             qb.AppendRaw "SUBSTR("
             visit str qb
             qb.AppendRaw ",("
             visit index qb
             qb.AppendRaw " + 1),1)"
 
-        | "GetString" when m.Arguments.Count = 2 && isNull m.Object && m.Arguments.[0].Type = typeof<string> ->
-            let str = m.Arguments.[0]
-            let index = m.Arguments.[1]
+        | OfShape1 null null "GetString" null (str, index) ->
             qb.AppendRaw "SUBSTR("
             visit str qb
             qb.AppendRaw ",("
             visit index qb
             qb.AppendRaw " + 1),1)"
 
-        | "Count" when m.Arguments.Count = 1 && isNull m.Object && let t = m.Arguments.[0].Type in t.IsConstructedGenericType && t.GetGenericTypeDefinition() = typedefof<System.Linq.IGrouping<_,_>> ->
+        | OfShape0 null null "Count" _ when let t = m.Arguments.[0].Type in t.IsConstructedGenericType && t.GetGenericTypeDefinition() = typedefof<System.Linq.IGrouping<_,_>> ->
             qb.AppendRaw $"json_array_length({qb.TableNameDot}Value, '$.Items')"
 
-        | "Items" when m.Arguments.Count = 1 && isNull m.Object && let t = m.Arguments.[0].Type in t.IsConstructedGenericType && t.GetGenericTypeDefinition() = typedefof<System.Linq.IGrouping<_,_>> ->
+        | OfShape0 null null "Items" _ when let t = m.Arguments.[0].Type in t.IsConstructedGenericType && t.GetGenericTypeDefinition() = typedefof<System.Linq.IGrouping<_,_>> ->
             qb.AppendRaw $"jsonb_extract({qb.TableNameDot}Value, '$.Items')"
 
-        | "Invoke" when FSharp.Reflection.FSharpType.IsRecord m.Type ->
+        | OfShape0 null null "Invoke" _ when FSharp.Reflection.FSharpType.IsRecord m.Type ->
             // This handles chained F# record construction via curried lambdas.
             // Example: Username => Auth => Banned => FirstSeen => LastSeen => new ...(...).Invoke(...)
             // We need to walk the chain and collect the arguments in reverse order.
@@ -1119,7 +1174,49 @@ module QueryTranslator =
 
             newObject qb args
 
-            ()
+        // String.Trim() -> TRIM(x)
+        | OfShape0 null OfString "Trim" str ->
+            qb.AppendRaw "TRIM("
+            visit str qb |> ignore
+            qb.AppendRaw ")"
+
+        // String.TrimStart() -> LTRIM(x)
+        | OfShape0 null OfString "TrimStart" str ->
+            qb.AppendRaw "LTRIM("
+            visit str qb |> ignore
+            qb.AppendRaw ")"
+
+        // String.TrimEnd() -> RTRIM(x)
+        | OfShape0 null OfString "TrimEnd" str ->
+            qb.AppendRaw "RTRIM("
+            visit str qb |> ignore
+            qb.AppendRaw ")"
+
+        // String.Replace(old, new) -> REPLACE(str, old, new)
+        | OfShape2 null OfString "Replace" null null (str, oldValue, newValue) ->
+            qb.AppendRaw "REPLACE("
+            visit str qb |> ignore
+            qb.AppendRaw ","
+            visit oldValue qb |> ignore
+            qb.AppendRaw ","
+            visit newValue qb |> ignore
+            qb.AppendRaw ")"
+
+        // String.IsNullOrEmpty(str) -> (str IS NULL OR str = '')
+        | OfShape0 null OfString "IsNullOrEmpty" str ->
+            qb.AppendRaw "("
+            visit str qb |> ignore
+            qb.AppendRaw " IS NULL OR "
+            visit str qb |> ignore
+            qb.AppendRaw " = '')"
+
+
+        // Regex.IsMatch(input, pattern) -> input REGEXP pattern
+        | OfShape1 null OfString "IsMatch" (OfString) (input, pattern) when m.Method.DeclaringType = typeof<System.Text.RegularExpressions.Regex> ->
+            visit input qb |> ignore
+            qb.AppendRaw " REGEXP "
+            visit pattern qb |> ignore
+
         | _ -> 
             raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
 
