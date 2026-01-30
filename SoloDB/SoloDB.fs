@@ -1331,7 +1331,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             connection.CreateFunction("REGEXP", Func<string, string, bool>(fun pattern input -> match isNull pattern || isNull input with true -> false | _ -> RegularExpressions.Regex.IsMatch(input, pattern)), true)
             eventSystem.CreateFunctions(connection)
             connection.CreateFunction("base64", Func<obj, obj>(Utils.sqlBase64), true) // https://www.sqlite.org/base64.html
-            connection.Execute "PRAGMA recursive_triggers = ON;" |> ignore // This must be enabled on every connection separately.
+            connection.Execute "PRAGMA recursive_triggers = ON; PRAGMA foreign_keys = on;" |> ignore // This must be enabled on every connection separately.
 
         let defaultConfig: SoloDBConfiguration = { CachingEnabled = true }
 
@@ -1568,7 +1568,6 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     {triggerSql}
 
                     PRAGMA user_version = 3;
-                    PRAGMA foreign_keys = on;
 
                     COMMIT TRANSACTION;
                 ", dbConnection.Inner)
