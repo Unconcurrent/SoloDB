@@ -24,6 +24,27 @@ open System.Text
 /// </summary>
 type internal EventSystem internal () =
     let mutable sessionIndex = 0L
+    let buildLockedException (ex: exn) =
+        match ex with
+        | :? SqliteException as se ->
+            let message = se.Message
+            let isLocked =
+                se.SqliteErrorCode = 6 ||
+                se.SqliteExtendedErrorCode = 6 ||
+                se.SqliteErrorCode = 5 ||
+                se.SqliteExtendedErrorCode = 5 ||
+                message.IndexOf("database is locked", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                message.IndexOf("database table is locked", StringComparison.OrdinalIgnoreCase) >= 0
+
+            if isLocked then
+                let wrapped = InvalidOperationException(
+                    "Event handlers must use ctx.Database. Using any other SoloDB/collection inside a handler can lock the database. " +
+                    $"Original error: {message}",
+                    se)
+                ValueSome (wrapped :> exn)
+            else
+                ValueNone
+        | _ -> ValueNone
     member val internal GlobalLock = ReentrantSpinLock()
     member val internal InsertingHandlerMapping = CowByteSpanMap<ResizeArray<InsertingHandlerSystem>>()
     member val internal DeletingHandlerMapping = CowByteSpanMap<ResizeArray<DeletingHandlerSystem>>()
@@ -41,7 +62,8 @@ type internal EventSystem internal () =
             if not sqliteCollectionName.IsText then invalidArg (nameof sqliteCollectionName) "The first argument of SHOULD_HANDLE_INSERTING must be a string"
 
             let sqliteCollectionNameUTF8 = sqliteCollectionName.GetBlobSpan()
-            sqliteCtx.SetInt32(if this.InsertingHandlerMapping.ContainsKey sqliteCollectionNameUTF8 then 1 else 0)
+            let should = if this.InsertingHandlerMapping.ContainsKey sqliteCollectionNameUTF8 then 1 else 0
+            sqliteCtx.SetInt32 should
         ))
 
         connection.CreateRawFunction("ON_INSERTING_HANDLER", RawScalarFunc2(fun sqliteCtx sqliteCollectionName jsonNew ->
@@ -104,9 +126,13 @@ type internal EventSystem internal () =
                                 if h.Invoke(connection, session, newSpan) = RemoveHandler then
                                     NativePtr.set handlersToRemove i true
                             with ex ->
+                                let finalEx =
+                                    match buildLockedException ex with
+                                    | ValueSome rewritten -> rewritten
+                                    | ValueNone -> ex
                                 handlerFailed <- true
-                                if not (String.IsNullOrWhiteSpace ex.Message) then
-                                    handlerFailureMessage <- ex.Message
+                                if not (String.IsNullOrWhiteSpace finalEx.Message) then
+                                    handlerFailureMessage <- finalEx.Message
                         i <- i + 1
                 finally
                     if not (NativePtr.isNullPtr handlersToRemove) then
@@ -197,9 +223,13 @@ type internal EventSystem internal () =
                                 if h.Invoke(connection, session, oldSpan) = RemoveHandler then
                                     NativePtr.set handlersToRemove i true
                             with ex ->
+                                let finalEx =
+                                    match buildLockedException ex with
+                                    | ValueSome rewritten -> rewritten
+                                    | ValueNone -> ex
                                 handlerFailed <- true
-                                if not (String.IsNullOrWhiteSpace ex.Message) then
-                                    handlerFailureMessage <- ex.Message
+                                if not (String.IsNullOrWhiteSpace finalEx.Message) then
+                                    handlerFailureMessage <- finalEx.Message
                         i <- i + 1
                 finally
                     if not (NativePtr.isNullPtr handlersToRemove) then
@@ -295,9 +325,13 @@ type internal EventSystem internal () =
                                 if h.Invoke(connection, session, oldUtf8, oldUtf8Size, newUtf8, newUtf8Size) = RemoveHandler then
                                     NativePtr.set handlersToRemove i true
                             with ex ->
+                                let finalEx =
+                                    match buildLockedException ex with
+                                    | ValueSome rewritten -> rewritten
+                                    | ValueNone -> ex
                                 handlerFailed <- true
-                                if not (String.IsNullOrWhiteSpace ex.Message) then
-                                    handlerFailureMessage <- ex.Message
+                                if not (String.IsNullOrWhiteSpace finalEx.Message) then
+                                    handlerFailureMessage <- finalEx.Message
                         i <- i + 1
                 finally
                     if not (NativePtr.isNullPtr handlersToRemove) then
@@ -388,9 +422,13 @@ type internal EventSystem internal () =
                                 if h.Invoke(connection, session, newSpan) = RemoveHandler then
                                     NativePtr.set handlersToRemove i true
                             with ex ->
+                                let finalEx =
+                                    match buildLockedException ex with
+                                    | ValueSome rewritten -> rewritten
+                                    | ValueNone -> ex
                                 handlerFailed <- true
-                                if not (String.IsNullOrWhiteSpace ex.Message) then
-                                    handlerFailureMessage <- ex.Message
+                                if not (String.IsNullOrWhiteSpace finalEx.Message) then
+                                    handlerFailureMessage <- finalEx.Message
                         i <- i + 1
                 finally
                     if not (NativePtr.isNullPtr handlersToRemove) then
@@ -481,9 +519,13 @@ type internal EventSystem internal () =
                                 if h.Invoke(connection, session, oldSpan) = RemoveHandler then
                                     NativePtr.set handlersToRemove i true
                             with ex ->
+                                let finalEx =
+                                    match buildLockedException ex with
+                                    | ValueSome rewritten -> rewritten
+                                    | ValueNone -> ex
                                 handlerFailed <- true
-                                if not (String.IsNullOrWhiteSpace ex.Message) then
-                                    handlerFailureMessage <- ex.Message
+                                if not (String.IsNullOrWhiteSpace finalEx.Message) then
+                                    handlerFailureMessage <- finalEx.Message
                         i <- i + 1
                 finally
                     if not (NativePtr.isNullPtr handlersToRemove) then
@@ -579,9 +621,13 @@ type internal EventSystem internal () =
                                 if h.Invoke(connection, session, oldUtf8, oldUtf8Size, newUtf8, newUtf8Size) = RemoveHandler then
                                     NativePtr.set handlersToRemove i true
                             with ex ->
+                                let finalEx =
+                                    match buildLockedException ex with
+                                    | ValueSome rewritten -> rewritten
+                                    | ValueNone -> ex
                                 handlerFailed <- true
-                                if not (String.IsNullOrWhiteSpace ex.Message) then
-                                    handlerFailureMessage <- ex.Message
+                                if not (String.IsNullOrWhiteSpace finalEx.Message) then
+                                    handlerFailureMessage <- finalEx.Message
                         i <- i + 1
                 finally
                     if not (NativePtr.isNullPtr handlersToRemove) then
