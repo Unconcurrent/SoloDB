@@ -855,7 +855,7 @@ and IFileSystem =
     /// </summary>
     /// <param name="path">The full path of the file.</param>
     /// <param name="stream">The stream containing the file data to upload.</param>
-    abstract member UploadAsync: path: string * stream: Stream -> Task<unit>
+    abstract member UploadAsync: path: string * stream: Stream -> Task
     /// <summary>
     /// Uploads a sequence of files in a single transaction. This is more efficient for uploading many small files.
     /// </summary>
@@ -866,7 +866,7 @@ and IFileSystem =
     /// </summary>
     /// <param name="path">The path of the file to replace.</param>
     /// <param name="stream">The stream with the new content.</param>
-    abstract member ReplaceAsyncWithinTransaction: path: string * stream: Stream -> Task<unit>
+    abstract member ReplaceAsyncWithinTransaction: path: string * stream: Stream -> Task
     /// <summary>
     /// Downloads a file from the specified path and writes its content to the provided stream.
     /// </summary>
@@ -880,7 +880,7 @@ and IFileSystem =
     /// <param name="path">The full path of the file to download.</param>
     /// <param name="stream">The stream to which the file content will be written.</param>
     /// <exception cref="FileNotFoundException">Thrown if the file does not exist at the specified path.</exception>
-    abstract member DownloadAsync: path: string * stream: Stream -> Task<unit>
+    abstract member DownloadAsync: path: string * stream: Stream -> Task
     /// <summary>
     /// Gets the header information for a file at the specified path.
     /// </summary>
