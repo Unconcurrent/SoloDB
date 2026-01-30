@@ -20,7 +20,9 @@
 	<DebugType>embedded</DebugType>
     <PackageOutputPath>$(OutputPath)</PackageOutputPath>
     <VersionPrefix>0.6.0</VersionPrefix>
-    <LangVersion>9</LangVersion>
+    <LangVersion>10</LangVersion>
+    <ParallelCompilation>true</ParallelCompilation>
+    <Deterministic>true</Deterministic>
 	<GenerateDocumentationFile>true</GenerateDocumentationFile>
 	<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
 	<NoWarn>3370</NoWarn>
