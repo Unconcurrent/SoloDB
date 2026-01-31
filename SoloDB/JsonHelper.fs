@@ -8,6 +8,7 @@ open System.Linq
 open System.Collections.Generic
 open System.Runtime.CompilerServices
 
+// NativePtr operations for low-level JSON buffer manipulation
 #nowarn "9"
 
 /// <summary>

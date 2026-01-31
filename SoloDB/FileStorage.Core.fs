@@ -12,6 +12,7 @@ open System.Runtime.InteropServices
 open System.Data
 open SoloDatabase.Connections
 
+// NativePtr operations for efficient chunk-based file I/O
 #nowarn "9"
 
 
