@@ -857,6 +857,41 @@ module QueryTranslator =
                 compareKnownJson qb (fun qb -> qb.AppendRaw "json_each.Value") targetType value
                 qb.AppendRaw ")"
 
+        /// Helper for nested array predicate methods (Any, All).
+        /// isAll=false: EXISTS (SELECT 1 FROM json_each(...) WHERE predicate)
+        /// isAll=true:  NOT EXISTS (SELECT 1 FROM json_each(...) WHERE NOT (predicate))
+        let visitNestedArrayPredicate (qb: QueryBuilder) (array: Expression) (whereFuncExpr: Expression) (isAll: bool) =
+            // Extract the lambda expression from the argument
+            // It may be: 1) A Quote containing a lambda, 2) A lambda directly, 3) A constant with delegate
+            let expr =
+                match whereFuncExpr with
+                | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote ->
+                    // Quoted lambda (from Queryable methods)
+                    ue.Operand
+                | :? LambdaExpression as le ->
+                    // Direct lambda
+                    le :> Expression
+                | _ ->
+                    // Try the original approach for backwards compatibility
+                    let exprFunc = Expression.Lambda<Func<Expression>>(whereFuncExpr).Compile(true)
+                    exprFunc.Invoke()
+
+            if isAll then qb.AppendRaw "NOT "
+            qb.AppendRaw "EXISTS (SELECT 1 FROM json_each("
+
+            do
+                let qb = if qb.TableNameDot = "" then {qb with TableNameDot = "o."} else qb
+                visit array qb |> ignore
+
+            qb.AppendRaw ") WHERE "
+            if isAll then qb.AppendRaw "NOT ("
+
+            let innerQb = {qb with TableNameDot = "json_each."; JsonExtractSelfValue = false}
+            visit expr innerQb |> ignore
+
+            if isAll then qb.AppendRaw ")"
+            qb.AppendRaw ")"
+
         match m with
         | OfShape0 null null "ToLowerInvariant" value
         | OfShape0 null null "ToLower" value ->
@@ -933,19 +968,12 @@ module QueryTranslator =
 
             | _ -> failwithf "Unable to translate property access."
 
+        // Nested array predicate methods (Any, All) - common platform
         | OfShape1 null null "Any" null (array, whereFuncExpr) ->
-            let exprFunc = Expression.Lambda<Func<Expression>>(whereFuncExpr).Compile(true)
-            let expr = exprFunc.Invoke()
-            qb.AppendRaw $"EXISTS (SELECT 1 FROM json_each("
+            visitNestedArrayPredicate qb array whereFuncExpr false // Any = EXISTS
 
-            do
-                let qb = if qb.TableNameDot = "" then {qb with TableNameDot = "o."} else qb
-                visit array qb |> ignore
-
-            qb.AppendRaw ") WHERE "
-            let innerQb = {qb with TableNameDot = "json_each."; JsonExtractSelfValue = false}
-            visit expr innerQb |> ignore
-            qb.AppendRaw ")"
+        | OfShape1 null null "All" null (array, whereFuncExpr) ->
+            visitNestedArrayPredicate qb array whereFuncExpr true  // All = NOT EXISTS ... NOT
                 
         // String.Contains(string, StringComparison) - case-insensitive support (must come before OfShape1)
         | OfShape2 null OfString "Contains" null OfStringComparison (text, what, comparisonExpr) ->
