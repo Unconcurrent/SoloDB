@@ -543,6 +543,15 @@ module QueryTranslator =
     let inline private OfType () = Unchecked.defaultof<Type>
     let inline private OfPropInfo () = Unchecked.defaultof<PropertyInfo>
     let inline private OfValueType () = Unchecked.defaultof<ValueType>
+    let inline private OfStringComparison () = Unchecked.defaultof<StringComparison>
+
+    /// Returns true if the StringComparison is case-insensitive.
+    let inline private isIgnoreCase (comparison: StringComparison) =
+        match comparison with
+        | StringComparison.OrdinalIgnoreCase
+        | StringComparison.CurrentCultureIgnoreCase
+        | StringComparison.InvariantCultureIgnoreCase -> true
+        | _ -> false
 
     /// <summary>
     /// A list of functions to handle unknown expression types.
@@ -849,12 +858,14 @@ module QueryTranslator =
                 qb.AppendRaw ")"
 
         match m with
+        | OfShape0 null null "ToLowerInvariant" value
         | OfShape0 null null "ToLower" value ->
             // User defined function to also support non ASCII.
             qb.AppendRaw "TO_LOWER("
             visit value qb
             qb.AppendRaw ")"
 
+        | OfShape0 null null "ToUpperInvariant" value
         | OfShape0 null null "ToUpper" value ->
             // User defined function to also support non ASCII.
             qb.AppendRaw "TO_UPPER("
@@ -936,6 +947,22 @@ module QueryTranslator =
             visit expr innerQb |> ignore
             qb.AppendRaw ")"
                 
+        // String.Contains(string, StringComparison) - case-insensitive support (must come before OfShape1)
+        | OfShape2 null OfString "Contains" null OfStringComparison (text, what, comparisonExpr) ->
+            let comparison = evaluateExpr<StringComparison> comparisonExpr
+            if isIgnoreCase comparison then
+                qb.AppendRaw "INSTR(TO_LOWER("
+                visit text qb |> ignore
+                qb.AppendRaw "),TO_LOWER("
+                visit what qb |> ignore
+                qb.AppendRaw ")) > 0"
+            else
+                qb.AppendRaw "INSTR("
+                visit text qb |> ignore
+                qb.AppendRaw ","
+                visit what qb |> ignore
+                qb.AppendRaw ") > 0"
+
         | OfShape1 null OfString "Contains" null (text, what) ->
             qb.AppendRaw "INSTR("
             visit text qb |> ignore
@@ -1007,6 +1034,25 @@ module QueryTranslator =
 
             qb.AppendRaw ")"
 
+        // String.StartsWith(string, StringComparison) - must come before OfShape1
+        | OfShape2 null OfString "StartsWith" null OfStringComparison (arg, v, comparisonExpr) ->
+            let comparison = evaluateExpr<StringComparison> comparisonExpr
+            if isIgnoreCase comparison then
+                qb.AppendRaw "SUBSTR(TO_LOWER("
+                visit arg qb
+                qb.AppendRaw "),1,LENGTH("
+                visit v qb
+                qb.AppendRaw ")) = TO_LOWER("
+                visit v qb
+                qb.AppendRaw ")"
+            else
+                qb.AppendRaw "SUBSTR("
+                visit arg qb
+                qb.AppendRaw ",1,LENGTH("
+                visit v qb
+                qb.AppendRaw ")) = "
+                visit v qb
+
         | OfShape1 null OfString "StartsWith" null (arg, v) ->
             if isFullyConstant v then
                 let prefix = if v.Type = typeof<char> then (string << evaluateExpr<char>) v else evaluateExpr<string> v
@@ -1050,7 +1096,26 @@ module QueryTranslator =
                 qb.AppendRaw "))"
                 qb.AppendRaw " = "
                 visit v qb
-                
+
+        // String.EndsWith(string, StringComparison) - must come before OfShape1
+        | OfShape2 null OfString "EndsWith" null OfStringComparison (arg, v, comparisonExpr) ->
+            let comparison = evaluateExpr<StringComparison> comparisonExpr
+            if isIgnoreCase comparison then
+                qb.AppendRaw "SUBSTR(TO_LOWER("
+                visit arg qb
+                qb.AppendRaw "),-LENGTH("
+                visit v qb
+                qb.AppendRaw ")) = TO_LOWER("
+                visit v qb
+                qb.AppendRaw ")"
+            else
+                qb.AppendRaw "SUBSTR("
+                visit arg qb
+                qb.AppendRaw ",-LENGTH("
+                visit v qb
+                qb.AppendRaw ")) = "
+                visit v qb
+
         | OfShape1 null OfString "EndsWith" null (arg, v) ->
             qb.AppendRaw "SUBSTR("
             visit arg qb
@@ -1060,6 +1125,77 @@ module QueryTranslator =
             qb.AppendRaw "))"
             qb.AppendRaw " = "
             visit v qb
+
+        // String.Equals(string, StringComparison) - instance method
+        | OfShape2 null OfString "Equals" null OfStringComparison (arg, v, comparisonExpr) ->
+            let comparison = evaluateExpr<StringComparison> comparisonExpr
+            if isIgnoreCase comparison then
+                qb.AppendRaw "TO_LOWER("
+                visit arg qb
+                qb.AppendRaw ") = TO_LOWER("
+                visit v qb
+                qb.AppendRaw ")"
+            else
+                visit arg qb
+                qb.AppendRaw " = "
+                visit v qb
+
+        // String.Equals(string, string, StringComparison) - static method
+        // For static methods with 3 args: o=args[0] (first string), arg1=args[1] (second string), arg2=args[2] (StringComparison)
+        | OfShape2 null null "Equals" OfString OfStringComparison (arg1, arg2, comparisonExpr) when m.Method.DeclaringType = typeof<string> && m.Method.IsStatic ->
+            let comparison = evaluateExpr<StringComparison> comparisonExpr
+            if isIgnoreCase comparison then
+                qb.AppendRaw "TO_LOWER("
+                visit arg1 qb
+                qb.AppendRaw ") = TO_LOWER("
+                visit arg2 qb
+                qb.AppendRaw ")"
+            else
+                visit arg1 qb
+                qb.AppendRaw " = "
+                visit arg2 qb
+
+        // String.Compare(string, string, StringComparison) - static method
+        // Returns: -1 if a < b, 0 if a = b, 1 if a > b
+        // For static methods with 3 args: o=args[0] (first string), arg1=args[1] (second string), arg2=args[2] (StringComparison)
+        | OfShape2 null null "Compare" OfString OfStringComparison (arg1, arg2, comparisonExpr) when m.Method.DeclaringType = typeof<string> && m.Method.IsStatic ->
+            let comparison = evaluateExpr<StringComparison> comparisonExpr
+            if isIgnoreCase comparison then
+                qb.AppendRaw "(CASE WHEN TO_LOWER("
+                visit arg1 qb
+                qb.AppendRaw ") < TO_LOWER("
+                visit arg2 qb
+                qb.AppendRaw ") THEN -1 WHEN TO_LOWER("
+                visit arg1 qb
+                qb.AppendRaw ") > TO_LOWER("
+                visit arg2 qb
+                qb.AppendRaw ") THEN 1 ELSE 0 END)"
+            else
+                qb.AppendRaw "(CASE WHEN "
+                visit arg1 qb
+                qb.AppendRaw " < "
+                visit arg2 qb
+                qb.AppendRaw " THEN -1 WHEN "
+                visit arg1 qb
+                qb.AppendRaw " > "
+                visit arg2 qb
+                qb.AppendRaw " THEN 1 ELSE 0 END)"
+
+        // String.IndexOf(string, StringComparison)
+        | OfShape2 null OfString "IndexOf" null OfStringComparison (arg, v, comparisonExpr) ->
+            let comparison = evaluateExpr<StringComparison> comparisonExpr
+            if isIgnoreCase comparison then
+                qb.AppendRaw "(INSTR(TO_LOWER("
+                visit arg qb
+                qb.AppendRaw "),TO_LOWER("
+                visit v qb
+                qb.AppendRaw ")) - 1)"
+            else
+                qb.AppendRaw "(INSTR("
+                visit arg qb
+                qb.AppendRaw ","
+                visit v qb
+                qb.AppendRaw ") - 1)"
 
         | OfShape0 null null "ToObject" o when typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.Method.DeclaringType || m.Method.DeclaringType.FullName = "SoloDatabase.MongoDB.BsonDocument" ->
             let castToType = m.Method.GetGenericArguments().[0]

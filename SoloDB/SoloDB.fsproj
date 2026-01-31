@@ -19,7 +19,7 @@
     <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
 	<DebugType>embedded</DebugType>
     <PackageOutputPath>$(OutputPath)</PackageOutputPath>
-    <VersionPrefix>1.0.0</VersionPrefix>
+    <VersionPrefix>1.0.1</VersionPrefix>
     <LangVersion>10</LangVersion>
     <ParallelCompilation>true</ParallelCompilation>
     <Deterministic>false</Deterministic>
