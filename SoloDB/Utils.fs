@@ -187,15 +187,18 @@ module Utils =
                                             | fastType -> fastType
                                             )
 
+    // LEGACY: File hashing was removed in schema version 2.
+    // These functions remain for backward compatibility with v1 databases during migration.
+    // The SHA_HASH SQLite function in SoloDB.fs uses shaHash.
     let private shaHashBytes (bytes: byte array) =
         use sha = SHA1.Create()
         sha.ComputeHash(bytes)
 
-    let internal shaHash (o: obj) = 
+    let internal shaHash (o: obj) =
         match o with
-        | :? (byte array) as bytes -> 
+        | :? (byte array) as bytes ->
             shaHashBytes(bytes)
-        | :? string as str -> 
+        | :? string as str ->
             shaHashBytes(str |> Encoding.UTF8.GetBytes)
         | other -> raise (InvalidDataException(sprintf "Cannot hash object of type: %A" (other.GetType())))
 
