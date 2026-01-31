@@ -13,6 +13,7 @@ open System.Runtime.InteropServices
 open System.Data
 open FileStorageCore
 
+// NativePtr operations for efficient stream handling
 #nowarn "9"
 
 module FileStorage =

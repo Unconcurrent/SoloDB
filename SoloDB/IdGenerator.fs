@@ -5,6 +5,7 @@ open SoloDatabase
 open System.Reflection
 open System.Linq.Expressions
 
+// Instantiating F# interfaces directly for generic ID generator factory pattern
 #nowarn "3535"
 
 [<Interface>]

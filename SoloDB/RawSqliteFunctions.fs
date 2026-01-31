@@ -8,6 +8,7 @@ open System.Collections.Concurrent
 open Microsoft.Data.Sqlite
 open SQLitePCL
 
+// NativePtr operations for zero-copy access to SQLite callback values
 #nowarn "9"
 
 // ============================================================================

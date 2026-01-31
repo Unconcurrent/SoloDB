@@ -17,6 +17,7 @@ open System.Threading
 open SoloDatabase.JsonSerializator
 open System.Text
 
+// NativePtr operations for zero-copy JSON parsing from SQLite trigger callbacks
 #nowarn "9"
 
 /// <summary>
@@ -24,8 +25,10 @@ open System.Text
 /// </summary>
 type internal EventSystem internal () =
     let mutable sessionIndex = 0L
-    let buildLockedException (ex: exn) =
+    /// Redirects common exceptions to actionable error messages.
+    let redirectException (ex: exn) =
         match ex with
+        // Database locked: user tried to use external SoloDB instance inside handler
         | :? SqliteException as se ->
             let message = se.Message
             let isLocked =
@@ -38,12 +41,20 @@ type internal EventSystem internal () =
 
             if isLocked then
                 let wrapped = InvalidOperationException(
-                    "Event handlers must use ctx.Database. Using any other SoloDB/collection inside a handler can lock the database. " +
+                    "Event handlers must use the ctx parameter (which implements ISoloDB). Using any other SoloDB instance inside a handler will lock the database. " +
                     $"Original error: {message}",
                     se)
                 ValueSome (wrapped :> exn)
             else
                 ValueNone
+
+        // Collection modified: user called Unregister from within handler
+        | :? InvalidOperationException as ioe when ioe.Message.Contains("Collection was modified") ->
+            let wrapped = InvalidOperationException(
+                "Cannot call Unregister from within a handler. Return SoloDBEventsResult.RemoveHandler instead.",
+                ioe)
+            ValueSome (wrapped :> exn)
+
         | _ -> ValueNone
     member val internal GlobalLock = ReentrantSpinLock()
     member val internal InsertingHandlerMapping = CowByteSpanMap<ResizeArray<InsertingHandlerSystem>>()
@@ -94,7 +105,7 @@ type internal EventSystem internal () =
             let mutable restoreTransactionState = false
             let mutable previousTransactionState = false
             let mutable cachedConnection = Unchecked.defaultof<SQLiteTools.CachingDbConnection>
-            try 
+            try
                 this.GlobalLock.Enter()
                 match (connection :> obj) with
                 | :? SQLiteTools.CachingDbConnection as cachingConn ->
@@ -115,28 +126,28 @@ type internal EventSystem internal () =
                 let mutable i = 0
 
                 try
-                    for h in handlers do
-                        if not handlerFailed then
+                    try
+                        for h in handlers do
                             if NativePtr.isNullPtr handlersToRemove then
                                 handlersToRemoveCount <- handlers.Count
                                 handlersToRemove <- NativePtr.stackalloc<bool> handlersToRemoveCount
                                 NativePtr.initBlock handlersToRemove 0uy (uint32 handlersToRemoveCount * uint32 sizeof<bool>)
 
-                            try
-                                match h.Invoke(connection, session, newSpan): (SoloDBEventsResult | null) with
-                                | EventHandled
-                                // Someone will definitely return null from C#.
-                                | null -> ()
-                                | RemoveHandler -> NativePtr.set handlersToRemove i true
-                            with ex ->
-                                let finalEx =
-                                    match buildLockedException ex with
-                                    | ValueSome rewritten -> rewritten
-                                    | ValueNone -> ex
-                                handlerFailed <- true
-                                if not (String.IsNullOrWhiteSpace finalEx.Message) then
-                                    handlerFailureMessage <- finalEx.Message
-                        i <- i + 1
+                            match h.Invoke(connection, session, newSpan) |> Option.ofObj with
+                            // Null from C# treated as EventHandled
+                            | None
+                            | Some EventHandled -> ()
+                            | Some RemoveHandler -> NativePtr.set handlersToRemove i true
+
+                            i <- i + 1
+                    with ex ->
+                        let finalEx =
+                            match redirectException ex with
+                            | ValueSome rewritten -> rewritten
+                            | ValueNone -> ex
+                        handlerFailed <- true
+                        if not (String.IsNullOrWhiteSpace finalEx.Message) then
+                            handlerFailureMessage <- finalEx.Message
                 finally
                     if not (NativePtr.isNullPtr handlersToRemove) then
                         for j = handlersToRemoveCount - 1 downto 0 do
@@ -215,25 +226,28 @@ type internal EventSystem internal () =
                 let mutable i = 0
 
                 try
-                    for h in handlers do
-                        if not handlerFailed then
+                    try
+                        for h in handlers do
                             if NativePtr.isNullPtr handlersToRemove then
                                 handlersToRemoveCount <- handlers.Count
                                 handlersToRemove <- NativePtr.stackalloc<bool> handlersToRemoveCount
                                 NativePtr.initBlock handlersToRemove 0uy (uint32 handlersToRemoveCount * uint32 sizeof<bool>)
 
-                            try
-                                if h.Invoke(connection, session, oldSpan) = RemoveHandler then
-                                    NativePtr.set handlersToRemove i true
-                            with ex ->
-                                let finalEx =
-                                    match buildLockedException ex with
-                                    | ValueSome rewritten -> rewritten
-                                    | ValueNone -> ex
-                                handlerFailed <- true
-                                if not (String.IsNullOrWhiteSpace finalEx.Message) then
-                                    handlerFailureMessage <- finalEx.Message
-                        i <- i + 1
+                            match h.Invoke(connection, session, oldSpan) |> Option.ofObj with
+                            // Null from C# treated as EventHandled
+                            | None
+                            | Some EventHandled -> ()
+                            | Some RemoveHandler -> NativePtr.set handlersToRemove i true
+
+                            i <- i + 1
+                    with ex ->
+                        let finalEx =
+                            match redirectException ex with
+                            | ValueSome rewritten -> rewritten
+                            | ValueNone -> ex
+                        handlerFailed <- true
+                        if not (String.IsNullOrWhiteSpace finalEx.Message) then
+                            handlerFailureMessage <- finalEx.Message
                 finally
                     if not (NativePtr.isNullPtr handlersToRemove) then
                         for j = handlersToRemoveCount - 1 downto 0 do
@@ -317,25 +331,28 @@ type internal EventSystem internal () =
                 let mutable i = 0
 
                 try
-                    for h in handlers do
-                        if not handlerFailed then
+                    try
+                        for h in handlers do
                             if NativePtr.isNullPtr handlersToRemove then
                                 handlersToRemoveCount <- handlers.Count
                                 handlersToRemove <- NativePtr.stackalloc<bool> handlersToRemoveCount
                                 NativePtr.initBlock handlersToRemove 0uy (uint32 handlersToRemoveCount * uint32 sizeof<bool>)
 
-                            try
-                                if h.Invoke(connection, session, oldUtf8, oldUtf8Size, newUtf8, newUtf8Size) = RemoveHandler then
-                                    NativePtr.set handlersToRemove i true
-                            with ex ->
-                                let finalEx =
-                                    match buildLockedException ex with
-                                    | ValueSome rewritten -> rewritten
-                                    | ValueNone -> ex
-                                handlerFailed <- true
-                                if not (String.IsNullOrWhiteSpace finalEx.Message) then
-                                    handlerFailureMessage <- finalEx.Message
-                        i <- i + 1
+                            match h.Invoke(connection, session, oldUtf8, oldUtf8Size, newUtf8, newUtf8Size) |> Option.ofObj with
+                            // Null from C# treated as EventHandled
+                            | None
+                            | Some EventHandled -> ()
+                            | Some RemoveHandler -> NativePtr.set handlersToRemove i true
+
+                            i <- i + 1
+                    with ex ->
+                        let finalEx =
+                            match redirectException ex with
+                            | ValueSome rewritten -> rewritten
+                            | ValueNone -> ex
+                        handlerFailed <- true
+                        if not (String.IsNullOrWhiteSpace finalEx.Message) then
+                            handlerFailureMessage <- finalEx.Message
                 finally
                     if not (NativePtr.isNullPtr handlersToRemove) then
                         for j = handlersToRemoveCount - 1 downto 0 do
@@ -414,25 +431,28 @@ type internal EventSystem internal () =
                 let mutable i = 0
 
                 try
-                    for h in handlers do
-                        if not handlerFailed then
+                    try
+                        for h in handlers do
                             if NativePtr.isNullPtr handlersToRemove then
                                 handlersToRemoveCount <- handlers.Count
                                 handlersToRemove <- NativePtr.stackalloc<bool> handlersToRemoveCount
                                 NativePtr.initBlock handlersToRemove 0uy (uint32 handlersToRemoveCount * uint32 sizeof<bool>)
 
-                            try
-                                if h.Invoke(connection, session, newSpan) = RemoveHandler then
-                                    NativePtr.set handlersToRemove i true
-                            with ex ->
-                                let finalEx =
-                                    match buildLockedException ex with
-                                    | ValueSome rewritten -> rewritten
-                                    | ValueNone -> ex
-                                handlerFailed <- true
-                                if not (String.IsNullOrWhiteSpace finalEx.Message) then
-                                    handlerFailureMessage <- finalEx.Message
-                        i <- i + 1
+                            match h.Invoke(connection, session, newSpan) |> Option.ofObj with
+                            // Null from C# treated as EventHandled
+                            | None
+                            | Some EventHandled -> ()
+                            | Some RemoveHandler -> NativePtr.set handlersToRemove i true
+
+                            i <- i + 1
+                    with ex ->
+                        let finalEx =
+                            match redirectException ex with
+                            | ValueSome rewritten -> rewritten
+                            | ValueNone -> ex
+                        handlerFailed <- true
+                        if not (String.IsNullOrWhiteSpace finalEx.Message) then
+                            handlerFailureMessage <- finalEx.Message
                 finally
                     if not (NativePtr.isNullPtr handlersToRemove) then
                         for j = handlersToRemoveCount - 1 downto 0 do
@@ -511,25 +531,28 @@ type internal EventSystem internal () =
                 let mutable i = 0
 
                 try
-                    for h in handlers do
-                        if not handlerFailed then
+                    try
+                        for h in handlers do
                             if NativePtr.isNullPtr handlersToRemove then
                                 handlersToRemoveCount <- handlers.Count
                                 handlersToRemove <- NativePtr.stackalloc<bool> handlersToRemoveCount
                                 NativePtr.initBlock handlersToRemove 0uy (uint32 handlersToRemoveCount * uint32 sizeof<bool>)
 
-                            try
-                                if h.Invoke(connection, session, oldSpan) = RemoveHandler then
-                                    NativePtr.set handlersToRemove i true
-                            with ex ->
-                                let finalEx =
-                                    match buildLockedException ex with
-                                    | ValueSome rewritten -> rewritten
-                                    | ValueNone -> ex
-                                handlerFailed <- true
-                                if not (String.IsNullOrWhiteSpace finalEx.Message) then
-                                    handlerFailureMessage <- finalEx.Message
-                        i <- i + 1
+                            match h.Invoke(connection, session, oldSpan) |> Option.ofObj with
+                            // Null from C# treated as EventHandled
+                            | None
+                            | Some EventHandled -> ()
+                            | Some RemoveHandler -> NativePtr.set handlersToRemove i true
+
+                            i <- i + 1
+                    with ex ->
+                        let finalEx =
+                            match redirectException ex with
+                            | ValueSome rewritten -> rewritten
+                            | ValueNone -> ex
+                        handlerFailed <- true
+                        if not (String.IsNullOrWhiteSpace finalEx.Message) then
+                            handlerFailureMessage <- finalEx.Message
                 finally
                     if not (NativePtr.isNullPtr handlersToRemove) then
                         for j = handlersToRemoveCount - 1 downto 0 do
@@ -613,25 +636,28 @@ type internal EventSystem internal () =
                 let mutable i = 0
 
                 try
-                    for h in handlers do
-                        if not handlerFailed then
+                    try
+                        for h in handlers do
                             if NativePtr.isNullPtr handlersToRemove then
                                 handlersToRemoveCount <- handlers.Count
                                 handlersToRemove <- NativePtr.stackalloc<bool> handlersToRemoveCount
                                 NativePtr.initBlock handlersToRemove 0uy (uint32 handlersToRemoveCount * uint32 sizeof<bool>)
 
-                            try
-                                if h.Invoke(connection, session, oldUtf8, oldUtf8Size, newUtf8, newUtf8Size) = RemoveHandler then
-                                    NativePtr.set handlersToRemove i true
-                            with ex ->
-                                let finalEx =
-                                    match buildLockedException ex with
-                                    | ValueSome rewritten -> rewritten
-                                    | ValueNone -> ex
-                                handlerFailed <- true
-                                if not (String.IsNullOrWhiteSpace finalEx.Message) then
-                                    handlerFailureMessage <- finalEx.Message
-                        i <- i + 1
+                            match h.Invoke(connection, session, oldUtf8, oldUtf8Size, newUtf8, newUtf8Size) |> Option.ofObj with
+                            // Null from C# treated as EventHandled
+                            | None
+                            | Some EventHandled -> ()
+                            | Some RemoveHandler -> NativePtr.set handlersToRemove i true
+
+                            i <- i + 1
+                    with ex ->
+                        let finalEx =
+                            match redirectException ex with
+                            | ValueSome rewritten -> rewritten
+                            | ValueNone -> ex
+                        handlerFailed <- true
+                        if not (String.IsNullOrWhiteSpace finalEx.Message) then
+                            handlerFailureMessage <- finalEx.Message
                 finally
                     if not (NativePtr.isNullPtr handlersToRemove) then
                         for j = handlersToRemoveCount - 1 downto 0 do
@@ -849,9 +875,10 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         if json.IsEmpty then NativePtr.nullPtr<byte>
                         else NativePtr.ofVoidPtr (Unsafe.AsPointer(&MemoryMarshal.GetReference json))
                     let result =
-                        try 
+                        try
                             ctx.Reset (conn, session, jsonPtr, json.Length)
-                            handler.Invoke ctx
+                            // Handle null from C# as EventHandled
+                            handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
                         finally
                             ctx.MarkDisposed()
                             ctxs.Push ctx
@@ -906,9 +933,10 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         if json.IsEmpty then NativePtr.nullPtr<byte>
                         else NativePtr.ofVoidPtr (Unsafe.AsPointer(&MemoryMarshal.GetReference json))
                     let result =
-                        try 
+                        try
                             ctx.Reset (conn, session, jsonPtr, json.Length)
-                            handler.Invoke ctx
+                            // Handle null from C# as EventHandled
+                            handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
                         finally
                             ctx.MarkDisposed()
                             ctxs.Push ctx
@@ -960,9 +988,10 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         ctx <- new SoloDBUpdatingEventContext<'T>(collectionName, createDb)
 
                     let result =
-                        try 
+                        try
                             ctx.Reset (conn, session, jsonOld, jsonOldSize, jsonNew, jsonNewSize)
-                            handler.Invoke ctx
+                            // Handle null from C# as EventHandled
+                            handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
                         finally
                             ctx.MarkDisposed()
                             ctxs.Push ctx
@@ -1017,9 +1046,10 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         if json.IsEmpty then NativePtr.nullPtr<byte>
                         else NativePtr.ofVoidPtr (Unsafe.AsPointer(&MemoryMarshal.GetReference json))
                     let result =
-                        try 
+                        try
                             ctx.Reset (conn, session, jsonPtr, json.Length)
-                            handler.Invoke ctx
+                            // Handle null from C# as EventHandled
+                            handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
                         finally
                             ctx.MarkDisposed()
                             ctxs.Push ctx
@@ -1074,9 +1104,10 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         if json.IsEmpty then NativePtr.nullPtr<byte>
                         else NativePtr.ofVoidPtr (Unsafe.AsPointer(&MemoryMarshal.GetReference json))
                     let result =
-                        try 
+                        try
                             ctx.Reset (conn, session, jsonPtr, json.Length)
-                            handler.Invoke ctx
+                            // Handle null from C# as EventHandled
+                            handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
                         finally
                             ctx.MarkDisposed()
                             ctxs.Push ctx
@@ -1128,9 +1159,10 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         ctx <- new SoloDBUpdatingEventContext<'T>(collectionName, createDb)
 
                     let result =
-                        try 
+                        try
                             ctx.Reset (conn, session, jsonOld, jsonOldSize, jsonNew, jsonNewSize)
-                            handler.Invoke ctx
+                            // Handle null from C# as EventHandled
+                            handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
                         finally
                             ctx.MarkDisposed()
                             ctxs.Push ctx
