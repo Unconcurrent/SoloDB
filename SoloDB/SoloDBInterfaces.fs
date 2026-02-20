@@ -1269,3 +1269,17 @@ type UntypedCollectionExt =
     [<Extension>]
     static member InsertObj(collection: ISoloDBCollection<JsonSerializator.JsonValue>, o: obj) =
         o |> JsonSerializator.JsonValue.SerializeWithType |> collection.Insert
+
+[<Extension>]
+type RelationQueryExt =
+    [<Extension>]
+    static member Exclude<'T, 'TRelation>(query: IQueryable<'T>, selector: Expression<Func<'T, 'TRelation>>) : IQueryable<'T> =
+        if isNull query then raise (ArgumentNullException(nameof(query)))
+        if isNull selector then raise (ArgumentNullException(nameof(selector)))
+        // Produce a MethodCallExpression so the query pipeline can detect Exclude and populate ExcludedPaths.
+        let method =
+            typeof<RelationQueryExt>
+                .GetMethod("Exclude", Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
+                .MakeGenericMethod(typeof<'T>, typeof<'TRelation>)
+        let callExpr = Expression.Call(method, query.Expression, selector)
+        query.Provider.CreateQuery<'T>(callExpr)

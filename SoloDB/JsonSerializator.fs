@@ -16,6 +16,7 @@ open System.Web
 open System.Linq.Expressions
 open System.Linq
 open System.Numerics
+open System.Runtime.Serialization
 
 #nowarn "9" // NativePtr stuff
 #nowarn "51" // voidptr of a stack var
@@ -2117,6 +2118,51 @@ and private JsonDeserializerImpl<'A> =
                 | _ -> fn.Invoke json
             )
 
+        | t when t.IsGenericType && t.GetGenericTypeDefinition().Name = "DBRef`1" ->
+            let targetType = (GenericTypeArgCache.Get t).[0]
+            let unloadedMethod = t.GetMethod("Unloaded", BindingFlags.NonPublic ||| BindingFlags.Static)
+            let loadedMethod = t.GetMethod("Loaded", BindingFlags.NonPublic ||| BindingFlags.Static)
+
+            // Pre-compile Unloaded(int64) delegate
+            let int64Param = Expression.Parameter(typeof<int64>)
+            let unloadedFn =
+                Expression.Lambda<Func<int64, 'A>>(
+                    Expression.Convert(Expression.Call(unloadedMethod, [|int64Param :> Expression|]), typeof<'A>),
+                    [|int64Param|]).Compile(false)
+
+            // Pre-compile Loaded(int64, obj) delegate
+            let idParam = Expression.Parameter(typeof<int64>)
+            let valueParam = Expression.Parameter(typeof<obj>)
+            let loadedFn =
+                Expression.Lambda<Func<int64, obj, 'A>>(
+                    Expression.Convert(
+                        Expression.Call(loadedMethod, [|idParam :> Expression; Expression.Convert(valueParam, targetType) :> Expression|]),
+                        typeof<'A>),
+                    [|idParam; valueParam|]).Compile(false)
+
+            // Pre-compile target type deserializer
+            let targetDeserializeMeth =
+                typedefof<JsonDeserializerImpl<_>>
+                    .MakeGenericType(targetType)
+                    .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+            let jsonParam2 = Expression.Parameter(typeof<JsonValue>)
+            let targetDeserializeFn =
+                Expression.Lambda<Func<JsonValue, obj>>(
+                    Expression.Convert(Expression.Call(targetDeserializeMeth, [|jsonParam2 :> Expression|]), typeof<obj>),
+                    [|jsonParam2|]).Compile(false)
+
+            (fun (json: JsonValue) ->
+                match json with
+                | Null -> Unchecked.defaultof<'A> // DBRef.None
+                | Number n -> unloadedFn.Invoke(int64 n) // DBRef.Unloaded(id)
+                | List items when items.Count = 2 ->
+                    // Materialized: [id, entityJson] from LEFT JOIN json_set
+                    let id = int64 (items.[0].ToObject<decimal>())
+                    let value = targetDeserializeFn.Invoke(items.[1])
+                    loadedFn.Invoke(id, value) // DBRef.Loaded(id, entity)
+                | other -> failwithf "Cannot deserialize DBRef<%s> from %A" targetType.Name other
+            )
+
         | t when t.IsValueType ->
             let propertiesInfo = t.GetProperties()
             let fields = t.GetFields()
@@ -2348,6 +2394,23 @@ and private JsonSerializerImpl<'A> =
                 | null -> JsonValue.Null
                 | _ -> JsonImpl.SerializeByTypeWithType (o.GetType()) o)
             :> obj :?> 'A -> JsonValue
+
+        | t when t.IsGenericType && t.GetGenericTypeDefinition().Name = "DBRef`1" ->
+            let idProp = t.GetProperty("Id", BindingFlags.Public ||| BindingFlags.Instance)
+            let hasValueProp = t.GetProperty("HasValue", BindingFlags.Public ||| BindingFlags.Instance)
+            if isNull idProp || isNull hasValueProp then
+                failwithf "Invalid DBRef serializer contract for type %s. Expected public Id and HasValue properties." t.FullName
+
+            (fun (o: 'A) ->
+                let boxed = box o
+                let hasValue = hasValueProp.GetValue(boxed, null) :?> bool
+                if not hasValue then
+                    Null
+                else
+                    let idObj = idProp.GetValue(boxed, null)
+                    let id = Convert.ToInt64(idObj, CultureInfo.InvariantCulture)
+                    Number(decimal id))
+            :> obj :?> ('A -> JsonValue)
 
         | OfType bool -> 
             (fun (o: bool) -> Boolean o)
@@ -2683,7 +2746,15 @@ and private JsonSerializerImpl<'A> =
                     JsonValue.List jsonList
             ) :> obj :?> ('A -> JsonValue)
         | t ->
-            let props = t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance) |> Array.filter(_.CanRead)
+            let isIgnoredDataMember (prop: PropertyInfo) =
+                not (isNull (prop.GetCustomAttribute<IgnoreDataMemberAttribute>(true)))
+
+            let isDBRefManyType (propType: Type) =
+                propType.IsGenericType && propType.GetGenericTypeDefinition().Name = "DBRefMany`1"
+
+            let props =
+                t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+                |> Array.filter (fun prop -> prop.CanRead && not (isIgnoredDataMember prop) && not (isDBRefManyType prop.PropertyType))
             let fields = t.GetFields()
 
             let param = Expression.Parameter(t)

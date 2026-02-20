@@ -528,6 +528,14 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         | Pooled _ -> false
     /// <summary>Gets a value indicating whether type information should be included during serialization for documents in this collection.</summary>
     member val IncludeType = mustIncludeTypeInformationInSerialization<'T>
+    /// <summary>True when the document type declares DBRef/DBRefMany properties.</summary>
+    member val private HasRelations =
+        typeof<'T>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+        |> Array.exists (fun p ->
+            let t = p.PropertyType
+            t.IsGenericType &&
+            let genericType = t.GetGenericTypeDefinition()
+            (genericType = typedefof<DBRef<_>> || genericType = typedefof<DBRefMany<_>>))
 
     /// <summary>Gets the event registration API for this collection.</summary>
     member val private Events: ISoloDBCollectionEvents<'T> =
@@ -577,8 +585,35 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="item">The document to insert.</param>
     /// <returns>The ID of the newly inserted document.</returns>
     member this.Insert (item: 'T) =
-        use connection = connection.Get()
-        Helper.insertInner this.IncludeType item connection name this
+        if this.HasRelations && not this.InTransaction then
+            use connection = connection.Get()
+            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
+            let directConnection = Transitive connection
+            let transientConnection = Collection(directConnection, name, connectionString, parentData)
+            connection.Execute "BEGIN IMMEDIATE;" |> ignore
+            try
+                let id = transientConnection.Insert(item)
+                connection.Execute "COMMIT;" |> ignore
+                id
+            with _ ->
+                connection.Execute "ROLLBACK;" |> ignore
+                reraise()
+        else
+            use connection = connection.Get()
+            if this.HasRelations then
+                let tx: Relations.RelationTxContext = {
+                    Connection = connection
+                    OwnerTable = name
+                    OwnerType = typeof<'T>
+                    InTransaction = true
+                }
+                Relations.ensureSchemaForOwnerType tx typeof<'T>
+                let plan = Relations.prepareInsert tx (box item)
+                let id = Helper.insertInner this.IncludeType item connection name this
+                Relations.syncInsert tx id plan
+                id
+            else
+                Helper.insertInner this.IncludeType item connection name this
 
     /// <summary>
     /// Inserts a new document or replaces an existing one if a document with the same ID already exists.
@@ -586,8 +621,64 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="item">The document to insert or replace.</param>
     /// <returns>The ID of the inserted or replaced document.</returns>
     member this.InsertOrReplace (item: 'T) =
-        use connection = connection.Get()
-        Helper.insertOrReplaceInner this.IncludeType item connection name this
+        if this.HasRelations && not this.InTransaction then
+            use connection = connection.Get()
+            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
+            let directConnection = Transitive connection
+            let transientConnection = Collection(directConnection, name, connectionString, parentData)
+            connection.Execute "BEGIN IMMEDIATE;" |> ignore
+            try
+                let id = transientConnection.InsertOrReplace(item)
+                connection.Execute "COMMIT;" |> ignore
+                id
+            with _ ->
+                connection.Execute "ROLLBACK;" |> ignore
+                reraise()
+        else
+            use connection = connection.Get()
+            if this.HasRelations then
+                let tx: Relations.RelationTxContext = {
+                    Connection = connection
+                    OwnerTable = name
+                    OwnerType = typeof<'T>
+                    InTransaction = true
+                }
+                Relations.ensureSchemaForOwnerType tx typeof<'T>
+
+                let oldRow =
+                    if HasTypeId<'T>.Value then
+                        let id = HasTypeId<'T>.Read item
+                        if id > 0L then
+                            match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {| id = id |}) with
+                            | row when Object.ReferenceEquals(row, null) -> ValueNone
+                            | row -> ValueSome row
+                        else ValueNone
+                    else
+                        match CustomTypeId<'T>.Value with
+                        | Some customId ->
+                            let idValue = customId.GetId(item |> box)
+                            let idProp = customId.Property
+                            let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = idValue))
+                            match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
+                            | row when Object.ReferenceEquals(row, null) -> ValueNone
+                            | row -> ValueSome row
+                        | None -> ValueNone
+
+                let oldOwner, oldOwnerId =
+                    match oldRow with
+                    | ValueSome row -> ValueSome (fromSQLite<'T> row |> box), ValueSome row.Id.Value
+                    | ValueNone -> ValueNone, ValueNone
+
+                match oldOwnerId with
+                | ValueSome ownerId -> Relations.applyOwnerDeletePolicies tx name ownerId
+                | ValueNone -> ()
+
+                let plan = Relations.prepareUpsert tx oldOwner (box item)
+                let id = Helper.insertOrReplaceInner this.IncludeType item connection name this
+                Relations.syncUpsert tx id plan
+                id
+            else
+                Helper.insertOrReplaceInner this.IncludeType item connection name this
 
     /// <summary>
     /// Inserts a sequence of documents in a single transaction for efficiency.
@@ -599,10 +690,28 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
 
         if this.InTransaction then
             use connection = connection.Get()
+            let tx =
+                if this.HasRelations then
+                    let x: Relations.RelationTxContext = {
+                        Connection = connection
+                        OwnerTable = name
+                        OwnerType = typeof<'T>
+                        InTransaction = true
+                    }
+                    Relations.ensureSchemaForOwnerType x typeof<'T>
+                    ValueSome x
+                else ValueNone
 
             let ids = List<int64>()
             for item in items do
-                Helper.insertInner this.IncludeType item connection name this |> ids.Add
+                match tx with
+                | ValueSome tx ->
+                    let plan = Relations.prepareInsert tx (box item)
+                    let id = Helper.insertInner this.IncludeType item connection name this
+                    Relations.syncInsert tx id plan
+                    ids.Add id
+                | ValueNone ->
+                    Helper.insertInner this.IncludeType item connection name this |> ids.Add
             ids
         else
 
@@ -613,9 +722,28 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         connection.Execute "BEGIN;" |> ignore
 
         try
+            let tx =
+                if this.HasRelations then
+                    let x: Relations.RelationTxContext = {
+                        Connection = connection
+                        OwnerTable = name
+                        OwnerType = typeof<'T>
+                        InTransaction = true
+                    }
+                    Relations.ensureSchemaForOwnerType x typeof<'T>
+                    ValueSome x
+                else ValueNone
+
             let ids = List<int64>()
             for item in items do
-                Helper.insertInner this.IncludeType item connection name transientConnection |> ids.Add
+                match tx with
+                | ValueSome tx ->
+                    let plan = Relations.prepareInsert tx (box item)
+                    let id = Helper.insertInner this.IncludeType item connection name transientConnection
+                    Relations.syncInsert tx id plan
+                    ids.Add id
+                | ValueNone ->
+                    Helper.insertInner this.IncludeType item connection name transientConnection |> ids.Add
 
             connection.Execute "COMMIT;" |> ignore
             ids
@@ -633,10 +761,56 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
 
         if this.InTransaction then
             use connection = connection.Get()
+            let tx =
+                if this.HasRelations then
+                    let x: Relations.RelationTxContext = {
+                        Connection = connection
+                        OwnerTable = name
+                        OwnerType = typeof<'T>
+                        InTransaction = true
+                    }
+                    Relations.ensureSchemaForOwnerType x typeof<'T>
+                    ValueSome x
+                else ValueNone
 
             let ids = List<int64>()
             for item in items do
-                Helper.insertOrReplaceInner this.IncludeType item connection name this |> ids.Add
+                match tx with
+                | ValueSome tx ->
+                    let oldRow =
+                        if HasTypeId<'T>.Value then
+                            let id = HasTypeId<'T>.Read item
+                            if id > 0L then
+                                match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {| id = id |}) with
+                                | row when Object.ReferenceEquals(row, null) -> ValueNone
+                                | row -> ValueSome row
+                            else ValueNone
+                        else
+                            match CustomTypeId<'T>.Value with
+                            | Some customId ->
+                                let idValue = customId.GetId(item |> box)
+                                let idProp = customId.Property
+                                let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = idValue))
+                                match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
+                                | row when Object.ReferenceEquals(row, null) -> ValueNone
+                                | row -> ValueSome row
+                            | None -> ValueNone
+
+                    let oldOwner, oldOwnerId =
+                        match oldRow with
+                        | ValueSome row -> ValueSome (fromSQLite<'T> row |> box), ValueSome row.Id.Value
+                        | ValueNone -> ValueNone, ValueNone
+
+                    match oldOwnerId with
+                    | ValueSome ownerId -> Relations.applyOwnerDeletePolicies tx name ownerId
+                    | ValueNone -> ()
+
+                    let plan = Relations.prepareUpsert tx oldOwner (box item)
+                    let id = Helper.insertOrReplaceInner this.IncludeType item connection name this
+                    Relations.syncUpsert tx id plan
+                    ids.Add id
+                | ValueNone ->
+                    Helper.insertOrReplaceInner this.IncludeType item connection name this |> ids.Add
             ids
         else
 
@@ -647,9 +821,56 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         connection.Execute "BEGIN;" |> ignore
         
         try
+            let tx =
+                if this.HasRelations then
+                    let x: Relations.RelationTxContext = {
+                        Connection = connection
+                        OwnerTable = name
+                        OwnerType = typeof<'T>
+                        InTransaction = true
+                    }
+                    Relations.ensureSchemaForOwnerType x typeof<'T>
+                    ValueSome x
+                else ValueNone
+
             let ids = List<int64>()
             for item in items do
-                Helper.insertOrReplaceInner this.IncludeType item connection name transientConnection |> ids.Add
+                match tx with
+                | ValueSome tx ->
+                    let oldRow =
+                        if HasTypeId<'T>.Value then
+                            let id = HasTypeId<'T>.Read item
+                            if id > 0L then
+                                match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {| id = id |}) with
+                                | row when Object.ReferenceEquals(row, null) -> ValueNone
+                                | row -> ValueSome row
+                            else ValueNone
+                        else
+                            match CustomTypeId<'T>.Value with
+                            | Some customId ->
+                                let idValue = customId.GetId(item |> box)
+                                let idProp = customId.Property
+                                let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = idValue))
+                                match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
+                                | row when Object.ReferenceEquals(row, null) -> ValueNone
+                                | row -> ValueSome row
+                            | None -> ValueNone
+
+                    let oldOwner, oldOwnerId =
+                        match oldRow with
+                        | ValueSome row -> ValueSome (fromSQLite<'T> row |> box), ValueSome row.Id.Value
+                        | ValueNone -> ValueNone, ValueNone
+
+                    match oldOwnerId with
+                    | ValueSome ownerId -> Relations.applyOwnerDeletePolicies tx name ownerId
+                    | ValueNone -> ()
+
+                    let plan = Relations.prepareUpsert tx oldOwner (box item)
+                    let id = Helper.insertOrReplaceInner this.IncludeType item connection name transientConnection
+                    Relations.syncUpsert tx id plan
+                    ids.Add id
+                | ValueNone ->
+                    Helper.insertOrReplaceInner this.IncludeType item connection name transientConnection |> ids.Add
 
             connection.Execute "COMMIT;" |> ignore
             ids
@@ -685,8 +906,39 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="id">The ID of the document to delete.</param>
     /// <returns>The number of documents deleted (0 or 1).</returns>
     member this.DeleteById(id: int64) =
-        use connection = connection.Get()
-        connection.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {|id = id|})
+        if this.HasRelations && not this.InTransaction then
+            use connection = connection.Get()
+            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
+            let directConnection = Transitive connection
+            let transientConnection = Collection(directConnection, name, connectionString, parentData)
+            connection.Execute "BEGIN IMMEDIATE;" |> ignore
+            try
+                let count = transientConnection.DeleteById(id)
+                connection.Execute "COMMIT;" |> ignore
+                count
+            with _ ->
+                connection.Execute "ROLLBACK;" |> ignore
+                reraise()
+        else
+            use connection = connection.Get()
+            if this.HasRelations then
+                let tx: Relations.RelationTxContext = {
+                    Connection = connection
+                    OwnerTable = name
+                    OwnerType = typeof<'T>
+                    InTransaction = true
+                }
+                Relations.ensureSchemaForOwnerType tx typeof<'T>
+                let oldRow = connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {| id = id |})
+                if isNull oldRow then
+                    0
+                else
+                    let owner = fromSQLite<'T> oldRow
+                    let deletePlan = Relations.prepareDeleteOwner tx id (box owner)
+                    Relations.syncDeleteOwner tx deletePlan
+                    connection.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {|id = id|})
+            else
+                connection.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {|id = id|})
 
     /// <summary>
     /// Tries to find a document by its custom ID, as defined by the [Id] attribute on the document type.
@@ -819,8 +1071,40 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
 
         let idProp = CustomTypeId<'T>.Value.Value.Property
         let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
-        use connection = connection.Get()
-        connection.Execute ($"DELETE FROM \"{name}\" WHERE {filter}", variables)
+        if this.HasRelations && not this.InTransaction then
+            use connection = connection.Get()
+            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
+            let directConnection = Transitive connection
+            let transientConnection = Collection(directConnection, name, connectionString, parentData)
+            connection.Execute "BEGIN IMMEDIATE;" |> ignore
+            try
+                let count = transientConnection.DeleteById<'IdType>(id)
+                connection.Execute "COMMIT;" |> ignore
+                count
+            with _ ->
+                connection.Execute "ROLLBACK;" |> ignore
+                reraise()
+        else
+            use connection = connection.Get()
+            if this.HasRelations then
+                let tx: Relations.RelationTxContext = {
+                    Connection = connection
+                    OwnerTable = name
+                    OwnerType = typeof<'T>
+                    InTransaction = true
+                }
+                Relations.ensureSchemaForOwnerType tx typeof<'T>
+
+                let oldRow = connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables)
+                if isNull oldRow then
+                    0
+                else
+                    let owner = fromSQLite<'T> oldRow
+                    let deletePlan = Relations.prepareDeleteOwner tx oldRow.Id.Value (box owner)
+                    Relations.syncDeleteOwner tx deletePlan
+                    connection.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {| id = oldRow.Id.Value |})
+            else
+                connection.Execute ($"DELETE FROM \"{name}\" WHERE {filter}", variables)
 
     /// <summary>
     /// Updates an existing document in the collection. The document must have a valid ID.
@@ -829,24 +1113,60 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <exception cref="KeyNotFoundException">Thrown if no document with the item's ID is found.</exception>
     /// <exception cref="InvalidOperationException">Thrown if the document type does not have a recognizable ID property.</exception>
     member this.Update(item: 'T) =
-        let filter, variables = 
-            if HasTypeId<'T>.Value then
-                let id = HasTypeId<'T>.Read item
-                QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<int64>("Id") = id))
-            else match CustomTypeId<'T>.Value with
-                 | Some customId ->
-                    let id = customId.GetId (item |> box)
-                    let idProp = CustomTypeId<'T>.Value.Value.Property
-                    QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = id))
-                 | None ->
-                    raise (InvalidOperationException $"The item's type {typeof<'T>.Name} does not have a int64 Id property or a custom Id to use in the update process.")
+        if this.HasRelations && not this.InTransaction then
+            use connection = connection.Get()
+            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
+            let directConnection = Transitive connection
+            let transientConnection = Collection(directConnection, name, connectionString, parentData)
+            connection.Execute "BEGIN IMMEDIATE;" |> ignore
+            try
+                transientConnection.Update(item)
+                connection.Execute "COMMIT;" |> ignore
+            with _ ->
+                connection.Execute "ROLLBACK;" |> ignore
+                reraise()
+        else
+            let filter, variables = 
+                if HasTypeId<'T>.Value then
+                    let id = HasTypeId<'T>.Read item
+                    QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<int64>("Id") = id))
+                else match CustomTypeId<'T>.Value with
+                     | Some customId ->
+                        let id = customId.GetId (item |> box)
+                        let idProp = CustomTypeId<'T>.Value.Value.Property
+                        QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = id))
+                     | None ->
+                        raise (InvalidOperationException $"The item's type {typeof<'T>.Name} does not have a int64 Id property or a custom Id to use in the update process.")
 
-        variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
-        use connection = connection.Get()
-        let count = connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
-        if count <= 0 then
-            raise (KeyNotFoundException "Could not Update any entities with specified Id.")
-        ()
+            use connection = connection.Get()
+            if this.HasRelations then
+                let tx: Relations.RelationTxContext = {
+                    Connection = connection
+                    OwnerTable = name
+                    OwnerType = typeof<'T>
+                    InTransaction = true
+                }
+                Relations.ensureSchemaForOwnerType tx typeof<'T>
+
+                let oldRow = connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables)
+                if isNull oldRow then
+                    raise (KeyNotFoundException "Could not Update any entities with specified Id.")
+
+                let oldOwner = fromSQLite<'T> oldRow
+                let writePlan = Relations.prepareUpdate tx (box oldOwner) (box item)
+
+                variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+                let count = connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
+                if count <= 0 then
+                    raise (KeyNotFoundException "Could not Update any entities with specified Id.")
+
+                Relations.syncUpdate tx oldRow.Id.Value writePlan
+            else
+                variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+                let count = connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
+                if count <= 0 then
+                    raise (KeyNotFoundException "Could not Update any entities with specified Id.")
+            ()
 
     /// <summary>
     /// Deletes all documents that match the specified filter.
@@ -855,10 +1175,54 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>The number of documents deleted.</returns>
     member this.DeleteMany(filter: Expression<Func<'T, bool>>) =
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
-        let filter, variables = QueryTranslator.translate name filter
+        if this.HasRelations && not this.InTransaction then
+            use connection = connection.Get()
+            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
+            let directConnection = Transitive connection
+            let transientConnection = Collection(directConnection, name, connectionString, parentData)
+            connection.Execute "BEGIN IMMEDIATE;" |> ignore
+            try
+                let count = transientConnection.DeleteMany(filter)
+                connection.Execute "COMMIT;" |> ignore
+                count
+            with _ ->
+                connection.Execute "ROLLBACK;" |> ignore
+                reraise()
+        else
+            let filter, variables = QueryTranslator.translate name filter
 
-        use connection = connection.Get()
-        connection.Execute ($"DELETE FROM \"{name}\" WHERE " + filter, variables)
+            use connection = connection.Get()
+            if this.HasRelations then
+                let tx: Relations.RelationTxContext = {
+                    Connection = connection
+                    OwnerTable = name
+                    OwnerType = typeof<'T>
+                    InTransaction = true
+                }
+                Relations.ensureSchemaForOwnerType tx typeof<'T>
+
+                let rows = connection.Query<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter}", variables) |> Seq.toArray
+                if rows.Length = 0 then
+                    0
+                else
+                    for row in rows do
+                        let owner = fromSQLite<'T> row
+                        let ownerId = row.Id.Value
+                        let deletePlan = Relations.prepareDeleteOwner tx ownerId (box owner)
+                        Relations.syncDeleteOwner tx deletePlan
+
+                    let deleteVars = Dictionary<string, obj>(rows.Length)
+                    let ids = ResizeArray<string>(rows.Length)
+                    for i in 0 .. rows.Length - 1 do
+                        let key = $"id{i}"
+                        ids.Add("@" + key)
+                        deleteVars.[key] <- rows.[i].Id.Value :> obj
+
+                    let idList = String.Join(",", ids)
+                    let sql = $"DELETE FROM \"{name}\" WHERE Id IN ({idList})"
+                    connection.Execute(sql, deleteVars)
+            else
+                connection.Execute ($"DELETE FROM \"{name}\" WHERE " + filter, variables)
 
     /// <summary>
     /// Deletes the first document that matches the specified filter.
@@ -867,10 +1231,42 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>The number of documents deleted (0 or 1).</returns>
     member this.DeleteOne(filter: Expression<Func<'T, bool>>) =
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
-        let filter, variables = QueryTranslator.translate name filter
+        if this.HasRelations && not this.InTransaction then
+            use connection = connection.Get()
+            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
+            let directConnection = Transitive connection
+            let transientConnection = Collection(directConnection, name, connectionString, parentData)
+            connection.Execute "BEGIN IMMEDIATE;" |> ignore
+            try
+                let count = transientConnection.DeleteOne(filter)
+                connection.Execute "COMMIT;" |> ignore
+                count
+            with _ ->
+                connection.Execute "ROLLBACK;" |> ignore
+                reraise()
+        else
+            let filter, variables = QueryTranslator.translate name filter
 
-        use connection = connection.Get()
-        connection.Execute ($"DELETE FROM \"{name}\" WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filter}) LIMIT 1)", variables)
+            use connection = connection.Get()
+            if this.HasRelations then
+                let tx: Relations.RelationTxContext = {
+                    Connection = connection
+                    OwnerTable = name
+                    OwnerType = typeof<'T>
+                    InTransaction = true
+                }
+                Relations.ensureSchemaForOwnerType tx typeof<'T>
+
+                let oldRow = connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE ({filter}) LIMIT 1", variables)
+                if isNull oldRow then
+                    0
+                else
+                    let owner = fromSQLite<'T> oldRow
+                    let deletePlan = Relations.prepareDeleteOwner tx oldRow.Id.Value (box owner)
+                    Relations.syncDeleteOwner tx deletePlan
+                    connection.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {| id = oldRow.Id.Value |})
+            else
+                connection.Execute ($"DELETE FROM \"{name}\" WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filter}) LIMIT 1)", variables)
 
     /// <summary>
     /// Replaces the content of all documents matching the filter with a new document.
@@ -880,11 +1276,44 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>The number of documents replaced.</returns>
     member this.ReplaceMany(item: 'T)(filter: Expression<Func<'T, bool>>) =
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
-        let filter, variables = QueryTranslator.translate name filter
-        variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+        if this.HasRelations && not this.InTransaction then
+            use connection = connection.Get()
+            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
+            let directConnection = Transitive connection
+            let transientConnection = Collection(directConnection, name, connectionString, parentData)
+            connection.Execute "BEGIN IMMEDIATE;" |> ignore
+            try
+                let count = transientConnection.ReplaceMany(item)(filter)
+                connection.Execute "COMMIT;" |> ignore
+                count
+            with _ ->
+                connection.Execute "ROLLBACK;" |> ignore
+                reraise()
+        else
+            let filter, variables = QueryTranslator.translate name filter
+            use connection = connection.Get()
 
-        use connection = connection.Get()
-        connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
+            if this.HasRelations then
+                let tx: Relations.RelationTxContext = {
+                    Connection = connection
+                    OwnerTable = name
+                    OwnerType = typeof<'T>
+                    InTransaction = true
+                }
+                Relations.ensureSchemaForOwnerType tx typeof<'T>
+
+                let oldRows = connection.Query<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter}", variables) |> Seq.toArray
+                if oldRows.Length = 0 then
+                    0
+                else
+                    let oldOwners = oldRows |> Seq.map (fun row -> fromSQLite<'T> row |> box)
+                    let ownerIds = oldRows |> Seq.map (fun row -> row.Id.Value)
+                    Relations.syncReplaceMany tx ownerIds oldOwners (box item)
+                    variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+                    connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
+            else
+                variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+                connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
 
     /// <summary>
     /// Replaces the content of the first document matching the filter with a new document.
@@ -894,11 +1323,43 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>The number of documents replaced (0 or 1).</returns>
     member this.ReplaceOne(item: 'T)(filter: Expression<Func<'T, bool>>) =
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
-        let filter, variables = QueryTranslator.translate name filter
-        variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+        if this.HasRelations && not this.InTransaction then
+            use connection = connection.Get()
+            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
+            let directConnection = Transitive connection
+            let transientConnection = Collection(directConnection, name, connectionString, parentData)
+            connection.Execute "BEGIN IMMEDIATE;" |> ignore
+            try
+                let count = transientConnection.ReplaceOne(item)(filter)
+                connection.Execute "COMMIT;" |> ignore
+                count
+            with _ ->
+                connection.Execute "ROLLBACK;" |> ignore
+                reraise()
+        else
+            let filter, variables = QueryTranslator.translate name filter
+            use connection = connection.Get()
 
-        use connection = connection.Get()
-        connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filter}) LIMIT 1)", variables)
+            if this.HasRelations then
+                let tx: Relations.RelationTxContext = {
+                    Connection = connection
+                    OwnerTable = name
+                    OwnerType = typeof<'T>
+                    InTransaction = true
+                }
+                Relations.ensureSchemaForOwnerType tx typeof<'T>
+
+                let oldRow = connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE ({filter}) LIMIT 1", variables)
+                if isNull oldRow then
+                    0
+                else
+                    let oldOwner = fromSQLite<'T> oldRow
+                    Relations.syncReplaceOne tx oldRow.Id.Value (box oldOwner) (box item)
+                    variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+                    connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id = @id", {| item = variables.["item"]; id = oldRow.Id.Value |})
+            else
+                variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+                connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filter}) LIMIT 1)", variables)
 
     /// <summary>
     /// Applies a set of transformations to update all documents that match the specified filter.
@@ -912,27 +1373,94 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         match transform.Length with
         | 0 -> 0 // If no transformations provided.
         | _ ->
+        if this.HasRelations && not this.InTransaction then
+            use connection = connection.Get()
+            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
+            let directConnection = Transitive connection
+            let transientConnection = Collection(directConnection, name, connectionString, parentData)
+            connection.Execute "BEGIN IMMEDIATE;" |> ignore
+            try
+                let count = transientConnection.UpdateMany(transform)(filter)
+                connection.Execute "COMMIT;" |> ignore
+                count
+            with _ ->
+                connection.Execute "ROLLBACK;" |> ignore
+                reraise()
+        else
+            let relationTransforms = ResizeArray<QueryTranslator.UpdateManyRelationTransform>()
+            let jsonTransforms = ResizeArray<Expression<System.Action<'T>>>()
 
-        let variables = Dictionary<string, obj>()
-        let fullSQL = StringBuilder()
-        let inline append (txt: string) = ignore (fullSQL.Append txt)
-        
-        append "UPDATE \""
-        append name
-        append "\" SET Value = jsonb_set(Value, "
+            for expression in transform do
+                match QueryTranslator.tryTranslateUpdateManyRelationTransform expression with
+                | ValueSome op -> relationTransforms.Add op
+                | ValueNone -> jsonTransforms.Add expression
 
-        for expression in transform do
-            QueryTranslator.translateUpdateMode name expression fullSQL variables
+            let executeJsonUpdates (connection: SqliteConnection) =
+                if jsonTransforms.Count = 0 then
+                    0
+                else
+                    let variables = Dictionary<string, obj>()
+                    let fullSQL = StringBuilder()
+                    let inline append (txt: string) = ignore (fullSQL.Append txt)
+                    
+                    append "UPDATE \""
+                    append name
+                    append "\" SET Value = jsonb_set(Value, "
 
-        fullSQL.Remove(fullSQL.Length - 1, 1) |> ignore // Remove the ',' at the end.
+                    for expression in jsonTransforms do
+                        QueryTranslator.translateUpdateMode name expression fullSQL variables
 
-        append ")  WHERE "
-        QueryTranslator.translateQueryable name filter fullSQL variables
+                    fullSQL.Remove(fullSQL.Length - 1, 1) |> ignore // Remove the ',' at the end.
 
-        let fullSQL = fullSQL.ToString()
+                    append ")  WHERE "
+                    QueryTranslator.translateQueryable name filter fullSQL variables
 
-        use connection = connection.Get()
-        connection.Execute (fullSQL, variables)
+                    connection.Execute (fullSQL.ToString(), variables)
+
+            use connection = connection.Get()
+            if this.HasRelations then
+                let tx: Relations.RelationTxContext = {
+                    Connection = connection
+                    OwnerTable = name
+                    OwnerType = typeof<'T>
+                    InTransaction = true
+                }
+                Relations.ensureSchemaForOwnerType tx typeof<'T>
+
+                let relationRows =
+                    if relationTransforms.Count = 0 then
+                        Array.empty
+                    else
+                        let filterSql, filterVars = QueryTranslator.translate name filter
+                        connection.Query<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filterSql}", filterVars) |> Seq.toArray
+
+                let mutable affected = executeJsonUpdates connection
+
+                if relationTransforms.Count > 0 then
+                    let mappedOps =
+                        relationTransforms
+                        |> Seq.map (function
+                            | QueryTranslator.SetDBRefToId(path, targetType, targetId) -> Relations.SetDBRefToId(path, targetType, targetId)
+                            | QueryTranslator.SetDBRefToNone(path, targetType) -> Relations.SetDBRefToNone(path, targetType)
+                            | QueryTranslator.AddDBRefMany(path, targetType, targetId) -> Relations.AddDBRefMany(path, targetType, targetId)
+                            | QueryTranslator.RemoveDBRefMany(path, targetType, targetId) -> Relations.RemoveDBRefMany(path, targetType, targetId)
+                            | QueryTranslator.ClearDBRefMany(path, targetType) -> Relations.ClearDBRefMany(path, targetType))
+                        |> Seq.toList
+
+                    for row in relationRows do
+                        let writePlan: Relations.RelationWritePlan = {
+                            Kind = "UpdateMany"
+                            OwnerType = typeof<'T>
+                            Ops = mappedOps
+                        }
+                        Relations.syncUpdate tx row.Id.Value writePlan
+
+                    if jsonTransforms.Count = 0 then
+                        affected <- relationRows.Length
+
+                affected
+            else
+                executeJsonUpdates connection
 
     /// <summary>
     /// Ensures that a non-unique index exists for the specified expression. Creates the index if it does not exist.

@@ -93,6 +93,10 @@ module QueryTranslator =
     let internal escapeSQLiteString (input: string) : string =
         input.Replace("'", "''").Replace("\0", "")
 
+    /// When set to ValueSome, QueryBuilder.New uses this shared context instead of constructing a fresh one.
+    /// Set by Queryable.fs startTranslation at query start; cleared after query execution.
+    let internal activeQueryContext = new System.Threading.ThreadLocal<QueryContext voption>(fun () -> ValueNone)
+
     /// <summary>
     /// A stateful builder for constructing a SQL query from an expression tree.
     /// </summary>
@@ -116,6 +120,8 @@ module QueryTranslator =
             Parameters: ReadOnlyCollection<ParameterExpression>
             /// <summary>The index of the parameter representing the document ID.</summary>
             IdParameterIndex: int
+            /// <summary>Query source context for multi-source (JOIN) support. When Joins is empty, behavior is identical to pre-relation pipeline.</summary>
+            SourceContext: QueryContext
         }
         /// <summary>
         /// Appends a raw string to the query being built.
@@ -137,6 +143,16 @@ module QueryTranslator =
         /// <returns>The SQL query as a string.</returns>
         override this.ToString() = this.StringBuilder.ToString()
 
+        /// Create a scoped sub-builder for correlated subquery predicate translation.
+        /// Shares StringBuilder + Variables (parameters go to the same query), but uses a different table name and lambda parameters.
+        member internal this.ForSubquery(tableName: string, lambdaExpr: LambdaExpression) =
+            { this with
+                TableNameDot = if String.IsNullOrEmpty tableName then String.Empty else "\"" + tableName + "\"."
+                Parameters = lambdaExpr.Parameters
+                JsonExtractSelfValue = true
+                UpdateMode = false
+                IdParameterIndex = -1 }
+
         /// <summary>
         /// Internal factory method to create a new QueryBuilder instance.
         /// </summary>
@@ -148,6 +164,10 @@ module QueryTranslator =
         /// <param name="idIndex">The parameter index for the document ID.</param>
         /// <returns>A new QueryBuilder instance.</returns>
         static member internal New(sb: StringBuilder)(variables: Dictionary<string, obj>)(updateMode: bool)(tableName)(expression: Expression)(idIndex: int) =
+            let sourceCtx =
+                match activeQueryContext.Value with
+                | ValueSome ctx -> ctx
+                | ValueNone -> QueryContext.SingleSource(tableName)
             {
                 StringBuilder = sb
                 Variables = variables
@@ -156,13 +176,14 @@ module QueryTranslator =
                 UpdateMode = updateMode
                 TableNameDot = if String.IsNullOrEmpty tableName then String.Empty else "\"" + tableName + "\"."
                 JsonExtractSelfValue = true
-                Parameters = 
-                    let expression = 
-                        if expression.NodeType = ExpressionType.Quote 
-                        then (expression :?> UnaryExpression).Operand 
-                        else expression 
+                Parameters =
+                    let expression =
+                        if expression.NodeType = ExpressionType.Quote
+                        then (expression :?> UnaryExpression).Operand
+                        else expression
                     in (expression :?> LambdaExpression).Parameters
                 IdParameterIndex = idIndex
+                SourceContext = sourceCtx
             }
 
     /// <summary>
@@ -1649,6 +1670,423 @@ module QueryTranslator =
             raise (NotSupportedException(sprintf "The member access '%O' is not supported" m.Member.Name))
             
 
+    // ─── DBRef relation query translation ────────────────────────────────────────
+
+    let private isDBRefType (t: Type) =
+        not (isNull t) && t.IsGenericType && t.GetGenericTypeDefinition().FullName = "SoloDatabase.DBRef`1"
+
+    let private isDBRefManyType (t: Type) =
+        not (isNull t) && t.IsGenericType && t.GetGenericTypeDefinition().FullName = "SoloDatabase.DBRefMany`1"
+
+    type internal UpdateManyRelationTransform =
+        | SetDBRefToId of PropertyPath: string * TargetType: Type * TargetId: int64
+        | SetDBRefToNone of PropertyPath: string * TargetType: Type
+        | AddDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
+        | RemoveDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
+        | ClearDBRefMany of PropertyPath: string * TargetType: Type
+
+    [<Literal>]
+    let private updateManyRelationUnsupportedMessage =
+        "UpdateMany relation transform not supported. Allowed: Ref.Set(DBRef.To/None), RefMany.Add/Append/Remove/Clear."
+
+    [<Literal>]
+    let private updateManyDbRefManyPersistedIdMessage =
+        "UpdateMany DBRefMany Add/Remove requires persisted target Id (> 0)."
+
+    [<Literal>]
+    let private updateManyDbRefValueMutationMessage =
+        "UpdateMany cannot mutate DBRef.Value members. Update target collection explicitly."
+
+    /// Batch 4 deterministic unsupported-shape messages.
+    let internal multiSourceCrossRootProjectionMessage =
+        "MSQ002: Cross-root projection requires explicit join key."
+
+    let internal multiSourceClientEvalForbiddenMessage =
+        "MSQ004: Client-side evaluation is forbidden for this query shape."
+
+    let private unwrapQuote (expr: Expression) =
+        match expr with
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote -> ue.Operand
+        | _ -> expr
+
+    let rec private unwrapConvertForUpdate (expr: Expression) =
+        match expr with
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> unwrapConvertForUpdate ue.Operand
+        | _ -> expr
+
+    let rec private computePathKeyForUpdate (expr: Expression) : string =
+        match expr with
+        | :? MemberExpression as me when not (isNull me.Expression) ->
+            let parent = computePathKeyForUpdate me.Expression
+            if parent = "" then me.Member.Name else parent + "." + me.Member.Name
+        | :? ParameterExpression -> ""
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> computePathKeyForUpdate ue.Operand
+        | _ -> ""
+
+    let private tryLambdaBody (expression: Expression) =
+        let expr = unwrapQuote expression
+        match expr with
+        | :? LambdaExpression as le -> le.Body
+        | _ -> null
+
+    let rec private containsDBRefValueMutationPath (expr: Expression) =
+        match expr with
+        | null -> false
+        | :? MemberExpression as me ->
+            let isBoundary =
+                me.Member.Name = "Value" &&
+                not (isNull me.Expression) &&
+                isDBRefType (unwrapConvertForUpdate me.Expression).Type
+            isBoundary || containsDBRefValueMutationPath me.Expression
+        | :? MethodCallExpression as mc ->
+            let isBoundaryCall =
+                mc.Method.Name = "get_Value" &&
+                ((not (isNull mc.Object) && isDBRefType (unwrapConvertForUpdate mc.Object).Type)
+                 || (mc.Arguments.Count > 0 && isDBRefType (unwrapConvertForUpdate mc.Arguments.[0]).Type))
+            isBoundaryCall ||
+            containsDBRefValueMutationPath mc.Object ||
+            (mc.Arguments |> Seq.exists containsDBRefValueMutationPath)
+        | :? UnaryExpression as ue ->
+            containsDBRefValueMutationPath ue.Operand
+        | :? BinaryExpression as be ->
+            containsDBRefValueMutationPath be.Left || containsDBRefValueMutationPath be.Right
+        | :? IndexExpression as ie ->
+            containsDBRefValueMutationPath ie.Object ||
+            (ie.Arguments |> Seq.exists containsDBRefValueMutationPath)
+        | _ -> false
+
+    let private tryAsInt64 (value: obj) =
+        match value with
+        | null -> ValueNone
+        | :? int64 as x -> ValueSome x
+        | :? int32 as x -> ValueSome (int64 x)
+        | :? int16 as x -> ValueSome (int64 x)
+        | :? int8 as x -> ValueSome (int64 x)
+        | :? uint64 as x ->
+            if x <= uint64 Int64.MaxValue then ValueSome (int64 x) else ValueNone
+        | :? uint32 as x -> ValueSome (int64 x)
+        | :? uint16 as x -> ValueSome (int64 x)
+        | :? uint8 as x -> ValueSome (int64 x)
+        | :? nativeint as x -> ValueSome (int64 x)
+        | :? unativeint as x -> ValueSome (int64 x)
+        | :? Nullable<int64> as x when x.HasValue -> ValueSome x.Value
+        | _ -> ValueNone
+
+    let private tryGetRootRelationMember (expr: Expression) =
+        let expr = unwrapConvertForUpdate expr
+        match expr with
+        | :? MemberExpression as me when not (isNull me.Expression) && isRootParameter me.Expression -> ValueSome me
+        | _ -> ValueNone
+
+    let private tryGetCallSourceAndArgStart (m: MethodCallExpression) =
+        if not (isNull m.Object) then
+            ValueSome struct (m.Object, 0)
+        elif m.Arguments.Count > 0 then
+            ValueSome struct (m.Arguments.[0], 1)
+        else
+            ValueNone
+
+    let private parseDbRefSetValue (dbRefType: Type) (propertyPath: string) (valueExpr: Expression) =
+        let targetType = dbRefType.GetGenericArguments().[0]
+        let valueExpr = unwrapConvertForUpdate valueExpr
+
+        match valueExpr with
+        | :? MethodCallExpression as mc
+            when mc.Method.Name = "To"
+              && not (isNull mc.Method.DeclaringType)
+              && mc.Method.DeclaringType.IsGenericType
+              && mc.Method.DeclaringType.GetGenericTypeDefinition().FullName = "SoloDatabase.DBRef`1"
+              && mc.Arguments.Count = 1 ->
+            let rawId = evaluateExpr<obj> mc.Arguments.[0]
+            match tryAsInt64 rawId with
+            | ValueSome id when id > 0L -> SetDBRefToId(propertyPath, targetType, id)
+            | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+
+        | :? MethodCallExpression as mc
+            when mc.Method.Name = "get_None"
+              && not (isNull mc.Method.DeclaringType)
+              && mc.Method.DeclaringType.IsGenericType
+              && mc.Method.DeclaringType.GetGenericTypeDefinition().FullName = "SoloDatabase.DBRef`1" ->
+            SetDBRefToNone(propertyPath, targetType)
+
+        | :? MemberExpression as me
+            when me.Member.Name = "None"
+              && isNull me.Expression
+              && not (isNull me.Member.DeclaringType)
+              && me.Member.DeclaringType.IsGenericType
+              && me.Member.DeclaringType.GetGenericTypeDefinition().FullName = "SoloDatabase.DBRef`1" ->
+            SetDBRefToNone(propertyPath, targetType)
+
+        | _ ->
+            raise (NotSupportedException updateManyRelationUnsupportedMessage)
+
+    let private extractTargetIdForDbRefManyOrThrow (expr: Expression) =
+        let valueObj = evaluateExpr<obj> expr
+        if isNull valueObj then
+            raise (NotSupportedException updateManyDbRefManyPersistedIdMessage)
+
+        let idProp = valueObj.GetType().GetProperty("Id", BindingFlags.Public ||| BindingFlags.Instance)
+        if isNull idProp then
+            raise (NotSupportedException updateManyDbRefManyPersistedIdMessage)
+
+        let rawId = idProp.GetValue valueObj
+        match tryAsInt64 rawId with
+        | ValueSome id when id > 0L -> id
+        | _ -> raise (NotSupportedException updateManyDbRefManyPersistedIdMessage)
+
+    let internal tryTranslateUpdateManyRelationTransform (expression: Expression) : UpdateManyRelationTransform voption =
+        let body = tryLambdaBody expression
+        if isNull body then ValueNone else
+
+        if containsDBRefValueMutationPath body then
+            raise (InvalidOperationException updateManyDbRefValueMutationMessage)
+
+        match body with
+        | :? BinaryExpression as be when be.NodeType = ExpressionType.Assign ->
+            match tryGetRootRelationMember be.Left with
+            | ValueSome me when isDBRefType me.Type || isDBRefManyType me.Type ->
+                raise (NotSupportedException updateManyRelationUnsupportedMessage)
+            | _ -> ValueNone
+
+        | :? MethodCallExpression as mc when mc.Method.Name = "Set" ->
+            let oldValue, newValue =
+                if not (isNull mc.Object) && mc.Arguments.Count = 1 then
+                    mc.Object, mc.Arguments.[0]
+                elif mc.Arguments.Count >= 2 then
+                    mc.Arguments.[0], mc.Arguments.[1]
+                else
+                    null, null
+
+            if isNull oldValue || isNull newValue then ValueNone else
+            match tryGetRootRelationMember oldValue with
+            | ValueSome me when isDBRefType me.Type ->
+                let propertyPath = computePathKeyForUpdate me
+                parseDbRefSetValue me.Type propertyPath newValue |> ValueSome
+            | ValueSome me when isDBRefManyType me.Type ->
+                raise (NotSupportedException updateManyRelationUnsupportedMessage)
+            | _ -> ValueNone
+
+        | :? MethodCallExpression as mc when mc.Method.Name = "Add" || mc.Method.Name = "Append" || mc.Method.Name = "Remove" || mc.Method.Name = "Clear" || mc.Method.Name = "SetAt" || mc.Method.Name = "RemoveAt" ->
+            match tryGetCallSourceAndArgStart mc with
+            | ValueSome struct (sourceExpr, argStart) ->
+                match tryGetRootRelationMember sourceExpr with
+                | ValueSome me when isDBRefManyType me.Type ->
+                    let propertyPath = computePathKeyForUpdate me
+                    let targetType = me.Type.GetGenericArguments().[0]
+                    match mc.Method.Name with
+                    | "Add"
+                    | "Append" ->
+                        if mc.Arguments.Count <= argStart then
+                            raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                        let targetId = extractTargetIdForDbRefManyOrThrow mc.Arguments.[argStart]
+                        AddDBRefMany(propertyPath, targetType, targetId) |> ValueSome
+                    | "Remove" ->
+                        if mc.Arguments.Count <= argStart then
+                            raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                        let targetId = extractTargetIdForDbRefManyOrThrow mc.Arguments.[argStart]
+                        RemoveDBRefMany(propertyPath, targetType, targetId) |> ValueSome
+                    | "Clear" ->
+                        ClearDBRefMany(propertyPath, targetType) |> ValueSome
+                    | _ ->
+                        raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                | ValueSome me when isDBRefType me.Type ->
+                    raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                | _ -> ValueNone
+            | ValueNone -> ValueNone
+
+        | _ -> ValueNone
+
+    /// Compute a stable path key for a member expression chain from root parameter.
+    let rec private computePathKey (expr: Expression) : string =
+        match expr with
+        | :? MemberExpression as me when not (isNull me.Expression) ->
+            let parent = computePathKey me.Expression
+            if parent = "" then me.Member.Name else parent + "." + me.Member.Name
+        | :? ParameterExpression -> ""
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> computePathKey ue.Operand
+        | _ -> ""
+
+    /// Unwrap Convert nodes to get the actual expression.
+    let private unwrapConvert (expr: Expression) =
+        match expr with
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> ue.Operand
+        | e -> e
+
+    /// Given a MemberExpression for a DBRef property (e.g., o.Customer or o.Author.Value.Publisher),
+    /// resolve the source prefix and property name for JSON extraction.
+    let rec private resolveDBRefPropertyLocation (qb: QueryBuilder) (dbrefPropExpr: MemberExpression) : struct(string * string) =
+        match dbrefPropExpr.Expression with
+        | :? ParameterExpression ->
+            struct(qb.TableNameDot, dbrefPropExpr.Member.Name)
+        | :? MemberExpression as parentMe when parentMe.Member.Name = "Value" && isDBRefType (unwrapConvert parentMe.Expression).Type ->
+            let parentAlias = ensureDBRefJoin qb parentMe
+            struct(parentAlias + ".", dbrefPropExpr.Member.Name)
+        | _ ->
+            let fullPath = computePathKey dbrefPropExpr
+            struct(qb.TableNameDot, fullPath)
+
+    /// Ensure a LEFT JOIN exists for a DBRef<T>.Value access. Returns the alias.
+    and private ensureDBRefJoin (qb: QueryBuilder) (valueMemberExpr: MemberExpression) : string =
+        let dbrefExpr = unwrapConvert valueMemberExpr.Expression
+        let targetType = valueMemberExpr.Type
+        let ctx = qb.SourceContext
+
+        if ctx.AliasCounter > 10 then
+            raise (NotSupportedException("Circular or excessively deep relation chain (depth > 10)"))
+
+        let pathKey = computePathKey dbrefExpr
+
+        if ctx.ExcludedPaths.Contains(pathKey) then
+            raise (InvalidOperationException(
+                sprintf "Cannot access excluded relation property '%s.Value'. Remove the Exclude call or use .Id instead." pathKey))
+
+        match ctx.FindJoin(pathKey) with
+        | Some existing -> existing.TargetAlias
+        | None ->
+            let alias = ctx.NextAlias()
+            let targetTable = targetType.Name
+
+            let struct(sourcePrefix, propName) =
+                match dbrefExpr with
+                | :? MemberExpression as me -> resolveDBRefPropertyLocation qb me
+                | _ -> struct(qb.TableNameDot, computePathKey dbrefExpr)
+
+            let onCondition = sprintf "%s.Id = jsonb_extract(%sValue, '$.%s')" alias sourcePrefix propName
+            ctx.Joins.Add({
+                TargetAlias = alias
+                TargetTable = targetTable
+                JoinKind = "LEFT JOIN"
+                OnCondition = onCondition
+                PropertyPath = pathKey
+            })
+            alias
+
+    /// preExpressionHandler for DBRef member access translation.
+    let private handleDBRefExpression (qb: QueryBuilder) (exp: Expression) : bool =
+        match exp with
+        | :? MemberExpression as topMe when not (isNull topMe.Expression) ->
+            let innerExpr = unwrapConvert topMe.Expression
+
+            // Case 1: Direct member on DBRef<T> — o.Ref.Id, o.Ref.HasValue
+            if isDBRefType innerExpr.Type then
+                match topMe.Member.Name with
+                | "Id" ->
+                    match innerExpr with
+                    | :? MemberExpression as dbrefPropExpr ->
+                        let struct(prefix, prop) = resolveDBRefPropertyLocation qb dbrefPropExpr
+                        qb.AppendRaw (sprintf "jsonb_extract(%sValue, '$.%s')" prefix prop)
+                        true
+                    | _ -> false
+                | "HasValue" ->
+                    match innerExpr with
+                    | :? MemberExpression as dbrefPropExpr ->
+                        let struct(prefix, prop) = resolveDBRefPropertyLocation qb dbrefPropExpr
+                        let extract = sprintf "jsonb_extract(%sValue, '$.%s')" prefix prop
+                        qb.AppendRaw (sprintf "(%s IS NOT NULL AND %s <> 0)" extract extract)
+                        true
+                    | _ -> false
+                | _ -> false
+
+            // Case 2: Property through DBRef<T>.Value — o.Ref.Value.Name, o.Ref.Value.Address.City
+            else
+                let rec findValueBoundary (expr: Expression) (above: string list) =
+                    match expr with
+                    | :? MemberExpression as me when not (isNull me.Expression) && isDBRefType (unwrapConvert me.Expression).Type && me.Member.Name = "Value" ->
+                        ValueSome struct(me, above)
+                    | :? MemberExpression as me when not (isNull me.Expression) ->
+                        findValueBoundary me.Expression (me.Member.Name :: above)
+                    | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert ->
+                        findValueBoundary ue.Operand above
+                    | _ -> ValueNone
+
+                match findValueBoundary topMe.Expression [topMe.Member.Name] with
+                | ValueSome struct(valueME, propParts) ->
+                    let alias = ensureDBRefJoin qb valueME
+                    let targetPath = String.concat "." propParts
+                    qb.AppendRaw (sprintf "jsonb_extract(%s.Value, '$.%s')" alias targetPath)
+                    true
+                | ValueNone -> false
+        | _ -> false
+
+    /// Compute the link table name for a DBRefMany property.
+    /// Convention: SoloDBRelLink_{SourceTable}_{PropertyName}
+    let private dbRefManyLinkTable (rootTable: string) (propName: string) =
+        sprintf "SoloDBRelLink_%s_%s" rootTable propName
+
+    /// Extract the DBRefMany<T> source MemberExpression from a method call argument, if it refers to a DBRefMany property on the root parameter.
+    let private tryGetDBRefManySource (arg: Expression) : MemberExpression voption =
+        let arg = unwrapConvert arg
+        match arg with
+        | :? MemberExpression as me when not (isNull me.Expression) && isDBRefManyType me.Type ->
+            match me.Expression with
+            | :? ParameterExpression -> ValueSome me
+            | _ -> ValueNone
+        | _ -> ValueNone
+
+    /// preExpressionHandler for DBRefMany.Count, Any(), Any(pred) as correlated subqueries.
+    let private handleDBRefManyExpression (qb: QueryBuilder) (exp: Expression) : bool =
+        let sourceAlias =
+            if String.IsNullOrEmpty qb.TableNameDot then
+                "\"" + qb.SourceContext.RootTable + "\""
+            else
+                qb.TableNameDot.TrimEnd('.')
+
+        match exp with
+        // Case 1: x.Tags.Count → correlated COUNT subquery
+        | :? MemberExpression as topMe when topMe.Member.Name = "Count" && not (isNull topMe.Expression) ->
+            let inner = unwrapConvert topMe.Expression
+            if isDBRefManyType inner.Type then
+                match inner with
+                | :? MemberExpression as me when not (isNull me.Expression) ->
+                    match me.Expression with
+                    | :? ParameterExpression ->
+                        let propName = me.Member.Name
+                        let linkTable = dbRefManyLinkTable qb.SourceContext.RootTable propName
+                        qb.AppendRaw (sprintf "(SELECT COUNT(*) FROM \"%s\" WHERE SourceId = %s.Id)" linkTable sourceAlias)
+                        true
+                    | _ -> false
+                | _ -> false
+            else false
+
+        // Case 2/3: Enumerable.Any(x.Tags) or Enumerable.Any(x.Tags, pred)
+        | :? MethodCallExpression as mce when mce.Method.Name = "Any" && mce.Arguments.Count >= 1 ->
+            match tryGetDBRefManySource mce.Arguments.[0] with
+            | ValueSome me ->
+                let propName = me.Member.Name
+                let linkTable = dbRefManyLinkTable qb.SourceContext.RootTable propName
+
+                if mce.Arguments.Count = 1 then
+                    // Any() without predicate
+                    qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" WHERE SourceId = %s.Id)" linkTable sourceAlias)
+                    true
+                elif mce.Arguments.Count = 2 then
+                    // Any(pred) with predicate — correlated EXISTS with INNER JOIN to target table
+                    let predExpr =
+                        let arg = mce.Arguments.[1]
+                        if arg.NodeType = ExpressionType.Quote then (arg :?> UnaryExpression).Operand :?> LambdaExpression
+                        else arg :?> LambdaExpression
+                    let targetType = me.Type.GetGenericArguments().[0]
+                    let targetTable = targetType.Name
+                    let tgtAlias = "_tgt"
+                    let lnkAlias = "_lnk"
+
+                    qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" AS %s INNER JOIN \"%s\" AS %s ON %s.Id = %s.TargetId WHERE %s.SourceId = \"%s\".Id AND "
+                        linkTable lnkAlias targetTable tgtAlias tgtAlias lnkAlias lnkAlias sourceAlias)
+
+                    // Translate predicate body with target table as context
+                    let subQb = qb.ForSubquery(tgtAlias, predExpr)
+                    visit predExpr.Body subQb
+
+                    qb.AppendRaw ")"
+                    true
+                else false
+            | ValueNone -> false
+
+        | _ -> false
+
+    do preExpressionHandler.Add(Func<QueryBuilder, Expression, bool>(handleDBRefExpression))
+    do preExpressionHandler.Add(Func<QueryBuilder, Expression, bool>(handleDBRefManyExpression))
+
     /// <summary>
     /// Translates a LINQ expression into a SQL string and a dictionary of parameters.
     /// This is a primary public entry point for the translator.
@@ -1711,6 +2149,11 @@ module QueryTranslator =
     /// <param name="fullSQL">The StringBuilder for the SQL command.</param>
     /// <param name="variableDict">The dictionary for parameters.</param>
     let internal translateUpdateMode (tableName: string) (expression: Expression) (fullSQL: StringBuilder) (variableDict: Dictionary<string, obj>) =
+        match tryTranslateUpdateManyRelationTransform expression with
+        | ValueSome _ ->
+            raise (NotSupportedException updateManyRelationUnsupportedMessage)
+        | ValueNone -> ()
+
         let builder = QueryBuilder.New fullSQL variableDict true tableName expression -1
-    
+
         visit expression builder
