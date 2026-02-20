@@ -86,6 +86,32 @@ module internal Helper =
     /// <param name="name">The name of the collection to drop.</param>
     /// <param name="connection">The active SQLite connection.</param>
     let internal dropCollection (name: string) (connection: SqliteConnection) =
+        // Phase 2 guard: check SoloDBRelation for inbound/outbound references before dropping.
+        let relationCatalogExists =
+            connection.QueryFirst<int64>(
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelation') THEN 1 ELSE 0 END") = 1L
+
+        if relationCatalogExists then
+            // Edge case 1: inbound references — other collections reference this one as target.
+            let inboundCount =
+                connection.QueryFirst<int64>(
+                    "SELECT COUNT(*) FROM SoloDBRelation WHERE TargetCollection = @name AND OwnerCollection <> @name",
+                    {| name = name |})
+            if inboundCount > 0L then
+                raise (InvalidOperationException(sprintf "Cannot drop collection '%s': referenced by active relations. Remove relations first." name))
+
+            // Edge case 2: outbound-only references — this collection owns relations. Clean up link tables + catalog rows.
+            let outboundRows =
+                connection.Query<{| Name: string |}>(
+                    "SELECT Name FROM SoloDBRelation WHERE OwnerCollection = @name",
+                    {| name = name |})
+                |> Seq.toArray
+            for row in outboundRows do
+                let linkTable = "SoloDBRelLink_" + row.Name
+                connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" linkTable) |> ignore
+            if outboundRows.Length > 0 then
+                connection.Execute("DELETE FROM SoloDBRelation WHERE OwnerCollection = @name", {| name = name |}) |> ignore
+
         dropTriggersForTable name connection
         connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name) |> ignore
         ensureTypeCollectionMapTable connection
@@ -920,7 +946,13 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         use connection = connection.Get()
         match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
         | json when Object.ReferenceEquals(json, null) -> None
-        | json -> fromSQLite<'T> json |> Some
+        | json ->
+            let entity = fromSQLite<'T> json
+            // Batch-load DBRefMany properties for GETBYID-FULL invariant.
+            if this.HasRelations then
+                let excludedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+                Relations.batchLoadDBRefManyProperties connection name typeof<'T> excludedPaths [| (id, box entity) |]
+            entity |> Some
 
     /// <summary>
     /// Finds a document by its 64-bit integer ID.

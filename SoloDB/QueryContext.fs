@@ -80,6 +80,8 @@ type internal QueryContext = {
     RelationTargets: Dictionary<string, string>
     /// Relation link table mapping keyed by "OwnerCollection|PropertyName"
     RelationLinks: Dictionary<string, string>
+    /// Whether this owner/property maps owner rows to SourceId (true) or TargetId (false) in the link table.
+    RelationOwnerUsesSource: Dictionary<string, bool>
     /// Type -> known collection names mapping (used to resolve custom collection names)
     TypeCollections: Dictionary<string, HashSet<string>>
 }
@@ -93,6 +95,7 @@ type internal QueryContext = {
           ExcludedPaths = HashSet()
           RelationTargets = Dictionary(System.StringComparer.Ordinal)
           RelationLinks = Dictionary(System.StringComparer.Ordinal)
+          RelationOwnerUsesSource = Dictionary(System.StringComparer.Ordinal)
           TypeCollections = Dictionary(System.StringComparer.Ordinal) }
 
     /// Create a multi-source context while preserving the first root as the primary table.
@@ -108,6 +111,7 @@ type internal QueryContext = {
           ExcludedPaths = HashSet()
           RelationTargets = Dictionary(System.StringComparer.Ordinal)
           RelationLinks = Dictionary(System.StringComparer.Ordinal)
+          RelationOwnerUsesSource = Dictionary(System.StringComparer.Ordinal)
           TypeCollections = Dictionary(System.StringComparer.Ordinal) }
 
     /// Generate a unique alias (_ref0, _ref1, ...).
@@ -138,10 +142,11 @@ type internal QueryContext = {
     member private this.RelationKey(ownerCollection: string, propertyName: string) =
         ownerCollection + "|" + propertyName
 
-    member this.RegisterRelation(ownerCollection: string, propertyName: string, targetCollection: string, relationName: string) =
+    member this.RegisterRelation(ownerCollection: string, propertyName: string, targetCollection: string, linkTable: string, ownerUsesSource: bool) =
         let key = this.RelationKey(ownerCollection, propertyName)
         this.RelationTargets.[key] <- targetCollection
-        this.RelationLinks.[key] <- "SoloDBRelLink_" + relationName
+        this.RelationLinks.[key] <- linkTable
+        this.RelationOwnerUsesSource.[key] <- ownerUsesSource
 
     member this.TryResolveRelationTarget(ownerCollection: string, propertyName: string) =
         let key = this.RelationKey(ownerCollection, propertyName)
@@ -152,6 +157,12 @@ type internal QueryContext = {
     member this.TryResolveRelationLink(ownerCollection: string, propertyName: string) =
         let key = this.RelationKey(ownerCollection, propertyName)
         match this.RelationLinks.TryGetValue key with
+        | true, value -> Some value
+        | _ -> None
+
+    member this.TryResolveRelationOwnerUsesSource(ownerCollection: string, propertyName: string) =
+        let key = this.RelationKey(ownerCollection, propertyName)
+        match this.RelationOwnerUsesSource.TryGetValue key with
         | true, value -> Some value
         | _ -> None
 

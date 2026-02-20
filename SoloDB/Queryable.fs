@@ -1213,18 +1213,46 @@ module private QueryHelper =
             let g = pt.GetGenericTypeDefinition()
             g = typedefof<DBRef<_>> || g = typedefof<DBRefMany<_>>)
 
+    /// Context captured during query translation for post-query relation batch loading.
+    [<Struct>]
+    type internal BatchLoadContext = {
+        OwnerTable: string
+        OwnerType: Type
+        ExcludedPaths: HashSet<string>
+        HasSingleRelations: bool
+        HasManyRelations: bool
+    }
+
+    let internal activeBatchLoadContext = new System.Threading.ThreadLocal<BatchLoadContext voption>(fun () -> ValueNone)
+
     let private preloadQueryContextMetadata (ctx: QueryContext) (connection: SqliteConnection) =
+        let canonicalManyName (a: string) (b: string) =
+            if StringComparer.Ordinal.Compare(a, b) <= 0 then $"{a}_{b}" else $"{b}_{a}"
+
         if tableExists connection "SoloDBRelation" then
             use relationCmd = connection.CreateCommand()
-            relationCmd.CommandText <- "SELECT Name, OwnerCollection, PropertyName, TargetCollection FROM SoloDBRelation;"
+            relationCmd.CommandText <- "SELECT Name, OwnerCollection, PropertyName, TargetCollection, RefKind FROM SoloDBRelation;"
             use relationReader = relationCmd.ExecuteReader()
             while relationReader.Read() do
                 let name = if relationReader.IsDBNull(0) then null else relationReader.GetString(0)
                 let ownerCollection = if relationReader.IsDBNull(1) then null else relationReader.GetString(1)
                 let propertyName = if relationReader.IsDBNull(2) then null else relationReader.GetString(2)
                 let targetCollection = if relationReader.IsDBNull(3) then null else relationReader.GetString(3)
-                if not (isNull name || isNull ownerCollection || isNull propertyName || isNull targetCollection) then
-                    ctx.RegisterRelation(ownerCollection, propertyName, targetCollection, name)
+                let refKind = if relationReader.IsDBNull(4) then null else relationReader.GetString(4)
+                if not (isNull name || isNull ownerCollection || isNull propertyName || isNull targetCollection || isNull refKind) then
+                    let canonicalName = canonicalManyName ownerCollection targetCollection
+                    let canonicalLinkTable = "SoloDBRelLink_" + canonicalName
+                    let defaultLinkTable = "SoloDBRelLink_" + name
+                    let useSharedMany =
+                        StringComparer.Ordinal.Equals(refKind, "Many")
+                        && tableExists connection canonicalLinkTable
+                    let ownerUsesSource =
+                        if useSharedMany then
+                            StringComparer.Ordinal.Compare(ownerCollection, targetCollection) <= 0
+                        else
+                            true
+                    let linkTable = if useSharedMany then canonicalLinkTable else defaultLinkTable
+                    ctx.RegisterRelation(ownerCollection, propertyName, targetCollection, linkTable, ownerUsesSource)
 
         if tableExists connection "SoloDBTypeCollectionMap" then
             use typeCmd = connection.CreateCommand()
@@ -1265,7 +1293,8 @@ module private QueryHelper =
 
         let ctx = QueryContext.SingleSource(source.Name)
         use metadataConnection = source.GetInternalConnection()
-        if hasRelationProperties typeof<'T> then
+        let hasRelations = hasRelationProperties typeof<'T>
+        if hasRelations then
             let relationTx: Relations.RelationTxContext = {
                 Connection = metadataConnection
                 OwnerTable = source.Name
@@ -1301,6 +1330,32 @@ module private QueryHelper =
             translateQuery<'T> builder expression
             builder.Append ")"
 
+        // Capture batch load context for DBRefMany post-query hydration.
+        // ExcludedPaths are populated during translation, so capture AFTER translateQuery.
+        let hasSingleRelations =
+            hasRelations &&
+            typeof<'T>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+            |> Array.exists (fun p ->
+                p.PropertyType.IsGenericType &&
+                p.PropertyType.GetGenericTypeDefinition() = typedefof<DBRef<_>>)
+
+        let hasManyRelations =
+            hasRelations &&
+            typeof<'T>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+            |> Array.exists (fun p ->
+                p.PropertyType.IsGenericType &&
+                p.PropertyType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>)
+
+        if hasSingleRelations || hasManyRelations then
+            activeBatchLoadContext.Value <- ValueSome {
+                OwnerTable = source.Name
+                OwnerType = typeof<'T>
+                ExcludedPaths = new HashSet<string>(ctx.ExcludedPaths, StringComparer.Ordinal)
+                HasSingleRelations = hasSingleRelations
+                HasManyRelations = hasManyRelations
+            }
+        else
+            activeBatchLoadContext.Value <- ValueNone
 
         builder.SQLiteCommand.ToString(), builder.Variables
 
@@ -1329,11 +1384,43 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
 
     interface SoloDBQueryProvider
     member internal this.ExecuteEnumetable<'Elem> (query: string) (par: obj) : IEnumerable<'Elem> =
+        // Capture batch load context before the lazy seq is enumerated.
+        let batchCtx = QueryHelper.activeBatchLoadContext.Value
+        QueryHelper.activeBatchLoadContext.Value <- ValueNone
         seq {
             use connection = source.GetInternalConnection()
-            for row in connection.Query<Types.DbObjectRow>(query, par) do
-                JsonFunctions.fromSQLite<'Elem> row
-            ()
+            match batchCtx with
+            | ValueSome ctx when ctx.HasSingleRelations || ctx.HasManyRelations ->
+                // Buffer all results, then batch-load relation properties.
+                let buffer = ResizeArray<int64 * 'Elem>()
+                for row in connection.Query<Types.DbObjectRow>(query, par) do
+                    let entity = JsonFunctions.fromSQLite<'Elem> row
+                    buffer.Add(row.Id.Value, entity)
+
+                if buffer.Count > 0 then
+                    // Select projections can change result element type (for example to string),
+                    // so batch loading must run only for actual owner entity objects.
+                    let ownerEntities =
+                        buffer
+                        |> Seq.choose (fun (id, e) ->
+                            let boxed = box e
+                            if isNull boxed then None
+                            elif ctx.OwnerType.IsInstanceOfType boxed then Some(id, boxed)
+                            else None)
+                        |> Seq.toArray
+
+                    if ownerEntities.Length > 0 then
+                        if ctx.HasSingleRelations then
+                            Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ownerEntities
+
+                        if ctx.HasManyRelations then
+                            Relations.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ownerEntities
+
+                for (_id, entity) in buffer do
+                    yield entity
+            | _ ->
+                for row in connection.Query<Types.DbObjectRow>(query, par) do
+                    yield JsonFunctions.fromSQLite<'Elem> row
         }
 
     interface IQueryProvider with
@@ -1350,20 +1437,37 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
 
         member this.Execute<'TResult>(expression: Expression) : 'TResult =
             let query, variables = QueryHelper.startTranslation source expression
+            // Capture batch load context (set during startTranslation, consumed here).
+            let batchCtx = QueryHelper.activeBatchLoadContext.Value
+            QueryHelper.activeBatchLoadContext.Value <- ValueNone
 
             #if DEBUG
             if System.Diagnostics.Debugger.IsAttached then
                 printfn "%s" query
             #endif
 
+            let inline batchLoadSingle (connection: SqliteConnection) (row: Types.DbObjectRow) (entity: 'TResult) =
+                match batchCtx with
+                | ValueSome ctx when (ctx.HasSingleRelations || ctx.HasManyRelations) && not (isNull (box entity)) && row.Id.HasValue && ctx.OwnerType.IsAssignableFrom(typeof<'TResult>) ->
+                    if ctx.HasSingleRelations then
+                        Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths [| (row.Id.Value, box entity) |]
+                    if ctx.HasManyRelations then
+                        Relations.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths [| (row.Id.Value, box entity) |]
+                | _ -> ()
+                entity
+
             try
                 match typeof<'TResult> with
                 | t when t.IsGenericType && typeof<IEnumerable<'T>>.Equals typeof<'TResult> ->
+                    // Batch load context is consumed inside ExecuteEnumetable (passed via capture above).
+                    // Re-set it so ExecuteEnumetable can pick it up.
+                    QueryHelper.activeBatchLoadContext.Value <- batchCtx
                     let result = this.ExecuteEnumetable<'T> query variables
                     result :> obj :?> 'TResult
                 | t when t.IsGenericType && typedefof<IEnumerable<_>>.Equals typedefof<'TResult> ->
+                    QueryHelper.activeBatchLoadContext.Value <- batchCtx
                     let elemType = (GenericTypeArgCache.Get t).[0]
-                    let m = 
+                    let m =
                         typeof<SoloDBCollectionQueryProvider<'T>>
                             .GetMethod(nameof(this.ExecuteEnumetable), BindingFlags.NonPublic ||| BindingFlags.Instance)
                             .MakeGenericMethod(elemType)
@@ -1378,7 +1482,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                     query :> obj :?> 'TResult
                 | _other ->
                     use connection = source.GetInternalConnection()
-                    let methodName = 
+                    let methodName =
                         match expression with
                         | :? MethodCallExpression as mce -> mce.Method.Name
                         | _ -> "Execute"
@@ -1388,36 +1492,47 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
 
                     match methodName with
                     | "Single" ->
-                        query.Single() |> JsonFunctions.fromSQLite<'TResult>
+                        let row = query.Single()
+                        let entity = JsonFunctions.fromSQLite<'TResult> row
+                        batchLoadSingle connection row entity
                     | "SingleOrDefault" ->
                         // Emulate query.SingleOrDefault()
                         use enumerator = query.GetEnumerator()
                         match enumerator.MoveNext() with
                         | false -> Unchecked.defaultof<'TResult>
-                        | true -> 
+                        | true ->
                             let prevElement = enumerator.Current
                             match enumerator.MoveNext() with
                             | true -> failwithf "Sequence contains more than one element"
-                            | false -> 
+                            | false ->
                                 // Only one element was found, return it.
-                                JsonFunctions.fromSQLite<'TResult> prevElement
+                                let entity = JsonFunctions.fromSQLite<'TResult> prevElement
+                                batchLoadSingle connection prevElement entity
 
                     | "First" ->
-                        query.First() |> JsonFunctions.fromSQLite<'TResult>
+                        let row = query.First()
+                        let entity = JsonFunctions.fromSQLite<'TResult> row
+                        batchLoadSingle connection row entity
                     | "FirstOrDefault" ->
                         match query |> Seq.tryHead with
                         | None -> Unchecked.defaultof<'TResult>
-                        | Some row -> JsonFunctions.fromSQLite<'TResult> row
+                        | Some row ->
+                            let entity = JsonFunctions.fromSQLite<'TResult> row
+                            batchLoadSingle connection row entity
 
                     | methodName when methodName.EndsWith("OrDefault", StringComparison.Ordinal) ->
                         match query |> Seq.tryHead with
                         | None -> Unchecked.defaultof<'TResult>
-                        | Some row -> JsonFunctions.fromSQLite<'TResult> row
+                        | Some row ->
+                            let entity = JsonFunctions.fromSQLite<'TResult> row
+                            batchLoadSingle connection row entity
                     | _ ->
                         match query |> Seq.tryHead with
                         | None -> failwithf "Sequence contains no elements"
-                        | Some row -> JsonFunctions.fromSQLite<'TResult> row
-                    
+                        | Some row ->
+                            let entity = JsonFunctions.fromSQLite<'TResult> row
+                            batchLoadSingle connection row entity
+
             with _ex ->
                 reraise()
             

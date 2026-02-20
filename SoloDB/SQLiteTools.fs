@@ -409,7 +409,7 @@ module SQLiteTools =
 
                     jsonObj :> obj :?> 'T
 
-            | t when FSharpType.IsRecord t ->
+            | t when FSharpType.IsRecord(t, true) ->
                 // Parameter declarations
                 let readerParam = Expression.Parameter(typeof<IDataReader>, "reader")
                 let startIndexParam = Expression.Parameter(typeof<int>, "startIndex")
@@ -417,9 +417,11 @@ module SQLiteTools =
 
                 let columnVar = Expression.Variable typeof<int>
 
-                let recordFields = FSharpType.GetRecordFields t
+                let recordFields = FSharpType.GetRecordFields(t, true)
                 let recordFieldsType = recordFields |> Array.map(_.PropertyType)
-                let ctor = t.GetConstructors() |> Array.find(fun c -> c.GetParameters() |> Array.map(_.ParameterType) = recordFieldsType)
+                let ctor =
+                    t.GetConstructors(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
+                    |> Array.find(fun c -> c.GetParameters() |> Array.map(_.ParameterType) = recordFieldsType)
                 
 
                 // Create parameter expressions for constructor

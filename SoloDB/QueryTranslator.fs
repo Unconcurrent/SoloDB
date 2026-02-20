@@ -357,6 +357,23 @@ module QueryTranslator =
             na.Expressions |> Seq.exists isFullyConstant
         | _ -> true
 
+    /// Substitute lambda parameters with invocation arguments (beta-reduction helper).
+    let private inlineLambdaInvocation (lambda: LambdaExpression) (args: IReadOnlyList<Expression>) =
+        if lambda.Parameters.Count <> args.Count then
+            lambda.Body
+        else
+            let mutable body = lambda.Body
+            for i = 0 to lambda.Parameters.Count - 1 do
+                let p = lambda.Parameters.[i]
+                let a = args.[i]
+                let visitor =
+                    { new ExpressionVisitor() with
+                        override _.VisitParameter(node: ParameterExpression) =
+                            if Object.ReferenceEquals(node, p) then a
+                            else base.VisitParameter(node) }
+                body <- visitor.Visit(body)
+            body
+
 
     /// <summary>
     /// Generates SQL to compare a database value with a known .NET object.
@@ -686,6 +703,17 @@ module QueryTranslator =
             else arrayIndex exp.Object arge qb
         | ExpressionType.Quote ->
             visit (exp :?> UnaryExpression).Operand qb
+        | ExpressionType.Invoke ->
+            let invocation = exp :?> InvocationExpression
+            match invocation.Expression with
+            | :? LambdaExpression as le when le.Parameters.Count = invocation.Arguments.Count ->
+                visit (inlineLambdaInvocation le invocation.Arguments) qb
+            | _ when invocation.CanReduce ->
+                visit (invocation.Reduce()) qb
+            | _ when isFullyConstant exp ->
+                qb.AppendVariable (evaluateExpr<obj> exp)
+            | _ ->
+                raise (NotSupportedException("Invoke expressions must be reducible, inlineable, or constant."))
         | ExpressionType.Conditional ->
             visitIfElse (exp :?> ConditionalExpression) qb
         | ExpressionType.TypeIs ->
@@ -914,6 +942,24 @@ module QueryTranslator =
             qb.AppendRaw ")"
 
         match m with
+        | _ when m.Method.Name = "Invoke" && not (FSharp.Reflection.FSharpType.IsRecord m.Type) ->
+            let rec stripConvert (expr: Expression) =
+                match expr with
+                | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> stripConvert ue.Operand
+                | _ -> expr
+
+            let targetExpr =
+                if isNull m.Object then null
+                else stripConvert m.Object
+
+            match targetExpr with
+            | :? LambdaExpression as le when le.Parameters.Count = m.Arguments.Count ->
+                visit (inlineLambdaInvocation le m.Arguments) qb
+            | _ when isFullyConstant (m :> Expression) ->
+                qb.AppendVariable (evaluateExpr<obj> (m :> Expression))
+            | _ ->
+                raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
+
         | OfShape0 null null "ToLowerInvariant" value
         | OfShape0 null null "ToLower" value ->
             // User defined function to also support non ASCII.
@@ -1714,6 +1760,59 @@ module QueryTranslator =
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> unwrapConvertForUpdate ue.Operand
         | _ -> expr
 
+    let rec private normalizeUpdateManyBody (expr: Expression) =
+        let expr = unwrapConvertForUpdate expr
+        match expr with
+        | :? MethodCallExpression as mc when mc.Method.Name = "op_PipeRight" && mc.Arguments.Count >= 1 ->
+            // F# "(x |> ignore)" wraps side-effecting call in op_PipeRight; keep the source call.
+            normalizeUpdateManyBody mc.Arguments.[0]
+        | :? MethodCallExpression as mc when (mc.Method.Name = "Ignore" || mc.Method.Name = "ignore") && mc.Arguments.Count = 1 ->
+            normalizeUpdateManyBody mc.Arguments.[0]
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote || ue.NodeType = ExpressionType.Convert ->
+            normalizeUpdateManyBody ue.Operand
+        | _ ->
+            expr
+
+    let rec private tryExtractLambdaExpression (expr: Expression) : LambdaExpression voption =
+        let tryEvaluateAsLambda (candidate: Expression) =
+            try
+                match evaluateExpr<obj> candidate with
+                | :? LambdaExpression as le -> ValueSome le
+                | :? Expression as e ->
+                    match e with
+                    | :? LambdaExpression as le -> ValueSome le
+                    | _ -> ValueNone
+                | _ -> ValueNone
+            with _ ->
+                ValueNone
+
+        match unwrapConvertForUpdate expr with
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote || ue.NodeType = ExpressionType.Convert ->
+            tryExtractLambdaExpression ue.Operand
+        | :? LambdaExpression as le ->
+            ValueSome le
+        | :? MethodCallExpression as mc ->
+            let fromObject =
+                if isNull mc.Object then ValueNone
+                else tryExtractLambdaExpression mc.Object
+            match fromObject with
+            | ValueSome _ as hit -> hit
+            | ValueNone ->
+                mc.Arguments
+                |> Seq.tryPick (fun a ->
+                    match tryExtractLambdaExpression a with
+                    | ValueSome le -> Some le
+                    | ValueNone -> None)
+                |> function
+                   | Some le -> ValueSome le
+                   | None -> tryEvaluateAsLambda (mc :> Expression)
+        | :? InvocationExpression as ie ->
+            match tryExtractLambdaExpression ie.Expression with
+            | ValueSome _ as hit -> hit
+            | ValueNone -> tryEvaluateAsLambda (ie :> Expression)
+        | _ ->
+            ValueNone
+
     let rec private computePathKeyForUpdate (expr: Expression) : string =
         match expr with
         | :? MemberExpression as me when not (isNull me.Expression) ->
@@ -1835,7 +1934,9 @@ module QueryTranslator =
         | _ -> raise (NotSupportedException updateManyDbRefManyPersistedIdMessage)
 
     let internal tryTranslateUpdateManyRelationTransform (expression: Expression) : UpdateManyRelationTransform voption =
-        let body = tryLambdaBody expression
+        let body =
+            let raw = tryLambdaBody expression
+            if isNull raw then null else normalizeUpdateManyBody raw
         if isNull body then ValueNone else
 
         if containsDBRefValueMutationPath body then
@@ -2073,6 +2174,11 @@ module QueryTranslator =
         | Some mapped when not (String.IsNullOrWhiteSpace mapped) -> formatName mapped
         | _ -> sprintf "SoloDBRelLink_%s_%s" ownerTable propName
 
+    let private dbRefManyOwnerUsesSource (ctx: QueryContext) (ownerTable: string) (propName: string) =
+        match ctx.TryResolveRelationOwnerUsesSource(ownerTable, propName) with
+        | Some value -> value
+        | None -> true
+
     /// Extract the DBRefMany<T> source MemberExpression from a method call argument, if it refers to a DBRefMany property on the root parameter.
     let private tryGetDBRefManySource (arg: Expression) : MemberExpression voption =
         let arg = unwrapConvert arg
@@ -2102,44 +2208,67 @@ module QueryTranslator =
                     | :? ParameterExpression ->
                         let propName = me.Member.Name
                         let linkTable = dbRefManyLinkTable qb.SourceContext qb.SourceContext.RootTable propName
-                        qb.AppendRaw (sprintf "(SELECT COUNT(*) FROM \"%s\" WHERE SourceId = %s.Id)" linkTable sourceAlias)
+                        let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext qb.SourceContext.RootTable propName
+                        let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
+                        qb.AppendRaw (sprintf "(SELECT COUNT(*) FROM \"%s\" WHERE %s = %s.Id)" linkTable ownerColumn sourceAlias)
                         true
                     | _ -> false
                 | _ -> false
             else false
 
-        // Case 2/3: Enumerable.Any(x.Tags) or Enumerable.Any(x.Tags, pred)
-        | :? MethodCallExpression as mce when mce.Method.Name = "Any" && mce.Arguments.Count >= 1 ->
-            match tryGetDBRefManySource mce.Arguments.[0] with
-            | ValueSome me ->
-                let propName = me.Member.Name
-                let linkTable = dbRefManyLinkTable qb.SourceContext qb.SourceContext.RootTable propName
+        // Case 2/3: Any() / Any(pred) over DBRefMany in either extension-call or instance-call form.
+        | :? MethodCallExpression as mce when mce.Method.Name = "Any" ->
+            let sourceArg, predArg =
+                if not (isNull mce.Object) then
+                    let pred =
+                        if mce.Arguments.Count >= 1 then ValueSome mce.Arguments.[0]
+                        else ValueNone
+                    ValueSome mce.Object, pred
+                elif mce.Arguments.Count >= 1 then
+                    let pred =
+                        if mce.Arguments.Count >= 2 then ValueSome mce.Arguments.[1]
+                        else ValueNone
+                    ValueSome mce.Arguments.[0], pred
+                else
+                    ValueNone, ValueNone
 
-                if mce.Arguments.Count = 1 then
-                    // Any() without predicate
-                    qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" WHERE SourceId = %s.Id)" linkTable sourceAlias)
-                    true
-                elif mce.Arguments.Count = 2 then
-                    // Any(pred) with predicate — correlated EXISTS with INNER JOIN to target table
-                    let predExpr =
-                        let arg = mce.Arguments.[1]
-                        if arg.NodeType = ExpressionType.Quote then (arg :?> UnaryExpression).Operand :?> LambdaExpression
-                        else arg :?> LambdaExpression
-                    let targetType = me.Type.GetGenericArguments().[0]
-                    let targetTable = resolveTargetCollectionForRelation qb.SourceContext qb.SourceContext.RootTable propName targetType
-                    let tgtAlias = "_tgt"
-                    let lnkAlias = "_lnk"
+            match sourceArg with
+            | ValueSome sourceExpr ->
+                match tryGetDBRefManySource sourceExpr with
+                | ValueSome me ->
+                    let propName = me.Member.Name
+                    let linkTable = dbRefManyLinkTable qb.SourceContext qb.SourceContext.RootTable propName
+                    let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext qb.SourceContext.RootTable propName
+                    let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
+                    let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
 
-                    qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" AS %s INNER JOIN \"%s\" AS %s ON %s.Id = %s.TargetId WHERE %s.SourceId = \"%s\".Id AND "
-                        linkTable lnkAlias targetTable tgtAlias tgtAlias lnkAlias lnkAlias sourceAlias)
+                    match predArg with
+                    | ValueNone ->
+                        // Any() without predicate.
+                        qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" WHERE %s = %s.Id)" linkTable ownerColumn sourceAlias)
+                        true
+                    | ValueSome predicateExpr ->
+                        // Any(pred) with predicate — correlated EXISTS with INNER JOIN to target table.
+                        match tryExtractLambdaExpression predicateExpr with
+                        | ValueSome predExpr ->
+                            let targetType = me.Type.GetGenericArguments().[0]
+                            let targetTable = resolveTargetCollectionForRelation qb.SourceContext qb.SourceContext.RootTable propName targetType
+                            let tgtAlias = "_tgt"
+                            let lnkAlias = "_lnk"
 
-                    // Translate predicate body with target table as context
-                    let subQb = qb.ForSubquery(tgtAlias, predExpr)
-                    visit predExpr.Body subQb
+                            qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" AS %s INNER JOIN \"%s\" AS %s ON %s.Id = %s.%s WHERE %s.%s = %s.Id AND "
+                                linkTable lnkAlias targetTable tgtAlias tgtAlias lnkAlias targetColumn lnkAlias ownerColumn sourceAlias)
 
-                    qb.AppendRaw ")"
-                    true
-                else false
+                            // Translate predicate body with target table as context
+                            let subQb = qb.ForSubquery(tgtAlias, predExpr)
+                            visit predExpr.Body subQb
+
+                            qb.AppendRaw ")"
+                            true
+                        | ValueNone ->
+                            false
+                | ValueNone ->
+                    false
             | ValueNone -> false
 
         | _ -> false

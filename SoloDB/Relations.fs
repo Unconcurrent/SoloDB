@@ -50,6 +50,9 @@ type private RelationDescriptor = {
     Kind: RelationKind
     TargetType: Type
     TargetTable: string
+    LinkSourceTable: string
+    LinkTargetTable: string
+    OwnerUsesSourceColumn: bool
     RelationName: string
     LinkTable: string
     OnDelete: DeletePolicy
@@ -100,6 +103,12 @@ let private quoteIdentifier (name: string) =
 
 let private relationName (ownerTable: string) (propertyName: string) =
     $"{ownerTable}_{propertyName}"
+
+let private canonicalManyRelationName (leftTable: string) (rightTable: string) =
+    if StringComparer.Ordinal.Compare(leftTable, rightTable) <= 0 then
+        $"{leftTable}_{rightTable}"
+    else
+        $"{rightTable}_{leftTable}"
 
 let private linkTableFromRelationName (name: string) =
     "SoloDBRelLink_" + name
@@ -348,6 +357,11 @@ let private buildRelationSpecs (ownerType: Type) =
 let private getRelationSpecs (ownerType: Type) =
     relationSpecsCache.GetOrAdd(ownerType, Func<_, _>(buildRelationSpecs))
 
+let private hasManyBackReference (ownerType: Type) (targetType: Type) =
+    getRelationSpecs targetType
+    |> Array.exists (fun (_, kind, candidateTargetType, _, _, _) ->
+        kind = Many && candidateTargetType = ownerType)
+
 let private typeCollectionMapTableExists (connection: SqliteConnection) =
     connection.QueryFirst<int64>(
         "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBTypeCollectionMap') THEN 1 ELSE 0 END") = 1L
@@ -357,6 +371,18 @@ let private tryGetStoredTargetCollection (connection: SqliteConnection) (ownerTa
     connection.QueryFirstOrDefault<string>(
         """
 SELECT TargetCollection
+FROM SoloDBRelation
+WHERE OwnerCollection = @ownerCollection AND PropertyName = @propertyName
+LIMIT 1;
+""",
+        {| ownerCollection = ownerTable; propertyName = propertyName |})
+    |> Option.ofObj
+
+let private tryGetStoredRelationName (connection: SqliteConnection) (ownerTable: string) (propertyName: string) =
+    ensureRelationCatalogTable connection
+    connection.QueryFirstOrDefault<string>(
+        """
+SELECT Name
 FROM SoloDBRelation
 WHERE OwnerCollection = @ownerCollection AND PropertyName = @propertyName
 LIMIT 1;
@@ -379,6 +405,11 @@ let private collectionExistsByName (connection: SqliteConnection) (collectionNam
     connection.QueryFirst<int64>(
         "SELECT CASE WHEN EXISTS (SELECT 1 FROM SoloDBCollections WHERE Name = @name) THEN 1 ELSE 0 END",
         {| name = collectionName |}) = 1L
+
+let private sqliteTableExistsByName (connection: SqliteConnection) (tableName: string) =
+    connection.QueryFirst<int64>(
+        "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @name) THEN 1 ELSE 0 END",
+        {| name = tableName |}) = 1L
 
 let private resolveTargetCollectionName (connection: SqliteConnection) (ownerTable: string) (propertyName: string) (targetType: Type) =
     let ownerTable = formatName ownerTable
@@ -406,7 +437,28 @@ let private buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) =
     getRelationSpecs ownerType
     |> Array.map (fun (prop, kind, targetType, onDelete, onOwnerDelete, isUnique) ->
         let targetTable = resolveTargetCollectionName tx.Connection ownerTable prop.Name targetType
-        let relName = relationName ownerTable prop.Name
+        let defaultRelName = relationName ownerTable prop.Name
+        let canonicalManyName = canonicalManyRelationName ownerTable targetTable
+        let isMutualMany = kind = Many && hasManyBackReference ownerType targetType
+        let proposedRelName = defaultRelName
+        let relName =
+            match tryGetStoredRelationName tx.Connection ownerTable prop.Name with
+            | Some stored when not (String.IsNullOrWhiteSpace stored) -> formatName stored
+            | _ -> proposedRelName
+
+        let canonicalSharedLinkTable = linkTableFromRelationName canonicalManyName
+        let isSharedMany =
+            kind = Many
+            && (isMutualMany || sqliteTableExistsByName tx.Connection canonicalSharedLinkTable)
+        let ownerUsesSourceColumn =
+            if isSharedMany then
+                StringComparer.Ordinal.Compare(ownerTable, targetTable) <= 0
+            else
+                true
+        let linkSourceTable, linkTargetTable =
+            if ownerUsesSourceColumn then ownerTable, targetTable
+            else targetTable, ownerTable
+
         {
             OwnerTable = ownerTable
             OwnerType = ownerType
@@ -415,8 +467,11 @@ let private buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) =
             Kind = kind
             TargetType = targetType
             TargetTable = targetTable
+            LinkSourceTable = linkSourceTable
+            LinkTargetTable = linkTargetTable
+            OwnerUsesSourceColumn = ownerUsesSourceColumn
             RelationName = relName
-            LinkTable = linkTableFromRelationName relName
+            LinkTable = if isSharedMany then canonicalSharedLinkTable else linkTableFromRelationName relName
             OnDelete = onDelete
             OnOwnerDelete = onOwnerDelete
             IsUnique = isUnique
@@ -426,8 +481,8 @@ let private ensureRelationSchema (tx: RelationTxContext) (descriptor: RelationDe
     ensureCollectionTableExists tx.Connection descriptor.TargetTable
 
     let qLink = quoteIdentifier descriptor.LinkTable
-    let qOwner = quoteIdentifier descriptor.OwnerTable
-    let qTarget = quoteIdentifier descriptor.TargetTable
+    let qSource = quoteIdentifier descriptor.LinkSourceTable
+    let qTarget = quoteIdentifier descriptor.LinkTargetTable
     let constraints =
         match descriptor.Kind with
         | Single when descriptor.IsUnique ->
@@ -442,7 +497,7 @@ CREATE TABLE IF NOT EXISTS {qLink} (
     Id INTEGER PRIMARY KEY,
     SourceId INTEGER NOT NULL,
     TargetId INTEGER NOT NULL,
-    FOREIGN KEY (SourceId) REFERENCES {qOwner}(Id) ON DELETE RESTRICT,
+    FOREIGN KEY (SourceId) REFERENCES {qSource}(Id) ON DELETE RESTRICT,
     FOREIGN KEY (TargetId) REFERENCES {qTarget}(Id) ON DELETE RESTRICT,
     {constraints}
 ) STRICT;
@@ -587,6 +642,12 @@ let private createDbRefTo (dbRefType: Type) (id: int64) =
         raise (InvalidOperationException($"Could not resolve DBRef.To on type {dbRefType.FullName}."))
     toMethod.Invoke(null, [| box id |])
 
+let private createDbRefLoaded (dbRefType: Type) (id: int64) (entity: obj) =
+    let loadedMethod =
+        dbRefType.GetMethods(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Static)
+        |> Array.find (fun m -> m.Name = "Loaded" && m.GetParameters().Length = 2)
+    loadedMethod.Invoke(null, [| box id; entity |])
+
 let private resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor: RelationDescriptor) (owner: obj) =
     let value = descriptor.Property.GetValue(owner)
     let id = readDbRefId value
@@ -671,6 +732,10 @@ let private applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWri
             $"INSERT OR REPLACE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
             {| sourceId = ownerId; targetId = targetId |}) |> ignore
 
+    let manyColumns (descriptor: RelationDescriptor) =
+        if descriptor.OwnerUsesSourceColumn then "SourceId", "TargetId"
+        else "TargetId", "SourceId"
+
     for op in plan.Ops do
         match op with
         | SetDBRefToId(propertyPath, targetType, targetId) ->
@@ -702,9 +767,12 @@ let private applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWri
             if descriptor.TargetType <> targetType then
                 raise (InvalidOperationException($"Relation target type mismatch on '{propertyPath}'. Expected {descriptor.TargetType.FullName}, got {targetType.FullName}."))
             ensureTargetExists tx descriptor.TargetTable targetId
+            let sourceId, targetIdValue =
+                if descriptor.OwnerUsesSourceColumn then ownerId, targetId
+                else targetId, ownerId
             tx.Connection.Execute(
                 $"INSERT OR IGNORE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
-                {| sourceId = ownerId; targetId = targetId |}) |> ignore
+                {| sourceId = sourceId; targetId = targetIdValue |}) |> ignore
 
         | RemoveDBRefMany(propertyPath, targetType, targetId) ->
             let descriptor = resolveDescriptor propertyPath
@@ -712,9 +780,11 @@ let private applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWri
                 raise (InvalidOperationException($"Relation '{propertyPath}' is not DBRefMany<T>."))
             if descriptor.TargetType <> targetType then
                 raise (InvalidOperationException($"Relation target type mismatch on '{propertyPath}'. Expected {descriptor.TargetType.FullName}, got {targetType.FullName}."))
+            let ownerColumn, targetColumn = manyColumns descriptor
+            let sql = $"DELETE FROM {quoteIdentifier descriptor.LinkTable} WHERE {ownerColumn} = @ownerId AND {targetColumn} = @targetId;"
             tx.Connection.Execute(
-                $"DELETE FROM {quoteIdentifier descriptor.LinkTable} WHERE SourceId = @sourceId AND TargetId = @targetId;",
-                {| sourceId = ownerId; targetId = targetId |}) |> ignore
+                sql,
+                {| ownerId = ownerId; targetId = targetId |}) |> ignore
 
         | ClearDBRefMany(propertyPath, targetType) ->
             let descriptor = resolveDescriptor propertyPath
@@ -722,9 +792,11 @@ let private applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWri
                 raise (InvalidOperationException($"Relation '{propertyPath}' is not DBRefMany<T>."))
             if descriptor.TargetType <> targetType then
                 raise (InvalidOperationException($"Relation target type mismatch on '{propertyPath}'. Expected {descriptor.TargetType.FullName}, got {targetType.FullName}."))
+            let ownerColumn, _ = manyColumns descriptor
+            let sql = $"DELETE FROM {quoteIdentifier descriptor.LinkTable} WHERE {ownerColumn} = @ownerId;"
             tx.Connection.Execute(
-                $"DELETE FROM {quoteIdentifier descriptor.LinkTable} WHERE SourceId = @sourceId;",
-                {| sourceId = ownerId |}) |> ignore
+                sql,
+                {| ownerId = ownerId |}) |> ignore
 
 let private withDeleteGuard (tableName: string) (id: int64) (fn: unit -> unit) =
     let key = $"{tableName}|{id}"
@@ -735,6 +807,24 @@ let private withDeleteGuard (tableName: string) (id: int64) (fn: unit -> unit) =
         set.Add(key) |> ignore
         try fn()
         finally set.Remove(key) |> ignore
+
+let private metadataLinkLayout (connection: SqliteConnection) (row: RelationMetadataRow) (relationKind: RelationKind) =
+    match relationKind with
+    | Single ->
+        linkTableFromRelationName row.Name, "SourceId", "TargetId"
+    | Many ->
+        let canonicalTable = linkTableFromRelationName (canonicalManyRelationName row.OwnerCollection row.TargetCollection)
+        let useShared = sqliteTableExistsByName connection canonicalTable
+        let ownerUsesSourceColumn =
+            if useShared then
+                StringComparer.Ordinal.Compare(row.OwnerCollection, row.TargetCollection) <= 0
+            else
+                true
+        let ownerColumn, targetColumn =
+            if ownerUsesSourceColumn then "SourceId", "TargetId"
+            else "TargetId", "SourceId"
+        let linkTable = if useShared then canonicalTable else linkTableFromRelationName row.Name
+        linkTable, ownerColumn, targetColumn
 
 let rec private applyOwnerDeletePoliciesCore (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) (deleteTargets: bool) =
     ensureTxContext tx
@@ -751,14 +841,16 @@ let rec private applyOwnerDeletePoliciesCore (tx: RelationTxContext) (ownerTable
     withDeleteGuard ownerTable ownerId (fun () ->
         for row in rows do
             let relationKind = stringToRelationKind row.RefKind
-            let linkTable = linkTableFromRelationName row.Name
+            let linkTable, ownerColumn, targetColumn = metadataLinkLayout tx.Connection row relationKind
             let qLink = quoteIdentifier linkTable
-            let targetIds = tx.Connection.Query<int64>($"SELECT TargetId FROM {qLink} WHERE SourceId = @sourceId;", {| sourceId = ownerId |}) |> Seq.toArray
+            let targetIds =
+                tx.Connection.Query<int64>($"SELECT {targetColumn} FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |})
+                |> Seq.toArray
             let hasLinks = targetIds.Length > 0
             match relationKind with
             | Single ->
                 if hasLinks then
-                    tx.Connection.Execute($"DELETE FROM {qLink} WHERE SourceId = @sourceId;", {| sourceId = ownerId |}) |> ignore
+                    tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
 
             | Many ->
                 match parseOnOwnerDeletePolicy row.OnOwnerDelete with
@@ -767,10 +859,10 @@ let rec private applyOwnerDeletePoliciesCore (tx: RelationTxContext) (ownerTable
                         raise (InvalidOperationException($"Cannot delete owner '{ownerTable}' Id={ownerId} because relation '{row.PropertyName}' uses OnOwnerDelete=Restrict and still has links."))
                 | DeletePolicy.Unlink ->
                     if hasLinks then
-                        tx.Connection.Execute($"DELETE FROM {qLink} WHERE SourceId = @sourceId;", {| sourceId = ownerId |}) |> ignore
+                        tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
                 | DeletePolicy.Deletion ->
                     if hasLinks then
-                        tx.Connection.Execute($"DELETE FROM {qLink} WHERE SourceId = @sourceId;", {| sourceId = ownerId |}) |> ignore
+                        tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
                         if deleteTargets then
                             let distinctTargetIds = targetIds |> Seq.distinct |> Seq.toArray
                             for targetId in distinctTargetIds do
@@ -800,9 +892,10 @@ and private applyTargetDeletePoliciesCore (tx: RelationTxContext) (targetTable: 
         for row in rows do
             let onDelete = parseOnDeletePolicy row.OnDelete
             let relationKind = stringToRelationKind row.RefKind
-            let qLink = quoteIdentifier (linkTableFromRelationName row.Name)
+            let linkTable, ownerColumn, targetColumn = metadataLinkLayout tx.Connection row relationKind
+            let qLink = quoteIdentifier linkTable
             let ownerIds =
-                tx.Connection.Query<int64>($"SELECT SourceId FROM {qLink} WHERE TargetId = @targetId;", {| targetId = targetId |})
+                tx.Connection.Query<int64>($"SELECT {ownerColumn} FROM {qLink} WHERE {targetColumn} = @targetId;", {| targetId = targetId |})
                 |> Seq.distinct
                 |> Seq.toArray
 
@@ -812,7 +905,7 @@ and private applyTargetDeletePoliciesCore (tx: RelationTxContext) (targetTable: 
                     raise (InvalidOperationException($"Cannot delete '{targetTable}' Id={targetId}. Relation '{row.OwnerCollection}.{row.PropertyName}' uses OnDelete=Restrict."))
 
                 | DeletePolicy.Unlink ->
-                    tx.Connection.Execute($"DELETE FROM {qLink} WHERE TargetId = @targetId;", {| targetId = targetId |}) |> ignore
+                    tx.Connection.Execute($"DELETE FROM {qLink} WHERE {targetColumn} = @targetId;", {| targetId = targetId |}) |> ignore
                     if relationKind = Single then
                         for ownerId in ownerIds do
                             updateDbRefJson tx row.OwnerCollection ownerId row.PropertyName 0L
@@ -843,8 +936,9 @@ and private globalRefCountCore (tx: RelationTxContext) (targetTable: string) (ta
     let rows = readMetadataByTarget tx.Connection targetTable
     let mutable count = 0L
     for row in rows do
-        let linkTable = quoteIdentifier (linkTableFromRelationName row.Name)
-        count <- count + tx.Connection.QueryFirst<int64>($"SELECT COUNT(*) FROM {linkTable} WHERE TargetId = @targetId;", {| targetId = targetId |})
+        let relationKind = stringToRelationKind row.RefKind
+        let linkTable, _, targetColumn = metadataLinkLayout tx.Connection row relationKind
+        count <- count + tx.Connection.QueryFirst<int64>($"SELECT COUNT(*) FROM {quoteIdentifier linkTable} WHERE {targetColumn} = @targetId;", {| targetId = targetId |})
     count
 let ensureSchemaForOwnerType (tx: RelationTxContext) (ownerType: Type) =
     ensureTxContext tx
@@ -1076,3 +1170,198 @@ let applyOwnerDeletePolicies (tx: RelationTxContext) (ownerTable: string) (owner
 
 let globalRefCount (tx: RelationTxContext) (targetTable: string) (targetId: int64) =
     globalRefCountCore tx targetTable targetId
+
+/// Batch-load all DBRef<T> single-reference properties for a set of owner entities.
+/// excludedPaths: property names to skip (from Exclude() operator).
+/// ownerEntities: (ownerId, ownerObject) pairs.
+let batchLoadDBRefProperties
+    (connection: SqliteConnection)
+    (ownerTable: string)
+    (ownerType: Type)
+    (excludedPaths: HashSet<string>)
+    (ownerEntities: (int64 * obj) array)
+    =
+    if ownerEntities.Length = 0 then ()
+    else
+
+    let specs = getRelationSpecs ownerType
+    let singleSpecs =
+        specs
+        |> Array.filter (fun (_, kind, _, _, _, _) -> kind = Single)
+
+    if singleSpecs.Length = 0 then ()
+    else
+
+    let ownerTable = formatName ownerTable
+
+    for (prop, _kind, targetType, _onDelete, _onOwnerDelete, _isUnique) in singleSpecs do
+        if excludedPaths.Contains(prop.Name) then ()
+        else
+
+        let targetTable = resolveTargetCollectionName connection ownerTable prop.Name targetType
+        let qTarget = quoteIdentifier targetTable
+        let idProp = getWritableInt64IdPropertyOrThrow targetType
+
+        let ownerTargets = ResizeArray<obj * int64>()
+        let distinctTargetIds = HashSet<int64>()
+
+        for (_ownerId, ownerObj) in ownerEntities do
+            let dbRefObj = prop.GetValue(ownerObj)
+            let targetId = readDbRefId dbRefObj
+            if targetId > 0L then
+                ownerTargets.Add(ownerObj, targetId)
+                distinctTargetIds.Add(targetId) |> ignore
+
+        if ownerTargets.Count > 0 then
+            let loadedTargets = Dictionary<int64, obj>()
+            let targetIds = distinctTargetIds |> Seq.toArray
+
+            let batchSize = 500
+            let chunks =
+                let mutable i = 0
+                [| while i < targetIds.Length do
+                       let len = min batchSize (targetIds.Length - i)
+                       yield targetIds.[i .. i + len - 1]
+                       i <- i + len |]
+
+            for chunk in chunks do
+                let paramNames = chunk |> Array.mapi (fun i _ -> $"@_tid{i}")
+                let inClause = String.Join(", ", paramNames)
+                let sql = $"SELECT Id, json_quote(Value) as ValueJSON FROM {qTarget} WHERE Id IN ({inClause});"
+
+                use cmd = connection.CreateCommand()
+                cmd.CommandText <- sql
+                for i = 0 to chunk.Length - 1 do
+                    cmd.Parameters.AddWithValue(paramNames.[i], chunk.[i]) |> ignore
+
+                use reader = cmd.ExecuteReader()
+                while reader.Read() do
+                    let targetId = reader.GetInt64(0)
+                    let valueJson = if reader.IsDBNull(1) then null else reader.GetString(1)
+
+                    if not (isNull valueJson) then
+                        let json = JsonValue.Parse valueJson
+                        let targetObj = json.ToObject(targetType)
+                        idProp.SetValue(targetObj, box targetId)
+                        loadedTargets.[targetId] <- targetObj
+
+            for (ownerObj, targetId) in ownerTargets do
+                match loadedTargets.TryGetValue(targetId) with
+                | true, targetObj ->
+                    let loadedRef = createDbRefLoaded prop.PropertyType targetId targetObj
+                    prop.SetValue(ownerObj, loadedRef)
+                | _ -> ()
+
+/// Batch-load all DBRefMany properties for a set of owner entities.
+/// For each Many-kind relation descriptor, issues a batched SELECT against the link table
+/// joined with the target collection, groups results by SourceId, and calls SetLoadedBoxed
+/// on each entity's DBRefMany property.
+/// excludedPaths: property names to skip (from Exclude() operator).
+/// ownerEntities: (ownerId, ownerObject) pairs.
+let batchLoadDBRefManyProperties
+    (connection: SqliteConnection)
+    (ownerTable: string)
+    (ownerType: Type)
+    (excludedPaths: HashSet<string>)
+    (ownerEntities: (int64 * obj) array)
+    =
+    if ownerEntities.Length = 0 then ()
+    else
+
+    let ownerTable = formatName ownerTable
+    let tx: RelationTxContext = {
+        Connection = connection
+        OwnerTable = ownerTable
+        OwnerType = ownerType
+        InTransaction = false
+    }
+    let manyDescriptors =
+        buildRelationDescriptors tx ownerType
+        |> Array.filter (fun d -> d.Kind = Many)
+
+    if manyDescriptors.Length = 0 then ()
+    else
+
+    for descriptor in manyDescriptors do
+        // Skip excluded paths.
+        if excludedPaths.Contains(descriptor.Property.Name) then ()
+        else
+
+        let qLink = quoteIdentifier descriptor.LinkTable
+        let qTarget = quoteIdentifier descriptor.TargetTable
+
+        // Chunk owner IDs into batches of 500 per Ruling 2.
+        let batchSize = 500
+        let ownerIds = ownerEntities |> Array.map fst
+
+        // Accumulate results across chunks: OwnerId -> (targetId, targetObj) list.
+        let grouped = Dictionary<int64, ResizeArray<int64 * obj>>()
+
+        let idProp = getWritableInt64IdPropertyOrThrow descriptor.TargetType
+        let ownerColumn = if descriptor.OwnerUsesSourceColumn then "SourceId" else "TargetId"
+        let targetColumn = if descriptor.OwnerUsesSourceColumn then "TargetId" else "SourceId"
+
+        let chunks =
+            let mutable i = 0
+            [| while i < ownerIds.Length do
+                   let len = min batchSize (ownerIds.Length - i)
+                   yield ownerIds.[i .. i + len - 1]
+                   i <- i + len |]
+
+        for chunk in chunks do
+            // Build parameterized IN clause.
+            let paramNames = chunk |> Array.mapi (fun i _ -> $"@_bid{i}")
+            let inClause = String.Join(", ", paramNames)
+            let sql =
+                $"SELECT lnk.{ownerColumn}, {qTarget}.Id, json_quote({qTarget}.Value) as ValueJSON " +
+                $"FROM {qLink} lnk JOIN {qTarget} ON {qTarget}.Id = lnk.{targetColumn} " +
+                $"WHERE lnk.{ownerColumn} IN ({inClause});"
+
+            use cmd = connection.CreateCommand()
+            cmd.CommandText <- sql
+            for i = 0 to chunk.Length - 1 do
+                cmd.Parameters.AddWithValue(paramNames.[i], chunk.[i]) |> ignore
+
+            use reader = cmd.ExecuteReader()
+            while reader.Read() do
+                let ownerId = reader.GetInt64(0)
+                let targetId = reader.GetInt64(1)
+                let valueJson = if reader.IsDBNull(2) then null else reader.GetString(2)
+
+                if not (isNull valueJson) then
+                    let json = JsonValue.Parse valueJson
+                    let targetObj = json.ToObject(descriptor.TargetType)
+                    idProp.SetValue(targetObj, box targetId)
+
+                    match grouped.TryGetValue(ownerId) with
+                    | true, list -> list.Add(targetId, targetObj)
+                    | _ ->
+                        let list = ResizeArray()
+                        list.Add(targetId, targetObj)
+                        grouped.[ownerId] <- list
+
+        // Populate each owner entity's DBRefMany property.
+        for (ownerId, ownerObj) in ownerEntities do
+            let tracker = descriptor.Property.GetValue(ownerObj)
+            match tracker with
+            | :? IDBRefManyInternal as internal' ->
+                match grouped.TryGetValue(ownerId) with
+                | true, items ->
+                    let ids = items |> Seq.map fst
+                    let objs = items |> Seq.map snd
+                    internal'.SetLoadedBoxed objs ids
+                | _ ->
+                    // No linked items — set loaded with empty.
+                    internal'.SetLoadedBoxed Seq.empty Seq.empty
+            | null ->
+                // Property is null — instantiate a new DBRefMany and set it.
+                let dbRefManyType = typedefof<DBRefMany<_>>.MakeGenericType(descriptor.TargetType)
+                let instance = Activator.CreateInstance(dbRefManyType)
+                descriptor.Property.SetValue(ownerObj, instance)
+                let internal' = instance :?> IDBRefManyInternal
+                match grouped.TryGetValue(ownerId) with
+                | true, items ->
+                    internal'.SetLoadedBoxed (items |> Seq.map snd) (items |> Seq.map fst)
+                | _ ->
+                    internal'.SetLoadedBoxed Seq.empty Seq.empty
+            | _ -> ()
