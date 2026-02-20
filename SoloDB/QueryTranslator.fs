@@ -1912,6 +1912,22 @@ module QueryTranslator =
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> ue.Operand
         | e -> e
 
+    // Count DBRef chain depth by relation hops, not by total JOIN count.
+    // This avoids false positives when a predicate touches many independent DBRefs.
+    let rec private dbRefChainDepth (expr: Expression) =
+        match unwrapConvert expr with
+        | :? MemberExpression as me when isDBRefType me.Type ->
+            1 + dbRefOwnerDepth me.Expression
+        | _ ->
+            0
+
+    and private dbRefOwnerDepth (expr: Expression) =
+        match unwrapConvert expr with
+        | :? MemberExpression as me when me.Member.Name = "Value" && isDBRefType (unwrapConvert me.Expression).Type ->
+            dbRefChainDepth (unwrapConvert me.Expression)
+        | _ ->
+            0
+
     /// Given a MemberExpression for a DBRef property (e.g., o.Customer or o.Author.Value.Publisher),
     /// resolve the source prefix and property name for JSON extraction.
     let rec private resolveDBRefPropertyLocation (qb: QueryBuilder) (dbrefPropExpr: MemberExpression) : struct(string * string) =
@@ -1925,13 +1941,35 @@ module QueryTranslator =
             let fullPath = computePathKey dbrefPropExpr
             struct(qb.TableNameDot, fullPath)
 
+    and private resolveDBRefOwnerCollectionAndProperty (qb: QueryBuilder) (dbrefPropExpr: MemberExpression) : struct(string * string) =
+        match dbrefPropExpr.Expression with
+        | :? ParameterExpression ->
+            struct(qb.SourceContext.RootTable, dbrefPropExpr.Member.Name)
+        | :? MemberExpression as parentMe when parentMe.Member.Name = "Value" && isDBRefType (unwrapConvert parentMe.Expression).Type ->
+            let parentDbRefExpr = unwrapConvert parentMe.Expression
+            let parentPath = computePathKey parentDbRefExpr
+            ensureDBRefJoin qb parentMe |> ignore
+            let ownerCollection =
+                match qb.SourceContext.FindJoin(parentPath) with
+                | Some join -> join.TargetTable
+                | None -> qb.SourceContext.RootTable
+            struct(ownerCollection, dbrefPropExpr.Member.Name)
+        | _ ->
+            struct(qb.SourceContext.RootTable, dbrefPropExpr.Member.Name)
+
+    and private resolveTargetCollectionForRelation (ctx: QueryContext) (ownerCollection: string) (propertyName: string) (targetType: Type) =
+        let defaultTable = formatName targetType.Name
+        match ctx.TryResolveRelationTarget(ownerCollection, propertyName) with
+        | Some mapped when not (String.IsNullOrWhiteSpace mapped) -> formatName mapped
+        | _ -> ctx.ResolveCollectionForType(Utils.typeIdentityKey targetType, defaultTable)
+
     /// Ensure a LEFT JOIN exists for a DBRef<T>.Value access. Returns the alias.
     and private ensureDBRefJoin (qb: QueryBuilder) (valueMemberExpr: MemberExpression) : string =
         let dbrefExpr = unwrapConvert valueMemberExpr.Expression
         let targetType = valueMemberExpr.Type
         let ctx = qb.SourceContext
 
-        if ctx.AliasCounter > 10 then
+        if dbRefChainDepth dbrefExpr > 10 then
             raise (NotSupportedException("Circular or excessively deep relation chain (depth > 10)"))
 
         let pathKey = computePathKey dbrefExpr
@@ -1944,12 +1982,18 @@ module QueryTranslator =
         | Some existing -> existing.TargetAlias
         | None ->
             let alias = ctx.NextAlias()
-            let targetTable = targetType.Name
 
             let struct(sourcePrefix, propName) =
                 match dbrefExpr with
                 | :? MemberExpression as me -> resolveDBRefPropertyLocation qb me
                 | _ -> struct(qb.TableNameDot, computePathKey dbrefExpr)
+
+            let struct(ownerCollection, relationPropertyName) =
+                match dbrefExpr with
+                | :? MemberExpression as me -> resolveDBRefOwnerCollectionAndProperty qb me
+                | _ -> struct(qb.SourceContext.RootTable, propName)
+
+            let targetTable = resolveTargetCollectionForRelation ctx ownerCollection relationPropertyName targetType
 
             let onCondition = sprintf "%s.Id = jsonb_extract(%sValue, '$.%s')" alias sourcePrefix propName
             ctx.Joins.Add({
@@ -1963,6 +2007,15 @@ module QueryTranslator =
 
     /// preExpressionHandler for DBRef member access translation.
     let private handleDBRefExpression (qb: QueryBuilder) (exp: Expression) : bool =
+        let tryMakeValueMemberFromInvokeArg (arg: Expression) =
+            match unwrapConvert arg with
+            | :? MemberExpression as dbrefPropExpr when isDBRefType dbrefPropExpr.Type ->
+                let valueProp = dbrefPropExpr.Type.GetProperty("Value", BindingFlags.Public ||| BindingFlags.Instance)
+                if isNull valueProp then ValueNone
+                else ValueSome (Expression.MakeMemberAccess(dbrefPropExpr, valueProp))
+            | _ ->
+                ValueNone
+
         match exp with
         | :? MemberExpression as topMe when not (isNull topMe.Expression) ->
             let innerExpr = unwrapConvert topMe.Expression
@@ -1995,6 +2048,11 @@ module QueryTranslator =
                         ValueSome struct(me, above)
                     | :? MemberExpression as me when not (isNull me.Expression) ->
                         findValueBoundary me.Expression (me.Member.Name :: above)
+                    | :? MethodCallExpression as mc when mc.Method.Name = "Invoke" && mc.Arguments.Count = 1 ->
+                        match tryMakeValueMemberFromInvokeArg mc.Arguments.[0] with
+                        | ValueSome valueME -> ValueSome struct(valueME, above)
+                        | ValueNone when not (isNull mc.Object) -> findValueBoundary mc.Object above
+                        | ValueNone -> ValueNone
                     | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert ->
                         findValueBoundary ue.Operand above
                     | _ -> ValueNone
@@ -2010,8 +2068,10 @@ module QueryTranslator =
 
     /// Compute the link table name for a DBRefMany property.
     /// Convention: SoloDBRelLink_{SourceTable}_{PropertyName}
-    let private dbRefManyLinkTable (rootTable: string) (propName: string) =
-        sprintf "SoloDBRelLink_%s_%s" rootTable propName
+    let private dbRefManyLinkTable (ctx: QueryContext) (ownerTable: string) (propName: string) =
+        match ctx.TryResolveRelationLink(ownerTable, propName) with
+        | Some mapped when not (String.IsNullOrWhiteSpace mapped) -> formatName mapped
+        | _ -> sprintf "SoloDBRelLink_%s_%s" ownerTable propName
 
     /// Extract the DBRefMany<T> source MemberExpression from a method call argument, if it refers to a DBRefMany property on the root parameter.
     let private tryGetDBRefManySource (arg: Expression) : MemberExpression voption =
@@ -2041,7 +2101,7 @@ module QueryTranslator =
                     match me.Expression with
                     | :? ParameterExpression ->
                         let propName = me.Member.Name
-                        let linkTable = dbRefManyLinkTable qb.SourceContext.RootTable propName
+                        let linkTable = dbRefManyLinkTable qb.SourceContext qb.SourceContext.RootTable propName
                         qb.AppendRaw (sprintf "(SELECT COUNT(*) FROM \"%s\" WHERE SourceId = %s.Id)" linkTable sourceAlias)
                         true
                     | _ -> false
@@ -2053,7 +2113,7 @@ module QueryTranslator =
             match tryGetDBRefManySource mce.Arguments.[0] with
             | ValueSome me ->
                 let propName = me.Member.Name
-                let linkTable = dbRefManyLinkTable qb.SourceContext.RootTable propName
+                let linkTable = dbRefManyLinkTable qb.SourceContext qb.SourceContext.RootTable propName
 
                 if mce.Arguments.Count = 1 then
                     // Any() without predicate
@@ -2066,7 +2126,7 @@ module QueryTranslator =
                         if arg.NodeType = ExpressionType.Quote then (arg :?> UnaryExpression).Operand :?> LambdaExpression
                         else arg :?> LambdaExpression
                     let targetType = me.Type.GetGenericArguments().[0]
-                    let targetTable = targetType.Name
+                    let targetTable = resolveTargetCollectionForRelation qb.SourceContext qb.SourceContext.RootTable propName targetType
                     let tgtAlias = "_tgt"
                     let lnkAlias = "_lnk"
 

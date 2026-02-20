@@ -55,8 +55,8 @@
     <Compile Include="QueryTranslator.fs" />
     <Compile Include="FileStorage.fs" />
     <Compile Include="Events\SoloDBEvents.fs" />
-    <Compile Include="Queryable.fs" />
     <Compile Include="Relations.fs" />
+    <Compile Include="Queryable.fs" />
     <Compile Include="SoloDB.fs" />
     <Compile Include="MongoEmulation.fs" />
   </ItemGroup>

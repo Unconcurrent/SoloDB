@@ -76,6 +76,12 @@ type internal QueryContext = {
     mutable AliasCounter: int
     /// Property paths excluded via Exclude() — skip JOIN/load for these
     ExcludedPaths: HashSet<string>
+    /// Relation target table mapping keyed by "OwnerCollection|PropertyName"
+    RelationTargets: Dictionary<string, string>
+    /// Relation link table mapping keyed by "OwnerCollection|PropertyName"
+    RelationLinks: Dictionary<string, string>
+    /// Type -> known collection names mapping (used to resolve custom collection names)
+    TypeCollections: Dictionary<string, HashSet<string>>
 }
     with
     /// Create a single-source context (backward-compatible default).
@@ -84,7 +90,10 @@ type internal QueryContext = {
           RootGraph = QueryRootGraph.Single(tableName)
           Joins = ResizeArray()
           AliasCounter = 0
-          ExcludedPaths = HashSet() }
+          ExcludedPaths = HashSet()
+          RelationTargets = Dictionary(System.StringComparer.Ordinal)
+          RelationLinks = Dictionary(System.StringComparer.Ordinal)
+          TypeCollections = Dictionary(System.StringComparer.Ordinal) }
 
     /// Create a multi-source context while preserving the first root as the primary table.
     static member MultiSource(rootTable: string, roots: seq<string * string>) =
@@ -96,7 +105,10 @@ type internal QueryContext = {
           RootGraph = graph
           Joins = ResizeArray()
           AliasCounter = 0
-          ExcludedPaths = HashSet() }
+          ExcludedPaths = HashSet()
+          RelationTargets = Dictionary(System.StringComparer.Ordinal)
+          RelationLinks = Dictionary(System.StringComparer.Ordinal)
+          TypeCollections = Dictionary(System.StringComparer.Ordinal) }
 
     /// Generate a unique alias (_ref0, _ref1, ...).
     member this.NextAlias() =
@@ -107,6 +119,9 @@ type internal QueryContext = {
     /// Find existing join for a property path, or None (deduplication).
     member this.FindJoin(propertyPath: string) =
         this.Joins |> Seq.tryFind (fun j -> j.PropertyPath = propertyPath)
+
+    member this.TryFindJoinByAlias(alias: string) =
+        this.Joins |> Seq.tryFind (fun j -> j.TargetAlias = alias)
 
     /// Resolve or create an additional query root for multi-source planning.
     member this.ResolveRoot(sourceKey: string, tableName: string) =
@@ -119,3 +134,43 @@ type internal QueryContext = {
     member this.RootTableNameDot =
         if System.String.IsNullOrEmpty this.RootTable then System.String.Empty
         else "\"" + this.RootTable + "\"."
+
+    member private this.RelationKey(ownerCollection: string, propertyName: string) =
+        ownerCollection + "|" + propertyName
+
+    member this.RegisterRelation(ownerCollection: string, propertyName: string, targetCollection: string, relationName: string) =
+        let key = this.RelationKey(ownerCollection, propertyName)
+        this.RelationTargets.[key] <- targetCollection
+        this.RelationLinks.[key] <- "SoloDBRelLink_" + relationName
+
+    member this.TryResolveRelationTarget(ownerCollection: string, propertyName: string) =
+        let key = this.RelationKey(ownerCollection, propertyName)
+        match this.RelationTargets.TryGetValue key with
+        | true, value -> Some value
+        | _ -> None
+
+    member this.TryResolveRelationLink(ownerCollection: string, propertyName: string) =
+        let key = this.RelationKey(ownerCollection, propertyName)
+        match this.RelationLinks.TryGetValue key with
+        | true, value -> Some value
+        | _ -> None
+
+    member this.RegisterTypeCollection(typeKey: string, collectionName: string) =
+        if not (System.String.IsNullOrWhiteSpace(typeKey) || System.String.IsNullOrWhiteSpace(collectionName)) then
+            let set =
+                match this.TypeCollections.TryGetValue(typeKey) with
+                | true, existing -> existing
+                | _ ->
+                    let created = HashSet<string>(System.StringComparer.Ordinal)
+                    this.TypeCollections.[typeKey] <- created
+                    created
+            set.Add(collectionName) |> ignore
+
+    member this.ResolveCollectionForType(typeKey: string, defaultCollection: string) =
+        match this.TypeCollections.TryGetValue(typeKey) with
+        | false, _ -> defaultCollection
+        | true, names when names.Count = 0 -> defaultCollection
+        | true, names when names.Contains(defaultCollection) -> defaultCollection
+        | true, names when names.Count = 1 -> names |> Seq.head
+        | true, _ ->
+            raise (System.InvalidOperationException($"Ambiguous collection mapping for relation target type '{typeKey}'. Register and use exactly one target collection for relation-backed queries."))

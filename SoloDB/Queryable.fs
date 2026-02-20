@@ -12,7 +12,9 @@ open System.Reflection
 open System.Text
 open JsonFunctions
 open Utils
+open Connections
 open SoloDatabase.JsonSerializator
+open Microsoft.Data.Sqlite
 
 /// <summary>
 /// An internal discriminated union that enumerates the LINQ methods supported by the query translator.
@@ -395,6 +397,34 @@ module private QueryHelper =
             | e -> raise (NotSupportedException(sprintf "Cannot preprocess expression of type %A: %A" e.NodeType e))
     }
 
+    let private tryExtractExcludePath (expressions: Expression array) =
+        if expressions.Length < 1 then
+            None
+        else
+            let selectorExpr =
+                let arg = expressions.[0]
+                if arg.NodeType = ExpressionType.Quote then (arg :?> UnaryExpression).Operand :?> LambdaExpression
+                else arg :?> LambdaExpression
+
+            let rec extractPath (e: Expression) =
+                match e with
+                | :? MemberExpression as me ->
+                    let parent = extractPath me.Expression
+                    if parent = "" then me.Member.Name else parent + "." + me.Member.Name
+                | :? ParameterExpression -> ""
+                | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> extractPath ue.Operand
+                | _ -> ""
+
+            match extractPath selectorExpr.Body with
+            | "" -> None
+            | path -> Some path
+
+    let private registerExcludePath path =
+        if not (String.IsNullOrWhiteSpace path) then
+            match QueryTranslator.activeQueryContext.Value with
+            | ValueSome ctx -> ctx.ExcludedPaths.Add(path) |> ignore
+            | ValueNone -> ()
+
     let private serializeForCollection (value: 'T) =
         struct (
             match typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T> with
@@ -456,8 +486,19 @@ module private QueryHelper =
         statements.Add (emptySQLStatement () |> Simple)
 
         let mutable tableName = ""
+        let preprocessed = preprocessQuery e |> Seq.toArray
 
-        for q in preprocessQuery e |> Seq.rev do
+        // Register all Exclude paths up-front so behavior is deterministic regardless method-call order.
+        // If a predicate accesses an excluded path via .Value, translator must fail loudly in both orders.
+        for q in preprocessed do
+            match q with
+            | Method m when m.Value = Exclude ->
+                match tryExtractExcludePath m.Expressions with
+                | Some path -> registerExcludePath path
+                | None -> ()
+            | _ -> ()
+
+        for q in preprocessed |> Array.rev do
             match q with
             | RootQuery rq -> tableName <- rq.SourceTableName
             | Method m ->
@@ -889,24 +930,9 @@ module private QueryHelper =
                 | Exclude ->
                     // Extract property path from the selector lambda and add to ExcludedPaths.
                     // Exclude does not produce SQL — it only suppresses materialization for the specified path.
-                    if m.Expressions.Length >= 1 then
-                        let selectorExpr =
-                            let arg = m.Expressions.[0]
-                            if arg.NodeType = ExpressionType.Quote then (arg :?> UnaryExpression).Operand :?> LambdaExpression
-                            else arg :?> LambdaExpression
-                        let rec extractPath (e: Expression) =
-                            match e with
-                            | :? MemberExpression as me ->
-                                let parent = extractPath me.Expression
-                                if parent = "" then me.Member.Name else parent + "." + me.Member.Name
-                            | :? ParameterExpression -> ""
-                            | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> extractPath ue.Operand
-                            | _ -> ""
-                        let path = extractPath selectorExpr.Body
-                        if path <> "" then
-                            match QueryTranslator.activeQueryContext.Value with
-                            | ValueSome ctx -> ctx.ExcludedPaths.Add(path) |> ignore
-                            | ValueNone -> ()
+                    match tryExtractExcludePath m.Expressions with
+                    | Some path -> registerExcludePath path
+                    | None -> ()
 
                 | Aggregate ->
                     failwithf "Aggregate is not supported."
@@ -1174,6 +1200,42 @@ module private QueryHelper =
             && expression.Arguments.[2].NodeType = ExpressionType.Quote
         | _ -> false
 
+    let private tableExists (connection: SqliteConnection) (tableName: string) =
+        connection.QueryFirst<int64>(
+            "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @name) THEN 1 ELSE 0 END",
+            {| name = tableName |}) = 1L
+
+    let private hasRelationProperties (t: Type) =
+        t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+        |> Array.exists (fun p ->
+            let pt = p.PropertyType
+            pt.IsGenericType &&
+            let g = pt.GetGenericTypeDefinition()
+            g = typedefof<DBRef<_>> || g = typedefof<DBRefMany<_>>)
+
+    let private preloadQueryContextMetadata (ctx: QueryContext) (connection: SqliteConnection) =
+        if tableExists connection "SoloDBRelation" then
+            use relationCmd = connection.CreateCommand()
+            relationCmd.CommandText <- "SELECT Name, OwnerCollection, PropertyName, TargetCollection FROM SoloDBRelation;"
+            use relationReader = relationCmd.ExecuteReader()
+            while relationReader.Read() do
+                let name = if relationReader.IsDBNull(0) then null else relationReader.GetString(0)
+                let ownerCollection = if relationReader.IsDBNull(1) then null else relationReader.GetString(1)
+                let propertyName = if relationReader.IsDBNull(2) then null else relationReader.GetString(2)
+                let targetCollection = if relationReader.IsDBNull(3) then null else relationReader.GetString(3)
+                if not (isNull name || isNull ownerCollection || isNull propertyName || isNull targetCollection) then
+                    ctx.RegisterRelation(ownerCollection, propertyName, targetCollection, name)
+
+        if tableExists connection "SoloDBTypeCollectionMap" then
+            use typeCmd = connection.CreateCommand()
+            typeCmd.CommandText <- "SELECT TypeKey, CollectionName FROM SoloDBTypeCollectionMap;"
+            use typeReader = typeCmd.ExecuteReader()
+            while typeReader.Read() do
+                let typeKey = if typeReader.IsDBNull(0) then null else typeReader.GetString(0)
+                let collectionName = if typeReader.IsDBNull(1) then null else typeReader.GetString(1)
+                if not (isNull typeKey || isNull collectionName) then
+                    ctx.RegisterTypeCollection(typeKey, collectionName)
+
     /// <summary>
     /// Initiates the translation of a LINQ expression tree to an SQL query string and a dictionary of parameters.
     /// </summary>
@@ -1201,9 +1263,22 @@ module private QueryHelper =
                 struct (false, expression.Arguments.[0])
             | _ -> struct (false, expression)
 
-        // Set up QueryContext for relation-aware translation.
-        // When no DBRef access occurs, Joins stays empty → byte-identical SQL to pre-relation pipeline.
         let ctx = QueryContext.SingleSource(source.Name)
+        use metadataConnection = source.GetInternalConnection()
+        if hasRelationProperties typeof<'T> then
+            let relationTx: Relations.RelationTxContext = {
+                Connection = metadataConnection
+                OwnerTable = source.Name
+                OwnerType = typeof<'T>
+                InTransaction = metadataConnection.IsWithinTransaction()
+            }
+            // Ensure relation schema exists before DBRefMany translation emits correlated subqueries.
+            Relations.ensureSchemaForOwnerType relationTx typeof<'T>
+
+        preloadQueryContextMetadata ctx metadataConnection
+
+        // Set up QueryContext for relation-aware translation.
+        // When no DBRef access occurs, Joins stays empty -> byte-identical SQL to pre-relation pipeline.
         let prev = QueryTranslator.activeQueryContext.Value
         QueryTranslator.activeQueryContext.Value <- ValueSome ctx
         try

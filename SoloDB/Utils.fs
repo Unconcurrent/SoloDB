@@ -142,6 +142,14 @@ module Utils =
         let formattedName = collectionNameOf<'T>() |> Encoding.UTF8.GetBytes
         fun () -> formattedName
 
+    let internal typeIdentityKey (t: Type) =
+        if isNull t then
+            nullArg "t"
+        match t.AssemblyQualifiedName with
+        | null | "" ->
+            if isNull t.FullName then t.Name else t.FullName
+        | value -> value
+
     let private nameToTypeCache = ConcurrentDictionary<string, Type>()
 
     let internal nameToType (typeName: string) = 

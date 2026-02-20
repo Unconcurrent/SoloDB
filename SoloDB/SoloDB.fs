@@ -44,6 +44,22 @@ module internal Helper =
     let internal existsCollection (name: string) (connection: SqliteConnection) =
         connection.QueryFirstOrDefault<string>("SELECT Name FROM SoloDBCollections WHERE Name = @name LIMIT 1", {|name = name|}) <> null
 
+    let internal ensureTypeCollectionMapTable (connection: SqliteConnection) =
+        connection.Execute("""
+            CREATE TABLE IF NOT EXISTS SoloDBTypeCollectionMap (
+                TypeKey TEXT NOT NULL,
+                CollectionName TEXT NOT NULL,
+                UNIQUE(TypeKey, CollectionName)
+            ) STRICT;
+            """) |> ignore
+
+    let internal registerTypeCollection<'T> (collectionName: string) (connection: SqliteConnection) =
+        if not (typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T>) then
+            ensureTypeCollectionMapTable connection
+            connection.Execute(
+                "INSERT INTO SoloDBTypeCollectionMap(TypeKey, CollectionName) VALUES(@typeKey, @collectionName) ON CONFLICT(TypeKey, CollectionName) DO NOTHING;",
+                {| typeKey = Utils.typeIdentityKey typeof<'T>; collectionName = collectionName |}) |> ignore
+
     /// <summary>
     /// Drops all event triggers associated with a collection table, if they exist.
     /// </summary>
@@ -72,6 +88,8 @@ module internal Helper =
     let internal dropCollection (name: string) (connection: SqliteConnection) =
         dropTriggersForTable name connection
         connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name) |> ignore
+        ensureTypeCollectionMapTable connection
+        connection.Execute("DELETE FROM SoloDBTypeCollectionMap WHERE CollectionName = @name", {|name = name|}) |> ignore
         connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}) |> ignore
 
     /// <summary>
@@ -475,6 +493,8 @@ type internal EventDbCache(connectionString: string, directConnection: SqliteCon
         else if not (Helper.existsCollection collectionName directConnection) then
             Helper.createTableInner<'U> collectionName directConnection
 
+        Helper.registerTypeCollection<'U> collectionName directConnection
+
     member this.FileSystem =
         if isNull cachedFileSystem then
             cachedFileSystem <- (FileSystem guardedConnection :> IFileSystem)
@@ -536,6 +556,19 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
             t.IsGenericType &&
             let genericType = t.GetGenericTypeDefinition()
             (genericType = typedefof<DBRef<_>> || genericType = typedefof<DBRefMany<_>>))
+
+    member private this.HasIncomingRelations(connection: SqliteConnection) =
+        let relationCatalogExists =
+            connection.QueryFirst<int64>(
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelation') THEN 1 ELSE 0 END") = 1L
+
+        relationCatalogExists &&
+            connection.QueryFirst<int64>(
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM SoloDBRelation WHERE TargetCollection = @name LIMIT 1) THEN 1 ELSE 0 END",
+                {| name = name |}) = 1L
+
+    member private this.RequiresRelationDeleteHandling(connection: SqliteConnection) =
+        this.HasRelations || this.HasIncomingRelations(connection)
 
     /// <summary>Gets the event registration API for this collection.</summary>
     member val private Events: ISoloDBCollectionEvents<'T> =
@@ -906,8 +939,9 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="id">The ID of the document to delete.</param>
     /// <returns>The number of documents deleted (0 or 1).</returns>
     member this.DeleteById(id: int64) =
-        if this.HasRelations && not this.InTransaction then
-            use connection = connection.Get()
+        use connection = connection.Get()
+        let requiresRelationHandling = this.RequiresRelationDeleteHandling(connection)
+        if requiresRelationHandling && not this.InTransaction then
             use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
             let directConnection = Transitive connection
             let transientConnection = Collection(directConnection, name, connectionString, parentData)
@@ -920,8 +954,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 connection.Execute "ROLLBACK;" |> ignore
                 reraise()
         else
-            use connection = connection.Get()
-            if this.HasRelations then
+            if requiresRelationHandling then
                 let tx: Relations.RelationTxContext = {
                     Connection = connection
                     OwnerTable = name
@@ -1071,8 +1104,9 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
 
         let idProp = CustomTypeId<'T>.Value.Value.Property
         let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
-        if this.HasRelations && not this.InTransaction then
-            use connection = connection.Get()
+        use connection = connection.Get()
+        let requiresRelationHandling = this.RequiresRelationDeleteHandling(connection)
+        if requiresRelationHandling && not this.InTransaction then
             use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
             let directConnection = Transitive connection
             let transientConnection = Collection(directConnection, name, connectionString, parentData)
@@ -1085,8 +1119,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 connection.Execute "ROLLBACK;" |> ignore
                 reraise()
         else
-            use connection = connection.Get()
-            if this.HasRelations then
+            if requiresRelationHandling then
                 let tx: Relations.RelationTxContext = {
                     Connection = connection
                     OwnerTable = name
@@ -1175,8 +1208,9 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>The number of documents deleted.</returns>
     member this.DeleteMany(filter: Expression<Func<'T, bool>>) =
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
-        if this.HasRelations && not this.InTransaction then
-            use connection = connection.Get()
+        use connection = connection.Get()
+        let requiresRelationHandling = this.RequiresRelationDeleteHandling(connection)
+        if requiresRelationHandling && not this.InTransaction then
             use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
             let directConnection = Transitive connection
             let transientConnection = Collection(directConnection, name, connectionString, parentData)
@@ -1191,8 +1225,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         else
             let filter, variables = QueryTranslator.translate name filter
 
-            use connection = connection.Get()
-            if this.HasRelations then
+            if requiresRelationHandling then
                 let tx: Relations.RelationTxContext = {
                     Connection = connection
                     OwnerTable = name
@@ -1231,8 +1264,9 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>The number of documents deleted (0 or 1).</returns>
     member this.DeleteOne(filter: Expression<Func<'T, bool>>) =
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
-        if this.HasRelations && not this.InTransaction then
-            use connection = connection.Get()
+        use connection = connection.Get()
+        let requiresRelationHandling = this.RequiresRelationDeleteHandling(connection)
+        if requiresRelationHandling && not this.InTransaction then
             use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
             let directConnection = Transitive connection
             let transientConnection = Collection(directConnection, name, connectionString, parentData)
@@ -1247,8 +1281,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         else
             let filter, variables = QueryTranslator.translate name filter
 
-            use connection = connection.Get()
-            if this.HasRelations then
+            if requiresRelationHandling then
                 let tx: Relations.RelationTxContext = {
                     Connection = connection
                     OwnerTable = name
@@ -1692,6 +1725,8 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
     member private this.InitializeCollection<'T> name =
         if not (Helper.existsCollection name connection) then 
             Helper.createTableInner<'T> name connection
+
+        Helper.registerTypeCollection<'T> name connection
             
         Collection<'T>(Transactional connection, name, connectionString, { ClearCacheFunction = ignore; EventSystem = parentData.EventSystem }) :> ISoloDBCollection<'T>
 
@@ -2147,16 +2182,19 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
         use connection = connectionManager.Borrow()
 
-        if not (Helper.existsCollection name connection) then 
-            let withinTransaction = connection.IsWithinTransaction()
-            if not withinTransaction then connection.Execute "BEGIN;" |> ignore
-            try
+        let shouldCreate = not (Helper.existsCollection name connection)
+        let withinTransaction = connection.IsWithinTransaction()
+        if not withinTransaction then connection.Execute "BEGIN;" |> ignore
+        try
+            if shouldCreate then
                 Helper.createTableInner<'T> name connection
 
-                if not withinTransaction then connection.Execute "COMMIT;" |> ignore
-            with ex ->
-                if not withinTransaction then connection.Execute "ROLLBACK;" |> ignore
-                reraise()
+            Helper.registerTypeCollection<'T> name connection
+
+            if not withinTransaction then connection.Execute "COMMIT;" |> ignore
+        with ex ->
+            if not withinTransaction then connection.Execute "ROLLBACK;" |> ignore
+            reraise()
 
         Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = this.ClearCache; EventSystem = this.Events }) :> ISoloDBCollection<'T>
 
