@@ -3,6 +3,7 @@ module internal SoloDatabase.Relations
 
 open System
 open System.Reflection
+open System.Runtime.Serialization
 open System.Collections.Generic
 open System.Collections.Concurrent
 open Microsoft.Data.Sqlite
@@ -694,6 +695,9 @@ let private updateDbRefJson (tx: RelationTxContext) (ownerTable: string) (ownerI
         $"UPDATE {quoteIdentifier ownerTable} SET Value = jsonb_set(Value, @path, jsonb(@jsonText)) WHERE Id = @ownerId;",
         {| path = path; jsonText = jsonText; ownerId = ownerId |}) |> ignore
 
+let private shouldSyncDbRefJson (descriptor: RelationDescriptor) =
+    isNull (descriptor.Property.GetCustomAttribute<IgnoreDataMemberAttribute>(true))
+
 let resetDbRefManyTrackers (owner: obj) (committedLinkedIdsByProperty: IReadOnlyDictionary<string, int64 array>) =
     if isNull owner then nullArg "owner"
     if isNull committedLinkedIdsByProperty then nullArg "committedLinkedIdsByProperty"
@@ -747,7 +751,7 @@ let private applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWri
             ensureTargetExists tx descriptor.TargetTable targetId
             deleteSingleLink descriptor
             insertSingleLink descriptor targetId
-            if updateOwnerJson then
+            if updateOwnerJson && shouldSyncDbRefJson descriptor then
                 updateDbRefJson tx tx.OwnerTable ownerId descriptor.PropertyPath targetId
 
         | SetDBRefToNone(propertyPath, targetType) ->
@@ -757,7 +761,7 @@ let private applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWri
             if descriptor.TargetType <> targetType then
                 raise (InvalidOperationException($"Relation target type mismatch on '{propertyPath}'. Expected {descriptor.TargetType.FullName}, got {targetType.FullName}."))
             deleteSingleLink descriptor
-            if updateOwnerJson then
+            if updateOwnerJson && shouldSyncDbRefJson descriptor then
                 updateDbRefJson tx tx.OwnerTable ownerId descriptor.PropertyPath 0L
 
         | AddDBRefMany(propertyPath, targetType, targetId) ->
