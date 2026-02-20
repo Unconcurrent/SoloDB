@@ -1230,15 +1230,18 @@ module private QueryHelper =
             if StringComparer.Ordinal.Compare(a, b) <= 0 then $"{a}_{b}" else $"{b}_{a}"
 
         if tableExists connection "SoloDBRelation" then
-            use relationCmd = connection.CreateCommand()
-            relationCmd.CommandText <- "SELECT Name, OwnerCollection, PropertyName, TargetCollection, RefKind FROM SoloDBRelation;"
-            use relationReader = relationCmd.ExecuteReader()
-            while relationReader.Read() do
-                let name = if relationReader.IsDBNull(0) then null else relationReader.GetString(0)
-                let ownerCollection = if relationReader.IsDBNull(1) then null else relationReader.GetString(1)
-                let propertyName = if relationReader.IsDBNull(2) then null else relationReader.GetString(2)
-                let targetCollection = if relationReader.IsDBNull(3) then null else relationReader.GetString(3)
-                let refKind = if relationReader.IsDBNull(4) then null else relationReader.GetString(4)
+            for relation in connection.Query<{|
+                Name: string
+                OwnerCollection: string
+                PropertyName: string
+                TargetCollection: string
+                RefKind: string
+            |}>("SELECT Name, OwnerCollection, PropertyName, TargetCollection, RefKind FROM SoloDBRelation;") do
+                let name = relation.Name
+                let ownerCollection = relation.OwnerCollection
+                let propertyName = relation.PropertyName
+                let targetCollection = relation.TargetCollection
+                let refKind = relation.RefKind
                 if not (isNull name || isNull ownerCollection || isNull propertyName || isNull targetCollection || isNull refKind) then
                     let canonicalName = canonicalManyName ownerCollection targetCollection
                     let canonicalLinkTable = "SoloDBRelLink_" + canonicalName
@@ -1255,12 +1258,12 @@ module private QueryHelper =
                     ctx.RegisterRelation(ownerCollection, propertyName, targetCollection, linkTable, ownerUsesSource)
 
         if tableExists connection "SoloDBTypeCollectionMap" then
-            use typeCmd = connection.CreateCommand()
-            typeCmd.CommandText <- "SELECT TypeKey, CollectionName FROM SoloDBTypeCollectionMap;"
-            use typeReader = typeCmd.ExecuteReader()
-            while typeReader.Read() do
-                let typeKey = if typeReader.IsDBNull(0) then null else typeReader.GetString(0)
-                let collectionName = if typeReader.IsDBNull(1) then null else typeReader.GetString(1)
+            for mapping in connection.Query<{|
+                TypeKey: string
+                CollectionName: string
+            |}>("SELECT TypeKey, CollectionName FROM SoloDBTypeCollectionMap;") do
+                let typeKey = mapping.TypeKey
+                let collectionName = mapping.CollectionName
                 if not (isNull typeKey || isNull collectionName) then
                     ctx.RegisterTypeCollection(typeKey, collectionName)
 

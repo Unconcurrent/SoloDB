@@ -1228,16 +1228,13 @@ let batchLoadDBRefProperties
                 let paramNames = chunk |> Array.mapi (fun i _ -> $"@_tid{i}")
                 let inClause = String.Join(", ", paramNames)
                 let sql = $"SELECT Id, json_quote(Value) as ValueJSON FROM {qTarget} WHERE Id IN ({inClause});"
-
-                use cmd = connection.CreateCommand()
-                cmd.CommandText <- sql
+                let parameters = Dictionary<string, obj>(chunk.Length)
                 for i = 0 to chunk.Length - 1 do
-                    cmd.Parameters.AddWithValue(paramNames.[i], chunk.[i]) |> ignore
+                    parameters.[paramNames.[i]] <- box chunk.[i]
 
-                use reader = cmd.ExecuteReader()
-                while reader.Read() do
-                    let targetId = reader.GetInt64(0)
-                    let valueJson = if reader.IsDBNull(1) then null else reader.GetString(1)
+                for row in connection.Query<{| Id: int64; ValueJSON: string |}>(sql, parameters) do
+                    let targetId = row.Id
+                    let valueJson = row.ValueJSON
 
                     if not (isNull valueJson) then
                         let json = JsonValue.Parse valueJson
@@ -1313,20 +1310,17 @@ let batchLoadDBRefManyProperties
             let paramNames = chunk |> Array.mapi (fun i _ -> $"@_bid{i}")
             let inClause = String.Join(", ", paramNames)
             let sql =
-                $"SELECT lnk.{ownerColumn}, {qTarget}.Id, json_quote({qTarget}.Value) as ValueJSON " +
+                $"SELECT lnk.{ownerColumn} AS OwnerId, {qTarget}.Id AS TargetId, json_quote({qTarget}.Value) as ValueJSON " +
                 $"FROM {qLink} lnk JOIN {qTarget} ON {qTarget}.Id = lnk.{targetColumn} " +
                 $"WHERE lnk.{ownerColumn} IN ({inClause});"
-
-            use cmd = connection.CreateCommand()
-            cmd.CommandText <- sql
+            let parameters = Dictionary<string, obj>(chunk.Length)
             for i = 0 to chunk.Length - 1 do
-                cmd.Parameters.AddWithValue(paramNames.[i], chunk.[i]) |> ignore
+                parameters.[paramNames.[i]] <- box chunk.[i]
 
-            use reader = cmd.ExecuteReader()
-            while reader.Read() do
-                let ownerId = reader.GetInt64(0)
-                let targetId = reader.GetInt64(1)
-                let valueJson = if reader.IsDBNull(2) then null else reader.GetString(2)
+            for row in connection.Query<{| OwnerId: int64; TargetId: int64; ValueJSON: string |}>(sql, parameters) do
+                let ownerId = row.OwnerId
+                let targetId = row.TargetId
+                let valueJson = row.ValueJSON
 
                 if not (isNull valueJson) then
                     let json = JsonValue.Parse valueJson
