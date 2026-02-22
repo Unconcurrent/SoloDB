@@ -10,9 +10,13 @@ module Connections =
     open SQLiteTools
     open System
     open System.Collections.Concurrent
+    open System.Threading
     open System.Threading.Tasks
     open Utils
     open System.IO
+
+    let internal ThrowOutsideEventContextUsage() =
+            raise (InvalidOperationException("Event handlers must use the ctx parameter (which implements ISoloDB). Using any other SoloDB instance inside a handler will lock the database."))
 
     /// <summary>
     /// Represents a specialized <see cref="SqliteConnection"/> whose <c>Dispose</c> method is a no-op.
@@ -70,6 +74,7 @@ module Connections =
         let pool = ConcurrentStack<CachingDbConnection>()
         /// <summary>A flag indicating whether the manager has been disposed.</summary>
         let mutable disposed = false
+        let mutable activeEventHandlerScopes = 0
 
         /// <summary>
         /// Checks if the manager has been disposed and throws an exception if it has.
@@ -105,7 +110,7 @@ module Connections =
                     c.Inner.Open()
                 c
             | false, _ -> 
-                let c = new CachingDbConnection(connectionStr, this.TakeBack, config)
+                let c = new CachingDbConnection(connectionStr, this.TakeBack, config, this.EnterEventHandlerScope, this.ExitEventHandlerScope)
                 c.Inner.Open()
                 setup c.Inner
                 all.Push c
@@ -187,6 +192,15 @@ module Connections =
             return! this.WithTransactionBorrowedAsync f
         }
 
+        member internal this.EnterEventHandlerScope() =
+            Interlocked.Increment(&activeEventHandlerScopes) |> ignore
+
+        member internal this.ExitEventHandlerScope() =
+            Interlocked.Decrement(&activeEventHandlerScopes) |> ignore
+
+        member internal this.HasActiveEventHandlerScope =
+            Volatile.Read(&activeEventHandlerScopes) > 0
+
         /// <summary>
         /// Disposes the connection manager, which closes and disposes all connections it has created.
         /// </summary>
@@ -221,7 +235,10 @@ module Connections =
         /// <returns>An active <see cref="SqliteConnection"/>.</returns>
         member this.Get() : SqliteConnection =
             match this with
-            | Pooled pool -> pool.Borrow()
+            | Pooled pool ->
+                if pool.HasActiveEventHandlerScope then
+                    ThrowOutsideEventContextUsage()
+                pool.Borrow()
             | Transactional conn -> conn
             | Transitive c -> c
             | Guarded (guard, inner) ->
@@ -278,3 +295,13 @@ module Connections =
             | :? TransactionalConnection -> true
             | :? CachingDbConnection as cc -> cc.InsideTransaction
             | _other -> false
+
+    let internal EnterEventHandlerScope(connection: SqliteConnection) =
+        match connection with
+        | :? CachingDbConnection as c -> c.EnterEventHandlerScope()
+        | _ -> ()
+
+    let internal ExitEventHandlerScope(connection: SqliteConnection) =
+        match connection with
+        | :? CachingDbConnection as c -> c.ExitEventHandlerScope()
+        | _ -> ()

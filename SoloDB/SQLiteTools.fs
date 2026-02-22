@@ -648,7 +648,7 @@ module SQLiteTools =
     /// <param name="connectionStr">The connection string.</param>
     /// <param name="onDispose">A callback function to execute on disposal.</param>
     /// <param name="config">The database configuration.</param>
-    type [<Sealed>] CachingDbConnection internal (connectionStr: string, onDispose, config: Types.SoloDBConfiguration) = 
+    type [<Sealed>] CachingDbConnection internal (connectionStr: string, onDispose, config: Types.SoloDBConfiguration, onEnterEventHandlerScope: unit -> unit, onExitEventHandlerScope: unit -> unit) = 
         inherit SqliteConnection(connectionStr)
         let mutable disposingDisabled = false
         let mutable disposeDisableCount = 0
@@ -697,6 +697,8 @@ module SQLiteTools =
         member internal this.Inner = this :> SqliteConnection
         /// <summary>Indicates if the connection is currently part of a transaction.</summary>
         member val InsideTransaction = false with get, set
+        member internal this.EnterEventHandlerScope() = onEnterEventHandlerScope()
+        member internal this.ExitEventHandlerScope() = onExitEventHandlerScope()
 
         /// <summary>
         /// Clears the prepared statement cache, waiting for any in-use commands to be released.

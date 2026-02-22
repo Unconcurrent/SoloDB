@@ -878,7 +878,11 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         try
                             ctx.Reset (conn, session, jsonPtr, json.Length)
                             // Handle null from C# as EventHandled
-                            handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
+                            Connections.EnterEventHandlerScope(conn)
+                            try
+                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
+                            finally
+                                Connections.ExitEventHandlerScope(conn)
                         finally
                             ctx.MarkDisposed()
                             ctxs.Push ctx
@@ -936,7 +940,11 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         try
                             ctx.Reset (conn, session, jsonPtr, json.Length)
                             // Handle null from C# as EventHandled
-                            handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
+                            Connections.EnterEventHandlerScope(conn)
+                            try
+                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
+                            finally
+                                Connections.ExitEventHandlerScope(conn)
                         finally
                             ctx.MarkDisposed()
                             ctxs.Push ctx
@@ -991,7 +999,11 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         try
                             ctx.Reset (conn, session, jsonOld, jsonOldSize, jsonNew, jsonNewSize)
                             // Handle null from C# as EventHandled
-                            handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
+                            Connections.EnterEventHandlerScope(conn)
+                            try
+                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
+                            finally
+                                Connections.ExitEventHandlerScope(conn)
                         finally
                             ctx.MarkDisposed()
                             ctxs.Push ctx
@@ -1049,7 +1061,11 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         try
                             ctx.Reset (conn, session, jsonPtr, json.Length)
                             // Handle null from C# as EventHandled
-                            handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
+                            Connections.EnterEventHandlerScope(conn)
+                            try
+                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
+                            finally
+                                Connections.ExitEventHandlerScope(conn)
                         finally
                             ctx.MarkDisposed()
                             ctxs.Push ctx
@@ -1107,7 +1123,11 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         try
                             ctx.Reset (conn, session, jsonPtr, json.Length)
                             // Handle null from C# as EventHandled
-                            handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
+                            Connections.EnterEventHandlerScope(conn)
+                            try
+                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
+                            finally
+                                Connections.ExitEventHandlerScope(conn)
                         finally
                             ctx.MarkDisposed()
                             ctxs.Push ctx
@@ -1162,7 +1182,11 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         try
                             ctx.Reset (conn, session, jsonOld, jsonOldSize, jsonNew, jsonNewSize)
                             // Handle null from C# as EventHandled
-                            handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
+                            Connections.EnterEventHandlerScope(conn)
+                            try
+                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
+                            finally
+                                Connections.ExitEventHandlerScope(conn)
                         finally
                             ctx.MarkDisposed()
                             ctxs.Push ctx
