@@ -65,6 +65,9 @@
     <Compile Include="FileStorage.Helpers.fs" />
     <Compile Include="FileStorage.Listing.fs" />
     <Compile Include="FileStorage.fs" />
+    <Compile Include="Events\SoloDBEvents.Helpers.fs" />
+    <Compile Include="Events\SoloDBEvents.EventSystem.fs" />
+    <Compile Include="Events\SoloDBEvents.Context.fs" />
     <Compile Include="Events\SoloDBEvents.fs" />
     <Compile Include="Relations.fs" />
     <Compile Include="Queryable.fs" />
