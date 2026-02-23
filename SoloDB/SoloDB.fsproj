@@ -43,6 +43,8 @@
     <Compile Include="JsonLexer.fs" />
     <Compile Include="JsonSerializator.fs" />
     <Compile Include="JsonFunctions.fs" />
+    <Compile Include="SQLiteTools.Params.fs" />
+    <Compile Include="SQLiteTools.Mapper.fs" />
     <Compile Include="SQLiteTools.fs" />
     <Compile Include="RawSqliteFunctions.fs" />
     <Compile Include="Connections.fs" />

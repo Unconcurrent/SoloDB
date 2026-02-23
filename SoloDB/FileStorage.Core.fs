@@ -5,6 +5,7 @@ open System
 open System.IO
 open Microsoft.Data.Sqlite
 open SQLiteTools
+open SQLiteToolsParams
 open SoloDatabase.Types
 open NativeArray
 open Snappier
