@@ -65,6 +65,9 @@
     <Compile Include="Relations.fs" />
     <Compile Include="Queryable.fs" />
     <Compile Include="SoloDB.fs" />
+    <Compile Include="MongoEmulation.BsonDocument.fs" />
+    <Compile Include="MongoEmulation.CollectionExt.fs" />
+    <Compile Include="MongoEmulation.Builders.fs" />
     <Compile Include="MongoEmulation.fs" />
   </ItemGroup>
 
