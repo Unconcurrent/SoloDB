@@ -62,6 +62,8 @@
     <Compile Include="QueryTranslator/QueryTranslator.VisitPostJoin.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.fs" />
     <Compile Include="QueryTranslator.fs" />
+    <Compile Include="FileStorage.Helpers.fs" />
+    <Compile Include="FileStorage.Listing.fs" />
     <Compile Include="FileStorage.fs" />
     <Compile Include="Events\SoloDBEvents.fs" />
     <Compile Include="Relations.fs" />
