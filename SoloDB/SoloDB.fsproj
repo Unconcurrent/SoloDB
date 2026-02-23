@@ -78,6 +78,8 @@
     <Compile Include="Relations.BatchLoad.fs" />
     <Compile Include="Relations.fs" />
     <Compile Include="Queryable.fs" />
+    <Compile Include="SoloDB.Helper.Schema.fs" />
+    <Compile Include="SoloDB.Helper.Core.fs" />
     <Compile Include="SoloDB.fs" />
     <Compile Include="MongoEmulation.BsonDocument.fs" />
     <Compile Include="MongoEmulation.CollectionExt.fs" />
