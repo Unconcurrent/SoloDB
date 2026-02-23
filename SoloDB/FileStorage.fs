@@ -12,13 +12,15 @@ open Snappier
 open System.Runtime.InteropServices
 open System.Data
 open FileStorageCore
+open FileStorageCoreChunks
+open FileStorageCoreStream
 
 // NativePtr operations for efficient stream handling
 #nowarn "9"
 
 module FileStorage =
     // For backward compatibility
-    type DbFileStream = FileStorageCore.DbFileStream
+    type DbFileStream = FileStorageCoreStream.DbFileStream
 
     /// <summary>
     /// Splits a file path into its directory path and file name. Normalizes separators to '/'.

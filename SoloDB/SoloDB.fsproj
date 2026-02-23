@@ -48,6 +48,8 @@
     <Compile Include="SQLiteTools.fs" />
     <Compile Include="RawSqliteFunctions.fs" />
     <Compile Include="Connections.fs" />
+    <Compile Include="FileStorage.Core.Helpers.fs" />
+    <Compile Include="FileStorage.Core.Chunks.fs" />
     <Compile Include="FileStorage.Core.fs" />
     <Compile Include="DBRef.fs" />
     <Compile Include="SoloDBInterfaces.fs" />

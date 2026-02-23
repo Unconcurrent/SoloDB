@@ -930,26 +930,26 @@ and IFileSystem =
     /// </summary>
     /// <param name="file">The file header of the file to open.</param>
     /// <returns>A readable and writable <c>Stream</c> for the file.</returns>
-    abstract member Open: file: SoloDBFileHeader -> FileStorageCore.DbFileStream
+    abstract member Open: file: SoloDBFileHeader -> FileStorageCoreStream.DbFileStream
     /// <summary>
     /// Opens a file stream for a file at the specified path.
     /// </summary>
     /// <param name="path">The full path of the file to open.</param>
     /// <returns>A readable and writable <c>Stream</c> for the file.</returns>
     /// <exception cref="FileNotFoundException">Thrown if the file does not exist at the specified path.</exception>
-    abstract member OpenAt: path: string -> FileStorageCore.DbFileStream
+    abstract member OpenAt: path: string -> FileStorageCoreStream.DbFileStream
     /// <summary>
     /// Tries to open a file stream for a file at the specified path.
     /// </summary>
     /// <param name="path">The full path of the file to open.</param>
     /// <returns>An option containing the <c>Stream</c> if the file exists, otherwise None.</returns>
-    abstract member TryOpenAt: path: string -> FileStorageCore.DbFileStream option
+    abstract member TryOpenAt: path: string -> FileStorageCoreStream.DbFileStream option
     /// <summary>
     /// Opens a file stream for a file at the specified path, creating the file if it does not exist.
     /// </summary>
     /// <param name="path">The full path of the file to open or create.</param>
     /// <returns>A readable and writable <c>Stream</c> for the file.</returns>
-    abstract member OpenOrCreateAt: path: string -> FileStorageCore.DbFileStream
+    abstract member OpenOrCreateAt: path: string -> FileStorageCoreStream.DbFileStream
     /// <summary>
     /// Writes data to a file at a specific offset.
     /// </summary>
