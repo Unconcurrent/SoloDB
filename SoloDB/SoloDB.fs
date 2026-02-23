@@ -1505,11 +1505,11 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     let mappedOps =
                         relationTransforms
                         |> Seq.map (function
-                            | QueryTranslatorBase.SetDBRefToId(path, targetType, targetId) -> Relations.SetDBRefToId(path, targetType, targetId)
-                            | QueryTranslatorBase.SetDBRefToNone(path, targetType) -> Relations.SetDBRefToNone(path, targetType)
-                            | QueryTranslatorBase.AddDBRefMany(path, targetType, targetId) -> Relations.AddDBRefMany(path, targetType, targetId)
-                            | QueryTranslatorBase.RemoveDBRefMany(path, targetType, targetId) -> Relations.RemoveDBRefMany(path, targetType, targetId)
-                            | QueryTranslatorBase.ClearDBRefMany(path, targetType) -> Relations.ClearDBRefMany(path, targetType))
+                            | QueryTranslatorBase.SetDBRefToId(path, targetType, targetId) -> RelationsTypes.SetDBRefToId(path, targetType, targetId)
+                            | QueryTranslatorBase.SetDBRefToNone(path, targetType) -> RelationsTypes.SetDBRefToNone(path, targetType)
+                            | QueryTranslatorBase.AddDBRefMany(path, targetType, targetId) -> RelationsTypes.AddDBRefMany(path, targetType, targetId)
+                            | QueryTranslatorBase.RemoveDBRefMany(path, targetType, targetId) -> RelationsTypes.RemoveDBRefMany(path, targetType, targetId)
+                            | QueryTranslatorBase.ClearDBRefMany(path, targetType) -> RelationsTypes.ClearDBRefMany(path, targetType))
                         |> Seq.toList
 
                     for row in relationRows do

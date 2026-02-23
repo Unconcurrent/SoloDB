@@ -69,6 +69,11 @@
     <Compile Include="Events\SoloDBEvents.EventSystem.fs" />
     <Compile Include="Events\SoloDBEvents.Context.fs" />
     <Compile Include="Events\SoloDBEvents.fs" />
+    <Compile Include="Relations.Types.fs" />
+    <Compile Include="Relations.Schema.fs" />
+    <Compile Include="Relations.Entity.fs" />
+    <Compile Include="Relations.Delete.fs" />
+    <Compile Include="Relations.BatchLoad.fs" />
     <Compile Include="Relations.fs" />
     <Compile Include="Queryable.fs" />
     <Compile Include="SoloDB.fs" />
