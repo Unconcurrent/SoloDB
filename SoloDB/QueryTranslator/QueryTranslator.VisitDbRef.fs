@@ -13,6 +13,7 @@ open Utils
 open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.QueryTranslatorVisitCore
 open SoloDatabase.QueryTranslatorVisitPost
+open SoloDatabase.QueryTranslatorVisitPostJoin
 
 module internal QueryTranslatorVisitDbRef =
     /// preExpressionHandler for DBRef member access translation.

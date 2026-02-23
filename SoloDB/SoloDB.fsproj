@@ -55,6 +55,7 @@
     <Compile Include="QueryTranslator/QueryTranslator.Base.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitCore.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitPost.fs" />
+    <Compile Include="QueryTranslator/QueryTranslator.VisitPostJoin.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.fs" />
     <Compile Include="QueryTranslator.fs" />
     <Compile Include="FileStorage.fs" />
