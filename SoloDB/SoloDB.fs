@@ -1465,17 +1465,6 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
         member this.Optimize() = this.Optimize()
         member this.Dispose() = ()
 
-
-/// <summary>
-/// Represents the storage location of a SoloDB database.
-/// </summary>
-[<Struct>]
-type internal SoloDBLocation =
-/// <summary>The database is stored in a physical file.</summary>
-| File of filePath: string
-/// <summary>The database is stored in-memory.</summary>
-| Memory of name: string
-
 /// <summary>
 /// The main database class, representing a single SQLite database file or in-memory instance.
 /// Provides access to collections and file system storage.
@@ -1495,10 +1484,10 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             if source.StartsWith("memory:", StringComparison.InvariantCultureIgnoreCase) then
                 let memoryName = source.Substring "memory:".Length
                 let memoryName = memoryName.Trim()
-                sprintf "Data Source=%s;Mode=Memory;Cache=Shared;Pooling=False" memoryName, Memory memoryName
+                sprintf "Data Source=%s;Mode=Memory;Cache=Shared;Pooling=False" memoryName, SoloDBLocation.Memory memoryName
             else 
                 let source = Path.GetFullPath source
-                $"Data Source={source};Pooling=False", File source
+                $"Data Source={source};Pooling=False", SoloDBLocation.File source
 
         let eventSystem = EventSystem ()
 
