@@ -4,6 +4,7 @@ open System
 open System.Linq.Expressions
 open System.Reflection
 open Utils
+open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.QueryTranslatorVisitPost
 

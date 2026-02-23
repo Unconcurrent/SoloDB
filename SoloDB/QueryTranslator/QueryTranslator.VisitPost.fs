@@ -10,6 +10,8 @@ open System.Runtime.InteropServices
 open System.Text
 open JsonFunctions
 open Utils
+open SoloDatabase.QueryTranslatorBaseTypes
+open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBase
 
 module internal QueryTranslatorVisitPost =
