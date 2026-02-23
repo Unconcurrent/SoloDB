@@ -21,18 +21,6 @@ open System.Globalization
 open System.Linq
 open SoloDatabase.Attributes
 
-type internal SoloDBToCollectionData = {
-    /// <summary>
-    /// A function that, when called, clears the database connection cache.
-    /// </summary>
-    ClearCacheFunction: unit -> unit
-
-    /// <summary>
-    /// The event system used by collections created from this SoloDB instance.
-    /// </summary>
-    EventSystem: EventSystem
-}
-
 /// <summary>
 /// Caches event-context database resources to avoid repeated allocations and redundant metadata queries.
 /// </summary>
