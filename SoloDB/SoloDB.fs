@@ -1452,11 +1452,11 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 connection.Execute "ROLLBACK;" |> ignore
                 reraise()
         else
-            let relationTransforms = ResizeArray<QueryTranslator.UpdateManyRelationTransform>()
+            let relationTransforms = ResizeArray<QueryTranslatorBase.UpdateManyRelationTransform>()
             let jsonTransforms = ResizeArray<Expression<System.Action<'T>>>()
 
             for expression in transform do
-                match QueryTranslator.tryTranslateUpdateManyRelationTransform expression with
+                match QueryTranslatorVisitPost.tryTranslateUpdateManyRelationTransform expression with
                 | ValueSome op -> relationTransforms.Add op
                 | ValueNone -> jsonTransforms.Add expression
 
@@ -1505,11 +1505,11 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     let mappedOps =
                         relationTransforms
                         |> Seq.map (function
-                            | QueryTranslator.SetDBRefToId(path, targetType, targetId) -> Relations.SetDBRefToId(path, targetType, targetId)
-                            | QueryTranslator.SetDBRefToNone(path, targetType) -> Relations.SetDBRefToNone(path, targetType)
-                            | QueryTranslator.AddDBRefMany(path, targetType, targetId) -> Relations.AddDBRefMany(path, targetType, targetId)
-                            | QueryTranslator.RemoveDBRefMany(path, targetType, targetId) -> Relations.RemoveDBRefMany(path, targetType, targetId)
-                            | QueryTranslator.ClearDBRefMany(path, targetType) -> Relations.ClearDBRefMany(path, targetType))
+                            | QueryTranslatorBase.SetDBRefToId(path, targetType, targetId) -> Relations.SetDBRefToId(path, targetType, targetId)
+                            | QueryTranslatorBase.SetDBRefToNone(path, targetType) -> Relations.SetDBRefToNone(path, targetType)
+                            | QueryTranslatorBase.AddDBRefMany(path, targetType, targetId) -> Relations.AddDBRefMany(path, targetType, targetId)
+                            | QueryTranslatorBase.RemoveDBRefMany(path, targetType, targetId) -> Relations.RemoveDBRefMany(path, targetType, targetId)
+                            | QueryTranslatorBase.ClearDBRefMany(path, targetType) -> Relations.ClearDBRefMany(path, targetType))
                         |> Seq.toList
 
                     for row in relationRows do

@@ -52,6 +52,10 @@
     <Compile Include="IdGenerator.fs" />
     <Compile Include="CustomTypeId.fs" />
     <Compile Include="QueryContext.fs" />
+    <Compile Include="QueryTranslator/QueryTranslator.Base.fs" />
+    <Compile Include="QueryTranslator/QueryTranslator.VisitCore.fs" />
+    <Compile Include="QueryTranslator/QueryTranslator.VisitPost.fs" />
+    <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.fs" />
     <Compile Include="QueryTranslator.fs" />
     <Compile Include="FileStorage.fs" />
     <Compile Include="Events\SoloDBEvents.fs" />
