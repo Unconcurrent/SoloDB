@@ -91,41 +91,56 @@ module internal QueryTranslatorVisitDbRef =
         | Some value -> value
         | None -> true
 
-    /// Extract the DBRefMany<T> source MemberExpression from a method call argument, if it refers to a DBRefMany property on the root parameter.
-    let private tryGetDBRefManySource (arg: Expression) : MemberExpression voption =
+    type private DBRefManyOwnerRef = {
+        OwnerCollection: string
+        OwnerAliasSql: string
+        PropertyExpr: MemberExpression
+    }
+
+    /// Extract DBRefMany source with owner resolution for both root and nested (through DBRef.Value) paths.
+    let private tryGetDBRefManyOwnerRef (qb: QueryBuilder) (arg: Expression) : DBRefManyOwnerRef voption =
         let arg = unwrapConvert arg
         match arg with
         | :? MemberExpression as me when not (isNull me.Expression) && isDBRefManyType me.Type ->
-            match me.Expression with
-            | :? ParameterExpression -> ValueSome me
+            match unwrapConvert me.Expression with
+            | :? ParameterExpression ->
+                let sourceAlias =
+                    if String.IsNullOrEmpty qb.TableNameDot then "\"" + qb.SourceContext.RootTable + "\""
+                    else qb.TableNameDot.TrimEnd('.')
+                ValueSome {
+                    OwnerCollection = qb.SourceContext.RootTable
+                    OwnerAliasSql = sourceAlias
+                    PropertyExpr = me
+                }
+            | :? MemberExpression as valueMe when valueMe.Member.Name = "Value" && isDBRefType (unwrapConvert valueMe.Expression).Type ->
+                // Nested: o.Ref.Value.Items — resolve via DBRef JOIN chain.
+                let alias = ensureDBRefJoin qb valueMe
+                let parentDbRefExpr = unwrapConvert valueMe.Expression :?> MemberExpression
+                let struct(_, _) = resolveDBRefOwnerCollectionAndProperty qb parentDbRefExpr
+                let joinedOwnerCollection =
+                    match qb.SourceContext.TryFindJoinByAlias(alias) with
+                    | Some join -> join.TargetTable
+                    | None -> qb.SourceContext.RootTable
+                ValueSome { OwnerCollection = joinedOwnerCollection; OwnerAliasSql = alias; PropertyExpr = me }
             | _ -> ValueNone
         | _ -> ValueNone
 
     /// preExpressionHandler for DBRefMany.Count, Any(), Any(pred) as correlated subqueries.
     let private handleDBRefManyExpression (qb: QueryBuilder) (exp: Expression) : bool =
-        let sourceAlias =
-            if String.IsNullOrEmpty qb.TableNameDot then
-                "\"" + qb.SourceContext.RootTable + "\""
-            else
-                qb.TableNameDot.TrimEnd('.')
-
         match exp with
-        // Case 1: x.Tags.Count → correlated COUNT subquery
+        // Case 1: x.Tags.Count or x.Ref.Value.Tags.Count → correlated COUNT subquery
         | :? MemberExpression as topMe when topMe.Member.Name = "Count" && not (isNull topMe.Expression) ->
             let inner = unwrapConvert topMe.Expression
             if isDBRefManyType inner.Type then
-                match inner with
-                | :? MemberExpression as me when not (isNull me.Expression) ->
-                    match me.Expression with
-                    | :? ParameterExpression ->
-                        let propName = me.Member.Name
-                        let linkTable = dbRefManyLinkTable qb.SourceContext qb.SourceContext.RootTable propName
-                        let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext qb.SourceContext.RootTable propName
-                        let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
-                        qb.AppendRaw (sprintf "(SELECT COUNT(*) FROM \"%s\" WHERE %s = %s.Id)" linkTable ownerColumn sourceAlias)
-                        true
-                    | _ -> false
-                | _ -> false
+                match tryGetDBRefManyOwnerRef qb inner with
+                | ValueSome ownerRef ->
+                    let propName = ownerRef.PropertyExpr.Member.Name
+                    let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
+                    let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
+                    let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
+                    qb.AppendRaw (sprintf "(SELECT COUNT(*) FROM \"%s\" WHERE %s = %s.Id)" linkTable ownerColumn ownerRef.OwnerAliasSql)
+                    true
+                | ValueNone -> false
             else false
 
         // Case 2/3: Any() / Any(pred) over DBRefMany in either extension-call or instance-call form.
@@ -146,30 +161,30 @@ module internal QueryTranslatorVisitDbRef =
 
             match sourceArg with
             | ValueSome sourceExpr ->
-                match tryGetDBRefManySource sourceExpr with
-                | ValueSome me ->
-                    let propName = me.Member.Name
-                    let linkTable = dbRefManyLinkTable qb.SourceContext qb.SourceContext.RootTable propName
-                    let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext qb.SourceContext.RootTable propName
+                match tryGetDBRefManyOwnerRef qb sourceExpr with
+                | ValueSome ownerRef ->
+                    let propName = ownerRef.PropertyExpr.Member.Name
+                    let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
+                    let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
                     let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
                     let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
 
                     match predArg with
                     | ValueNone ->
                         // Any() without predicate.
-                        qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" WHERE %s = %s.Id)" linkTable ownerColumn sourceAlias)
+                        qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" WHERE %s = %s.Id)" linkTable ownerColumn ownerRef.OwnerAliasSql)
                         true
                     | ValueSome predicateExpr ->
                         // Any(pred) with predicate — correlated EXISTS with INNER JOIN to target table.
                         match tryExtractLambdaExpression predicateExpr with
                         | ValueSome predExpr ->
-                            let targetType = me.Type.GetGenericArguments().[0]
-                            let targetTable = resolveTargetCollectionForRelation qb.SourceContext qb.SourceContext.RootTable propName targetType
+                            let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
+                            let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
                             let tgtAlias = "_tgt"
                             let lnkAlias = "_lnk"
 
                             qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" AS %s INNER JOIN \"%s\" AS %s ON %s.Id = %s.%s WHERE %s.%s = %s.Id AND "
-                                linkTable lnkAlias targetTable tgtAlias tgtAlias lnkAlias targetColumn lnkAlias ownerColumn sourceAlias)
+                                linkTable lnkAlias targetTable tgtAlias tgtAlias lnkAlias targetColumn lnkAlias ownerColumn ownerRef.OwnerAliasSql)
 
                             // Translate predicate body with target table as context
                             let subQb = qb.ForSubquery(tgtAlias, predExpr)

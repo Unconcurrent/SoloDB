@@ -54,7 +54,7 @@ module internal QueryTranslatorVisitPostJoin =
             let fullPath = computePathKey dbrefPropExpr
             struct(qb.TableNameDot, fullPath)
 
-    and private resolveDBRefOwnerCollectionAndProperty (qb: QueryBuilder) (dbrefPropExpr: MemberExpression) : struct(string * string) =
+    and internal resolveDBRefOwnerCollectionAndProperty (qb: QueryBuilder) (dbrefPropExpr: MemberExpression) : struct(string * string) =
         match dbrefPropExpr.Expression with
         | :? ParameterExpression ->
             struct(qb.SourceContext.RootTable, dbrefPropExpr.Member.Name)
