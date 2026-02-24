@@ -97,7 +97,20 @@ module internal QueryTranslatorVisitDbRef =
         PropertyExpr: MemberExpression
     }
 
+    /// Synthesize a MemberExpression for DBRef<T>.Value from an Invoke arg that is a DBRef property.
+    /// F# expression trees emit Invoke(closure, dbrefPropExpr) instead of MemberAccess(Value, dbrefPropExpr).
+    let private tryMakeValueMemberFromInvoke (invokeExpr: MethodCallExpression) : MemberExpression voption =
+        if invokeExpr.Arguments.Count <> 1 then ValueNone
+        else
+            match unwrapConvert invokeExpr.Arguments.[0] with
+            | :? MemberExpression as dbrefPropExpr when isDBRefType dbrefPropExpr.Type ->
+                let valueProp = dbrefPropExpr.Type.GetProperty("Value", BindingFlags.Public ||| BindingFlags.Instance)
+                if isNull valueProp then ValueNone
+                else ValueSome (Expression.MakeMemberAccess(dbrefPropExpr, valueProp))
+            | _ -> ValueNone
+
     /// Extract DBRefMany source with owner resolution for both root and nested (through DBRef.Value) paths.
+    /// Handles both C# MemberExpression chains and F# MethodCallExpression(Invoke) wrappers.
     let private tryGetDBRefManyOwnerRef (qb: QueryBuilder) (arg: Expression) : DBRefManyOwnerRef voption =
         let arg = unwrapConvert arg
         match arg with
@@ -113,7 +126,7 @@ module internal QueryTranslatorVisitDbRef =
                     PropertyExpr = me
                 }
             | :? MemberExpression as valueMe when valueMe.Member.Name = "Value" && isDBRefType (unwrapConvert valueMe.Expression).Type ->
-                // Nested: o.Ref.Value.Items — resolve via DBRef JOIN chain.
+                // Nested C#: o.Ref.Value.Items — resolve via DBRef JOIN chain.
                 let alias = ensureDBRefJoin qb valueMe
                 let parentDbRefExpr = unwrapConvert valueMe.Expression :?> MemberExpression
                 let struct(_, _) = resolveDBRefOwnerCollectionAndProperty qb parentDbRefExpr
@@ -122,6 +135,19 @@ module internal QueryTranslatorVisitDbRef =
                     | Some join -> join.TargetTable
                     | None -> qb.SourceContext.RootTable
                 ValueSome { OwnerCollection = joinedOwnerCollection; OwnerAliasSql = alias; PropertyExpr = me }
+            // F# expression tree: Items member on Invoke(closure, Ref) — synthesize .Value access.
+            | :? MethodCallExpression as mc when mc.Method.Name = "Invoke" ->
+                match tryMakeValueMemberFromInvoke mc with
+                | ValueSome valueMe ->
+                    let alias = ensureDBRefJoin qb valueMe
+                    let parentDbRefExpr = unwrapConvert valueMe.Expression :?> MemberExpression
+                    let struct(_, _) = resolveDBRefOwnerCollectionAndProperty qb parentDbRefExpr
+                    let joinedOwnerCollection =
+                        match qb.SourceContext.TryFindJoinByAlias(alias) with
+                        | Some join -> join.TargetTable
+                        | None -> qb.SourceContext.RootTable
+                    ValueSome { OwnerCollection = joinedOwnerCollection; OwnerAliasSql = alias; PropertyExpr = me }
+                | ValueNone -> ValueNone
             | _ -> ValueNone
         | _ -> ValueNone
 
