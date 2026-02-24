@@ -482,6 +482,172 @@ module private QueryHelper =
         | None, None -> ()
 
 
+    let private writeLayers<'T>
+        (builder: QueryableBuilder)
+        (layers: SQLSubquery ResizeArray)
+        =
+
+        let layerCount = layers.Count
+
+        let tableName =
+            if layerCount > 0 then
+                match layers.[0] with
+                | Simple layer ->
+                    layer.TableName
+                | Complex _ ->
+                    ""
+            else
+                ""
+
+        let rec writeLayer (i: int) =
+            let layer = layers.[i]
+            match layer with
+            | Simple layer when layer.IsEmptyWithTableName ->
+                let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
+                if isTypePrimitive then
+                    builder.Append "SELECT Id, jsonb_extract(Value, '$') as Value FROM " |> ignore
+                    builder.Append "\""
+                    builder.Append layer.TableName
+                    builder.Append "\""
+                else
+                    builder.Append "\""
+                    builder.Append layer.TableName
+                    builder.Append "\""
+                
+            | Simple layer ->
+                // Track Value column position for potential json_set materialization.
+                // mutable because it's set inside the match below but used after JOIN discovery.
+                let mutable valueColumnRange = ValueNone
+
+                // Qualify column names with table name when present (needed for JOINed queries).
+                let hasTableName = not (String.IsNullOrEmpty layer.TableName)
+                let idColumn = if hasTableName then sprintf "\"%s\".Id" layer.TableName else "Id"
+                let valueColumn = if hasTableName then sprintf "\"%s\".Value" layer.TableName else "Value"
+
+                match layer.Selector with
+                | Some (Expression selector) ->
+                    builder.Append "SELECT " |> ignore
+                    builder.Append idColumn |> ignore
+                    builder.Append ", " |> ignore
+                    QueryTranslator.translateQueryable layer.TableName selector builder.SQLiteCommand builder.Variables
+                    builder.Append "AS Value " |> ignore
+                | Some (Raw func) ->
+                    builder.Append "SELECT " |> ignore
+                    func layer.TableName builder.SQLiteCommand builder.Variables
+                | None ->
+                    let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
+                    if isTypePrimitive then
+                        builder.Append "SELECT " |> ignore
+                        builder.Append idColumn |> ignore
+                        builder.Append ", jsonb_extract(" |> ignore
+                        builder.Append valueColumn |> ignore
+                        builder.Append ", '$') as Value " |> ignore
+                    else
+                        builder.Append "SELECT " |> ignore
+                        builder.Append idColumn |> ignore
+                        builder.Append ", " |> ignore
+                        let vStart = builder.SQLiteCommand.Length
+                        builder.Append valueColumn |> ignore
+                        builder.Append " " |> ignore
+                        let vEnd = builder.SQLiteCommand.Length
+                        valueColumnRange <- ValueSome struct(vStart, vEnd)
+
+                builder.Append "FROM " |> ignore
+                let joinInsertPoint =
+                    if i = 0 then
+                        builder.Append "\""
+                        builder.Append layer.TableName
+                        builder.Append "\""
+                        ValueSome builder.SQLiteCommand.Length
+                    else
+                        builder.Append "(" |> ignore
+                        writeLayer (i - 1)
+                        builder.Append ")" |> ignore
+                        ValueNone
+
+                writeClauses builder layer layer.TableName
+
+                // After expression translation, emit LEFT JOINs + materialization SELECT rewriting.
+                // JOINs are discovered during writeClauses but appear between FROM "Table" and WHERE.
+                match joinInsertPoint with
+                | ValueSome pos ->
+                    match QueryTranslator.activeQueryContext.Value with
+                    | ValueSome ctx when ctx.Joins.Count > 0 ->
+                        // Step 1: Rewrite SELECT Value → json_set(Value, ...) for materialization.
+                        // Do this FIRST because it's earlier in the string — adjusting joinInsertPoint afterward.
+                        let mutable posAdjustment = 0
+                        match valueColumnRange with
+                        | ValueSome struct(vStart, vEnd) ->
+                            let jsonSetSb = StringBuilder()
+                            jsonSetSb.Append("jsonb_set(\"") |> ignore
+                            jsonSetSb.Append(layer.TableName) |> ignore
+                            jsonSetSb.Append("\".Value") |> ignore
+                            let mutable hasMaterialization = false
+                            for j in ctx.Joins do
+                                // Skip materialization for excluded paths — the DBRef stays as raw integer (Unloaded).
+                                // The JOIN itself is still emitted (needed for WHERE/ORDER BY).
+                                if not (ctx.ExcludedPaths.Contains(j.PropertyPath)) then
+                                    hasMaterialization <- true
+                                    jsonSetSb.Append(", '$.") |> ignore
+                                    jsonSetSb.Append(j.PropertyPath) |> ignore
+                                    jsonSetSb.Append("', CASE WHEN ") |> ignore
+                                    jsonSetSb.Append(j.TargetAlias) |> ignore
+                                    jsonSetSb.Append(".Id IS NOT NULL THEN jsonb_array(") |> ignore
+                                    jsonSetSb.Append(j.TargetAlias) |> ignore
+                                    jsonSetSb.Append(".Id, ") |> ignore
+                                    jsonSetSb.Append(j.TargetAlias) |> ignore
+                                    jsonSetSb.Append(".Value) ELSE jsonb_extract(\"") |> ignore
+                                    jsonSetSb.Append(layer.TableName) |> ignore
+                                    jsonSetSb.Append("\".Value, '$.") |> ignore
+                                    jsonSetSb.Append(j.PropertyPath) |> ignore
+                                    jsonSetSb.Append("') END") |> ignore
+                            if hasMaterialization then
+                                jsonSetSb.Append(") as Value ") |> ignore
+                            else
+                                // All joins are excluded — no materialization needed, keep original qualified Value
+                                jsonSetSb.Clear() |> ignore
+                                jsonSetSb.Append("\"") |> ignore
+                                jsonSetSb.Append(layer.TableName) |> ignore
+                                jsonSetSb.Append("\".Value ") |> ignore
+                            let replacement = jsonSetSb.ToString()
+                            let originalLen = vEnd - vStart
+                            builder.SQLiteCommand.Remove(vStart, originalLen) |> ignore
+                            builder.SQLiteCommand.Insert(vStart, replacement) |> ignore
+                            posAdjustment <- replacement.Length - originalLen
+                        | ValueNone -> ()
+
+                        // Step 2: Insert LEFT JOIN clauses after FROM "TableName".
+                        let adjustedPos = pos + posAdjustment
+                        let joinSql = StringBuilder()
+                        for j in ctx.Joins do
+                            joinSql.Append(' ') |> ignore
+                            joinSql.Append(j.JoinKind) |> ignore
+                            joinSql.Append(" \"") |> ignore
+                            joinSql.Append(j.TargetTable) |> ignore
+                            joinSql.Append("\" AS ") |> ignore
+                            joinSql.Append(j.TargetAlias) |> ignore
+                            joinSql.Append(" ON ") |> ignore
+                            joinSql.Append(j.OnCondition) |> ignore
+                        builder.SQLiteCommand.Insert(adjustedPos, joinSql.ToString()) |> ignore
+                    | _ -> ()
+                | ValueNone -> ()
+            | Complex writeFunc ->
+                let tableName =
+                    if i = 0 then
+                        tableName
+                    else
+                        ""
+
+                writeFunc {|
+                    Command = builder.SQLiteCommand 
+                    Vars = builder.Variables
+                    WriteInner = fun () -> writeLayer (i - 1)
+                    TableName = tableName
+                |}
+
+        writeLayer (layerCount - 1)
+
+
     let rec private buildQuery<'T> (statements: SQLSubquery ResizeArray) (e: Expression) =
         statements.Add (emptySQLStatement () |> Simple)
 
@@ -943,172 +1109,6 @@ module private QueryHelper =
             statements.[0] <- Simple {s with TableName = tableName}
         | Complex _ ->
             ()
-
-    and private writeLayers<'T>
-        (builder: QueryableBuilder)
-        (layers: SQLSubquery ResizeArray)
-        =
-
-        let layerCount = layers.Count
-
-        let tableName =
-            if layerCount > 0 then
-                match layers.[0] with
-                | Simple layer ->
-                    layer.TableName
-                | Complex _ ->
-                    ""
-            else
-                ""
-
-        let rec writeLayer (i: int) =
-            let layer = layers.[i]
-            match layer with
-            | Simple layer when layer.IsEmptyWithTableName ->
-                let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
-                if isTypePrimitive then
-                    builder.Append "SELECT Id, jsonb_extract(Value, '$') as Value FROM " |> ignore
-                    builder.Append "\""
-                    builder.Append layer.TableName
-                    builder.Append "\""
-                else
-                    builder.Append "\""
-                    builder.Append layer.TableName
-                    builder.Append "\""
-                
-            | Simple layer ->
-                // Track Value column position for potential json_set materialization.
-                // mutable because it's set inside the match below but used after JOIN discovery.
-                let mutable valueColumnRange = ValueNone
-
-                // Qualify column names with table name when present (needed for JOINed queries).
-                let hasTableName = not (String.IsNullOrEmpty layer.TableName)
-                let idColumn = if hasTableName then sprintf "\"%s\".Id" layer.TableName else "Id"
-                let valueColumn = if hasTableName then sprintf "\"%s\".Value" layer.TableName else "Value"
-
-                match layer.Selector with
-                | Some (Expression selector) ->
-                    builder.Append "SELECT " |> ignore
-                    builder.Append idColumn |> ignore
-                    builder.Append ", " |> ignore
-                    QueryTranslator.translateQueryable layer.TableName selector builder.SQLiteCommand builder.Variables
-                    builder.Append "AS Value " |> ignore
-                | Some (Raw func) ->
-                    builder.Append "SELECT " |> ignore
-                    func layer.TableName builder.SQLiteCommand builder.Variables
-                | None ->
-                    let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
-                    if isTypePrimitive then
-                        builder.Append "SELECT " |> ignore
-                        builder.Append idColumn |> ignore
-                        builder.Append ", jsonb_extract(" |> ignore
-                        builder.Append valueColumn |> ignore
-                        builder.Append ", '$') as Value " |> ignore
-                    else
-                        builder.Append "SELECT " |> ignore
-                        builder.Append idColumn |> ignore
-                        builder.Append ", " |> ignore
-                        let vStart = builder.SQLiteCommand.Length
-                        builder.Append valueColumn |> ignore
-                        builder.Append " " |> ignore
-                        let vEnd = builder.SQLiteCommand.Length
-                        valueColumnRange <- ValueSome struct(vStart, vEnd)
-
-                builder.Append "FROM " |> ignore
-                let joinInsertPoint =
-                    if i = 0 then
-                        builder.Append "\""
-                        builder.Append layer.TableName
-                        builder.Append "\""
-                        ValueSome builder.SQLiteCommand.Length
-                    else
-                        builder.Append "(" |> ignore
-                        writeLayer (i - 1)
-                        builder.Append ")" |> ignore
-                        ValueNone
-
-                writeClauses builder layer layer.TableName
-
-                // After expression translation, emit LEFT JOINs + materialization SELECT rewriting.
-                // JOINs are discovered during writeClauses but appear between FROM "Table" and WHERE.
-                match joinInsertPoint with
-                | ValueSome pos ->
-                    match QueryTranslator.activeQueryContext.Value with
-                    | ValueSome ctx when ctx.Joins.Count > 0 ->
-                        // Step 1: Rewrite SELECT Value → json_set(Value, ...) for materialization.
-                        // Do this FIRST because it's earlier in the string — adjusting joinInsertPoint afterward.
-                        let mutable posAdjustment = 0
-                        match valueColumnRange with
-                        | ValueSome struct(vStart, vEnd) ->
-                            let jsonSetSb = StringBuilder()
-                            jsonSetSb.Append("jsonb_set(\"") |> ignore
-                            jsonSetSb.Append(layer.TableName) |> ignore
-                            jsonSetSb.Append("\".Value") |> ignore
-                            let mutable hasMaterialization = false
-                            for j in ctx.Joins do
-                                // Skip materialization for excluded paths — the DBRef stays as raw integer (Unloaded).
-                                // The JOIN itself is still emitted (needed for WHERE/ORDER BY).
-                                if not (ctx.ExcludedPaths.Contains(j.PropertyPath)) then
-                                    hasMaterialization <- true
-                                    jsonSetSb.Append(", '$.") |> ignore
-                                    jsonSetSb.Append(j.PropertyPath) |> ignore
-                                    jsonSetSb.Append("', CASE WHEN ") |> ignore
-                                    jsonSetSb.Append(j.TargetAlias) |> ignore
-                                    jsonSetSb.Append(".Id IS NOT NULL THEN jsonb_array(") |> ignore
-                                    jsonSetSb.Append(j.TargetAlias) |> ignore
-                                    jsonSetSb.Append(".Id, ") |> ignore
-                                    jsonSetSb.Append(j.TargetAlias) |> ignore
-                                    jsonSetSb.Append(".Value) ELSE jsonb_extract(\"") |> ignore
-                                    jsonSetSb.Append(layer.TableName) |> ignore
-                                    jsonSetSb.Append("\".Value, '$.") |> ignore
-                                    jsonSetSb.Append(j.PropertyPath) |> ignore
-                                    jsonSetSb.Append("') END") |> ignore
-                            if hasMaterialization then
-                                jsonSetSb.Append(") as Value ") |> ignore
-                            else
-                                // All joins are excluded — no materialization needed, keep original qualified Value
-                                jsonSetSb.Clear() |> ignore
-                                jsonSetSb.Append("\"") |> ignore
-                                jsonSetSb.Append(layer.TableName) |> ignore
-                                jsonSetSb.Append("\".Value ") |> ignore
-                            let replacement = jsonSetSb.ToString()
-                            let originalLen = vEnd - vStart
-                            builder.SQLiteCommand.Remove(vStart, originalLen) |> ignore
-                            builder.SQLiteCommand.Insert(vStart, replacement) |> ignore
-                            posAdjustment <- replacement.Length - originalLen
-                        | ValueNone -> ()
-
-                        // Step 2: Insert LEFT JOIN clauses after FROM "TableName".
-                        let adjustedPos = pos + posAdjustment
-                        let joinSql = StringBuilder()
-                        for j in ctx.Joins do
-                            joinSql.Append(' ') |> ignore
-                            joinSql.Append(j.JoinKind) |> ignore
-                            joinSql.Append(" \"") |> ignore
-                            joinSql.Append(j.TargetTable) |> ignore
-                            joinSql.Append("\" AS ") |> ignore
-                            joinSql.Append(j.TargetAlias) |> ignore
-                            joinSql.Append(" ON ") |> ignore
-                            joinSql.Append(j.OnCondition) |> ignore
-                        builder.SQLiteCommand.Insert(adjustedPos, joinSql.ToString()) |> ignore
-                    | _ -> ()
-                | ValueNone -> ()
-            | Complex writeFunc ->
-                let tableName =
-                    if i = 0 then
-                        tableName
-                    else
-                        ""
-
-                writeFunc {|
-                    Command = builder.SQLiteCommand 
-                    Vars = builder.Variables
-                    WriteInner = fun () -> writeLayer (i - 1)
-                    TableName = tableName
-                |}
-
-        writeLayer (layerCount - 1)
-
 
     and private translateQuery<'T> (builder: QueryableBuilder) (expression: Expression) =
         // Collect layers + possible terminal
