@@ -240,10 +240,24 @@ let internal resolveTargetCollectionName (connection: SqliteConnection) (ownerTa
         else
             defaultTable
 
+let private br04Message (ownerType: Type) (ownerTable: string) (linkTable: string) (propNames: string array) =
+    let props = String.Join(",", propNames)
+    $"error[SDBREL0004] patternId=NLR-SCH-04 phase=build shape=contradictory-shared-many ownerType={ownerType.FullName} ownerCollection={ownerTable} linkTable={linkTable} properties={props} collisions={props} message=Multiple DBRefMany properties on '{ownerType.Name}' resolve to the same link table '{linkTable}'. This contradictory shared-many topology is not supported."
+
+let private validateSharedManyContradictions (ownerType: Type) (ownerTable: string) (descriptors: RelationDescriptor array) =
+    descriptors
+    |> Array.filter (fun d -> d.Kind = Many)
+    |> Array.groupBy (fun d -> d.LinkTable)
+    |> Array.iter (fun (linkTable, grp) ->
+        if grp.Length > 1 then
+            let propNames = grp |> Array.map (fun d -> d.Property.Name) |> Array.sort
+            raise (InvalidOperationException(br04Message ownerType ownerTable linkTable propNames)))
+
 let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) =
     let ownerTable = formatName tx.OwnerTable
-    getRelationSpecs ownerType
-    |> Array.map (fun (prop, kind, targetType, onDelete, onOwnerDelete, isUnique) ->
+    let descriptors =
+        getRelationSpecs ownerType
+        |> Array.map (fun (prop, kind, targetType, onDelete, onOwnerDelete, isUnique) ->
         let targetTable = resolveTargetCollectionName tx.Connection ownerTable prop.Name targetType
         let defaultRelName = relationName ownerTable prop.Name
         let canonicalManyName = canonicalManyRelationName ownerTable targetTable
@@ -284,6 +298,9 @@ let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) 
             OnOwnerDelete = onOwnerDelete
             IsUnique = isUnique
         })
+
+    validateSharedManyContradictions ownerType ownerTable descriptors
+    descriptors
 
 let internal ensureRelationSchema (tx: RelationTxContext) (descriptor: RelationDescriptor) =
     ensureCollectionTableExists tx.Connection descriptor.TargetTable

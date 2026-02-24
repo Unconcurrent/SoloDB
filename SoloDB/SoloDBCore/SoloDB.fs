@@ -94,6 +94,17 @@ type internal EventDbCache(connectionString: string, directConnection: SqliteCon
 
         Helper.registerTypeCollection<'U> collectionName directConnection
 
+        // BR-04: validate relation topology after table creation.
+        let hasRelations = RelationsSchema.getRelationSpecs typeof<'U> |> Array.isEmpty |> not
+        if hasRelations then
+            let relationTx: Relations.RelationTxContext = {
+                Connection = directConnection
+                OwnerTable = collectionName
+                OwnerType = typeof<'U>
+                InTransaction = directConnection.IsWithinTransaction()
+            }
+            Relations.ensureSchemaForOwnerType relationTx typeof<'U>
+
     member this.FileSystem =
         if isNull cachedFileSystem then
             cachedFileSystem <- (FileSystem guardedConnection :> IFileSystem)
@@ -1335,10 +1346,21 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
     member val FileSystem: IFileSystem = FileSystem (Connection.Transactional connection) :> IFileSystem
 
     member private this.InitializeCollection<'T> name =
-        if not (Helper.existsCollection name connection) then 
+        if not (Helper.existsCollection name connection) then
             Helper.createTableInner<'T> name connection
 
         Helper.registerTypeCollection<'T> name connection
+
+        // BR-04: validate relation topology after table creation.
+        let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
+        if hasRelations then
+            let relationTx: Relations.RelationTxContext = {
+                Connection = connection
+                OwnerTable = name
+                OwnerType = typeof<'T>
+                InTransaction = connection.IsWithinTransaction()
+            }
+            Relations.ensureSchemaForOwnerType relationTx typeof<'T>
             
         Collection<'T>(Transactional connection, name, connectionString, { ClearCacheFunction = ignore; EventSystem = parentData.EventSystem }) :> ISoloDBCollection<'T>
 
@@ -1529,6 +1551,18 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 Helper.createTableInner<'T> name connection
 
             Helper.registerTypeCollection<'T> name connection
+
+            // BR-04: validate relation topology after table creation but before returning.
+            // Must run after createTableInner so self-referential types don't hit "table already exists".
+            let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
+            if hasRelations then
+                let relationTx: Relations.RelationTxContext = {
+                    Connection = connection
+                    OwnerTable = name
+                    OwnerType = typeof<'T>
+                    InTransaction = true
+                }
+                Relations.ensureSchemaForOwnerType relationTx typeof<'T>
 
             if not withinTransaction then connection.Execute "COMMIT;" |> ignore
         with ex ->
