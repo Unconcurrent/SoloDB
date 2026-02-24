@@ -128,7 +128,120 @@ let internal createDbRefLoaded (dbRefType: Type) (id: int64) (entity: obj) =
         |> Array.find (fun m -> m.Name = "Loaded" && m.GetParameters().Length = 2)
     loadedMethod.Invoke(null, [| box id; entity |])
 
-let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor: RelationDescriptor) (owner: obj) =
+let internal updateDbRefJson (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) (propertyPath: string) (targetId: int64) =
+    let path = "$." + propertyPath
+    let jsonText = if targetId = 0L then "null" else string targetId
+    tx.Connection.Execute(
+        $"UPDATE {quoteIdentifier ownerTable} SET Value = jsonb_set(Value, @path, jsonb(@jsonText)) WHERE Id = @ownerId;",
+        {| path = path; jsonText = jsonText; ownerId = ownerId |}) |> ignore
+
+let internal shouldSyncDbRefJson (descriptor: RelationDescriptor) =
+    isNull (descriptor.Property.GetCustomAttribute<IgnoreDataMemberAttribute>(true))
+
+// ─── D-LIB-1: Reference-identity comparer for netstandard2.0 circular guard ──
+
+type private ReferenceComparer() =
+    interface IEqualityComparer<obj> with
+        member _.Equals(x, y) = Object.ReferenceEquals(x, y)
+        member _.GetHashCode(x) = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(x)
+
+let internal refComparer = ReferenceComparer() :> IEqualityComparer<obj>
+
+// ─── D-LIB-1: Recursive cascade-insert with full-graph circular guard ────────
+
+let rec internal cascadeInsertDeep
+    (tx: RelationTxContext)
+    (targetTable: string)
+    (targetType: Type)
+    (entity: obj)
+    (visited: HashSet<obj>)
+    =
+    // Circular guard: detect if this exact object instance was already visited.
+    if not (visited.Add(entity)) then
+        raise (InvalidOperationException(
+            $"Circular cascade-insert detected for type '{targetType.FullName}'. " +
+            "Circular DBRef.From chains are not supported. Use DBRef.To(id) to break the cycle."))
+
+    // 1. Insert the entity itself (shallow).
+    let insertedId = insertTargetEntity tx targetTable targetType entity
+
+    // 2. Build a tx context for the target's collection.
+    let childTx: RelationTxContext = {
+        Connection = tx.Connection
+        OwnerTable = targetTable
+        OwnerType = targetType
+        InTransaction = tx.InTransaction
+    }
+
+    // 3. Process the target entity's own relation properties.
+    let descriptors = buildRelationDescriptors childTx targetType
+
+    for descriptor in descriptors do
+        match descriptor.Kind with
+        | Single ->
+            let value = descriptor.Property.GetValue(entity)
+            let refId = readDbRefId value
+            if refId > 0L then
+                // Already-resolved reference — create link row, validate target exists.
+                ensureRelationSchema childTx descriptor
+                ensureTargetExists childTx descriptor.TargetTable refId
+                childTx.Connection.Execute(
+                    $"INSERT OR REPLACE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
+                    {| sourceId = insertedId; targetId = refId |}) |> ignore
+                if shouldSyncDbRefJson descriptor then
+                    updateDbRefJson childTx targetTable insertedId descriptor.PropertyPath refId
+            else
+                match tryGetPendingEntity value with
+                | ValueSome pending ->
+                    let entityId = readEntityIdOrZero descriptor.TargetType pending
+                    if entityId > 0L then
+                        // D-LIB-2: existing entity, link-only.
+                        let dbRef = createDbRefTo descriptor.Property.PropertyType entityId
+                        descriptor.Property.SetValue(entity, dbRef)
+                        ensureRelationSchema childTx descriptor
+                        ensureTargetExists childTx descriptor.TargetTable entityId
+                        childTx.Connection.Execute(
+                            $"INSERT OR REPLACE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
+                            {| sourceId = insertedId; targetId = entityId |}) |> ignore
+                        if shouldSyncDbRefJson descriptor then
+                            updateDbRefJson childTx targetTable insertedId descriptor.PropertyPath entityId
+                    else
+                        // RECURSIVE cascade-insert.
+                        ensureRelationSchema childTx descriptor
+                        let childId = cascadeInsertDeep childTx descriptor.TargetTable descriptor.TargetType pending visited
+                        let dbRef = createDbRefTo descriptor.Property.PropertyType childId
+                        descriptor.Property.SetValue(entity, dbRef)
+                        childTx.Connection.Execute(
+                            $"INSERT OR REPLACE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
+                            {| sourceId = insertedId; targetId = childId |}) |> ignore
+                        if shouldSyncDbRefJson descriptor then
+                            updateDbRefJson childTx targetTable insertedId descriptor.PropertyPath childId
+                | ValueNone -> ()
+
+        | Many ->
+            let trackerObj = descriptor.Property.GetValue(entity)
+            match trackerObj with
+            | :? IDBRefManyInternal as tracker ->
+                // Always process Many items during cascade-insert, loaded or not.
+                ensureRelationSchema childTx descriptor
+                for item in tracker.GetCurrentItemsBoxed() do
+                    if not (isNull item) then
+                        let mutable itemId = readEntityIdOrZero descriptor.TargetType item
+                        if itemId <= 0L then
+                            // RECURSIVE cascade-insert for Many items.
+                            itemId <- cascadeInsertDeep childTx descriptor.TargetTable descriptor.TargetType item visited
+                        if itemId > 0L then
+                            let sourceId, targetId =
+                                if descriptor.OwnerUsesSourceColumn then insertedId, itemId
+                                else itemId, insertedId
+                            childTx.Connection.Execute(
+                                $"INSERT OR IGNORE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
+                                {| sourceId = sourceId; targetId = targetId |}) |> ignore
+            | _ -> ()
+
+    insertedId
+
+let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor: RelationDescriptor) (owner: obj) (visited: HashSet<obj>) =
     let value = descriptor.Property.GetValue(owner)
     let id = readDbRefId value
     if id > 0L then
@@ -136,14 +249,21 @@ let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor
     else
         match tryGetPendingEntity value with
         | ValueSome pending ->
-            let insertedId = insertTargetEntity tx descriptor.TargetTable descriptor.TargetType pending
-            let dbRef = createDbRefTo descriptor.Property.PropertyType insertedId
-            descriptor.Property.SetValue(owner, dbRef)
-            insertedId
+            let entityId = readEntityIdOrZero descriptor.TargetType pending
+            if entityId > 0L then
+                // D-LIB-2: Entity already persisted (Id > 0) — link-only, no re-insert.
+                let dbRef = createDbRefTo descriptor.Property.PropertyType entityId
+                descriptor.Property.SetValue(owner, dbRef)
+                entityId
+            else
+                let insertedId = cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType pending visited
+                let dbRef = createDbRefTo descriptor.Property.PropertyType insertedId
+                descriptor.Property.SetValue(owner, dbRef)
+                insertedId
         | ValueNone ->
             0L
 
-let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor: RelationDescriptor) (owner: obj) (includeWhenUnloaded: bool) =
+let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor: RelationDescriptor) (owner: obj) (includeWhenUnloaded: bool) (visited: HashSet<obj>) =
     let trackerObj = descriptor.Property.GetValue(owner)
     if isNull trackerObj then
         if includeWhenUnloaded then ValueSome [||] else ValueNone
@@ -160,22 +280,12 @@ let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor:
                     else
                         let mutable id = readEntityIdOrZero descriptor.TargetType item
                         if id <= 0L then
-                            id <- insertTargetEntity tx descriptor.TargetTable descriptor.TargetType item
+                            id <- cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType item visited
                         if id > 0L then
                             ids.Add(id) |> ignore
                 ValueSome (ids |> Seq.toArray)
         | _ ->
             raise (InvalidOperationException($"Property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' is expected to implement IDBRefManyInternal."))
-
-let internal updateDbRefJson (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) (propertyPath: string) (targetId: int64) =
-    let path = "$." + propertyPath
-    let jsonText = if targetId = 0L then "null" else string targetId
-    tx.Connection.Execute(
-        $"UPDATE {quoteIdentifier ownerTable} SET Value = jsonb_set(Value, @path, jsonb(@jsonText)) WHERE Id = @ownerId;",
-        {| path = path; jsonText = jsonText; ownerId = ownerId |}) |> ignore
-
-let internal shouldSyncDbRefJson (descriptor: RelationDescriptor) =
-    isNull (descriptor.Property.GetCustomAttribute<IgnoreDataMemberAttribute>(true))
 
 let internal readSingleIdNoCascade (descriptor: RelationDescriptor) (owner: obj) =
     descriptor.Property.GetValue(owner) |> readDbRefId

@@ -128,6 +128,12 @@ type internal IDBRefManyInternal =
     /// True if this collection was populated by the query pipeline or reset after Insert.
     abstract IsLoaded: bool
 
+    /// True if any mutation (Add/Remove/Clear) was called since construction or last reset.
+    abstract HasPendingMutations: bool
+
+    /// True if Clear() was called since construction or last reset.
+    abstract WasCleared: bool
+
     /// Ids present at the last load/reset checkpoint (snapshot before user mutations).
     abstract OriginalIds: IReadOnlyCollection<int64>
 
@@ -159,6 +165,8 @@ type DBRefMany<'T>() =
     let _originalIds = HashSet<int64>()
     let _currentItems = List<'T>()
     let mutable _isLoaded = false
+    let mutable _wasCleared = false
+    let mutable _hasPendingMutations = false
 
     // ─── Public properties ────────────────────────────────────────────────────
 
@@ -167,6 +175,12 @@ type DBRefMany<'T>() =
 
     /// <summary>True if populated from query or after Insert (TRACKER-RESET).</summary>
     member _.IsLoaded = _isLoaded
+
+    /// <summary>True if any mutation (Add/Remove/Clear) was called since construction or last reset.</summary>
+    member _.HasPendingMutations = _hasPendingMutations
+
+    /// <summary>True if Clear() was called since construction or last reset.</summary>
+    member _.WasCleared = _wasCleared
 
     // ─── Internal: for Relations.fs ───────────────────────────────────────────
 
@@ -184,6 +198,8 @@ type DBRefMany<'T>() =
         for id in ids do
             _originalIds.Add id |> ignore
         _isLoaded <- true
+        _wasCleared <- false
+        _hasPendingMutations <- false
 
     /// Reset change tracker after successful commit (Insert or Update).
     member internal _.ResetTrackerTyped(committedIds: int64 seq) =
@@ -191,11 +207,17 @@ type DBRefMany<'T>() =
         for id in committedIds do
             _originalIds.Add id |> ignore
         _isLoaded <- true
+        _wasCleared <- false
+        _hasPendingMutations <- false
 
     // ─── IDBRefManyInternal (non-generic interface for Relations.fs) ──────────
 
     interface IDBRefManyInternal with
         member _.IsLoaded = _isLoaded
+
+        member _.HasPendingMutations = _hasPendingMutations
+
+        member _.WasCleared = _wasCleared
 
         member _.OriginalIds = _originalIds :> IReadOnlyCollection<int64>
 
@@ -207,6 +229,8 @@ type DBRefMany<'T>() =
             for id in committedIds do
                 _originalIds.Add id |> ignore
             _isLoaded <- true
+            _wasCleared <- false
+            _hasPendingMutations <- false
 
         member _.SetLoadedBoxed (items: obj seq) (ids: int64 seq) =
             _currentItems.Clear()
@@ -216,20 +240,22 @@ type DBRefMany<'T>() =
             for id in ids do
                 _originalIds.Add id |> ignore
             _isLoaded <- true
+            _wasCleared <- false
+            _hasPendingMutations <- false
 
     // ─── IList<'T> ───────────────────────────────────────────────────────────
 
     /// <summary>Adds an item to the collection. Tracked for diff-on-Update.</summary>
-    member _.Add(item: 'T) = _currentItems.Add item
+    member _.Add(item: 'T) = _currentItems.Add item; _hasPendingMutations <- true
 
     /// <summary>Removes the first occurrence of an item. Tracked for diff-on-Update.</summary>
-    member _.Remove(item: 'T) = _currentItems.Remove item
+    member _.Remove(item: 'T) = _hasPendingMutations <- true; _currentItems.Remove item
 
     /// <summary>Removes the item at the specified index. Tracked for diff-on-Update.</summary>
-    member _.RemoveAt(index: int) = _currentItems.RemoveAt index
+    member _.RemoveAt(index: int) = _currentItems.RemoveAt index; _hasPendingMutations <- true
 
     /// <summary>Removes all items. All original links will be deleted on Update.</summary>
-    member _.Clear() = _currentItems.Clear()
+    member _.Clear() = _currentItems.Clear(); _wasCleared <- true; _hasPendingMutations <- true
 
     /// <summary>Determines whether the collection contains a specific item.</summary>
     member _.Contains(item: 'T) = _currentItems.Contains item

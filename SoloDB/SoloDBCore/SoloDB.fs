@@ -791,7 +791,9 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     raise (KeyNotFoundException "Could not Update any entities with specified Id.")
 
                 let oldOwner = fromSQLite<'T> oldRow
-                let writePlan = Relations.prepareUpdate tx (box oldOwner) (box item)
+                let excludedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
+                Relations.batchLoadDBRefManyProperties connection name typeof<'T> excludedPaths [| (oldRow.Id.Value, box oldOwner) |]
+                let writePlan = Relations.prepareUpdate tx oldRow.Id.Value (box oldOwner) (box item)
 
                 variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
                 let count = connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
@@ -944,9 +946,12 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 if oldRows.Length = 0 then
                     0
                 else
-                    let oldOwners = oldRows |> Seq.map (fun row -> fromSQLite<'T> row |> box)
-                    let ownerIds = oldRows |> Seq.map (fun row -> row.Id.Value)
-                    Relations.syncReplaceMany tx ownerIds oldOwners (box item)
+                    let oldOwners = oldRows |> Array.map (fun row -> fromSQLite<'T> row |> box)
+                    let ownerIds = oldRows |> Array.map (fun row -> row.Id.Value)
+                    let excludedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
+                    let ownerPairs = Array.zip ownerIds oldOwners
+                    Relations.batchLoadDBRefManyProperties connection name typeof<'T> excludedPaths ownerPairs
+                    Relations.syncReplaceMany tx (ownerIds :> seq<_>) (oldOwners :> seq<_>) (box item)
                     variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
                     connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
             else
@@ -992,6 +997,8 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     0
                 else
                     let oldOwner = fromSQLite<'T> oldRow
+                    let excludedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
+                    Relations.batchLoadDBRefManyProperties connection name typeof<'T> excludedPaths [| (oldRow.Id.Value, box oldOwner) |]
                     Relations.syncReplaceOne tx oldRow.Id.Value (box oldOwner) (box item)
                     variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
                     connection.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id = @id", {| item = variables.["item"]; id = oldRow.Id.Value |})

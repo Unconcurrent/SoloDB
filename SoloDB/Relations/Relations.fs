@@ -53,15 +53,17 @@ let prepareInsert (tx: RelationTxContext) (owner: obj) =
     let descriptors = buildRelationDescriptors tx tx.OwnerType
     let ops = ResizeArray<RelationUpdateManyOp>()
     let resetMap = Dictionary<string, int64 array>(StringComparer.Ordinal)
+    let visited = HashSet<obj>(refComparer)
+    visited.Add(owner) |> ignore
 
     for descriptor in descriptors do
         match descriptor.Kind with
         | Single ->
-            let targetId = resolveSingleTargetIdAndCascade tx descriptor owner
+            let targetId = resolveSingleTargetIdAndCascade tx descriptor owner visited
             if targetId > 0L then
                 ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, targetId))
         | Many ->
-            match collectManyTargetIdsAndCascade tx descriptor owner true with
+            match collectManyTargetIdsAndCascade tx descriptor owner true visited with
             | ValueSome ids ->
                 resetMap.[descriptor.Property.Name] <- ids
                 for id in ids do
@@ -84,17 +86,19 @@ let prepareUpsert (tx: RelationTxContext) (oldOwner: obj voption) (newOwner: obj
     let descriptors = buildRelationDescriptors tx tx.OwnerType
     let ops = ResizeArray<RelationUpdateManyOp>()
     let resetMap = Dictionary<string, int64 array>(StringComparer.Ordinal)
+    let visited = HashSet<obj>(refComparer)
+    visited.Add(newOwner) |> ignore
 
     for descriptor in descriptors do
         match descriptor.Kind with
         | Single ->
             let oldId = match oldOwner with | ValueSome old -> readSingleIdNoCascade descriptor old | ValueNone -> 0L
-            let newId = resolveSingleTargetIdAndCascade tx descriptor newOwner
+            let newId = resolveSingleTargetIdAndCascade tx descriptor newOwner visited
             if oldId <> newId then
                 if newId > 0L then ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, newId))
                 else ops.Add(SetDBRefToNone(descriptor.PropertyPath, descriptor.TargetType))
         | Many ->
-            match collectManyTargetIdsAndCascade tx descriptor newOwner true with
+            match collectManyTargetIdsAndCascade tx descriptor newOwner true visited with
             | ValueSome ids ->
                 resetMap.[descriptor.Property.Name] <- ids
                 if hadOldOwner then ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
@@ -107,33 +111,75 @@ let prepareUpsert (tx: RelationTxContext) (oldOwner: obj voption) (newOwner: obj
 
     { Kind = "Upsert"; OwnerType = tx.OwnerType; Ops = ops |> Seq.toList }
 
-let prepareUpdate (tx: RelationTxContext) (oldOwner: obj) (newOwner: obj) =
+let private readPersistedManyTargetIds (tx: RelationTxContext) (descriptor: RelationDescriptor) (ownerId: int64) =
+    if ownerId <= 0L then
+        [||]
+    else
+        let ownerColumn, targetColumn =
+            if descriptor.OwnerUsesSourceColumn then "SourceId", "TargetId"
+            else "TargetId", "SourceId"
+        tx.Connection.Query<int64>(
+            $"SELECT {targetColumn} FROM {quoteIdentifier descriptor.LinkTable} WHERE {ownerColumn} = @ownerId;",
+            {| ownerId = ownerId |})
+        |> Seq.toArray
+
+let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newOwner: obj) =
     ensureTxContext tx
+    if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
     ensureOwnerInstance tx.OwnerType oldOwner "oldOwner"
     ensureOwnerInstance tx.OwnerType newOwner "newOwner"
     let descriptors = buildRelationDescriptors tx tx.OwnerType
     let ops = ResizeArray<RelationUpdateManyOp>()
     let resetMap = Dictionary<string, int64 array>(StringComparer.Ordinal)
+    let visited = HashSet<obj>(refComparer)
+    visited.Add(newOwner) |> ignore
 
     for descriptor in descriptors do
         match descriptor.Kind with
         | Single ->
             let oldId = readSingleIdNoCascade descriptor oldOwner
-            let newId = resolveSingleTargetIdAndCascade tx descriptor newOwner
+            let newId = resolveSingleTargetIdAndCascade tx descriptor newOwner visited
             if oldId <> newId then
                 if newId > 0L then ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, newId))
                 else ops.Add(SetDBRefToNone(descriptor.PropertyPath, descriptor.TargetType))
         | Many ->
-            match collectManyTargetIdsAndCascade tx descriptor newOwner false with
-            | ValueNone -> ()
-            | ValueSome newIds ->
-                resetMap.[descriptor.Property.Name] <- newIds
-                let oldIds = match collectManyTargetIdsAndCascade tx descriptor oldOwner false with | ValueSome ids -> ids | ValueNone -> [||]
-                let oldSet = HashSet<int64>(oldIds)
-                let newSet = HashSet<int64>(newIds)
-                if not (oldSet.SetEquals(newSet)) then
+            match descriptor.Property.GetValue(newOwner) with
+            | :? IDBRefManyInternal as tracker when tracker.IsLoaded ->
+                // Loaded tracker: diff against OriginalIds
+                match collectManyTargetIdsAndCascade tx descriptor newOwner false visited with
+                | ValueNone -> ()
+                | ValueSome newIds ->
+                    resetMap.[descriptor.Property.Name] <- newIds
+                    let oldIds = tracker.OriginalIds |> Seq.toArray
+                    let oldSet = HashSet<int64>(oldIds)
+                    let newSet = HashSet<int64>(newIds)
+                    if not (oldSet.SetEquals(newSet)) then
+                        ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
+                        for id in newIds do ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
+            | :? IDBRefManyInternal as tracker when not tracker.IsLoaded && tracker.HasPendingMutations ->
+                if tracker.WasCleared then
+                    // Explicit Clear() on unloaded tracker: unlink all persisted rows.
+                    resetMap.[descriptor.Property.Name] <- [||]
                     ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
-                    for id in newIds do ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
+                else
+                    // Unloaded + pending mutations (Add without load): diff against persisted ids
+                    match collectManyTargetIdsAndCascade tx descriptor newOwner true visited with
+                    | ValueNone -> ()
+                    | ValueSome newIds ->
+                        resetMap.[descriptor.Property.Name] <- newIds
+                        let oldIds = readPersistedManyTargetIds tx descriptor ownerId
+                        let oldSet = HashSet<int64>(oldIds)
+                        let newSet = HashSet<int64>(newIds)
+                        if not (oldSet.SetEquals(newSet)) then
+                            ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
+                            for id in newIds do ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
+            | :? IDBRefManyInternal ->
+                // Unloaded + no mutations: no relation operation required.
+                ()
+            | null ->
+                ()
+            | _ ->
+                raise (InvalidOperationException($"Property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' is expected to implement IDBRefManyInternal."))
 
     if resetMap.Count > 0 then
         resetDbRefManyTrackers newOwner (asReadOnlyDict resetMap)
@@ -175,7 +221,7 @@ let syncReplaceOne (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (new
     ensureOwnerInstance tx.OwnerType oldOwner "oldOwner"
     ensureOwnerInstance tx.OwnerType newOwner "newOwner"
     ensureSchemaForOwnerType tx tx.OwnerType
-    let plan = prepareUpdate tx oldOwner newOwner
+    let plan = prepareUpdate tx ownerId oldOwner newOwner
     applyOps tx ownerId plan false
 
 let syncReplaceMany (tx: RelationTxContext) (ownerIds: int64 seq) (oldOwners: obj seq) (newOwner: obj) =
@@ -197,7 +243,7 @@ let syncReplaceMany (tx: RelationTxContext) (ownerIds: int64 seq) (oldOwners: ob
         raise (ArgumentException("ownerIds and oldOwners must have the same length.", "oldOwners"))
 
     for i = 0 to ownerIdArr.Length - 1 do
-        let plan = prepareUpdate tx oldOwnerArr.[i] newOwner
+        let plan = prepareUpdate tx ownerIdArr.[i] oldOwnerArr.[i] newOwner
         applyOps tx ownerIdArr.[i] plan false
 
 let syncDeleteOwner (tx: RelationTxContext) (plan: RelationDeletePlan) =
