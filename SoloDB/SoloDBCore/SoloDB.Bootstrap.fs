@@ -243,13 +243,15 @@ module internal Bootstrap =
         let sqliteVersion = parseSqliteVersion sqliteVersionText
 
         if sqliteVersion < minimumSqliteVersion then
-            raise (NotSupportedException $"SQLite version {sqliteVersionText} is too old. SoloDB requires SQLite 3.47.0 or newer because trigger RAISE() error messages use SQL expressions and other required features such as JSONB.")
+            raise (NotSupportedException
+                $"Error: SQLite version {sqliteVersionText} is too old.\nReason: SoloDB requires SQLite 3.47.0+ (JSONB + trigger RAISE() expressions).\nFix: Upgrade SQLite to 3.47.0 or newer.")
 
         let mutable dbSchemaVersion = dbConnection.QueryFirst<int> "PRAGMA user_version;";
 
         // Edge case 2: future schema version
         if dbSchemaVersion > currentSupportedSchemaVersion then
-            raise (NotSupportedException $"The schema version of the current DB is {dbSchemaVersion}, but the current version is {currentSupportedSchemaVersion}. This check can be mistaken if the user modified the 'PRAGMA user_version;' pragma, in which the version is stored.")
+            raise (NotSupportedException
+                $"Error: Schema version {dbSchemaVersion} is not supported.\nReason: Current supported version is {currentSupportedSchemaVersion}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
 
         // Schema creation: version 0 -> 1
         if dbSchemaVersion = 0 then

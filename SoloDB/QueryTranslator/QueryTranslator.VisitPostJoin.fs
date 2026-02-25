@@ -83,13 +83,14 @@ module internal QueryTranslatorVisitPostJoin =
         let ctx = qb.SourceContext
 
         if dbRefChainDepth dbrefExpr > 10 then
-            raise (NotSupportedException("Circular or excessively deep relation chain (depth > 10)"))
+            raise (NotSupportedException(
+                "Error: Relation chain is too deep or circular (depth > 10).\nReason: The query exceeds the supported relation traversal depth.\nFix: Reduce relation depth or split the query into multiple steps."))
 
         let pathKey = computePathKey dbrefExpr
 
         if ctx.ExcludedPaths.Contains(pathKey) then
             raise (InvalidOperationException(
-                sprintf "Cannot access excluded relation property '%s.Value'. Remove the Exclude call or use .Id instead." pathKey))
+                sprintf "Error: Cannot access excluded relation property '%s.Value'.\nReason: The property was excluded from the query.\nFix: Remove the Exclude call or use .Id instead." pathKey))
 
         match ctx.FindJoin(pathKey) with
         | Some existing -> existing.TargetAlias

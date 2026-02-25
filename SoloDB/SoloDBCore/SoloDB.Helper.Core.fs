@@ -98,7 +98,8 @@ module internal Helper =
                     "SELECT COUNT(*) FROM SoloDBRelation WHERE TargetCollection = @name AND OwnerCollection <> @name",
                     {| name = name |})
             if inboundCount > 0L then
-                raise (InvalidOperationException(sprintf "Cannot drop collection '%s': referenced by active relations. Remove relations first." name))
+                raise (InvalidOperationException(
+                    sprintf "Error: Cannot drop collection '%s'.\nReason: It is referenced by active relations.\nFix: Remove relations first, then drop the collection." name))
 
             // Edge case 2: outbound-only references — this collection owns relations. Clean up link tables + catalog rows.
             let outboundRows =
@@ -185,7 +186,8 @@ module internal Helper =
                 if generator.IsEmpty oldId then
                     let id = generator.GenerateId collection item
                     x.SetId id item
-            | other -> raise (InvalidOperationException(sprintf "Invalid Id generator type: %s" (other.GetType().ToString())))
+            | other -> raise (InvalidOperationException(
+                sprintf "Error: Invalid Id generator type.\nReason: Type '%s' is not supported.\nFix: Use a supported Id generator or configure a custom Id strategy." (other.GetType().ToString())))
         | None -> ()
         
         let json = if typed then toTypedJson item else toJson item
@@ -193,7 +195,8 @@ module internal Helper =
 
         let id =
             if existsWritebleDirectId && -1L >= HasTypeId<'T>.Read item then 
-                raise (InvalidOperationException "The Id must be either be:\n a) equal to 0, for it to be replaced by SQLite.\n b) A value greater than 0, for a specific Id to be inserted.")
+                raise (InvalidOperationException
+                    "Error: Invalid Id value.\nReason: Id must be 0 for auto-generated ids or > 0 for explicit ids.\nFix: Use Id=0 for new entities or a positive Id for explicit insert.")
             elif existsWritebleDirectId && 0L <> HasTypeId<'T>.Read item then 
                 // Inserting with Id
                 insertJson orReplace (Some (HasTypeId<'T>.Read item)) name json connection
@@ -323,4 +326,3 @@ module internal Helper =
     /// </summary>
     let internal collectionNameOf<'T> =
         Utils.collectionNameOf<'T>()
-

@@ -72,7 +72,8 @@ type internal RelationMetadataRow = {
 
 let internal ensureTransaction (tx: RelationTxContext) =
     if not tx.InTransaction then
-        raise (InvalidOperationException("Relations API requires active transaction."))
+        raise (InvalidOperationException(
+            "Error: Relations API requires an active transaction.\nReason: Relation mutations must be atomic.\nFix: Wrap the call in WithTransaction or TransactionalSoloDB."))
 
 let internal ensureTxContext (tx: RelationTxContext) =
     if isNull tx.Connection then nullArg "tx.Connection"
@@ -114,7 +115,8 @@ let internal stringToRelationKind (value: string) =
     match value with
     | "Single" -> Single
     | "Many" -> Many
-    | _ -> raise (InvalidOperationException($"Invalid relation kind '{value}'."))
+    | _ -> raise (InvalidOperationException(
+        $"Error: Invalid relation kind '{value}'.\nReason: The stored relation kind is not recognized.\nFix: Ensure metadata is valid or rebuild the schema."))
 
 let internal relationKindToString kind =
     match kind with
@@ -129,7 +131,8 @@ let internal parseDeletePolicy (value: string) =
             value.Trim()
     match Enum.TryParse<DeletePolicy>(value, true) with
     | true, policy -> policy
-    | _ -> raise (InvalidOperationException($"Invalid delete policy '{value}'."))
+    | _ -> raise (InvalidOperationException(
+        $"Error: Invalid delete policy '{value}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Cascade, Unlink, or Deletion as appropriate."))
 
 let internal parseOnDeletePolicy (value: string) =
     let policy =
@@ -139,7 +142,8 @@ let internal parseOnDeletePolicy (value: string) =
             parseDeletePolicy value
     match policy with
     | DeletePolicy.Deletion ->
-        raise (InvalidOperationException("OnDelete cannot be Deletion."))
+        raise (InvalidOperationException(
+            "Error: Invalid delete policy.\nReason: OnDelete cannot be Deletion.\nFix: Use Restrict, Cascade, or Unlink for OnDelete."))
     | _ -> policy
 
 let internal parseOnOwnerDeletePolicy (value: string) =
@@ -150,7 +154,8 @@ let internal parseOnOwnerDeletePolicy (value: string) =
             parseDeletePolicy value
     match policy with
     | DeletePolicy.Cascade ->
-        raise (InvalidOperationException("OnOwnerDelete cannot be Cascade. Use Deletion instead."))
+        raise (InvalidOperationException(
+            "Error: Invalid owner-delete policy.\nReason: OnOwnerDelete cannot be Cascade.\nFix: Use Deletion instead."))
     | _ -> policy
 
 let internal tryGetWritableInt64IdProperty (t: Type) =
@@ -164,12 +169,14 @@ let internal getWritableInt64IdPropertyOrThrow (t: Type) =
     match tryGetWritableInt64IdProperty t with
     | ValueSome prop -> prop
     | ValueNone ->
-        raise (InvalidOperationException($"Type '{t.FullName}' used in DBRef/DBRefMany relations must expose writable int64 Id. Custom-id DBRef<,> is deferred for Batch 6."))
+        raise (InvalidOperationException(
+            $"Error: Relation target type '{t.FullName}' does not expose a writable int64 Id.\nReason: DBRef/DBRefMany requires an int64 Id.\nFix: Add an int64 Id property or use supported relation types."))
 
 let internal readEntityIdOrZero (targetType: Type) (entity: obj) =
     if isNull entity then 0L
     elif not (targetType.IsAssignableFrom(entity.GetType())) then
-        raise (InvalidOperationException($"Invalid relation target instance type. Expected assignable to {targetType.FullName}, got {entity.GetType().FullName}."))
+        raise (InvalidOperationException(
+            $"Error: Invalid relation target instance type.\nReason: Expected assignable to {targetType.FullName}, got {entity.GetType().FullName}.\nFix: Use the correct target type for this relation."))
     else
         let idProp = getWritableInt64IdPropertyOrThrow targetType
         idProp.GetValue(entity) :?> int64

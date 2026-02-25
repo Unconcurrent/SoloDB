@@ -307,7 +307,8 @@ module internal QueryTranslatorBase =
                 let value = evaluateExpr m
                 qb.AppendVariable value
             else
-                raise (NotSupportedException(sprintf "The member access '%O' is not supported" m.Member.Name))
+                raise (NotSupportedException(
+                    sprintf "Error: Member access '%O' is not supported.\nReason: The member cannot be translated to SQL in this context.\nFix: Simplify the expression or move it after AsEnumerable()." m.Member.Name))
 
     /// <summary>
     /// The main recursive visitor function that traverses the expression tree.

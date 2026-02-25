@@ -23,15 +23,15 @@ module internal QueryTranslatorVisitPost =
 
     [<Literal>]
     let internal updateManyRelationUnsupportedMessage =
-        "UpdateMany relation transform not supported. Allowed: Ref.Set(DBRef.To/None), RefMany.Add/Append/Remove/Clear."
+        "Error: UpdateMany relation transform is not supported.\nReason: Only specific relation mutations are allowed in UpdateMany.\nFix: Use Ref.Set(DBRef.To/None) or RefMany.Add/Append/Remove/Clear, or apply changes outside UpdateMany."
 
     [<Literal>]
     let private updateManyDbRefManyPersistedIdMessage =
-        "UpdateMany DBRefMany Add/Remove requires persisted target Id (> 0)."
+        "Error: UpdateMany DBRefMany Add/Remove requires a persisted target Id.\nReason: The target Id must be > 0 to reference an existing row.\nFix: Save the target first or use a valid persisted Id."
 
     [<Literal>]
     let private updateManyDbRefValueMutationMessage =
-        "UpdateMany cannot mutate DBRef.Value members. Update target collection explicitly."
+        "Error: UpdateMany cannot mutate DBRef.Value members.\nReason: DBRef.Value is not mutable through UpdateMany.\nFix: Update the target collection explicitly, then update the reference."
 
     /// Batch 4 deterministic unsupported-shape messages.
     let internal multiSourceCrossRootProjectionMessage =
@@ -286,4 +286,3 @@ module internal QueryTranslatorVisitPost =
             | ValueNone -> ValueNone
 
         | _ -> ValueNone
-

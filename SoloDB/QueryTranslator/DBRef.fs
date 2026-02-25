@@ -39,13 +39,13 @@ type DBRef<'T> =
     member this.Value =
         if not this._isLoaded then
             raise (InvalidOperationException(
-                sprintf "DBRef<%s>.Value is not loaded. Either Exclude was applied or the reference was created with DBRef.To(id). Use .Id to access the reference Id without loading." typeof<'T>.Name))
+                sprintf "Error: DBRef<%s>.Value is not loaded.\nReason: Exclude was applied or the reference was created with DBRef.To(id).\nFix: Use .Id or Load the reference in the query." typeof<'T>.Name))
         if this._id = 0L && not (obj.ReferenceEquals(this._value :> obj, null)) then
             // From(entity) case: entity is pending cascade-insert, Id not yet assigned.
             this._value
         elif this._id = 0L then
             raise (InvalidOperationException(
-                sprintf "DBRef<%s> is empty (no reference). Check .HasValue before accessing .Value." typeof<'T>.Name))
+                sprintf "Error: DBRef<%s> is empty (no reference).\nReason: HasValue is false.\nFix: Check .HasValue before accessing .Value." typeof<'T>.Name))
         else
             this._value
 
@@ -72,7 +72,8 @@ type DBRef<'T> =
     /// <param name="id">The database Id of the target entity. Must be greater than 0.</param>
     static member To(id: int64) =
         if id <= 0L then
-            raise (ArgumentOutOfRangeException(nameof id, id, "DBRef.To requires a positive Id (> 0). Use DBRef.None for an empty reference."))
+            raise (ArgumentOutOfRangeException(nameof id, id,
+                "Error: DBRef.To requires a positive Id (> 0).\nReason: Id 0 represents an empty reference.\nFix: Use DBRef.None for empty or supply a positive Id."))
         DBRef<'T>(id, Unchecked.defaultof<'T>, false)
 
     /// <summary>

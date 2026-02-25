@@ -68,7 +68,8 @@ let rec internal applyOwnerDeletePoliciesCore (tx: RelationTxContext) (ownerTabl
                 match parseOnOwnerDeletePolicy row.OnOwnerDelete with
                 | DeletePolicy.Restrict ->
                     if hasLinks then
-                        raise (InvalidOperationException($"Cannot delete owner '{ownerTable}' Id={ownerId} because relation '{row.PropertyName}' uses OnOwnerDelete=Restrict and still has links."))
+                        raise (InvalidOperationException(
+                            $"Error: Cannot delete owner '{ownerTable}' Id={ownerId}.\nReason: Relation '{row.PropertyName}' uses OnOwnerDelete=Restrict and still has links.\nFix: Remove related links or change the delete policy before deleting."))
                 | DeletePolicy.Unlink ->
                     if hasLinks then
                         tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
@@ -83,9 +84,11 @@ let rec internal applyOwnerDeletePoliciesCore (tx: RelationTxContext) (ownerTabl
                                     applyOwnerDeletePoliciesCore tx row.TargetCollection targetId true
                                     tx.Connection.Execute($"DELETE FROM {quoteIdentifier row.TargetCollection} WHERE Id = @id;", {| id = targetId |}) |> ignore
                 | DeletePolicy.Cascade ->
-                    raise (InvalidOperationException($"Invalid relation metadata: OnOwnerDelete=Cascade is not supported on '{ownerTable}.{row.PropertyName}'."))
+                    raise (InvalidOperationException(
+                        $"Error: Invalid relation metadata on '{ownerTable}.{row.PropertyName}'.\nReason: OnOwnerDelete=Cascade is not supported.\nFix: Use OnOwnerDelete=Deletion or update the metadata to a supported policy."))
                 | _ ->
-                    raise (InvalidOperationException($"Invalid OnOwnerDelete policy on relation '{ownerTable}.{row.PropertyName}'."))
+                    raise (InvalidOperationException(
+                        $"Error: Invalid OnOwnerDelete policy on relation '{ownerTable}.{row.PropertyName}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Unlink, or Deletion."))
 )
 
 and internal applyTargetDeletePoliciesCore (tx: RelationTxContext) (targetTable: string) (targetId: int64) =
@@ -114,7 +117,8 @@ and internal applyTargetDeletePoliciesCore (tx: RelationTxContext) (targetTable:
             if ownerIds.Length > 0 then
                 match onDelete with
                 | DeletePolicy.Restrict ->
-                    raise (InvalidOperationException($"Cannot delete '{targetTable}' Id={targetId}. Relation '{row.OwnerCollection}.{row.PropertyName}' uses OnDelete=Restrict."))
+                    raise (InvalidOperationException(
+                        $"Error: Cannot delete '{targetTable}' Id={targetId}.\nReason: Relation '{row.OwnerCollection}.{row.PropertyName}' uses OnDelete=Restrict.\nFix: Remove related links or change the delete policy before deleting."))
 
                 | DeletePolicy.Unlink ->
                     tx.Connection.Execute($"DELETE FROM {qLink} WHERE {targetColumn} = @targetId;", {| targetId = targetId |}) |> ignore
@@ -130,9 +134,11 @@ and internal applyTargetDeletePoliciesCore (tx: RelationTxContext) (targetTable:
                         tx.Connection.Execute($"DELETE FROM {qOwner} WHERE Id = @id;", {| id = ownerId |}) |> ignore
 
                 | DeletePolicy.Deletion ->
-                    raise (InvalidOperationException("OnDelete cannot be Deletion."))
+                    raise (InvalidOperationException(
+                        "Error: Invalid delete policy.\nReason: OnDelete cannot be Deletion.\nFix: Use Restrict, Cascade, or Unlink for OnDelete."))
                 | _ ->
-                    raise (InvalidOperationException($"Invalid OnDelete policy on relation '{row.OwnerCollection}.{row.PropertyName}'."))
+                    raise (InvalidOperationException(
+                        $"Error: Invalid OnDelete policy on relation '{row.OwnerCollection}.{row.PropertyName}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Cascade, or Unlink."))
 )
 
 and internal globalRefCountCore (tx: RelationTxContext) (targetTable: string) (targetId: int64) =

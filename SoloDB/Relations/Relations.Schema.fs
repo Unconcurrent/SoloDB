@@ -155,7 +155,8 @@ let private buildRelationSpecs (ownerType: Type) =
 
                     match kind with
                     | Many when onOwnerDelete = DeletePolicy.Cascade ->
-                        raise (InvalidOperationException($"Invalid relation policy on {ownerType.FullName}.{prop.Name}: OnOwnerDelete cannot be Cascade. Use Deletion instead."))
+                        raise (InvalidOperationException(
+                            $"Error: Invalid relation policy on {ownerType.FullName}.{prop.Name}.\nReason: OnOwnerDelete cannot be Cascade.\nFix: Use Deletion instead."))
                     | _ -> ()
 
                     Some (prop, kind, targetType, onDelete, onOwnerDelete, isUnique)
@@ -236,7 +237,8 @@ let internal resolveTargetCollectionName (connection: SqliteConnection) (ownerTa
             mapped.[0]
         elif mapped.Length > 1 then
             let mappedList = String.Join(", ", mapped)
-            raise (InvalidOperationException($"Ambiguous target collection mapping for relation {ownerTable}.{propertyName} and type '{targetType.FullName}'. Mapped collections: {mappedList}."))
+            raise (InvalidOperationException(
+                $"Error: Ambiguous target collection mapping for relation {ownerTable}.{propertyName} and type '{targetType.FullName}'.\nReason: Multiple collections are mapped ({mappedList}).\nFix: Register exactly one target collection for this type."))
         else
             defaultTable
 

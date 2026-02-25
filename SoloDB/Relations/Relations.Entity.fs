@@ -59,11 +59,13 @@ let internal insertTargetEntity (tx: RelationTxContext) (targetTable: string) (t
     if isNull entity then
         raise (ArgumentNullException("entity", "Cascade insert target entity cannot be null."))
 
-    ensureCollectionTableExists tx.Connection targetTable
-
+    // ET-02: reject negative id before any schema side effects
     let id = readEntityIdOrZero targetType entity
     if id < 0L then
-        raise (InvalidOperationException($"Invalid Id {id} on pending relation target '{targetType.FullName}'. Id must be >= 0."))
+        raise (InvalidOperationException(
+            $"Error: Invalid Id {id} on pending relation target '{targetType.FullName}'.\nReason: Id must be >= 0.\nFix: Use 0 for new entities or a positive Id for existing entities."))
+
+    ensureCollectionTableExists tx.Connection targetTable
 
     let json = serializeEntityForStorage targetType entity
     let qTarget = quoteIdentifier targetTable
@@ -81,7 +83,8 @@ let internal ensureTargetExists (tx: RelationTxContext) (targetTable: string) (t
     let exists =
         tx.Connection.QueryFirst<int64>($"SELECT CASE WHEN EXISTS (SELECT 1 FROM {quoteIdentifier targetTable} WHERE Id = @id) THEN 1 ELSE 0 END", {| id = targetId |}) = 1L
     if not exists then
-        raise (InvalidOperationException($"Relation target '{targetTable}' with Id={targetId} does not exist."))
+        raise (InvalidOperationException(
+            $"Error: Relation target '{targetTable}' with Id={targetId} does not exist.\nReason: The target row is missing.\nFix: Insert the target first or correct the Id."))
 
 let internal readDbRefId (dbRefObj: obj) =
     if isNull dbRefObj then
@@ -119,7 +122,8 @@ let internal tryGetPendingEntity (dbRefObj: obj) =
 let internal createDbRefTo (dbRefType: Type) (id: int64) =
     let toMethod = dbRefType.GetMethod("To", BindingFlags.Public ||| BindingFlags.Static, null, [| typeof<int64> |], null)
     if isNull toMethod then
-        raise (InvalidOperationException($"Could not resolve DBRef.To on type {dbRefType.FullName}."))
+        raise (InvalidOperationException(
+            $"Error: Could not resolve DBRef.To on type {dbRefType.FullName}.\nReason: The DBRef target type could not be inferred.\nFix: Ensure the DBRef is correctly typed and initialized."))
     toMethod.Invoke(null, [| box id |])
 
 let internal createDbRefLoaded (dbRefType: Type) (id: int64) (entity: obj) =
@@ -245,6 +249,8 @@ let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor
     let value = descriptor.Property.GetValue(owner)
     let id = readDbRefId value
     if id > 0L then
+        // ET-01: preflight target-exists for DBRef.To(id) before owner mutation
+        ensureTargetExists tx descriptor.TargetTable id
         id
     else
         match tryGetPendingEntity value with
@@ -252,6 +258,8 @@ let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor
             let entityId = readEntityIdOrZero descriptor.TargetType pending
             if entityId > 0L then
                 // D-LIB-2: Entity already persisted (Id > 0) — link-only, no re-insert.
+                // ET-01: preflight target-exists for From(existing) before owner mutation
+                ensureTargetExists tx descriptor.TargetTable entityId
                 let dbRef = createDbRefTo descriptor.Property.PropertyType entityId
                 descriptor.Property.SetValue(owner, dbRef)
                 entityId
@@ -281,11 +289,15 @@ let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor:
                         let mutable id = readEntityIdOrZero descriptor.TargetType item
                         if id <= 0L then
                             id <- cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType item visited
+                        elif id > 0L then
+                            // ET-01: preflight target-exists for pre-existing many items before owner mutation
+                            ensureTargetExists tx descriptor.TargetTable id
                         if id > 0L then
                             ids.Add(id) |> ignore
                 ValueSome (ids |> Seq.toArray)
         | _ ->
-            raise (InvalidOperationException($"Property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' is expected to implement IDBRefManyInternal."))
+            raise (InvalidOperationException(
+                $"Error: Property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' does not implement IDBRefManyInternal.\nReason: The relation property type is incorrect.\nFix: Use DBRefMany<T> for multi-relations."))
 
 let internal readSingleIdNoCascade (descriptor: RelationDescriptor) (owner: obj) =
     descriptor.Property.GetValue(owner) |> readDbRefId
@@ -303,7 +315,8 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
             match descriptorMap.TryGetValue(firstSegment) with
             | true, descriptor -> descriptor
             | _ ->
-                raise (InvalidOperationException($"Unknown relation property path '{propertyPath}' for owner type '{tx.OwnerType.FullName}'."))
+                raise (InvalidOperationException(
+                    $"Error: Unknown relation property path '{propertyPath}' for owner type '{tx.OwnerType.FullName}'.\nReason: The path does not match any relation on the type.\nFix: Use a valid relation property path."))
 
     let deleteSingleLink (descriptor: RelationDescriptor) =
         tx.Connection.Execute(
@@ -324,9 +337,11 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
         | SetDBRefToId(propertyPath, targetType, targetId) ->
             let descriptor = resolveDescriptor propertyPath
             if descriptor.Kind <> Single then
-                raise (InvalidOperationException($"Relation '{propertyPath}' is not DBRef<T>."))
+                raise (InvalidOperationException(
+                    $"Error: Relation '{propertyPath}' is not DBRef<T>.\nReason: The relation type does not match the expected DBRef.\nFix: Use a DBRef<T> relation or correct the property path."))
             if descriptor.TargetType <> targetType then
-                raise (InvalidOperationException($"Relation target type mismatch on '{propertyPath}'. Expected {descriptor.TargetType.FullName}, got {targetType.FullName}."))
+                raise (InvalidOperationException(
+                    $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             ensureTargetExists tx descriptor.TargetTable targetId
             deleteSingleLink descriptor
             insertSingleLink descriptor targetId
@@ -336,9 +351,11 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
         | SetDBRefToNone(propertyPath, targetType) ->
             let descriptor = resolveDescriptor propertyPath
             if descriptor.Kind <> Single then
-                raise (InvalidOperationException($"Relation '{propertyPath}' is not DBRef<T>."))
+                raise (InvalidOperationException(
+                    $"Error: Relation '{propertyPath}' is not DBRef<T>.\nReason: The relation type does not match the expected DBRef.\nFix: Use a DBRef<T> relation or correct the property path."))
             if descriptor.TargetType <> targetType then
-                raise (InvalidOperationException($"Relation target type mismatch on '{propertyPath}'. Expected {descriptor.TargetType.FullName}, got {targetType.FullName}."))
+                raise (InvalidOperationException(
+                    $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             deleteSingleLink descriptor
             if updateOwnerJson && shouldSyncDbRefJson descriptor then
                 updateDbRefJson tx tx.OwnerTable ownerId descriptor.PropertyPath 0L
@@ -346,9 +363,11 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
         | AddDBRefMany(propertyPath, targetType, targetId) ->
             let descriptor = resolveDescriptor propertyPath
             if descriptor.Kind <> Many then
-                raise (InvalidOperationException($"Relation '{propertyPath}' is not DBRefMany<T>."))
+                raise (InvalidOperationException(
+                    $"Error: Relation '{propertyPath}' is not DBRefMany<T>.\nReason: The relation type does not match the expected DBRefMany.\nFix: Use a DBRefMany<T> relation or correct the property path."))
             if descriptor.TargetType <> targetType then
-                raise (InvalidOperationException($"Relation target type mismatch on '{propertyPath}'. Expected {descriptor.TargetType.FullName}, got {targetType.FullName}."))
+                raise (InvalidOperationException(
+                    $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             ensureTargetExists tx descriptor.TargetTable targetId
             let sourceId, targetIdValue =
                 if descriptor.OwnerUsesSourceColumn then ownerId, targetId
@@ -360,9 +379,11 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
         | RemoveDBRefMany(propertyPath, targetType, targetId) ->
             let descriptor = resolveDescriptor propertyPath
             if descriptor.Kind <> Many then
-                raise (InvalidOperationException($"Relation '{propertyPath}' is not DBRefMany<T>."))
+                raise (InvalidOperationException(
+                    $"Error: Relation '{propertyPath}' is not DBRefMany<T>.\nReason: The relation type does not match the expected DBRefMany.\nFix: Use a DBRefMany<T> relation or correct the property path."))
             if descriptor.TargetType <> targetType then
-                raise (InvalidOperationException($"Relation target type mismatch on '{propertyPath}'. Expected {descriptor.TargetType.FullName}, got {targetType.FullName}."))
+                raise (InvalidOperationException(
+                    $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             let ownerColumn, targetColumn = manyColumns descriptor
             let sql = $"DELETE FROM {quoteIdentifier descriptor.LinkTable} WHERE {ownerColumn} = @ownerId AND {targetColumn} = @targetId;"
             tx.Connection.Execute(
@@ -372,9 +393,11 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
         | ClearDBRefMany(propertyPath, targetType) ->
             let descriptor = resolveDescriptor propertyPath
             if descriptor.Kind <> Many then
-                raise (InvalidOperationException($"Relation '{propertyPath}' is not DBRefMany<T>."))
+                raise (InvalidOperationException(
+                    $"Error: Relation '{propertyPath}' is not DBRefMany<T>.\nReason: The relation type does not match the expected DBRefMany.\nFix: Use a DBRefMany<T> relation or correct the property path."))
             if descriptor.TargetType <> targetType then
-                raise (InvalidOperationException($"Relation target type mismatch on '{propertyPath}'. Expected {descriptor.TargetType.FullName}, got {targetType.FullName}."))
+                raise (InvalidOperationException(
+                    $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             let ownerColumn, _ = manyColumns descriptor
             let sql = $"DELETE FROM {quoteIdentifier descriptor.LinkTable} WHERE {ownerColumn} = @ownerId;"
             tx.Connection.Execute(

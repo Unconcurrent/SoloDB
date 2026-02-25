@@ -390,11 +390,15 @@ module private QueryHelper =
                     expression <- mce.Arguments.[0]
                     let exprs = Array.init (mce.Arguments.Count - 1) (fun i -> mce.Arguments.[i + 1])
                     Method {| Value = value; Expressions = exprs; OriginalMethod = mce.Method |}
-                | None -> raise (NotSupportedException(sprintf "Queryable method not implemented: %s" mce.Method.Name))
+                | None ->
+                    raise (NotSupportedException(
+                        sprintf "Error: Queryable method '%s' is not supported.\nReason: The expression cannot be translated to SQL.\nFix: Call AsEnumerable() before this method or rewrite the query to a supported shape." mce.Method.Name))
             | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
                 RootQuery (ce.Value :?> IRootQueryable)
                 expression <- null
-            | e -> raise (NotSupportedException(sprintf "Cannot preprocess expression of type %A: %A" e.NodeType e))
+            | e ->
+                raise (NotSupportedException(
+                    sprintf "Error: Cannot preprocess expression of type %A.\nReason: The expression shape is not supported for SQL translation.\nFix: Simplify the expression or switch to AsEnumerable() before this operation." e.NodeType))
     }
 
     let private tryExtractExcludePath (expressions: Expression array) =
@@ -780,8 +784,12 @@ module private QueryHelper =
                                     builder.Command.Append "JOIN json_each(" |> ignore
                                     builder.Command.Append innerSourceName |> ignore
                                     builder.Command.Append ".Value)" |> ignore
-                                | _ -> raise (NotSupportedException("Unsupported SelectMany selector structure"))
-                            | _ -> raise (NotSupportedException("Invalid SelectMany structure"))
+                                | _ ->
+                                    raise (NotSupportedException(
+                                        "Error: Unsupported SelectMany selector structure.\nReason: The selector cannot be translated to SQL.\nFix: Simplify the selector or move SelectMany after AsEnumerable()."))
+                            | _ ->
+                                raise (NotSupportedException(
+                                    "Error: Invalid SelectMany structure.\nReason: The SelectMany arguments are not a supported query pattern.\nFix: Rewrite the query or move SelectMany after AsEnumerable()."))
                         | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
                     )
                 

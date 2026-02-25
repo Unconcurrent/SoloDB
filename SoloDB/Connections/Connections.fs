@@ -16,7 +16,8 @@ module Connections =
     open System.IO
 
     let internal ThrowOutsideEventContextUsage() =
-            raise (InvalidOperationException("Event handlers must use the ctx parameter (which implements ISoloDB). Using any other SoloDB instance inside a handler will lock the database."))
+            raise (InvalidOperationException(
+                "Error: Event handler used a non-context SoloDB instance.\nReason: Event handlers must use the provided ctx (ISoloDB). Using another instance can lock the database.\nFix: Use the ctx parameter for all database operations inside handlers."))
 
     let private beginImmediateWithRetry (connection: CachingDbConnection) =
         let mutable attempt = 0
@@ -105,7 +106,8 @@ module Connections =
             try pooledConn.Execute("BEGIN; ROLLBACK;") |> ignore
             with 
             | :? SqliteException as se when se.SqliteErrorCode = 1 && se.SqliteExtendedErrorCode = 1 ->
-                ("The transaction must be finished before you return the connection to the pool.", se) |> InvalidOperationException |> raise
+                ("Error: Connection returned to pool while a transaction is still active.\nReason: The transaction must be finished before returning the connection.\nFix: Commit or rollback the transaction before returning the connection.", se)
+                |> InvalidOperationException |> raise
 
             pool.Push pooledConn
 
@@ -270,7 +272,8 @@ module Connections =
             | Transitive conn when conn.IsWithinTransaction() ->
                 f conn
             | Transitive _conn ->
-                raise (InvalidOperationException "A simple Transitive Connection should never be used with a transation.")
+                raise (InvalidOperationException
+                    "Error: Simple transitive connection used with a transaction.\nReason: This connection type does not support transactions.\nFix: Use a transactional connection or remove the transaction.")
             | Guarded (guard, inner) ->
                 guard()
                 inner.WithTransaction f
@@ -288,7 +291,8 @@ module Connections =
             | Transactional conn -> 
                 f conn
             | Transitive _conn -> 
-                raise (InvalidOperationException "A Transitive Connection should never be used with a transation.")
+                raise (InvalidOperationException
+                    "Error: Transitive connection used with a transaction.\nReason: This connection type does not support transactions.\nFix: Use a transactional connection or remove the transaction.")
             | Guarded (guard, inner) ->
                 guard()
                 inner.WithAsyncTransaction f

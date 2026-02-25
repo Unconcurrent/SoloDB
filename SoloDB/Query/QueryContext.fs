@@ -184,4 +184,5 @@ type internal QueryContext = {
         | true, names when names.Contains(defaultCollection) -> defaultCollection
         | true, names when names.Count = 1 -> names |> Seq.head
         | true, _ ->
-            raise (System.InvalidOperationException($"Ambiguous collection mapping for relation target type '{typeKey}'. Register and use exactly one target collection for relation-backed queries."))
+            raise (System.InvalidOperationException(
+                $"Error: Ambiguous collection mapping for relation target type '{typeKey}'.\nReason: Multiple collections are registered for this type.\nFix: Register exactly one target collection for relation-backed queries."))

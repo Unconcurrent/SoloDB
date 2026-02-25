@@ -81,15 +81,20 @@ module internal QueryTranslatorVisitDbRef =
 
     /// Compute the link table name for a DBRefMany property.
     /// Convention: SoloDBRelLink_{SourceTable}_{PropertyName}
+    // ET-03: strict metadata resolution — no silent fallback for relation-backed paths
     let private dbRefManyLinkTable (ctx: QueryContext) (ownerTable: string) (propName: string) =
         match ctx.TryResolveRelationLink(ownerTable, propName) with
         | Some mapped when not (String.IsNullOrWhiteSpace mapped) -> formatName mapped
-        | _ -> sprintf "SoloDBRelLink_%s_%s" ownerTable propName
+        | _ ->
+            raise (InvalidOperationException(
+                $"error[SDBREL0005] patternId=NLR-SCH-05 phase=translation shape=missing-relation-metadata ownerCollection={ownerTable} property={propName} message=Relation metadata missing for '{ownerTable}.{propName}'. Link table cannot be resolved without metadata."))
 
     let private dbRefManyOwnerUsesSource (ctx: QueryContext) (ownerTable: string) (propName: string) =
         match ctx.TryResolveRelationOwnerUsesSource(ownerTable, propName) with
         | Some value -> value
-        | None -> true
+        | None ->
+            raise (InvalidOperationException(
+                $"error[SDBREL0005] patternId=NLR-SCH-05 phase=translation shape=missing-relation-metadata ownerCollection={ownerTable} property={propName} message=Relation metadata missing for '{ownerTable}.{propName}'. Owner-source direction cannot be resolved without metadata."))
 
     type private DBRefManyOwnerRef = {
         OwnerCollection: string
@@ -275,7 +280,8 @@ module internal QueryTranslatorVisitDbRef =
                             qb.AppendRaw "))"
                             true
                         | ValueNone ->
-                            raise (NotSupportedException("Cannot extract predicate lambda for relation-backed DBRefMany.All. Ensure the predicate is a simple lambda expression."))
+                            raise (NotSupportedException(
+                                "Error: Cannot extract predicate lambda for relation-backed DBRefMany.All.\nReason: The predicate is not a simple lambda expression.\nFix: Use a simple lambda (e.g., x => ...) or move the operation after AsEnumerable()."))
                     | ValueNone ->
                         // All() without predicate is trivially true; emit literal 1.
                         qb.AppendRaw "1"

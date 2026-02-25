@@ -130,10 +130,12 @@ type internal EventDbCache(connectionString: string, directConnection: SqliteCon
         else Helper.existsCollection collectionName directConnection
 
     member this.DropCollectionIfExists(collectionName: string) =
-        raise (InvalidOperationException "Dropping collections is not supported from event handlers.")
+        raise (InvalidOperationException
+            "Error: Dropping collections is not supported from event handlers.\nReason: Event handlers must not perform schema changes.\nFix: Drop collections outside event handlers.")
 
     member this.DropCollection(collectionName: string) =
-        raise (InvalidOperationException "Dropping collections is not supported from event handlers.")
+        raise (InvalidOperationException
+            "Error: Dropping collections is not supported from event handlers.\nReason: Event handlers must not perform schema changes.\nFix: Drop collections outside event handlers.")
 
 /// <summary>
 /// Represents a collection of documents of type 'T stored in the database. Provides methods for CRUD operations, indexing, and LINQ querying.
@@ -785,7 +787,8 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                         let idProp = CustomTypeId<'T>.Value.Value.Property
                         QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = id))
                      | None ->
-                        raise (InvalidOperationException $"The item's type {typeof<'T>.Name} does not have a int64 Id property or a custom Id to use in the update process.")
+                        raise (InvalidOperationException
+                            $"Error: Item type {typeof<'T>.Name} has no int64 Id or custom Id.\nReason: Updates require a stable identifier.\nFix: Add an int64 Id property or configure a custom Id strategy.")
 
             use connection = connection.Get()
             if this.HasRelations then

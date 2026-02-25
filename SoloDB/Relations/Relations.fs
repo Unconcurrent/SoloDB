@@ -180,7 +180,8 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
             | null ->
                 ()
             | _ ->
-                raise (InvalidOperationException($"Property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' is expected to implement IDBRefManyInternal."))
+                raise (InvalidOperationException(
+                    $"Error: Property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' does not implement IDBRefManyInternal.\nReason: The relation property type is incorrect.\nFix: Use DBRefMany<T> for multi-relations."))
 
     if resetMap.Count > 0 then
         resetDbRefManyTrackers newOwner (asReadOnlyDict resetMap)

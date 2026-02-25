@@ -68,12 +68,12 @@ module internal QueryTranslatorVisitCore =
             match exp with
             | :? ParameterExpression as pe -> visitParameter pe qb
             | :? BinaryExpression as be -> arrayIndex be.Left be.Right qb
-            | other -> failwithf "Unknown array index expression of: %A" other
+            | other -> raise (NotSupportedException(sprintf "Unknown array index expression of: %A" other))
         | ExpressionType.Index ->
             let exp = exp :?> IndexExpression
-            if exp.Arguments.Count <> 1 then failwithf "The SQL translator does not support multiple args indexes."
+            if exp.Arguments.Count <> 1 then raise (NotSupportedException("The SQL translator does not support multiple args indexes."))
             let arge = exp.Arguments.[0]
-            if not (isFullyConstant arge) then failwithf "The SQL translator does not support non constant index arg."
+            if not (isFullyConstant arge) then raise (NotSupportedException("The SQL translator does not support non constant index arg."))
             
 
             if arge.Type = typeof<string> then
@@ -95,7 +95,8 @@ module internal QueryTranslatorVisitCore =
             | _ when isFullyConstant exp ->
                 qb.AppendVariable (evaluateExpr<obj> exp)
             | _ ->
-                raise (NotSupportedException("Invoke expressions must be reducible, inlineable, or constant."))
+                raise (NotSupportedException(
+                    "Error: Invoke expression is not reducible.\nReason: The invoked expression cannot be inlined or treated as a constant for SQL translation.\nFix: Inline the lambda or move the invocation after AsEnumerable()."))
         | ExpressionType.Conditional ->
             visitIfElse (exp :?> ConditionalExpression) qb
         | ExpressionType.TypeIs ->
@@ -128,7 +129,7 @@ module internal QueryTranslatorVisitCore =
     /// </summary>
     and private visitTypeIs (exp: TypeBinaryExpression) (qb: QueryBuilder) =
         if not (mustIncludeTypeInformationInSerializationFn exp.Expression.Type) then
-            failwithf "Cannot translate TypeIs expression, because the DB will not store its type information for %A" exp.Type
+            raise (NotSupportedException(sprintf "Cannot translate TypeIs expression, because the DB will not store its type information for %A" exp.Type))
 
         qb.AppendRaw "json_extract("
         do  visit exp.Expression qb
@@ -137,7 +138,7 @@ module internal QueryTranslatorVisitCore =
         qb.AppendRaw ')'
         qb.AppendRaw '='
         match exp.TypeOperand |> typeToName with
-        | None -> failwithf "Cannot translate TypeIs expression with the TypeOperand: %A" exp.TypeOperand
+        | None -> raise (NotSupportedException(sprintf "Cannot translate TypeIs expression with the TypeOperand: %A" exp.TypeOperand))
         | Some typeName ->
         qb.AppendVariable typeName
 
@@ -163,7 +164,7 @@ module internal QueryTranslatorVisitCore =
         match index with
         | :? ConstantExpression as ce when ce.Type.IsPrimitive ->
             qb.AppendRaw (string ce.Value)
-        | _other -> failwithf "The index of the array must always be a constant value."
+        | _other -> raise (NotSupportedException("The index of the array must always be a constant value."))
         qb.AppendRaw "]')"
         ()
 
@@ -197,7 +198,7 @@ module internal QueryTranslatorVisitCore =
             }
             visitMemberAccess memberAccess qb
 
-        | _other -> failwithf "Unable to translate property access."
+        | _other -> raise (NotSupportedException("Unable to translate property access."))
 
     /// <summary>
     /// Wraps an expression in a SQL CAST operation.
@@ -305,7 +306,8 @@ module internal QueryTranslatorVisitCore =
             | _ when isFullyConstant (m :> Expression) ->
                 qb.AppendVariable (evaluateExpr<obj> (m :> Expression))
             | _ ->
-                raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
+                raise (NotSupportedException(
+                    sprintf "Error: Method '%s' is not supported.\nReason: The method has no SQL translation.\nFix: Rewrite the query or call AsEnumerable() before using this method." m.Method.Name))
 
         | OfShape0 null null "ToLowerInvariant" value
         | OfShape0 null null "ToLower" value ->
@@ -380,7 +382,7 @@ module internal QueryTranslatorVisitCore =
                 }
                 visitMemberAccess memberAccess qb
 
-            | _ -> failwithf "Unable to translate property access."
+            | _ -> raise (NotSupportedException("Unable to translate property access."))
 
         // Nested array predicate methods (Any, All) - common platform
         | OfShape1 null null "Any" null (array, whereFuncExpr) ->
@@ -454,7 +456,7 @@ module internal QueryTranslatorVisitCore =
                 match propExpr.Type with
                 | t when t = typeof<string> || isIntegerBasedType t ->
                     evaluateExpr<obj> propExpr
-                | _other -> failwithf "Cannot access dynamic property of %A" o
+                | _other -> raise (NotSupportedException(sprintf "Cannot access dynamic property of %A" o))
 
             visitProperty o property m qb
 
@@ -466,7 +468,7 @@ module internal QueryTranslatorVisitCore =
                     array.Expressions
                 else if len > 1 then          
                     m.Arguments
-                else failwithf "Unknown such concat function: %A" m.Method
+                else raise (NotSupportedException(sprintf "Unknown such concat function: %A" m.Method))
 
             let len = args.Count
             qb.AppendRaw "CONCAT("
@@ -667,7 +669,7 @@ module internal QueryTranslatorVisitCore =
                 | t when t = typeof<SByte> || t = typeof<Byte> || t = typeof<Int16> || t = typeof<UInt16>
                     || t = typeof<Int32> || t = typeof<UInt32> || t = typeof<Int64> || t = typeof<UInt64> -> "INTEGER"
                 | t when t = typeof<Single> || t = typeof<Double> -> "REAL"
-                | _ -> failwithf "Unsupported Parse type: %A" m.Method.DeclaringType
+                | _ -> raise (NotSupportedException(sprintf "Unsupported Parse type: %A" m.Method.DeclaringType))
 
             qb.AppendRaw "CAST("
             visit arg qb
@@ -796,7 +798,8 @@ module internal QueryTranslatorVisitCore =
             visit pattern qb |> ignore
 
         | _ -> 
-            raise (NotSupportedException(sprintf "The method %s is not supported" m.Method.Name))
+            raise (NotSupportedException(
+                sprintf "Error: Method '%s' is not supported.\nReason: The method has no SQL translation.\nFix: Rewrite the query or call AsEnumerable() before using this method." m.Method.Name))
 
     /// <summary>
     /// Translates a LambdaExpression by visiting its body.
@@ -878,7 +881,7 @@ module internal QueryTranslatorVisitCore =
             let members = pairs |> Seq.map(fun (membr, expr) -> struct (membr.Name, fun qb -> visit expr qb)) |> Seq.toArray
             newObject qb members
         else
-            failwithf "Cannot construct new in SQL query %A" t
+            raise (NotSupportedException(sprintf "Cannot construct new in SQL query %A" t))
 
     /// <summary>
     /// Translates a MemberInitExpression (object initializer syntax) into a jsonb_object call.
@@ -974,7 +977,9 @@ module internal QueryTranslatorVisitCore =
         | ExpressionType.Multiply -> qb.AppendRaw(" * ") |> ignore
         | ExpressionType.Divide -> qb.AppendRaw(" / ") |> ignore
         | ExpressionType.Modulo -> qb.AppendRaw(" % ") |> ignore
-        | _ -> raise (NotSupportedException(sprintf "The binary operator %O is not supported" b.NodeType))
+        | _ ->
+            raise (NotSupportedException(
+                sprintf "Error: Binary operator '%O' is not supported.\nReason: The operator cannot be translated to SQL for this expression.\nFix: Simplify the expression or move it after AsEnumerable()." b.NodeType))
         visit(right) qb |> ignore
         qb.AppendRaw(")") |> ignore       
 
@@ -998,4 +1003,3 @@ module internal QueryTranslatorVisitCore =
             
 
     // ─── DBRef relation query translation ────────────────────────────────────────
-

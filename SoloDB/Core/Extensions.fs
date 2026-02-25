@@ -91,7 +91,7 @@ type Extensions =
     static member CastTo<'T>(this: obj) : 'T =
         this :?> 'T
 
-    // There is a bug with the VS 2022 IntelliSense / Code completion showing only this method on generic byref structs
+    // VS 2022 IntelliSense limitation: shows only this method on generic byref structs
     #if (RELEASE || !false)
 
     /// This method sets a new value to a property inside the UpdateMany method's transform expression. This should not be called inside real code.

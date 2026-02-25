@@ -26,7 +26,9 @@ module internal HelperSchema =
         if variables.Count > 0 then raise (ArgumentException "Cannot have variables in index.")
         let expressionBody = expression.Body
 
-        if QueryTranslator.isAnyConstant expressionBody then raise (InvalidOperationException "Cannot index an outside or constant expression.")
+        if QueryTranslator.isAnyConstant expressionBody then
+            raise (InvalidOperationException
+                "Error: Cannot index an outside or constant expression.\nReason: Index expressions must reference the entity parameter.\nFix: Use a member access on the entity parameter.")
 
         let whereSQL =
             match expressionBody with
