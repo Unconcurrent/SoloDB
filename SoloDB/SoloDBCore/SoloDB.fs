@@ -1545,7 +1545,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
         let shouldCreate = not (Helper.existsCollection name connection)
         let withinTransaction = connection.IsWithinTransaction()
-        if not withinTransaction then connection.Execute "BEGIN;" |> ignore
+        if not withinTransaction then connection.Execute "BEGIN IMMEDIATE;" |> ignore
         try
             if shouldCreate then
                 Helper.createTableInner<'T> name connection
@@ -1725,7 +1725,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     member this.WithTransaction<'R>(func: Func<TransactionalSoloDB, 'R>) : 'R =
         use connectionForTransaction = connectionManager.CreateForTransaction()
         try
-            connectionForTransaction.Execute("BEGIN;") |> ignore
+            connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
             let transactionalDb = new TransactionalSoloDB(connectionForTransaction, { ClearCacheFunction = ignore; EventSystem = this.Events })
             
             try
