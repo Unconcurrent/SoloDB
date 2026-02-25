@@ -42,6 +42,7 @@ let ensureSchemaForOwnerType (tx: RelationTxContext) (ownerType: Type) =
     ensureRelationCatalogTable tx.Connection
     let descriptors = buildRelationDescriptors tx ownerType
     for descriptor in descriptors do
+        ensureMetadataNotResurrected tx descriptor
         ensureRelationSchema tx descriptor
 
 let private asReadOnlyDict (input: Dictionary<string, int64 array>) =

@@ -302,6 +302,26 @@ let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) 
     validateSharedManyContradictions ownerType ownerTable descriptors
     descriptors
 
+let private br05Message (ownerTable: string) (propertyName: string) (phase: string) =
+    $"error[SDBREL0005] patternId=NLR-SCH-05 phase={phase} shape=missing-relation-metadata ownerCollection={ownerTable} property={propertyName} message=Relation metadata missing for '{ownerTable}.{propertyName}'. Cannot auto-heal: prior relation evidence exists."
+
+let private hasCatalogRow (connection: SqliteConnection) (ownerTable: string) (propertyName: string) =
+    ensureRelationCatalogTable connection
+    connection.QueryFirst<int64>(
+        "SELECT CASE WHEN EXISTS (SELECT 1 FROM SoloDBRelation WHERE OwnerCollection = @owner AND PropertyName = @prop) THEN 1 ELSE 0 END",
+        {| owner = ownerTable; prop = propertyName |}) = 1L
+
+/// BR-05 guard: prevent metadata resurrection when prior relation evidence exists.
+/// The link table is the definitive evidence that a relation was previously established.
+/// Target collections can exist independently (they store their own entities) and must not
+/// be treated as relation evidence.
+let internal ensureMetadataNotResurrected (tx: RelationTxContext) (descriptor: RelationDescriptor) =
+    let ownerExists = collectionExistsByName tx.Connection descriptor.OwnerTable
+    if ownerExists then
+        let linkExists = sqliteTableExistsByName tx.Connection descriptor.LinkTable
+        if linkExists && not (hasCatalogRow tx.Connection descriptor.OwnerTable descriptor.Property.Name) then
+            raise (InvalidOperationException(br05Message descriptor.OwnerTable descriptor.Property.Name "build"))
+
 let internal ensureRelationSchema (tx: RelationTxContext) (descriptor: RelationDescriptor) =
     ensureCollectionTableExists tx.Connection descriptor.TargetTable
 
