@@ -780,8 +780,8 @@ module private QueryHelper =
                                     builder.Command.Append "JOIN json_each(" |> ignore
                                     builder.Command.Append innerSourceName |> ignore
                                     builder.Command.Append ".Value)" |> ignore
-                                | _ -> failwith "Unsupported SelectMany selector structure"
-                            | _ -> failwith "Invalid SelectMany structure"
+                                | _ -> raise (NotSupportedException("Unsupported SelectMany selector structure"))
+                            | _ -> raise (NotSupportedException("Invalid SelectMany structure"))
                         | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
                     )
                 
