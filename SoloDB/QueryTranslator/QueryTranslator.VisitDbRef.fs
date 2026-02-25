@@ -116,12 +116,20 @@ module internal QueryTranslatorVisitDbRef =
         match arg with
         | :? MemberExpression as me when not (isNull me.Expression) && isDBRefManyType me.Type ->
             match unwrapConvert me.Expression with
-            | :? ParameterExpression ->
+            | :? ParameterExpression as pe ->
                 let sourceAlias =
                     if String.IsNullOrEmpty qb.TableNameDot then "\"" + qb.SourceContext.RootTable + "\""
                     else qb.TableNameDot.TrimEnd('.')
+                // Detect subquery context: if sourceAlias differs from root alias,
+                // resolve owner collection from parameter type (e.g. ChainMid in inner Any).
+                let rootAlias = "\"" + qb.SourceContext.RootTable + "\""
+                let ownerCollection =
+                    if StringComparer.Ordinal.Equals(sourceAlias, rootAlias) then
+                        qb.SourceContext.RootTable
+                    else
+                        qb.SourceContext.ResolveCollectionForType(Utils.typeIdentityKey pe.Type, formatName pe.Type.Name)
                 ValueSome {
-                    OwnerCollection = qb.SourceContext.RootTable
+                    OwnerCollection = ownerCollection
                     OwnerAliasSql = sourceAlias
                     PropertyExpr = me
                 }
