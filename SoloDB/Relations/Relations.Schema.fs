@@ -311,16 +311,40 @@ let private hasCatalogRow (connection: SqliteConnection) (ownerTable: string) (p
         "SELECT CASE WHEN EXISTS (SELECT 1 FROM SoloDBRelation WHERE OwnerCollection = @owner AND PropertyName = @prop) THEN 1 ELSE 0 END",
         {| owner = ownerTable; prop = propertyName |}) = 1L
 
+/// Returns true when a SoloDBRelation row exists involving the same two
+/// collections (in either direction) from a *different* (OwnerCollection, PropertyName)
+/// pair. This identifies the shared-many bootstrap case where the other side of a
+/// mutual M:N created the link table first.
+let private linkTableOwnedByOtherProperty (connection: SqliteConnection) (descriptor: RelationDescriptor) =
+    ensureRelationCatalogTable connection
+    let a = descriptor.OwnerTable
+    let b = descriptor.TargetTable
+    connection.QueryFirst<int64>(
+        """
+SELECT CASE WHEN EXISTS (
+    SELECT 1 FROM SoloDBRelation
+    WHERE ((SourceCollection = @a AND TargetCollection = @b)
+        OR (SourceCollection = @b AND TargetCollection = @a))
+      AND NOT (OwnerCollection = @owner AND PropertyName = @prop)
+) THEN 1 ELSE 0 END
+""",
+        {| a = a; b = b; owner = a; prop = descriptor.Property.Name |}) = 1L
+
 /// BR-05 guard: prevent metadata resurrection when prior relation evidence exists.
 /// The link table is the definitive evidence that a relation was previously established.
 /// Target collections can exist independently (they store their own entities) and must not
-/// be treated as relation evidence.
+/// be treated as relation evidence. For shared-many relations, the link table may have been
+/// created by the other side of a mutual M:N — this is normal bootstrap, not deletion.
 let internal ensureMetadataNotResurrected (tx: RelationTxContext) (descriptor: RelationDescriptor) =
     let ownerExists = collectionExistsByName tx.Connection descriptor.OwnerTable
     if ownerExists then
         let linkExists = sqliteTableExistsByName tx.Connection descriptor.LinkTable
         if linkExists && not (hasCatalogRow tx.Connection descriptor.OwnerTable descriptor.Property.Name) then
-            raise (InvalidOperationException(br05Message descriptor.OwnerTable descriptor.Property.Name "build"))
+            // Edge case: shared-many link table created by the other side of a mutual M:N.
+            // If another (OwnerCollection, PropertyName) pair already owns this link table,
+            // the current property is being bootstrapped for the first time — not resurrected.
+            if not (linkTableOwnedByOtherProperty tx.Connection descriptor) then
+                raise (InvalidOperationException(br05Message descriptor.OwnerTable descriptor.Property.Name "build"))
 
 let internal ensureRelationSchema (tx: RelationTxContext) (descriptor: RelationDescriptor) =
     ensureCollectionTableExists tx.Connection descriptor.TargetTable
