@@ -44,6 +44,7 @@ module internal QueryTranslatorBaseTypes =
 
     type internal UpdateManyRelationTransform =
         | SetDBRefToId of PropertyPath: string * TargetType: Type * TargetId: int64
+        | SetDBRefToTypedId of PropertyPath: string * TargetType: Type * TargetIdType: Type * TargetTypedId: obj
         | SetDBRefToNone of PropertyPath: string * TargetType: Type
         | AddDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
         | RemoveDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64

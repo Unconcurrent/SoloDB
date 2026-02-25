@@ -119,6 +119,99 @@ type DBRef<'T> =
         else
             sprintf "DBRef<%s>.To(%d)" typeof<'T>.Name this._id
 
+[<Struct; CustomEquality; CustomComparison>]
+type DBRef<'TTarget, 'TId> =
+    val private _id: int64
+    val private _typedId: 'TId
+    val private _hasTypedId: bool
+    val private _value: 'TTarget
+    val private _isLoaded: bool
+
+    private new(id: int64, typedId: 'TId, hasTypedId: bool, value: 'TTarget, isLoaded: bool) =
+        { _id = id; _typedId = typedId; _hasTypedId = hasTypedId; _value = value; _isLoaded = isLoaded }
+
+    member this.Id = this._id
+
+    member this.HasValue = this._id <> 0L || this._hasTypedId
+
+    member this.IsLoaded = this._isLoaded
+
+    member this.Value =
+        if not this._isLoaded then
+            raise (InvalidOperationException(
+                sprintf "Error: DBRef<%s,%s>.Value is not loaded.\nReason: Exclude was applied or the reference was created with DBRef.To(id).\nFix: Use .Id or Load the reference in the query." typeof<'TTarget>.Name typeof<'TId>.Name))
+        if this._id = 0L && not (obj.ReferenceEquals(this._value :> obj, null)) then
+            this._value
+        elif this._id = 0L then
+            raise (InvalidOperationException(
+                sprintf "Error: DBRef<%s,%s> is empty (no reference).\nReason: HasValue is false.\nFix: Check .HasValue before accessing .Value." typeof<'TTarget>.Name typeof<'TId>.Name))
+        else
+            this._value
+
+    member internal this.PendingEntity: 'TTarget voption =
+        if this._id = 0L && this._isLoaded && not (obj.ReferenceEquals(this._value :> obj, null)) then
+            ValueSome this._value
+        else
+            ValueNone
+
+    member internal this.PendingTypedId: 'TId voption =
+        if this._id = 0L && this._hasTypedId then ValueSome this._typedId else ValueNone
+
+    static member internal Loaded(id: int64, value: 'TTarget) =
+        DBRef<'TTarget, 'TId>(id, Unchecked.defaultof<'TId>, false, value, true)
+
+    static member internal Unloaded(id: int64) =
+        DBRef<'TTarget, 'TId>(id, Unchecked.defaultof<'TId>, false, Unchecked.defaultof<'TTarget>, false)
+
+    static member internal Resolved(id: int64) =
+        if id <= 0L then
+            raise (ArgumentOutOfRangeException(nameof id, id, "Resolved DBRef id must be > 0."))
+        DBRef<'TTarget, 'TId>(id, Unchecked.defaultof<'TId>, false, Unchecked.defaultof<'TTarget>, false)
+
+    static member To(id: 'TId) =
+        if obj.ReferenceEquals(id, null) then
+            raise (ArgumentNullException(nameof id, "DBRef.To requires a non-null typed id."))
+        DBRef<'TTarget, 'TId>(0L, id, true, Unchecked.defaultof<'TTarget>, false)
+
+    static member From(entity: 'TTarget) =
+        if obj.ReferenceEquals(entity, null) then
+            raise (ArgumentNullException(nameof entity, "DBRef.From requires a non-null entity. Use DBRef.None for an empty reference."))
+        DBRef<'TTarget, 'TId>(0L, Unchecked.defaultof<'TId>, false, entity, true)
+
+    static member None = DBRef<'TTarget, 'TId>(0L, Unchecked.defaultof<'TId>, false, Unchecked.defaultof<'TTarget>, false)
+
+    override this.Equals(other: obj) =
+        match other with
+        | :? DBRef<'TTarget, 'TId> as o ->
+            this._id = o._id &&
+            (if this._id = 0L then this._hasTypedId = o._hasTypedId else true)
+        | _ -> false
+
+    override this.GetHashCode() = this._id.GetHashCode()
+
+    interface IEquatable<DBRef<'TTarget, 'TId>> with
+        member this.Equals(other: DBRef<'TTarget, 'TId>) = this._id = other._id
+
+    interface IComparable<DBRef<'TTarget, 'TId>> with
+        member this.CompareTo(other: DBRef<'TTarget, 'TId>) = compare this._id other._id
+
+    interface IComparable with
+        member this.CompareTo(other: obj) =
+            match other with
+            | :? DBRef<'TTarget, 'TId> as o -> compare this._id o._id
+            | _ -> raise (ArgumentException("Cannot compare DBRef with a different type."))
+
+    override this.ToString() =
+        if this._id = 0L then
+            if this._hasTypedId then
+                sprintf "DBRef<%s,%s>.To(%O)" typeof<'TTarget>.Name typeof<'TId>.Name this._typedId
+            else
+                sprintf "DBRef<%s,%s>.None" typeof<'TTarget>.Name typeof<'TId>.Name
+        elif this._isLoaded then
+            sprintf "DBRef<%s,%s>.To(%d) [Loaded]" typeof<'TTarget>.Name typeof<'TId>.Name this._id
+        else
+            sprintf "DBRef<%s,%s>.To(%d)" typeof<'TTarget>.Name typeof<'TId>.Name this._id
+
 // ─── IDBRefManyInternal: non-generic interface for Relations.fs ───────────────
 
 /// <summary>

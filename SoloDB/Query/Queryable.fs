@@ -1216,10 +1216,7 @@ module private QueryHelper =
     let private hasRelationProperties (t: Type) =
         t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
         |> Array.exists (fun p ->
-            let pt = p.PropertyType
-            pt.IsGenericType &&
-            let g = pt.GetGenericTypeDefinition()
-            g = typedefof<DBRef<_>> || g = typedefof<DBRefMany<_>>)
+            DBRefTypeHelpers.isAnyRelationRefType p.PropertyType)
 
     /// Context captured during query translation for post-query relation batch loading.
     [<Struct>]
@@ -1347,15 +1344,13 @@ module private QueryHelper =
             hasRelations &&
             typeof<'T>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
             |> Array.exists (fun p ->
-                p.PropertyType.IsGenericType &&
-                p.PropertyType.GetGenericTypeDefinition() = typedefof<DBRef<_>>)
+                DBRefTypeHelpers.isDBRefType p.PropertyType)
 
         let hasManyRelations =
             hasRelations &&
             typeof<'T>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
             |> Array.exists (fun p ->
-                p.PropertyType.IsGenericType &&
-                p.PropertyType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>)
+                DBRefTypeHelpers.isDBRefManyType p.PropertyType)
 
         if hasSingleRelations || hasManyRelations then
             activeBatchLoadContext.Value <- ValueSome {

@@ -17,6 +17,7 @@ open System.Linq.Expressions
 open System.Linq
 open System.Numerics
 open System.Runtime.Serialization
+open SoloDatabase
 
 #nowarn "9" // NativePtr stuff
 #nowarn "51" // voidptr of a stack var
@@ -2118,7 +2119,7 @@ and private JsonDeserializerImpl<'A> =
                 | _ -> fn.Invoke json
             )
 
-        | t when t.IsGenericType && t.GetGenericTypeDefinition().Name = "DBRef`1" ->
+        | t when DBRefTypeHelpers.isDBRefType t ->
             let targetType = (GenericTypeArgCache.Get t).[0]
             let unloadedMethod = t.GetMethod("Unloaded", BindingFlags.NonPublic ||| BindingFlags.Static)
             let loadedMethod = t.GetMethod("Loaded", BindingFlags.NonPublic ||| BindingFlags.Static)
@@ -2395,7 +2396,7 @@ and private JsonSerializerImpl<'A> =
                 | _ -> JsonImpl.SerializeByTypeWithType (o.GetType()) o)
             :> obj :?> 'A -> JsonValue
 
-        | t when t.IsGenericType && t.GetGenericTypeDefinition().Name = "DBRef`1" ->
+        | t when DBRefTypeHelpers.isDBRefType t ->
             let idProp = t.GetProperty("Id", BindingFlags.Public ||| BindingFlags.Instance)
             let hasValueProp = t.GetProperty("HasValue", BindingFlags.Public ||| BindingFlags.Instance)
             if isNull idProp || isNull hasValueProp then
@@ -2749,12 +2750,9 @@ and private JsonSerializerImpl<'A> =
             let isIgnoredDataMember (prop: PropertyInfo) =
                 not (isNull (prop.GetCustomAttribute<IgnoreDataMemberAttribute>(true)))
 
-            let isDBRefManyType (propType: Type) =
-                propType.IsGenericType && propType.GetGenericTypeDefinition().Name = "DBRefMany`1"
-
             let props =
                 t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-                |> Array.filter (fun prop -> prop.CanRead && not (isIgnoredDataMember prop) && not (isDBRefManyType prop.PropertyType))
+                |> Array.filter (fun prop -> prop.CanRead && not (isIgnoredDataMember prop) && not (DBRefTypeHelpers.isDBRefManyType prop.PropertyType))
             let fields = t.GetFields()
 
             let param = Expression.Parameter(t)

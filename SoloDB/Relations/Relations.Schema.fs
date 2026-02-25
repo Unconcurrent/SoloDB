@@ -134,24 +134,39 @@ let internal ensureCollectionTableExists (connection: SqliteConnection) (tableNa
         "INSERT INTO SoloDBCollections(Name) SELECT @name WHERE NOT EXISTS (SELECT 1 FROM SoloDBCollections WHERE Name = @name);",
         {| name = tableName |}) |> ignore
 
+let private tryGetSoloIdProperty (targetType: Type) =
+    let props =
+        targetType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+        |> Array.filter (fun p -> not (isNull (p.GetCustomAttribute<SoloId>(true))))
+    match props with
+    | [||] -> ValueNone
+    | [| p |] -> ValueSome p
+    | _ ->
+        raise (InvalidOperationException(
+            $"Error: Invalid [SoloId] declaration on '{targetType.FullName}'.\nReason: Multiple [SoloId] properties are not supported.\nFix: Keep exactly one [SoloId] property on relation targets."))
+
 let private buildRelationSpecs (ownerType: Type) =
     ownerType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
     |> Array.choose (fun prop ->
         if not prop.CanRead then
             None
         else
-            let propType = prop.PropertyType
-            if not propType.IsGenericType then
-                None
-            else
+                let propType = prop.PropertyType
+                if not propType.IsGenericType then
+                    None
+                else
                 let generic = propType.GetGenericTypeDefinition()
-                if generic = typedefof<DBRef<_>> || generic = typedefof<DBRefMany<_>> then
-                    let targetType = propType.GetGenericArguments().[0]
+                if DBRefTypeHelpers.isAnyRelationRefType propType then
+                    let args = propType.GetGenericArguments()
+                    let targetType = args.[0]
+                    let typedIdType =
+                        if DBRefTypeHelpers.isDBRefTypedDefinition generic then ValueSome args.[1]
+                        else ValueNone
                     let attr = prop.GetCustomAttribute<SoloRefAttribute>(true)
                     let onDelete = if isNull attr then DeletePolicy.Restrict else attr.OnDelete
                     let onOwnerDelete = if isNull attr then DeletePolicy.Deletion else attr.OnOwnerDelete
                     let isUnique = not (isNull attr) && attr.Unique
-                    let kind = if generic = typedefof<DBRef<_>> then Single else Many
+                    let kind = if DBRefTypeHelpers.isDBRefManyDefinition generic then Many else Single
 
                     match kind with
                     | Many when onOwnerDelete = DeletePolicy.Cascade ->
@@ -159,7 +174,19 @@ let private buildRelationSpecs (ownerType: Type) =
                             $"Error: Invalid relation policy on {ownerType.FullName}.{prop.Name}.\nReason: OnOwnerDelete cannot be Cascade.\nFix: Use Deletion instead."))
                     | _ -> ()
 
-                    Some (prop, kind, targetType, onDelete, onOwnerDelete, isUnique)
+                    match typedIdType with
+                    | ValueSome idType ->
+                        match tryGetSoloIdProperty targetType with
+                        | ValueNone ->
+                            raise (InvalidOperationException(
+                                $"Error: Invalid typed relation on {ownerType.FullName}.{prop.Name}.\nReason: Target type '{targetType.FullName}' has no [SoloId] property.\nFix: Add exactly one [SoloId] property with type '{idType.FullName}'."))
+                        | ValueSome soloIdProp when soloIdProp.PropertyType <> idType ->
+                            raise (InvalidOperationException(
+                                $"Error: Invalid typed relation on {ownerType.FullName}.{prop.Name}.\nReason: DBRef id type '{idType.FullName}' does not match target [SoloId] type '{soloIdProp.PropertyType.FullName}'.\nFix: Align DBRef<'TTarget,'TId> with target [SoloId] property type."))
+                        | _ -> ()
+                    | ValueNone -> ()
+
+                    Some (prop, kind, targetType, typedIdType, onDelete, onOwnerDelete, isUnique)
                 else
                     None)
 
@@ -168,7 +195,7 @@ let internal getRelationSpecs (ownerType: Type) =
 
 let internal hasManyBackReference (ownerType: Type) (targetType: Type) =
     getRelationSpecs targetType
-    |> Array.exists (fun (_, kind, candidateTargetType, _, _, _) ->
+    |> Array.exists (fun (_, kind, candidateTargetType, _, _, _, _) ->
         kind = Many && candidateTargetType = ownerType)
 
 let private typeCollectionMapTableExists (connection: SqliteConnection) =
@@ -259,7 +286,7 @@ let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) 
     let ownerTable = formatName tx.OwnerTable
     let descriptors =
         getRelationSpecs ownerType
-        |> Array.map (fun (prop, kind, targetType, onDelete, onOwnerDelete, isUnique) ->
+        |> Array.map (fun (prop, kind, targetType, typedIdType, onDelete, onOwnerDelete, isUnique) ->
         let targetTable = resolveTargetCollectionName tx.Connection ownerTable prop.Name targetType
         let defaultRelName = relationName ownerTable prop.Name
         let canonicalManyName = canonicalManyRelationName ownerTable targetTable
@@ -299,6 +326,8 @@ let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) 
             OnDelete = onDelete
             OnOwnerDelete = onOwnerDelete
             IsUnique = isUnique
+            TypedIdType = typedIdType
+            TargetSoloIdProperty = tryGetSoloIdProperty targetType
         })
 
     validateSharedManyContradictions ownerType ownerTable descriptors
@@ -350,6 +379,28 @@ let internal ensureMetadataNotResurrected (tx: RelationTxContext) (descriptor: R
 
 let internal ensureRelationSchema (tx: RelationTxContext) (descriptor: RelationDescriptor) =
     ensureCollectionTableExists tx.Connection descriptor.TargetTable
+
+    match descriptor.TypedIdType, descriptor.TargetSoloIdProperty with
+    | ValueSome _, ValueSome soloIdProp ->
+        let needle = $"jsonb_extract(value,'$.{soloIdProp.Name}')".ToLowerInvariant()
+        let hasUniqueSoloIdIndex =
+            tx.Connection.QueryFirst<int64>(
+                """
+SELECT CASE WHEN EXISTS (
+    SELECT 1
+    FROM sqlite_master
+    WHERE type = 'index'
+      AND tbl_name = @tableName
+      AND sql IS NOT NULL
+      AND instr(lower(sql), 'create unique index') > 0
+      AND instr(replace(replace(replace(lower(sql), ' ', ''), char(10), ''), char(9), ''), @needle) > 0
+) THEN 1 ELSE 0 END;
+""",
+                {| tableName = descriptor.TargetTable; needle = needle |}) = 1L
+        if not hasUniqueSoloIdIndex then
+            raise (InvalidOperationException(
+                $"Error: Missing required unique index for typed relation '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\nReason: Typed-id resolver requires unique index on jsonb_extract(Value, '$.{soloIdProp.Name}') in target collection '{descriptor.TargetTable}'.\nFix: Add [SoloId] or EnsureUniqueAndIndex for this path before using DBRef<'TTarget,'TId>."))
+    | _ -> ()
 
     let qLink = quoteIdentifier descriptor.LinkTable
     let qSource = quoteIdentifier descriptor.LinkSourceTable

@@ -37,6 +37,7 @@
     <Compile Include="Core/Stack128.fs" />
     <Compile Include="Core/Sort.fs" />
     <Compile Include="Core/Types.fs" />
+    <Compile Include="Core/DBRefTypeHelpers.fs" />
     <Compile Include="Utils/Utils.fs" />
     <Compile Include="Utils/Utils.Reflection.fs" />
     <Compile Include="Utils/Utils.Core.fs" />

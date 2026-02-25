@@ -19,6 +19,7 @@ type internal RelationTxContext = {
 
 type internal RelationUpdateManyOp =
     | SetDBRefToId of PropertyPath: string * TargetType: Type * TargetId: int64
+    | SetDBRefToTypedId of PropertyPath: string * TargetType: Type * TargetIdType: Type * TargetTypedId: obj
     | SetDBRefToNone of PropertyPath: string * TargetType: Type
     | AddDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
     | RemoveDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
@@ -55,6 +56,8 @@ type internal RelationDescriptor = {
     OnDelete: DeletePolicy
     OnOwnerDelete: DeletePolicy
     IsUnique: bool
+    TypedIdType: Type voption
+    TargetSoloIdProperty: PropertyInfo voption
 }
 
 [<CLIMutable>]
@@ -93,7 +96,7 @@ let internal emptyPlan kind ownerType =
       OwnerType = ownerType
       Ops = [] }
 
-let internal relationSpecsCache = ConcurrentDictionary<Type, (PropertyInfo * RelationKind * Type * DeletePolicy * DeletePolicy * bool) array>()
+let internal relationSpecsCache = ConcurrentDictionary<Type, (PropertyInfo * RelationKind * Type * Type voption * DeletePolicy * DeletePolicy * bool) array>()
 let internal deleteGuard = new System.Threading.ThreadLocal<System.Collections.Generic.HashSet<string>>(fun () -> System.Collections.Generic.HashSet<string>(StringComparer.Ordinal))
 
 let internal quoteIdentifier (name: string) =

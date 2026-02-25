@@ -25,12 +25,12 @@ let batchLoadDBRefProperties
     else
 
     let specs = getRelationSpecs ownerType
-    let singleSpecs = specs |> Array.filter (fun (_, kind, _, _, _, _) -> kind = Single)
+    let singleSpecs = specs |> Array.filter (fun (_, kind, _, _, _, _, _) -> kind = Single)
     if singleSpecs.Length = 0 then ()
     else
 
     let ownerTable = formatName ownerTable
-    for (prop, _kind, targetType, _onDelete, _onOwnerDelete, _isUnique) in singleSpecs do
+    for (prop, _kind, targetType, _typedIdType, _onDelete, _onOwnerDelete, _isUnique) in singleSpecs do
         if excludedPaths.Contains(prop.Name) then ()
         else
 

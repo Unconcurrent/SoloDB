@@ -109,22 +109,32 @@ let internal tryGetValueOptionValue (valueOpt: obj) =
         else
             ValueNone
 
-let internal tryGetPendingEntity (dbRefObj: obj) =
+let internal tryGetVOptionProperty (dbRefObj: obj) (propertyName: string) =
     if isNull dbRefObj then
         ValueNone
     else
-        let pendingProp = dbRefObj.GetType().GetProperty("PendingEntity", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance)
-        if isNull pendingProp then
+        let prop = dbRefObj.GetType().GetProperty(propertyName, BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance)
+        if isNull prop then
             ValueNone
         else
-            pendingProp.GetValue(dbRefObj) |> tryGetValueOptionValue
+            prop.GetValue(dbRefObj) |> tryGetValueOptionValue
+
+let internal tryGetPendingEntity (dbRefObj: obj) =
+    tryGetVOptionProperty dbRefObj "PendingEntity"
+
+let internal tryGetPendingTypedId (dbRefObj: obj) =
+    tryGetVOptionProperty dbRefObj "PendingTypedId"
 
 let internal createDbRefTo (dbRefType: Type) (id: int64) =
     let toMethod = dbRefType.GetMethod("To", BindingFlags.Public ||| BindingFlags.Static, null, [| typeof<int64> |], null)
-    if isNull toMethod then
-        raise (InvalidOperationException(
-            $"Error: Could not resolve DBRef.To on type {dbRefType.FullName}.\nReason: The DBRef target type could not be inferred.\nFix: Ensure the DBRef is correctly typed and initialized."))
-    toMethod.Invoke(null, [| box id |])
+    if not (isNull toMethod) then
+        toMethod.Invoke(null, [| box id |])
+    else
+        let resolvedMethod = dbRefType.GetMethod("Resolved", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Static, null, [| typeof<int64> |], null)
+        if isNull resolvedMethod then
+            raise (InvalidOperationException(
+                $"Error: Could not resolve DBRef.To/Resolved on type {dbRefType.FullName}.\nReason: The DBRef target type could not be inferred.\nFix: Ensure the DBRef is correctly typed and initialized."))
+        resolvedMethod.Invoke(null, [| box id |])
 
 let internal createDbRefLoaded (dbRefType: Type) (id: int64) (entity: obj) =
     let loadedMethod =
@@ -141,6 +151,36 @@ let internal updateDbRefJson (tx: RelationTxContext) (ownerTable: string) (owner
 
 let internal shouldSyncDbRefJson (descriptor: RelationDescriptor) =
     isNull (descriptor.Property.GetCustomAttribute<IgnoreDataMemberAttribute>(true))
+
+let internal resolveTypedIdToTargetId (tx: RelationTxContext) (descriptor: RelationDescriptor) (typedId: obj) =
+    match descriptor.TypedIdType, descriptor.TargetSoloIdProperty with
+    | ValueSome idType, ValueSome soloIdProp ->
+        ensureCollectionTableExists tx.Connection descriptor.TargetTable
+        if isNull typedId then
+            raise (InvalidOperationException(
+                $"Error: Null typed id on relation '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}'.\nReason: DBRef<'TTarget,'TId>.To requires a non-null typed id.\nFix: Use DBRef.None or provide a valid typed id."))
+        if not (idType.IsAssignableFrom(typedId.GetType())) then
+            raise (InvalidOperationException(
+                $"Error: Typed id mismatch on relation '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}'.\nReason: Expected id type '{idType.FullName}', got '{typedId.GetType().FullName}'.\nFix: Use the exact target [SoloId] type."))
+
+        let jsonPath = "$." + soloIdProp.Name
+        let matches =
+            tx.Connection.Query<int64>(
+                $"SELECT Id FROM {quoteIdentifier descriptor.TargetTable} WHERE jsonb_extract(Value, @path) = @typedId;",
+                {| path = jsonPath; typedId = typedId |})
+            |> Seq.toArray
+
+        match matches with
+        | [| id |] -> id
+        | [||] ->
+            raise (InvalidOperationException(
+                $"Error: Typed relation target not found for '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}'.\nReason: No row in '{descriptor.TargetTable}' matches [SoloId] value '{typedId}'.\nFix: Insert the target first or correct the typed id."))
+        | _ ->
+            raise (InvalidOperationException(
+                $"Error: Ambiguous typed relation target for '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}'.\nReason: Multiple rows in '{descriptor.TargetTable}' share [SoloId] value '{typedId}'.\nFix: Enforce unique index on the [SoloId] path and deduplicate data."))
+    | _ ->
+        raise (InvalidOperationException(
+            $"Error: Relation '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' is not configured for typed-id resolution.\nReason: Missing DBRef<'TTarget,'TId> metadata.\nFix: Use DBRef<T> with row id or configure typed-id relation correctly."))
 
 // ─── D-LIB-1: Reference-identity comparer for netstandard2.0 circular guard ──
 
@@ -253,23 +293,31 @@ let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor
         ensureTargetExists tx descriptor.TargetTable id
         id
     else
-        match tryGetPendingEntity value with
-        | ValueSome pending ->
-            let entityId = readEntityIdOrZero descriptor.TargetType pending
-            if entityId > 0L then
-                // D-LIB-2: Entity already persisted (Id > 0) — link-only, no re-insert.
-                // ET-01: preflight target-exists for From(existing) before owner mutation
-                ensureTargetExists tx descriptor.TargetTable entityId
-                let dbRef = createDbRefTo descriptor.Property.PropertyType entityId
-                descriptor.Property.SetValue(owner, dbRef)
-                entityId
-            else
-                let insertedId = cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType pending visited
-                let dbRef = createDbRefTo descriptor.Property.PropertyType insertedId
-                descriptor.Property.SetValue(owner, dbRef)
-                insertedId
+        match tryGetPendingTypedId value with
+        | ValueSome typedId ->
+            ensureRelationSchema tx descriptor
+            let resolvedId = resolveTypedIdToTargetId tx descriptor typedId
+            let dbRef = createDbRefTo descriptor.Property.PropertyType resolvedId
+            descriptor.Property.SetValue(owner, dbRef)
+            resolvedId
         | ValueNone ->
-            0L
+            match tryGetPendingEntity value with
+            | ValueSome pending ->
+                let entityId = readEntityIdOrZero descriptor.TargetType pending
+                if entityId > 0L then
+                    // D-LIB-2: Entity already persisted (Id > 0) — link-only, no re-insert.
+                    // ET-01: preflight target-exists for From(existing) before owner mutation
+                    ensureTargetExists tx descriptor.TargetTable entityId
+                    let dbRef = createDbRefTo descriptor.Property.PropertyType entityId
+                    descriptor.Property.SetValue(owner, dbRef)
+                    entityId
+                else
+                    let insertedId = cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType pending visited
+                    let dbRef = createDbRefTo descriptor.Property.PropertyType insertedId
+                    descriptor.Property.SetValue(owner, dbRef)
+                    insertedId
+            | ValueNone ->
+                0L
 
 let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor: RelationDescriptor) (owner: obj) (includeWhenUnloaded: bool) (visited: HashSet<obj>) =
     let trackerObj = descriptor.Property.GetValue(owner)
@@ -328,6 +376,12 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
             $"INSERT OR REPLACE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
             {| sourceId = ownerId; targetId = targetId |}) |> ignore
 
+    let applySingleSetAndSync (descriptor: RelationDescriptor) (targetId: int64) =
+        deleteSingleLink descriptor
+        insertSingleLink descriptor targetId
+        if updateOwnerJson && shouldSyncDbRefJson descriptor then
+            updateDbRefJson tx tx.OwnerTable ownerId descriptor.PropertyPath targetId
+
     let manyColumns (descriptor: RelationDescriptor) =
         if descriptor.OwnerUsesSourceColumn then "SourceId", "TargetId"
         else "TargetId", "SourceId"
@@ -343,10 +397,26 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
                 raise (InvalidOperationException(
                     $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             ensureTargetExists tx descriptor.TargetTable targetId
-            deleteSingleLink descriptor
-            insertSingleLink descriptor targetId
-            if updateOwnerJson && shouldSyncDbRefJson descriptor then
-                updateDbRefJson tx tx.OwnerTable ownerId descriptor.PropertyPath targetId
+            applySingleSetAndSync descriptor targetId
+
+        | SetDBRefToTypedId(propertyPath, targetType, targetIdType, targetTypedId) ->
+            let descriptor = resolveDescriptor propertyPath
+            if descriptor.Kind <> Single then
+                raise (InvalidOperationException(
+                    $"Error: Relation '{propertyPath}' is not DBRef<T>.\nReason: The relation type does not match the expected DBRef.\nFix: Use a DBRef<T> relation or correct the property path."))
+            if descriptor.TargetType <> targetType then
+                raise (InvalidOperationException(
+                    $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
+            match descriptor.TypedIdType with
+            | ValueSome configured when configured = targetIdType -> ()
+            | ValueSome configured ->
+                raise (InvalidOperationException(
+                    $"Error: Typed id type mismatch on '{propertyPath}'.\nReason: Expected {configured.FullName}, got {targetIdType.FullName}.\nFix: Use the correct typed id type for this relation."))
+            | ValueNone ->
+                raise (InvalidOperationException(
+                    $"Error: Relation '{propertyPath}' does not support typed-id UpdateMany Set.\nReason: This relation is DBRef<T> row-id based.\nFix: Use DBRef.To(int64) or change relation type to DBRef<TTarget,'TId>."))
+            let targetId = resolveTypedIdToTargetId tx descriptor targetTypedId
+            applySingleSetAndSync descriptor targetId
 
         | SetDBRefToNone(propertyPath, targetType) ->
             let descriptor = resolveDescriptor propertyPath

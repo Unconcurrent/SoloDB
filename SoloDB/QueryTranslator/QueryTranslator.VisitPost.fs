@@ -16,10 +16,10 @@ open SoloDatabase.QueryTranslatorBase
 
 module internal QueryTranslatorVisitPost =
     let internal isDBRefType (t: Type) =
-        not (isNull t) && t.IsGenericType && t.GetGenericTypeDefinition().FullName = "SoloDatabase.DBRef`1"
+        DBRefTypeHelpers.isDBRefType t
 
     let internal isDBRefManyType (t: Type) =
-        not (isNull t) && t.IsGenericType && t.GetGenericTypeDefinition().FullName = "SoloDatabase.DBRefMany`1"
+        DBRefTypeHelpers.isDBRefManyType t
 
     [<Literal>]
     let internal updateManyRelationUnsupportedMessage =
@@ -176,7 +176,9 @@ module internal QueryTranslatorVisitPost =
             ValueNone
 
     let private parseDbRefSetValue (dbRefType: Type) (propertyPath: string) (valueExpr: Expression) =
-        let targetType = dbRefType.GetGenericArguments().[0]
+        let dbRefDef = dbRefType.GetGenericTypeDefinition()
+        let args = dbRefType.GetGenericArguments()
+        let targetType = args.[0]
         let valueExpr = unwrapConvertForUpdate valueExpr
 
         match valueExpr with
@@ -184,18 +186,22 @@ module internal QueryTranslatorVisitPost =
             when mc.Method.Name = "To"
               && not (isNull mc.Method.DeclaringType)
               && mc.Method.DeclaringType.IsGenericType
-              && mc.Method.DeclaringType.GetGenericTypeDefinition().FullName = "SoloDatabase.DBRef`1"
+              && DBRefTypeHelpers.isDBRefDefinition (mc.Method.DeclaringType.GetGenericTypeDefinition())
               && mc.Arguments.Count = 1 ->
-            let rawId = evaluateExpr<obj> mc.Arguments.[0]
-            match tryAsInt64 rawId with
-            | ValueSome id when id > 0L -> SetDBRefToId(propertyPath, targetType, id)
-            | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+            if DBRefTypeHelpers.isDBRefSingleDefinition dbRefDef then
+                let rawId = evaluateExpr<obj> mc.Arguments.[0]
+                match tryAsInt64 rawId with
+                | ValueSome id when id > 0L -> SetDBRefToId(propertyPath, targetType, id)
+                | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+            else
+                let typedId = evaluateExpr<obj> mc.Arguments.[0]
+                SetDBRefToTypedId(propertyPath, targetType, args.[1], typedId)
 
         | :? MethodCallExpression as mc
             when mc.Method.Name = "get_None"
               && not (isNull mc.Method.DeclaringType)
               && mc.Method.DeclaringType.IsGenericType
-              && mc.Method.DeclaringType.GetGenericTypeDefinition().FullName = "SoloDatabase.DBRef`1" ->
+              && DBRefTypeHelpers.isDBRefDefinition (mc.Method.DeclaringType.GetGenericTypeDefinition()) ->
             SetDBRefToNone(propertyPath, targetType)
 
         | :? MemberExpression as me
@@ -203,7 +209,7 @@ module internal QueryTranslatorVisitPost =
               && isNull me.Expression
               && not (isNull me.Member.DeclaringType)
               && me.Member.DeclaringType.IsGenericType
-              && me.Member.DeclaringType.GetGenericTypeDefinition().FullName = "SoloDatabase.DBRef`1" ->
+              && DBRefTypeHelpers.isDBRefDefinition (me.Member.DeclaringType.GetGenericTypeDefinition()) ->
             SetDBRefToNone(propertyPath, targetType)
 
         | _ ->

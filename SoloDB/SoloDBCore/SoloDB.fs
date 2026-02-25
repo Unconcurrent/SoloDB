@@ -163,11 +163,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <summary>True when the document type declares DBRef/DBRefMany properties.</summary>
     member val private HasRelations =
         typeof<'T>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-        |> Array.exists (fun p ->
-            let t = p.PropertyType
-            t.IsGenericType &&
-            let genericType = t.GetGenericTypeDefinition()
-            (genericType = typedefof<DBRef<_>> || genericType = typedefof<DBRefMany<_>>))
+        |> Array.exists (fun p -> DBRefTypeHelpers.isAnyRelationRefType p.PropertyType)
 
     member private this.HasIncomingRelations(connection: SqliteConnection) =
         let relationCatalogExists =
@@ -1100,6 +1096,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                         relationTransforms
                         |> Seq.map (function
                             | QueryTranslatorBaseTypes.SetDBRefToId(path, targetType, targetId) -> RelationsTypes.SetDBRefToId(path, targetType, targetId)
+                            | QueryTranslatorBaseTypes.SetDBRefToTypedId(path, targetType, targetIdType, targetTypedId) -> RelationsTypes.SetDBRefToTypedId(path, targetType, targetIdType, targetTypedId)
                             | QueryTranslatorBaseTypes.SetDBRefToNone(path, targetType) -> RelationsTypes.SetDBRefToNone(path, targetType)
                             | QueryTranslatorBaseTypes.AddDBRefMany(path, targetType, targetId) -> RelationsTypes.AddDBRefMany(path, targetType, targetId)
                             | QueryTranslatorBaseTypes.RemoveDBRefMany(path, targetType, targetId) -> RelationsTypes.RemoveDBRefMany(path, targetType, targetId)
