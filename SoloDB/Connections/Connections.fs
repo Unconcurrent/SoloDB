@@ -18,6 +18,17 @@ module Connections =
     let internal ThrowOutsideEventContextUsage() =
             raise (InvalidOperationException("Event handlers must use the ctx parameter (which implements ISoloDB). Using any other SoloDB instance inside a handler will lock the database."))
 
+    let private beginImmediateWithRetry (connection: CachingDbConnection) =
+        let mutable attempt = 0
+        let mutable started = false
+        while not started && attempt < 5 do
+            try
+                connection.Execute("BEGIN IMMEDIATE;") |> ignore
+                started <- true
+            with :? SqliteException as se when (se.SqliteErrorCode = 5 || se.SqliteErrorCode = 6) && attempt < 4 ->
+                attempt <- attempt + 1
+                Thread.Sleep(25 * attempt)
+
     /// <summary>
     /// Represents a specialized <see cref="SqliteConnection"/> whose <c>Dispose</c> method is a no-op.
     /// This is used to pass a connection to a user-defined transaction block without it being closed prematurely.
@@ -141,7 +152,7 @@ module Connections =
         /// <returns>The result of the function <paramref name="f"/>.</returns>
         member private this.WithTransactionBorrowed(f: CachingDbConnection -> 'T) =
             use connectionForTransaction = this.Borrow()
-            connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
+            beginImmediateWithRetry connectionForTransaction
             try
                 connectionForTransaction.InsideTransaction <- true
                 try
@@ -161,7 +172,7 @@ module Connections =
         /// <returns>A task that represents the asynchronous operation, containing the result of the function <paramref name="f"/>.</returns>
         member private this.WithTransactionBorrowedAsync(f: CachingDbConnection -> Task<'T>) = task {
             use connectionForTransaction = this.Borrow()
-            connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
+            beginImmediateWithRetry connectionForTransaction
             try
                 connectionForTransaction.InsideTransaction <- true
                 try

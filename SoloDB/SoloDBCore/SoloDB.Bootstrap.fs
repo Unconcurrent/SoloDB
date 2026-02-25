@@ -41,7 +41,7 @@ module internal Bootstrap =
             connection.CreateFunction("REGEXP", Func<string, string, bool>(fun pattern input -> match isNull pattern || isNull input with true -> false | _ -> System.Text.RegularExpressions.Regex.IsMatch(input, pattern)), true)
             eventSystem.CreateFunctions(connection)
             connection.CreateFunction("base64", Func<obj, obj>(Utils.sqlBase64), true) // https://www.sqlite.org/base64.html
-            connection.Execute "PRAGMA recursive_triggers = ON; PRAGMA foreign_keys = on;" |> ignore // This must be enabled on every connection separately.
+            connection.Execute "PRAGMA recursive_triggers = ON; PRAGMA foreign_keys = on; PRAGMA busy_timeout = 5000;" |> ignore // This must be enabled on every connection separately.
 
     /// <summary>
     /// Parses the SQLite version string and returns a comparable Version value.
