@@ -9,6 +9,8 @@ module internal DBRefTypeHelpers =
     let private dbRef2Name = "SoloDatabase.DBRef`2"
     [<Literal>]
     let private dbRefManyName = "SoloDatabase.DBRefMany`1"
+    [<Literal>]
+    let private fsharpOptionName = "Microsoft.FSharp.Core.FSharpOption`1"
 
     let internal isDBRefSingleDefinition (t: Type) =
         not (isNull t) && StringComparer.Ordinal.Equals(t.FullName, dbRef1Name)
@@ -22,6 +24,9 @@ module internal DBRefTypeHelpers =
     let internal isDBRefManyDefinition (t: Type) =
         not (isNull t) && StringComparer.Ordinal.Equals(t.FullName, dbRefManyName)
 
+    let internal isFSharpOptionDefinition (t: Type) =
+        not (isNull t) && StringComparer.Ordinal.Equals(t.FullName, fsharpOptionName)
+
     let internal isDBRefType (t: Type) =
         not (isNull t) && t.IsGenericType && isDBRefDefinition (t.GetGenericTypeDefinition())
 
@@ -33,3 +38,14 @@ module internal DBRefTypeHelpers =
 
     let internal isAnyRelationRefType (t: Type) =
         isDBRefType t || isDBRefManyType t
+
+    let internal tryUnwrapFSharpOption (t: Type) =
+        if not (isNull t) && t.IsGenericType && isFSharpOptionDefinition (t.GetGenericTypeDefinition()) then
+            ValueSome (t.GetGenericArguments().[0])
+        else
+            ValueNone
+
+    let internal isOptionWrappedRelationRefType (t: Type) =
+        match tryUnwrapFSharpOption t with
+        | ValueSome inner -> isAnyRelationRefType inner
+        | ValueNone -> false

@@ -151,10 +151,13 @@ let private buildRelationSpecs (ownerType: Type) =
         if not prop.CanRead then
             None
         else
-                let propType = prop.PropertyType
-                if not propType.IsGenericType then
-                    None
-                else
+            let propType = prop.PropertyType
+            if DBRefTypeHelpers.isOptionWrappedRelationRefType propType then
+                raise (InvalidOperationException(
+                    $"Error: Invalid relation property '{ownerType.FullName}.{prop.Name}'.\nReason: Option-wrapped DBRef/DBRefMany is not supported.\nFix: Use DBRef<T>/DBRef<TTarget,'TId>/DBRefMany<T> directly (non-option)."))
+            elif not propType.IsGenericType then
+                None
+            else
                 let generic = propType.GetGenericTypeDefinition()
                 if DBRefTypeHelpers.isAnyRelationRefType propType then
                     let args = propType.GetGenericArguments()
