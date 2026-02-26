@@ -189,9 +189,18 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                             for id in newIds do ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
                 | :? IDBRefManyInternal as tracker when not tracker.IsLoaded && tracker.HasPendingMutations ->
                     if tracker.WasCleared then
-                        // Explicit Clear() on unloaded tracker: unlink all persisted rows.
-                        resetMap.[descriptor.Property.Name] <- [||]
-                        ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
+                        // Unloaded + Clear(): collect post-clear items to detect Clear()+Add() pattern.
+                        match collectManyTargetIdsAndCascade tx descriptor newOwner true visited with
+                        | ValueNone | ValueSome [||] ->
+                            // Pure clear — no items after clear.
+                            resetMap.[descriptor.Property.Name] <- [||]
+                            ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
+                        | ValueSome newIds ->
+                            // Clear()+Add(): emit clear then re-add for parity with loaded path.
+                            resetMap.[descriptor.Property.Name] <- newIds
+                            ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
+                            for id in newIds do
+                                ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
                     else
                         // Unloaded + pending mutations (Add without load): diff against persisted ids
                         match collectManyTargetIdsAndCascade tx descriptor newOwner true visited with
