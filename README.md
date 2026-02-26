@@ -236,7 +236,7 @@ Important constraints:
 
 #### Loading Semantics
 
-By default, relation loading is performed by SoloDB's relation batch-load pipeline after owner rows are read. In practice:
+Relation loading is performed by SoloDB's relation batch-load pipeline after owner rows are read. In practice:
 
 ```csharp
 using SoloDatabase;
@@ -269,10 +269,33 @@ catch (InvalidOperationException)
 {
     Console.WriteLine("Lead.Value is unavailable when excluded.");
 }
+
+// Include path: hydrate only selected relations.
+var includeOnlyMembers = teams.AsQueryable()
+    .Include(t => t.Members)
+    .Where(t => t.Lead.Value.Name == "Loaded Alice") // predicate still works
+    .Single();
+
+Console.WriteLine(includeOnlyMembers.Lead.Id); // id is still available
+try
+{
+    _ = includeOnlyMembers.Lead.Value; // throws: not loaded (Lead not included)
+}
+catch (InvalidOperationException)
+{
+    Console.WriteLine("Lead.Value is unavailable when not included.");
+}
+
+Console.WriteLine(includeOnlyMembers.Members.Count); // hydrated because Members was included
 ```
 
 Key behavior:
 
+- Default (no Include): relation hydration remains include-all behavior.
+- Include is hydration-only: included paths are hydrated; non-included paths keep persisted ids and remain unloaded.
+- Non-included relation paths can still be used in LINQ predicates/projections that require SQL joins.
+- Exclude is stricter than non-included: excluded relation `.Value` access is rejected.
+- Same path in Include and Exclude is rejected deterministically.
 - `DBRef<T>.Id` is always the persisted relation id (or `0` for empty).
 - `DBRef<T>.Value` requires materialization; excluded/unloaded access throws `InvalidOperationException`.
 - `DBRefMany<T>` relation queries (`Any`, `Count`) are translated through relation metadata/link tables.
@@ -323,6 +346,8 @@ var largeTeams = teams.AsQueryable()
     .Where(t => t.Members.Count > 10)
     .ToList();
 ```
+
+`Include(...)` affects post-query hydration, not SQL predicate capability. Relation predicates (for example `DBRef.Value`, `DBRefMany.Any`, `DBRefMany.Count`) remain translatable.
 
 ```fsharp
 open SoloDatabase
@@ -399,6 +424,7 @@ teamsR.Insert(teamR) |> ignore
 - `DBRefMany<T>` item ordering is not a stable ordering contract unless your query/project explicitly orders results.
 - Nested DBRefMany relation predicates such as `Items.Any(i => i.SubItems.Any(...))` are rejected by translation.
 - `option<DBRef<_>>` / `option<DBRefMany<_>>` relation-property shapes are not supported; use `DBRef<_>.None` for empty single refs.
+- `Include` + `Exclude` on the same relation path is rejected deterministically.
 - For custom-id relation scenarios (`DBRef<TTarget, TId>`), target-side id/index constraints must be satisfied before relation writes.
 
 ### Indexing for Performance
