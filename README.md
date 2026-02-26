@@ -401,28 +401,82 @@ teamsR.Insert(teamR) |> ignore
 
 ### Indexing for Performance
 
-Create indexes on properties to dramatically speed up query performance. Simply add the [Indexed] attribute to your model.
+Use index attributes for property-level defaults, and use expression APIs for operational index management and composite keys.
+
+#### Attribute Indexes
 
 ```csharp
 using SoloDatabase.Attributes;
 
 public class IndexedProduct
 {
-    public long Id { get; set; } // The primary key is always indexed.
+    public long Id { get; set; } // Primary key is indexed.
 
-    [Indexed(unique: true)] // Create a unique index to enforce SKU uniqueness.
-    public string SKU { get; set; }
+    [Indexed(unique: true)] // Unique property index.
+    public string SKU { get; set; } = "";
 
-    [Indexed] // Create a non-unique index for fast category lookups.
-    public string Category { get; set; }
+    [Indexed] // Non-unique property index.
+    public string Category { get; set; } = "";
+
     public decimal Price { get; set; }
 }
 
 var products = db.GetCollection<IndexedProduct>();
-
-// This query will be very fast, using the index on 'Category'.
+products.Insert(new IndexedProduct { SKU = "BOOK-123", Category = "Books", Price = 29.99m });
 var books = products.Where(p => p.Category == "Books").ToList();
 ```
+
+#### Expression Index APIs
+
+```csharp
+var users = db.GetCollection<User>();
+
+// Create a non-unique expression index.
+users.EnsureIndex(u => u.Username);
+
+// Create a unique expression index.
+users.EnsureUniqueAndIndex(u => u.Email);
+
+// Drop if present (no-op if missing).
+users.DropIndexIfExists(u => u.Email);
+
+// Backfill attribute-declared indexes for an existing collection.
+users.EnsureAddedAttributeIndexes();
+```
+
+#### Index SQL Shape and Naming
+
+- Expression indexes are built from translated expression SQL over persisted `Value`.
+- Member-path expressions are translated to JSON extraction expressions (for example `jsonb_extract(...)` paths).
+- Generated names are deterministic: collection name + sanitized translated expression.
+- Practical effect: the same expression shape maps to the same index identity.
+
+#### Composite Index Boundaries
+
+Composite (tuple) indexes are supported via expression APIs:
+
+```csharp
+// Composite non-unique index.
+users.EnsureIndex(u => (u.Username, u.Auth));
+
+// Composite unique index.
+users.EnsureUniqueAndIndex(u => (u.Username, u.Auth));
+```
+
+`[Indexed]` is property-level only. It does not declare multi-column composite indexes.
+
+#### SoloId and Typed-Relation Requirements
+
+- `[SoloId(...)]` carries unique-index semantics via attribute inheritance behavior.
+- For typed relations (`DBRef<TTarget, TId>`), target-side SoloId resolution requires a usable UNIQUE index on the target SoloId path before relation writes.
+
+#### Reject Constraints for Invalid Index Expressions
+
+Invalid index expressions are rejected with typed exceptions (argument/operation), including:
+
+- constant or outside expressions,
+- expressions with captured variables,
+- unsupported expression node shapes.
 
 ### Atomic Transactions
 
