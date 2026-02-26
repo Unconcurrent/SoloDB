@@ -360,6 +360,8 @@ let manyMembers =
         .ToList()
 ```
 
+**Ordering note:** DBRefMany item order is not guaranteed unless you explicitly apply ordering in query/projection.
+
 F# mutable-record style (common idiom) is also supported as long as relation properties are mutable:
 
 ```fsharp
