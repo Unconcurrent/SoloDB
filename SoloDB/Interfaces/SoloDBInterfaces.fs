@@ -1273,6 +1273,18 @@ type UntypedCollectionExt =
 [<Extension>]
 type RelationQueryExt =
     [<Extension>]
+    static member Include<'T, 'TRelation>(query: IQueryable<'T>, selector: Expression<Func<'T, 'TRelation>>) : IQueryable<'T> =
+        if isNull query then raise (ArgumentNullException(nameof(query)))
+        if isNull selector then raise (ArgumentNullException(nameof(selector)))
+        // Produce a MethodCallExpression so the query pipeline can detect Include and populate IncludedPaths.
+        let method =
+            typeof<RelationQueryExt>
+                .GetMethod("Include", Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
+                .MakeGenericMethod(typeof<'T>, typeof<'TRelation>)
+        let callExpr = Expression.Call(method, query.Expression, selector)
+        query.Provider.CreateQuery<'T>(callExpr)
+
+    [<Extension>]
     static member Exclude<'T, 'TRelation>(query: IQueryable<'T>, selector: Expression<Func<'T, 'TRelation>>) : IQueryable<'T> =
         if isNull query then raise (ArgumentNullException(nameof(query)))
         if isNull selector then raise (ArgumentNullException(nameof(selector)))

@@ -20,6 +20,7 @@ let batchLoadDBRefProperties
     (ownerTable: string)
     (ownerType: Type)
     (excludedPaths: HashSet<string>)
+    (includedPaths: HashSet<string>)
     (ownerEntities: (int64 * obj) array)
     =
     if ownerEntities.Length = 0 then ()
@@ -31,8 +32,13 @@ let batchLoadDBRefProperties
     else
 
     let ownerTable = formatName ownerTable
+    let shouldLoadPath (path: string) =
+        if excludedPaths.Contains(path) then false
+        elif includedPaths.Count > 0 then includedPaths.Contains(path)
+        else true
+
     for (prop, _kind, targetType, _typedIdType, _onDelete, _onOwnerDelete, _isUnique, _orderBy) in singleSpecs do
-        if excludedPaths.Contains(prop.Name) then ()
+        if not (shouldLoadPath prop.Name) then ()
         else
 
         let targetTable = resolveTargetCollectionName connection ownerTable prop.Name targetType
@@ -87,6 +93,7 @@ let batchLoadDBRefManyProperties
     (ownerTable: string)
     (ownerType: Type)
     (excludedPaths: HashSet<string>)
+    (includedPaths: HashSet<string>)
     (ownerEntities: (int64 * obj) array)
     =
     if ownerEntities.Length = 0 then ()
@@ -98,8 +105,13 @@ let batchLoadDBRefManyProperties
     if manyDescriptors.Length = 0 then ()
     else
 
+    let shouldLoadPath (path: string) =
+        if excludedPaths.Contains(path) then false
+        elif includedPaths.Count > 0 then includedPaths.Contains(path)
+        else true
+
     for descriptor in manyDescriptors do
-        if excludedPaths.Contains(descriptor.Property.Name) then ()
+        if not (shouldLoadPath descriptor.Property.Name) then ()
         else
 
         let qLink = quoteIdentifier descriptor.LinkTable

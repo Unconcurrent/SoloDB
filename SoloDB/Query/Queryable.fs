@@ -60,6 +60,7 @@ type internal SupportedLinqMethods =
 | Cast
 | OfType
 | Aggregate
+| Include
 | Exclude
 
 // Translation validation helpers.
@@ -196,6 +197,7 @@ module private QueryHelper =
         | "Cast" -> Some Cast
         | "OfType" -> Some OfType
         | "Aggregate" -> Some Aggregate
+        | "Include" -> Some Include
         | "Exclude" -> Some Exclude
         | _ -> None
 
@@ -429,6 +431,23 @@ module private QueryHelper =
             | ValueSome ctx -> ctx.ExcludedPaths.Add(path) |> ignore
             | ValueNone -> ()
 
+    let private registerIncludePath path =
+        if not (String.IsNullOrWhiteSpace path) then
+            match QueryTranslator.activeQueryContext.Value with
+            | ValueSome ctx -> ctx.IncludedPaths.Add(path) |> ignore
+            | ValueNone -> ()
+
+    let private validateIncludeExcludeConflicts (ctx: QueryContext) =
+        for path in ctx.IncludedPaths do
+            if ctx.ExcludedPaths.Contains(path) then
+                raise (InvalidOperationException(
+                    $"Error: Path '{path}' is both included and excluded.\nReason: Include/Exclude conflict on same relation path.\nFix: Keep only one directive for this path."))
+
+    let private shouldLoadRelationPath (ctx: QueryContext) (path: string) =
+        if ctx.ExcludedPaths.Contains(path) then false
+        elif ctx.IncludedPaths.Count > 0 then ctx.IncludedPaths.Contains(path)
+        else true
+
     let private serializeForCollection (value: 'T) =
         struct (
             match typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T> with
@@ -590,7 +609,7 @@ module private QueryHelper =
                             for j in ctx.Joins do
                                 // Skip materialization for excluded paths — the DBRef stays as raw integer (Unloaded).
                                 // The JOIN itself is still emitted (needed for WHERE/ORDER BY).
-                                if not (ctx.ExcludedPaths.Contains(j.PropertyPath)) then
+                                if shouldLoadRelationPath ctx j.PropertyPath then
                                     hasMaterialization <- true
                                     jsonSetSb.Append(", '$.") |> ignore
                                     jsonSetSb.Append(j.PropertyPath) |> ignore
@@ -658,15 +677,21 @@ module private QueryHelper =
         let mutable tableName = ""
         let preprocessed = preprocessQuery e |> Seq.toArray
 
-        // Register all Exclude paths up-front so behavior is deterministic regardless method-call order.
+        // Register Include/Exclude paths up-front so behavior is deterministic regardless method-call order.
         // If a predicate accesses an excluded path via .Value, translator must fail loudly in both orders.
         for q in preprocessed do
             match q with
-            | Method m when m.Value = Exclude ->
+            | Method m when m.Value = Exclude || m.Value = Include ->
                 match tryExtractExcludePath m.Expressions with
-                | Some path -> registerExcludePath path
+                | Some path ->
+                    if m.Value = Exclude then registerExcludePath path
+                    else registerIncludePath path
                 | None -> ()
             | _ -> ()
+
+        match QueryTranslator.activeQueryContext.Value with
+        | ValueSome ctx -> validateIncludeExcludeConflicts ctx
+        | ValueNone -> ()
 
         for q in preprocessed |> Array.rev do
             match q with
@@ -1107,6 +1132,12 @@ module private QueryHelper =
                     match tryExtractExcludePath m.Expressions with
                     | Some path -> registerExcludePath path
                     | None -> ()
+                | Include ->
+                    // Extract property path from the selector lambda and add to IncludedPaths.
+                    // Include does not produce SQL — it only controls relation hydration allowlist.
+                    match tryExtractExcludePath m.Expressions with
+                    | Some path -> registerIncludePath path
+                    | None -> ()
 
                 | Aggregate ->
                     failwithf "Aggregate is not supported."
@@ -1176,6 +1207,7 @@ module private QueryHelper =
             | IntersectBy
             | Cast
             | OfType
+            | Include
             | Exclude
                 -> false
         | _other -> false
@@ -1224,6 +1256,7 @@ module private QueryHelper =
         OwnerTable: string
         OwnerType: Type
         ExcludedPaths: HashSet<string>
+        IncludedPaths: HashSet<string>
         HasSingleRelations: bool
         HasManyRelations: bool
     }
@@ -1359,6 +1392,7 @@ module private QueryHelper =
                 OwnerTable = source.Name
                 OwnerType = typeof<'T>
                 ExcludedPaths = new HashSet<string>(ctx.ExcludedPaths, StringComparer.Ordinal)
+                IncludedPaths = new HashSet<string>(ctx.IncludedPaths, StringComparer.Ordinal)
                 HasSingleRelations = hasSingleRelations
                 HasManyRelations = hasManyRelations
             }
@@ -1420,12 +1454,12 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                     if ownerEntities.Length > 0 then
                         if ctx.HasSingleRelations then
                             Relations.withRelationSqliteWrap "query-batch-load" "ExecuteEnumerable.batchLoadDBRefProperties" (fun () ->
-                                Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ownerEntities
+                                Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ownerEntities
                             )
 
                         if ctx.HasManyRelations then
                             Relations.withRelationSqliteWrap "query-batch-load" "ExecuteEnumerable.batchLoadDBRefManyProperties" (fun () ->
-                                Relations.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ownerEntities
+                                Relations.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ownerEntities
                             )
 
                 for (_id, entity) in buffer do
@@ -1463,11 +1497,11 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                 | ValueSome ctx when (ctx.HasSingleRelations || ctx.HasManyRelations) && not (isNull (box entity)) && row.Id.HasValue && ctx.OwnerType.IsAssignableFrom(typeof<'TResult>) ->
                     if ctx.HasSingleRelations then
                         Relations.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefProperties" (fun () ->
-                            Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths [| (row.Id.Value, box entity) |]
+                            Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths [| (row.Id.Value, box entity) |]
                         )
                     if ctx.HasManyRelations then
                         Relations.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefManyProperties" (fun () ->
-                            Relations.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths [| (row.Id.Value, box entity) |]
+                            Relations.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths [| (row.Id.Value, box entity) |]
                         )
                 | _ -> ()
                 entity

@@ -335,10 +335,11 @@ let batchLoadDBRefProperties
     (ownerTable: string)
     (ownerType: Type)
     (excludedPaths: HashSet<string>)
+    (includedPaths: HashSet<string>)
     (ownerEntities: (int64 * obj) array)
     =
     withRelationSqliteWrap "batch-load" "batchLoadDBRefProperties" (fun () ->
-        RelationsBatchLoad.batchLoadDBRefProperties connection ownerTable ownerType excludedPaths ownerEntities
+        RelationsBatchLoad.batchLoadDBRefProperties connection ownerTable ownerType excludedPaths includedPaths ownerEntities
     )
 
 let batchLoadDBRefManyProperties
@@ -346,8 +347,9 @@ let batchLoadDBRefManyProperties
     (ownerTable: string)
     (ownerType: Type)
     (excludedPaths: HashSet<string>)
+    (includedPaths: HashSet<string>)
     (ownerEntities: (int64 * obj) array)
     =
     withRelationSqliteWrap "batch-load" "batchLoadDBRefManyProperties" (fun () ->
-        RelationsBatchLoad.batchLoadDBRefManyProperties connection ownerTable ownerType excludedPaths ownerEntities
+        RelationsBatchLoad.batchLoadDBRefManyProperties connection ownerTable ownerType excludedPaths includedPaths ownerEntities
     )

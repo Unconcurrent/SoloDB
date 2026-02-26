@@ -76,6 +76,8 @@ type internal QueryContext = {
     mutable AliasCounter: int
     /// Property paths excluded via Exclude() — skip JOIN/load for these
     ExcludedPaths: HashSet<string>
+    /// Property paths included via Include() allowlist for hydration.
+    IncludedPaths: HashSet<string>
     /// Relation target table mapping keyed by "OwnerCollection|PropertyName"
     RelationTargets: Dictionary<string, string>
     /// Relation link table mapping keyed by "OwnerCollection|PropertyName"
@@ -93,6 +95,7 @@ type internal QueryContext = {
           Joins = ResizeArray()
           AliasCounter = 0
           ExcludedPaths = HashSet()
+          IncludedPaths = HashSet()
           RelationTargets = Dictionary(System.StringComparer.Ordinal)
           RelationLinks = Dictionary(System.StringComparer.Ordinal)
           RelationOwnerUsesSource = Dictionary(System.StringComparer.Ordinal)
@@ -109,6 +112,7 @@ type internal QueryContext = {
           Joins = ResizeArray()
           AliasCounter = 0
           ExcludedPaths = HashSet()
+          IncludedPaths = HashSet()
           RelationTargets = Dictionary(System.StringComparer.Ordinal)
           RelationLinks = Dictionary(System.StringComparer.Ordinal)
           RelationOwnerUsesSource = Dictionary(System.StringComparer.Ordinal)
