@@ -56,6 +56,7 @@ type internal RelationDescriptor = {
     OnDelete: DeletePolicy
     OnOwnerDelete: DeletePolicy
     IsUnique: bool
+    OrderBy: DBRefOrder
     TypedIdType: Type voption
     TargetSoloIdProperty: PropertyInfo voption
 }
@@ -96,7 +97,7 @@ let internal emptyPlan kind ownerType =
       OwnerType = ownerType
       Ops = [] }
 
-let internal relationSpecsCache = ConcurrentDictionary<Type, (PropertyInfo * RelationKind * Type * Type voption * DeletePolicy * DeletePolicy * bool) array>()
+let internal relationSpecsCache = ConcurrentDictionary<Type, (PropertyInfo * RelationKind * Type * Type voption * DeletePolicy * DeletePolicy * bool * DBRefOrder) array>()
 let internal deleteGuard = new System.Threading.ThreadLocal<System.Collections.Generic.HashSet<string>>(fun () -> System.Collections.Generic.HashSet<string>(StringComparer.Ordinal))
 
 let internal quoteIdentifier (name: string) =

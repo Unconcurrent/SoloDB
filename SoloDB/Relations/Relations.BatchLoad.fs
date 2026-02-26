@@ -6,6 +6,7 @@ open System.Reflection
 open System.Collections.Generic
 open Microsoft.Data.Sqlite
 open SoloDatabase
+open SoloDatabase.Attributes
 open SoloDatabase.Utils
 open SoloDatabase.JsonSerializator
 open SQLiteTools
@@ -25,12 +26,12 @@ let batchLoadDBRefProperties
     else
 
     let specs = getRelationSpecs ownerType
-    let singleSpecs = specs |> Array.filter (fun (_, kind, _, _, _, _, _) -> kind = Single)
+    let singleSpecs = specs |> Array.filter (fun (_, kind, _, _, _, _, _, _) -> kind = Single)
     if singleSpecs.Length = 0 then ()
     else
 
     let ownerTable = formatName ownerTable
-    for (prop, _kind, targetType, _typedIdType, _onDelete, _onOwnerDelete, _isUnique) in singleSpecs do
+    for (prop, _kind, targetType, _typedIdType, _onDelete, _onOwnerDelete, _isUnique, _orderBy) in singleSpecs do
         if excludedPaths.Contains(prop.Name) then ()
         else
 
@@ -120,10 +121,14 @@ let batchLoadDBRefManyProperties
         for chunk in chunks do
             let paramNames = chunk |> Array.mapi (fun i _ -> $"@_bid{i}")
             let inClause = String.Join(", ", paramNames)
+            let orderClause =
+                match descriptor.OrderBy with
+                | DBRefOrder.TargetId -> $" ORDER BY {qTarget}.Id"
+                | _ -> ""
             let sql =
                 $"SELECT lnk.{ownerColumn} AS OwnerId, {qTarget}.Id AS TargetId, json_quote({qTarget}.Value) as ValueJSON " +
                 $"FROM {qLink} lnk JOIN {qTarget} ON {qTarget}.Id = lnk.{targetColumn} " +
-                $"WHERE lnk.{ownerColumn} IN ({inClause});"
+                $"WHERE lnk.{ownerColumn} IN ({inClause})" + orderClause + ";"
             let parameters = Dictionary<string, obj>(chunk.Length)
             for i = 0 to chunk.Length - 1 do
                 parameters.[paramNames.[i]] <- box chunk.[i]

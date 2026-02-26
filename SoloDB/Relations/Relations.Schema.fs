@@ -186,7 +186,8 @@ let private buildRelationSpecs (ownerType: Type) =
                         | _ -> ()
                     | ValueNone -> ()
 
-                    Some (prop, kind, targetType, typedIdType, onDelete, onOwnerDelete, isUnique)
+                    let orderBy = if isNull attr then DBRefOrder.Undefined else attr.OrderBy
+                    Some (prop, kind, targetType, typedIdType, onDelete, onOwnerDelete, isUnique, orderBy)
                 else
                     None)
 
@@ -195,7 +196,7 @@ let internal getRelationSpecs (ownerType: Type) =
 
 let internal hasManyBackReference (ownerType: Type) (targetType: Type) =
     getRelationSpecs targetType
-    |> Array.exists (fun (_, kind, candidateTargetType, _, _, _, _) ->
+    |> Array.exists (fun (_, kind, candidateTargetType, _, _, _, _, _) ->
         kind = Many && candidateTargetType = ownerType)
 
 let private typeCollectionMapTableExists (connection: SqliteConnection) =
@@ -286,7 +287,7 @@ let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) 
     let ownerTable = formatName tx.OwnerTable
     let descriptors =
         getRelationSpecs ownerType
-        |> Array.map (fun (prop, kind, targetType, typedIdType, onDelete, onOwnerDelete, isUnique) ->
+        |> Array.map (fun (prop, kind, targetType, typedIdType, onDelete, onOwnerDelete, isUnique, orderBy) ->
         let targetTable = resolveTargetCollectionName tx.Connection ownerTable prop.Name targetType
         let defaultRelName = relationName ownerTable prop.Name
         let canonicalManyName = canonicalManyRelationName ownerTable targetTable
@@ -326,6 +327,7 @@ let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) 
             OnDelete = onDelete
             OnOwnerDelete = onOwnerDelete
             IsUnique = isUnique
+            OrderBy = orderBy
             TypedIdType = typedIdType
             TargetSoloIdProperty = tryGetSoloIdProperty targetType
         })
