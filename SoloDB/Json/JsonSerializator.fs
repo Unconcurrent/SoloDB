@@ -2152,6 +2152,32 @@ and private JsonDeserializerImpl<'A> =
                     Expression.Convert(Expression.Call(targetDeserializeMeth, [|jsonParam2 :> Expression|]), typeof<obj>),
                     [|jsonParam2|]).Compile(false)
 
+            // DBRef`2 only: pre-compile To(typedId) delegate for $dbrefTypedId marker deserialization.
+            let isDbRef2 = DBRefTypeHelpers.isDBRefTypedType t
+            let typedIdToFn =
+                if isDbRef2 then
+                    let tidType = (GenericTypeArgCache.Get t).[1]
+                    let toMethod = t.GetMethod("To", BindingFlags.Public ||| BindingFlags.Static, null, [| tidType |], null)
+                    let tidDeserializeMeth =
+                        typedefof<JsonDeserializerImpl<_>>
+                            .MakeGenericType(tidType)
+                            .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+                    let jvParam = Expression.Parameter(typeof<JsonValue>)
+                    let tidDeserializeFn =
+                        Expression.Lambda<Func<JsonValue, obj>>(
+                            Expression.Convert(Expression.Call(tidDeserializeMeth, [| jvParam :> Expression |]), typeof<obj>),
+                            [| jvParam |]).Compile(false)
+                    let objParam = Expression.Parameter(typeof<obj>)
+                    let toFn =
+                        Expression.Lambda<Func<obj, 'A>>(
+                            Expression.Convert(
+                                Expression.Call(toMethod, [| Expression.Convert(objParam, tidType) :> Expression |]),
+                                typeof<'A>),
+                            [| objParam |]).Compile(false)
+                    ValueSome struct(tidDeserializeFn, toFn)
+                else
+                    ValueNone
+
             (fun (json: JsonValue) ->
                 match json with
                 | Null -> Unchecked.defaultof<'A> // DBRef.None
@@ -2161,6 +2187,15 @@ and private JsonDeserializerImpl<'A> =
                     let id = int64 (items.[0].ToObject<decimal>())
                     let value = targetDeserializeFn.Invoke(items.[1])
                     loadedFn.Invoke(id, value) // DBRef.Loaded(id, entity)
+                | Object o when o.ContainsKey "$dbrefTypedId" ->
+                    // Transient wire marker for pending typed-id (DBRef`2 only).
+                    match typedIdToFn with
+                    | ValueSome struct(tidDeserialize, toFn) ->
+                        let tidJson = o.["$dbrefTypedId"]
+                        let tidObj = tidDeserialize.Invoke(tidJson)
+                        toFn.Invoke(tidObj)
+                    | ValueNone ->
+                        failwithf "Cannot deserialize DBRef<%s> from $dbrefTypedId marker: only DBRef<TTarget,TId> supports typed-id wire format." targetType.Name
                 | other -> failwithf "Cannot deserialize DBRef<%s> from %A" targetType.Name other
             )
 
@@ -2402,6 +2437,26 @@ and private JsonSerializerImpl<'A> =
             if isNull idProp || isNull hasValueProp then
                 failwithf "Invalid DBRef serializer contract for type %s. Expected public Id and HasValue properties." t.FullName
 
+            // DBRef`2: detect pending typed-id for transient wire roundtrip marker.
+            let isDbRef2 = DBRefTypeHelpers.isDBRefTypedType t
+            let hasPendingTypedIdProp =
+                if isDbRef2 then t.GetProperty("HasPendingTypedId", BindingFlags.NonPublic ||| BindingFlags.Instance) else null
+            let typedIdOrDefaultProp =
+                if isDbRef2 then t.GetProperty("TypedIdOrDefault", BindingFlags.NonPublic ||| BindingFlags.Instance) else null
+            let typedIdSerializeFn =
+                if isDbRef2 && not (isNull typedIdOrDefaultProp) then
+                    let tidType = (GenericTypeArgCache.Get t).[1]
+                    let meth =
+                        typedefof<JsonSerializerImpl<_>>
+                            .MakeGenericType(tidType)
+                            .GetMethod(nameof JsonSerializerImpl<_>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+                    let tidParam = Expression.Parameter(typeof<obj>)
+                    Expression.Lambda<Func<obj, JsonValue>>(
+                        Expression.Call(meth, [| Expression.Convert(tidParam, tidType) :> Expression |]),
+                        [| tidParam |]).Compile(false)
+                else
+                    Unchecked.defaultof<Func<obj, JsonValue>>
+
             (fun (o: 'A) ->
                 let boxed = box o
                 let hasValue = hasValueProp.GetValue(boxed, null) :?> bool
@@ -2410,7 +2465,17 @@ and private JsonSerializerImpl<'A> =
                 else
                     let idObj = idProp.GetValue(boxed, null)
                     let id = Convert.ToInt64(idObj, CultureInfo.InvariantCulture)
-                    Number(decimal id))
+                    if id > 0L then
+                        Number(decimal id)
+                    elif isDbRef2 && not (isNull hasPendingTypedIdProp) &&
+                         (hasPendingTypedIdProp.GetValue(boxed, null) :?> bool) then
+                        // Transient wire marker for pending typed-id (roundtrip-safe).
+                        let tidVal = typedIdOrDefaultProp.GetValue(boxed, null)
+                        let dict = Dictionary<string, JsonValue>(1)
+                        dict.["$dbrefTypedId"] <- typedIdSerializeFn.Invoke(tidVal)
+                        Object(dict)
+                    else
+                        Number(decimal id))
             :> obj :?> ('A -> JsonValue)
 
         | OfType bool -> 

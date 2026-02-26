@@ -157,6 +157,10 @@ type DBRef<'TTarget, 'TId> =
     member internal this.PendingTypedId: 'TId voption =
         if this._id = 0L && this._hasTypedId then ValueSome this._typedId else ValueNone
 
+    // Serializer introspection: pending typed-id state for transient wire roundtrip.
+    member internal this.HasPendingTypedId = this._id = 0L && this._hasTypedId
+    member internal this.TypedIdOrDefault = this._typedId
+
     static member internal Loaded(id: int64, value: 'TTarget) =
         DBRef<'TTarget, 'TId>(id, Unchecked.defaultof<'TId>, false, value, true)
 
@@ -431,6 +435,15 @@ type DeletePolicy =
 
 
 /// <summary>
+/// Controls the load-time ordering of DBRefMany items.
+/// </summary>
+type DBRefOrder =
+    /// <summary>No ordering guarantee (default). Matches current behavior.</summary>
+    | Undefined = 0
+    /// <summary>Order loaded items by target entity Id ascending.</summary>
+    | TargetId = 1
+
+/// <summary>
 /// Configures relation behavior on a <see cref="DBRef{T}"/> or <see cref="DBRefMany{T}"/> property.
 /// </summary>
 /// <remarks>
@@ -468,3 +481,9 @@ type SoloRefAttribute() =
     /// Only valid on <see cref="DBRef{T}"/>. Default is false (ManyToOne).
     /// </summary>
     member val Unique: bool = false with get, set
+
+    /// <summary>
+    /// Controls the load-time ordering of DBRefMany items.
+    /// Undefined (default): no ordering guarantee. TargetId: order by target entity Id ascending.
+    /// </summary>
+    member val OrderBy: DBRefOrder = DBRefOrder.Undefined with get, set
