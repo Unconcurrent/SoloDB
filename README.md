@@ -17,6 +17,7 @@ I wrote a detailed comparison with a popular alternative, [LiteDB](https://githu
 - [Usage and Examples](#usage-and-examples)
   - [Initializing the Database](#initializing-the-database)
   - [Working with Collections](#working-with-collections)
+  - [Relations (DBRef, DBRefMany, SoloRef)](#relations-dbref-dbrefmany-soloref)
   - [Indexing for Performance](#indexing-for-performance)
   - [Atomic Transactions](#atomic-transactions)
   - [Storing Polymorphic Data](#storing-polymorphic-data)
@@ -144,6 +145,259 @@ var untypedProducts = db.GetUntypedCollection("Product");
 
 public class Product { /* ... */ }
 ```
+
+### Relations (DBRef, DBRefMany, SoloRef)
+
+#### Overview
+
+SoloDB relations are explicit, typed links between collections:
+
+- `DBRef<TTarget>`: single relation to one target row.
+- `DBRefMany<TTarget>`: many relation via link rows.
+- `[SoloRef(...)]`: relation policy annotation (`OnDelete`, `OnOwnerDelete`, `Unique`).
+
+Relations are persisted through dedicated link tables (`SoloDBRelLink_*`) and relation metadata (`SoloDBRelation`), not embedded owner-document arrays of foreign keys.
+
+#### DBRef and DBRefMany Basics
+
+```csharp
+using SoloDatabase;
+using SoloDatabase.Attributes;
+using System.Collections.Generic;
+
+public class Team
+{
+    public long Id { get; set; }
+    public string Name { get; set; } = "";
+
+    // Single relation
+    public DBRef<Lead> Lead { get; set; } = DBRef<Lead>.None;
+
+    // Many relation
+    public DBRefMany<Member> Members { get; set; } = new();
+}
+
+public class Lead
+{
+    public long Id { get; set; }
+    public string Name { get; set; } = "";
+}
+
+public class Member
+{
+    public long Id { get; set; }
+    public string Name { get; set; } = "";
+}
+
+using var db = new SoloDB("memory:relations-basics");
+var teams = db.GetCollection<Team>();
+var leads = db.GetCollection<Lead>();
+
+// DBRef.To(existingId): link to an already persisted target.
+var existingLeadId = leads.Insert(new Lead { Name = "Existing Alice" });
+teams.Insert(new Team
+{
+    Name = "Ops",
+    Lead = DBRef<Lead>.To(existingLeadId)
+});
+
+// DBRef.From(entity): insert target first, then link owner to inserted target.
+var team = new Team
+{
+    Name = "Core",
+    Lead = DBRef<Lead>.From(new Lead { Name = "Alice" })
+};
+
+// DBRefMany supports Add/Clear/Remove mutations tracked on Update.
+team.Members.Add(new Member { Name = "Bob" });
+team.Members.Add(new Member { Name = "Carol" });
+
+teams.Insert(team);
+```
+
+#### SoloRef Policy Matrix
+
+`DeletePolicy` values in SoloDB are: `Restrict`, `Cascade`, `Unlink`, `Deletion`.
+
+| Policy Surface | Trigger Operation | Persistence Result | Reject Behavior |
+|---|---|---|---|
+| `OnDelete = Restrict` | Delete target while owners still reference it | Target delete blocked; links and owners unchanged | Typed reject (`InvalidOperationException`) |
+| `OnDelete = Cascade` | Delete target | Referencing owners are deleted (and their links removed) | N/A when valid |
+| `OnDelete = Unlink` | Delete target | Owner rows survive; relation links removed / refs become empty | N/A when valid |
+| `OnOwnerDelete = Restrict` | Delete owner that still has links | Owner delete blocked | Typed reject (`InvalidOperationException`) |
+| `OnOwnerDelete = Unlink` | Delete owner | Owner removed; links removed; targets survive | N/A when valid |
+| `OnOwnerDelete = Deletion` | Delete owner | Owner removed; orphaned targets in that relation lane can be deleted | N/A when valid |
+| `Unique = true` on single ref | Link/update relation | Enforces one-to-one style constraints at link-table level | Constraint reject if violated |
+
+Important constraints:
+
+- `SetNull` is **not** a `DeletePolicy` value in SoloDB.
+- `OnOwnerDelete = Cascade` is rejected by schema/build guards.
+
+#### Loading Semantics
+
+By default, relation loading is performed by SoloDB's relation batch-load pipeline after owner rows are read. In practice:
+
+```csharp
+using SoloDatabase;
+using System;
+using System.Linq;
+
+using var db = new SoloDB("memory:relations-loading");
+var leads = db.GetCollection<Lead>();
+var teams = db.GetCollection<Team>();
+
+var leadId = leads.Insert(new Lead { Name = "Loaded Alice" });
+teams.Insert(new Team { Name = "Core", Lead = DBRef<Lead>.To(leadId) });
+
+// Default path: relation is loaded, so .Value is available.
+var loadedTeam = teams.AsQueryable().First(t => t.Name == "Core");
+Console.WriteLine(loadedTeam.Lead.Id);         // row id
+Console.WriteLine(loadedTeam.Lead.Value.Name); // works: loaded by relation batch-load
+
+// Exclude path: relation value is not loaded.
+var excludedTeam = teams.AsQueryable()
+    .Exclude(t => t.Lead)
+    .First(t => t.Name == "Core");
+
+Console.WriteLine(excludedTeam.Lead.Id); // id is still available
+try
+{
+    _ = excludedTeam.Lead.Value; // throws: not loaded
+}
+catch (InvalidOperationException)
+{
+    Console.WriteLine("Lead.Value is unavailable when excluded.");
+}
+```
+
+Key behavior:
+
+- `DBRef<T>.Id` is always the persisted relation id (or `0` for empty).
+- `DBRef<T>.Value` requires materialization; excluded/unloaded access throws `InvalidOperationException`.
+- `DBRefMany<T>` relation queries (`Any`, `Count`) are translated through relation metadata/link tables.
+
+#### UpdateMany and Relation Diffs
+
+`UpdateMany` supports relation transforms for approved shapes:
+
+> `Set` / `Add` / `Remove` / `Clear` here are expression-tree markers for `UpdateMany` translation only.  
+> Calling them directly outside `UpdateMany` is unsupported and will throw.
+
+```csharp
+var leads = db.GetCollection<Lead>();
+var members = db.GetCollection<Member>();
+var teams = db.GetCollection<Team>();
+
+var leadId = leads.Insert(new Lead { Name = "Dora" });
+var member = new Member { Name = "Eve" };
+members.Insert(member);
+
+// Single ref set to an existing target
+teams.UpdateMany(t => t.Name == "Core",
+    t => t.Lead.Set(DBRef<Lead>.To(leadId)));
+
+// Clear single ref
+teams.UpdateMany(t => t.Name == "Core",
+    t => t.Lead.Set(DBRef<Lead>.None));
+
+// Many relation add/remove/clear
+teams.UpdateMany(t => t.Name == "Core",
+    t => t.Members.Add(member));
+teams.UpdateMany(t => t.Name == "Core",
+    t => t.Members.Remove(member));
+teams.UpdateMany(t => t.Name == "Core",
+    t => t.Members.Clear());
+```
+
+#### LINQ Relation Support
+
+```csharp
+// Any(...) over DBRefMany
+var teamsWithBob = teams.AsQueryable()
+    .Where(t => t.Members.Any(m => m.Name == "Bob"))
+    .ToList();
+
+// Count(...) over DBRefMany
+var largeTeams = teams.AsQueryable()
+    .Where(t => t.Members.Count > 10)
+    .ToList();
+```
+
+```fsharp
+open SoloDatabase
+open System.Linq
+
+type FLead() =
+    member val Id = 0L with get, set
+    member val Name = "" with get, set
+
+type FMember() =
+    member val Id = 0L with get, set
+    member val Name = "" with get, set
+
+type FTeam() =
+    member val Id = 0L with get, set
+    member val Name = "" with get, set
+    member val Lead = DBRef<FLead>.None with get, set
+    member val Members = DBRefMany<FMember>() with get, set
+
+use db = new SoloDB("memory:relations-fsharp")
+let teams = db.GetCollection<FTeam>()
+
+let team = FTeam(Name = "Core", Lead = DBRef<FLead>.From(FLead(Name = "Alice")))
+team.Members.Add(FMember(Name = "Bob"))
+teams.Insert(team) |> ignore
+
+let hasBob =
+    teams.AsQueryable()
+        .Where(fun t -> t.Members.Any(fun m -> m.Name = "Bob"))
+        .ToList()
+
+let manyMembers =
+    teams.AsQueryable()
+        .Where(fun t -> t.Members.Count > 0)
+        .ToList()
+```
+
+F# mutable-record style (common idiom) is also supported as long as relation properties are mutable:
+
+```fsharp
+type FLeadR = { mutable Id: int64; mutable Name: string }
+type FMemberR = { mutable Id: int64; mutable Name: string }
+type FTeamR =
+    { mutable Id: int64
+      mutable Name: string
+      mutable Lead: DBRef<FLeadR>
+      mutable Members: DBRefMany<FMemberR> }
+
+use db2 = new SoloDB("memory:relations-fsharp-record")
+let teamsR = db2.GetCollection<FTeamR>()
+let teamR =
+    { Id = 0L
+      Name = "RecordTeam"
+      Lead = DBRef<FLeadR>.From({ Id = 0L; Name = "RecordLead" })
+      Members = DBRefMany<FMemberR>() }
+teamR.Members.Add({ Id = 0L; Name = "RecordMember" })
+teamsR.Insert(teamR) |> ignore
+```
+
+#### Failure Contracts
+
+1. Unsupported relation query/update expression shapes are rejected with typed exceptions (`NotSupportedException`).
+2. Missing/inconsistent relation metadata is rejected where knowable (build/bootstrap), with translation-time safety net rejects for invalid metadata states.
+3. Reject paths are fail-closed: no owner/target/link/catalog mutation on rejected operations.
+
+**No silent fallback:** SoloDB does not silently downgrade unsupported relation operations to generic JSON scanning behavior.
+
+#### Compatibility and Migration Notes
+
+- Existing `DBRef<TTarget>` / `DBRefMany<TTarget>` persistence model remains relation-first (`SoloDBRelLink_*`, `SoloDBRelation`).
+- DBRef traversal depth is bounded: chains deeper than 10 relation hops are rejected during translation.
+- `DBRefMany<T>` item ordering is not a stable ordering contract unless your query/project explicitly orders results.
+- Nested DBRefMany relation predicates such as `Items.Any(i => i.SubItems.Any(...))` are rejected by translation.
+- `option<DBRef<_>>` / `option<DBRefMany<_>>` relation-property shapes are not supported; use `DBRef<_>.None` for empty single refs.
+- For custom-id relation scenarios (`DBRef<TTarget, TId>`), target-side id/index constraints must be satisfied before relation writes.
 
 ### Indexing for Performance
 
