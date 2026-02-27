@@ -145,6 +145,16 @@ let private tryGetSoloIdProperty (targetType: Type) =
         raise (InvalidOperationException(
             $"Error: Invalid [SoloId] declaration on '{targetType.FullName}'.\nReason: Multiple [SoloId] properties are not supported.\nFix: Keep exactly one [SoloId] property on relation targets."))
 
+let rec private containsNestedRelationRefType (t: Type) =
+    if isNull t then false
+    elif DBRefTypeHelpers.isAnyRelationRefType t then true
+    elif t.IsArray then
+        containsNestedRelationRefType (t.GetElementType())
+    elif t.IsGenericType then
+        t.GetGenericArguments() |> Array.exists containsNestedRelationRefType
+    else
+        false
+
 let private buildRelationSpecs (ownerType: Type) =
     ownerType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
     |> Array.choose (fun prop ->
@@ -155,11 +165,12 @@ let private buildRelationSpecs (ownerType: Type) =
             if DBRefTypeHelpers.isOptionWrappedRelationRefType propType then
                 raise (InvalidOperationException(
                     $"Error: Invalid relation property '{ownerType.FullName}.{prop.Name}'.\nReason: Option-wrapped DBRef/DBRefMany is not supported.\nFix: Use DBRef<T>/DBRef<TTarget,'TId>/DBRefMany<T> directly (non-option)."))
-            elif not propType.IsGenericType then
-                None
-            else
-                let generic = propType.GetGenericTypeDefinition()
-                if DBRefTypeHelpers.isAnyRelationRefType propType then
+            elif DBRefTypeHelpers.isAnyRelationRefType propType then
+                if not prop.CanWrite then
+                    raise (InvalidOperationException(
+                        $"Error: Invalid relation property '{ownerType.FullName}.{prop.Name}'.\nReason: Relation properties must be writable.\nFix: Add a public setter, or remove relation type from this property."))
+                else
+                    let generic = propType.GetGenericTypeDefinition()
                     let args = propType.GetGenericArguments()
                     let targetType = args.[0]
                     let typedIdType =
@@ -191,8 +202,11 @@ let private buildRelationSpecs (ownerType: Type) =
 
                     let orderBy = if isNull attr then DBRefOrder.Undefined else attr.OrderBy
                     Some (prop, kind, targetType, typedIdType, onDelete, onOwnerDelete, isUnique, orderBy)
-                else
-                    None)
+            elif containsNestedRelationRefType propType then
+                raise (InvalidOperationException(
+                    $"Error: Invalid relation property '{ownerType.FullName}.{prop.Name}'.\nReason: Container-wrapped relation-like shapes are not supported.\nFix: Use direct DBRef<T>/DBRef<TTarget,'TId>/DBRefMany<T> property types."))
+            else
+                None)
 
 let internal getRelationSpecs (ownerType: Type) =
     relationSpecsCache.GetOrAdd(ownerType, Func<_, _>(buildRelationSpecs))
