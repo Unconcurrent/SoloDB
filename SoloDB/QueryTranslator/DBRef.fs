@@ -347,7 +347,10 @@ type DBRefMany<'T>() =
     member _.Add(item: 'T) = _currentItems.Add item; _hasPendingMutations <- true
 
     /// <summary>Removes the first occurrence of an item. Tracked for diff-on-Update.</summary>
-    member _.Remove(item: 'T) = _hasPendingMutations <- true; _currentItems.Remove item
+    member _.Remove(item: 'T) =
+        let removed = _currentItems.Remove item
+        if removed then _hasPendingMutations <- true
+        removed
 
     /// <summary>Removes the item at the specified index. Tracked for diff-on-Update.</summary>
     member _.RemoveAt(index: int) = _currentItems.RemoveAt index; _hasPendingMutations <- true
@@ -362,7 +365,7 @@ type DBRefMany<'T>() =
     member _.IndexOf(item: 'T) = _currentItems.IndexOf item
 
     /// <summary>Inserts an item at the specified index. Tracked for diff-on-Update.</summary>
-    member _.Insert(index: int, item: 'T) = _currentItems.Insert(index, item)
+    member _.Insert(index: int, item: 'T) = _currentItems.Insert(index, item); _hasPendingMutations <- true
 
     /// <summary>Copies the elements to an array, starting at a particular array index.</summary>
     member _.CopyTo(array: 'T array, arrayIndex: int) = _currentItems.CopyTo(array, arrayIndex)
@@ -370,7 +373,10 @@ type DBRefMany<'T>() =
     /// <summary>Gets or sets the element at the specified index.</summary>
     member _.Item
         with get(index: int) = _currentItems.[index]
-        and set (index: int) (value: 'T) = _currentItems.[index] <- value
+        and set (index: int) (value: 'T) =
+            if not (EqualityComparer<'T>.Default.Equals(_currentItems.[index], value)) then
+                _currentItems.[index] <- value
+                _hasPendingMutations <- true
 
     /// <summary>Returns an enumerator that iterates through the collection.</summary>
     member _.GetEnumerator() : IEnumerator<'T> =

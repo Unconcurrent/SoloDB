@@ -185,8 +185,18 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                         let oldSet = HashSet<int64>(oldIds)
                         let newSet = HashSet<int64>(newIds)
                         if not (oldSet.SetEquals(newSet)) then
-                            ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
-                            for id in newIds do ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
+                            if tracker.WasCleared then
+                                ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
+                                for id in newIds do
+                                    ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
+                            else
+                                // Delta mode preserves concurrent changes outside this view's OriginalIds.
+                                for id in oldIds do
+                                    if not (newSet.Contains id) then
+                                        ops.Add(RemoveDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
+                                for id in newIds do
+                                    if not (oldSet.Contains id) then
+                                        ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
                 | :? IDBRefManyInternal as tracker when not tracker.IsLoaded && tracker.HasPendingMutations ->
                     if tracker.WasCleared then
                         // Unloaded + Clear(): collect post-clear items to detect Clear()+Add() pattern.
@@ -202,17 +212,23 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                             for id in newIds do
                                 ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
                     else
-                        // Unloaded + pending mutations (Add without load): diff against persisted ids
-                        match collectManyTargetIdsAndCascade tx descriptor newOwner true visited with
-                        | ValueNone -> ()
-                        | ValueSome newIds ->
-                            resetMap.[descriptor.Property.Name] <- newIds
-                            let oldIds = readPersistedManyTargetIds tx descriptor ownerId
-                            let oldSet = HashSet<int64>(oldIds)
-                            let newSet = HashSet<int64>(newIds)
-                            if not (oldSet.SetEquals(newSet)) then
-                                ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
-                                for id in newIds do ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
+                        let newOwnerEntityId = readEntityIdOrZero tx.OwnerType newOwner
+                        if newOwnerEntityId > 0L then
+                            raise (InvalidOperationException(
+                                $"Error: Cannot apply add-only mutation on unloaded relation '{descriptor.PropertyPath}'.\nReason: The DBRefMany tracker is unloaded and has pending mutations without Clear(), which is ambiguous.\nFix: Load the relation first, or call Clear() then Add(...) before saving."))
+                        else
+                            // ReplaceMany template objects (Id=0) model a full replacement payload.
+                            // Keep deterministic replace semantics here to avoid per-owner tracker bleed.
+                            match collectManyTargetIdsAndCascade tx descriptor newOwner true visited with
+                            | ValueNone -> ()
+                            | ValueSome newIds ->
+                                resetMap.[descriptor.Property.Name] <- newIds
+                                let oldIds = readPersistedManyTargetIds tx descriptor ownerId
+                                let oldSet = HashSet<int64>(oldIds)
+                                let newSet = HashSet<int64>(newIds)
+                                if not (oldSet.SetEquals(newSet)) then
+                                    ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
+                                    for id in newIds do ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
                 | :? IDBRefManyInternal ->
                     // Unloaded + no mutations: no relation operation required.
                     ()
@@ -235,6 +251,34 @@ let prepareDeleteOwner (tx: RelationTxContext) (ownerId: int64) (owner: obj) =
     withRelationSqliteWrap "prepare" "prepareDeleteOwner" (fun () ->
         { OwnerId = ownerId; OwnerType = tx.OwnerType }
     )
+
+let private cloneOwnerForReplaceMany (ownerType: Type) (owner: obj) =
+    ensureOwnerInstance ownerType owner "owner"
+    let clone = Activator.CreateInstance(ownerType)
+    let props = ownerType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+    for prop in props do
+        if prop.CanRead && prop.CanWrite then
+            let value = prop.GetValue(owner)
+            if isNull value then
+                prop.SetValue(clone, null)
+            else
+                match value with
+                | :? IDBRefManyInternal as srcTracker ->
+                    let dst = Activator.CreateInstance(prop.PropertyType)
+                    let addMethod =
+                        prop.PropertyType.GetMethods(BindingFlags.Public ||| BindingFlags.Instance)
+                        |> Array.tryFind (fun m -> m.Name = "Add" && m.GetParameters().Length = 1)
+                    match addMethod with
+                    | Some methodInfo ->
+                        for item in srcTracker.GetCurrentItemsBoxed() do
+                            methodInfo.Invoke(dst, [| item |]) |> ignore
+                        prop.SetValue(clone, dst)
+                    | None ->
+                        raise (InvalidOperationException(
+                            $"Error: Could not clone DBRefMany property '{ownerType.FullName}.{prop.Name}'.\nReason: Missing Add(T) method on relation container type.\nFix: Use DBRefMany<T> for multi-relations."))
+                | _ ->
+                    prop.SetValue(clone, value)
+    clone
 
 let syncInsert (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) =
     ensureTxContext tx
@@ -296,7 +340,8 @@ let syncReplaceMany (tx: RelationTxContext) (ownerIds: int64 seq) (oldOwners: ob
             raise (ArgumentException("ownerIds and oldOwners must have the same length.", "oldOwners"))
 
         for i = 0 to ownerIdArr.Length - 1 do
-            let plan = prepareUpdate tx ownerIdArr.[i] oldOwnerArr.[i] newOwner
+            let newOwnerClone = cloneOwnerForReplaceMany tx.OwnerType newOwner
+            let plan = prepareUpdate tx ownerIdArr.[i] oldOwnerArr.[i] newOwnerClone
             applyOps tx ownerIdArr.[i] plan false
     )
 
