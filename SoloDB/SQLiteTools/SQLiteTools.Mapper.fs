@@ -93,6 +93,19 @@ module internal SQLiteToolsMapper =
                     ) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
             | t when t = typeof<obj> ->
                 fun (reader: IDataReader) (startIndex: int) (columns: IDictionary<string, int>) ->
+                    // Scalar object queries should preserve DB NULL as null and avoid object wrappers.
+                    if columns.Count = 1 then
+                        let first = columns.Values |> Seq.head
+                        if startIndex <= first then
+                            let scalar: obj =
+                                if reader.IsDBNull(first) then
+                                    null
+                                else
+                                    reader.GetValue(first)
+                            JsonSerializator.JsonValue.Serialize<obj>(scalar).ToObject<'T>()
+                        else
+                            Unchecked.defaultof<'T>
+                    else
                     let jsonObj = JsonSerializator.JsonValue.Object(Dictionary(columns.Count))
                     for key in columns.Keys do
                         if startIndex <= columns.[key] then
