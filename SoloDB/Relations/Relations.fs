@@ -22,7 +22,7 @@ type RelationWritePlan = RelationsTypes.RelationWritePlan
 type RelationDeletePlan = RelationsTypes.RelationDeletePlan
 type RelationUpdateManyOp = RelationsTypes.RelationUpdateManyOp
 
-let private relationSqlWrapKey = "error[SDBREL0010]"
+let private relationSqlWrapKey = "relation-sql-boundary-operation-failed"
 
 let private isWrappedRelationSqlBoundaryError (ex: InvalidOperationException) =
     not (isNull ex)
@@ -39,7 +39,7 @@ let internal withRelationSqliteWrap (phase: string) (operation: string) (fn: uni
         raise ex
     | :? SqliteException as ex ->
         let message =
-            $"error[SDBREL0010] phase={phase} operation={operation} message=relation-sql-boundary-operation-failed\n" +
+            $"phase={phase} operation={operation} message={relationSqlWrapKey}\n" +
             "Error: relation SQL operation failed.\n" +
             $"Reason: underlying SQLite error at relation boundary (sqliteErrorCode={ex.SqliteErrorCode}, sqliteExtendedErrorCode={ex.SqliteExtendedErrorCode}).\n" +
             "Fix: check schema, relation metadata, link-table integrity, and constraints; then retry with valid state."

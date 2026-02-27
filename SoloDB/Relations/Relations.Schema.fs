@@ -275,7 +275,7 @@ let internal resolveTargetCollectionName (connection: SqliteConnection) (ownerTa
 
 let private br04Message (ownerType: Type) (ownerTable: string) (linkTable: string) (propNames: string array) =
     let props = String.Join(",", propNames)
-    $"error[SDBREL0004] patternId=NLR-SCH-04 phase=build shape=contradictory-shared-many ownerType={ownerType.FullName} ownerCollection={ownerTable} linkTable={linkTable} properties={props} collisions={props} message=Multiple DBRefMany properties on '{ownerType.Name}' resolve to the same link table '{linkTable}'. This contradictory shared-many topology is not supported."
+    $"Error: contradictory shared-many topology detected for '{ownerType.FullName}'.\nReason: Multiple DBRefMany properties ({props}) on collection '{ownerTable}' resolve to the same link table '{linkTable}'.\nFix: ensure each DBRefMany relation resolves to a distinct link table or redesign the relation topology."
 
 let private validateSharedManyContradictions (ownerType: Type) (ownerTable: string) (descriptors: RelationDescriptor array) =
     descriptors
@@ -339,7 +339,7 @@ let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) 
     descriptors
 
 let private br05Message (ownerTable: string) (propertyName: string) (phase: string) =
-    $"error[SDBREL0005] patternId=NLR-SCH-05 phase={phase} shape=missing-relation-metadata ownerCollection={ownerTable} property={propertyName} message=Relation metadata missing for '{ownerTable}.{propertyName}'. Cannot auto-heal: prior relation evidence exists."
+    $"Error: relation metadata missing for '{ownerTable}.{propertyName}'.\nReason: prior relation evidence exists and auto-heal is not safe (phase={phase}).\nFix: rebuild/repair relation metadata and link-table state before retrying."
 
 let private hasCatalogRow (connection: SqliteConnection) (ownerTable: string) (propertyName: string) =
     ensureRelationCatalogTable connection

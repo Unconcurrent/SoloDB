@@ -87,14 +87,14 @@ module internal QueryTranslatorVisitDbRef =
         | Some mapped when not (String.IsNullOrWhiteSpace mapped) -> formatName mapped
         | _ ->
             raise (InvalidOperationException(
-                $"error[SDBREL0005] patternId=NLR-SCH-05 phase=translation shape=missing-relation-metadata ownerCollection={ownerTable} property={propName} message=Relation metadata missing for '{ownerTable}.{propName}'. Link table cannot be resolved without metadata."))
+                $"Error: relation metadata missing for '{ownerTable}.{propName}'.\nReason: link table cannot be resolved without relation metadata (phase=translation).\nFix: repair/rebuild relation metadata before executing this query."))
 
     let private dbRefManyOwnerUsesSource (ctx: QueryContext) (ownerTable: string) (propName: string) =
         match ctx.TryResolveRelationOwnerUsesSource(ownerTable, propName) with
         | Some value -> value
         | None ->
             raise (InvalidOperationException(
-                $"error[SDBREL0005] patternId=NLR-SCH-05 phase=translation shape=missing-relation-metadata ownerCollection={ownerTable} property={propName} message=Relation metadata missing for '{ownerTable}.{propName}'. Owner-source direction cannot be resolved without metadata."))
+                $"Error: relation metadata missing for '{ownerTable}.{propName}'.\nReason: owner-source direction cannot be resolved without relation metadata (phase=translation).\nFix: repair/rebuild relation metadata before executing this query."))
 
     type private DBRefManyOwnerRef = {
         OwnerCollection: string
