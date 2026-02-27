@@ -120,6 +120,9 @@ module internal SQLiteToolsParams =
     let internal processParameters processFn (command: IDbCommand) (parameters: obj) =
         match parameters with
         | null -> ()
+        | :? IDictionary<string, obj> as dict ->
+            for KeyValue(key, value) in dict do
+                processFn command key value
         | :? IDictionary as dict ->
             for key in dict.Keys do
                 let value = dict.[key]
