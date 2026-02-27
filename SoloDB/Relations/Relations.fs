@@ -212,13 +212,16 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                             for id in newIds do
                                 ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
                     else
-                        let newOwnerEntityId = readEntityIdOrZero tx.OwnerType newOwner
-                        if newOwnerEntityId > 0L then
+                        // Discriminator: reject only ambiguous unloaded AddOnly with unsaved targets.
+                        // Persisted-target AddOnly on an unloaded tracker is treated as explicit replace intent.
+                        let hasUnsavedPendingTarget =
+                            tracker.GetCurrentItemsBoxed()
+                            |> Seq.exists (fun item -> readEntityIdOrZero descriptor.TargetType item <= 0L)
+                        if hasUnsavedPendingTarget then
                             raise (InvalidOperationException(
                                 $"Error: Cannot apply add-only mutation on unloaded relation '{descriptor.PropertyPath}'.\nReason: The DBRefMany tracker is unloaded and has pending mutations without Clear(), which is ambiguous.\nFix: Load the relation first, or call Clear() then Add(...) before saving."))
                         else
-                            // ReplaceMany template objects (Id=0) model a full replacement payload.
-                            // Keep deterministic replace semantics here to avoid per-owner tracker bleed.
+                            // Deterministic replace payload on unloaded tracker with persisted targets.
                             match collectManyTargetIdsAndCascade tx descriptor newOwner true visited with
                             | ValueNone -> ()
                             | ValueSome newIds ->
