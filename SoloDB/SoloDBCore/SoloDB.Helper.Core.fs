@@ -118,6 +118,8 @@ module internal Helper =
         ensureTypeCollectionMapTable connection
         connection.Execute("DELETE FROM SoloDBTypeCollectionMap WHERE CollectionName = @name", {|name = name|}) |> ignore
         connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}) |> ignore
+        // Drop/recreate must rebuild relation descriptors from a clean cache snapshot.
+        RelationsTypes.relationSpecsCache.Clear()
 
     /// <summary>
     /// Inserts a JSON string into a specified table, with options for replacement and explicit ID.
