@@ -26,16 +26,6 @@ open SoloDatabase.Attributes
 /// </summary>
 module internal Helper =
     /// <summary>
-    /// Creates a disposable mutex for a given table name to ensure thread-safe operations on that table.
-    /// </summary>
-    /// <param name="connectionStr">The connection string, used to ensure the lock is specific to the database instance.</param>
-    /// <param name="name">The name of the table to lock.</param>
-    /// <returns>A disposable mutex object.</returns>
-    let internal lockTable (connectionStr: string) (name: string) =
-        let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(connectionStr)}-Table-{name}")
-        mutex
-
-    /// <summary>
     /// Checks if a collection with the specified name exists in the database.
     /// </summary>
     /// <param name="name">The name of the collection.</param>

@@ -17,6 +17,9 @@ open SQLiteToolsMapper
 module SQLiteTools =
     /// <summary>
     /// Internal interface to allow temporary, nestable disabling of the Dispose method on a connection.
+    /// Used by 16 collection/FileStorage auto-transaction sites (SC3 removes these callers)
+    /// and 1 event-handler site at SoloDBEvents.Helpers.fs (SC5 removes this caller).
+    /// [SC6-DELETE: remove interface entirely after all callers are eliminated]
     /// </summary>
     type internal IDisableDispose =
         /// <summary>
@@ -268,6 +271,11 @@ module SQLiteTools =
         member this.DisposeReal() =
             base.Dispose(true)
 
+        // DISABLE-DISPOSE CONTRACT:
+        // Counter-based nestable suppression. NOT thread-safe (disposeDisableCount and
+        // disposingDisabled are plain int/bool, no Interlocked). Safe only because all
+        // callers operate on a borrowed connection that is single-threaded by design.
+        // [SC6-DELETE: remove implementation after all callers are eliminated]
         interface IDisableDispose with
             member this.DisableDispose(): IDisposable =
                 disposeDisableCount <- disposeDisableCount + 1

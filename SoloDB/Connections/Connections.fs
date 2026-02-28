@@ -258,6 +258,34 @@ module Connections =
                 guard()
                 inner.Get()
 
+        /// Resolves the sync transaction dispatch for this connection type.
+        /// Returns ValueSome(conn) for pass-through cases (already in transaction),
+        /// or ValueNone to indicate the Pooled path should handle transaction management.
+        member private this.ResolveSyncTransactionTarget() : struct (ConnectionManager voption * SqliteConnection voption) =
+            match this with
+            | Pooled pool -> struct (ValueSome pool, ValueNone)
+            | Transactional conn -> struct (ValueNone, ValueSome (conn :> SqliteConnection))
+            | Transitive conn when conn.IsWithinTransaction() -> struct (ValueNone, ValueSome conn)
+            | Transitive _conn ->
+                raise (InvalidOperationException
+                    "Error: Simple transitive connection used with a transaction.\nReason: This connection type does not support transactions.\nFix: Use a transactional connection or remove the transaction.")
+            | Guarded (guard, inner) ->
+                guard()
+                inner.ResolveSyncTransactionTarget()
+
+        /// Resolves the async transaction dispatch for this connection type.
+        /// Transitive always throws for async (preserved asymmetry).
+        member private this.ResolveAsyncTransactionTarget() : struct (ConnectionManager voption * SqliteConnection voption) =
+            match this with
+            | Pooled pool -> struct (ValueSome pool, ValueNone)
+            | Transactional conn -> struct (ValueNone, ValueSome (conn :> SqliteConnection))
+            | Transitive _conn ->
+                raise (InvalidOperationException
+                    "Error: Transitive connection used with a transaction.\nReason: This connection type does not support transactions.\nFix: Use a transactional connection or remove the transaction.")
+            | Guarded (guard, inner) ->
+                guard()
+                inner.ResolveAsyncTransactionTarget()
+
         /// <summary>
         /// Executes a synchronous function within a transaction. The behavior depends on the connection type.
         /// </summary>
@@ -265,18 +293,10 @@ module Connections =
         /// <returns>The result of the function.</returns>
         /// <exception cref="InvalidOperationException">Thrown if attempting to start a transaction on a simple Transitive connection.</exception>
         member this.WithTransaction(f: SqliteConnection -> 'T) =
-            match this with
-            | Pooled pool -> pool.WithTransaction f
-            | Transactional conn -> 
-                f conn
-            | Transitive conn when conn.IsWithinTransaction() ->
-                f conn
-            | Transitive _conn ->
-                raise (InvalidOperationException
-                    "Error: Simple transitive connection used with a transaction.\nReason: This connection type does not support transactions.\nFix: Use a transactional connection or remove the transaction.")
-            | Guarded (guard, inner) ->
-                guard()
-                inner.WithTransaction f
+            let struct (poolOpt, connOpt) = this.ResolveSyncTransactionTarget()
+            match poolOpt with
+            | ValueSome pool -> pool.WithTransaction f
+            | ValueNone -> f connOpt.Value
 
         /// <summary>
         /// Executes an asynchronous function within a transaction. The behavior depends on the connection type.
@@ -285,17 +305,10 @@ module Connections =
         /// <returns>A task representing the asynchronous operation.</returns>
         /// <exception cref="InvalidOperationException">Thrown if attempting to start a transaction on a Transitive connection.</exception>
         member this.WithAsyncTransaction(f: SqliteConnection -> Task<'T>) =
-            match this with
-            | Pooled pool -> 
-                pool.WithAsyncTransaction f
-            | Transactional conn -> 
-                f conn
-            | Transitive _conn -> 
-                raise (InvalidOperationException
-                    "Error: Transitive connection used with a transaction.\nReason: This connection type does not support transactions.\nFix: Use a transactional connection or remove the transaction.")
-            | Guarded (guard, inner) ->
-                guard()
-                inner.WithAsyncTransaction f
+            let struct (poolOpt, connOpt) = this.ResolveAsyncTransactionTarget()
+            match poolOpt with
+            | ValueSome pool -> pool.WithAsyncTransaction f
+            | ValueNone -> f connOpt.Value
         
     /// <summary>
     /// Extends the <see cref="SqliteConnection"/> class with helper methods.

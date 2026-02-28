@@ -218,7 +218,25 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
             createDb)
 
     /// <summary>Gets the internal connection provider for this collection.</summary>
-    member val internal Connection = connection    
+    member val internal Connection = connection
+
+    /// Wraps an operation in a relation-safe auto-transaction when not already in one.
+    /// Borrows a connection, disables dispose, creates a transient Collection via Transitive,
+    /// and runs BEGIN [beginKind] / COMMIT / ROLLBACK around the operation.
+    /// Used by Insert, Update, Delete, Replace, and batch methods that need relation atomicity.
+    member private this.WithRelationAutoTx (beginKind: string) (f: Collection<'T> -> 'R) : 'R =
+        use conn = connection.Get()
+        use _disabled = (unbox<IDisableDispose> conn).DisableDispose()
+        let directConnection = Transitive conn
+        let transientCollection = Collection<'T>(directConnection, name, connectionString, parentData)
+        conn.Execute (beginKind + ";") |> ignore
+        try
+            let result = f transientCollection
+            conn.Execute "COMMIT;" |> ignore
+            result
+        with _ ->
+            conn.Execute "ROLLBACK;" |> ignore
+            reraise()
 
     /// <summary>
     /// Inserts a new document into the collection.
@@ -227,18 +245,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>The ID of the newly inserted document.</returns>
     member this.Insert (item: 'T) =
         if this.HasRelations && not this.InTransaction then
-            use connection = connection.Get()
-            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
-            let directConnection = Transitive connection
-            let transientConnection = Collection(directConnection, name, connectionString, parentData)
-            connection.Execute "BEGIN IMMEDIATE;" |> ignore
-            try
-                let id = transientConnection.Insert(item)
-                connection.Execute "COMMIT;" |> ignore
-                id
-            with _ ->
-                connection.Execute "ROLLBACK;" |> ignore
-                reraise()
+            this.WithRelationAutoTx "BEGIN IMMEDIATE" (fun tc -> tc.Insert(item))
         else
             use connection = connection.Get()
             if this.HasRelations then
@@ -263,18 +270,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>The ID of the inserted or replaced document.</returns>
     member this.InsertOrReplace (item: 'T) =
         if this.HasRelations && not this.InTransaction then
-            use connection = connection.Get()
-            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
-            let directConnection = Transitive connection
-            let transientConnection = Collection(directConnection, name, connectionString, parentData)
-            connection.Execute "BEGIN IMMEDIATE;" |> ignore
-            try
-                let id = transientConnection.InsertOrReplace(item)
-                connection.Execute "COMMIT;" |> ignore
-                id
-            with _ ->
-                connection.Execute "ROLLBACK;" |> ignore
-                reraise()
+            this.WithRelationAutoTx "BEGIN IMMEDIATE" (fun tc -> tc.InsertOrReplace(item))
         else
             use connection = connection.Get()
             if this.HasRelations then
@@ -356,6 +352,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
             ids
         else
 
+        // Batch path: uses BEGIN (not BEGIN IMMEDIATE) — preserved intentionally.
         use connection = connection.Get()
         use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
         let directConnection = Transitive connection
@@ -388,10 +385,10 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
 
             connection.Execute "COMMIT;" |> ignore
             ids
-        with ex ->
+        with _ ->
             connection.Execute "ROLLBACK;" |> ignore
             reraise()
-            
+
     /// <summary>
     /// Inserts or replaces a sequence of documents in a single transaction.
     /// </summary>
@@ -763,17 +760,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <exception cref="InvalidOperationException">Thrown if the document type does not have a recognizable ID property.</exception>
     member this.Update(item: 'T) =
         if this.HasRelations && not this.InTransaction then
-            use connection = connection.Get()
-            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
-            let directConnection = Transitive connection
-            let transientConnection = Collection(directConnection, name, connectionString, parentData)
-            connection.Execute "BEGIN IMMEDIATE;" |> ignore
-            try
-                transientConnection.Update(item)
-                connection.Execute "COMMIT;" |> ignore
-            with _ ->
-                connection.Execute "ROLLBACK;" |> ignore
-                reraise()
+            this.WithRelationAutoTx "BEGIN IMMEDIATE" (fun tc -> tc.Update(item))
         else
             let filter, variables = 
                 if HasTypeId<'T>.Value then
@@ -930,18 +917,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member this.ReplaceMany(item: 'T)(filter: Expression<Func<'T, bool>>) =
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
         if this.HasRelations && not this.InTransaction then
-            use connection = connection.Get()
-            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
-            let directConnection = Transitive connection
-            let transientConnection = Collection(directConnection, name, connectionString, parentData)
-            connection.Execute "BEGIN IMMEDIATE;" |> ignore
-            try
-                let count = transientConnection.ReplaceMany(item)(filter)
-                connection.Execute "COMMIT;" |> ignore
-                count
-            with _ ->
-                connection.Execute "ROLLBACK;" |> ignore
-                reraise()
+            this.WithRelationAutoTx "BEGIN IMMEDIATE" (fun tc -> tc.ReplaceMany(item)(filter))
         else
             let filter, variables = QueryTranslator.translate name filter
             use connection = connection.Get()
@@ -981,18 +957,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member this.ReplaceOne(item: 'T)(filter: Expression<Func<'T, bool>>) =
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
         if this.HasRelations && not this.InTransaction then
-            use connection = connection.Get()
-            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
-            let directConnection = Transitive connection
-            let transientConnection = Collection(directConnection, name, connectionString, parentData)
-            connection.Execute "BEGIN IMMEDIATE;" |> ignore
-            try
-                let count = transientConnection.ReplaceOne(item)(filter)
-                connection.Execute "COMMIT;" |> ignore
-                count
-            with _ ->
-                connection.Execute "ROLLBACK;" |> ignore
-                reraise()
+            this.WithRelationAutoTx "BEGIN IMMEDIATE" (fun tc -> tc.ReplaceOne(item)(filter))
         else
             let filter, variables = QueryTranslator.translate name filter
             use connection = connection.Get()
@@ -1034,18 +999,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         | 0 -> 0 // If no transformations provided.
         | _ ->
         if this.HasRelations && not this.InTransaction then
-            use connection = connection.Get()
-            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
-            let directConnection = Transitive connection
-            let transientConnection = Collection(directConnection, name, connectionString, parentData)
-            connection.Execute "BEGIN IMMEDIATE;" |> ignore
-            try
-                let count = transientConnection.UpdateMany(transform)(filter)
-                connection.Execute "COMMIT;" |> ignore
-                count
-            with _ ->
-                connection.Execute "ROLLBACK;" |> ignore
-                reraise()
+            this.WithRelationAutoTx "BEGIN IMMEDIATE" (fun tc -> tc.UpdateMany(transform)(filter))
         else
             let relationTransforms = ResizeArray<QueryTranslatorBase.UpdateManyRelationTransform>()
             let jsonTransforms = ResizeArray<Expression<System.Action<'T>>>()
