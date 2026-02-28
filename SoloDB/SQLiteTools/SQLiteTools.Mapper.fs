@@ -128,6 +128,70 @@ module internal SQLiteToolsMapper =
 
                     jsonObj :> obj :?> 'T
 
+            | t when isTuple t ->
+                // Tuple branch: ordinal-based mapping. Element i → column startIndex + i.
+                let elementTypes = GenericTypeArgCache.Get t
+                let arity = elementTypes.Length
+
+                // Build expression tree for per-row tuple construction.
+                let readerParam = Expression.Parameter(typeof<IDataReader>, "reader")
+                let startIndexParam = Expression.Parameter(typeof<int>, "startIndex")
+                let columnsParam = Expression.Parameter(typeof<IDictionary<string, int>>, "columns")
+
+                // For each element, build a read expression with null-check.
+                let elementExprs = elementTypes |> Array.mapi (fun i elemType ->
+                    let ordinalExpr = Expression.Add(startIndexParam, Expression.Constant(i)) :> Expression
+
+                    // Build the reader.GetXxx(ordinal) call using type-based dispatch.
+                    let readExpr = matchMethodWithType elemType readerParam ordinalExpr
+
+                    // Null check: if reader.IsDBNull(ordinal) ...
+                    let isDbNullExpr =
+                        Expression.Call(
+                            readerParam,
+                            typeof<IDataRecord>.GetMethod("IsDBNull"),
+                            [| ordinalExpr |]
+                        )
+
+                    if elemType.IsValueType && not (elemType.IsGenericType && elemType.GetGenericTypeDefinition() = typedefof<Nullable<_>>) then
+                        // Non-nullable value type: DBNull → throw InvalidOperationException
+                        let throwExpr =
+                            let exCtor = typeof<InvalidOperationException>.GetConstructor([| typeof<string> |])
+                            let msg = $"DB null in non-nullable tuple element %i{i} of type '%s{elemType.Name}'."
+                            Expression.Throw(Expression.New(exCtor, Expression.Constant(msg)), elemType)
+                        Expression.Condition(isDbNullExpr, throwExpr, readExpr) :> Expression
+                    else
+                        // Reference type or Nullable<T>: DBNull → null/default
+                        let nullExpr =
+                            if elemType.IsValueType then
+                                Expression.Default(elemType) :> Expression
+                            else
+                                Expression.Constant(null, elemType) :> Expression
+                        Expression.Condition(isDbNullExpr, nullExpr, readExpr) :> Expression
+                )
+
+                // Construct the tuple via its constructor.
+                let ctor =
+                    t.GetConstructors()
+                    |> Array.find (fun c -> c.GetParameters().Length = arity)
+
+                let body = Expression.New(ctor, elementExprs) :> Expression
+
+                let lambda = Expression.Lambda<Func<IDataReader, int, IDictionary<string, int>, 'T>>(
+                    body,
+                    [| readerParam; startIndexParam; columnsParam |]
+                )
+
+                let fn = lambda.Compile()
+
+                fun (reader: IDataReader) (startIndex: int) (columns: IDictionary<string, int>) ->
+                    // Arity underflow guard: fail-closed.
+                    let available = reader.FieldCount - startIndex
+                    if available < arity then
+                        raise (InvalidOperationException(
+                            $"Tuple arity mismatch: tuple type '%s{t.Name}' has %i{arity} elements but query returns %i{available} columns from startIndex %i{startIndex}."))
+                    fn.Invoke(reader, startIndex, columns)
+
             | t when FSharpType.IsRecord(t, true) ->
                 // Parameter declarations
                 let readerParam = Expression.Parameter(typeof<IDataReader>, "reader")
@@ -316,6 +380,21 @@ module internal SQLiteToolsMapper =
                     with _ex -> reraise()
 
     /// <summary>
+    /// Returns a proper default value for type 'T. For tuple types, constructs a tuple with
+    /// all-default elements instead of returning null (which Unchecked.defaultof produces for reference tuples).
+    /// </summary>
+    let internal defaultOf<'T> () : 'T =
+        let t = typeof<'T>
+        if isTuple t then
+            let elementTypes = GenericTypeArgCache.Get t
+            let defaults = elementTypes |> Array.map (fun et ->
+                if et.IsValueType then Activator.CreateInstance(et)
+                else null)
+            FSharpValue.MakeTuple(defaults, t) :?> 'T
+        else
+            Unchecked.defaultof<'T>
+
+    /// <summary>
     /// Executes a command and maps the resulting data reader to a sequence of objects of type 'T.
     /// </summary>
     let internal queryCommand<'T> (command: IDbCommand) (nullableCachedDict: Dictionary<string, int>) = seq {
@@ -328,7 +407,7 @@ module internal SQLiteToolsMapper =
 
         if dict.Count = 0 then
             for i in 0..(reader.FieldCount - 1) do
-                dict.Add(reader.GetName(i), i)
+                dict.[reader.GetName(i)] <- i
 
 
         while reader.Read() do

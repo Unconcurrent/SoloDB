@@ -203,6 +203,91 @@ module internal SQLiteToolsParams =
             Expression.Call (stna, method, [|e|])
 
     /// <summary>
+    /// Resolves the IDataReader method, conversion flag, and optional conversion function for a given target type.
+    /// Shared logic used by both member-based and type-based expression builders.
+    /// </summary>
+    let private resolveReaderMethod (t: Type) : string * bool * (Expression -> Expression) option =
+        match t with
+        | t when t = typeof<byte> || t = typeof<int8> ->
+            "GetByte", false, None
+        | t when t = typeof<uint8> ->
+            "GetByte", true, Some (fun (expr: Expression) -> Expression.Convert(expr, typeof<uint8>) :> Expression)
+        | t when t = typeof<int16> ->
+            "GetInt16", false, None
+        | t when t = typeof<uint16> ->
+            "GetInt32", true, Some (fun (expr: Expression) ->
+                Expression.Convert(Expression.Call(
+                    null,
+                    typeof<uint16>.GetMethod("op_Explicit", [|typeof<int32>|]),
+                    expr),
+                    typeof<uint16>) :> Expression)
+        | t when t = typeof<int32> ->
+            "GetInt32", false, None
+        | t when t = typeof<uint32> ->
+            "GetInt64", true, Some (fun (expr: Expression) ->
+                Expression.Convert(Expression.Call(
+                    null,
+                    typeof<uint32>.GetMethod("op_Explicit", [|typeof<int64>|]),
+                    expr),
+                    typeof<uint32>) :> Expression)
+        | t when t = typeof<int64> ->
+            "GetInt64", false, None
+        | t when t = typeof<uint64> ->
+            "GetInt64", true, Some (fun (expr: Expression) ->
+                Expression.Convert(Expression.Call(
+                    null,
+                    typeof<uint64>.GetMethod("op_Explicit", [|typeof<int64>|]),
+                    expr),
+                    typeof<uint64>) :> Expression)
+        | t when t = typeof<float32> || t = typeof<float> ->
+            "GetFloat", false, None
+        | t when t = typeof<double> ->
+            "GetDouble", false, None
+        | t when t = typeof<decimal> ->
+            "GetDecimal", false, None
+        | t when t = typeof<string> ->
+            "GetString", false, None
+        | t when t = typeof<bool> ->
+            "GetBoolean", false, None
+        | t when t = typeof<NativeArray.NativeArray> ->
+            "GetStream", true, Some (fun (expr: Expression) -> streamToNativeArray (Expression.TypeAs(expr, typeof<SqliteBlob>)) :> Expression)
+        | t when t = typeof<byte[]> ->
+            "GetValue", true, Some (fun (expr: Expression) -> Expression.TypeAs(expr, typeof<byte[]>) :> Expression)
+        | t when t = typeof<Guid> ->
+            "GetGuid", false, None
+        | t when t = typeof<DateTime> ->
+            "GetDateTime", false, None
+        | t when t = typeof<DateTimeOffset> ->
+            "GetInt64", true, Some (fun (expr: Expression) -> Expression.Call(typeof<DateTimeOffset>.GetMethod("FromUnixTimeMilliseconds", [|typeof<int64>|]), expr) :> Expression)
+        | _ ->
+            "GetValue", true, Some (fun (expr: Expression) -> Expression.Convert(expr, t) :> Expression)
+
+    /// <summary>
+    /// Builds the final reader call expression from the resolved method and conversion.
+    /// </summary>
+    let private buildReaderExpr (readerParam: Expression) (columnVar: Expression) (getMethodName: string, needsConversion: bool, conversionFunc: (Expression -> Expression) option) =
+        let method = dataReaderMethods |> List.find(fun m -> m.Name = getMethodName)
+        let readerParam = Expression.TypeAs(readerParam, typeof<DbDataReader>)
+
+        let valueExpr: Expression =
+            Expression.Call(
+                readerParam,
+                method,
+                [| columnVar |]
+            )
+
+        match needsConversion, conversionFunc with
+        | true, Some convFunc -> convFunc(valueExpr)
+        | _ -> valueExpr
+
+    /// <summary>
+    /// Dynamically builds a LINQ Expression to read a value from an IDataReader for a given target type.
+    /// Used by the tuple mapper for ordinal-based element reads.
+    /// </summary>
+    let internal matchMethodWithType (t: Type) (readerParam: Expression) (columnVar: Expression) =
+        resolveReaderMethod t |> buildReaderExpr readerParam columnVar
+
+    /// <summary>
     /// Dynamically builds a LINQ Expression to read a value from an IDataReader for a specific member (property or field).
     /// </summary>
     let internal matchMethodWithMemberType (prop: MemberInfo) (readerParam: Expression) (columnVar: Expression) =

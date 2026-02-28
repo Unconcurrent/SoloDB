@@ -181,7 +181,7 @@ module SQLiteTools =
                 try
                     match queryCommand<'T> command columnDict |> Seq.tryHead with
                     | Some x -> x
-                    | None -> Unchecked.defaultof<'T>
+                    | None -> defaultOf<'T>()
                 finally inUse := false
 
             | ValueNone ->
@@ -189,7 +189,7 @@ module SQLiteTools =
 
             match queryCommand<'T> command null |> Seq.tryHead with
             | Some x -> x
-            | None -> Unchecked.defaultof<'T>
+            | None -> defaultOf<'T>()
 
         /// <summary>Executes a multi-mapping query, utilizing the cache if possible.</summary>
         /// <typeparam name="'T1">The type of the first object.</typeparam>
@@ -318,7 +318,7 @@ module SQLiteTools =
             | _ ->
             match queryInner<'T> this sql parameters |> Seq.tryHead with
             | Some x -> x
-            | None -> Unchecked.defaultof<'T>
+            | None -> defaultOf<'T>()
 
         /// <summary>
         /// Extension method for executing a multi-mapping query.
