@@ -31,14 +31,9 @@ module FileStorageCoreStream =
 
         member internal this.UpdateModified() =
             if dirty then
-                use db = db.Get()
-                match db.IsWithinTransaction() with
-                | true ->
-                    ignore (db.Execute (updateModifiedTimestampSQL, {|FileId = fileId; DirId = directoryId|}))
-                | false ->
-                    ignore (db.Execute (updateModifiedTimestampTrSQL, {|FileId = fileId; DirId = directoryId|}))
-                ()
-            ()
+                db.WithTransaction(fun conn ->
+                    ignore (conn.Execute (updateModifiedTimestampSQL, {|FileId = fileId; DirId = directoryId|}))
+                )
 
         override _.CanRead = not disposed
         override _.CanSeek = not disposed

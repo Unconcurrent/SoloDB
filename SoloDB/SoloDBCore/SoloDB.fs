@@ -101,7 +101,7 @@ type internal EventDbCache(connectionString: string, directConnection: SqliteCon
                 Connection = directConnection
                 OwnerTable = collectionName
                 OwnerType = typeof<'U>
-                InTransaction = directConnection.IsWithinTransaction()
+                InTransaction = true // Event context is always inside a transaction.
             }
             Relations.ensureSchemaForOwnerType relationTx typeof<'U>
 
@@ -152,10 +152,10 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <summary>Gets a value indicating whether the collection is operating within a transaction.</summary>
     member val InTransaction =
         match connection with
-        | Transactional _ | Transitive _ -> true
+        | Transactional _ -> true
         | Guarded (_, inner) ->
             match inner with
-            | Transactional _ | Transitive _ -> true
+            | Transactional _ -> true
             | _ -> false
         | Pooled _ -> false
     /// <summary>Gets a value indicating whether type information should be included during serialization for documents in this collection.</summary>
@@ -181,7 +181,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <summary>Gets the event registration API for this collection.</summary>
     member val private Events: ISoloDBCollectionEvents<'T> =
         let createDb (directConnection: SqliteConnection) (guard: unit -> unit) : ISoloDB =
-            let guardedConnection = Guarded(guard, Transitive directConnection)
+            let guardedConnection = Guarded(guard, Transactional directConnection)
             let cache = EventDbCache(connectionString, directConnection, guardedConnection, parentData, name)
 
             { new ISoloDB with
@@ -221,22 +221,26 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member val internal Connection = connection
 
     /// Wraps an operation in a relation-safe auto-transaction when not already in one.
-    /// Borrows a connection, disables dispose, creates a transient Collection via Transitive,
-    /// and runs BEGIN [beginKind] / COMMIT / ROLLBACK around the operation.
-    /// Used by Insert, Update, Delete, Replace, and batch methods that need relation atomicity.
-    member private this.WithRelationAutoTx (beginKind: string) (f: Collection<'T> -> 'R) : 'R =
-        use conn = connection.Get()
-        use _disabled = (unbox<IDisableDispose> conn).DisableDispose()
-        let directConnection = Transitive conn
-        let transientCollection = Collection<'T>(directConnection, name, connectionString, parentData)
-        conn.Execute (beginKind + ";") |> ignore
-        try
-            let result = f transientCollection
-            conn.Execute "COMMIT;" |> ignore
-            result
-        with _ ->
-            conn.Execute "ROLLBACK;" |> ignore
-            reraise()
+    /// Routes through Connection.WithTransaction (hybrid: BEGIN IMMEDIATE top-level, SAVEPOINT nested).
+    /// Used by Insert, Update, Replace, and batch methods that need relation atomicity.
+    member private this.WithRelationAutoTx (f: Collection<'T> -> 'R) : 'R =
+        connection.WithTransaction(fun conn ->
+            let directConnection = Transactional conn
+            let transientCollection = Collection<'T>(directConnection, name, connectionString, parentData)
+            f transientCollection)
+
+    /// Wraps a delete operation in a relation-safe auto-transaction.
+    /// Checks RequiresRelationDeleteHandling inside the transaction scope (no double-borrow).
+    /// If relation handling is needed, routes through transient collection; otherwise, runs fallback directly.
+    member private this.WithRelationAutoTxDelete (f: Collection<'T> -> 'R) (fallback: SqliteConnection -> 'R) : 'R =
+        connection.WithTransaction(fun conn ->
+            let requiresRelationHandling = this.RequiresRelationDeleteHandling(conn)
+            if requiresRelationHandling then
+                let directConnection = Transactional conn
+                let transientCollection = Collection<'T>(directConnection, name, connectionString, parentData)
+                f transientCollection
+            else
+                fallback conn)
 
     /// <summary>
     /// Inserts a new document into the collection.
@@ -245,7 +249,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>The ID of the newly inserted document.</returns>
     member this.Insert (item: 'T) =
         if this.HasRelations && not this.InTransaction then
-            this.WithRelationAutoTx "BEGIN IMMEDIATE" (fun tc -> tc.Insert(item))
+            this.WithRelationAutoTx (fun tc -> tc.Insert(item))
         else
             use connection = connection.Get()
             if this.HasRelations then
@@ -270,7 +274,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>The ID of the inserted or replaced document.</returns>
     member this.InsertOrReplace (item: 'T) =
         if this.HasRelations && not this.InTransaction then
-            this.WithRelationAutoTx "BEGIN IMMEDIATE" (fun tc -> tc.InsertOrReplace(item))
+            this.WithRelationAutoTx (fun tc -> tc.InsertOrReplace(item))
         else
             use connection = connection.Get()
             if this.HasRelations then
@@ -325,8 +329,8 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member this.InsertBatch (items: 'T seq) =
         if isNull items then raise (ArgumentNullException(nameof(items)))
 
-        if this.InTransaction then
-            use connection = connection.Get()
+        this.WithRelationAutoTx (fun transientCollection ->
+            let connection = transientCollection.Connection.Get()
             let tx =
                 if this.HasRelations then
                     let x: Relations.RelationTxContext = {
@@ -344,50 +348,12 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 match tx with
                 | ValueSome tx ->
                     let plan = Relations.prepareInsert tx (box item)
-                    let id = Helper.insertInner this.IncludeType item connection name this
+                    let id = Helper.insertInner this.IncludeType item connection name transientCollection
                     Relations.syncInsert tx id plan
                     ids.Add id
                 | ValueNone ->
-                    Helper.insertInner this.IncludeType item connection name this |> ids.Add
-            ids
-        else
-
-        // Batch path: uses BEGIN (not BEGIN IMMEDIATE) — preserved intentionally.
-        use connection = connection.Get()
-        use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
-        let directConnection = Transitive connection
-        let transientConnection = Collection(directConnection, name, connectionString, parentData)
-        connection.Execute "BEGIN;" |> ignore
-
-        try
-            let tx =
-                if this.HasRelations then
-                    let x: Relations.RelationTxContext = {
-                        Connection = connection
-                        OwnerTable = name
-                        OwnerType = typeof<'T>
-                        InTransaction = true
-                    }
-                    Relations.ensureSchemaForOwnerType x typeof<'T>
-                    ValueSome x
-                else ValueNone
-
-            let ids = List<int64>()
-            for item in items do
-                match tx with
-                | ValueSome tx ->
-                    let plan = Relations.prepareInsert tx (box item)
-                    let id = Helper.insertInner this.IncludeType item connection name transientConnection
-                    Relations.syncInsert tx id plan
-                    ids.Add id
-                | ValueNone ->
-                    Helper.insertInner this.IncludeType item connection name transientConnection |> ids.Add
-
-            connection.Execute "COMMIT;" |> ignore
-            ids
-        with _ ->
-            connection.Execute "ROLLBACK;" |> ignore
-            reraise()
+                    Helper.insertInner this.IncludeType item connection name transientCollection |> ids.Add
+            ids)
 
     /// <summary>
     /// Inserts or replaces a sequence of documents in a single transaction.
@@ -397,8 +363,8 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member this.InsertOrReplaceBatch (items: 'T seq) =
         if isNull items then raise (ArgumentNullException(nameof(items)))
 
-        if this.InTransaction then
-            use connection = connection.Get()
+        this.WithRelationAutoTx (fun transientCollection ->
+            let connection = transientCollection.Connection.Get()
             let tx =
                 if this.HasRelations then
                     let x: Relations.RelationTxContext = {
@@ -444,77 +410,12 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     | ValueNone -> ()
 
                     let plan = Relations.prepareUpsert tx oldOwner (box item)
-                    let id = Helper.insertOrReplaceInner this.IncludeType item connection name this
+                    let id = Helper.insertOrReplaceInner this.IncludeType item connection name transientCollection
                     Relations.syncUpsert tx id plan
                     ids.Add id
                 | ValueNone ->
-                    Helper.insertOrReplaceInner this.IncludeType item connection name this |> ids.Add
-            ids
-        else
-
-        use connection = connection.Get()
-        use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
-        let directConnection = Transitive connection
-        let transientConnection = Collection(directConnection, name, connectionString, parentData)
-        connection.Execute "BEGIN;" |> ignore
-        
-        try
-            let tx =
-                if this.HasRelations then
-                    let x: Relations.RelationTxContext = {
-                        Connection = connection
-                        OwnerTable = name
-                        OwnerType = typeof<'T>
-                        InTransaction = true
-                    }
-                    Relations.ensureSchemaForOwnerType x typeof<'T>
-                    ValueSome x
-                else ValueNone
-
-            let ids = List<int64>()
-            for item in items do
-                match tx with
-                | ValueSome tx ->
-                    let oldRow =
-                        if HasTypeId<'T>.Value then
-                            let id = HasTypeId<'T>.Read item
-                            if id > 0L then
-                                match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {| id = id |}) with
-                                | row when Object.ReferenceEquals(row, null) -> ValueNone
-                                | row -> ValueSome row
-                            else ValueNone
-                        else
-                            match CustomTypeId<'T>.Value with
-                            | Some customId ->
-                                let idValue = customId.GetId(item |> box)
-                                let idProp = customId.Property
-                                let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = idValue))
-                                match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
-                                | row when Object.ReferenceEquals(row, null) -> ValueNone
-                                | row -> ValueSome row
-                            | None -> ValueNone
-
-                    let oldOwner, oldOwnerId =
-                        match oldRow with
-                        | ValueSome row -> ValueSome (fromSQLite<'T> row |> box), ValueSome row.Id.Value
-                        | ValueNone -> ValueNone, ValueNone
-
-                    match oldOwnerId with
-                    | ValueSome ownerId -> Relations.applyOwnerDeletePolicies tx name ownerId
-                    | ValueNone -> ()
-
-                    let plan = Relations.prepareUpsert tx oldOwner (box item)
-                    let id = Helper.insertOrReplaceInner this.IncludeType item connection name transientConnection
-                    Relations.syncUpsert tx id plan
-                    ids.Add id
-                | ValueNone ->
-                    Helper.insertOrReplaceInner this.IncludeType item connection name transientConnection |> ids.Add
-
-            connection.Execute "COMMIT;" |> ignore
-            ids
-        with ex ->
-            connection.Execute "ROLLBACK;" |> ignore
-            reraise()
+                    Helper.insertOrReplaceInner this.IncludeType item connection name transientCollection |> ids.Add
+            ids)
 
     /// <summary>
     /// Tries to find a document by its 64-bit integer ID.
@@ -552,21 +453,13 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="id">The ID of the document to delete.</param>
     /// <returns>The number of documents deleted (0 or 1).</returns>
     member this.DeleteById(id: int64) =
-        use connection = connection.Get()
-        let requiresRelationHandling = this.RequiresRelationDeleteHandling(connection)
-        if requiresRelationHandling && not this.InTransaction then
-            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
-            let directConnection = Transitive connection
-            let transientConnection = Collection(directConnection, name, connectionString, parentData)
-            connection.Execute "BEGIN IMMEDIATE;" |> ignore
-            try
-                let count = transientConnection.DeleteById(id)
-                connection.Execute "COMMIT;" |> ignore
-                count
-            with _ ->
-                connection.Execute "ROLLBACK;" |> ignore
-                reraise()
+        if not this.InTransaction then
+            this.WithRelationAutoTxDelete
+                (fun tc -> tc.DeleteById(id))
+                (fun conn -> conn.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {|id = id|}))
         else
+            use connection = connection.Get()
+            let requiresRelationHandling = this.RequiresRelationDeleteHandling(connection)
             if requiresRelationHandling then
                 let tx: Relations.RelationTxContext = {
                     Connection = connection
@@ -717,21 +610,13 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
 
         let idProp = CustomTypeId<'T>.Value.Value.Property
         let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
-        use connection = connection.Get()
-        let requiresRelationHandling = this.RequiresRelationDeleteHandling(connection)
-        if requiresRelationHandling && not this.InTransaction then
-            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
-            let directConnection = Transitive connection
-            let transientConnection = Collection(directConnection, name, connectionString, parentData)
-            connection.Execute "BEGIN IMMEDIATE;" |> ignore
-            try
-                let count = transientConnection.DeleteById<'IdType>(id)
-                connection.Execute "COMMIT;" |> ignore
-                count
-            with _ ->
-                connection.Execute "ROLLBACK;" |> ignore
-                reraise()
+        if not this.InTransaction then
+            this.WithRelationAutoTxDelete
+                (fun tc -> tc.DeleteById<'IdType>(id))
+                (fun conn -> conn.Execute ($"DELETE FROM \"{name}\" WHERE {filter}", variables))
         else
+            use connection = connection.Get()
+            let requiresRelationHandling = this.RequiresRelationDeleteHandling(connection)
             if requiresRelationHandling then
                 let tx: Relations.RelationTxContext = {
                     Connection = connection
@@ -760,7 +645,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <exception cref="InvalidOperationException">Thrown if the document type does not have a recognizable ID property.</exception>
     member this.Update(item: 'T) =
         if this.HasRelations && not this.InTransaction then
-            this.WithRelationAutoTx "BEGIN IMMEDIATE" (fun tc -> tc.Update(item))
+            this.WithRelationAutoTx (fun tc -> tc.Update(item))
         else
             let filter, variables = 
                 if HasTypeId<'T>.Value then
@@ -815,21 +700,15 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>The number of documents deleted.</returns>
     member this.DeleteMany(filter: Expression<Func<'T, bool>>) =
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
-        use connection = connection.Get()
-        let requiresRelationHandling = this.RequiresRelationDeleteHandling(connection)
-        if requiresRelationHandling && not this.InTransaction then
-            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
-            let directConnection = Transitive connection
-            let transientConnection = Collection(directConnection, name, connectionString, parentData)
-            connection.Execute "BEGIN IMMEDIATE;" |> ignore
-            try
-                let count = transientConnection.DeleteMany(filter)
-                connection.Execute "COMMIT;" |> ignore
-                count
-            with _ ->
-                connection.Execute "ROLLBACK;" |> ignore
-                reraise()
+        if not this.InTransaction then
+            this.WithRelationAutoTxDelete
+                (fun tc -> tc.DeleteMany(filter))
+                (fun conn ->
+                    let filter, variables = QueryTranslator.translate name filter
+                    conn.Execute ($"DELETE FROM \"{name}\" WHERE " + filter, variables))
         else
+            use connection = connection.Get()
+            let requiresRelationHandling = this.RequiresRelationDeleteHandling(connection)
             let filter, variables = QueryTranslator.translate name filter
 
             if requiresRelationHandling then
@@ -871,21 +750,15 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>The number of documents deleted (0 or 1).</returns>
     member this.DeleteOne(filter: Expression<Func<'T, bool>>) =
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
-        use connection = connection.Get()
-        let requiresRelationHandling = this.RequiresRelationDeleteHandling(connection)
-        if requiresRelationHandling && not this.InTransaction then
-            use _disabled = (unbox<IDisableDispose> connection).DisableDispose()
-            let directConnection = Transitive connection
-            let transientConnection = Collection(directConnection, name, connectionString, parentData)
-            connection.Execute "BEGIN IMMEDIATE;" |> ignore
-            try
-                let count = transientConnection.DeleteOne(filter)
-                connection.Execute "COMMIT;" |> ignore
-                count
-            with _ ->
-                connection.Execute "ROLLBACK;" |> ignore
-                reraise()
+        if not this.InTransaction then
+            this.WithRelationAutoTxDelete
+                (fun tc -> tc.DeleteOne(filter))
+                (fun conn ->
+                    let filter, variables = QueryTranslator.translate name filter
+                    conn.Execute ($"DELETE FROM \"{name}\" WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filter}) LIMIT 1)", variables))
         else
+            use connection = connection.Get()
+            let requiresRelationHandling = this.RequiresRelationDeleteHandling(connection)
             let filter, variables = QueryTranslator.translate name filter
 
             if requiresRelationHandling then
@@ -917,7 +790,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member this.ReplaceMany(item: 'T)(filter: Expression<Func<'T, bool>>) =
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
         if this.HasRelations && not this.InTransaction then
-            this.WithRelationAutoTx "BEGIN IMMEDIATE" (fun tc -> tc.ReplaceMany(item)(filter))
+            this.WithRelationAutoTx (fun tc -> tc.ReplaceMany(item)(filter))
         else
             let filter, variables = QueryTranslator.translate name filter
             use connection = connection.Get()
@@ -957,7 +830,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member this.ReplaceOne(item: 'T)(filter: Expression<Func<'T, bool>>) =
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
         if this.HasRelations && not this.InTransaction then
-            this.WithRelationAutoTx "BEGIN IMMEDIATE" (fun tc -> tc.ReplaceOne(item)(filter))
+            this.WithRelationAutoTx (fun tc -> tc.ReplaceOne(item)(filter))
         else
             let filter, variables = QueryTranslator.translate name filter
             use connection = connection.Get()
@@ -999,7 +872,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         | 0 -> 0 // If no transformations provided.
         | _ ->
         if this.HasRelations && not this.InTransaction then
-            this.WithRelationAutoTx "BEGIN IMMEDIATE" (fun tc -> tc.UpdateMany(transform)(filter))
+            this.WithRelationAutoTx (fun tc -> tc.UpdateMany(transform)(filter))
         else
             let relationTransforms = ResizeArray<QueryTranslatorBase.UpdateManyRelationTransform>()
             let jsonTransforms = ResizeArray<Expression<System.Action<'T>>>()
@@ -1317,10 +1190,10 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
                 Connection = connection
                 OwnerTable = name
                 OwnerType = typeof<'T>
-                InTransaction = connection.IsWithinTransaction()
+                InTransaction = true // TransactionalSoloDB is always inside a transaction.
             }
             Relations.ensureSchemaForOwnerType relationTx typeof<'T>
-            
+
         Collection<'T>(Transactional connection, name, connectionString, { ClearCacheFunction = ignore; EventSystem = parentData.EventSystem }) :> ISoloDBCollection<'T>
 
     /// <summary>
@@ -1498,8 +1371,8 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         if name.StartsWith "SoloDB" then raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
         use connection = connectionManager.Borrow()
-        let withinTransaction = connection.IsWithinTransaction()
-        if not withinTransaction then connection.Execute "BEGIN IMMEDIATE;" |> ignore
+        let alreadyInTransaction = connection.InsideTransaction
+        if not alreadyInTransaction then connection.Execute "BEGIN IMMEDIATE;" |> ignore
         try
             let shouldCreate = not (Helper.existsCollection name connection)
             if shouldCreate then
@@ -1519,9 +1392,9 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 }
                 Relations.ensureSchemaForOwnerType relationTx typeof<'T>
 
-            if not withinTransaction then connection.Execute "COMMIT;" |> ignore
+            if not alreadyInTransaction then connection.Execute "COMMIT;" |> ignore
         with _ ->
-            if not withinTransaction then connection.Execute "ROLLBACK;" |> ignore
+            if not alreadyInTransaction then connection.Execute "ROLLBACK;" |> ignore
             reraise()
 
         Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = this.ClearCache; EventSystem = this.Events }) :> ISoloDBCollection<'T>
@@ -1583,18 +1456,18 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         let name = Helper.formatName name
 
         use connection = connectionManager.Borrow()
-        let withinTransaction = connection.IsWithinTransaction()
-        if not withinTransaction then connection.Execute "BEGIN IMMEDIATE;" |> ignore
+        let alreadyInTransaction = connection.InsideTransaction
+        if not alreadyInTransaction then connection.Execute "BEGIN IMMEDIATE;" |> ignore
         try
             if Helper.existsCollection name connection then
                 Helper.dropCollection name connection
-                if not withinTransaction then connection.Execute "COMMIT;" |> ignore
+                if not alreadyInTransaction then connection.Execute "COMMIT;" |> ignore
                 true
             else
-                if not withinTransaction then connection.Execute "COMMIT;" |> ignore
+                if not alreadyInTransaction then connection.Execute "COMMIT;" |> ignore
                 false
         with _ ->
-            if not withinTransaction then connection.Execute "ROLLBACK;" |> ignore
+            if not alreadyInTransaction then connection.Execute "ROLLBACK;" |> ignore
             reraise()
 
     /// <summary>

@@ -16,18 +16,6 @@ open SQLiteToolsMapper
 /// </summary>
 module SQLiteTools =
     /// <summary>
-    /// Internal interface to allow temporary, nestable disabling of the Dispose method on a connection.
-    /// Used by 16 collection/FileStorage auto-transaction sites (SC3 removes these callers)
-    /// and 1 event-handler site at SoloDBEvents.Helpers.fs (SC5 removes this caller).
-    /// [SC6-DELETE: remove interface entirely after all callers are eliminated]
-    /// </summary>
-    type internal IDisableDispose =
-        /// <summary>
-        /// Increments the dispose-disable counter and returns an IDisposable that decrements it.
-        /// </summary>
-        abstract DisableDispose: unit -> IDisposable
-
-    /// <summary>
     /// A sealed wrapper around SqliteConnection that adds command caching capabilities.
     /// </summary>
     /// <param name="connectionStr">The connection string.</param>
@@ -35,8 +23,6 @@ module SQLiteTools =
     /// <param name="config">The database configuration.</param>
     type [<Sealed>] CachingDbConnection internal (connectionStr: string, onDispose, config: Types.SoloDBConfiguration, onEnterEventHandlerScope: unit -> unit, onExitEventHandlerScope: unit -> unit) =
         inherit SqliteConnection(connectionStr)
-        let mutable disposingDisabled = false
-        let mutable disposeDisableCount = 0
         let mutable preparedCache = Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
         let maxCacheSize = 1000
         // K1: connection-level reader-active guard to prevent indefinite hang from overlapping readers.
@@ -271,32 +257,18 @@ module SQLiteTools =
         member this.DisposeReal() =
             base.Dispose(true)
 
-        // DISABLE-DISPOSE CONTRACT:
-        // Counter-based nestable suppression. NOT thread-safe (disposeDisableCount and
-        // disposingDisabled are plain int/bool, no Interlocked). Safe only because all
-        // callers operate on a borrowed connection that is single-threaded by design.
-        // [SC6-DELETE: remove implementation after all callers are eliminated]
-        interface IDisableDispose with
-            member this.DisableDispose(): IDisposable =
-                disposeDisableCount <- disposeDisableCount + 1
-                disposingDisabled <- true
-                { new IDisposable with
-                    override _.Dispose() =
-                        disposeDisableCount <- disposeDisableCount - 1
-                        if disposeDisableCount <= 0 then
-                            disposeDisableCount <- 0
-                            disposingDisabled <- false
-                        ()}
-
         // K4: override Dispose(bool) to ensure TakeBack is always called on disposal,
         // regardless of whether Dispose() is called via IDisposable or base class dispatch.
+        // Dispose is suppressed when InsideTransaction is true (set by WithTransactionBorrowed
+        // and event handler paths). This prevents premature pool return when connection is used
+        // inside a transaction via Transactional wrapping or event callbacks.
         override this.Dispose(disposing: bool) =
-            if disposing && not disposingDisabled then
+            if disposing && not this.InsideTransaction then
                 onDispose this
 
         interface IDisposable with
             override this.Dispose (): unit =
-                if not disposingDisabled then
+                if not this.InsideTransaction then
                     onDispose this
 
     /// <summary>

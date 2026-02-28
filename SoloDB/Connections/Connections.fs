@@ -19,6 +19,38 @@ module Connections =
             raise (InvalidOperationException(
                 "Error: Event handler used a non-context SoloDB instance.\nReason: Event handlers must use the provided ctx (ISoloDB). Using another instance can lock the database.\nFix: Use the ctx parameter for all database operations inside handlers."))
 
+    // Global savepoint counter for unique savepoint names across all connections and threads.
+    let mutable private savepointCounter = 0L
+
+    /// Wraps a synchronous operation in a SAVEPOINT scope.
+    /// On success: RELEASE (merge into parent). On failure: ROLLBACK TO + RELEASE (undo nested, keep parent).
+    let internal withSavepoint (conn: SqliteConnection) (f: SqliteConnection -> 'T) =
+        let sp = $"sp_{Interlocked.Increment(&savepointCounter)}"
+        conn.Execute($"SAVEPOINT \"{sp}\";") |> ignore
+        try
+            let ret = f conn
+            conn.Execute($"RELEASE \"{sp}\";") |> ignore
+            ret
+        with _ex ->
+            try conn.Execute($"ROLLBACK TO \"{sp}\";") |> ignore with _ -> ()
+            try conn.Execute($"RELEASE \"{sp}\";") |> ignore with _ -> ()
+            reraise()
+
+    /// Wraps an asynchronous operation in a SAVEPOINT scope.
+    /// On success: RELEASE (merge into parent). On failure: ROLLBACK TO + RELEASE (undo nested, keep parent).
+    let internal withSavepointAsync (conn: SqliteConnection) (f: SqliteConnection -> Task<'T>) = task {
+        let sp = $"sp_{Interlocked.Increment(&savepointCounter)}"
+        conn.Execute($"SAVEPOINT \"{sp}\";") |> ignore
+        try
+            let! ret = f conn
+            conn.Execute($"RELEASE \"{sp}\";") |> ignore
+            return ret
+        with _ex ->
+            try conn.Execute($"ROLLBACK TO \"{sp}\";") |> ignore with _ -> ()
+            try conn.Execute($"RELEASE \"{sp}\";") |> ignore with _ -> ()
+            return reraiseAnywhere _ex
+    }
+
     let private beginImmediateWithRetry (connection: CachingDbConnection) =
         let mutable attempt = 0
         let mutable started = false
@@ -46,22 +78,6 @@ module Connections =
         /// <param name="disposing">If true, disposes managed resources.</param>
         member internal this.DisposeReal(disposing) =
             base.Dispose disposing
-
-        /// <summary>
-        /// A static, reusable IDisposable object that performs no action upon disposal.
-        /// </summary>
-        static member private NoopDispose = { new IDisposable with override _.Dispose() = () }
-
-        /// <summary>
-        /// Implementation of the IDisableDispose interface.
-        /// </summary>
-        interface IDisableDispose with
-            /// <summary>
-            /// Returns a dummy IDisposable that does nothing.
-            /// </summary>
-            /// <returns>An IDisposable that can be safely "disposed" without affecting the connection.</returns>
-            member this.DisableDispose(): IDisposable = 
-                TransactionalConnection.NoopDispose
 
         /// <summary>
         /// Overrides the default Dispose behavior to do nothing. This prevents the connection
@@ -235,9 +251,7 @@ module Connections =
         /// <summary>A connection sourced from a connection pool.</summary>
         | Pooled of pool: ConnectionManager
         /// <summary>A dedicated, non-disposing connection for an ongoing transaction.</summary>
-        | Transactional of conn: TransactionalConnection
-        /// <summary>A raw, pass-through connection, typically for internal operations.</summary>
-        | Transitive of tc: SqliteConnection
+        | Transactional of conn: SqliteConnection
         /// <summary>A connection guarded by a validity check.</summary>
         | Guarded of guard: (unit -> unit) * inner: Connection
 
@@ -253,76 +267,37 @@ module Connections =
                     ThrowOutsideEventContextUsage()
                 pool.Borrow()
             | Transactional conn -> conn
-            | Transitive c -> c
             | Guarded (guard, inner) ->
                 guard()
                 inner.Get()
 
-        /// Resolves the sync transaction dispatch for this connection type.
-        /// Returns ValueSome(conn) for pass-through cases (already in transaction),
-        /// or ValueNone to indicate the Pooled path should handle transaction management.
-        member private this.ResolveSyncTransactionTarget() : struct (ConnectionManager voption * SqliteConnection voption) =
-            match this with
-            | Pooled pool -> struct (ValueSome pool, ValueNone)
-            | Transactional conn -> struct (ValueNone, ValueSome (conn :> SqliteConnection))
-            | Transitive conn when conn.IsWithinTransaction() -> struct (ValueNone, ValueSome conn)
-            | Transitive _conn ->
-                raise (InvalidOperationException
-                    "Error: Simple transitive connection used with a transaction.\nReason: This connection type does not support transactions.\nFix: Use a transactional connection or remove the transaction.")
-            | Guarded (guard, inner) ->
-                guard()
-                inner.ResolveSyncTransactionTarget()
-
-        /// Resolves the async transaction dispatch for this connection type.
-        /// Transitive always throws for async (preserved asymmetry).
-        member private this.ResolveAsyncTransactionTarget() : struct (ConnectionManager voption * SqliteConnection voption) =
-            match this with
-            | Pooled pool -> struct (ValueSome pool, ValueNone)
-            | Transactional conn -> struct (ValueNone, ValueSome (conn :> SqliteConnection))
-            | Transitive _conn ->
-                raise (InvalidOperationException
-                    "Error: Transitive connection used with a transaction.\nReason: This connection type does not support transactions.\nFix: Use a transactional connection or remove the transaction.")
-            | Guarded (guard, inner) ->
-                guard()
-                inner.ResolveAsyncTransactionTarget()
-
         /// <summary>
         /// Executes a synchronous function within a transaction. The behavior depends on the connection type.
+        /// Pooled: BEGIN IMMEDIATE (top-level). Transactional: SAVEPOINT (nested).
         /// </summary>
         /// <param name="f">The function to execute within the transaction.</param>
         /// <returns>The result of the function.</returns>
-        /// <exception cref="InvalidOperationException">Thrown if attempting to start a transaction on a simple Transitive connection.</exception>
         member this.WithTransaction(f: SqliteConnection -> 'T) =
-            let struct (poolOpt, connOpt) = this.ResolveSyncTransactionTarget()
-            match poolOpt with
-            | ValueSome pool -> pool.WithTransaction f
-            | ValueNone -> f connOpt.Value
+            match this with
+            | Pooled pool -> pool.WithTransaction f
+            | Transactional conn -> withSavepoint conn f
+            | Guarded (guard, inner) ->
+                guard()
+                inner.WithTransaction f
 
         /// <summary>
         /// Executes an asynchronous function within a transaction. The behavior depends on the connection type.
+        /// Pooled: BEGIN IMMEDIATE (top-level). Transactional: SAVEPOINT (nested).
         /// </summary>
         /// <param name="f">The asynchronous function to execute.</param>
         /// <returns>A task representing the asynchronous operation.</returns>
-        /// <exception cref="InvalidOperationException">Thrown if attempting to start a transaction on a Transitive connection.</exception>
         member this.WithAsyncTransaction(f: SqliteConnection -> Task<'T>) =
-            let struct (poolOpt, connOpt) = this.ResolveAsyncTransactionTarget()
-            match poolOpt with
-            | ValueSome pool -> pool.WithAsyncTransaction f
-            | ValueNone -> f connOpt.Value
-        
-    /// <summary>
-    /// Extends the <see cref="SqliteConnection"/> class with helper methods.
-    /// </summary>
-    and SqliteConnection with
-        /// <summary>
-        /// Checks if the connection is currently operating within a transaction managed by this system.
-        /// </summary>
-        /// <returns><c>true</c> if the connection is within a transaction, otherwise <c>false</c>.</returns>
-        member this.IsWithinTransaction() =
             match this with
-            | :? TransactionalConnection -> true
-            | :? CachingDbConnection as cc -> cc.InsideTransaction
-            | _other -> false
+            | Pooled pool -> pool.WithAsyncTransaction f
+            | Transactional conn -> withSavepointAsync conn f
+            | Guarded (guard, inner) ->
+                guard()
+                inner.WithAsyncTransaction f
 
     let internal EnterEventHandlerScope(connection: SqliteConnection) =
         match connection with

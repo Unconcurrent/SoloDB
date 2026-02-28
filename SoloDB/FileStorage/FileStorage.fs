@@ -23,11 +23,6 @@ open FileStorageListing
 module FileStorage =
     type DbFileStream = FileStorageCoreStream.DbFileStream
 
-    /// Creates a Transitive connection wrapper with dispose suppression for use inside WithTransaction callbacks.
-    /// Returns (IDisposable guard, Connection). Caller must `use` the guard to ensure cleanup.
-    let private withDisposeSuppressed (tx: SqliteConnection) =
-        struct ((unbox<IDisableDispose> tx).DisableDispose(), Transitive tx)
-
     /// <summary>
     /// Provides an API for interacting with a virtual file system within the SQLite database.
     /// </summary>
@@ -45,8 +40,7 @@ module FileStorage =
 
         member this.UploadBulk(files: BulkFileData seq) =
             connection.WithTransaction(fun tx ->
-                let struct (_disabled, innerConnection) = withDisposeSuppressed tx
-                use _guard = _disabled
+                let innerConnection = Transactional tx
                 for file in files do
                     let fileHeader = getOrCreateFileAt tx file.FullPath
                     do
@@ -62,8 +56,7 @@ module FileStorage =
 
         member this.ReplaceAsyncWithinTransaction(path, stream: Stream) = task {
             return! connection.WithAsyncTransaction(fun tx -> task {
-                let struct (_disabled, innerConnection) = withDisposeSuppressed tx
-                use _guard = _disabled
+                let innerConnection = Transactional tx
                 use file = openOrCreateFile innerConnection path
                 do! stream.CopyToAsync(file, int chunkSize)
                 file.SetLength file.Position
@@ -135,8 +128,7 @@ module FileStorage =
         member this.WriteAt(path: string, offset: int64, data: byte[], [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool) =
              connection.WithTransaction(fun tx ->
                 let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
-                let struct (_disabled, innerConnection) = withDisposeSuppressed tx
-                use _guard = _disabled
+                let innerConnection = Transactional tx
                 use fileStream = openFile innerConnection file
                 fileStream.Position <- offset
                 fileStream.Write(data, 0, data.Length)
@@ -146,8 +138,7 @@ module FileStorage =
         member this.WriteAt(path: string, offset: int64, data: Stream, [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool) =
             connection.WithTransaction(fun tx ->
                 let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
-                let struct (_disabled, innerConnection) = withDisposeSuppressed tx
-                use _guard = _disabled
+                let innerConnection = Transactional tx
                 use fileStream = openFile innerConnection file
                 fileStream.Position <- offset
                 data.CopyTo (fileStream, int chunkSize * 10)

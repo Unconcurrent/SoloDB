@@ -93,13 +93,6 @@ module internal Helper =
             if outboundRows.Length > 0 then
                 connection.Execute("DELETE FROM SoloDBRelation WHERE OwnerCollection = @name", {| name = name |}) |> ignore
 
-        // Clean up RelationVersion rows for the dropped collection (K7: orphan residue prevention).
-        let relationVersionTableExists =
-            connection.QueryFirst<int64>(
-                "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelationVersion') THEN 1 ELSE 0 END") = 1L
-        if relationVersionTableExists then
-            connection.Execute("DELETE FROM SoloDBRelationVersion WHERE OwnerCollection = @name", {| name = name |}) |> ignore
-
         dropTriggersForTable name connection
         connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name) |> ignore
         connection.Execute("DELETE FROM SoloDBTypeCollectionMap WHERE CollectionName = @name", {|name = name|}) |> ignore

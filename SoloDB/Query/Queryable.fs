@@ -1340,7 +1340,11 @@ module private QueryHelper =
                 Connection = metadataConnection
                 OwnerTable = source.Name
                 OwnerType = typeof<'T>
-                InTransaction = metadataConnection.IsWithinTransaction()
+                InTransaction =
+                    match metadataConnection with
+                    | :? TransactionalConnection -> true
+                    | :? CachingDbConnection as cc -> cc.InsideTransaction
+                    | _ -> false
             }
             // Ensure relation schema exists before DBRefMany translation emits correlated subqueries.
             Relations.withRelationSqliteWrap "build" "startTranslation.ensureSchemaForOwnerType" (fun () ->

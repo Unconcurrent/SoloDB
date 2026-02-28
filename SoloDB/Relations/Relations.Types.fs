@@ -234,17 +234,6 @@ let internal getLoadedRelationVersion (entity: obj) =
     | true, v -> unbox<int64> v
     | _ -> 0L
 
-/// Ensure the SoloDBRelationVersion table exists. Bootstrap migration precondition only.
-/// Runtime code must not call this; use Metadata column path instead.
-let internal ensureRelationVersionTable (connection: SqliteConnection) =
-    ignore (connection.Execute(
-        "CREATE TABLE IF NOT EXISTS SoloDBRelationVersion (" +
-        "OwnerCollection TEXT NOT NULL, " +
-        "OwnerId INTEGER NOT NULL, " +
-        "Version INTEGER NOT NULL DEFAULT 0, " +
-        "PRIMARY KEY (OwnerCollection, OwnerId)" +
-        ") STRICT;"))
-
 let [<Literal>] internal relationVersionMetadataPath = "$.RelationVersion"
 
 /// Read the current persisted RelationVersion from the Metadata column. Returns 0 if not set.

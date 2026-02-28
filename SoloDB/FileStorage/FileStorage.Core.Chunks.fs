@@ -158,9 +158,6 @@ module FileStorageCoreChunks =
         WHERE Id = @DirId AND Modified < UNIXTIMESTAMP();
     "
 
-    [<Literal>]
-    let internal updateModifiedTimestampTrSQL = "BEGIN;" + updateModifiedTimestampSQL + "COMMIT TRANSACTION;"
-
     let internal writeChunkedData (db: SqliteConnection) (fileId: int64) (position: int64) (buffer: ReadOnlySpan<byte>) =
         let bufferLen = buffer.Length
         use uncompressedChunkBuffer = NativeArray.Alloc (int chunkSize)

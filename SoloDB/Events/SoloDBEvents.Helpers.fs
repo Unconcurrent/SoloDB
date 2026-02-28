@@ -54,7 +54,6 @@ module internal SoloDBEventsHelpers =
         let mutable handlerFailed = false
         let mutable handlerFailureMessage = defaultMessage
 
-        let mutable disableHandle: IDisposable = null
         let mutable restoreTransactionState = false
         let mutable previousTransactionState = false
         let mutable cachedConnection = Unchecked.defaultof<SQLiteTools.CachingDbConnection>
@@ -72,7 +71,7 @@ module internal SoloDBEventsHelpers =
             // "in transaction" and skips auto-transaction creation (which would
             // attempt BEGIN IMMEDIATE inside an already-active transaction and fail).
             // The original state is saved and restored in the finally block.
-            // [SC5-REPLACE: remove when wrapper dispatch replaces InTransaction branching]
+            // InsideTransaction override must remain: it serves Dispose suppression for event handlers.
             match (connection :> obj) with
             | :? SQLiteTools.CachingDbConnection as cachingConn ->
                 cachedConnection <- cachingConn
@@ -82,17 +81,10 @@ module internal SoloDBEventsHelpers =
                     restoreTransactionState <- true
             | _ -> ()
 
-            // EVENT-PATH INVARIANT 3 of 3: Dispose suppression (exempt from SC1-SC4).
-            // Prevents CachingDbConnection.Dispose() from returning the connection
-            // to the pool while handler code executes. Without this, any `use conn = ...`
-            // binding exit inside a handler callback would trigger onDispose -> TakeBack,
-            // returning the connection to the pool while it is still mid-statement execution
-            // inside a SQLite trigger. This is the ONLY remaining justified DisableDispose
-            // site after SC3 completes.
-            // [SC5-REPLACE: remove when event-path ownership lease API lands]
-            match (connection :> obj) with
-            | :? SQLiteTools.IDisableDispose as disable -> disableHandle <- disable.DisableDispose()
-            | _ -> ()
+            // EVENT-PATH INVARIANT 3 of 3: Dispose suppression via InsideTransaction flag.
+            // CachingDbConnection.Dispose() checks InsideTransaction and suppresses pool return
+            // when true. Since invariant 2 above sets InsideTransaction = true, any `use conn = ...`
+            // binding exit inside a handler callback is safe — Dispose becomes a no-op.
 
             let session = Interlocked.Increment &sessionIndex
 
@@ -133,13 +125,11 @@ module internal SoloDBEventsHelpers =
 
         finally
             // EVENT-PATH CLEANUP: reverse order of invariant acquisition.
-            // 1. Release dispose suppression (invariant 3).
-            if not (isNull disableHandle) then
-                disableHandle.Dispose()
-            // 2. Restore original InsideTransaction state (invariant 2).
+            // 1. Restore original InsideTransaction state (invariant 2).
+            //    This also re-enables CachingDbConnection.Dispose pool-return (invariant 3).
             if restoreTransactionState then
                 cachedConnection.InsideTransaction <- previousTransactionState
-            // 3. Release GlobalLock (invariant 1).
+            // 2. Release GlobalLock (invariant 1).
             globalLock.Exit()
 
         struct (handlerFailed, handlerFailureMessage)

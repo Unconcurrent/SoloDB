@@ -48,8 +48,14 @@ module FileStorageCore =
     /// <summary>
     /// Acquires a mutex to lock the specified path if a transaction is not already active.
     /// </summary>
+    let private isInTransaction (db: SqliteConnection) =
+        match db with
+        | :? TransactionalConnection -> true
+        | :? CachingDbConnection as cc -> cc.InsideTransaction
+        | _ -> false
+
     let internal lockPathIfNotInTransaction (db: SqliteConnection) (path: string) =
-        if db.IsWithinTransaction() then
+        if isInTransaction db then
             noopDisposer
         else
         let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(db.ConnectionString)}-Path-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(path)}")
@@ -59,7 +65,7 @@ module FileStorageCore =
     /// Acquires a mutex to lock the specified file ID if a transaction is not already active.
     /// </summary>
     let internal lockFileIdIfNotInTransaction (db: SqliteConnection) (id: int64) =
-        if db.IsWithinTransaction() then
+        if isInTransaction db then
             noopDisposer
         else
         let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(db.ConnectionString)}-FileId-{id}")
