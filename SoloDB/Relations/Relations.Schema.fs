@@ -121,13 +121,21 @@ BEGIN
 END;
 """
 
+let internal ensureCollectionMetadataColumn (connection: SqliteConnection) (tableName: string) =
+    let qTable = quoteIdentifier tableName
+    let hasMetadata =
+        connection.QueryFirst<int64>(
+            $"SELECT CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('{tableName}') WHERE name = 'Metadata') THEN 1 ELSE 0 END") = 1L
+    if not hasMetadata then
+        connection.Execute($"ALTER TABLE {qTable} ADD COLUMN Metadata JSONB NOT NULL DEFAULT '{{}}';") |> ignore
+
 let internal ensureCollectionTableExists (connection: SqliteConnection) (tableName: string) =
     let qTable = quoteIdentifier tableName
     let exists =
         connection.QueryFirst<int64>("SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @name) THEN 1 ELSE 0 END", {| name = tableName |}) = 1L
 
     if not exists then
-        connection.Execute($"CREATE TABLE {qTable} (Id INTEGER NOT NULL PRIMARY KEY UNIQUE, Value JSONB NOT NULL);") |> ignore
+        connection.Execute($"CREATE TABLE {qTable} (Id INTEGER NOT NULL PRIMARY KEY UNIQUE, Value JSONB NOT NULL, Metadata JSONB NOT NULL DEFAULT '{{}}');") |> ignore
         connection.Execute(getSQLForTriggersForTable tableName) |> ignore
 
     connection.Execute(

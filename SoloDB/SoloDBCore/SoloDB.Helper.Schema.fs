@@ -170,7 +170,8 @@ module internal HelperSchema =
     let internal createTableInner<'T> (name: string) (conn: SqliteConnection) =
         conn.Execute($"CREATE TABLE \"{name}\" (
                         Id INTEGER NOT NULL PRIMARY KEY UNIQUE,
-                        Value JSONB NOT NULL
+                        Value JSONB NOT NULL,
+                        Metadata JSONB NOT NULL DEFAULT '{{}}'
                     );") |> ignore
         conn.Execute("INSERT INTO SoloDBCollections(Name) VALUES (@name);", {|name = name|}) |> ignore
         createTriggersForTable name conn |> ignore

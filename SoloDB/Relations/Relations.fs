@@ -64,7 +64,7 @@ let ensureSchemaForOwnerType (tx: RelationTxContext) (ownerType: Type) =
     if isNull ownerType then nullArg "ownerType"
     withRelationSqliteWrap "build" "ensureSchemaForOwnerType" (fun () ->
         ensureRelationCatalogTable tx.Connection
-        ensureRelationVersionTable tx.Connection
+        ensureCollectionMetadataColumn tx.Connection tx.OwnerTable
         let descriptors = buildRelationDescriptors tx ownerType
         for descriptor in descriptors do
             ensureMetadataNotResurrected tx descriptor
@@ -307,10 +307,11 @@ let private cloneOwnerForReplaceMany (ownerType: Type) (owner: obj) =
     clone
 
 let private incrementRelationVersion (tx: RelationTxContext) (ownerId: int64) =
+    let qOwner = quoteIdentifier tx.OwnerTable
     tx.Connection.Execute(
-        "INSERT INTO SoloDBRelationVersion(OwnerCollection, OwnerId, Version) VALUES(@col, @id, 1) " +
-        "ON CONFLICT(OwnerCollection, OwnerId) DO UPDATE SET Version = Version + 1;",
-        {| col = tx.OwnerTable; id = ownerId |}) |> ignore
+        $"UPDATE {qOwner} SET Metadata = jsonb_set(COALESCE(Metadata, jsonb('{{}}')), @path, " +
+        "jsonb(CAST(COALESCE(jsonb_extract(Metadata, @path), 0) + 1 AS TEXT))) WHERE Id = @id;",
+        {| path = relationVersionMetadataPath; id = ownerId |}) |> ignore
 
 let syncInsert (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) =
     ensureTxContext tx
@@ -391,7 +392,6 @@ let syncDeleteOwner (tx: RelationTxContext) (plan: RelationDeletePlan) =
     if plan.OwnerId <= 0L then raise (ArgumentOutOfRangeException("plan.OwnerId", plan.OwnerId, "ownerId must be > 0."))
     withRelationSqliteWrap "sync" "syncDeleteOwner" (fun () ->
         ensureRelationCatalogTable tx.Connection
-        ensureRelationVersionTable tx.Connection
         applyOwnerDeletePoliciesCore tx tx.OwnerTable plan.OwnerId true
         applyTargetDeletePoliciesCore tx tx.OwnerTable plan.OwnerId
     )
@@ -448,7 +448,6 @@ let captureRelationVersionForEntities
     (ownerEntities: (int64 * obj) array)
     =
     if ownerEntities.Length > 0 then
-        ensureRelationVersionTable connection
         for (ownerId, entity) in ownerEntities do
             let version = readPersistedRelationVersion connection ownerTable ownerId
             captureRelationVersion entity version

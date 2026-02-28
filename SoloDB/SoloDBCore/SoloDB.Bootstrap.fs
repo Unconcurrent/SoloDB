@@ -224,7 +224,7 @@ module internal Bootstrap =
     /// <summary>
     /// The current supported schema version. The database will refuse to open future versions.
     /// </summary>
-    let [<Literal>] currentSupportedSchemaVersion = 3
+    let [<Literal>] currentSupportedSchemaVersion = 4
 
     /// <summary>
     /// The minimum required SQLite version.
@@ -305,6 +305,44 @@ module internal Bootstrap =
             ignore (command.ExecuteNonQuery())
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
             if dbSchemaVersion = 2 then
+                failwithf "Failure to migrate schema."
+
+        // Migration: version 3 -> 4
+        // v3 = triggers/Event API. v4 = Relational API.
+        // Ensure SoloDBTypeCollectionMap exists and add Metadata column to existing collections.
+        if dbSchemaVersion = 3 then
+            let collectionNames =
+                dbConnection.Query<string>("SELECT Name FROM SoloDBCollections")
+                |> Seq.toArray
+
+            let addMetadataColumnSql =
+                collectionNames
+                |> Array.choose (fun name ->
+                    let hasMetadata =
+                        dbConnection.QueryFirst<int64>(
+                            $"SELECT CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('{name}') WHERE name = 'Metadata') THEN 1 ELSE 0 END") = 1L
+                    if hasMetadata then None
+                    else Some ($"ALTER TABLE \"{name}\" ADD COLUMN Metadata JSONB NOT NULL DEFAULT '{{}}';"))
+                |> String.concat "\n"
+
+            use command = new SqliteCommand($"
+                    BEGIN EXCLUSIVE;
+
+                    CREATE TABLE IF NOT EXISTS SoloDBTypeCollectionMap (
+                        TypeKey TEXT NOT NULL,
+                        CollectionName TEXT NOT NULL,
+                        UNIQUE(TypeKey, CollectionName)
+                    ) STRICT;
+
+                    {addMetadataColumnSql}
+
+                    PRAGMA user_version = 4;
+                    COMMIT TRANSACTION;
+                ", dbConnection.Inner)
+            // command.Prepare() // Cannot Prepare when tables are created in the same command batch.
+            ignore (command.ExecuteNonQuery())
+            dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
+            if dbSchemaVersion = 3 then
                 failwithf "Failure to migrate schema."
 
         // https://www.sqlite.org/pragma.html#pragma_optimize

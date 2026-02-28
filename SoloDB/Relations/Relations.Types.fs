@@ -234,7 +234,8 @@ let internal getLoadedRelationVersion (entity: obj) =
     | true, v -> unbox<int64> v
     | _ -> 0L
 
-/// Ensure the SoloDBRelationVersion table exists. Created alongside relation catalog.
+/// Ensure the SoloDBRelationVersion table exists. Bootstrap migration precondition only.
+/// Runtime code must not call this; use Metadata column path instead.
 let internal ensureRelationVersionTable (connection: SqliteConnection) =
     ignore (connection.Execute(
         "CREATE TABLE IF NOT EXISTS SoloDBRelationVersion (" +
@@ -244,8 +245,11 @@ let internal ensureRelationVersionTable (connection: SqliteConnection) =
         "PRIMARY KEY (OwnerCollection, OwnerId)" +
         ") STRICT;"))
 
-/// Read the current persisted RelationVersion for an owner row. Returns 0 if no row exists.
+let [<Literal>] internal relationVersionMetadataPath = "$.RelationVersion"
+
+/// Read the current persisted RelationVersion from the Metadata column. Returns 0 if not set.
 let internal readPersistedRelationVersion (connection: SqliteConnection) (ownerTable: string) (ownerId: int64) =
+    let qOwner = quoteIdentifier ownerTable
     connection.QueryFirstOrDefault<int64>(
-        "SELECT Version FROM SoloDBRelationVersion WHERE OwnerCollection = @col AND OwnerId = @id;",
-        {| col = ownerTable; id = ownerId |})
+        $"SELECT COALESCE(CAST(jsonb_extract(Metadata, @path) AS INTEGER), 0) FROM {qOwner} WHERE Id = @id;",
+        {| path = relationVersionMetadataPath; id = ownerId |})
