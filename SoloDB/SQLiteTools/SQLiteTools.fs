@@ -36,6 +36,8 @@ module SQLiteTools =
         let mutable disposeDisableCount = 0
         let mutable preparedCache = Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
         let maxCacheSize = 1000
+        // K1: connection-level reader-active guard to prevent indefinite hang from overlapping readers.
+        let mutable readerActive = false
 
         let tryCachedCommand (this: CachingDbConnection) (sql: string) (parameters: obj) =
             // @VAR variable names are randomly generated, so caching them is not possible.
@@ -91,17 +93,35 @@ module SQLiteTools =
             let oldCache = preparedCache
             preparedCache <- Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
 
-            while oldCache.Count > 0 do
+            // K2: bounded timeout to prevent livelock from permanently in-use commands.
+            let deadline = System.Diagnostics.Stopwatch.StartNew()
+            let maxWaitMs = 5000L
+            while oldCache.Count > 0 && deadline.ElapsedMilliseconds < maxWaitMs do
                 for KeyValue(k, v) in oldCache |> Seq.toArray do
                     if (not !v.InUse) then
                         v.Command.Dispose()
                         ignore (oldCache.Remove k)
+                if oldCache.Count > 0 then
+                    Threading.Thread.Sleep(1)
+
+            // Force-dispose any commands still in-use after deadline.
+            for KeyValue(_, v) in oldCache do
+                v.Command.Dispose()
+            oldCache.Clear()
 
         /// <summary>Executes a non-query SQL command, utilizing the cache if possible.</summary>
         /// <param name="sql">The SQL command text.</param>
         /// <param name="parameters">The parameters for the command.</param>
         /// <returns>The number of rows affected.</returns>
+        member internal this.ReaderActive
+            with get() = readerActive
+            and set(v) = readerActive <- v
+        member internal this.CheckNoActiveReader() =
+            if readerActive then
+                raise (InvalidOperationException("A data reader is already active on this connection. Close the existing reader before executing another command."))
+
         member this.Execute(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+            this.CheckNoActiveReader()
             match tryCachedCommand this sql parameters with
             | ValueSome struct (command, _columnDict, inUse) ->
                 try
@@ -120,21 +140,29 @@ module SQLiteTools =
         /// <param name="parameters">The parameters for the query.</param>
         /// <returns>An IDisposable to manage the lifetime of the reader and command.</returns>
         member this.OpenReader(sql: string, outReader: outref<SqliteDataReader>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+            this.CheckNoActiveReader()
             match tryCachedCommand this sql parameters with
             | ValueSome struct (command, _columnDict, inUse) ->
                 try
                     let reader = command.ExecuteReader()
                     outReader <- reader
+                    readerActive <- true
+                    let conn = this
                     { new IDisposable with
-                        member _.Dispose() = reader.Dispose() }
+                        member _.Dispose() =
+                            conn.ReaderActive <- false
+                            reader.Dispose() }
                 finally inUse := false
             | ValueNone ->
                 let command = createCommand this sql parameters
                 command.Prepare()
                 let reader = command.ExecuteReader()
                 outReader <- reader
+                readerActive <- true
+                let conn = this
                 { new IDisposable with
                     member _.Dispose() =
+                        conn.ReaderActive <- false
                         reader.Dispose()
                         command.Dispose()
                 }
@@ -145,6 +173,7 @@ module SQLiteTools =
         /// <param name="parameters">The parameters for the query.</param>
         /// <returns>A sequence of 'T objects.</returns>
         member this.Query<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = seq {
+            this.CheckNoActiveReader()
             match tryCachedCommand this sql parameters with
             | ValueSome struct (command, columnDict, inUse) ->
                 try yield! queryCommand<'T> command columnDict
@@ -160,6 +189,7 @@ module SQLiteTools =
         /// <param name="parameters">The parameters for the query.</param>
         /// <returns>The first 'T object from the result set.</returns>
         member this.QueryFirst<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+            this.CheckNoActiveReader()
             match tryCachedCommand this sql parameters with
             | ValueSome struct (command, columnDict, inUse) ->
                 try
@@ -176,6 +206,7 @@ module SQLiteTools =
         /// <param name="parameters">The parameters for the query.</param>
         /// <returns>The first 'T object from the result set, or default.</returns>
         member this.QueryFirstOrDefault<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+            this.CheckNoActiveReader()
             match tryCachedCommand this sql parameters with
             | ValueSome struct (command, columnDict, inUse) ->
                 try
@@ -201,6 +232,7 @@ module SQLiteTools =
         /// <param name="splitOn">The column name to split the results on.</param>
         /// <returns>A sequence of 'TReturn objects.</returns>
         member this.Query<'T1, 'T2, 'TReturn>(sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = seq {
+            this.CheckNoActiveReader()
             let struct (command, dict, dispose, inUse) =
                 match tryCachedCommand this sql parameters with
                 | ValueSome struct (command, columnDict, inUse) ->
@@ -248,6 +280,12 @@ module SQLiteTools =
                             disposingDisabled <- false
                         ()}
 
+        // K4: override Dispose(bool) to ensure TakeBack is always called on disposal,
+        // regardless of whether Dispose() is called via IDisposable or base class dispatch.
+        override this.Dispose(disposing: bool) =
+            if disposing && not disposingDisabled then
+                onDispose this
+
         interface IDisposable with
             override this.Dispose (): unit =
                 if not disposingDisabled then
@@ -264,7 +302,20 @@ module SQLiteTools =
         [<Extension>]
         static member OpenReader<'R>(this: SqliteConnection, sql: string, outReader: outref<DbDataReader>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             match this with
-            | :? CachingDbConnection as c -> c.OpenReader(sql, &outReader, parameters)
+            | :? CachingDbConnection as c ->
+                // K1: route through CachingDbConnection member to get reader-active guard.
+                c.CheckNoActiveReader()
+                let command = createCommand this sql parameters
+                command.Prepare()
+                let reader = command.ExecuteReader()
+                outReader <- reader
+                c.ReaderActive <- true
+                { new IDisposable with
+                    member _.Dispose() =
+                        c.ReaderActive <- false
+                        reader.Dispose()
+                        command.Dispose()
+                }
             | _ ->
                 let command = createCommand this sql parameters
                 command.Prepare()
