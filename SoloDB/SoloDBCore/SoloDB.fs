@@ -1423,7 +1423,6 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
     /// <returns>True if the collection was dropped, false if it did not exist.</returns>
     member this.DropCollectionIfExists name =
         let name = Helper.formatName name
-        use _mutex = Helper.lockTable connectionString name
 
         if Helper.existsCollection name connection then
             Helper.dropCollection name connection
@@ -1540,18 +1539,15 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
     member private this.GetNewConnection() = connectionManager.Borrow()
         
-    member private this.InitializeCollection<'T> (name: string) =    
+    member private this.InitializeCollection<'T> (name: string) =
         if disposed then raise (ObjectDisposedException(nameof(SoloDB)))
         if name.StartsWith "SoloDB" then raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
-        use _mutex = Helper.lockTable connectionString name // To prevent a race condition where the next if statment is true for 2 threads.
-
         use connection = connectionManager.Borrow()
-
-        let shouldCreate = not (Helper.existsCollection name connection)
         let withinTransaction = connection.IsWithinTransaction()
         if not withinTransaction then connection.Execute "BEGIN IMMEDIATE;" |> ignore
         try
+            let shouldCreate = not (Helper.existsCollection name connection)
             if shouldCreate then
                 Helper.createTableInner<'T> name connection
 
@@ -1570,7 +1566,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 Relations.ensureSchemaForOwnerType relationTx typeof<'T>
 
             if not withinTransaction then connection.Execute "COMMIT;" |> ignore
-        with ex ->
+        with _ ->
             if not withinTransaction then connection.Execute "ROLLBACK;" |> ignore
             reraise()
 
@@ -1631,22 +1627,21 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <returns>True if the collection was dropped, false if it did not exist.</returns>
     member this.DropCollectionIfExists name =
         let name = Helper.formatName name
-        use _mutex = Helper.lockTable connectionString name
 
         use connection = connectionManager.Borrow()
-
-        if Helper.existsCollection name connection then
-            let withinTransaction = connection.IsWithinTransaction()
-            if not withinTransaction then connection.Execute "BEGIN;" |> ignore
-            try
+        let withinTransaction = connection.IsWithinTransaction()
+        if not withinTransaction then connection.Execute "BEGIN IMMEDIATE;" |> ignore
+        try
+            if Helper.existsCollection name connection then
                 Helper.dropCollection name connection
-
                 if not withinTransaction then connection.Execute "COMMIT;" |> ignore
                 true
-            with ex ->
-                if not withinTransaction then connection.Execute "ROLLBACK;" |> ignore
-                reraise()
-        else false
+            else
+                if not withinTransaction then connection.Execute "COMMIT;" |> ignore
+                false
+        with _ ->
+            if not withinTransaction then connection.Execute "ROLLBACK;" |> ignore
+            reraise()
 
     /// <summary>
     /// Drops a collection for the specified type if it exists.
