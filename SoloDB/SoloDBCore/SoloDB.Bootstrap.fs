@@ -5,6 +5,7 @@ open System
 open System.Globalization
 open SQLiteTools
 open SoloDatabase.Types
+open SoloDatabase.RelationsSharedSql
 
 /// <summary>
 /// Module containing lifted helpers for SoloDB constructor initialization.
@@ -328,11 +329,7 @@ module internal Bootstrap =
             use command = new SqliteCommand($"
                     BEGIN EXCLUSIVE;
 
-                    CREATE TABLE IF NOT EXISTS SoloDBTypeCollectionMap (
-                        TypeKey TEXT NOT NULL,
-                        CollectionName TEXT NOT NULL,
-                        UNIQUE(TypeKey, CollectionName)
-                    ) STRICT;
+                    {RelationsSharedSql.createTypeCollectionMapTableSql}
 
                     {addMetadataColumnSql}
 

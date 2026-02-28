@@ -61,100 +61,11 @@ module internal HelperSchema =
 
     /// <summary>
     /// Returns the SQL that creates the event triggers for a collection table.
+    /// Delegates to the canonical shared SQL module.
     /// </summary>
     /// <param name="name">The name of the collection.</param>
     let internal getSQLForTriggersForTable (name: string) =
-        let triggerName = $"SoloDB_Update_{name}"
-        let insertTriggerName = $"SoloDB_Insert_{name}"
-        let deleteTriggerName = $"SoloDB_Delete_{name}"
-        let updatedTriggerName = $"SoloDB_Updated_{name}"
-        let insertedTriggerName = $"SoloDB_Inserted_{name}"
-        let deletedTriggerName = $"SoloDB_Deleted_{name}"
-        $"""
-            CREATE TRIGGER IF NOT EXISTS "{insertTriggerName}"
-            BEFORE INSERT ON "{name}"
-            FOR EACH ROW
-            WHEN SHOULD_HANDLE_INSERTING('{name}') = 1
-            BEGIN
-                SELECT CASE
-                    WHEN message IS NULL THEN NULL
-                    ELSE RAISE(ABORT, message)
-                END
-                FROM (
-                    SELECT ON_INSERTING_HANDLER('{name}', json(NEW.Value)) AS message
-                );
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS "{triggerName}"
-            BEFORE UPDATE ON "{name}"
-            FOR EACH ROW
-            WHEN SHOULD_HANDLE_UPDATING('{name}') = 1
-            BEGIN
-                SELECT CASE
-                    WHEN message IS NULL THEN NULL
-                    ELSE RAISE(ABORT, message)
-                END
-                FROM (
-                    SELECT ON_UPDATING_HANDLER('{name}', json(OLD.Value), json(NEW.Value)) AS message
-                );
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS "{deleteTriggerName}"
-            BEFORE DELETE ON "{name}"
-            FOR EACH ROW
-            WHEN SHOULD_HANDLE_DELETING('{name}') = 1
-            BEGIN
-                SELECT CASE
-                    WHEN message IS NULL THEN NULL
-                    ELSE RAISE(ABORT, message)
-                END
-                FROM (
-                    SELECT ON_DELETING_HANDLER('{name}', json(OLD.Value)) AS message
-                );
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS "{insertedTriggerName}"
-            AFTER INSERT ON "{name}"
-            FOR EACH ROW
-            WHEN SHOULD_HANDLE_INSERTED('{name}') = 1
-            BEGIN
-                SELECT CASE
-                    WHEN message IS NULL THEN NULL
-                    ELSE RAISE(ABORT, message)
-                END
-                FROM (
-                    SELECT ON_INSERTED_HANDLER('{name}', json(NEW.Value)) AS message
-                );
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS "{updatedTriggerName}"
-            AFTER UPDATE ON "{name}"
-            FOR EACH ROW
-            WHEN SHOULD_HANDLE_UPDATED('{name}') = 1
-            BEGIN
-                SELECT CASE
-                    WHEN message IS NULL THEN NULL
-                    ELSE RAISE(ABORT, message)
-                END
-                FROM (
-                    SELECT ON_UPDATED_HANDLER('{name}', json(OLD.Value), json(NEW.Value)) AS message
-                );
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS "{deletedTriggerName}"
-            AFTER DELETE ON "{name}"
-            FOR EACH ROW
-            WHEN SHOULD_HANDLE_DELETED('{name}') = 1
-            BEGIN
-                SELECT CASE
-                    WHEN message IS NULL THEN NULL
-                    ELSE RAISE(ABORT, message)
-                END
-                FROM (
-                    SELECT ON_DELETED_HANDLER('{name}', json(OLD.Value)) AS message
-                );
-            END;
-        """
+        RelationsSharedSql.getSQLForTriggersForTable name
 
     /// <summary>
     /// Creates update triggers for a collection table.
@@ -168,11 +79,7 @@ module internal HelperSchema =
     /// Creates a new table for a collection, including its metadata entry and declared indexes.
     /// </summary>
     let internal createTableInner<'T> (name: string) (conn: SqliteConnection) =
-        conn.Execute($"CREATE TABLE \"{name}\" (
-                        Id INTEGER NOT NULL PRIMARY KEY UNIQUE,
-                        Value JSONB NOT NULL,
-                        Metadata JSONB NOT NULL DEFAULT '{{}}'
-                    );") |> ignore
+        conn.Execute(RelationsSharedSql.createCollectionTableSql $"\"{name}\"") |> ignore
         conn.Execute("INSERT INTO SoloDBCollections(Name) VALUES (@name);", {|name = name|}) |> ignore
         createTriggersForTable name conn |> ignore
 

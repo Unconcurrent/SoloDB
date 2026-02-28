@@ -44,18 +44,8 @@ module internal Helper =
     let internal existsCollection (name: string) (connection: SqliteConnection) =
         connection.QueryFirstOrDefault<string>("SELECT Name FROM SoloDBCollections WHERE Name = @name LIMIT 1", {|name = name|}) <> null
 
-    let internal ensureTypeCollectionMapTable (connection: SqliteConnection) =
-        connection.Execute("""
-            CREATE TABLE IF NOT EXISTS SoloDBTypeCollectionMap (
-                TypeKey TEXT NOT NULL,
-                CollectionName TEXT NOT NULL,
-                UNIQUE(TypeKey, CollectionName)
-            ) STRICT;
-            """) |> ignore
-
     let internal registerTypeCollection<'T> (collectionName: string) (connection: SqliteConnection) =
         if not (typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T>) then
-            ensureTypeCollectionMapTable connection
             connection.Execute(
                 "INSERT INTO SoloDBTypeCollectionMap(TypeKey, CollectionName) VALUES(@typeKey, @collectionName) ON CONFLICT(TypeKey, CollectionName) DO NOTHING;",
                 {| typeKey = Utils.typeIdentityKey typeof<'T>; collectionName = collectionName |}) |> ignore
@@ -122,7 +112,6 @@ module internal Helper =
 
         dropTriggersForTable name connection
         connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name) |> ignore
-        ensureTypeCollectionMapTable connection
         connection.Execute("DELETE FROM SoloDBTypeCollectionMap WHERE CollectionName = @name", {|name = name|}) |> ignore
         connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}) |> ignore
         // Drop/recreate must rebuild relation descriptors from a clean cache snapshot.

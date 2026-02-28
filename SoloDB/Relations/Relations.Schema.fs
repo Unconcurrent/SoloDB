@@ -29,97 +29,7 @@ CREATE TABLE IF NOT EXISTS SoloDBRelation (
 """))
 
 let internal getSQLForTriggersForTable (name: string) =
-    let updateTriggerName = $"SoloDB_Update_{name}"
-    let insertTriggerName = $"SoloDB_Insert_{name}"
-    let deleteTriggerName = $"SoloDB_Delete_{name}"
-    let updatedTriggerName = $"SoloDB_Updated_{name}"
-    let insertedTriggerName = $"SoloDB_Inserted_{name}"
-    let deletedTriggerName = $"SoloDB_Deleted_{name}"
-    $"""
-CREATE TRIGGER IF NOT EXISTS "{insertTriggerName}"
-BEFORE INSERT ON "{name}"
-FOR EACH ROW
-WHEN SHOULD_HANDLE_INSERTING('{name}') = 1
-BEGIN
-    SELECT CASE
-        WHEN message IS NULL THEN NULL
-        ELSE RAISE(ABORT, message)
-    END
-    FROM (
-        SELECT ON_INSERTING_HANDLER('{name}', json(NEW.Value)) AS message
-    );
-END;
-
-CREATE TRIGGER IF NOT EXISTS "{updateTriggerName}"
-BEFORE UPDATE ON "{name}"
-FOR EACH ROW
-WHEN SHOULD_HANDLE_UPDATING('{name}') = 1
-BEGIN
-    SELECT CASE
-        WHEN message IS NULL THEN NULL
-        ELSE RAISE(ABORT, message)
-    END
-    FROM (
-        SELECT ON_UPDATING_HANDLER('{name}', json(OLD.Value), json(NEW.Value)) AS message
-    );
-END;
-
-CREATE TRIGGER IF NOT EXISTS "{deleteTriggerName}"
-BEFORE DELETE ON "{name}"
-FOR EACH ROW
-WHEN SHOULD_HANDLE_DELETING('{name}') = 1
-BEGIN
-    SELECT CASE
-        WHEN message IS NULL THEN NULL
-        ELSE RAISE(ABORT, message)
-    END
-    FROM (
-        SELECT ON_DELETING_HANDLER('{name}', json(OLD.Value)) AS message
-    );
-END;
-
-CREATE TRIGGER IF NOT EXISTS "{insertedTriggerName}"
-AFTER INSERT ON "{name}"
-FOR EACH ROW
-WHEN SHOULD_HANDLE_INSERTED('{name}') = 1
-BEGIN
-    SELECT CASE
-        WHEN message IS NULL THEN NULL
-        ELSE RAISE(ABORT, message)
-    END
-    FROM (
-        SELECT ON_INSERTED_HANDLER('{name}', json(NEW.Value)) AS message
-    );
-END;
-
-CREATE TRIGGER IF NOT EXISTS "{updatedTriggerName}"
-AFTER UPDATE ON "{name}"
-FOR EACH ROW
-WHEN SHOULD_HANDLE_UPDATED('{name}') = 1
-BEGIN
-    SELECT CASE
-        WHEN message IS NULL THEN NULL
-        ELSE RAISE(ABORT, message)
-    END
-    FROM (
-        SELECT ON_UPDATED_HANDLER('{name}', json(OLD.Value), json(NEW.Value)) AS message
-    );
-END;
-
-CREATE TRIGGER IF NOT EXISTS "{deletedTriggerName}"
-AFTER DELETE ON "{name}"
-FOR EACH ROW
-WHEN SHOULD_HANDLE_DELETED('{name}') = 1
-BEGIN
-    SELECT CASE
-        WHEN message IS NULL THEN NULL
-        ELSE RAISE(ABORT, message)
-    END
-    FROM (
-        SELECT ON_DELETED_HANDLER('{name}', json(OLD.Value)) AS message
-    );
-END;
-"""
+    RelationsSharedSql.getSQLForTriggersForTable name
 
 let internal ensureCollectionMetadataColumn (connection: SqliteConnection) (tableName: string) =
     let qTable = quoteIdentifier tableName
@@ -135,7 +45,7 @@ let internal ensureCollectionTableExists (connection: SqliteConnection) (tableNa
         connection.QueryFirst<int64>("SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @name) THEN 1 ELSE 0 END", {| name = tableName |}) = 1L
 
     if not exists then
-        connection.Execute($"CREATE TABLE {qTable} (Id INTEGER NOT NULL PRIMARY KEY UNIQUE, Value JSONB NOT NULL, Metadata JSONB NOT NULL DEFAULT '{{}}');") |> ignore
+        connection.Execute(RelationsSharedSql.createCollectionTableSql qTable) |> ignore
         connection.Execute(getSQLForTriggersForTable tableName) |> ignore
 
     connection.Execute(
@@ -224,10 +134,6 @@ let internal hasManyBackReference (ownerType: Type) (targetType: Type) =
     |> Array.exists (fun (_, kind, candidateTargetType, _, _, _, _, _) ->
         kind = Many && candidateTargetType = ownerType)
 
-let private typeCollectionMapTableExists (connection: SqliteConnection) =
-    connection.QueryFirst<int64>(
-        "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBTypeCollectionMap') THEN 1 ELSE 0 END") = 1L
-
 let private tryGetStoredTargetCollection (connection: SqliteConnection) (ownerTable: string) (propertyName: string) =
     ensureRelationCatalogTable connection
     connection.QueryFirstOrDefault<string>(
@@ -253,15 +159,12 @@ LIMIT 1;
     |> Option.ofObj
 
 let private readMappedCollectionsForType (connection: SqliteConnection) (targetType: Type) =
-    if not (typeCollectionMapTableExists connection) then
-        [||]
-    else
-        connection.Query<string>(
-            "SELECT CollectionName FROM SoloDBTypeCollectionMap WHERE TypeKey = @typeKey;",
-            {| typeKey = Utils.typeIdentityKey targetType |})
-        |> Seq.map formatName
-        |> Seq.distinct
-        |> Seq.toArray
+    connection.Query<string>(
+        "SELECT CollectionName FROM SoloDBTypeCollectionMap WHERE TypeKey = @typeKey;",
+        {| typeKey = Utils.typeIdentityKey targetType |})
+    |> Seq.map formatName
+    |> Seq.distinct
+    |> Seq.toArray
 
 let private collectionExistsByName (connection: SqliteConnection) (collectionName: string) =
     connection.QueryFirst<int64>(
