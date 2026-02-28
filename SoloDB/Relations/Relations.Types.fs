@@ -4,10 +4,13 @@ module internal SoloDatabase.RelationsTypes
 open System
 open System.Reflection
 open System.Collections.Concurrent
+open System.Runtime.CompilerServices
+open Microsoft.Data.Sqlite
 open SoloDatabase
 open SoloDatabase.Attributes
 open SoloDatabase.Utils
 open SoloDatabase.JsonSerializator
+open SQLiteTools
 open JsonFunctions
 
 type internal RelationTxContext = {
@@ -211,3 +214,38 @@ let internal serializeEntityForStorage (targetType: Type) (entity: obj) =
         objMap.Remove("Id") |> ignore
     | _ -> ()
     json.ToJsonString()
+
+// ─── Cycle24: Per-owner RelationVersion baseline tracking ─────────────────────
+
+/// Weak table mapping entity instances to their loaded RelationVersion.
+/// Entries are collected when the entity instance is GC'd.
+let internal relationVersionBaseline = ConditionalWeakTable<obj, obj>()
+
+/// Record the RelationVersion that was current when this entity was loaded.
+let internal captureRelationVersion (entity: obj) (version: int64) =
+    // ConditionalWeakTable.AddOrUpdate is not available on netstandard2.0.
+    // Remove first if present, then add.
+    relationVersionBaseline.Remove(entity) |> ignore
+    relationVersionBaseline.Add(entity, box version)
+
+/// Retrieve the RelationVersion captured at load time for this entity, or 0L if not tracked.
+let internal getLoadedRelationVersion (entity: obj) =
+    match relationVersionBaseline.TryGetValue(entity) with
+    | true, v -> unbox<int64> v
+    | _ -> 0L
+
+/// Ensure the SoloDBRelationVersion table exists. Created alongside relation catalog.
+let internal ensureRelationVersionTable (connection: SqliteConnection) =
+    ignore (connection.Execute(
+        "CREATE TABLE IF NOT EXISTS SoloDBRelationVersion (" +
+        "OwnerCollection TEXT NOT NULL, " +
+        "OwnerId INTEGER NOT NULL, " +
+        "Version INTEGER NOT NULL DEFAULT 0, " +
+        "PRIMARY KEY (OwnerCollection, OwnerId)" +
+        ") STRICT;"))
+
+/// Read the current persisted RelationVersion for an owner row. Returns 0 if no row exists.
+let internal readPersistedRelationVersion (connection: SqliteConnection) (ownerTable: string) (ownerId: int64) =
+    connection.QueryFirstOrDefault<int64>(
+        "SELECT Version FROM SoloDBRelationVersion WHERE OwnerCollection = @col AND OwnerId = @id;",
+        {| col = ownerTable; id = ownerId |})

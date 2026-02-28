@@ -535,6 +535,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 let excludedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
                 let includedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
                 Relations.batchLoadDBRefManyProperties connection name typeof<'T> excludedPaths includedPaths [| (id, box entity) |]
+                Relations.captureRelationVersionForEntities connection name [| (id, box entity) |]
             entity |> Some
 
     /// <summary>

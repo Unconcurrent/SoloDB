@@ -64,6 +64,7 @@ let ensureSchemaForOwnerType (tx: RelationTxContext) (ownerType: Type) =
     if isNull ownerType then nullArg "ownerType"
     withRelationSqliteWrap "build" "ensureSchemaForOwnerType" (fun () ->
         ensureRelationCatalogTable tx.Connection
+        ensureRelationVersionTable tx.Connection
         let descriptors = buildRelationDescriptors tx ownerType
         for descriptor in descriptors do
             ensureMetadataNotResurrected tx descriptor
@@ -153,12 +154,32 @@ let private readPersistedManyTargetIds (tx: RelationTxContext) (descriptor: Rela
             {| ownerId = ownerId |})
         |> Seq.toArray
 
+let private hasLoadedRelationVersion (entity: obj) =
+    match relationVersionBaseline.TryGetValue(entity) with
+    | true, _ -> true
+    | _ -> false
+
+let private checkRelationVersionStale (tx: RelationTxContext) (ownerId: int64) (newOwner: obj) =
+    // Only check if a baseline was captured at load time. Entities that were never loaded
+    // via GetById/query (e.g., fresh constructions, clones, patch-update patterns) skip the check.
+    if hasLoadedRelationVersion newOwner then
+        let loadedVersion = getLoadedRelationVersion newOwner
+        let currentVersion = readPersistedRelationVersion tx.Connection tx.OwnerTable ownerId
+        if currentVersion <> loadedVersion then
+            raise (InvalidOperationException(
+                $"Error: Stale relation state detected for '{tx.OwnerTable}' (owner id {ownerId}). " +
+                $"The relation was modified since this entity was loaded (loaded version {loadedVersion}, current version {currentVersion}).\n" +
+                "Fix: Reload the owner entity and retry, or use WithTransaction to ensure atomic relation updates."))
+
 let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newOwner: obj) =
     ensureTxContext tx
     if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
     ensureOwnerInstance tx.OwnerType oldOwner "oldOwner"
     ensureOwnerInstance tx.OwnerType newOwner "newOwner"
     withRelationSqliteWrap "prepare" "prepareUpdate" (fun () ->
+        // Cycle24: stale-version guard before any relation mutation planning.
+        checkRelationVersionStale tx ownerId newOwner
+
         let descriptors = buildRelationDescriptors tx tx.OwnerType
         let ops = ResizeArray<RelationUpdateManyOp>()
         let resetMap = Dictionary<string, int64 array>(StringComparer.Ordinal)
@@ -252,6 +273,8 @@ let prepareDeleteOwner (tx: RelationTxContext) (ownerId: int64) (owner: obj) =
     if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
     ensureOwnerInstance tx.OwnerType owner "owner"
     withRelationSqliteWrap "prepare" "prepareDeleteOwner" (fun () ->
+        // Cycle24: stale-version guard before delete relation handling.
+        checkRelationVersionStale tx ownerId owner
         { OwnerId = ownerId; OwnerType = tx.OwnerType }
     )
 
@@ -283,6 +306,12 @@ let private cloneOwnerForReplaceMany (ownerType: Type) (owner: obj) =
                     prop.SetValue(clone, value)
     clone
 
+let private incrementRelationVersion (tx: RelationTxContext) (ownerId: int64) =
+    tx.Connection.Execute(
+        "INSERT INTO SoloDBRelationVersion(OwnerCollection, OwnerId, Version) VALUES(@col, @id, 1) " +
+        "ON CONFLICT(OwnerCollection, OwnerId) DO UPDATE SET Version = Version + 1;",
+        {| col = tx.OwnerTable; id = ownerId |}) |> ignore
+
 let syncInsert (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) =
     ensureTxContext tx
     ensureTransaction tx
@@ -290,6 +319,7 @@ let syncInsert (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan
     withRelationSqliteWrap "sync" "syncInsert" (fun () ->
         ensureSchemaForOwnerType tx tx.OwnerType
         applyOps tx ownerId plan false
+        if plan.Ops.Length > 0 then incrementRelationVersion tx ownerId
     )
 
 let syncUpsert (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) =
@@ -299,6 +329,7 @@ let syncUpsert (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan
     withRelationSqliteWrap "sync" "syncUpsert" (fun () ->
         ensureSchemaForOwnerType tx tx.OwnerType
         applyOps tx ownerId plan false
+        if plan.Ops.Length > 0 then incrementRelationVersion tx ownerId
     )
 
 let syncUpdate (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) =
@@ -309,6 +340,7 @@ let syncUpdate (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan
         ensureSchemaForOwnerType tx tx.OwnerType
         let updateOwnerJson = StringComparer.Ordinal.Equals(plan.Kind, "UpdateMany")
         applyOps tx ownerId plan updateOwnerJson
+        if plan.Ops.Length > 0 then incrementRelationVersion tx ownerId
     )
 
 let syncReplaceOne (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newOwner: obj) =
@@ -321,6 +353,7 @@ let syncReplaceOne (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (new
         ensureSchemaForOwnerType tx tx.OwnerType
         let plan = prepareUpdate tx ownerId oldOwner newOwner
         applyOps tx ownerId plan false
+        if plan.Ops.Length > 0 then incrementRelationVersion tx ownerId
     )
 
 let syncReplaceMany (tx: RelationTxContext) (ownerIds: int64 seq) (oldOwners: obj seq) (newOwner: obj) =
@@ -344,8 +377,12 @@ let syncReplaceMany (tx: RelationTxContext) (ownerIds: int64 seq) (oldOwners: ob
 
         for i = 0 to ownerIdArr.Length - 1 do
             let newOwnerClone = cloneOwnerForReplaceMany tx.OwnerType newOwner
+            // Propagate stale-version baseline from original entity to clone so the guard fires.
+            if hasLoadedRelationVersion newOwner then
+                captureRelationVersion newOwnerClone (getLoadedRelationVersion newOwner)
             let plan = prepareUpdate tx ownerIdArr.[i] oldOwnerArr.[i] newOwnerClone
             applyOps tx ownerIdArr.[i] plan false
+            if plan.Ops.Length > 0 then incrementRelationVersion tx ownerIdArr.[i]
     )
 
 let syncDeleteOwner (tx: RelationTxContext) (plan: RelationDeletePlan) =
@@ -354,6 +391,7 @@ let syncDeleteOwner (tx: RelationTxContext) (plan: RelationDeletePlan) =
     if plan.OwnerId <= 0L then raise (ArgumentOutOfRangeException("plan.OwnerId", plan.OwnerId, "ownerId must be > 0."))
     withRelationSqliteWrap "sync" "syncDeleteOwner" (fun () ->
         ensureRelationCatalogTable tx.Connection
+        ensureRelationVersionTable tx.Connection
         applyOwnerDeletePoliciesCore tx tx.OwnerTable plan.OwnerId true
         applyTargetDeletePoliciesCore tx tx.OwnerTable plan.OwnerId
     )
@@ -401,3 +439,16 @@ let batchLoadDBRefManyProperties
     withRelationSqliteWrap "batch-load" "batchLoadDBRefManyProperties" (fun () ->
         RelationsBatchLoad.batchLoadDBRefManyProperties connection ownerTable ownerType excludedPaths includedPaths ownerEntities
     )
+
+/// Capture the RelationVersion baseline for loaded entities.
+/// Called after batch-loading relations so the version is recorded at load time.
+let captureRelationVersionForEntities
+    (connection: SqliteConnection)
+    (ownerTable: string)
+    (ownerEntities: (int64 * obj) array)
+    =
+    if ownerEntities.Length > 0 then
+        ensureRelationVersionTable connection
+        for (ownerId, entity) in ownerEntities do
+            let version = readPersistedRelationVersion connection ownerTable ownerId
+            captureRelationVersion entity version
