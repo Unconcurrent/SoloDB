@@ -71,6 +71,7 @@
     <Compile Include="Query/QueryTranslator.fs" />
     <Compile Include="FileStorage/FileStorage.Helpers.fs" />
     <Compile Include="FileStorage/FileStorage.Listing.fs" />
+    <Compile Include="FileStorage/FileStorage.Copy.fs" />
     <Compile Include="FileStorage/FileStorage.fs" />
     <Compile Include="Events\SoloDBEvents.Helpers.fs" />
     <Compile Include="Events\SoloDBEvents.EventSystem.fs" />

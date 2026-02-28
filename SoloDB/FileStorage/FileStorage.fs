@@ -270,6 +270,52 @@ module FileStorage =
                 moveDirectoryMustBeWithinTransaction db dirToMove toPathParent fileName
             )
 
+        // ── Copy operations (Cycle34) ──────────────────────────────────
+
+        member this.CopyFile(fromPath, toPath, [<Optional; DefaultParameterValue(false)>] copyMetadata: bool) =
+            connection.WithTransaction(fun db ->
+                copyFileMustBeWithinTransaction db fromPath toPath false copyMetadata
+            )
+
+        member this.CopyFileAsync(fromPath, toPath, [<Optional; DefaultParameterValue(false)>] copyMetadata: bool) = task {
+            return connection.WithTransaction(fun db ->
+                copyFileMustBeWithinTransaction db fromPath toPath false copyMetadata
+            )
+        }
+
+        member this.CopyReplaceFile(fromPath, toPath, [<Optional; DefaultParameterValue(false)>] copyMetadata: bool) =
+            connection.WithTransaction(fun db ->
+                copyFileMustBeWithinTransaction db fromPath toPath true copyMetadata
+            )
+
+        member this.CopyReplaceFileAsync(fromPath, toPath, [<Optional; DefaultParameterValue(false)>] copyMetadata: bool) = task {
+            return connection.WithTransaction(fun db ->
+                copyFileMustBeWithinTransaction db fromPath toPath true copyMetadata
+            )
+        }
+
+        member this.CopyDirectory(fromPath, toPath, [<Optional; DefaultParameterValue(true)>] recursive: bool, [<Optional; DefaultParameterValue(false)>] copyMetadata: bool) : SoloDBDirectoryHeader =
+            connection.WithTransaction(fun db ->
+                copyDirectoryMustBeWithinTransaction db fromPath toPath false recursive copyMetadata
+            )
+
+        member this.CopyDirectoryAsync(fromPath, toPath, [<Optional; DefaultParameterValue(true)>] recursive: bool, [<Optional; DefaultParameterValue(false)>] copyMetadata: bool) : Threading.Tasks.Task<SoloDBDirectoryHeader> = task {
+            return connection.WithTransaction(fun db ->
+                copyDirectoryMustBeWithinTransaction db fromPath toPath false recursive copyMetadata
+            )
+        }
+
+        member this.CopyReplaceDirectory(fromPath, toPath, [<Optional; DefaultParameterValue(true)>] recursive: bool, [<Optional; DefaultParameterValue(false)>] copyMetadata: bool) : SoloDBDirectoryHeader =
+            connection.WithTransaction(fun db ->
+                copyDirectoryMustBeWithinTransaction db fromPath toPath true recursive copyMetadata
+            )
+
+        member this.CopyReplaceDirectoryAsync(fromPath, toPath, [<Optional; DefaultParameterValue(true)>] recursive: bool, [<Optional; DefaultParameterValue(false)>] copyMetadata: bool) : Threading.Tasks.Task<SoloDBDirectoryHeader> = task {
+            return connection.WithTransaction(fun db ->
+                copyDirectoryMustBeWithinTransaction db fromPath toPath true recursive copyMetadata
+            )
+        }
+
         interface IFileSystem with
             member this.Upload(path, stream) = this.Upload(path, stream)
             member this.UploadAsync(path, stream) = this.UploadAsync(path, stream)
@@ -315,3 +361,13 @@ module FileStorage =
             member this.MoveFile(from, toPath) = this.MoveFile(from, toPath)
             member this.MoveReplaceFile(from, toPath) = this.MoveReplaceFile(from, toPath)
             member this.MoveDirectory(from, toPath) = this.MoveDirectory(from, toPath)
+
+        interface IFileSystemCopyInternal with
+            member this.CopyFile(fromPath, toPath, copyMetadata) = this.CopyFile(fromPath, toPath, copyMetadata)
+            member this.CopyFileAsync(fromPath, toPath, copyMetadata) = this.CopyFileAsync(fromPath, toPath, copyMetadata)
+            member this.CopyReplaceFile(fromPath, toPath, copyMetadata) = this.CopyReplaceFile(fromPath, toPath, copyMetadata)
+            member this.CopyReplaceFileAsync(fromPath, toPath, copyMetadata) = this.CopyReplaceFileAsync(fromPath, toPath, copyMetadata)
+            member this.CopyDirectory(fromPath, toPath, recursive, copyMetadata) = this.CopyDirectory(fromPath, toPath, recursive, copyMetadata)
+            member this.CopyDirectoryAsync(fromPath, toPath, recursive, copyMetadata) = this.CopyDirectoryAsync(fromPath, toPath, recursive, copyMetadata)
+            member this.CopyReplaceDirectory(fromPath, toPath, recursive, copyMetadata) = this.CopyReplaceDirectory(fromPath, toPath, recursive, copyMetadata)
+            member this.CopyReplaceDirectoryAsync(fromPath, toPath, recursive, copyMetadata) = this.CopyReplaceDirectoryAsync(fromPath, toPath, recursive, copyMetadata)
