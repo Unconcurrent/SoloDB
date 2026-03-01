@@ -69,6 +69,34 @@ let ensureSchemaForOwnerType (tx: RelationTxContext) (ownerType: Type) =
         for descriptor in descriptors do
             ensureMetadataNotResurrected tx descriptor
             ensureRelationSchema tx descriptor
+
+        // Delta 1: Orphan detection (E2/E3/SI-2, L1/L2 — detect at GetCollection time)
+        // Query catalog for all stored relation properties of this owner collection.
+        // Any property in catalog but NOT in current descriptors is orphaned.
+        let ownerTable = formatName tx.OwnerTable
+        let storedProperties =
+            tx.Connection.Query<{| PropertyName: string; Name: string |}>(
+                "SELECT PropertyName, Name FROM SoloDBRelation WHERE OwnerCollection = @owner;",
+                {| owner = ownerTable |})
+            |> Seq.toArray
+        let currentPropertyNames =
+            descriptors |> Array.map (fun d -> d.Property.Name) |> Set.ofArray
+        for stored in storedProperties do
+            if not (currentPropertyNames.Contains stored.PropertyName) then
+                // Orphaned catalog row: check if link table has persisted data
+                let linkTable = linkTableFromRelationName stored.Name
+                let hasPersistedLinks =
+                    sqliteTableExistsByName tx.Connection linkTable
+                    && tx.Connection.QueryFirst<int64>(
+                        $"SELECT CASE WHEN EXISTS (SELECT 1 FROM {quoteIdentifier linkTable} LIMIT 1) THEN 1 ELSE 0 END") = 1L
+                if hasPersistedLinks then
+                    // E2: ERROR — persisted links exist for removed property
+                    raise (InvalidOperationException(
+                        $"Error: relation property '{ownerTable}.{stored.PropertyName}' was removed but persisted link data exists.\n" +
+                        $"Reason: link table '{linkTable}' contains rows that reference this relation. " +
+                        "Removing a relation property with persisted links is not allowed because it would orphan link data silently.\n" +
+                        "Fix: clear all link data for this relation before removing the property from the type, " +
+                        "or drop the collection entirely."))
     )
 
 let private asReadOnlyDict (input: Dictionary<string, int64 array>) =

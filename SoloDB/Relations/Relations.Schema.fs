@@ -307,8 +307,125 @@ let internal ensureMetadataNotResurrected (tx: RelationTxContext) (descriptor: R
             if not (linkTableOwnedByOtherProperty tx.Connection descriptor) then
                 raise (InvalidOperationException(br05Message descriptor.OwnerTable descriptor.Property.Name "build"))
 
+/// Detects evolution conflicts between the current descriptor and the stored catalog row.
+/// Raises on target-type mismatch or Many→Single kind narrowing.
+/// Performs atomic constraint migration for Single→Many kind widening (Captain directive).
+let private detectAndMigrateEvolutionConflicts (tx: RelationTxContext) (descriptor: RelationDescriptor) =
+    ensureRelationCatalogTable tx.Connection
+    let stored =
+        tx.Connection.QueryFirstOrDefault<{| RefKind: string; TargetCollection: string |}>(
+            "SELECT RefKind, TargetCollection FROM SoloDBRelation WHERE OwnerCollection = @owner AND PropertyName = @prop LIMIT 1;",
+            {| owner = descriptor.OwnerTable; prop = descriptor.Property.Name |})
+    if not (isNull (box stored)) then
+        // Delta 3: Target-type-change detection (E5/SI-4)
+        if not (StringComparer.OrdinalIgnoreCase.Equals(stored.TargetCollection, descriptor.TargetTable)) then
+            raise (InvalidOperationException(
+                $"Error: relation target type changed for '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\n" +
+                $"Reason: stored target is '{stored.TargetCollection}' but current type resolves to '{descriptor.TargetTable}'. " +
+                "Changing the target type of an existing relation is not supported because the link table's foreign keys reference the original target.\n" +
+                "Fix: drop the collection or clear all relation data before changing the target type."))
+
+        // Delta 2: Kind-change detection (E3/SI-3, Captain directive)
+        let storedKind = if stored.RefKind = "Many" then Many else Single
+        if storedKind <> descriptor.Kind then
+            let linkTable = descriptor.LinkTable
+            let linkExists = sqliteTableExistsByName tx.Connection linkTable
+            match storedKind, descriptor.Kind with
+            | Single, Many when linkExists ->
+                // Forward migration: Single → Many (Captain: ALLOW)
+                // Existing single-link data satisfies Many constraint (subset).
+                // Atomic: drop UNIQUE(SourceId) index, recreate table constraints via
+                // standard SQLite table-recreate pattern inside the current transaction.
+                let qLink = quoteIdentifier linkTable
+                let qSource = quoteIdentifier descriptor.LinkSourceTable
+                let qTarget = quoteIdentifier descriptor.LinkTargetTable
+                let tmpTable = linkTable + "_migration_tmp"
+                let qTmp = quoteIdentifier tmpTable
+                // Capture pre-migration row count for invariant check
+                let preCount = tx.Connection.QueryFirst<int64>($"SELECT COUNT(*) FROM {qLink};")
+                tx.Connection.Execute(
+                    $"CREATE TABLE {qTmp} (" +
+                    "Id INTEGER PRIMARY KEY, " +
+                    "SourceId INTEGER NOT NULL, " +
+                    "TargetId INTEGER NOT NULL, " +
+                    $"FOREIGN KEY (SourceId) REFERENCES {qSource}(Id) ON DELETE RESTRICT, " +
+                    $"FOREIGN KEY (TargetId) REFERENCES {qTarget}(Id) ON DELETE RESTRICT, " +
+                    "UNIQUE(SourceId, TargetId)" +
+                    ") STRICT;") |> ignore
+                tx.Connection.Execute($"INSERT INTO {qTmp}(Id, SourceId, TargetId) SELECT Id, SourceId, TargetId FROM {qLink};") |> ignore
+                // Post-insert invariant: row count must match (no duplicates lost)
+                let postCount = tx.Connection.QueryFirst<int64>($"SELECT COUNT(*) FROM {qTmp};")
+                if preCount <> postCount then
+                    // Abort migration: duplicate (SourceId, TargetId) pairs in source data
+                    tx.Connection.Execute($"DROP TABLE {qTmp};") |> ignore
+                    raise (InvalidOperationException(
+                        $"Error: forward migration failed for '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\n" +
+                        $"Reason: source link table '{linkTable}' contains {preCount} rows but migration target accepted only {postCount}. " +
+                        "This indicates duplicate (SourceId, TargetId) pairs in the existing Single-relation data.\n" +
+                        "Fix: resolve duplicate link rows before retrying the migration."))
+                tx.Connection.Execute($"DROP TABLE {qLink};") |> ignore
+                tx.Connection.Execute($"ALTER TABLE {qTmp} RENAME TO {qLink};") |> ignore
+                // Recreate indexes
+                let sourceIdx = formatName($"IX_{linkTable}_Source")
+                let targetIdx = formatName($"IX_{linkTable}_Target")
+                tx.Connection.Execute($"CREATE INDEX IF NOT EXISTS {quoteIdentifier sourceIdx} ON {qLink}(SourceId);") |> ignore
+                tx.Connection.Execute($"CREATE INDEX IF NOT EXISTS {quoteIdentifier targetIdx} ON {qLink}(TargetId);") |> ignore
+                // Post-migration invariant verification
+                // 1. Row count preserved
+                let finalCount = tx.Connection.QueryFirst<int64>($"SELECT COUNT(*) FROM {qLink};")
+                if finalCount <> preCount then
+                    raise (InvalidOperationException(
+                        $"Error: forward migration invariant violation for '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\n" +
+                        $"Reason: expected {preCount} rows after migration but found {finalCount} in '{linkTable}'.\n" +
+                        "Fix: this indicates a migration defect. Report this error."))
+                // 2. UNIQUE(SourceId, TargetId) constraint exists on migrated table
+                let hasUniqueConstraint =
+                    tx.Connection.QueryFirst<int64>(
+                        "SELECT CASE WHEN EXISTS (" +
+                        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND tbl_name = @tbl " +
+                        "AND sql IS NOT NULL AND instr(lower(sql), 'unique') > 0" +
+                        ") THEN 1 ELSE 0 END;",
+                        {| tbl = linkTable |}) = 1L
+                if not hasUniqueConstraint then
+                    raise (InvalidOperationException(
+                        $"Error: forward migration invariant violation for '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\n" +
+                        $"Reason: migrated table '{linkTable}' is missing expected UNIQUE constraint.\n" +
+                        "Fix: this indicates a migration defect. Report this error."))
+                // 3. Absence of obsolete UNIQUE(SourceId)-only index (I2)
+                // The old Single table had UNIQUE(SourceId). The table-recreate removes it,
+                // but we verify no autoindex or explicit index enforces SourceId-only uniqueness.
+                let hasObsoleteSourceOnlyUnique =
+                    tx.Connection.QueryFirst<int64>(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = @tbl " +
+                        "AND sql IS NOT NULL AND instr(lower(replace(sql, ' ', '')), 'unique(sourceid)') > 0;",
+                        {| tbl = linkTable |})
+                if hasObsoleteSourceOnlyUnique > 0L then
+                    raise (InvalidOperationException(
+                        $"Error: forward migration invariant violation for '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\n" +
+                        $"Reason: migrated table '{linkTable}' still has obsolete UNIQUE(SourceId) constraint from Single cardinality.\n" +
+                        "Fix: this indicates a migration defect. Report this error."))
+                // 4. Source and target indexes exist (I4)
+                let idxCount =
+                    tx.Connection.QueryFirst<int64>(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = @tbl AND name IN (@src, @tgt);",
+                        {| tbl = linkTable; src = sourceIdx; tgt = targetIdx |})
+                if idxCount <> 2L then
+                    raise (InvalidOperationException(
+                        $"Error: forward migration invariant violation for '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\n" +
+                        $"Reason: migrated table '{linkTable}' is missing expected indexes (found {idxCount}/2).\n" +
+                        "Fix: this indicates a migration defect. Report this error."))
+            | Many, Single ->
+                // Reverse migration: Many → Single (Captain: ERROR)
+                raise (InvalidOperationException(
+                    $"Error: relation kind narrowing not supported for '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\n" +
+                    $"Reason: stored relation is 'Many' but current type declares 'Single'. " +
+                    "Existing multi-target link rows would violate the Single cardinality constraint.\n" +
+                    "Fix: drop the collection or clear all relation data before narrowing from DBRefMany to DBRef."))
+            | _ -> () // Single→Many with no existing link table: CREATE TABLE will handle it
+
 let internal ensureRelationSchema (tx: RelationTxContext) (descriptor: RelationDescriptor) =
     ensureCollectionTableExists tx.Connection descriptor.TargetTable
+    detectAndMigrateEvolutionConflicts tx descriptor
 
     match descriptor.TypedIdType, descriptor.TargetSoloIdProperty with
     | ValueSome _, ValueSome soloIdProp ->
