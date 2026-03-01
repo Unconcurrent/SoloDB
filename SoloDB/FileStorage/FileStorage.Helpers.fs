@@ -25,17 +25,12 @@ module internal FileStorageHelpers =
     let internal createFileAt (db: SqliteConnection) (path: string) =
         let struct (dirPath, name) = getPathAndName path
         let directory = getOrCreateDir db dirPath
-        let newFile = {
-            Name = name
-            FullPath = combinePath dirPath name
-            DirectoryId = directory.Id
-            Length = 0L
-            Created = DateTimeOffset.Now
-            Modified = DateTimeOffset.Now
-            Id = 0
-            Metadata = null
-        }
-        let result = db.QueryFirst<SoloDBFileHeader>("INSERT INTO SoloDBFileHeader(Name, FullPath, DirectoryId, Length, Created, Modified) VALUES (@Name, @FullPath, @DirectoryId, @Length, @Created, @Modified) RETURNING *", newFile)
+        let fullPath = combinePath dirPath name
+        let now = DateTimeOffset.Now
+        db.Execute(
+            "INSERT INTO SoloDBFileHeader(Name, FullPath, DirectoryId, Length, Created, Modified) VALUES (@Name, @FullPath, @DirectoryId, 0, @Created, @Modified) ON CONFLICT(FullPath) DO NOTHING",
+            {| Name = name; FullPath = fullPath; DirectoryId = directory.Id; Created = now; Modified = now |}) |> ignore
+        let result = db.QueryFirst<SoloDBFileHeader>("SELECT * FROM SoloDBFileHeader WHERE FullPath = @FullPath", {| FullPath = fullPath |})
         {result with Metadata = readOnlyDict []}
 
     let internal listDirectoriesAt (db: SqliteConnection) (path: string) =
@@ -93,7 +88,6 @@ module internal FileStorageHelpers =
         getFilesWhere db "fh.FullPath = @FullPath" {|FullPath = fullPath|} |> Seq.tryHead
 
     let internal getOrCreateFileAt (db: SqliteConnection) (path: string) =
-        use l = lockPathIfNotInTransaction db path
         match tryGetFileAt db path with
         | Some f -> f
         | None ->
@@ -145,10 +139,12 @@ module internal FileStorageHelpers =
 
     let internal openOrCreateFile (db: Connection) (path: string) =
         let file =
-            use conn = db.Get()
-            match tryGetFileAt conn path with
+            let existing =
+                use conn = db.Get()
+                tryGetFileAt conn path
+            match existing with
             | Some x -> x
-            | None -> createFileAt conn path
+            | None -> db.WithTransaction(fun conn -> createFileAt conn path)
         new FileStorageCoreStream.DbFileStream(db, file.Id, file.DirectoryId, file.FullPath)
 
     let internal setSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) (value: string) =

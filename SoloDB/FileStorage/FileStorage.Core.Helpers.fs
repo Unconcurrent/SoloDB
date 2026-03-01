@@ -124,8 +124,6 @@ module FileStorageCore =
     /// Recursively retrieves or creates a directory in the database.
     /// </summary>
     let rec internal getOrCreateDir (db: SqliteConnection) (path: string) =
-        use _l = lockPathIfNotInTransaction db path
-
         match tryGetDir db path with
         | Some d -> d
         | None ->
@@ -147,7 +145,7 @@ module FileStorageCore =
             FullPath = path
         |}
 
-        let _result = db.Execute("INSERT INTO SoloDBDirectoryHeader(Name, ParentId, FullPath) VALUES(@Name, @ParentId, @FullPath)", newDir)
+        db.Execute("INSERT INTO SoloDBDirectoryHeader(Name, ParentId, FullPath) VALUES(@Name, @ParentId, @FullPath) ON CONFLICT(FullPath) DO NOTHING", newDir) |> ignore
 
         match db.QueryFirstOrDefault<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE FullPath = @FullPath", {|FullPath = path|}) with
         | dir when Utils.isNull dir -> failwithf "Normally you cannot end up here, cannot find a directory that has just created: %s" path

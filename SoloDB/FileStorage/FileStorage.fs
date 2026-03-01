@@ -98,8 +98,12 @@ module FileStorage =
             db.QueryFirst<bool>(sql, {| Path = formatPath path |})
 
         member this.GetOrCreateAt path =
-            use db = connection.Get()
-            getOrCreateFileAt db path
+            let existing =
+                use db = connection.Get()
+                tryGetFileAt db path
+            match existing with
+            | Some f -> f
+            | None -> connection.WithTransaction(fun tx -> getOrCreateFileAt tx path)
 
         member this.GetDirAt path =
             use db = connection.Get()
@@ -110,8 +114,12 @@ module FileStorage =
             tryGetDir db path
 
         member this.GetOrCreateDirAt path =
-            use db = connection.Get()
-            getOrCreateDirectoryAt db path
+            let existing =
+                use db = connection.Get()
+                tryGetDir db (formatPath path)
+            match existing with
+            | Some d -> d
+            | None -> connection.WithTransaction(fun tx -> getOrCreateDirectoryAt tx path)
 
         member this.Open file = openFile connection file
         member this.OpenAt path =
