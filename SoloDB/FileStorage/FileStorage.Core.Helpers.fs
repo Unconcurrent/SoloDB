@@ -62,16 +62,6 @@ module FileStorageCore =
         mutex :> IDisposable
 
     /// <summary>
-    /// Acquires a mutex to lock the specified file ID if a transaction is not already active.
-    /// </summary>
-    let internal lockFileIdIfNotInTransaction (db: SqliteConnection) (id: int64) =
-        if isInTransaction db then
-            noopDisposer
-        else
-        let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(db.ConnectionString)}-FileId-{id}")
-        mutex :> IDisposable
-
-    /// <summary>
     /// Fills the directory metadata for a given directory header by querying the database.
     /// </summary>
     let internal fillDirectoryMetadata (db: SqliteConnection) (directory: SoloDBDirectoryHeader) =
