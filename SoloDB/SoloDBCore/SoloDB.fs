@@ -209,6 +209,26 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     directConnection.Query<string>("SELECT Name FROM SoloDBCollections")
                 member _.Optimize() =
                     directConnection.Execute "PRAGMA optimize;" |> ignore
+                member _.WithTransaction<'R>(_func: Func<ISoloDB, 'R>) : 'R =
+                    raise (NotSupportedException(
+                        "Error: Nested transactions are not supported inside event handler contexts.\n" +
+                        "Reason: Event handlers execute during active SQL statements where SQLite cannot open SAVEPOINTs.\n" +
+                        "Fix: Perform transactional work outside event handlers, or use the event context directly without nesting."))
+                member _.WithTransaction(_func: Action<ISoloDB>) : unit =
+                    raise (NotSupportedException(
+                        "Error: Nested transactions are not supported inside event handler contexts.\n" +
+                        "Reason: Event handlers execute during active SQL statements where SQLite cannot open SAVEPOINTs.\n" +
+                        "Fix: Perform transactional work outside event handlers, or use the event context directly without nesting."))
+                member _.WithTransactionAsync<'R>(_func: Func<ISoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> =
+                    raise (NotSupportedException(
+                        "Error: Nested transactions are not supported inside event handler contexts.\n" +
+                        "Reason: Event handlers execute during active SQL statements where SQLite cannot open SAVEPOINTs.\n" +
+                        "Fix: Perform transactional work outside event handlers, or use the event context directly without nesting."))
+                member _.WithTransactionAsync(_func: Func<ISoloDB, Threading.Tasks.Task>) : Threading.Tasks.Task =
+                    raise (NotSupportedException(
+                        "Error: Nested transactions are not supported inside event handler contexts.\n" +
+                        "Reason: Event handlers execute during active SQL statements where SQLite cannot open SAVEPOINTs.\n" +
+                        "Fix: Perform transactional work outside event handlers, or use the event context directly without nesting."))
                 member _.Dispose() = ()
             }
 
@@ -1308,6 +1328,10 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
         member this.DropCollection<'T>() = this.DropCollection<'T>()
         member this.ListCollectionNames() = this.ListCollectionNames()
         member this.Optimize() = this.Optimize()
+        member this.WithTransaction<'R>(func: Func<ISoloDB, 'R>) : 'R = this.WithTransaction(func)
+        member this.WithTransaction(func: Action<ISoloDB>) : unit = this.WithTransaction(func)
+        member this.WithTransactionAsync<'R>(func: Func<ISoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> = this.WithTransactionAsync(func)
+        member this.WithTransactionAsync(func: Func<ISoloDB, Threading.Tasks.Task>) : Threading.Tasks.Task = this.WithTransactionAsync(func)
         member this.Dispose() = ()
 
 /// <summary>
@@ -1645,6 +1669,14 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         member this.DropCollection<'T>() = this.DropCollection<'T>()
         member this.ListCollectionNames() = this.ListCollectionNames()
         member this.Optimize() = this.Optimize()
+        member this.WithTransaction<'R>(func: Func<ISoloDB, 'R>) : 'R =
+            this.WithTransaction(fun (tx: TransactionalSoloDB) -> func.Invoke(tx :> ISoloDB))
+        member this.WithTransaction(func: Action<ISoloDB>) : unit =
+            this.WithTransaction(fun (tx: TransactionalSoloDB) -> func.Invoke(tx :> ISoloDB))
+        member this.WithTransactionAsync<'R>(func: Func<ISoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> =
+            this.WithTransactionAsync(fun (tx: TransactionalSoloDB) -> func.Invoke(tx :> ISoloDB))
+        member this.WithTransactionAsync(func: Func<ISoloDB, Threading.Tasks.Task>) : Threading.Tasks.Task =
+            this.WithTransactionAsync(fun (tx: TransactionalSoloDB) -> func.Invoke(tx :> ISoloDB))
 
 
     /// <summary>
@@ -1661,94 +1693,3 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <param name="query">The LINQ query to translate.</param>
     /// <returns>The generated SQL string.</returns>
     static member GetSQL(query: IQueryable<'T>) = QueryUtils.getSQL query
-
-namespace SoloDatabase.Transactions
-
-open System
-open System.Runtime.CompilerServices
-open System.Threading.Tasks
-open SoloDatabase
-
-/// <summary>
-/// Provides extension methods on <see cref="ISoloDB"/> for entering nested transactions.
-/// </summary>
-/// <remarks>
-/// <para>
-/// When the receiver is a root <see cref="SoloDB"/> instance, a top-level transaction is started
-/// using <c>BEGIN IMMEDIATE</c>. When the receiver is a <see cref="TransactionalSoloDB"/> instance
-/// (i.e., already inside a transaction), a nested <c>SAVEPOINT</c> is created instead.
-/// </para>
-/// <para>
-/// Calling these methods on an event-handler context (the <c>ISoloDB</c> proxy passed to event
-/// callbacks) is not supported and will throw <see cref="NotSupportedException"/> with an
-/// actionable message.
-/// </para>
-/// </remarks>
-[<Extension>]
-type SoloDBTransactionExtensions =
-    /// <summary>
-    /// Executes a function within a transaction scope. Opens a top-level transaction on a root
-    /// <see cref="SoloDB"/> instance, or a nested savepoint on a <see cref="TransactionalSoloDB"/> instance.
-    /// </summary>
-    /// <param name="db">The database instance.</param>
-    /// <param name="func">A function that receives a transactional <see cref="ISoloDB"/> context and returns a result.</param>
-    /// <typeparam name="'R">The return type of the function.</typeparam>
-    /// <returns>The result of the function.</returns>
-    /// <exception cref="System.NotSupportedException">Thrown when called on an event-handler context where SAVEPOINTs cannot be opened.</exception>
-    [<Extension>]
-    static member WithTransaction<'R>(db: ISoloDB, func: Func<ISoloDB, 'R>) : 'R =
-        match db with
-        | :? SoloDB as root ->
-            root.WithTransaction(fun (tx: TransactionalSoloDB) -> func.Invoke(tx :> ISoloDB))
-        | :? TransactionalSoloDB as tx ->
-            tx.WithTransaction(func)
-        | _ ->
-            raise (NotSupportedException(
-                "Error: Nested transactions are not supported inside event handler contexts.\n" +
-                "Reason: Event handlers execute during active SQL statements where SQLite cannot open SAVEPOINTs.\n" +
-                "Fix: Perform transactional work outside event handlers, or use the event context directly without nesting."))
-
-    /// <summary>
-    /// Executes an action within a transaction scope. Opens a top-level transaction on a root
-    /// <see cref="SoloDB"/> instance, or a nested savepoint on a <see cref="TransactionalSoloDB"/> instance.
-    /// </summary>
-    /// <param name="db">The database instance.</param>
-    /// <param name="func">An action that receives a transactional <see cref="ISoloDB"/> context.</param>
-    /// <exception cref="System.NotSupportedException">Thrown when called on an event-handler context where SAVEPOINTs cannot be opened.</exception>
-    [<Extension>]
-    static member WithTransaction(db: ISoloDB, func: Action<ISoloDB>) : unit =
-        SoloDBTransactionExtensions.WithTransaction<unit>(db, fun ctx -> func.Invoke ctx)
-
-    /// <summary>
-    /// Executes an asynchronous function within a transaction scope. Opens a top-level transaction on a root
-    /// <see cref="SoloDB"/> instance, or a nested savepoint on a <see cref="TransactionalSoloDB"/> instance.
-    /// </summary>
-    /// <param name="db">The database instance.</param>
-    /// <param name="func">An async function that receives a transactional <see cref="ISoloDB"/> context and returns a result.</param>
-    /// <typeparam name="'R">The return type of the function.</typeparam>
-    /// <returns>A task representing the asynchronous transactional operation.</returns>
-    /// <exception cref="System.NotSupportedException">Thrown when called on an event-handler context where SAVEPOINTs cannot be opened.</exception>
-    [<Extension>]
-    static member WithTransactionAsync<'R>(db: ISoloDB, func: Func<ISoloDB, Task<'R>>) : Task<'R> =
-        match db with
-        | :? SoloDB as root ->
-            root.WithTransactionAsync(fun (tx: TransactionalSoloDB) -> func.Invoke(tx :> ISoloDB))
-        | :? TransactionalSoloDB as tx ->
-            tx.WithTransactionAsync(func)
-        | _ ->
-            raise (NotSupportedException(
-                "Error: Nested transactions are not supported inside event handler contexts.\n" +
-                "Reason: Event handlers execute during active SQL statements where SQLite cannot open SAVEPOINTs.\n" +
-                "Fix: Perform transactional work outside event handlers, or use the event context directly without nesting."))
-
-    /// <summary>
-    /// Executes an asynchronous action within a transaction scope. Opens a top-level transaction on a root
-    /// <see cref="SoloDB"/> instance, or a nested savepoint on a <see cref="TransactionalSoloDB"/> instance.
-    /// </summary>
-    /// <param name="db">The database instance.</param>
-    /// <param name="func">An async function that receives a transactional <see cref="ISoloDB"/> context.</param>
-    /// <returns>A task representing the asynchronous transactional operation.</returns>
-    /// <exception cref="System.NotSupportedException">Thrown when called on an event-handler context where SAVEPOINTs cannot be opened.</exception>
-    [<Extension>]
-    static member WithTransactionAsync(db: ISoloDB, func: Func<ISoloDB, Task>) : Task =
-        SoloDBTransactionExtensions.WithTransactionAsync<unit>(db, fun ctx -> task { do! func.Invoke ctx }) :> Task

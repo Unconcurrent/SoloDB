@@ -66,6 +66,10 @@ type internal SoloDBItemEventContext<'T> internal (collectionName: string, creat
         member this.DropCollection<'A> () = this.ReadDB().DropCollection<'A> ()
         member this.ListCollectionNames () = this.ReadDB().ListCollectionNames ()
         member this.Optimize () = this.ReadDB().Optimize ()
+        member this.WithTransaction<'R> (func: Func<ISoloDB, 'R>) : 'R = this.ReadDB().WithTransaction<'R>(func)
+        member this.WithTransaction (func: Action<ISoloDB>) : unit = this.ReadDB().WithTransaction(func)
+        member this.WithTransactionAsync<'R> (func: Func<ISoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> = this.ReadDB().WithTransactionAsync<'R>(func)
+        member this.WithTransactionAsync (func: Func<ISoloDB, Threading.Tasks.Task>) : Threading.Tasks.Task = this.ReadDB().WithTransactionAsync(func)
         member this.Dispose () = this.ReadDB().Dispose ()
 
 
@@ -142,4 +146,8 @@ type internal SoloDBUpdatingEventContext<'T> internal (collectionName: string, c
         member this.DropCollection<'A> () = this.ReadDB().DropCollection<'A> ()
         member this.ListCollectionNames () = this.ReadDB().ListCollectionNames ()
         member this.Optimize () = this.ReadDB().Optimize ()
+        member this.WithTransaction<'R> (func: Func<ISoloDB, 'R>) : 'R = this.ReadDB().WithTransaction<'R>(func)
+        member this.WithTransaction (func: Action<ISoloDB>) : unit = this.ReadDB().WithTransaction(func)
+        member this.WithTransactionAsync<'R> (func: Func<ISoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> = this.ReadDB().WithTransactionAsync<'R>(func)
+        member this.WithTransactionAsync (func: Func<ISoloDB, Threading.Tasks.Task>) : Threading.Tasks.Task = this.ReadDB().WithTransactionAsync(func)
         member this.Dispose () = this.ReadDB().Dispose ()

@@ -1167,6 +1167,61 @@ and ISoloDB =
     abstract member FileSystem: IFileSystem
 
     /// <summary>
+    /// Executes a function inside a transaction scope and returns its result.
+    /// </summary>
+    /// <remarks>
+    /// On a root database context, this opens a top-level transaction. On an existing transactional context,
+    /// this opens a nested savepoint.
+    /// </remarks>
+    /// <param name="func">The function executed inside the transaction scope.</param>
+    /// <returns>The function result.</returns>
+    /// <exception cref="System.NotSupportedException">
+    /// Thrown for event-handler contexts where nested transaction entry is not supported.
+    /// </exception>
+    abstract member WithTransaction<'R> : func: Func<ISoloDB, 'R> -> 'R
+
+    /// <summary>
+    /// Executes an action inside a transaction scope.
+    /// </summary>
+    /// <remarks>
+    /// On a root database context, this opens a top-level transaction. On an existing transactional context,
+    /// this opens a nested savepoint.
+    /// </remarks>
+    /// <param name="func">The action executed inside the transaction scope.</param>
+    /// <exception cref="System.NotSupportedException">
+    /// Thrown for event-handler contexts where nested transaction entry is not supported.
+    /// </exception>
+    abstract member WithTransaction : func: Action<ISoloDB> -> unit
+
+    /// <summary>
+    /// Executes an asynchronous function inside a transaction scope and returns its result.
+    /// </summary>
+    /// <remarks>
+    /// On a root database context, this opens a top-level transaction. On an existing transactional context,
+    /// this opens a nested savepoint.
+    /// </remarks>
+    /// <param name="func">The asynchronous function executed inside the transaction scope.</param>
+    /// <returns>A task containing the function result.</returns>
+    /// <exception cref="System.NotSupportedException">
+    /// Thrown for event-handler contexts where nested transaction entry is not supported.
+    /// </exception>
+    abstract member WithTransactionAsync<'R> : func: Func<ISoloDB, Task<'R>> -> Task<'R>
+
+    /// <summary>
+    /// Executes an asynchronous action inside a transaction scope.
+    /// </summary>
+    /// <remarks>
+    /// On a root database context, this opens a top-level transaction. On an existing transactional context,
+    /// this opens a nested savepoint.
+    /// </remarks>
+    /// <param name="func">The asynchronous action executed inside the transaction scope.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    /// <exception cref="System.NotSupportedException">
+    /// Thrown for event-handler contexts where nested transaction entry is not supported.
+    /// </exception>
+    abstract member WithTransactionAsync : func: Func<ISoloDB, Task> -> Task
+
+    /// <summary>
     /// Gets a typed collection using the document type name as the collection name.
     /// Creates the collection if it does not exist.
     /// </summary>
