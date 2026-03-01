@@ -202,7 +202,7 @@ module FileStorage =
 
         member this.Delete(file: SoloDBFileHeader) =
             use db = connection.Get()
-            deleteFile db file
+            deleteFile db file |> ignore
 
         member this.Delete(dir: SoloDBDirectoryHeader) =
             use db = connection.Get()
@@ -212,8 +212,8 @@ module FileStorage =
             match this.TryGetAt path with
             | None -> false
             | Some file ->
-            this.Delete file
-            true
+            use db = connection.Get()
+            deleteFile db file
 
         member this.DeleteDirAt(path) =
             use db = connection.Get()
@@ -251,11 +251,12 @@ module FileStorage =
         }
 
         member this.MoveFile(from, toPath) =
-            let file = this.GetAt from
             let struct (toDirPath, fileName) = getPathAndName toPath
-            let dir = this.GetOrCreateDirAt toDirPath
-            use db = connection.Get()
-            moveFile db file dir fileName
+            connection.WithTransaction(fun db ->
+                let file = match tryGetFileAt db from with | Some f -> f | None -> raise (FileNotFoundException("File not found.", from))
+                let dir = getOrCreateDirectoryAt db toDirPath
+                moveFile db file dir fileName
+            )
 
         member this.MoveReplaceFile(from, toPath) =
             let struct (toDirPath, fileName) = getPathAndName toPath
@@ -265,7 +266,7 @@ module FileStorage =
                 match tryGetFileAt db toPath with
                 | Some replacedFile ->
                     if replacedFile.FullPath <> file.FullPath then
-                        deleteFile db replacedFile
+                        deleteFile db replacedFile |> ignore
                 | None -> ()
                 moveFile db file dir fileName
             )

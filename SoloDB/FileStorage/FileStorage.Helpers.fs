@@ -245,7 +245,7 @@ module internal FileStorageHelpers =
         // Collision check
         match tryGetFileAt db dstFullPath with
         | Some existing when replace ->
-            deleteFile db existing // CASCADE deletes chunks + metadata
+            deleteFile db existing |> ignore // CASCADE deletes chunks + metadata
         | Some _ ->
             raise (IOException("File already exists."))
         | None -> ()

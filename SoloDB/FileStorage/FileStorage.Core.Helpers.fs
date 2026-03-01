@@ -177,9 +177,9 @@ module FileStorageCore =
     /// Deletes a file from the database based on its header information.
     /// </summary>
     let internal deleteFile (db: SqliteConnection) (file: SoloDBFileHeader) =
-        let _result = db.Execute(@"DELETE FROM SoloDBFileHeader WHERE Id = @FileId",
+        let result = db.Execute(@"DELETE FROM SoloDBFileHeader WHERE Id = @FileId",
                     {| FileId = file.Id; |})
-        ()
+        result > 0
 
     /// <summary>
     /// Deletes a directory from the database based on its header information.
