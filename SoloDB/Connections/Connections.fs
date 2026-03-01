@@ -51,6 +51,16 @@ module Connections =
             return reraiseAnywhere _ex
     }
 
+    // SC-B2: Handler-context savepoint suppression.
+    // Returns true only when the connection is a CachingDbConnection currently inside
+    // a SQLite trigger callback (event handler scope). In this context, the original
+    // INSERT/UPDATE/DELETE statement is still active, and opening a SAVEPOINT would
+    // fail with SQLite Error 5 ("cannot open savepoint - SQL statements in progress").
+    let private shouldSuppressSavepointInHandler (conn: SqliteConnection) =
+        match conn with
+        | :? CachingDbConnection as c -> c.IsInEventHandlerScope
+        | _ -> false
+
     let private beginImmediateWithRetry (connection: CachingDbConnection) =
         let mutable attempt = 0
         let mutable started = false
@@ -280,6 +290,7 @@ module Connections =
         member this.WithTransaction(f: SqliteConnection -> 'T) =
             match this with
             | Pooled pool -> pool.WithTransaction f
+            | Transactional conn when shouldSuppressSavepointInHandler conn -> f conn
             | Transactional conn -> withSavepoint conn f
             | Guarded (guard, inner) ->
                 guard()
@@ -294,6 +305,7 @@ module Connections =
         member this.WithAsyncTransaction(f: SqliteConnection -> Task<'T>) =
             match this with
             | Pooled pool -> pool.WithAsyncTransaction f
+            | Transactional conn when shouldSuppressSavepointInHandler conn -> f conn
             | Transactional conn -> withSavepointAsync conn f
             | Guarded (guard, inner) ->
                 guard()

@@ -66,12 +66,30 @@ module SQLiteTools =
             processParameters setOrAddParameter item.Command parameters
             struct (item.Command, item.ColumnDict, item.InUse) |> ValueSome
 
+        // Per-connection event-handler depth counter for savepoint suppression (SC-B1, SC-B6, SC-B7).
+        // Tracks how many nested handler invocations are active on THIS connection.
+        // Strict Enter/Exit balance — no negative clamping (negative depth = bug signal).
+        let mutable eventHandlerDepth = 0
+
         /// <summary>The underlying SqliteConnection.</summary>
         member internal this.Inner = this :> SqliteConnection
         /// <summary>Indicates if the connection is currently part of a transaction.</summary>
         member val InsideTransaction = false with get, set
-        member internal this.EnterEventHandlerScope() = onEnterEventHandlerScope()
-        member internal this.ExitEventHandlerScope() = onExitEventHandlerScope()
+
+        member internal this.EnterEventHandlerScope() =
+            Threading.Interlocked.Increment(&eventHandlerDepth) |> ignore
+            onEnterEventHandlerScope()
+
+        member internal this.ExitEventHandlerScope() =
+            Threading.Interlocked.Decrement(&eventHandlerDepth) |> ignore
+            onExitEventHandlerScope()
+
+        /// <summary>
+        /// Returns true when this connection is currently executing inside a SQLite trigger callback.
+        /// Used by savepoint suppression to avoid SAVEPOINT on active-statement connections.
+        /// </summary>
+        member internal this.IsInEventHandlerScope =
+            Threading.Volatile.Read(&eventHandlerDepth) > 0
 
         /// <summary>
         /// Clears the prepared statement cache, waiting for any in-use commands to be released.
