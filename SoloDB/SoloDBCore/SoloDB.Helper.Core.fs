@@ -223,58 +223,17 @@ module internal Helper =
 
     /// <summary>
     /// Retrieves properties of a type that are marked with the [Indexed] attribute.
+    /// Delegates to the canonical shared implementation in HelperSchema.
     /// </summary>
-    /// <returns>An array of tuples, each containing the PropertyInfo and the IndexedAttribute instance.</returns>
     let internal getIndexesFields<'a>() =
-        // Get all serializable properties
-        typeof<'a>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-        |> Array.choose(
-            fun p -> // That have the IndexedAttribute
-                match p.GetCustomAttribute<SoloDatabase.Attributes.IndexedAttribute>(true) with
-                | a when isNull a -> None
-                | a -> Some(p, a)) // With its uniqueness information.
+        HelperSchema.getIndexesFieldsShared<'a>()
 
     /// <summary>
     /// Translates a LINQ expression into an SQL index definition and a sanitized index name.
+    /// Delegates to the canonical shared implementation in HelperSchema.
     /// </summary>
-    /// <param name="name">The name of the collection.</param>
-    /// <param name="expression">The LINQ expression defining the index key(s).</param>
-    /// <returns>A tuple containing the generated index name and the SQL for the indexed columns.</returns>
     let internal getIndexWhereAndName<'T, 'R> (name: string) (expression: Expression<System.Func<'T, 'R>>) =
-        if isNull expression then raise (ArgumentNullException(nameof(expression)))
-
-        let isDirectIdAccess =
-            match expression.Body with
-            | :? MemberExpression as me ->
-                me.Member.Name = "Id" &&
-                match me.Expression with
-                | :? ParameterExpression -> true
-                | _ -> false
-            | _ -> false
-
-        if isDirectIdAccess then raise (ArgumentException "The Id of a collection is always stored in an index.")
-
-        let whereSQL, variables = QueryTranslator.translate name expression
-        let whereSQL = whereSQL.Replace($"\"{name}\".", "") // Table-qualified references are not allowed in index expressions.
-        if variables.Count > 0 then raise (ArgumentException "Cannot have variables in index.")
-        if whereSQL.Contains "SELECT" then
-            raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
-        let expressionBody = expression.Body
-
-        if QueryTranslator.isAnyConstant expressionBody then raise(InvalidOperationException "Cannot index an outside or constant expression.")
-
-        let whereSQL =
-            match expressionBody with
-            | :? NewExpression as ne when isTuple ne.Type
-                -> whereSQL.Substring("json_array".Length)
-            | :? MethodCallExpression
-            | :? MemberExpression ->
-                $"({whereSQL})"
-            | other -> raise (ArgumentException (sprintf "Cannot index an expression with type: %s" (other.GetType().FullName)))
-
-        let expressionStr = whereSQL.ToCharArray() |> Seq.filter(fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""
-        let indexName = $"{name}_index_{expressionStr}"
-        indexName, whereSQL
+        HelperSchema.getIndexWhereAndNameShared<'T, 'R> name expression
 
     /// <summary>
     /// Ensures a non-unique index exists for the given expression.

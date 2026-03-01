@@ -9,7 +9,7 @@ open Utils
 open SQLiteTools
 
 module internal HelperSchema =
-    let private getIndexesFieldsLocal<'a>() =
+    let internal getIndexesFieldsShared<'a>() =
         typeof<'a>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
         |> Array.choose(
             fun p ->
@@ -17,7 +17,39 @@ module internal HelperSchema =
                 | a when isNull a -> None
                 | a -> Some(p, a))
 
-    let private getIndexWhereAndNameLocal<'T, 'R> (name: string) (expression: Expression<System.Func<'T, 'R>>) =
+    /// Recursively checks whether an expression tree references a relation type
+    /// (DBRefMany member access or DBRef.Value navigation) that cannot produce a
+    /// valid SQLite index expression.
+    let rec private containsRelationSubExpression (expr: Expression) =
+        match expr with
+        | :? MemberExpression as me ->
+            // DBRefMany.Count / DBRefMany.IsLoaded etc — member on a DBRefMany-typed expression.
+            if not (isNull me.Expression) && DBRefTypeHelpers.isDBRefManyType me.Expression.Type then
+                true
+            // DBRef.Value.Property — member on an expression whose type is DBRef, meaning .Value navigation.
+            elif not (isNull me.Expression) && me.Member.Name = "Value" && DBRefTypeHelpers.isDBRefType me.Expression.Type then
+                true
+            // Allow DBRef.Id and DBRef.HasValue (direct members on DBRef, NOT .Value navigation).
+            elif not (isNull me.Expression) && DBRefTypeHelpers.isDBRefType me.Expression.Type then
+                false
+            // Recurse into inner expression for nested member access chains.
+            elif not (isNull me.Expression) then
+                containsRelationSubExpression me.Expression
+            else false
+        | :? MethodCallExpression as mc ->
+            // Any()/All() on a DBRefMany source — reject.
+            let hasDBRefManyArg =
+                (not (isNull mc.Object) && DBRefTypeHelpers.isDBRefManyType mc.Object.Type) ||
+                (mc.Arguments.Count > 0 && DBRefTypeHelpers.isDBRefManyType mc.Arguments.[0].Type)
+            hasDBRefManyArg
+        | :? NewExpression as ne ->
+            // Tuple: check all arguments.
+            ne.Arguments |> Seq.exists containsRelationSubExpression
+        | :? UnaryExpression as ue ->
+            containsRelationSubExpression ue.Operand
+        | _ -> false
+
+    let internal getIndexWhereAndNameShared<'T, 'R> (name: string) (expression: Expression<System.Func<'T, 'R>>) =
         if isNull expression then raise (ArgumentNullException(nameof(expression)))
 
         let isDirectIdAccess =
@@ -31,9 +63,15 @@ module internal HelperSchema =
 
         if isDirectIdAccess then raise (ArgumentException "The Id of a collection is always stored in an index.")
 
+        // Expression-tree structural guard: reject relation-derived expressions BEFORE calling translate,
+        // because the translator may silently fall through to jsonb_extract for unresolved relation metadata.
+        if containsRelationSubExpression expression.Body then
+            raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
+
         let whereSQL, variables = QueryTranslator.translate name expression
         let whereSQL = whereSQL.Replace($"\"{name}\".", "") // Table-qualified references are not allowed in index expressions.
         if variables.Count > 0 then raise (ArgumentException "Cannot have variables in index.")
+        // Safety net: also reject any SQL that contains subqueries (in case new translator paths are added).
         if whereSQL.Contains "SELECT" then
             raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
         let expressionBody = expression.Body
@@ -56,17 +94,17 @@ module internal HelperSchema =
         indexName, whereSQL
 
     let private ensureIndexLocal<'T, 'R> (collectionName: string) (conn: SqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
-        let indexName, whereSQL = getIndexWhereAndNameLocal<'T, 'R> collectionName expression
+        let indexName, whereSQL = getIndexWhereAndNameShared<'T, 'R> collectionName expression
         let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
         conn.Execute(indexSQL) |> ignore
 
     let private ensureUniqueAndIndexLocal<'T, 'R> (collectionName: string) (conn: SqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
-        let indexName, whereSQL = getIndexWhereAndNameLocal<'T, 'R> collectionName expression
+        let indexName, whereSQL = getIndexWhereAndNameShared<'T, 'R> collectionName expression
         let indexSQL = $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
         conn.Execute(indexSQL) |> ignore
 
     let private ensureDeclaredIndexesFieldsLocal<'T> (name: string) (conn: SqliteConnection) =
-        for (pi, indexed) in getIndexesFieldsLocal<'T>() do
+        for (pi, indexed) in getIndexesFieldsShared<'T>() do
             let ensureIndexesFn = if indexed.Unique then ensureUniqueAndIndexLocal else ensureIndexLocal
             let _code = ensureIndexesFn name conn (ExpressionHelper.get<obj, obj>(fun row -> row.Dyn<obj>(pi.Name)))
             ()
