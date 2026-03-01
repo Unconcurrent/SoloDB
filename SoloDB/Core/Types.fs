@@ -37,6 +37,9 @@ type Metadata = {
     Value: string
 }
 
+/// <summary>
+/// Header information for a file stored in the SoloDB file system.
+/// </summary>
 [<CLIMutable>]
 type SoloDBFileHeader = {
     Id: int64
@@ -49,6 +52,9 @@ type SoloDBFileHeader = {
     Metadata: IReadOnlyDictionary<string, string>
 }
 
+/// <summary>
+/// Header information for a directory in the SoloDB file system.
+/// </summary>
 [<CLIMutable>]
 type SoloDBDirectoryHeader = {
     Id: int64
@@ -72,36 +78,47 @@ type BulkFileData = {
     Modified: Nullable<DateTimeOffset>
 }
 
+/// <summary>
+/// A discriminated union representing either a file or directory entry in the SoloDB file system.
+/// </summary>
 [<Struct>]
 type SoloDBEntryHeader = 
+    /// <summary>A file entry.</summary>
     | File of file: SoloDBFileHeader
+    /// <summary>A directory entry.</summary>
     | Directory of directory: SoloDBDirectoryHeader
 
+    /// <summary>The name of the file or directory.</summary>
     member this.Name = 
         match this with
         | File f -> f.Name
         | Directory d -> d.Name
 
+    /// <summary>The full path of the file or directory.</summary>
     member this.FullPath = 
         match this with
         | File f -> f.FullPath
         | Directory d -> d.FullPath
 
+    /// <summary>The Id of the parent directory, or null for root entries.</summary>
     member this.DirectoryId = 
         match this with
         | File f -> f.DirectoryId |> Nullable
         | Directory d -> d.ParentId
 
+    /// <summary>The creation timestamp.</summary>
     member this.Created = 
         match this with
         | File f -> f.Created
         | Directory d -> d.Created
 
+    /// <summary>The last modification timestamp.</summary>
     member this.Modified = 
         match this with
         | File f -> f.Modified
         | Directory d -> d.Modified
 
+    /// <summary>The key-value metadata associated with the entry.</summary>
     member this.Metadata = 
         match this with
         | File f -> f.Metadata
