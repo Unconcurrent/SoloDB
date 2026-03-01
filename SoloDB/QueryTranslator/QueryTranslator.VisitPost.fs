@@ -33,7 +33,7 @@ module internal QueryTranslatorVisitPost =
     let private updateManyDbRefValueMutationMessage =
         "Error: UpdateMany cannot mutate DBRef.Value members.\nReason: DBRef.Value is not mutable through UpdateMany.\nFix: Update the target collection explicitly, then update the reference."
 
-    /// Batch 4 deterministic unsupported-shape messages.
+    /// Deterministic unsupported-shape messages.
     let internal multiSourceCrossRootProjectionMessage =
         "MSQ002: Cross-root projection requires explicit join key."
 

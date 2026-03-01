@@ -196,7 +196,7 @@ module internal FileStorageHelpers =
         | :? SqliteException as ex when ex.SqliteErrorCode = 19 && ex.Message.Contains "FullPath" ->
             raise (IOException("Directory or file already exists in the destination.", ex))
 
-    // ── Copy helpers (Cycle34) ──────────────────────────────────────────
+    // ── Copy helpers ──────────────────────────────────────────────────────
 
     /// Bulk-copies all chunk rows from source file to destination file via SQL-level INSERT...SELECT.
     /// No Snappy decompression/recompression — compressed blobs are copied as-is.

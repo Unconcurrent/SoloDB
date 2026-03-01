@@ -76,7 +76,7 @@ type internal QueryContext = {
     mutable AliasCounter: int
     /// Property paths excluded via Exclude() — skip JOIN/load for these
     ExcludedPaths: HashSet<string>
-    /// Property paths included via Include() allowlist for hydration.
+    /// Property paths included via Include() whitelist for hydration.
     IncludedPaths: HashSet<string>
     /// Relation target table mapping keyed by "OwnerCollection|PropertyName"
     RelationTargets: Dictionary<string, string>

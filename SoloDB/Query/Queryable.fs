@@ -1134,7 +1134,7 @@ module private QueryHelper =
                     | None -> ()
                 | Include ->
                     // Extract property path from the selector lambda and add to IncludedPaths.
-                    // Include does not produce SQL — it only controls relation hydration allowlist.
+                    // Include does not produce SQL — it only controls relation hydration whitelist.
                     match tryExtractExcludePath m.Expressions with
                     | Some path -> registerIncludePath path
                     | None -> ()

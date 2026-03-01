@@ -51,7 +51,7 @@ module Connections =
             return reraiseAnywhere _ex
     }
 
-    // SC-B2: Handler-context savepoint suppression.
+    // Handler-context savepoint suppression.
     // Returns true only when the connection is a CachingDbConnection currently inside
     // a SQLite trigger callback (event handler scope). In this context, the original
     // INSERT/UPDATE/DELETE statement is still active, and opening a SAVEPOINT would

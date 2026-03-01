@@ -70,7 +70,7 @@ let ensureSchemaForOwnerType (tx: RelationTxContext) (ownerType: Type) =
             ensureMetadataNotResurrected tx descriptor
             ensureRelationSchema tx descriptor
 
-        // Delta 1: Orphan detection (E2/E3/SI-2, L1/L2 — detect at GetCollection time)
+        // Orphan detection — detect removed relation properties at GetCollection time.
         // Query catalog for all stored relation properties of this owner collection.
         // Any property in catalog but NOT in current descriptors is orphaned.
         let ownerTable = formatName tx.OwnerTable
@@ -205,7 +205,7 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
     ensureOwnerInstance tx.OwnerType oldOwner "oldOwner"
     ensureOwnerInstance tx.OwnerType newOwner "newOwner"
     withRelationSqliteWrap "prepare" "prepareUpdate" (fun () ->
-        // Cycle24: stale-version guard before any relation mutation planning.
+        // Stale-version guard before any relation mutation planning.
         checkRelationVersionStale tx ownerId newOwner
 
         let descriptors = buildRelationDescriptors tx tx.OwnerType
@@ -301,7 +301,7 @@ let prepareDeleteOwner (tx: RelationTxContext) (ownerId: int64) (owner: obj) =
     if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
     ensureOwnerInstance tx.OwnerType owner "owner"
     withRelationSqliteWrap "prepare" "prepareDeleteOwner" (fun () ->
-        // Cycle24: stale-version guard before delete relation handling.
+        // Stale-version guard before delete relation handling.
         checkRelationVersionStale tx ownerId owner
         { OwnerId = ownerId; OwnerType = tx.OwnerType }
     )

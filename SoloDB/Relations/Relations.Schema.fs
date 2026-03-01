@@ -291,7 +291,7 @@ SELECT CASE WHEN EXISTS (
 """,
         {| a = a; b = b; owner = a; prop = descriptor.Property.Name |}) = 1L
 
-/// BR-05 guard: prevent metadata resurrection when prior relation evidence exists.
+/// Prevent metadata resurrection when prior relation evidence exists.
 /// The link table is the definitive evidence that a relation was previously established.
 /// Target collections can exist independently (they store their own entities) and must not
 /// be treated as relation evidence. For shared-many relations, the link table may have been
@@ -309,7 +309,7 @@ let internal ensureMetadataNotResurrected (tx: RelationTxContext) (descriptor: R
 
 /// Detects evolution conflicts between the current descriptor and the stored catalog row.
 /// Raises on target-type mismatch or Many→Single kind narrowing.
-/// Performs atomic constraint migration for Single→Many kind widening (Captain directive).
+/// Performs atomic constraint migration for Single→Many kind widening.
 let private detectAndMigrateEvolutionConflicts (tx: RelationTxContext) (descriptor: RelationDescriptor) =
     ensureRelationCatalogTable tx.Connection
     let stored =
@@ -317,7 +317,7 @@ let private detectAndMigrateEvolutionConflicts (tx: RelationTxContext) (descript
             "SELECT RefKind, TargetCollection FROM SoloDBRelation WHERE OwnerCollection = @owner AND PropertyName = @prop LIMIT 1;",
             {| owner = descriptor.OwnerTable; prop = descriptor.Property.Name |})
     if not (isNull (box stored)) then
-        // Delta 3: Target-type-change detection (E5/SI-4)
+        // Target-type-change detection
         if not (StringComparer.OrdinalIgnoreCase.Equals(stored.TargetCollection, descriptor.TargetTable)) then
             raise (InvalidOperationException(
                 $"Error: relation target type changed for '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\n" +
@@ -325,14 +325,14 @@ let private detectAndMigrateEvolutionConflicts (tx: RelationTxContext) (descript
                 "Changing the target type of an existing relation is not supported because the link table's foreign keys reference the original target.\n" +
                 "Fix: drop the collection or clear all relation data before changing the target type."))
 
-        // Delta 2: Kind-change detection (E3/SI-3, Captain directive)
+        // Kind-change detection
         let storedKind = if stored.RefKind = "Many" then Many else Single
         if storedKind <> descriptor.Kind then
             let linkTable = descriptor.LinkTable
             let linkExists = sqliteTableExistsByName tx.Connection linkTable
             match storedKind, descriptor.Kind with
             | Single, Many when linkExists ->
-                // Forward migration: Single → Many (Captain: ALLOW)
+                // Forward migration: Single → Many (supported)
                 // Existing single-link data satisfies Many constraint (subset).
                 // Atomic: drop UNIQUE(SourceId) index, recreate table constraints via
                 // standard SQLite table-recreate pattern inside the current transaction.
@@ -415,7 +415,7 @@ let private detectAndMigrateEvolutionConflicts (tx: RelationTxContext) (descript
                         $"Reason: migrated table '{linkTable}' is missing expected indexes (found {idxCount}/2).\n" +
                         "Fix: this indicates a migration defect. Report this error."))
             | Many, Single ->
-                // Reverse migration: Many → Single (Captain: ERROR)
+                // Reverse migration: Many → Single (not supported)
                 raise (InvalidOperationException(
                     $"Error: relation kind narrowing not supported for '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\n" +
                     $"Reason: stored relation is 'Many' but current type declares 'Single'. " +

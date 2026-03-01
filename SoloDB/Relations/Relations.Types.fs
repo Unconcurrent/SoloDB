@@ -215,7 +215,7 @@ let internal serializeEntityForStorage (targetType: Type) (entity: obj) =
     | _ -> ()
     json.ToJsonString()
 
-// ─── Cycle24: Per-owner RelationVersion baseline tracking ─────────────────────
+// ─── Per-owner RelationVersion baseline tracking ─────────────────────────────
 
 /// Weak table mapping entity instances to their loaded RelationVersion.
 /// Entries are collected when the entity instance is GC'd.

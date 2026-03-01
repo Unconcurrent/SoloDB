@@ -81,7 +81,7 @@ module internal QueryTranslatorVisitDbRef =
 
     /// Compute the link table name for a DBRefMany property.
     /// Convention: SoloDBRelLink_{SourceTable}_{PropertyName}
-    // ET-03: strict metadata resolution — no silent fallback for relation-backed paths
+    // Strict metadata resolution — no silent fallback for relation-backed paths.
     let private dbRefManyLinkTable (ctx: QueryContext) (ownerTable: string) (propName: string) =
         match ctx.TryResolveRelationLink(ownerTable, propName) with
         | Some mapped when not (String.IsNullOrWhiteSpace mapped) -> formatName mapped

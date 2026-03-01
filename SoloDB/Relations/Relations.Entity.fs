@@ -59,7 +59,7 @@ let internal insertTargetEntity (tx: RelationTxContext) (targetTable: string) (t
     if isNull entity then
         raise (ArgumentNullException("entity", "Cascade insert target entity cannot be null."))
 
-    // ET-02: reject negative id before any schema side effects
+    // Reject negative id before any schema side effects.
     let id = readEntityIdOrZero targetType entity
     if id < 0L then
         raise (InvalidOperationException(
@@ -182,7 +182,7 @@ let internal resolveTypedIdToTargetId (tx: RelationTxContext) (descriptor: Relat
         raise (InvalidOperationException(
             $"Error: Relation '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' is not configured for typed-id resolution.\nReason: Missing DBRef<'TTarget,'TId> metadata.\nFix: Use DBRef<T> with row id or configure typed-id relation correctly."))
 
-// ─── D-LIB-1: Reference-identity comparer for netstandard2.0 circular guard ──
+// ─── Reference-identity comparer for netstandard2.0 circular guard ───────────
 
 type private ReferenceComparer() =
     interface IEqualityComparer<obj> with
@@ -191,7 +191,7 @@ type private ReferenceComparer() =
 
 let internal refComparer = ReferenceComparer() :> IEqualityComparer<obj>
 
-// ─── D-LIB-1: Recursive cascade-insert with full-graph circular guard ────────
+// ─── Recursive cascade-insert with full-graph circular guard ─────────────────
 
 let rec internal cascadeInsertDeep
     (tx: RelationTxContext)
@@ -239,7 +239,7 @@ let rec internal cascadeInsertDeep
                 | ValueSome pending ->
                     let entityId = readEntityIdOrZero descriptor.TargetType pending
                     if entityId > 0L then
-                        // D-LIB-2: existing entity, link-only.
+                        // Existing entity, link-only.
                         let dbRef = createDbRefTo descriptor.Property.PropertyType entityId
                         descriptor.Property.SetValue(entity, dbRef)
                         ensureRelationSchema childTx descriptor
@@ -289,7 +289,7 @@ let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor
     let value = descriptor.Property.GetValue(owner)
     let id = readDbRefId value
     if id > 0L then
-        // ET-01: preflight target-exists for DBRef.To(id) before owner mutation
+        // Preflight target-exists for DBRef.To(id) before owner mutation.
         ensureTargetExists tx descriptor.TargetTable id
         id
     else
@@ -305,8 +305,8 @@ let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor
             | ValueSome pending ->
                 let entityId = readEntityIdOrZero descriptor.TargetType pending
                 if entityId > 0L then
-                    // D-LIB-2: Entity already persisted (Id > 0) — link-only, no re-insert.
-                    // ET-01: preflight target-exists for From(existing) before owner mutation
+                    // Entity already persisted (Id > 0) — link-only, no re-insert.
+                    // Preflight target-exists for From(existing) before owner mutation.
                     ensureTargetExists tx descriptor.TargetTable entityId
                     let dbRef = createDbRefTo descriptor.Property.PropertyType entityId
                     descriptor.Property.SetValue(owner, dbRef)
@@ -338,7 +338,7 @@ let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor:
                         if id <= 0L then
                             id <- cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType item visited
                         elif id > 0L then
-                            // ET-01: preflight target-exists for pre-existing many items before owner mutation
+                            // Preflight target-exists for pre-existing many items before owner mutation.
                             ensureTargetExists tx descriptor.TargetTable id
                         if id > 0L then
                             ids.Add(id) |> ignore

@@ -155,7 +155,7 @@ module internal QueryTranslatorBaseTypes =
                 UpdateMode = false
                 IdParameterIndex = -1 }
 
-        // Step1 allowlisted internal accessors for cross-file visitor split boundary.
+        // Whitelisted internal accessors for cross-file visitor split boundary.
         member internal this.GetSourceContext() = this.SourceContext
         member internal this.GetIdParameterIndex() = this.IdParameterIndex
         member internal this.IsUpdateMode() = this.UpdateMode

@@ -25,7 +25,7 @@ module SQLiteTools =
         inherit SqliteConnection(connectionStr)
         let mutable preparedCache = Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
         let maxCacheSize = 1000
-        // K1: connection-level reader-active guard to prevent indefinite hang from overlapping readers.
+        // Connection-level reader-active guard to prevent indefinite hang from overlapping readers.
         let mutable readerActive = false
 
         let tryCachedCommand (this: CachingDbConnection) (sql: string) (parameters: obj) =
@@ -66,7 +66,7 @@ module SQLiteTools =
             processParameters setOrAddParameter item.Command parameters
             struct (item.Command, item.ColumnDict, item.InUse) |> ValueSome
 
-        // Per-connection event-handler depth counter for savepoint suppression (SC-B1, SC-B6, SC-B7).
+        // Per-connection event-handler depth counter for savepoint suppression.
         // Tracks how many nested handler invocations are active on THIS connection.
         // Strict Enter/Exit balance — no negative clamping (negative depth = bug signal).
         let mutable eventHandlerDepth = 0
@@ -100,7 +100,7 @@ module SQLiteTools =
             let oldCache = preparedCache
             preparedCache <- Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
 
-            // K2: bounded timeout to prevent livelock from permanently in-use commands.
+            // Bounded timeout to prevent livelock from permanently in-use commands.
             let deadline = System.Diagnostics.Stopwatch.StartNew()
             let maxWaitMs = 5000L
             while oldCache.Count > 0 && deadline.ElapsedMilliseconds < maxWaitMs do
@@ -275,7 +275,7 @@ module SQLiteTools =
         member this.DisposeReal() =
             base.Dispose(true)
 
-        // K4: override Dispose(bool) to ensure TakeBack is always called on disposal,
+        // Override Dispose(bool) to ensure TakeBack is always called on disposal,
         // regardless of whether Dispose() is called via IDisposable or base class dispatch.
         // Dispose is suppressed when InsideTransaction is true (set by WithTransactionBorrowed
         // and event handler paths). This prevents premature pool return when connection is used
@@ -301,7 +301,7 @@ module SQLiteTools =
         static member OpenReader<'R>(this: SqliteConnection, sql: string, outReader: outref<DbDataReader>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             match this with
             | :? CachingDbConnection as c ->
-                // K1: route through CachingDbConnection member to get reader-active guard.
+                // Route through CachingDbConnection member to get reader-active guard.
                 c.CheckNoActiveReader()
                 let command = createCommand this sql parameters
                 command.Prepare()

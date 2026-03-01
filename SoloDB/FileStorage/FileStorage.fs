@@ -278,7 +278,7 @@ module FileStorage =
                 moveDirectoryMustBeWithinTransaction db dirToMove toPathParent fileName
             )
 
-        // ── Copy operations (Cycle34) ──────────────────────────────────
+        // ── Copy operations ──────────────────────────────────────────────
 
         member this.CopyFile(fromPath, toPath, [<Optional; DefaultParameterValue(false)>] copyMetadata: bool) =
             connection.WithTransaction(fun db ->

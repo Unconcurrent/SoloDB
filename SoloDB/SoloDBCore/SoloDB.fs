@@ -94,7 +94,7 @@ type internal EventDbCache(connectionString: string, directConnection: SqliteCon
 
         Helper.registerTypeCollection<'U> collectionName directConnection
 
-        // BR-04: validate relation topology after table creation.
+        // Validate relation topology after table creation.
         let hasRelations = RelationsSchema.getRelationSpecs typeof<'U> |> Array.isEmpty |> not
         if hasRelations then
             let relationTx: Relations.RelationTxContext = {
@@ -413,7 +413,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         | json when Object.ReferenceEquals(json, null) -> None
         | json ->
             let entity = fromSQLite<'T> json
-            // Batch-load DBRefMany properties for GETBYID-FULL invariant.
+            // Batch-load DBRefMany properties for full entity hydration.
             if this.HasRelations then
                 let excludedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
                 let includedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
@@ -1142,7 +1142,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
 
         Helper.registerTypeCollection<'T> name connection
 
-        // BR-04: validate relation topology after table creation.
+        // Validate relation topology after table creation.
         let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
         if hasRelations then
             let relationTx: Relations.RelationTxContext = {
@@ -1367,8 +1367,8 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         if disposed then raise (ObjectDisposedException(nameof(SoloDB)))
         if name.StartsWith "SoloDB" then raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
-        // MC-1: Transaction callback returns unit; Collection construction stays outside.
-        // MC-3: BR-04 relation schema validation runs after createTableInner inside the transaction.
+        // Transaction callback returns unit; Collection construction stays outside.
+        // Relation schema validation runs after createTableInner inside the transaction.
         connectionManager.WithTransaction(fun connection ->
             let shouldCreate = not (Helper.existsCollection name connection)
             if shouldCreate then
@@ -1376,7 +1376,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
             Helper.registerTypeCollection<'T> name connection
 
-            // BR-04: validate relation topology after table creation but before returning.
+            // Validate relation topology after table creation but before returning.
             // Must run after createTableInner so self-referential types don't hit "table already exists".
             let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
             if hasRelations then
@@ -1447,7 +1447,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     member this.DropCollectionIfExists name =
         let name = Helper.formatName name
 
-        // MC-2: bool return preserved through WithTransaction callback.
+        // Bool return preserved through WithTransaction callback.
         connectionManager.WithTransaction(fun connection ->
             if Helper.existsCollection name connection then
                 Helper.dropCollection name connection
