@@ -345,7 +345,7 @@ let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor:
                 ValueSome (ids |> Seq.toArray)
         | _ ->
             raise (InvalidOperationException(
-                $"Error: Property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' does not implement IDBRefManyInternal.\nReason: The relation property type is incorrect.\nFix: Use DBRefMany<T> for multi-relations."))
+                $"Error: Property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' does not implement IDBRefManyInternal.\nReason: The relation property type is incorrect.\nFix: Use DBRefMany<T> or DBRefMany<TTarget,'TId> for multi-relations."))
 
 let internal readSingleIdNoCascade (descriptor: RelationDescriptor) (owner: obj) =
     descriptor.Property.GetValue(owner) |> readDbRefId

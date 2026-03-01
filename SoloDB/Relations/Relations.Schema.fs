@@ -82,7 +82,7 @@ let private buildRelationSpecs (ownerType: Type) =
             let propType = prop.PropertyType
             if DBRefTypeHelpers.isOptionWrappedRelationRefType propType then
                 raise (InvalidOperationException(
-                    $"Error: Invalid relation property '{ownerType.FullName}.{prop.Name}'.\nReason: Option-wrapped DBRef/DBRefMany is not supported.\nFix: Use DBRef<T>/DBRef<TTarget,'TId>/DBRefMany<T> directly (non-option)."))
+                    $"Error: Invalid relation property '{ownerType.FullName}.{prop.Name}'.\nReason: Option-wrapped DBRef/DBRefMany is not supported.\nFix: Use DBRef<T>/DBRef<TTarget,'TId>/DBRefMany<T>/DBRefMany<TTarget,'TId> directly (non-option)."))
             elif DBRefTypeHelpers.isAnyRelationRefType propType then
                 if not prop.CanWrite then
                     raise (InvalidOperationException(
@@ -92,7 +92,7 @@ let private buildRelationSpecs (ownerType: Type) =
                     let args = propType.GetGenericArguments()
                     let targetType = args.[0]
                     let typedIdType =
-                        if DBRefTypeHelpers.isDBRefTypedDefinition generic then ValueSome args.[1]
+                        if DBRefTypeHelpers.isDBRefTypedDefinition generic || DBRefTypeHelpers.isDBRefManyTypedDefinition generic then ValueSome args.[1]
                         else ValueNone
                     let attr = prop.GetCustomAttribute<SoloRefAttribute>(true)
                     let onDelete = if isNull attr then DeletePolicy.Restrict else attr.OnDelete
@@ -122,7 +122,7 @@ let private buildRelationSpecs (ownerType: Type) =
                     Some (prop, kind, targetType, typedIdType, onDelete, onOwnerDelete, isUnique, orderBy)
             elif containsNestedRelationRefType propType then
                 raise (InvalidOperationException(
-                    $"Error: Invalid relation property '{ownerType.FullName}.{prop.Name}'.\nReason: Container-wrapped relation-like shapes are not supported.\nFix: Use direct DBRef<T>/DBRef<TTarget,'TId>/DBRefMany<T> property types."))
+                    $"Error: Invalid relation property '{ownerType.FullName}.{prop.Name}'.\nReason: Container-wrapped relation-like shapes are not supported.\nFix: Use direct DBRef<T>/DBRef<TTarget,'TId>/DBRefMany<T>/DBRefMany<TTarget,'TId> property types."))
             else
                 None)
 
@@ -446,7 +446,7 @@ SELECT CASE WHEN EXISTS (
                 {| tableName = descriptor.TargetTable; needle = needle |}) = 1L
         if not hasUniqueSoloIdIndex then
             raise (InvalidOperationException(
-                $"Error: Missing required unique index for typed relation '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\nReason: Typed-id resolver requires unique index on jsonb_extract(Value, '$.{soloIdProp.Name}') in target collection '{descriptor.TargetTable}'.\nFix: Add [SoloId] or EnsureUniqueAndIndex for this path before using DBRef<'TTarget,'TId>."))
+                $"Error: Missing required unique index for typed relation '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\nReason: Typed-id resolver requires unique index on jsonb_extract(Value, '$.{soloIdProp.Name}') in target collection '{descriptor.TargetTable}'.\nFix: Add [SoloId] or EnsureUniqueAndIndex for this path before using DBRef<'TTarget,'TId>/DBRefMany<'TTarget,'TId>."))
     | _ -> ()
 
     let qLink = quoteIdentifier descriptor.LinkTable

@@ -10,6 +10,8 @@ module internal DBRefTypeHelpers =
     [<Literal>]
     let private dbRefManyName = "SoloDatabase.DBRefMany`1"
     [<Literal>]
+    let private dbRefMany2Name = "SoloDatabase.DBRefMany`2"
+    [<Literal>]
     let private fsharpOptionName = "Microsoft.FSharp.Core.FSharpOption`1"
 
     let internal isDBRefSingleDefinition (t: Type) =
@@ -22,7 +24,10 @@ module internal DBRefTypeHelpers =
         isDBRefSingleDefinition t || isDBRefTypedDefinition t
 
     let internal isDBRefManyDefinition (t: Type) =
-        not (isNull t) && StringComparer.Ordinal.Equals(t.FullName, dbRefManyName)
+        not (isNull t) && (StringComparer.Ordinal.Equals(t.FullName, dbRefManyName) || StringComparer.Ordinal.Equals(t.FullName, dbRefMany2Name))
+
+    let internal isDBRefManyTypedDefinition (t: Type) =
+        not (isNull t) && StringComparer.Ordinal.Equals(t.FullName, dbRefMany2Name)
 
     let internal isFSharpOptionDefinition (t: Type) =
         not (isNull t) && StringComparer.Ordinal.Equals(t.FullName, fsharpOptionName)

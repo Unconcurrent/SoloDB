@@ -165,8 +165,7 @@ let batchLoadDBRefManyProperties
                 | true, items -> internal'.SetLoadedBoxed (items |> Seq.map snd) (items |> Seq.map fst)
                 | _ -> internal'.SetLoadedBoxed Seq.empty Seq.empty
             | null ->
-                let dbRefManyType = typedefof<DBRefMany<_>>.MakeGenericType(descriptor.TargetType)
-                let instance = Activator.CreateInstance(dbRefManyType)
+                let instance = Activator.CreateInstance(descriptor.Property.PropertyType)
                 descriptor.Property.SetValue(ownerObj, instance)
                 let internal' = instance :?> IDBRefManyInternal
                 match grouped.TryGetValue(ownerId) with
