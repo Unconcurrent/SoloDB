@@ -1314,8 +1314,13 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
 /// The main database class, representing a single SQLite database file or in-memory instance.
 /// Provides access to collections and file system storage.
 /// </summary>
-type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation, config: SoloDBConfiguration, eventSystem: EventSystem) = 
+type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation, config: SoloDBConfiguration, eventSystem: EventSystem) =
     let mutable disposed = false
+    // Serializes DDL operations (InitializeCollection, DropCollectionIfExists) to prevent
+    // concurrent sqlite3_prepare_v2 calls from racing with schema changes in the ADO.NET layer.
+    // Static because multiple SoloDB instances on the same shared-cache database share the
+    // same sqlite3 schema state.
+    static let ddlLock = obj()
 
     /// <summary>
     /// Initializes a new instance of the SoloDB class.
@@ -1367,26 +1372,28 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         if disposed then raise (ObjectDisposedException(nameof(SoloDB)))
         if name.StartsWith "SoloDB" then raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
-        // Transaction callback returns unit; Collection construction stays outside.
-        // Relation schema validation runs after createTableInner inside the transaction.
-        connectionManager.WithTransaction(fun connection ->
-            let shouldCreate = not (Helper.existsCollection name connection)
-            if shouldCreate then
-                Helper.createTableInner<'T> name connection
+        lock ddlLock (fun () ->
+            // Transaction callback returns unit; Collection construction stays outside.
+            // Relation schema validation runs after createTableInner inside the transaction.
+            connectionManager.WithTransaction(fun connection ->
+                let shouldCreate = not (Helper.existsCollection name connection)
+                if shouldCreate then
+                    Helper.createTableInner<'T> name connection
 
-            Helper.registerTypeCollection<'T> name connection
+                Helper.registerTypeCollection<'T> name connection
 
-            // Validate relation topology after table creation but before returning.
-            // Must run after createTableInner so self-referential types don't hit "table already exists".
-            let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
-            if hasRelations then
-                let relationTx: Relations.RelationTxContext = {
-                    Connection = connection
-                    OwnerTable = name
-                    OwnerType = typeof<'T>
-                    InTransaction = true
-                }
-                Relations.ensureSchemaForOwnerType relationTx typeof<'T>
+                // Validate relation topology after table creation but before returning.
+                // Must run after createTableInner so self-referential types don't hit "table already exists".
+                let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
+                if hasRelations then
+                    let relationTx: Relations.RelationTxContext = {
+                        Connection = connection
+                        OwnerTable = name
+                        OwnerType = typeof<'T>
+                        InTransaction = true
+                    }
+                    Relations.ensureSchemaForOwnerType relationTx typeof<'T>
+            )
         )
 
         Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = this.ClearCache; EventSystem = this.Events }) :> ISoloDBCollection<'T>
@@ -1447,13 +1454,14 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     member this.DropCollectionIfExists name =
         let name = Helper.formatName name
 
-        // Bool return preserved through WithTransaction callback.
-        connectionManager.WithTransaction(fun connection ->
-            if Helper.existsCollection name connection then
-                Helper.dropCollection name connection
-                true
-            else
-                false
+        lock ddlLock (fun () ->
+            connectionManager.WithTransaction(fun connection ->
+                if Helper.existsCollection name connection then
+                    Helper.dropCollection name connection
+                    true
+                else
+                    false
+            )
         )
 
     /// <summary>
@@ -1686,6 +1694,7 @@ type SoloDBTransactionExtensions =
     /// <param name="func">A function that receives a transactional <see cref="ISoloDB"/> context and returns a result.</param>
     /// <typeparam name="'R">The return type of the function.</typeparam>
     /// <returns>The result of the function.</returns>
+    /// <exception cref="System.NotSupportedException">Thrown when called on an event-handler context where SAVEPOINTs cannot be opened.</exception>
     [<Extension>]
     static member WithTransaction<'R>(db: ISoloDB, func: Func<ISoloDB, 'R>) : 'R =
         match db with
@@ -1705,6 +1714,7 @@ type SoloDBTransactionExtensions =
     /// </summary>
     /// <param name="db">The database instance.</param>
     /// <param name="func">An action that receives a transactional <see cref="ISoloDB"/> context.</param>
+    /// <exception cref="System.NotSupportedException">Thrown when called on an event-handler context where SAVEPOINTs cannot be opened.</exception>
     [<Extension>]
     static member WithTransaction(db: ISoloDB, func: Action<ISoloDB>) : unit =
         SoloDBTransactionExtensions.WithTransaction<unit>(db, fun ctx -> func.Invoke ctx)
@@ -1717,6 +1727,7 @@ type SoloDBTransactionExtensions =
     /// <param name="func">An async function that receives a transactional <see cref="ISoloDB"/> context and returns a result.</param>
     /// <typeparam name="'R">The return type of the function.</typeparam>
     /// <returns>A task representing the asynchronous transactional operation.</returns>
+    /// <exception cref="System.NotSupportedException">Thrown when called on an event-handler context where SAVEPOINTs cannot be opened.</exception>
     [<Extension>]
     static member WithTransactionAsync<'R>(db: ISoloDB, func: Func<ISoloDB, Task<'R>>) : Task<'R> =
         match db with
@@ -1737,6 +1748,7 @@ type SoloDBTransactionExtensions =
     /// <param name="db">The database instance.</param>
     /// <param name="func">An async function that receives a transactional <see cref="ISoloDB"/> context.</param>
     /// <returns>A task representing the asynchronous transactional operation.</returns>
+    /// <exception cref="System.NotSupportedException">Thrown when called on an event-handler context where SAVEPOINTs cannot be opened.</exception>
     [<Extension>]
     static member WithTransactionAsync(db: ISoloDB, func: Func<ISoloDB, Task>) : Task =
         SoloDBTransactionExtensions.WithTransactionAsync<unit>(db, fun ctx -> task { do! func.Invoke ctx }) :> Task

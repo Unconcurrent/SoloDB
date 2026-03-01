@@ -20,10 +20,22 @@ module internal HelperSchema =
     let private getIndexWhereAndNameLocal<'T, 'R> (name: string) (expression: Expression<System.Func<'T, 'R>>) =
         if isNull expression then raise (ArgumentNullException(nameof(expression)))
 
+        let isDirectIdAccess =
+            match expression.Body with
+            | :? MemberExpression as me ->
+                me.Member.Name = "Id" &&
+                match me.Expression with
+                | :? ParameterExpression -> true
+                | _ -> false
+            | _ -> false
+
+        if isDirectIdAccess then raise (ArgumentException "The Id of a collection is always stored in an index.")
+
         let whereSQL, variables = QueryTranslator.translate name expression
-        let whereSQL = whereSQL.Replace($"\"{name}\".Value", "Value")
-        if whereSQL.Contains $"\"{name}\".Id" then raise (ArgumentException "The Id of a collection is always stored in an index.")
+        let whereSQL = whereSQL.Replace($"\"{name}\".", "") // Table-qualified references are not allowed in index expressions.
         if variables.Count > 0 then raise (ArgumentException "Cannot have variables in index.")
+        if whereSQL.Contains "SELECT" then
+            raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
         let expressionBody = expression.Body
 
         if QueryTranslator.isAnyConstant expressionBody then
