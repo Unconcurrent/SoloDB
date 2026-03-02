@@ -6,7 +6,6 @@ open System.IO
 open Microsoft.Data.Sqlite
 open SQLiteTools
 open SoloDatabase.Types
-open SoloDatabase.Connections
 
 // NativePtr operations for efficient chunk-based file I/O
 #nowarn "9"
@@ -35,31 +34,6 @@ module FileStorageCore =
     /// Combines an array of path segments into a single path, replacing backslashes with forward slashes.
     /// </summary>
     let internal combinePathArr arr = arr |> Path.Combine |> _.Replace('\\', '/')
-
-    /// <summary>
-    /// Represents a disposable object that performs no action when disposed.
-    /// </summary>
-    let internal noopDisposer = {
-         new System.IDisposable with
-             member this.Dispose() =
-                 ()
-    }
-
-    /// <summary>
-    /// Acquires a mutex to lock the specified path if a transaction is not already active.
-    /// </summary>
-    let private isInTransaction (db: SqliteConnection) =
-        match db with
-        | :? TransactionalConnection -> true
-        | :? CachingDbConnection as cc -> cc.InsideTransaction
-        | _ -> false
-
-    let internal lockPathIfNotInTransaction (db: SqliteConnection) (path: string) =
-        if isInTransaction db then
-            noopDisposer
-        else
-        let mutex = new DisposableMutex($"SoloDB-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(db.ConnectionString)}-Path-{StringComparer.InvariantCultureIgnoreCase.GetHashCode(path)}")
-        mutex :> IDisposable
 
     /// <summary>
     /// Fills the directory metadata for a given directory header by querying the database.

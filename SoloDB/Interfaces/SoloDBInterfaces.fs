@@ -1162,7 +1162,7 @@ and ISoloDB =
     /// </summary>
     /// <remarks>
     /// In a transactional context, all operations are scoped to the current transaction and will be committed or rolled back
-    /// together with other database operations.
+    /// together with other database operations. Coordination is SQLite-transaction-native; no process-local path mutex is used.
     /// </remarks>
     abstract member FileSystem: IFileSystem
 
@@ -1170,8 +1170,8 @@ and ISoloDB =
     /// Executes a function inside a transaction scope and returns its result.
     /// </summary>
     /// <remarks>
-    /// On a root database context, this opens a top-level transaction. On an existing transactional context,
-    /// this opens a nested savepoint.
+    /// On a root database context, this opens a top-level SQLite BEGIN IMMEDIATE transaction.
+    /// On an existing transactional context, this opens a nested savepoint.
     /// </remarks>
     /// <param name="func">The function executed inside the transaction scope.</param>
     /// <returns>The function result.</returns>
@@ -1184,8 +1184,8 @@ and ISoloDB =
     /// Executes an action inside a transaction scope.
     /// </summary>
     /// <remarks>
-    /// On a root database context, this opens a top-level transaction. On an existing transactional context,
-    /// this opens a nested savepoint.
+    /// On a root database context, this opens a top-level SQLite BEGIN IMMEDIATE transaction.
+    /// On an existing transactional context, this opens a nested savepoint.
     /// </remarks>
     /// <param name="func">The action executed inside the transaction scope.</param>
     /// <exception cref="System.NotSupportedException">
@@ -1197,8 +1197,8 @@ and ISoloDB =
     /// Executes an asynchronous function inside a transaction scope and returns its result.
     /// </summary>
     /// <remarks>
-    /// On a root database context, this opens a top-level transaction. On an existing transactional context,
-    /// this opens a nested savepoint.
+    /// On a root database context, this opens a top-level SQLite BEGIN IMMEDIATE transaction.
+    /// On an existing transactional context, this opens a nested savepoint.
     /// </remarks>
     /// <param name="func">The asynchronous function executed inside the transaction scope.</param>
     /// <returns>A task containing the function result.</returns>
@@ -1211,8 +1211,8 @@ and ISoloDB =
     /// Executes an asynchronous action inside a transaction scope.
     /// </summary>
     /// <remarks>
-    /// On a root database context, this opens a top-level transaction. On an existing transactional context,
-    /// this opens a nested savepoint.
+    /// On a root database context, this opens a top-level SQLite BEGIN IMMEDIATE transaction.
+    /// On an existing transactional context, this opens a nested savepoint.
     /// </remarks>
     /// <param name="func">The asynchronous action executed inside the transaction scope.</param>
     /// <returns>A task representing the asynchronous operation.</returns>

@@ -1,25 +1,9 @@
 ﻿namespace SoloDatabase.Types
 
 open System
-open System.Threading
 open System.Collections.Generic
 open System.Runtime.CompilerServices
 open System.Runtime.InteropServices
-
-type internal DisposableMutex =
-    val mutex: Mutex
-
-    internal new(name: string) =
-        let mutex = new Mutex(false, name)
-        mutex.WaitOne() |> ignore
-
-        { mutex = mutex }
-
-
-    interface IDisposable with
-        member this.Dispose() =
-            this.mutex.ReleaseMutex()
-            this.mutex.Dispose()
 
 /// <summary>
 /// This is for internal use only, don't touch.

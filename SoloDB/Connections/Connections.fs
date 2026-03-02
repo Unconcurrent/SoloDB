@@ -61,7 +61,7 @@ module Connections =
         | :? CachingDbConnection as c -> c.IsInEventHandlerScope
         | _ -> false
 
-    let private beginImmediateWithRetry (connection: CachingDbConnection) =
+    let internal beginImmediateWithRetry (connection: SqliteConnection) =
         let mutable attempt = 0
         let mutable started = false
         while not started && attempt < 5 do
@@ -179,19 +179,31 @@ module Connections =
         /// <param name="f">The function to execute within the transaction.</param>
         /// <returns>The result of the function <paramref name="f"/>.</returns>
         member private this.WithTransactionBorrowed(f: CachingDbConnection -> 'T) =
-            use connectionForTransaction = this.Borrow()
-            beginImmediateWithRetry connectionForTransaction
+            let conn = this.Borrow()
+            let mutable primaryEx: exn option = None
+            let mutable cleanupEx: exn option = None
+            let mutable result = Unchecked.defaultof<'T>
             try
-                connectionForTransaction.InsideTransaction <- true
+                beginImmediateWithRetry conn
+                conn.InsideTransaction <- true
                 try
-                    let ret = f connectionForTransaction
-                    connectionForTransaction.Execute "COMMIT;" |> ignore
-                    ret
-                with ex -> 
-                    connectionForTransaction.Execute "ROLLBACK;" |> ignore
-                    reraise()
+                    result <- f conn
+                    conn.Execute "COMMIT;" |> ignore
+                with ex ->
+                    primaryEx <- Some ex
+                    try conn.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
             finally
-                connectionForTransaction.InsideTransaction <- false
+                conn.InsideTransaction <- false
+                try (conn :> IDisposable).Dispose() with ex ->
+                    match cleanupEx with
+                    | None -> cleanupEx <- Some ex
+                    | Some _ -> () // keep first cleanup error
+
+            match primaryEx, cleanupEx with
+            | Some p, Some c -> p.Data["SoloDB.CleanupException"] <- c; raise p
+            | Some p, None -> raise p
+            | None, Some c -> raise c
+            | None, None -> result
 
         /// <summary>
         /// The core implementation for executing an asynchronous function within a database transaction.
@@ -199,19 +211,32 @@ module Connections =
         /// <param name="f">The asynchronous function to execute within the transaction.</param>
         /// <returns>A task that represents the asynchronous operation, containing the result of the function <paramref name="f"/>.</returns>
         member private this.WithTransactionBorrowedAsync(f: CachingDbConnection -> Task<'T>) = task {
-            use connectionForTransaction = this.Borrow()
-            beginImmediateWithRetry connectionForTransaction
+            let conn = this.Borrow()
+            let mutable primaryEx: exn option = None
+            let mutable cleanupEx: exn option = None
+            let mutable result = Unchecked.defaultof<'T>
             try
-                connectionForTransaction.InsideTransaction <- true
+                beginImmediateWithRetry conn
+                conn.InsideTransaction <- true
                 try
-                    let! ret = f connectionForTransaction
-                    connectionForTransaction.Execute "COMMIT;" |> ignore
-                    return ret
-                with ex -> 
-                    connectionForTransaction.Execute "ROLLBACK;" |> ignore
-                    return reraiseAnywhere ex
+                    let! ret = f conn
+                    result <- ret
+                    conn.Execute "COMMIT;" |> ignore
+                with ex ->
+                    primaryEx <- Some ex
+                    try conn.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
             finally
-                connectionForTransaction.InsideTransaction <- false
+                conn.InsideTransaction <- false
+                try (conn :> IDisposable).Dispose() with ex ->
+                    match cleanupEx with
+                    | None -> cleanupEx <- Some ex
+                    | Some _ -> ()
+
+            match primaryEx, cleanupEx with
+            | Some p, Some c -> p.Data["SoloDB.CleanupException"] <- c; return reraiseAnywhere p
+            | Some p, None -> return reraiseAnywhere p
+            | None, Some c -> return reraiseAnywhere c
+            | None, None -> return result
         }
 
         /// <summary>

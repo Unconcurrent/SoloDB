@@ -4,6 +4,8 @@
 
 [SoloDB](https://solodb.org/) is a high-performance, lightweight, and robust embedded .NET database that elegantly combines the power of a NoSQL document store with the reliability of SQL. Built directly on top of SQLite and its native [JSONB](https://sqlite.org/jsonb.html) support, SoloDB offers a serverless, feature-rich experience, combining a simple [MongoDB](https://www.mongodb.com/)-like API with full LINQ support for expressive, strongly-typed queries.
 
+SoloDB includes native relational-document support via `DBRef<T>`, `DBRefMany<T>`, and `[SoloRef(...)]`, so you can model references and graph-like data while staying in a strongly-typed document API.
+
 It is designed for developers who need a fast, reliable, and easy-to-use database solution without the overhead of a separate server. It's perfect for desktop applications, mobile apps (via .NET MAUI), and small to medium-sized web applications.
 
 I wrote a detailed comparison with a popular alternative, [LiteDB](https://github.com/litedb-org/LiteDB) — including benchmarks, API differences, and developer experience. [Read the article here](https://unconcurrent.com/articles/SoloDBvsLiteDB.html).
@@ -509,6 +511,10 @@ Invalid index expressions are rejected with typed exceptions (argument/operation
 ### Atomic Transactions
 
 For operations that must either fully complete or not at all, use WithTransaction. If an exception is thrown inside the delegate, all database changes are automatically rolled back.
+
+- Root `WithTransaction(...)` scopes run as SQLite `BEGIN IMMEDIATE` transactions.
+- Calling `WithTransaction(...)` inside an existing transaction uses a nested SQLite `SAVEPOINT`.
+- Event handlers execute inside active SQL statements; opening a nested transaction from handler context is intentionally rejected.
 
 ```csharp
 try

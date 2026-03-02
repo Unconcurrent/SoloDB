@@ -1570,14 +1570,14 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     member this.WithTransaction<'R>(func: Func<TransactionalSoloDB, 'R>) : 'R =
         use connectionForTransaction = connectionManager.CreateForTransaction()
         try
-            connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
+            Connections.beginImmediateWithRetry connectionForTransaction
             let transactionalDb = new TransactionalSoloDB(connectionForTransaction, { ClearCacheFunction = ignore; EventSystem = this.Events })
-            
+
             try
                 let ret = func.Invoke transactionalDb
                 connectionForTransaction.Execute "COMMIT;" |> ignore
                 ret
-            with _ex -> 
+            with _ex ->
                 connectionForTransaction.Execute "ROLLBACK;" |> ignore
                 reraise()
         finally connectionForTransaction.DisposeReal(true)
@@ -1598,7 +1598,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     member this.WithTransactionAsync<'R>(func: Func<TransactionalSoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> = task {
         use connectionForTransaction = connectionManager.CreateForTransaction()
         try
-            connectionForTransaction.Execute("BEGIN IMMEDIATE;") |> ignore
+            Connections.beginImmediateWithRetry connectionForTransaction
             let transactionalDb = new TransactionalSoloDB(connectionForTransaction, { ClearCacheFunction = ignore; EventSystem = this.Events })
 
             try
