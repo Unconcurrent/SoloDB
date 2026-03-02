@@ -49,9 +49,12 @@ let resetDbRefManyTrackers (owner: obj) (committedLinkedIdsByProperty: IReadOnly
     if isNull owner then nullArg "owner"
     if isNull committedLinkedIdsByProperty then nullArg "committedLinkedIdsByProperty"
 
-    let props = owner.GetType().GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-    for prop in props do
-        let value = prop.GetValue owner
+    let ownerType = owner.GetType()
+    let specs = getRelationSpecs ownerType
+    let manySpecs = specs |> Array.filter (fun (_, kind, _, _, _, _, _, _) -> kind = Many)
+    for (prop, _kind, _, _, _, _, _, _) in manySpecs do
+        let getter = RelationsAccessorCache.compiledPropGetter prop
+        let value = getter.Invoke(owner)
         match value with
         | :? IDBRefManyInternal as tracker ->
             match committedLinkedIdsByProperty.TryGetValue prop.Name with
@@ -129,7 +132,7 @@ let prepareInsert (tx: RelationTxContext) (owner: obj) =
         if resetMap.Count > 0 then
             resetDbRefManyTrackers owner (asReadOnlyDict resetMap)
 
-        { Kind = "Insert"; OwnerType = tx.OwnerType; Ops = ops |> Seq.toList }
+        { Kind = RelationPlanKind.Insert; OwnerType = tx.OwnerType; Ops = ops |> Seq.toList }
     )
 
 let prepareUpsert (tx: RelationTxContext) (oldOwner: obj voption) (newOwner: obj) =
@@ -167,7 +170,7 @@ let prepareUpsert (tx: RelationTxContext) (oldOwner: obj voption) (newOwner: obj
         if resetMap.Count > 0 then
             resetDbRefManyTrackers newOwner (asReadOnlyDict resetMap)
 
-        { Kind = "Upsert"; OwnerType = tx.OwnerType; Ops = ops |> Seq.toList }
+        { Kind = RelationPlanKind.Upsert; OwnerType = tx.OwnerType; Ops = ops |> Seq.toList }
     )
 
 let private readPersistedManyTargetIds (tx: RelationTxContext) (descriptor: RelationDescriptor) (ownerId: int64) =
@@ -223,7 +226,7 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                     if newId > 0L then ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, newId))
                     else ops.Add(SetDBRefToNone(descriptor.PropertyPath, descriptor.TargetType))
             | Many ->
-                match descriptor.Property.GetValue(newOwner) with
+                match (RelationsAccessorCache.compiledPropGetter descriptor.Property).Invoke(newOwner) with
                 | :? IDBRefManyInternal as tracker when tracker.IsLoaded ->
                     // Loaded tracker: diff against OriginalIds
                     match collectManyTargetIdsAndCascade tx descriptor newOwner false visited with
@@ -293,7 +296,7 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
         if resetMap.Count > 0 then
             resetDbRefManyTrackers newOwner (asReadOnlyDict resetMap)
 
-        { Kind = "Update"; OwnerType = tx.OwnerType; Ops = ops |> Seq.toList }
+        { Kind = RelationPlanKind.Update; OwnerType = tx.OwnerType; Ops = ops |> Seq.toList }
     )
 
 let prepareDeleteOwner (tx: RelationTxContext) (ownerId: int64) (owner: obj) =
@@ -308,30 +311,25 @@ let prepareDeleteOwner (tx: RelationTxContext) (ownerId: int64) (owner: obj) =
 
 let private cloneOwnerForReplaceMany (ownerType: Type) (owner: obj) =
     ensureOwnerInstance ownerType owner "owner"
-    let clone = Activator.CreateInstance(ownerType)
-    let props = ownerType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-    for prop in props do
-        if prop.CanRead && prop.CanWrite then
-            let value = prop.GetValue(owner)
-            if isNull value then
-                prop.SetValue(clone, null)
-            else
-                match value with
-                | :? IDBRefManyInternal as srcTracker ->
-                    let dst = Activator.CreateInstance(prop.PropertyType)
-                    let addMethod =
-                        prop.PropertyType.GetMethods(BindingFlags.Public ||| BindingFlags.Instance)
-                        |> Array.tryFind (fun m -> m.Name = "Add" && m.GetParameters().Length = 1)
-                    match addMethod with
-                    | Some methodInfo ->
-                        for item in srcTracker.GetCurrentItemsBoxed() do
-                            methodInfo.Invoke(dst, [| item |]) |> ignore
-                        prop.SetValue(clone, dst)
-                    | None ->
-                        raise (InvalidOperationException(
-                            $"Error: Could not clone DBRefMany property '{ownerType.FullName}.{prop.Name}'.\nReason: Missing Add(T) method on relation container type.\nFix: Use DBRefMany<T> for multi-relations."))
-                | _ ->
-                    prop.SetValue(clone, value)
+    let desc = RelationsAccessorCache.compiledCloneDescriptor ownerType
+    let clone = desc.CreateInstance.Invoke()
+    desc.CopyScalars.Invoke(owner, clone)
+    for prop in desc.ManyProperties do
+        let getter = RelationsAccessorCache.compiledPropGetter prop
+        let setter = RelationsAccessorCache.compiledPropSetter prop
+        let value = getter.Invoke(owner)
+        if isNull value then
+            setter.Invoke(clone, null)
+        else
+            match value with
+            | :? IDBRefManyInternal as srcTracker ->
+                let dst = (RelationsAccessorCache.compiledDefaultCtor prop.PropertyType).Invoke()
+                let addFn = RelationsAccessorCache.compiledAddMethod prop.PropertyType
+                for item in srcTracker.GetCurrentItemsBoxed() do
+                    addFn.Invoke(dst, item)
+                setter.Invoke(clone, dst)
+            | _ ->
+                setter.Invoke(clone, value)
     clone
 
 let private incrementRelationVersion (tx: RelationTxContext) (ownerId: int64) =
@@ -367,7 +365,7 @@ let syncUpdate (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan
     if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
     withRelationSqliteWrap "sync" "syncUpdate" (fun () ->
         ensureSchemaForOwnerType tx tx.OwnerType
-        let updateOwnerJson = StringComparer.Ordinal.Equals(plan.Kind, "UpdateMany")
+        let updateOwnerJson = plan.Kind = RelationPlanKind.UpdateMany
         applyOps tx ownerId plan updateOwnerJson
         if plan.Ops.Length > 0 then incrementRelationVersion tx ownerId
     )
@@ -463,9 +461,10 @@ let batchLoadDBRefManyProperties
     (excludedPaths: HashSet<string>)
     (includedPaths: HashSet<string>)
     (ownerEntities: (int64 * obj) array)
+    (inTransaction: bool)
     =
     withRelationSqliteWrap "batch-load" "batchLoadDBRefManyProperties" (fun () ->
-        RelationsBatchLoad.batchLoadDBRefManyProperties connection ownerTable ownerType excludedPaths includedPaths ownerEntities
+        RelationsBatchLoad.batchLoadDBRefManyProperties connection ownerTable ownerType excludedPaths includedPaths ownerEntities inTransaction
     )
 
 /// Capture the RelationVersion baseline for loaded entities.

@@ -61,8 +61,21 @@ let rec internal applyOwnerDeletePoliciesCore (tx: RelationTxContext) (ownerTabl
             let hasLinks = targetIds.Length > 0
             match relationKind with
             | Single ->
-                if hasLinks then
-                    tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
+                match parseOnOwnerDeletePolicy row.OnOwnerDelete with
+                | DeletePolicy.Restrict ->
+                    if hasLinks then
+                        raise (InvalidOperationException(
+                            $"Error: Cannot delete owner '{ownerTable}' Id={ownerId}.\nReason: Relation '{row.PropertyName}' uses OnOwnerDelete=Restrict and still has links.\nFix: Remove related links or change the delete policy before deleting."))
+                | DeletePolicy.Unlink
+                | DeletePolicy.Deletion ->
+                    if hasLinks then
+                        tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
+                | DeletePolicy.Cascade ->
+                    raise (InvalidOperationException(
+                        $"Error: Invalid relation metadata on '{ownerTable}.{row.PropertyName}'.\nReason: OnOwnerDelete=Cascade is not supported.\nFix: Use OnOwnerDelete=Deletion or update the metadata to a supported policy."))
+                | _ ->
+                    raise (InvalidOperationException(
+                        $"Error: Invalid OnOwnerDelete policy on relation '{ownerTable}.{row.PropertyName}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Unlink, or Deletion."))
 
             | Many ->
                 match parseOnOwnerDeletePolicy row.OnOwnerDelete with

@@ -208,14 +208,22 @@ type DBRef<'TTarget, 'TId> =
     override this.Equals(other: obj) =
         match other with
         | :? DBRef<'TTarget, 'TId> as o ->
-            this._id = o._id &&
-            (if this._id = 0L then this._hasTypedId = o._hasTypedId else true)
+            if this._id <> o._id then false
+            elif this._id <> 0L then true
+            elif this._hasTypedId <> o._hasTypedId then false
+            elif this._hasTypedId then EqualityComparer<'TId>.Default.Equals(this._typedId, o._typedId)
+            else true
         | _ -> false
 
-    override this.GetHashCode() = this._id.GetHashCode()
+    override this.GetHashCode() =
+        if this._id <> 0L then this._id.GetHashCode()
+        elif this._hasTypedId then
+            let typedHash = EqualityComparer<'TId>.Default.GetHashCode(this._typedId)
+            hash (this._id, this._hasTypedId, typedHash)
+        else hash (this._id, this._hasTypedId)
 
     interface IEquatable<DBRef<'TTarget, 'TId>> with
-        member this.Equals(other: DBRef<'TTarget, 'TId>) = this._id = other._id
+        member this.Equals(other: DBRef<'TTarget, 'TId>) = (this :> obj).Equals(other)
 
     interface IComparable<DBRef<'TTarget, 'TId>> with
         member this.CompareTo(other: DBRef<'TTarget, 'TId>) = compare this._id other._id

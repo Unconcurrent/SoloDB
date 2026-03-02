@@ -433,11 +433,12 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         | json when Object.ReferenceEquals(json, null) -> None
         | json ->
             let entity = fromSQLite<'T> json
-            // Batch-load DBRefMany properties for full entity hydration.
+            // Batch-load Single and Many relation properties for full entity hydration.
             if this.HasRelations then
                 let excludedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
                 let includedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
-                Relations.batchLoadDBRefManyProperties connection name typeof<'T> excludedPaths includedPaths [| (id, box entity) |]
+                Relations.batchLoadDBRefProperties connection name typeof<'T> excludedPaths includedPaths [| (id, box entity) |]
+                Relations.batchLoadDBRefManyProperties connection name typeof<'T> excludedPaths includedPaths [| (id, box entity) |] this.InTransaction
                 Relations.captureRelationVersionForEntities connection name [| (id, box entity) |]
             entity |> Some
 
@@ -540,7 +541,15 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         use connection = connection.Get()
         match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
         | json when Object.ReferenceEquals(json, null) -> None
-        | json -> fromSQLite<'T> json |> Some
+        | json ->
+            let entity = fromSQLite<'T> json
+            if this.HasRelations then
+                let excludedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+                let includedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+                Relations.batchLoadDBRefProperties connection name typeof<'T> excludedPaths includedPaths [| (json.Id.Value, box entity) |]
+                Relations.batchLoadDBRefManyProperties connection name typeof<'T> excludedPaths includedPaths [| (json.Id.Value, box entity) |] this.InTransaction
+                Relations.captureRelationVersionForEntities connection name [| (json.Id.Value, box entity) |]
+            entity |> Some
 
     /// <summary>
     /// Finds a document by its custom ID, as defined by the [Id] attribute on the document type.
@@ -671,7 +680,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 let oldOwner = fromSQLite<'T> oldRow
                 let excludedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
                 let includedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
-                Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths [| (oldRow.Id.Value, box oldOwner) |]
+                Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths [| (oldRow.Id.Value, box oldOwner) |] true
                 let writePlan = Relations.prepareUpdate tx oldRow.Id.Value (box oldOwner) (box item)
 
                 variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
@@ -792,7 +801,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     let excludedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
                     let includedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
                     let ownerPairs = Array.zip ownerIds oldOwners
-                    Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths ownerPairs
+                    Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths ownerPairs true
                     Relations.syncReplaceMany tx (ownerIds :> seq<_>) (oldOwners :> seq<_>) (box item)
                     variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
@@ -828,7 +837,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     let oldOwner = fromSQLite<'T> oldRow
                     let excludedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
                     let includedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
-                    Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths [| (oldRow.Id.Value, box oldOwner) |]
+                    Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths [| (oldRow.Id.Value, box oldOwner) |] true
                     Relations.syncReplaceOne tx oldRow.Id.Value (box oldOwner) (box item)
                     variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id = @id", {| item = variables.["item"]; id = oldRow.Id.Value |})
@@ -914,7 +923,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
 
                     for row in relationRows do
                         let writePlan: Relations.RelationWritePlan = {
-                            Kind = "UpdateMany"
+                            Kind = RelationsTypes.RelationPlanKind.UpdateMany
                             OwnerType = typeof<'T>
                             Ops = mappedOps
                         }

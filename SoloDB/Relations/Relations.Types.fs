@@ -28,8 +28,14 @@ type internal RelationUpdateManyOp =
     | RemoveDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
     | ClearDBRefMany of PropertyPath: string * TargetType: Type
 
+type internal RelationPlanKind =
+    | Insert
+    | Upsert
+    | Update
+    | UpdateMany
+
 type internal RelationWritePlan = {
-    Kind: string
+    Kind: RelationPlanKind
     OwnerType: Type
     Ops: RelationUpdateManyOp list
 }
@@ -95,7 +101,7 @@ let internal ensureOwnerInstance (ownerType: Type) (owner: obj) (argName: string
     if not (ownerType.IsAssignableFrom actual) then
         raise (ArgumentException($"Invalid owner instance type. Expected assignable to {ownerType.FullName}, got {actual.FullName}.", argName))
 
-let internal emptyPlan kind ownerType =
+let internal emptyPlan (kind: RelationPlanKind) ownerType =
     { Kind = kind
       OwnerType = ownerType
       Ops = [] }
@@ -137,7 +143,14 @@ let internal parseDeletePolicy (value: string) =
         else
             value.Trim()
     match Enum.TryParse<DeletePolicy>(value, true) with
-    | true, policy -> policy
+    | true, policy ->
+        match policy with
+        | DeletePolicy.Restrict
+        | DeletePolicy.Cascade
+        | DeletePolicy.Unlink
+        | DeletePolicy.Deletion -> policy
+        | _ -> raise (InvalidOperationException(
+            $"Error: Invalid delete policy '{value}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Cascade, Unlink, or Deletion as appropriate."))
     | _ -> raise (InvalidOperationException(
         $"Error: Invalid delete policy '{value}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Cascade, Unlink, or Deletion as appropriate."))
 
@@ -151,7 +164,12 @@ let internal parseOnDeletePolicy (value: string) =
     | DeletePolicy.Deletion ->
         raise (InvalidOperationException(
             "Error: Invalid delete policy.\nReason: OnDelete cannot be Deletion.\nFix: Use Restrict, Cascade, or Unlink for OnDelete."))
-    | _ -> policy
+    | DeletePolicy.Restrict
+    | DeletePolicy.Cascade
+    | DeletePolicy.Unlink -> policy
+    | _ ->
+        raise (InvalidOperationException(
+            $"Error: Invalid delete policy '{policy}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Cascade, or Unlink for OnDelete."))
 
 let internal parseOnOwnerDeletePolicy (value: string) =
     let policy =
@@ -163,7 +181,12 @@ let internal parseOnOwnerDeletePolicy (value: string) =
     | DeletePolicy.Cascade ->
         raise (InvalidOperationException(
             "Error: Invalid owner-delete policy.\nReason: OnOwnerDelete cannot be Cascade.\nFix: Use Deletion instead."))
-    | _ -> policy
+    | DeletePolicy.Restrict
+    | DeletePolicy.Unlink
+    | DeletePolicy.Deletion -> policy
+    | _ ->
+        raise (InvalidOperationException(
+            $"Error: Invalid owner-delete policy '{policy}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Unlink, or Deletion for OnOwnerDelete."))
 
 let internal tryGetWritableInt64IdProperty (t: Type) =
     let prop = t.GetProperty("Id", BindingFlags.Public ||| BindingFlags.Instance)
@@ -185,12 +208,10 @@ let internal readEntityIdOrZero (targetType: Type) (entity: obj) =
         raise (InvalidOperationException(
             $"Error: Invalid relation target instance type.\nReason: Expected assignable to {targetType.FullName}, got {entity.GetType().FullName}.\nFix: Use the correct target type for this relation."))
     else
-        let idProp = getWritableInt64IdPropertyOrThrow targetType
-        idProp.GetValue(entity) :?> int64
+        RelationsAccessorCache.compiledInt64IdReader(targetType).Invoke(entity)
 
 let internal writeEntityId (targetType: Type) (entity: obj) (id: int64) =
-    let idProp = getWritableInt64IdPropertyOrThrow targetType
-    idProp.SetValue(entity, box id)
+    RelationsAccessorCache.compiledInt64IdWriter(targetType).Invoke(entity, id)
 
 let internal jsonSerializeMethod =
     typeof<JsonValue>.GetMethods(BindingFlags.Public ||| BindingFlags.Static)
@@ -202,13 +223,9 @@ let internal jsonSerializeWithTypeMethod =
 
 let internal serializeEntityForStorage (targetType: Type) (entity: obj) =
     let includeType = mustIncludeTypeInformationInSerializationFn targetType
-    let serializer =
-        if includeType then
-            jsonSerializeWithTypeMethod.MakeGenericMethod(targetType)
-        else
-            jsonSerializeMethod.MakeGenericMethod(targetType)
-
-    let json = serializer.Invoke(null, [| entity |]) :?> JsonValue
+    let baseMethod = if includeType then jsonSerializeWithTypeMethod else jsonSerializeMethod
+    let serializer = RelationsAccessorCache.compiledSerializer targetType includeType baseMethod
+    let json = serializer.Invoke(entity) :?> JsonValue
     match json with
     | JsonValue.Object objMap when (tryGetWritableInt64IdProperty targetType).IsSome ->
         objMap.Remove("Id") |> ignore

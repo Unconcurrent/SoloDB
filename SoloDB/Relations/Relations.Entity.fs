@@ -90,34 +90,32 @@ let internal readDbRefId (dbRefObj: obj) =
     if isNull dbRefObj then
         0L
     else
-        let idProp = dbRefObj.GetType().GetProperty("Id", BindingFlags.Public ||| BindingFlags.Instance)
-        if isNull idProp then 0L else idProp.GetValue(dbRefObj) :?> int64
+        RelationsAccessorCache.compiledDbRefIdReader(dbRefObj.GetType()).Invoke(dbRefObj)
 
 let internal tryGetValueOptionValue (valueOpt: obj) =
     if isNull valueOpt then
         ValueNone
     else
-        let t = valueOpt.GetType()
-        let isSomeProp = t.GetProperty("IsSome", BindingFlags.Public ||| BindingFlags.Instance)
-        if isNull isSomeProp then
-            ValueNone
-        elif isSomeProp.GetValue(valueOpt) :?> bool then
-            let valueProp = t.GetProperty("Value", BindingFlags.Public ||| BindingFlags.Instance)
-            if isNull valueProp then ValueNone else
-            let value = valueProp.GetValue(valueOpt)
-            if isNull value then ValueNone else ValueSome value
-        else
-            ValueNone
+        match RelationsAccessorCache.compiledValueOptionAccessors (valueOpt.GetType()) with
+        | ValueNone -> ValueNone
+        | ValueSome acc ->
+            if acc.IsSome.Invoke(valueOpt) then
+                let value = acc.GetValue.Invoke(valueOpt)
+                if isNull value then ValueNone else ValueSome value
+            else
+                ValueNone
 
 let internal tryGetVOptionProperty (dbRefObj: obj) (propertyName: string) =
     if isNull dbRefObj then
         ValueNone
     else
-        let prop = dbRefObj.GetType().GetProperty(propertyName, BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance)
+        let t = dbRefObj.GetType()
+        let prop = t.GetProperty(propertyName, BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance)
         if isNull prop then
             ValueNone
         else
-            prop.GetValue(dbRefObj) |> tryGetValueOptionValue
+            let getter = RelationsAccessorCache.compiledPropGetter prop
+            getter.Invoke(dbRefObj) |> tryGetValueOptionValue
 
 let internal tryGetPendingEntity (dbRefObj: obj) =
     tryGetVOptionProperty dbRefObj "PendingEntity"
@@ -126,21 +124,12 @@ let internal tryGetPendingTypedId (dbRefObj: obj) =
     tryGetVOptionProperty dbRefObj "PendingTypedId"
 
 let internal createDbRefTo (dbRefType: Type) (id: int64) =
-    let toMethod = dbRefType.GetMethod("To", BindingFlags.Public ||| BindingFlags.Static, null, [| typeof<int64> |], null)
-    if not (isNull toMethod) then
-        toMethod.Invoke(null, [| box id |])
-    else
-        let resolvedMethod = dbRefType.GetMethod("Resolved", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Static, null, [| typeof<int64> |], null)
-        if isNull resolvedMethod then
-            raise (InvalidOperationException(
-                $"Error: Could not resolve DBRef.To/Resolved on type {dbRefType.FullName}.\nReason: The DBRef target type could not be inferred.\nFix: Ensure the DBRef is correctly typed and initialized."))
-        resolvedMethod.Invoke(null, [| box id |])
+    let factories = RelationsAccessorCache.compiledDbRefFactories dbRefType
+    factories.ToOrResolved.Invoke(id)
 
 let internal createDbRefLoaded (dbRefType: Type) (id: int64) (entity: obj) =
-    let loadedMethod =
-        dbRefType.GetMethods(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Static)
-        |> Array.find (fun m -> m.Name = "Loaded" && m.GetParameters().Length = 2)
-    loadedMethod.Invoke(null, [| box id; entity |])
+    let factories = RelationsAccessorCache.compiledDbRefFactories dbRefType
+    factories.Loaded.Invoke(id, entity)
 
 let internal updateDbRefJson (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) (propertyPath: string) (targetId: int64) =
     let path = "$." + propertyPath
@@ -223,7 +212,7 @@ let rec internal cascadeInsertDeep
     for descriptor in descriptors do
         match descriptor.Kind with
         | Single ->
-            let value = descriptor.Property.GetValue(entity)
+            let value = (RelationsAccessorCache.compiledPropGetter descriptor.Property).Invoke(entity)
             let refId = readDbRefId value
             if refId > 0L then
                 // Already-resolved reference — create link row, validate target exists.
@@ -241,7 +230,7 @@ let rec internal cascadeInsertDeep
                     if entityId > 0L then
                         // Existing entity, link-only.
                         let dbRef = createDbRefTo descriptor.Property.PropertyType entityId
-                        descriptor.Property.SetValue(entity, dbRef)
+                        (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(entity, dbRef)
                         ensureRelationSchema childTx descriptor
                         ensureTargetExists childTx descriptor.TargetTable entityId
                         childTx.Connection.Execute(
@@ -254,7 +243,7 @@ let rec internal cascadeInsertDeep
                         ensureRelationSchema childTx descriptor
                         let childId = cascadeInsertDeep childTx descriptor.TargetTable descriptor.TargetType pending visited
                         let dbRef = createDbRefTo descriptor.Property.PropertyType childId
-                        descriptor.Property.SetValue(entity, dbRef)
+                        (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(entity, dbRef)
                         childTx.Connection.Execute(
                             $"INSERT OR REPLACE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
                             {| sourceId = insertedId; targetId = childId |}) |> ignore
@@ -263,7 +252,7 @@ let rec internal cascadeInsertDeep
                 | ValueNone -> ()
 
         | Many ->
-            let trackerObj = descriptor.Property.GetValue(entity)
+            let trackerObj = (RelationsAccessorCache.compiledPropGetter descriptor.Property).Invoke(entity)
             match trackerObj with
             | :? IDBRefManyInternal as tracker ->
                 // Always process Many items during cascade-insert, loaded or not.
@@ -286,7 +275,7 @@ let rec internal cascadeInsertDeep
     insertedId
 
 let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor: RelationDescriptor) (owner: obj) (visited: HashSet<obj>) =
-    let value = descriptor.Property.GetValue(owner)
+    let value = (RelationsAccessorCache.compiledPropGetter descriptor.Property).Invoke(owner)
     let id = readDbRefId value
     if id > 0L then
         // Preflight target-exists for DBRef.To(id) before owner mutation.
@@ -298,7 +287,7 @@ let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor
             ensureRelationSchema tx descriptor
             let resolvedId = resolveTypedIdToTargetId tx descriptor typedId
             let dbRef = createDbRefTo descriptor.Property.PropertyType resolvedId
-            descriptor.Property.SetValue(owner, dbRef)
+            (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(owner, dbRef)
             resolvedId
         | ValueNone ->
             match tryGetPendingEntity value with
@@ -309,18 +298,18 @@ let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor
                     // Preflight target-exists for From(existing) before owner mutation.
                     ensureTargetExists tx descriptor.TargetTable entityId
                     let dbRef = createDbRefTo descriptor.Property.PropertyType entityId
-                    descriptor.Property.SetValue(owner, dbRef)
+                    (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(owner, dbRef)
                     entityId
                 else
                     let insertedId = cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType pending visited
                     let dbRef = createDbRefTo descriptor.Property.PropertyType insertedId
-                    descriptor.Property.SetValue(owner, dbRef)
+                    (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(owner, dbRef)
                     insertedId
             | ValueNone ->
                 0L
 
 let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor: RelationDescriptor) (owner: obj) (includeWhenUnloaded: bool) (visited: HashSet<obj>) =
-    let trackerObj = descriptor.Property.GetValue(owner)
+    let trackerObj = (RelationsAccessorCache.compiledPropGetter descriptor.Property).Invoke(owner)
     if isNull trackerObj then
         if includeWhenUnloaded then ValueSome [||] else ValueNone
     else
@@ -348,7 +337,7 @@ let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor:
                 $"Error: Property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' does not implement IDBRefManyInternal.\nReason: The relation property type is incorrect.\nFix: Use DBRefMany<T> or DBRefMany<TTarget,'TId> for multi-relations."))
 
 let internal readSingleIdNoCascade (descriptor: RelationDescriptor) (owner: obj) =
-    descriptor.Property.GetValue(owner) |> readDbRefId
+    (RelationsAccessorCache.compiledPropGetter descriptor.Property).Invoke(owner) |> readDbRefId
 
 let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) (updateOwnerJson: bool) =
     let descriptorMap = relationDescriptorByPath tx tx.OwnerType

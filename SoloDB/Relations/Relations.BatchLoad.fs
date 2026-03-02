@@ -48,8 +48,9 @@ let batchLoadDBRefProperties
         let ownerTargets = ResizeArray<obj * int64>()
         let distinctTargetIds = HashSet<int64>()
 
+        let propGetter = RelationsAccessorCache.compiledPropGetter prop
         for (_ownerId, ownerObj) in ownerEntities do
-            let dbRefObj = prop.GetValue(ownerObj)
+            let dbRefObj = propGetter.Invoke(ownerObj)
             let targetId = readDbRefId dbRefObj
             if targetId > 0L then
                 ownerTargets.Add(ownerObj, targetId)
@@ -74,18 +75,20 @@ let batchLoadDBRefProperties
                 for i = 0 to chunk.Length - 1 do
                     parameters.[paramNames.[i]] <- box chunk.[i]
 
+                let idWriter = RelationsAccessorCache.compiledInt64IdWriter targetType
                 for row in connection.Query<{| Id: int64; ValueJSON: string |}>(sql, parameters) do
                     if not (isNull row.ValueJSON) then
                         let json = JsonValue.Parse row.ValueJSON
                         let targetObj = json.ToObject(targetType)
-                        idProp.SetValue(targetObj, box row.Id)
+                        idWriter.Invoke(targetObj, row.Id)
                         loadedTargets.[row.Id] <- targetObj
 
+            let propSetter = RelationsAccessorCache.compiledPropSetter prop
             for (ownerObj, targetId) in ownerTargets do
                 match loadedTargets.TryGetValue(targetId) with
                 | true, targetObj ->
                     let loadedRef = createDbRefLoaded prop.PropertyType targetId targetObj
-                    prop.SetValue(ownerObj, loadedRef)
+                    propSetter.Invoke(ownerObj, loadedRef)
                 | _ -> ()
 
 let batchLoadDBRefManyProperties
@@ -95,12 +98,13 @@ let batchLoadDBRefManyProperties
     (excludedPaths: HashSet<string>)
     (includedPaths: HashSet<string>)
     (ownerEntities: (int64 * obj) array)
+    (inTransaction: bool)
     =
     if ownerEntities.Length = 0 then ()
     else
 
     let ownerTable = formatName ownerTable
-    let tx: RelationTxContext = { Connection = connection; OwnerTable = ownerTable; OwnerType = ownerType; InTransaction = false }
+    let tx: RelationTxContext = { Connection = connection; OwnerTable = ownerTable; OwnerType = ownerType; InTransaction = inTransaction }
     let manyDescriptors = buildRelationDescriptors tx ownerType |> Array.filter (fun d -> d.Kind = Many)
     if manyDescriptors.Length = 0 then ()
     else
@@ -119,7 +123,7 @@ let batchLoadDBRefManyProperties
         let batchSize = 500
         let ownerIds = ownerEntities |> Array.map fst
         let grouped = Dictionary<int64, ResizeArray<int64 * obj>>()
-        let idProp = getWritableInt64IdPropertyOrThrow descriptor.TargetType
+        let idWriter = RelationsAccessorCache.compiledInt64IdWriter descriptor.TargetType
         let ownerColumn = if descriptor.OwnerUsesSourceColumn then "SourceId" else "TargetId"
         let targetColumn = if descriptor.OwnerUsesSourceColumn then "TargetId" else "SourceId"
 
@@ -136,6 +140,7 @@ let batchLoadDBRefManyProperties
             let orderClause =
                 match descriptor.OrderBy with
                 | DBRefOrder.TargetId -> $" ORDER BY {qTarget}.Id"
+                | DBRefOrder.Undefined -> ""
                 | _ -> ""
             let sql =
                 $"SELECT lnk.{ownerColumn} AS OwnerId, {qTarget}.Id AS TargetId, json_quote({qTarget}.Value) as ValueJSON " +
@@ -149,7 +154,7 @@ let batchLoadDBRefManyProperties
                 if not (isNull row.ValueJSON) then
                     let json = JsonValue.Parse row.ValueJSON
                     let targetObj = json.ToObject(descriptor.TargetType)
-                    idProp.SetValue(targetObj, box row.TargetId)
+                    idWriter.Invoke(targetObj, row.TargetId)
                     match grouped.TryGetValue(row.OwnerId) with
                     | true, list -> list.Add(row.TargetId, targetObj)
                     | _ ->
@@ -157,16 +162,19 @@ let batchLoadDBRefManyProperties
                         list.Add(row.TargetId, targetObj)
                         grouped.[row.OwnerId] <- list
 
+        let trackerGetter = RelationsAccessorCache.compiledPropGetter descriptor.Property
+        let trackerSetter = RelationsAccessorCache.compiledPropSetter descriptor.Property
+        let trackerCtor = RelationsAccessorCache.compiledDefaultCtor descriptor.Property.PropertyType
         for (ownerId, ownerObj) in ownerEntities do
-            let tracker = descriptor.Property.GetValue(ownerObj)
+            let tracker = trackerGetter.Invoke(ownerObj)
             match tracker with
             | :? IDBRefManyInternal as internal' ->
                 match grouped.TryGetValue(ownerId) with
                 | true, items -> internal'.SetLoadedBoxed (items |> Seq.map snd) (items |> Seq.map fst)
                 | _ -> internal'.SetLoadedBoxed Seq.empty Seq.empty
             | null ->
-                let instance = Activator.CreateInstance(descriptor.Property.PropertyType)
-                descriptor.Property.SetValue(ownerObj, instance)
+                let instance = trackerCtor.Invoke()
+                trackerSetter.Invoke(ownerObj, instance)
                 let internal' = instance :?> IDBRefManyInternal
                 match grouped.TryGetValue(ownerId) with
                 | true, items -> internal'.SetLoadedBoxed (items |> Seq.map snd) (items |> Seq.map fst)

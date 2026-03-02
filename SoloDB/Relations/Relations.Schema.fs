@@ -100,11 +100,13 @@ let private buildRelationSpecs (ownerType: Type) =
                     let isUnique = not (isNull attr) && attr.Unique
                     let kind = if DBRefTypeHelpers.isDBRefManyDefinition generic then Many else Single
 
-                    match kind with
-                    | Many when onOwnerDelete = DeletePolicy.Cascade ->
+                    match kind, onOwnerDelete with
+                    | Single, DeletePolicy.Cascade
+                    | Many, DeletePolicy.Cascade ->
                         raise (InvalidOperationException(
                             $"Error: Invalid relation policy on {ownerType.FullName}.{prop.Name}.\nReason: OnOwnerDelete cannot be Cascade.\nFix: Use Deletion instead."))
-                    | _ -> ()
+                    | Single, _
+                    | Many, _ -> ()
 
                     match typedIdType with
                     | ValueSome idType ->
@@ -115,7 +117,7 @@ let private buildRelationSpecs (ownerType: Type) =
                         | ValueSome soloIdProp when soloIdProp.PropertyType <> idType ->
                             raise (InvalidOperationException(
                                 $"Error: Invalid typed relation on {ownerType.FullName}.{prop.Name}.\nReason: DBRef id type '{idType.FullName}' does not match target [SoloId] type '{soloIdProp.PropertyType.FullName}'.\nFix: Align DBRef<'TTarget,'TId> with target [SoloId] property type."))
-                        | _ -> ()
+                        | ValueSome _ -> ()
                     | ValueNone -> ()
 
                     let orderBy = if isNull attr then DBRefOrder.Undefined else attr.OrderBy
@@ -312,11 +314,19 @@ let internal ensureMetadataNotResurrected (tx: RelationTxContext) (descriptor: R
 /// Performs atomic constraint migration for Single→Many kind widening.
 let private detectAndMigrateEvolutionConflicts (tx: RelationTxContext) (descriptor: RelationDescriptor) =
     ensureRelationCatalogTable tx.Connection
-    let stored =
+    let storedRaw =
         tx.Connection.QueryFirstOrDefault<{| RefKind: string; TargetCollection: string |}>(
             "SELECT RefKind, TargetCollection FROM SoloDBRelation WHERE OwnerCollection = @owner AND PropertyName = @prop LIMIT 1;",
             {| owner = descriptor.OwnerTable; prop = descriptor.Property.Name |})
-    if not (isNull (box stored)) then
+    let stored =
+        if isNull (box storedRaw) then
+            ValueNone
+        else
+            ValueSome {| Kind = stringToRelationKind storedRaw.RefKind; TargetCollection = storedRaw.TargetCollection |}
+
+    match stored with
+    | ValueNone -> ()
+    | ValueSome stored ->
         // Target-type-change detection
         if not (StringComparer.OrdinalIgnoreCase.Equals(stored.TargetCollection, descriptor.TargetTable)) then
             raise (InvalidOperationException(
@@ -326,7 +336,7 @@ let private detectAndMigrateEvolutionConflicts (tx: RelationTxContext) (descript
                 "Fix: drop the collection or clear all relation data before changing the target type."))
 
         // Kind-change detection
-        let storedKind = if stored.RefKind = "Many" then Many else Single
+        let storedKind = stored.Kind
         if storedKind <> descriptor.Kind then
             let linkTable = descriptor.LinkTable
             let linkExists = sqliteTableExistsByName tx.Connection linkTable
@@ -421,7 +431,13 @@ let private detectAndMigrateEvolutionConflicts (tx: RelationTxContext) (descript
                     $"Reason: stored relation is 'Many' but current type declares 'Single'. " +
                     "Existing multi-target link rows would violate the Single cardinality constraint.\n" +
                     "Fix: drop the collection or clear all relation data before narrowing from DBRefMany to DBRef."))
-            | _ -> () // Single→Many with no existing link table: CREATE TABLE will handle it
+            | Single, Many ->
+                // No existing link table; ensureRelationSchema CREATE TABLE will handle it.
+                ()
+            | Single, Single
+            | Many, Many ->
+                // Same kind — filtered by outer guard, but explicit for compiler exhaustiveness.
+                ()
 
 let internal ensureRelationSchema (tx: RelationTxContext) (descriptor: RelationDescriptor) =
     ensureCollectionTableExists tx.Connection descriptor.TargetTable
@@ -447,7 +463,8 @@ SELECT CASE WHEN EXISTS (
         if not hasUniqueSoloIdIndex then
             raise (InvalidOperationException(
                 $"Error: Missing required unique index for typed relation '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\nReason: Typed-id resolver requires unique index on jsonb_extract(Value, '$.{soloIdProp.Name}') in target collection '{descriptor.TargetTable}'.\nFix: Add [SoloId] or EnsureUniqueAndIndex for this path before using DBRef<'TTarget,'TId>/DBRefMany<'TTarget,'TId>."))
-    | _ -> ()
+    | ValueSome _, ValueNone
+    | ValueNone, _ -> ()
 
     let qLink = quoteIdentifier descriptor.LinkTable
     let qSource = quoteIdentifier descriptor.LinkSourceTable
