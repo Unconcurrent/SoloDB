@@ -28,6 +28,15 @@ module internal Helper =
     let internal listCollectionNamesSnapshot (connection: SqliteConnection) : string array =
         connection.Query<string>("SELECT Name FROM SoloDBCollections") |> Seq.toArray
 
+    let internal sqlLiteralEscape (value: string) =
+        value.Replace("'", "''")
+
+    let internal normalizeCatalogNameOrThrow (step: string) (name: string) =
+        let normalized = Utils.formatName name
+        if String.IsNullOrWhiteSpace name || normalized <> name then
+            raise (InvalidOperationException($"Schema migration failed at {step}. Invalid collection name in SoloDBCollections: '{name}'."))
+        normalized
+
     /// <summary>
     /// Checks if a collection with the specified name exists in the database.
     /// </summary>

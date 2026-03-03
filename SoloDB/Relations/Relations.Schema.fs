@@ -31,22 +31,10 @@ CREATE TABLE IF NOT EXISTS SoloDBRelation (
 let internal getSQLForTriggersForTable (name: string) =
     RelationsSharedSql.getSQLForTriggersForTable name
 
-let private invalidCatalogNameError (step: string) (name: string) =
-    InvalidOperationException($"Schema migration failed at {step}. Invalid collection name in SoloDBCollections: '{name}'.")
-
-let private normalizeCatalogNameOrThrow (step: string) (name: string) =
-    let normalized = formatName name
-    if String.IsNullOrWhiteSpace name || normalized <> name then
-        raise (invalidCatalogNameError step name)
-    normalized
-
-let private sqlLiteral (value: string) =
-    value.Replace("'", "''")
-
 let internal ensureCollectionMetadataColumn (connection: SqliteConnection) (tableName: string) =
-    let normalizedTableName = normalizeCatalogNameOrThrow "relation metadata ensure" tableName
+    let normalizedTableName = Helper.normalizeCatalogNameOrThrow "relation metadata ensure" tableName
     let qTable = quoteIdentifier normalizedTableName
-    let tableLit = sqlLiteral normalizedTableName
+    let tableLit = Helper.sqlLiteralEscape normalizedTableName
     let hasMetadata =
         connection.QueryFirst<int64>(
             $"SELECT CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('{tableLit}') WHERE name = 'Metadata') THEN 1 ELSE 0 END") = 1L
@@ -54,7 +42,7 @@ let internal ensureCollectionMetadataColumn (connection: SqliteConnection) (tabl
         connection.Execute($"ALTER TABLE {qTable} ADD COLUMN Metadata JSONB NOT NULL DEFAULT '{{}}';") |> ignore
 
 let internal ensureCollectionTableExists (connection: SqliteConnection) (tableName: string) =
-    let tableName = normalizeCatalogNameOrThrow "relation table ensure" tableName
+    let tableName = Helper.normalizeCatalogNameOrThrow "relation table ensure" tableName
     let qTable = quoteIdentifier tableName
     let exists =
         connection.QueryFirst<int64>("SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @name) THEN 1 ELSE 0 END", {| name = tableName |}) = 1L
@@ -405,7 +393,7 @@ let private detectAndMigrateEvolutionConflicts (tx: RelationTxContext) (descript
                         "Fix: this indicates a migration defect. Report this error."))
                 // 2. Verify exact unique index shape through pragma metadata.
                 let uniqueIndexNames =
-                    let tableLit = sqlLiteral linkTable
+                    let tableLit = Helper.sqlLiteralEscape linkTable
                     try
                         tx.Connection.Query<string>($"SELECT name FROM pragma_index_list('{tableLit}') WHERE \"unique\" = 1;")
                         |> Seq.toArray
@@ -418,7 +406,7 @@ let private detectAndMigrateEvolutionConflicts (tx: RelationTxContext) (descript
                 let uniqueColumnSets =
                     uniqueIndexNames
                     |> Array.map (fun indexName ->
-                        let indexLit = sqlLiteral indexName
+                        let indexLit = Helper.sqlLiteralEscape indexName
                         try
                             tx.Connection.Query<{| name: string; seqno: int64 |}>($"SELECT name, seqno FROM pragma_index_info('{indexLit}');")
                             |> Seq.sortBy (fun row -> row.seqno)

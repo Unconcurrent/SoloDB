@@ -19,12 +19,6 @@ module internal Bootstrap =
     let private migrationVerificationError (step: string) (expected: int) (actual: int) =
         InvalidOperationException($"Schema migration verification failed at {step}. Expected user_version={expected}, actual={actual}.")
 
-    let private invalidCatalogNameError (step: string) (name: string) =
-        InvalidOperationException($"Schema migration failed at {step}. Invalid collection name in SoloDBCollections: '{name}'.")
-
-    let private sqlLiteral (value: string) =
-        value.Replace("'", "''")
-
     /// <summary>
     /// Parses a connection source string into a connection string and location.
     /// </summary>
@@ -341,10 +335,8 @@ module internal Bootstrap =
             let addMetadataColumnSql =
                 collectionNames
                 |> Array.choose (fun name ->
-                    let normalized = Utils.formatName name
-                    if String.IsNullOrWhiteSpace name || normalized <> name then
-                        raise (invalidCatalogNameError "v3->v4 catalog-name validation" name)
-                    let tableLit = sqlLiteral normalized
+                    let normalized = Helper.normalizeCatalogNameOrThrow "v3->v4 catalog-name validation" name
+                    let tableLit = Helper.sqlLiteralEscape normalized
                     let hasMetadata =
                         dbConnection.QueryFirst<int64>(
                             $"SELECT CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('{tableLit}') WHERE name = 'Metadata') THEN 1 ELSE 0 END") = 1L
