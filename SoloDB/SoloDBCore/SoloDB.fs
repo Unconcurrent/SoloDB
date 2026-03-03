@@ -183,6 +183,11 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         let createDb (directConnection: SqliteConnection) (guard: unit -> unit) : ISoloDB =
             let guardedConnection = Guarded(guard, Transactional directConnection)
             let cache = EventDbCache(connectionString, directConnection, guardedConnection, parentData, name)
+            let throwNestedTxInEventContext () =
+                raise (NotSupportedException(
+                    "Error: Nested transactions are not supported inside event handler contexts.\n" +
+                    "Reason: Event handlers execute during active SQL statements where SQLite cannot open SAVEPOINTs.\n" +
+                    "Fix: Perform transactional work outside event handlers, or use the event context directly without nesting."))
 
             { new ISoloDB with
                 member _.ConnectionString = connectionString
@@ -210,25 +215,13 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 member _.Optimize() =
                     directConnection.Execute "PRAGMA optimize;" |> ignore
                 member _.WithTransaction<'R>(_func: Func<ISoloDB, 'R>) : 'R =
-                    raise (NotSupportedException(
-                        "Error: Nested transactions are not supported inside event handler contexts.\n" +
-                        "Reason: Event handlers execute during active SQL statements where SQLite cannot open SAVEPOINTs.\n" +
-                        "Fix: Perform transactional work outside event handlers, or use the event context directly without nesting."))
+                    throwNestedTxInEventContext()
                 member _.WithTransaction(_func: Action<ISoloDB>) : unit =
-                    raise (NotSupportedException(
-                        "Error: Nested transactions are not supported inside event handler contexts.\n" +
-                        "Reason: Event handlers execute during active SQL statements where SQLite cannot open SAVEPOINTs.\n" +
-                        "Fix: Perform transactional work outside event handlers, or use the event context directly without nesting."))
+                    throwNestedTxInEventContext()
                 member _.WithTransactionAsync<'R>(_func: Func<ISoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> =
-                    raise (NotSupportedException(
-                        "Error: Nested transactions are not supported inside event handler contexts.\n" +
-                        "Reason: Event handlers execute during active SQL statements where SQLite cannot open SAVEPOINTs.\n" +
-                        "Fix: Perform transactional work outside event handlers, or use the event context directly without nesting."))
+                    throwNestedTxInEventContext()
                 member _.WithTransactionAsync(_func: Func<ISoloDB, Threading.Tasks.Task>) : Threading.Tasks.Task =
-                    raise (NotSupportedException(
-                        "Error: Nested transactions are not supported inside event handler contexts.\n" +
-                        "Reason: Event handlers execute during active SQL statements where SQLite cannot open SAVEPOINTs.\n" +
-                        "Fix: Perform transactional work outside event handlers, or use the event context directly without nesting."))
+                    throwNestedTxInEventContext()
                 member _.Dispose() = ()
             }
 
