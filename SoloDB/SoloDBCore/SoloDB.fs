@@ -1556,7 +1556,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <returns>A sequence of collection names.</returns>
     member this.ListCollectionNames() =
         use dbConnection = connectionManager.Borrow()
-        dbConnection.Query<string>("SELECT Name FROM SoloDBCollections")
+        dbConnection.Query<string>("SELECT Name FROM SoloDBCollections") |> Seq.toArray
 
     /// <summary>
     /// Performs an online backup of this database to another SoloDB instance.
