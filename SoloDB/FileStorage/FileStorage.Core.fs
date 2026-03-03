@@ -210,6 +210,8 @@ module FileStorageCoreStream =
 
         override this.Dispose(disposing) =
             if not disposed then
-                this.Flush()
-            disposed <- true
+                try
+                    this.Flush()
+                finally
+                    disposed <- true
             ()
