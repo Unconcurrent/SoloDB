@@ -206,7 +206,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 member _.DropCollection<'U>() =
                     cache.DropCollection(Helper.collectionNameOf<'U>)
                 member _.ListCollectionNames() =
-                    directConnection.Query<string>("SELECT Name FROM SoloDBCollections")
+                    directConnection.Query<string>("SELECT Name FROM SoloDBCollections") |> Seq.toArray :> seq<string>
                 member _.Optimize() =
                     directConnection.Execute "PRAGMA optimize;" |> ignore
                 member _.WithTransaction<'R>(_func: Func<ISoloDB, 'R>) : 'R =
@@ -1301,7 +1301,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
     /// </summary>
     /// <returns>A sequence of collection names.</returns>
     member this.ListCollectionNames() =
-        connection.Query<string>("SELECT Name FROM SoloDBCollections")
+        connection.Query<string>("SELECT Name FROM SoloDBCollections") |> Seq.toArray
 
     /// <summary>
     /// Asks the SQLite engine to run analysis to optimize query plans within the current transaction.
