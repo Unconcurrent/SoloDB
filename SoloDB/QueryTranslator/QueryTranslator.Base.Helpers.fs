@@ -265,7 +265,8 @@ module internal QueryTranslatorBaseHelpers =
 
                 | JsonSerializator.JsonValue.Object dict ->
                     for KeyValue(k, v) in dict do
-                        let newPath = if path = "$" then $"$.{k}" else $"{path}.{k}"
+                        let escapedKey = escapeSQLiteString k
+                        let newPath = if path = "$" then $"$.{escapedKey}" else $"{path}.{escapedKey}"
                         compareJson qb newPath v
 
                 | JsonSerializator.JsonValue.List items ->
@@ -287,8 +288,7 @@ module internal QueryTranslatorBaseHelpers =
             | JsonSerializator.JsonValue.Object d ->
                 for KeyValue(k, v) in d do
                     if k = "$type" then () else
-
-                    compareJson qb $"$.{k}" v
+                    compareJson qb $"$.{escapeSQLiteString k}" v
             | JsonSerializator.JsonValue.List _items ->
                 compareJson qb "$" json
             | JsonSerializator.JsonValue.Null
