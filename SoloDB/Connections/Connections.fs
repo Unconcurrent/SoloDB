@@ -90,6 +90,15 @@ module Connections =
                 attempt <- attempt + 1
                 Thread.Sleep(25 * attempt)
 
+    let internal resolveTxOutcome (primaryEx: exn option) (cleanupEx: exn option) : exn option =
+        match primaryEx, cleanupEx with
+        | Some p, Some c ->
+            p.Data["SoloDB.CleanupException"] <- c
+            Some p
+        | Some p, None -> Some p
+        | None, Some c -> Some c
+        | None, None -> None
+
     /// <summary>
     /// Represents a specialized <see cref="SqliteConnection"/> whose <c>Dispose</c> method is a no-op.
     /// This is used to pass a connection to a user-defined transaction block without it being closed prematurely.
@@ -250,11 +259,9 @@ module Connections =
                     | None -> cleanupEx <- Some ex
                     | Some _ -> () // keep first cleanup error
 
-            match primaryEx, cleanupEx with
-            | Some p, Some c -> p.Data["SoloDB.CleanupException"] <- c; raise p
-            | Some p, None -> raise p
-            | None, Some c -> raise c
-            | None, None -> result
+            match resolveTxOutcome primaryEx cleanupEx with
+            | Some ex -> raise ex
+            | None -> result
 
         /// <summary>
         /// The core implementation for executing an asynchronous function within a database transaction.
@@ -283,11 +290,9 @@ module Connections =
                     | None -> cleanupEx <- Some ex
                     | Some _ -> ()
 
-            match primaryEx, cleanupEx with
-            | Some p, Some c -> p.Data["SoloDB.CleanupException"] <- c; return reraiseAnywhere p
-            | Some p, None -> return reraiseAnywhere p
-            | None, Some c -> return reraiseAnywhere c
-            | None, None -> return result
+            match resolveTxOutcome primaryEx cleanupEx with
+            | Some ex -> return reraiseAnywhere ex
+            | None -> return result
         }
 
         /// <summary>

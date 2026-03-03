@@ -1623,11 +1623,9 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
         finally connectionForTransaction.DisposeReal(true)
 
-        match primaryEx, cleanupEx with
-        | Some p, Some c -> p.Data["SoloDB.CleanupException"] <- c; raise p
-        | Some p, None -> raise p
-        | None, Some c -> raise c
-        | None, None -> result
+        match Connections.resolveTxOutcome primaryEx cleanupEx with
+        | Some ex -> raise ex
+        | None -> result
 
     /// <summary>
     /// Executes a series of database operations within a single atomic transaction.
@@ -1661,11 +1659,9 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                 try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
         finally connectionForTransaction.DisposeReal(true)
 
-        match primaryEx, cleanupEx with
-        | Some p, Some c -> p.Data["SoloDB.CleanupException"] <- c; return reraiseAnywhere p
-        | Some p, None -> return reraiseAnywhere p
-        | None, Some c -> return reraiseAnywhere c
-        | None, None -> return result
+        match Connections.resolveTxOutcome primaryEx cleanupEx with
+        | Some ex -> return reraiseAnywhere ex
+        | None -> return result
     }
 
     /// <summary>
