@@ -185,7 +185,8 @@ module internal QueryTranslatorBaseHelpers =
     /// Substitute lambda parameters with invocation arguments (beta-reduction helper).
     let internal inlineLambdaInvocation (lambda: LambdaExpression) (args: IReadOnlyList<Expression>) =
         if lambda.Parameters.Count <> args.Count then
-            lambda.Body
+            raise (NotSupportedException(
+                $"Error: Lambda invocation arity mismatch.\nReason: Expected {lambda.Parameters.Count} argument(s) but got {args.Count}.\nFix: Ensure invoked lambda argument count matches parameter count, or simplify expression before translation."))
         else
             let mutable body = lambda.Body
             for i = 0 to lambda.Parameters.Count - 1 do
