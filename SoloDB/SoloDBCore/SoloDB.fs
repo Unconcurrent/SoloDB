@@ -1604,18 +1604,26 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <returns>The result of the function.</returns>
     member this.WithTransaction<'R>(func: Func<TransactionalSoloDB, 'R>) : 'R =
         use connectionForTransaction = connectionManager.CreateForTransaction()
+        let mutable primaryEx: exn option = None
+        let mutable cleanupEx: exn option = None
+        let mutable result = Unchecked.defaultof<'R>
         try
             Connections.beginImmediateWithRetry connectionForTransaction
             let transactionalDb = new TransactionalSoloDB(connectionForTransaction, { ClearCacheFunction = ignore; EventSystem = this.Events })
 
             try
-                let ret = func.Invoke transactionalDb
+                result <- func.Invoke transactionalDb
                 connectionForTransaction.Execute "COMMIT;" |> ignore
-                ret
-            with _ex ->
-                connectionForTransaction.Execute "ROLLBACK;" |> ignore
-                reraise()
+            with ex ->
+                primaryEx <- Some ex
+                try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
         finally connectionForTransaction.DisposeReal(true)
+
+        match primaryEx, cleanupEx with
+        | Some p, Some c -> p.Data["SoloDB.CleanupException"] <- c; raise p
+        | Some p, None -> raise p
+        | None, Some c -> raise c
+        | None, None -> result
 
     /// <summary>
     /// Executes a series of database operations within a single atomic transaction.
@@ -1632,18 +1640,27 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <returns>A task representing the asynchronous transactional operation.</returns>
     member this.WithTransactionAsync<'R>(func: Func<TransactionalSoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> = task {
         use connectionForTransaction = connectionManager.CreateForTransaction()
+        let mutable primaryEx: exn option = None
+        let mutable cleanupEx: exn option = None
+        let mutable result = Unchecked.defaultof<'R>
         try
             Connections.beginImmediateWithRetry connectionForTransaction
             let transactionalDb = new TransactionalSoloDB(connectionForTransaction, { ClearCacheFunction = ignore; EventSystem = this.Events })
 
             try
                 let! ret = func.Invoke transactionalDb
+                result <- ret
                 connectionForTransaction.Execute "COMMIT;" |> ignore
-                return ret
-            with _ex ->
-                connectionForTransaction.Execute "ROLLBACK;" |> ignore
-                return reraiseAnywhere _ex
+            with ex ->
+                primaryEx <- Some ex
+                try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
         finally connectionForTransaction.DisposeReal(true)
+
+        match primaryEx, cleanupEx with
+        | Some p, Some c -> p.Data["SoloDB.CleanupException"] <- c; return reraiseAnywhere p
+        | Some p, None -> return reraiseAnywhere p
+        | None, Some c -> return reraiseAnywhere c
+        | None, None -> return result
     }
 
     /// <summary>
