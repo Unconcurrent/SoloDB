@@ -177,10 +177,21 @@ module Connections =
                 c
             | false, _ -> 
                 let c = new CachingDbConnection(connectionStr, this.TakeBack, config, this.EnterEventHandlerScope, this.ExitEventHandlerScope)
-                c.Inner.Open()
-                setup c.Inner
-                all.Push c
-                c
+                let mutable primaryEx: exn option = None
+                let mutable cleanupEx: exn option = None
+                try
+                    c.Inner.Open()
+                    setup c.Inner
+                    all.Push c
+                    c
+                with ex ->
+                    primaryEx <- Some ex
+                    try c.DisposeReal() with d -> cleanupEx <- Some d
+                    match primaryEx, cleanupEx with
+                    | Some p, Some d -> p.Data["SoloDB.CleanupException"] <- d; raise p
+                    | Some p, None -> raise p
+                    | None, Some d -> raise d
+                    | None, None -> raise (InvalidOperationException("Connection setup failed."))
 
         /// <summary>
         /// Gets a collection of all connections (both in-pool and in-use) created by this manager.
@@ -195,9 +206,20 @@ module Connections =
         member internal this.CreateForTransaction() =
             checkDisposed()
             let c = new TransactionalConnection(connectionStr)
-            c.Open()
-            setup c
-            c
+            let mutable primaryEx: exn option = None
+            let mutable cleanupEx: exn option = None
+            try
+                c.Open()
+                setup c
+                c
+            with ex ->
+                primaryEx <- Some ex
+                try c.DisposeReal(true) with d -> cleanupEx <- Some d
+                match primaryEx, cleanupEx with
+                | Some p, Some d -> p.Data["SoloDB.CleanupException"] <- d; raise p
+                | Some p, None -> raise p
+                | None, Some d -> raise d
+                | None, None -> raise (InvalidOperationException("Transactional connection setup failed."))
 
         /// <summary>
         /// The core implementation for executing a synchronous function within a database transaction.
