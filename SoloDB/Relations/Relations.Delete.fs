@@ -10,6 +10,13 @@ open RelationsTypes
 open RelationsSchema
 open RelationsEntity
 
+let private incrementRelationVersionForOwner (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) =
+    let qOwner = quoteIdentifier (formatName ownerTable)
+    tx.Connection.Execute(
+        $"UPDATE {qOwner} SET Metadata = jsonb_set(COALESCE(Metadata, jsonb('{{}}')), @path, " +
+        "jsonb(CAST(COALESCE(jsonb_extract(Metadata, @path), 0) + 1 AS TEXT))) WHERE Id = @id;",
+        {| path = relationVersionMetadataPath; id = ownerId |}) |> ignore
+
 let internal withDeleteGuard (deleteCtx: DeleteTraversalContext) (tableName: string) (id: int64) (fn: unit -> unit) =
     let key = $"{tableName}|{id}"
     let set = deleteCtx.GuardSet
@@ -94,9 +101,11 @@ let rec internal applyOwnerDeletePoliciesCore (deleteCtx: DeleteTraversalContext
                 | DeletePolicy.Unlink ->
                     if hasLinks then
                         tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
+                        incrementRelationVersionForOwner tx ownerTable ownerId
                 | DeletePolicy.Deletion ->
                     if hasLinks then
                         tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
+                        incrementRelationVersionForOwner tx ownerTable ownerId
                         if deleteTargets then
                             let distinctTargetIds = targetIds |> Seq.distinct |> Seq.toArray
                             for targetId in distinctTargetIds do
@@ -124,9 +133,11 @@ let rec internal applyOwnerDeletePoliciesCore (deleteCtx: DeleteTraversalContext
                 | DeletePolicy.Unlink ->
                     if hasLinks then
                         tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
+                        incrementRelationVersionForOwner tx ownerTable ownerId
                 | DeletePolicy.Deletion ->
                     if hasLinks then
                         tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
+                        incrementRelationVersionForOwner tx ownerTable ownerId
                         if deleteTargets then
                             let distinctTargetIds = targetIds |> Seq.distinct |> Seq.toArray
                             for targetId in distinctTargetIds do
@@ -180,6 +191,8 @@ and internal applyTargetDeletePoliciesCore (deleteCtx: DeleteTraversalContext) (
                     if relationKind = Single then
                         for ownerId in ownerIds do
                             updateDbRefJson tx row.OwnerCollection ownerId row.PropertyName 0L
+                    for ownerId in ownerIds do
+                        incrementRelationVersionForOwner tx row.OwnerCollection ownerId
 
                 | DeletePolicy.Cascade ->
                     let ownerTable = formatName row.OwnerCollection
