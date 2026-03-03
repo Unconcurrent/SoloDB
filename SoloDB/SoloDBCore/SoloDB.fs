@@ -1425,9 +1425,12 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     member val internal Events = eventSystem
 
     member private this.GetNewConnection() = connectionManager.Borrow()
+    member private this.CheckDisposed() =
+        if System.Threading.Volatile.Read(&disposed) then
+            raise (ObjectDisposedException(nameof(SoloDB)))
         
     member private this.InitializeCollection<'T> (name: string) =
-        if disposed then raise (ObjectDisposedException(nameof(SoloDB)))
+        this.CheckDisposed()
         if name.StartsWith "SoloDB" then raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
         lock ddlLock (fun () ->
@@ -1491,6 +1494,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <param name="name">The name of the collection.</param>
     /// <returns>True if the collection exists, otherwise false.</returns>
     member this.CollectionExists name =
+        this.CheckDisposed()
         use dbConnection = connectionManager.Borrow()
         Helper.existsCollection name dbConnection
 
@@ -1500,6 +1504,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <typeparam name="'T">The document type.</typeparam>
     /// <returns>True if the collection exists, otherwise false.</returns>
     member this.CollectionExists<'T>() =
+        this.CheckDisposed()
         let name = Helper.collectionNameOf<'T>
         use dbConnection = connectionManager.Borrow()
         Helper.existsCollection name dbConnection
@@ -1510,6 +1515,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <param name="name">The name of the collection to drop.</param>
     /// <returns>True if the collection was dropped, false if it did not exist.</returns>
     member this.DropCollectionIfExists name =
+        this.CheckDisposed()
         let name = Helper.formatName name
 
         lock ddlLock (fun () ->
@@ -1555,6 +1561,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// </summary>
     /// <returns>A sequence of collection names.</returns>
     member this.ListCollectionNames() =
+        this.CheckDisposed()
         use dbConnection = connectionManager.Borrow()
         dbConnection.Query<string>("SELECT Name FROM SoloDBCollections") |> Seq.toArray
 
@@ -1563,6 +1570,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// </summary>
     /// <param name="otherDb">The destination database instance.</param>
     member this.BackupTo(otherDb: SoloDB) =
+        this.CheckDisposed()
         use dbConnection = connectionManager.Borrow()
         use otherConnection = otherDb.GetNewConnection()
         dbConnection.Inner.BackupDatabase otherConnection.Inner
@@ -1573,6 +1581,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <param name="location">The file path for the new, vacuumed database file.</param>
     /// <exception cref="InvalidOperationException">Thrown if the source database is in-memory.</exception>
     member this.VacuumTo(location: string) =
+        this.CheckDisposed()
         match this.DataLocation with
         | Memory _ -> (raise << InvalidOperationException) "Cannot vacuum backup from or to memory."
         | other ->
@@ -1589,6 +1598,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// </summary>
     /// <exception cref="InvalidOperationException">Thrown if the database is in-memory.</exception>
     member this.Vacuum() =
+        this.CheckDisposed()
         match this.DataLocation with
         | Memory _ -> (raise << InvalidOperationException) "Cannot vacuum memory databases."
         | other ->
@@ -1603,6 +1613,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <typeparam name="'R">The return type of the function.</typeparam>
     /// <returns>The result of the function.</returns>
     member this.WithTransaction<'R>(func: Func<TransactionalSoloDB, 'R>) : 'R =
+        this.CheckDisposed()
         use connectionForTransaction = connectionManager.CreateForTransaction()
         let mutable primaryEx: exn option = None
         let mutable cleanupEx: exn option = None
@@ -1639,6 +1650,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <typeparam name="'R">The return type of the function.</typeparam>
     /// <returns>A task representing the asynchronous transactional operation.</returns>
     member this.WithTransactionAsync<'R>(func: Func<TransactionalSoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> = task {
+        this.CheckDisposed()
         use connectionForTransaction = connectionManager.CreateForTransaction()
         let mutable primaryEx: exn option = None
         let mutable cleanupEx: exn option = None
@@ -1676,6 +1688,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// It is recommended to run this after making significant changes to data or indexes.
     /// </summary>
     member this.Optimize() =
+        this.CheckDisposed()
         use dbConnection = connectionManager.Borrow()
         dbConnection.Execute "PRAGMA optimize;" |> ignore
 
@@ -1683,25 +1696,28 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// Disables the in-memory cache of prepared SQL commands for all connections.
     /// </summary>
     member this.DisableCaching() =
+        this.CheckDisposed()
         config.CachingEnabled <- false
 
     /// <summary>
     /// Clears the in-memory cache of prepared SQL commands across all connections without disabling it.
     /// </summary>
     member this.ClearCache() =
+        this.CheckDisposed()
         connectionManager.All |> Seq.iter _.ClearCache()
 
     /// <summary>
     /// Enables the in-memory cache of prepared SQL commands for all connections. Caching is enabled by default.
     /// </summary>
     member this.EnableCaching() =
+        this.CheckDisposed()
         config.CachingEnabled <- true
 
     /// <summary>
     /// Disposes the database instance, closing all connections and releasing resources.
     /// </summary>
     member this.Dispose() =
-        disposed <- true
+        System.Threading.Volatile.Write(&disposed, true)
         (connectionManager :> IDisposable).Dispose()
 
     interface IDisposable with
