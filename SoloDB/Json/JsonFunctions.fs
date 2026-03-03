@@ -171,7 +171,7 @@ module JsonFunctions =
 
         match JsonValue.Parse row.ValueJSON with
         | Null when typeof<JsonValue> = typeof<'R> -> 
-            Unchecked.defaultof<'R>
+            JsonValue.Null :> obj :?> 'R
         | Null when typeof<'R>.IsValueType && typeof<float> <> typeof<'R> && typeof<float32> <> typeof<'R> -> 
             Unchecked.defaultof<'R>
         | json when typeof<JsonValue> = typeof<'R> ->

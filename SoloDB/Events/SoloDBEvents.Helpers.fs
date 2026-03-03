@@ -13,6 +13,12 @@ open System.Threading
 #nowarn "9"
 
 module internal SoloDBEventsHelpers =
+    let private callbackScopeDepth = new ThreadLocal<int>(fun () -> 0)
+    let private deferredRecursiveRemovals = new ThreadLocal<ResizeArray<obj * obj>>(fun () -> ResizeArray<obj * obj>())
+
+    let private unregisterInsideHandlerMessage =
+        "Cannot call Unregister from within a handler. Return SoloDBEventsResult.RemoveHandler instead."
+
     let internal redirectException (ex: exn) =
         match ex with
         | :? SqliteException as se ->
@@ -33,12 +39,6 @@ module internal SoloDBEventsHelpers =
                 ValueSome (wrapped :> exn)
             else
                 ValueNone
-
-        | :? InvalidOperationException as ioe when ioe.Message.Contains("Collection was modified") ->
-            let wrapped = InvalidOperationException(
-                "Cannot call Unregister from within a handler. Return SoloDBEventsResult.RemoveHandler instead.",
-                ioe)
-            ValueSome (wrapped :> exn)
 
         | _ -> ValueNone
 
@@ -85,27 +85,49 @@ module internal SoloDBEventsHelpers =
             // CachingDbConnection.Dispose() checks InsideTransaction and suppresses pool return
             // when true. Since invariant 2 above sets InsideTransaction = true, any `use conn = ...`
             // binding exit inside a handler callback is safe — Dispose becomes a no-op.
+            callbackScopeDepth.Value <- callbackScopeDepth.Value + 1
 
             let session = Interlocked.Increment &sessionIndex
-
-            let mutable handlersToRemove = NativePtr.nullPtr<bool>
-            let mutable handlersToRemoveCount = 0
-            let mutable i = 0
+            let isRecursiveDispatch = callbackScopeDepth.Value > 1
 
             try
                 try
-                    for h in handlers do
-                        if NativePtr.isNullPtr handlersToRemove then
-                            handlersToRemoveCount <- handlers.Count
-                            handlersToRemove <- NativePtr.stackalloc<bool> handlersToRemoveCount
-                            NativePtr.initBlock handlersToRemove 0uy (uint32 handlersToRemoveCount * uint32 sizeof<bool>)
+                    if isRecursiveDispatch then
+                        let snapshot = handlers.ToArray()
+                        let handlersToRemove = ResizeArray<'THandler>()
+                        for h in snapshot do
+                            match invokeHandler h connection session |> Option.ofObj with
+                            | None
+                            | Some EventHandled -> ()
+                            | Some RemoveHandler -> handlersToRemove.Add h
 
-                        match invokeHandler h connection session |> Option.ofObj with
-                        | None
-                        | Some EventHandled -> ()
-                        | Some RemoveHandler -> NativePtr.set handlersToRemove i true
+                        if handlersToRemove.Count > 0 then
+                            let pending = deferredRecursiveRemovals.Value
+                            let handlersObj = handlers :> obj
+                            for removedHandler in handlersToRemove do
+                                pending.Add((handlersObj, box removedHandler))
+                    else
+                        let mutable handlersToRemove = NativePtr.nullPtr<bool>
+                        let mutable handlersToRemoveCount = 0
+                        let mutable i = 0
 
-                        i <- i + 1
+                        for h in handlers do
+                            if NativePtr.isNullPtr handlersToRemove then
+                                handlersToRemoveCount <- handlers.Count
+                                handlersToRemove <- NativePtr.stackalloc<bool> handlersToRemoveCount
+                                NativePtr.initBlock handlersToRemove 0uy (uint32 handlersToRemoveCount * uint32 sizeof<bool>)
+
+                            match invokeHandler h connection session |> Option.ofObj with
+                            | None
+                            | Some EventHandled -> ()
+                            | Some RemoveHandler -> NativePtr.set handlersToRemove i true
+
+                            i <- i + 1
+
+                        if not (NativePtr.isNullPtr handlersToRemove) then
+                            for j = handlersToRemoveCount - 1 downto 0 do
+                                if NativePtr.get handlersToRemove j then
+                                    handlers.RemoveAt j
                 with ex ->
                     let finalEx =
                         match redirectException ex with
@@ -115,18 +137,27 @@ module internal SoloDBEventsHelpers =
                     if not (String.IsNullOrWhiteSpace finalEx.Message) then
                         handlerFailureMessage <- finalEx.Message
             finally
-                if not (NativePtr.isNullPtr handlersToRemove) then
-                    for j = handlersToRemoveCount - 1 downto 0 do
-                        if NativePtr.get handlersToRemove j then
-                            handlers.RemoveAt j
+                if callbackScopeDepth.Value = 1 then
+                    let pending = deferredRecursiveRemovals.Value
+                    if pending.Count > 0 then
+                        let handlersObj = handlers :> obj
+                        for idx = pending.Count - 1 downto 0 do
+                            let (targetList, removedHandler) = pending.[idx]
+                            if Object.ReferenceEquals(targetList, handlersObj) then
+                                for j = handlers.Count - 1 downto 0 do
+                                    if Object.ReferenceEquals(box handlers.[j], removedHandler) then
+                                        handlers.RemoveAt j
+                                pending.RemoveAt idx
 
-                    if handlers.Count = 0 then
-                        removeMapping ()
+                if handlers.Count = 0 then
+                    removeMapping ()
 
         finally
             // EVENT-PATH CLEANUP: reverse order of invariant acquisition.
             // 1. Restore original InsideTransaction state (invariant 2).
             //    This also re-enables CachingDbConnection.Dispose pool-return (invariant 3).
+            let scopeDepthAfterExit = callbackScopeDepth.Value - 1
+            callbackScopeDepth.Value <- if scopeDepthAfterExit < 0 then 0 else scopeDepthAfterExit
             if restoreTransactionState then
                 cachedConnection.InsideTransaction <- previousTransactionState
             // 2. Release GlobalLock (invariant 1).
@@ -140,6 +171,8 @@ module internal SoloDBEventsHelpers =
         (globalMapping: CowByteSpanMap<ResizeArray<'TSys>>)
         (localMap: Dictionary<'THandler, ResizeArray<'TSys>>)
         (handler: 'THandler) =
+        if callbackScopeDepth.Value > 0 then
+            raise (InvalidOperationException(unregisterInsideHandlerMessage))
         let collectionNameBytes = System.Text.Encoding.UTF8.GetBytes collectionName
         try
             globalLock.Enter()

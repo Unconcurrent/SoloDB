@@ -28,14 +28,20 @@ module FileStorage =
     /// </summary>
     type internal FileSystem(connection: Connection) =
         member this.Upload(path, stream: Stream) =
-            use file = openOrCreateFile connection path
-            stream.CopyTo(file, int chunkSize)
-            file.SetLength file.Position
+            connection.WithTransaction(fun tx ->
+                let innerConnection = Transactional tx
+                use file = openOrCreateFile innerConnection path
+                stream.CopyTo(file, int chunkSize)
+                file.SetLength file.Position
+            )
 
         member this.UploadAsync(path, stream: Stream) = task {
-            use file = openOrCreateFile connection path
-            do! stream.CopyToAsync(file, int chunkSize)
-            file.SetLength file.Position
+            return! connection.WithAsyncTransaction(fun tx -> task {
+                let innerConnection = Transactional tx
+                use file = openOrCreateFile innerConnection path
+                do! stream.CopyToAsync(file, int chunkSize)
+                file.SetLength file.Position
+            })
         }
 
         member this.UploadBulk(files: BulkFileData seq) =

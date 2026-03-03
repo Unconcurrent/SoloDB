@@ -110,7 +110,9 @@ module internal QueryTranslatorVisitPost =
             if parent = "" then me.Member.Name else parent + "." + me.Member.Name
         | :? ParameterExpression -> ""
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> computePathKeyForUpdate ue.Operand
-        | _ -> ""
+        | _ ->
+            raise (NotSupportedException(
+                sprintf "Unsupported relation update path expression node: %A. Rewrite update transform to direct member access from query root." expr.NodeType))
 
     let private tryLambdaBody (expression: Expression) =
         let expr = unwrapQuote expression

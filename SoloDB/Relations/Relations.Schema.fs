@@ -31,15 +31,30 @@ CREATE TABLE IF NOT EXISTS SoloDBRelation (
 let internal getSQLForTriggersForTable (name: string) =
     RelationsSharedSql.getSQLForTriggersForTable name
 
+let private invalidCatalogNameError (step: string) (name: string) =
+    InvalidOperationException($"Schema migration failed at {step}. Invalid collection name in SoloDBCollections: '{name}'.")
+
+let private normalizeCatalogNameOrThrow (step: string) (name: string) =
+    let normalized = formatName name
+    if String.IsNullOrWhiteSpace name || normalized <> name then
+        raise (invalidCatalogNameError step name)
+    normalized
+
+let private sqlLiteral (value: string) =
+    value.Replace("'", "''")
+
 let internal ensureCollectionMetadataColumn (connection: SqliteConnection) (tableName: string) =
-    let qTable = quoteIdentifier tableName
+    let normalizedTableName = normalizeCatalogNameOrThrow "relation metadata ensure" tableName
+    let qTable = quoteIdentifier normalizedTableName
+    let tableLit = sqlLiteral normalizedTableName
     let hasMetadata =
         connection.QueryFirst<int64>(
-            $"SELECT CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('{tableName}') WHERE name = 'Metadata') THEN 1 ELSE 0 END") = 1L
+            $"SELECT CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('{tableLit}') WHERE name = 'Metadata') THEN 1 ELSE 0 END") = 1L
     if not hasMetadata then
         connection.Execute($"ALTER TABLE {qTable} ADD COLUMN Metadata JSONB NOT NULL DEFAULT '{{}}';") |> ignore
 
 let internal ensureCollectionTableExists (connection: SqliteConnection) (tableName: string) =
+    let tableName = normalizeCatalogNameOrThrow "relation table ensure" tableName
     let qTable = quoteIdentifier tableName
     let exists =
         connection.QueryFirst<int64>("SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @name) THEN 1 ELSE 0 END", {| name = tableName |}) = 1L
@@ -49,7 +64,7 @@ let internal ensureCollectionTableExists (connection: SqliteConnection) (tableNa
         connection.Execute(getSQLForTriggersForTable tableName) |> ignore
 
     connection.Execute(
-        "INSERT INTO SoloDBCollections(Name) SELECT @name WHERE NOT EXISTS (SELECT 1 FROM SoloDBCollections WHERE Name = @name);",
+        "INSERT INTO SoloDBCollections(Name) VALUES (@name) ON CONFLICT(Name) DO NOTHING;",
         {| name = tableName |}) |> ignore
 
 let private tryGetSoloIdProperty (targetType: Type) =
@@ -388,28 +403,51 @@ let private detectAndMigrateEvolutionConflicts (tx: RelationTxContext) (descript
                         $"Error: forward migration invariant violation for '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\n" +
                         $"Reason: expected {preCount} rows after migration but found {finalCount} in '{linkTable}'.\n" +
                         "Fix: this indicates a migration defect. Report this error."))
-                // 2. UNIQUE(SourceId, TargetId) constraint exists on migrated table
-                let hasUniqueConstraint =
-                    tx.Connection.QueryFirst<int64>(
-                        "SELECT CASE WHEN EXISTS (" +
-                        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND tbl_name = @tbl " +
-                        "AND sql IS NOT NULL AND instr(lower(sql), 'unique') > 0" +
-                        ") THEN 1 ELSE 0 END;",
-                        {| tbl = linkTable |}) = 1L
-                if not hasUniqueConstraint then
+                // 2. Verify exact unique index shape through pragma metadata.
+                let uniqueIndexNames =
+                    let tableLit = sqlLiteral linkTable
+                    try
+                        tx.Connection.Query<string>($"SELECT name FROM pragma_index_list('{tableLit}') WHERE \"unique\" = 1;")
+                        |> Seq.toArray
+                    with :? SqliteException ->
+                        tx.Connection.Query<{| name: string; ``unique``: int64 |}>($"PRAGMA index_list('{tableLit}');")
+                        |> Seq.filter (fun idx -> idx.``unique`` = 1L)
+                        |> Seq.map (fun idx -> idx.name)
+                        |> Seq.toArray
+
+                let uniqueColumnSets =
+                    uniqueIndexNames
+                    |> Array.map (fun indexName ->
+                        let indexLit = sqlLiteral indexName
+                        try
+                            tx.Connection.Query<{| name: string; seqno: int64 |}>($"SELECT name, seqno FROM pragma_index_info('{indexLit}');")
+                            |> Seq.sortBy (fun row -> row.seqno)
+                            |> Seq.map (fun row -> row.name)
+                            |> Seq.toArray
+                        with :? SqliteException ->
+                            tx.Connection.Query<{| name: string; seqno: int64 |}>($"PRAGMA index_info('{indexLit}');")
+                            |> Seq.sortBy (fun row -> row.seqno)
+                            |> Seq.map (fun row -> row.name)
+                            |> Seq.toArray)
+
+                let hasExactSourceTargetUnique =
+                    uniqueColumnSets
+                    |> Array.exists (fun cols ->
+                        cols.Length = 2 &&
+                        ((cols.[0] = "SourceId" && cols.[1] = "TargetId")
+                         || (cols.[0] = "TargetId" && cols.[1] = "SourceId")))
+
+                if not hasExactSourceTargetUnique then
                     raise (InvalidOperationException(
                         $"Error: forward migration invariant violation for '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\n" +
-                        $"Reason: migrated table '{linkTable}' is missing expected UNIQUE constraint.\n" +
+                        $"Reason: migrated table '{linkTable}' is missing exact UNIQUE(SourceId,TargetId) constraint.\n" +
                         "Fix: this indicates a migration defect. Report this error."))
-                // 3. Absence of obsolete UNIQUE(SourceId)-only index (I2)
-                // The old Single table had UNIQUE(SourceId). The table-recreate removes it,
-                // but we verify no autoindex or explicit index enforces SourceId-only uniqueness.
-                let hasObsoleteSourceOnlyUnique =
-                    tx.Connection.QueryFirst<int64>(
-                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = @tbl " +
-                        "AND sql IS NOT NULL AND instr(lower(replace(sql, ' ', '')), 'unique(sourceid)') > 0;",
-                        {| tbl = linkTable |})
-                if hasObsoleteSourceOnlyUnique > 0L then
+
+                let hasSourceOnlyUnique =
+                    uniqueColumnSets
+                    |> Array.exists (fun cols -> cols.Length = 1 && cols.[0] = "SourceId")
+
+                if hasSourceOnlyUnique then
                     raise (InvalidOperationException(
                         $"Error: forward migration invariant violation for '{descriptor.OwnerTable}.{descriptor.Property.Name}'.\n" +
                         $"Reason: migrated table '{linkTable}' still has obsolete UNIQUE(SourceId) constraint from Single cardinality.\n" +

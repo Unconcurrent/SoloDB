@@ -16,36 +16,36 @@ open RelationsSchema
 let internal readMetadataByOwner (connection: SqliteConnection) (ownerTable: string) =
     connection.Query<RelationMetadataRow>(
         """
-SELECT Name,
-       SourceCollection,
-       TargetCollection,
-       PropertyName,
-       OwnerCollection,
-       RefKind,
-       COALESCE(NULLIF(OnDelete, ''), 'Restrict') AS OnDelete,
-       COALESCE(NULLIF(OnOwnerDelete, ''), 'Deletion') AS OnOwnerDelete,
-       IsUnique
-FROM SoloDBRelation
-WHERE OwnerCollection = @ownerCollection;
-""",
+	SELECT Name,
+	       SourceCollection,
+	       TargetCollection,
+	       PropertyName,
+	       OwnerCollection,
+	       RefKind,
+	       OnDelete,
+	       OnOwnerDelete,
+	       IsUnique
+	FROM SoloDBRelation
+	WHERE OwnerCollection = @ownerCollection;
+	""",
         {| ownerCollection = ownerTable |})
     |> Seq.toArray
 
 let internal readMetadataByTarget (connection: SqliteConnection) (targetTable: string) =
     connection.Query<RelationMetadataRow>(
         """
-SELECT Name,
-       SourceCollection,
-       TargetCollection,
-       PropertyName,
-       OwnerCollection,
-       RefKind,
-       COALESCE(NULLIF(OnDelete, ''), 'Restrict') AS OnDelete,
-       COALESCE(NULLIF(OnOwnerDelete, ''), 'Deletion') AS OnOwnerDelete,
-       IsUnique
-FROM SoloDBRelation
-WHERE TargetCollection = @targetCollection;
-""",
+	SELECT Name,
+	       SourceCollection,
+	       TargetCollection,
+	       PropertyName,
+	       OwnerCollection,
+	       RefKind,
+	       OnDelete,
+	       OnOwnerDelete,
+	       IsUnique
+	FROM SoloDBRelation
+	WHERE TargetCollection = @targetCollection;
+	""",
         {| targetCollection = targetTable |})
     |> Seq.toArray
 

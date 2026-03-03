@@ -130,7 +130,7 @@ module internal HelperSchema =
     /// </summary>
     let internal createTableInner<'T> (name: string) (conn: SqliteConnection) =
         conn.Execute(RelationsSharedSql.createCollectionTableSql $"\"{name}\"") |> ignore
-        conn.Execute("INSERT INTO SoloDBCollections(Name) VALUES (@name);", {|name = name|}) |> ignore
+        conn.Execute("INSERT INTO SoloDBCollections(Name) VALUES (@name) ON CONFLICT(Name) DO NOTHING;", {|name = name|}) |> ignore
         createTriggersForTable name conn |> ignore
 
         // Ignore the untyped collections.

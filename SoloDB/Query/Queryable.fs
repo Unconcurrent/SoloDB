@@ -13,6 +13,7 @@ open System.Text
 open JsonFunctions
 open Utils
 open Connections
+open SoloDatabase.RelationsTypes
 open SoloDatabase.JsonSerializator
 open Microsoft.Data.Sqlite
 
@@ -310,7 +311,7 @@ module private QueryHelper =
             match args.Length with
             | 0 -> QueryTranslator.translateQueryable tableName (method.ReturnType |> ExpressionHelper.id) builder vars
             | 1 -> QueryTranslator.translateQueryable tableName args.[0] builder vars
-            | other -> failwithf "Invalid number of arguments in %s: %A" method.Name other
+            | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" method.Name other))
 
             builder.Append ") AS Value " |> ignore
         ))
@@ -325,7 +326,7 @@ module private QueryHelper =
             match args.Length with
             | 0 -> QueryTranslator.translateQueryable tableName (method.ReturnType |> ExpressionHelper.id) builder vars
             | 1 -> QueryTranslator.translateQueryable tableName args.[0] builder vars
-            | other -> failwithf "Invalid number of arguments in %s: %A" method.Name other
+            | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" method.Name other))
 
             builder.Append "),0) AS Value " |> ignore
         ))
@@ -336,7 +337,7 @@ module private QueryHelper =
     /// <param name="methodArg">The method argument expression.</param>
     /// <returns>The expression representing the queryable collection.</returns>
     let private readSoloDBQueryable<'T> (methodArg: Expression) =
-        let failwithMsg = "Cannot concat with an IEnumerable other that another SoloDB IQueryable, on the same connection. Do do this anyway, use to AsEnumerable()."
+        let unsupportedConcatMessage = "Cannot concat with an IEnumerable other than another SoloDB IQueryable on the same connection. To do this anyway, use AsEnumerable()."
         match methodArg with
         | :? ConstantExpression as ce -> 
             match QueryTranslator.evaluateExpr<IEnumerable> ce with
@@ -344,10 +345,10 @@ module private QueryHelper =
                 appendingQuery.Expression
             | :? IRootQueryable as rq ->
                 Expression.Constant(rq, typeof<IRootQueryable>)
-            | _other -> failwith failwithMsg
+            | _other -> raise (NotSupportedException(unsupportedConcatMessage))
         | :? MethodCallExpression as mcl ->
             mcl
-        | _other -> failwith failwithMsg
+        | _other -> raise (NotSupportedException(unsupportedConcatMessage))
 
     let private addUnionAll (queries: SQLSubquery ResizeArray) (fn: string -> StringBuilder -> Dictionary<string, obj> -> unit) =
         match queries.Last() with
@@ -407,23 +408,38 @@ module private QueryHelper =
         if expressions.Length < 1 then
             None
         else
-            let selectorExpr =
-                let arg = expressions.[0]
-                if arg.NodeType = ExpressionType.Quote then (arg :?> UnaryExpression).Operand :?> LambdaExpression
-                else arg :?> LambdaExpression
+            let selectorExprOpt =
+                try
+                    let arg = expressions.[0]
+                    let lambdaExpr =
+                        if arg.NodeType = ExpressionType.Quote then (arg :?> UnaryExpression).Operand :?> LambdaExpression
+                        else arg :?> LambdaExpression
+                    Some lambdaExpr
+                with _ ->
+                    None
 
-            let rec extractPath (e: Expression) =
-                match e with
-                | :? MemberExpression as me ->
-                    let parent = extractPath me.Expression
-                    if parent = "" then me.Member.Name else parent + "." + me.Member.Name
-                | :? ParameterExpression -> ""
-                | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> extractPath ue.Operand
-                | _ -> ""
+            match selectorExprOpt with
+            | None -> None
+            | Some selectorExpr ->
+                let rec extractPath (e: Expression) =
+                    match e with
+                    | :? MemberExpression as me ->
+                        let parent = extractPath me.Expression
+                        if parent = "" then me.Member.Name else parent + "." + me.Member.Name
+                    | :? ParameterExpression -> ""
+                    | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> extractPath ue.Operand
+                    | _ -> ""
 
-            match extractPath selectorExpr.Body with
-            | "" -> None
-            | path -> Some path
+                match extractPath selectorExpr.Body with
+                | "" -> None
+                | path -> Some path
+
+    let private extractRelationPathOrThrow (directiveName: string) (expressions: Expression array) =
+        match tryExtractExcludePath expressions with
+        | Some path -> path
+        | None ->
+            raise (NotSupportedException(
+                $"Error: {directiveName} selector is not supported.\nReason: Only direct member-path selectors are supported for relation directives.\nFix: Use a selector like x => x.Ref or x => x.RefMany (member path only)."))
 
     let private registerExcludePath path =
         if not (String.IsNullOrWhiteSpace path) then
@@ -682,11 +698,11 @@ module private QueryHelper =
         for q in preprocessed do
             match q with
             | Method m when m.Value = Exclude || m.Value = Include ->
-                match tryExtractExcludePath m.Expressions with
-                | Some path ->
-                    if m.Value = Exclude then registerExcludePath path
-                    else registerIncludePath path
-                | None -> ()
+                let path =
+                    if m.Value = Exclude then extractRelationPathOrThrow "Exclude" m.Expressions
+                    else extractRelationPathOrThrow "Include" m.Expressions
+                if m.Value = Exclude then registerExcludePath path
+                else registerIncludePath path
             | _ -> ()
 
         match QueryTranslator.activeQueryContext.Value with
@@ -745,7 +761,7 @@ module private QueryHelper =
                         match m.Expressions.Length with
                         | 0 -> QueryTranslator.translateQueryable builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
                         | 1 -> QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
-                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                        | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                     )
 
                 | GroupBy ->
@@ -774,7 +790,7 @@ module private QueryHelper =
                         | 1 -> 
                             builder.Command.Append "WHERE " |> ignore
                             QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
-                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                        | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                     )
                 
                 
@@ -815,7 +831,7 @@ module private QueryHelper =
                             | _ ->
                                 raise (NotSupportedException(
                                     "Error: Invalid SelectMany structure.\nReason: The SelectMany arguments are not a supported query pattern.\nFix: Rewrite the query or move SelectMany after AsEnumerable()."))
-                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                        | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                     )
                 
                 | Single | SingleOrDefault
@@ -826,8 +842,8 @@ module private QueryHelper =
                         match m.Expressions.[0] with
                         | :? LambdaExpression as expr -> addFilter statements expr
                         | expr when typeof<Expression>.IsAssignableFrom expr.Type -> addFilter statements expr
-                        | _ -> failwith "SingleOrDefault and FirstOrDefault are not supported with a default Value argument."
-                    | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                        | _ -> raise (NotSupportedException("SingleOrDefault and FirstOrDefault are not supported with a default value argument."))
+                    | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
                     let limit =
                         match m.Value with
@@ -865,7 +881,7 @@ module private QueryHelper =
                             builder.Command.Append "jsonb_extract(jsonb('" |> ignore
                             builder.Command.Append escapedJsonText |> ignore
                             builder.Command.Append "'), '$') " |> ignore
-                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                        | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                         builder.Command.Append " WHERE NOT EXISTS (SELECT 1 FROM (" |> ignore
                         builder.WriteInner()
                         builder.Command.Append ") o)" |> ignore
@@ -877,7 +893,7 @@ module private QueryHelper =
                     | 0 -> () // If no arguments are provided, we assume the last element is the one with the highest Id.
                     | 1 ->
                         addFilter statements m.Expressions.[0]
-                    | other -> failwithf "Invalid number of arguments in %A: %A" m.Value other
+                    | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %A: %A" m.Value other))
 
                     match statements.Last() with
                     | Simple x when x.Orders.Count <> 0 ->
@@ -897,7 +913,7 @@ module private QueryHelper =
                         match m.Expressions.Length with
                         | 0 -> QueryTranslator.translateQueryable builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
                         | 1 -> QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
-                        | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                        | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                         builder.Command.Append ") " |> ignore
                     )
 
@@ -905,7 +921,7 @@ module private QueryHelper =
                     match m.Expressions.Length with
                     | 0 -> ()
                     | 1 -> addFilter statements m.Expressions.[0]
-                    | other -> failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other
+                    | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
                     addTake statements (ExpressionHelper.constant 1)
 
@@ -920,7 +936,7 @@ module private QueryHelper =
                     let struct (t, value) = 
                         match m.Expressions.[0] with
                         | :? ConstantExpression as ce -> struct (ce.Type, ce.Value)
-                        | other -> failwithf "Invalid Contains(...) parameter: %A" other
+                        | other -> raise (NotSupportedException(sprintf "Invalid Contains(...) parameter: %A" other))
 
                     let filter = (ExpressionHelper.eq t value)
                     addFilter statements filter
@@ -1020,7 +1036,7 @@ module private QueryHelper =
 
                 | ExceptBy ->
                     // Arguments: other, keySelector
-                    if m.Expressions.Length <> 2 then failwithf "Invalid number of arguments, expected 2, in %s: %A" m.OriginalMethod.Name m.Expressions.Length
+                    if m.Expressions.Length <> 2 then raise (NotSupportedException(sprintf "Invalid number of arguments, expected 2, in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
                     let keySelE =  m.Expressions.[1]
                     addComplexFinal statements (fun ctx ->
                         ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
@@ -1048,7 +1064,7 @@ module private QueryHelper =
 
                 | IntersectBy ->
                     // Arguments: other, keySelector
-                    if m.Expressions.Length <> 2 then failwithf "Invalid number of arguments, expected 2, in %s: %A" m.OriginalMethod.Name m.Expressions.Length
+                    if m.Expressions.Length <> 2 then raise (NotSupportedException(sprintf "Invalid number of arguments, expected 2, in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
                     let keySelE = m.Expressions.[1]
                     addComplexFinal statements (fun ctx ->
                         ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
@@ -1078,15 +1094,15 @@ module private QueryHelper =
                 // --- Type filtering / casting over polymorphic payloads ---
                 | Cast ->
                     // Cast<TTarget>() with polymorphic guard & diagnostic messages.
-                    if m.Expressions.Length <> 0 then failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length
+                    if m.Expressions.Length <> 0 then raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
                     match GenericMethodArgCache.Get m.OriginalMethod |> Array.tryHead with
-                    | None -> failwith "Invalid type from Cast<T> method."
+                    | None -> raise (NotSupportedException("Invalid type from Cast<T> method."))
                     | Some t when typeof<JsonSerializator.JsonValue>.IsAssignableFrom t ->
                         // No-op cast: just keep pipeline as-is (i.e., do nothing here).
                         ()
                     | Some t ->
                         match t |> typeToName with
-                        | None -> failwith "Incompatible type from Cast<T> method."
+                        | None -> raise (NotSupportedException("Incompatible type from Cast<T> method."))
                         | Some typeName ->
                             addComplexFinal statements (fun ctx ->
                                 ctx.Command.Append "SELECT " |> ignore
@@ -1108,15 +1124,15 @@ module private QueryHelper =
                             )
 
                 | OfType ->
-                    if m.Expressions.Length <> 0 then failwithf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length
+                    if m.Expressions.Length <> 0 then raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
                     match GenericMethodArgCache.Get m.OriginalMethod |> Array.tryHead with
-                    | None -> failwith "Invalid type from OfType<T> method."
+                    | None -> raise (NotSupportedException("Invalid type from OfType<T> method."))
                     | Some t when typeof<JsonSerializator.JsonValue>.IsAssignableFrom t ->
                         // No-op filter to JsonValue
                         ()
                     | Some t ->
                         match t |> typeToName with
-                        | None -> failwith "Incompatible type from OfType<T> method."
+                        | None -> raise (NotSupportedException("Incompatible type from OfType<T> method."))
                         | Some typeName ->
                             addComplexFinal statements (fun ctx ->
                                 ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
@@ -1129,18 +1145,16 @@ module private QueryHelper =
                 | Exclude ->
                     // Extract property path from the selector lambda and add to ExcludedPaths.
                     // Exclude does not produce SQL — it only suppresses materialization for the specified path.
-                    match tryExtractExcludePath m.Expressions with
-                    | Some path -> registerExcludePath path
-                    | None -> ()
+                    let path = extractRelationPathOrThrow "Exclude" m.Expressions
+                    registerExcludePath path
                 | Include ->
                     // Extract property path from the selector lambda and add to IncludedPaths.
                     // Include does not produce SQL — it only controls relation hydration whitelist.
-                    match tryExtractExcludePath m.Expressions with
-                    | Some path -> registerIncludePath path
-                    | None -> ()
+                    let path = extractRelationPathOrThrow "Include" m.Expressions
+                    registerIncludePath path
 
                 | Aggregate ->
-                    failwithf "Aggregate is not supported."
+                    raise (NotSupportedException("Aggregate is not supported."))
 
 
         match statements.[0] with
@@ -1245,10 +1259,25 @@ module private QueryHelper =
             "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @name) THEN 1 ELSE 0 END",
             {| name = tableName |}) = 1L
 
+    [<Struct>]
+    type private RelationShapeInfo = {
+        HasAny: bool
+        HasSingle: bool
+        HasMany: bool
+    }
+
+    let private relationShapeCache = System.Collections.Concurrent.ConcurrentDictionary<Type, RelationShapeInfo>()
+
+    let private getRelationShape (t: Type) : RelationShapeInfo =
+        relationShapeCache.GetOrAdd(t, Func<Type, RelationShapeInfo>(fun t ->
+            let props = t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+            let hasSingle = props |> Array.exists (fun p -> DBRefTypeHelpers.isDBRefType p.PropertyType)
+            let hasMany = props |> Array.exists (fun p -> DBRefTypeHelpers.isDBRefManyType p.PropertyType)
+            { HasAny = hasSingle || hasMany; HasSingle = hasSingle; HasMany = hasMany }
+        ))
+
     let private hasRelationProperties (t: Type) =
-        t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-        |> Array.exists (fun p ->
-            DBRefTypeHelpers.isAnyRelationRefType p.PropertyType)
+        (getRelationShape t).HasAny
 
     /// Context captured during query translation for post-query relation batch loading.
     [<Struct>]
@@ -1281,12 +1310,14 @@ module private QueryHelper =
                 let targetCollection = relation.TargetCollection
                 let refKind = relation.RefKind
                 if not (isNull name || isNull ownerCollection || isNull propertyName || isNull targetCollection || isNull refKind) then
+                    let relationKind = stringToRelationKind refKind
                     let canonicalName = canonicalManyName ownerCollection targetCollection
                     let canonicalLinkTable = "SoloDBRelLink_" + canonicalName
                     let defaultLinkTable = "SoloDBRelLink_" + name
                     let useSharedMany =
-                        StringComparer.Ordinal.Equals(refKind, "Many")
-                        && tableExists connection canonicalLinkTable
+                        match relationKind with
+                        | RelationKind.Many -> tableExists connection canonicalLinkTable
+                        | RelationKind.Single -> false
                     let ownerUsesSource =
                         if useSharedMany then
                             StringComparer.Ordinal.Compare(ownerCollection, targetCollection) <= 0
@@ -1379,17 +1410,9 @@ module private QueryHelper =
 
         // Capture batch load context for DBRefMany post-query hydration.
         // ExcludedPaths are populated during translation, so capture AFTER translateQuery.
-        let hasSingleRelations =
-            hasRelations &&
-            typeof<'T>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-            |> Array.exists (fun p ->
-                DBRefTypeHelpers.isDBRefType p.PropertyType)
-
-        let hasManyRelations =
-            hasRelations &&
-            typeof<'T>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-            |> Array.exists (fun p ->
-                DBRefTypeHelpers.isDBRefManyType p.PropertyType)
+        let shape = getRelationShape typeof<'T>
+        let hasSingleRelations = hasRelations && shape.HasSingle
+        let hasManyRelations = hasRelations && shape.HasMany
 
         if hasSingleRelations || hasManyRelations then
             activeBatchLoadContext.Value <- ValueSome {
@@ -1424,6 +1447,8 @@ type internal ISoloDBCollectionQueryProvider =
 /// <param name="source">The source collection.</param>
 /// <param name="data">Additional data, such as cache clearing functions.</param>
 type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, data: obj) =
+    static let enumerableDispatchCache = System.Collections.Concurrent.ConcurrentDictionary<Type, MethodInfo>()
+
     interface ISoloDBCollectionQueryProvider with
         override this.Source = source
         override this.AdditionalData = data
@@ -1524,10 +1549,12 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                 | t when t.IsGenericType && typedefof<IEnumerable<_>>.Equals typedefof<'TResult> ->
                     QueryHelper.activeBatchLoadContext.Value <- batchCtx
                     let elemType = (GenericTypeArgCache.Get t).[0]
-                    let m =
-                        typeof<SoloDBCollectionQueryProvider<'T>>
-                            .GetMethod(nameof(this.ExecuteEnumetable), BindingFlags.NonPublic ||| BindingFlags.Instance)
-                            .MakeGenericMethod(elemType)
+                    let m : MethodInfo =
+                        enumerableDispatchCache.GetOrAdd(elemType, Func<Type, MethodInfo>(fun et ->
+                            typeof<SoloDBCollectionQueryProvider<'T>>
+                                .GetMethod(nameof(this.ExecuteEnumetable), BindingFlags.NonPublic ||| BindingFlags.Instance)
+                                .MakeGenericMethod(et)
+                        ))
                     m.Invoke(this, [|query; variables|]) :?> 'TResult
                     // When is explain query plan.
                 | t when t = typeof<string> && QueryHelper.isAggregateExplainQuery expression ->
@@ -1560,7 +1587,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         | true ->
                             let prevElement = enumerator.Current
                             match enumerator.MoveNext() with
-                            | true -> failwithf "Sequence contains more than one element"
+                            | true -> raise (InvalidOperationException("Sequence contains more than one element"))
                             | false ->
                                 // Only one element was found, return it.
                                 let entity = JsonFunctions.fromSQLite<'TResult> prevElement
@@ -1585,13 +1612,13 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                             batchLoadSingle connection row entity
                     | _ ->
                         match query |> Seq.tryHead with
-                        | None -> failwithf "Sequence contains no elements"
+                        | None -> raise (InvalidOperationException("Sequence contains no elements"))
                         | Some row ->
                             let entity = JsonFunctions.fromSQLite<'TResult> row
                             batchLoadSingle connection row entity
 
-            with _ex ->
-                reraise()
+            finally
+                QueryHelper.activeBatchLoadContext.Value <- ValueNone
             
 /// <summary>
 /// The internal implementation of <c>IQueryable</c> and <c>IOrderedQueryable</c> for SoloDB collections.

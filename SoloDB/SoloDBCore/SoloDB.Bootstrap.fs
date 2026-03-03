@@ -13,6 +13,18 @@ open SoloDatabase.RelationsSharedSql
 /// </summary>
 module internal Bootstrap =
 
+    let private parseVersionError (input: string) (detail: string) =
+        FormatException($"Invalid sqlite_version value '{input}'. {detail}")
+
+    let private migrationVerificationError (step: string) (expected: int) (actual: int) =
+        InvalidOperationException($"Schema migration verification failed at {step}. Expected user_version={expected}, actual={actual}.")
+
+    let private invalidCatalogNameError (step: string) (name: string) =
+        InvalidOperationException($"Schema migration failed at {step}. Invalid collection name in SoloDBCollections: '{name}'.")
+
+    let private sqlLiteral (value: string) =
+        value.Replace("'", "''")
+
     /// <summary>
     /// Parses a connection source string into a connection string and location.
     /// </summary>
@@ -22,6 +34,8 @@ module internal Bootstrap =
         if source.StartsWith("memory:", StringComparison.InvariantCultureIgnoreCase) then
             let memoryName = source.Substring "memory:".Length
             let memoryName = memoryName.Trim()
+            if String.IsNullOrWhiteSpace memoryName then
+                raise (ArgumentException("Invalid memory source. Provide a non-empty name after 'memory:'."))
             sprintf "Data Source=%s;Mode=Memory;Cache=Shared;Pooling=False" memoryName, SoloDBLocation.Memory memoryName
         else
             let source = System.IO.Path.GetFullPath source
@@ -55,11 +69,11 @@ module internal Bootstrap =
                 |> Seq.map Int32.Parse
                 |> ResizeArray
             with e ->
-                failwithf "Could not parse the SQLite version string: %s" e.Message
+                raise (parseVersionError versionText e.Message)
 
-        let major = if parts.Count > 0 then parts.[0] else failwithf "Could not parse the SQLite version string."
-        let minor = if parts.Count > 1 then parts.[1] else failwithf "Could not parse the SQLite version string."
-        let patch = if parts.Count > 2 then parts.[2] else failwithf "Could not parse the SQLite version string."
+        let major = if parts.Count > 0 then parts.[0] else raise (parseVersionError versionText "Missing major component.")
+        let minor = if parts.Count > 1 then parts.[1] else raise (parseVersionError versionText "Missing minor component.")
+        let patch = if parts.Count > 2 then parts.[2] else raise (parseVersionError versionText "Missing patch component.")
         Version(major, minor, patch)
 
     /// <summary>
@@ -198,7 +212,7 @@ module internal Bootstrap =
                     WHERE Id = NEW.DirectoryId AND Modified < UNIXTIMESTAMP();
                 END;
 
-                CREATE INDEX SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
+                CREATE UNIQUE INDEX SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
 
                 CREATE INDEX SoloDBDirectoryHeaderParentIdIndex ON SoloDBDirectoryHeader(ParentId);
                 CREATE UNIQUE INDEX SoloDBDirectoryHeaderFullPathIndex ON SoloDBDirectoryHeader(FullPath);
@@ -225,7 +239,7 @@ module internal Bootstrap =
     /// <summary>
     /// The current supported schema version. The database will refuse to open future versions.
     /// </summary>
-    let [<Literal>] currentSupportedSchemaVersion = 4
+    let [<Literal>] currentSupportedSchemaVersion = 5
 
     /// <summary>
     /// The minimum required SQLite version.
@@ -260,8 +274,8 @@ module internal Bootstrap =
             // command.Prepare() // It does not work if the referenced tables are not created yet.
             ignore (command.ExecuteNonQuery())
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
-            if dbSchemaVersion = 0 then
-                failwithf "Failure to create the schema."
+            if dbSchemaVersion <> 1 then
+                raise (migrationVerificationError "v0->v1" 1 dbSchemaVersion)
 
         // Migration: version 1 -> 2
         if dbSchemaVersion = 1 then
@@ -282,8 +296,8 @@ module internal Bootstrap =
             command.Prepare()
             ignore (command.ExecuteNonQuery())
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
-            if dbSchemaVersion = 1 then
-                failwithf "Failure to migrate schema."
+            if dbSchemaVersion <> 2 then
+                raise (migrationVerificationError "v1->v2" 2 dbSchemaVersion)
 
         // Migration: version 2 -> 3
         if dbSchemaVersion = 2 then
@@ -305,8 +319,8 @@ module internal Bootstrap =
             command.Prepare()
             ignore (command.ExecuteNonQuery())
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
-            if dbSchemaVersion = 2 then
-                failwithf "Failure to migrate schema."
+            if dbSchemaVersion <> 3 then
+                raise (migrationVerificationError "v2->v3" 3 dbSchemaVersion)
 
         // Migration: version 3 -> 4
         // v3 = triggers/Event API. v4 = Relational API.
@@ -319,11 +333,15 @@ module internal Bootstrap =
             let addMetadataColumnSql =
                 collectionNames
                 |> Array.choose (fun name ->
+                    let normalized = Utils.formatName name
+                    if String.IsNullOrWhiteSpace name || normalized <> name then
+                        raise (invalidCatalogNameError "v3->v4 catalog-name validation" name)
+                    let tableLit = sqlLiteral normalized
                     let hasMetadata =
                         dbConnection.QueryFirst<int64>(
-                            $"SELECT CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('{name}') WHERE name = 'Metadata') THEN 1 ELSE 0 END") = 1L
+                            $"SELECT CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('{tableLit}') WHERE name = 'Metadata') THEN 1 ELSE 0 END") = 1L
                     if hasMetadata then None
-                    else Some ($"ALTER TABLE \"{name}\" ADD COLUMN Metadata JSONB NOT NULL DEFAULT '{{}}';"))
+                    else Some ($"ALTER TABLE \"{normalized}\" ADD COLUMN Metadata JSONB NOT NULL DEFAULT '{{}}';"))
                 |> String.concat "\n"
 
             use command = new SqliteCommand($"
@@ -339,8 +357,31 @@ module internal Bootstrap =
             // command.Prepare() // Cannot Prepare when tables are created in the same command batch.
             ignore (command.ExecuteNonQuery())
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
-            if dbSchemaVersion = 3 then
-                failwithf "Failure to migrate schema."
+            if dbSchemaVersion <> 4 then
+                raise (migrationVerificationError "v3->v4" 4 dbSchemaVersion)
+
+        // Migration: version 4 -> 5
+        // v5 enforces unique SoloDBCollections.Name for deterministic metadata behavior.
+        if dbSchemaVersion = 4 then
+            use command = new SqliteCommand("
+                    BEGIN EXCLUSIVE;
+
+                    DELETE FROM SoloDBCollections
+                    WHERE rowid NOT IN (
+                        SELECT MIN(rowid) FROM SoloDBCollections GROUP BY Name
+                    );
+
+                    DROP INDEX IF EXISTS SoloDBCollectionsNameIndex;
+                    CREATE UNIQUE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
+
+                    PRAGMA user_version = 5;
+                    COMMIT TRANSACTION;
+                ", dbConnection.Inner)
+            command.Prepare()
+            ignore (command.ExecuteNonQuery())
+            dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
+            if dbSchemaVersion <> 5 then
+                raise (migrationVerificationError "v4->v5" 5 dbSchemaVersion)
 
         // https://www.sqlite.org/pragma.html#pragma_optimize
         let _rez = dbConnection.Execute("PRAGMA optimize=0x10002;")

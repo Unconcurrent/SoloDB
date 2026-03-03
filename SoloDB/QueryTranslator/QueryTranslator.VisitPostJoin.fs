@@ -17,7 +17,9 @@ module internal QueryTranslatorVisitPostJoin =
             if parent = "" then me.Member.Name else parent + "." + me.Member.Name
         | :? ParameterExpression -> ""
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> computePathKey ue.Operand
-        | _ -> ""
+        | _ ->
+            raise (NotSupportedException(
+                sprintf "Unsupported relation path expression node: %A. Rewrite the query to use direct member access from the query root." expr.NodeType))
 
     /// Unwrap Convert nodes to get the actual expression.
     let internal unwrapConvert (expr: Expression) =

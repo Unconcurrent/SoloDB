@@ -137,8 +137,6 @@ module FileStorageCoreStream =
         #endif
             this.Write(buffer: ReadOnlySpan<byte>) =
             if buffer.IsEmpty then () else
-            dirty <- true
-
             let bufferLen = buffer.Length
             use buffer = fixed buffer
 
@@ -146,11 +144,12 @@ module FileStorageCoreStream =
                 let buffer = ReadOnlySpan<byte>(NativeInterop.NativePtr.toVoidPtr buffer, bufferLen)
                 let newPosition = writeChunkedData db fileId position buffer
 
-                if newPosition > this.Length then
+                if newPosition > getFileLengthById db fileId then
                     updateLenById db fileId newPosition
 
                 this.Position <- newPosition
             )
+            dirty <- true
 
         override this.Write(buffer: byte[], offset: int, count: int) =
             if buffer = null then raise (ArgumentNullException(nameof buffer))
@@ -160,6 +159,7 @@ module FileStorageCoreStream =
             this.Write(buffer.AsSpan(offset, count))
 
         override this.WriteAsync(buffer: byte[], offset: int, count: int, ct) =
+            ct.ThrowIfCancellationRequested()
             this.Write(buffer, offset, count)
             Threading.Tasks.Task.CompletedTask
 
@@ -168,26 +168,30 @@ module FileStorageCoreStream =
             if value < 0 then
                 raise (ArgumentOutOfRangeException("Length"))
 
-            let len = this.Length
-            if len = value then
-                ()
-            elif len < value then
-                dirty <- true
-                let oldPos = position
-                position <- len
-                let chunkOffset = position % chunkSize
-                use mem = NativeArray.NativeArray.Alloc (int chunkSize - int chunkOffset)
-                let mem = mem.Span
-                mem.Clear()
-                this.Write mem
-                position <- oldPos
-                use db = db.Get()
-                updateLenById db fileId value
-            else
-                dirty <- true
-                use db = db.Get()
-                downsetFileLength db fileId value
-                if position > value then position <- value
+            let mutable shouldMarkDirty = false
+            let mutable shouldClampPosition = false
+
+            db.WithTransaction(fun db ->
+                let len = getFileLengthById db fileId
+                if len = value then
+                    ()
+                elif len < value then
+                    shouldMarkDirty <- true
+                    let chunkOffset = len % chunkSize
+                    let fillSize = int (chunkSize - chunkOffset)
+                    use mem = NativeArray.NativeArray.Alloc fillSize
+                    let mem = mem.Span
+                    mem.Clear()
+                    ignore (writeChunkedData db fileId len (Span.op_Implicit mem))
+                    updateLenById db fileId value
+                else
+                    shouldMarkDirty <- true
+                    downsetFileLength db fileId value
+                    shouldClampPosition <- position > value
+            )
+
+            if shouldClampPosition then position <- value
+            if shouldMarkDirty then dirty <- true
 
         override this.Seek(offset: int64, origin: SeekOrigin) =
             checkDisposed()

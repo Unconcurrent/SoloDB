@@ -81,7 +81,17 @@ module SQLiteTools =
             onEnterEventHandlerScope()
 
         member internal this.ExitEventHandlerScope() =
-            Threading.Interlocked.Decrement(&eventHandlerDepth) |> ignore
+            let rec decrementOrFail () =
+                let snapshot = Threading.Volatile.Read(&eventHandlerDepth)
+                if snapshot <= 0 then
+                    if Threading.Interlocked.CompareExchange(&eventHandlerDepth, 0, snapshot) = snapshot then
+                        raise (InvalidOperationException("Event handler scope underflow detected. ExitEventHandlerScope was called without a matching EnterEventHandlerScope."))
+                    else
+                        decrementOrFail ()
+                else if Threading.Interlocked.CompareExchange(&eventHandlerDepth, snapshot - 1, snapshot) <> snapshot then
+                    decrementOrFail ()
+
+            decrementOrFail ()
             onExitEventHandlerScope()
 
         /// <summary>
@@ -158,8 +168,13 @@ module SQLiteTools =
                     { new IDisposable with
                         member _.Dispose() =
                             conn.ReaderActive <- false
-                            reader.Dispose() }
-                finally inUse := false
+                            try
+                                reader.Dispose()
+                            finally
+                                inUse := false }
+                with _ ->
+                    inUse := false
+                    reraise()
             | ValueNone ->
                 let command = createCommand this sql parameters
                 command.Prepare()

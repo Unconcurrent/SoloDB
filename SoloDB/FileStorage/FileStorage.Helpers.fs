@@ -239,7 +239,7 @@ module internal FileStorageHelpers =
         let src = match tryGetFileAt db fromNorm with | Some f -> f | None -> raise (FileNotFoundException("File not found.", fromPath))
         // Resolve destination directory and name
         let struct (toDirPath, toName) = getPathAndName toPath
-        // B4: file-copy auto-creates destination parent
+        // File copy auto-creates destination parent.
         let dstDir = getOrCreateDirectoryAt db toDirPath
         let dstFullPath = combinePath dstDir.FullPath toName
         // Collision check
@@ -270,7 +270,7 @@ module internal FileStorageHelpers =
             raise (ArgumentException("Cannot copy a directory into its own subtree.", "toPath"))
         // Resolve source
         let srcDir = match tryGetDir db fromNorm with | Some d -> d | None -> raise (DirectoryNotFoundException("Directory not found at: " + fromPath))
-        // B4: directory-copy requires destination parent to exist
+        // Directory copy requires destination parent to exist.
         let struct (toParentPath, toDirName) = getPathAndName toPath
         let toParentNorm = formatPath toParentPath
         let parentDir = match tryGetDir db toParentNorm with | Some d -> d | None -> raise (DirectoryNotFoundException("Destination parent directory not found at: " + toParentPath))

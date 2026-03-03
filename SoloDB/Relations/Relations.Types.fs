@@ -137,29 +137,31 @@ let internal relationKindToString kind =
     | Many -> "Many"
 
 let internal parseDeletePolicy (value: string) =
-    let value =
-        if String.IsNullOrWhiteSpace value then
-            "Restrict"
+    let token =
+        if isNull value then
+            ""
         else
             value.Trim()
-    match Enum.TryParse<DeletePolicy>(value, true) with
-    | true, policy ->
-        match policy with
-        | DeletePolicy.Restrict
-        | DeletePolicy.Cascade
-        | DeletePolicy.Unlink
-        | DeletePolicy.Deletion -> policy
-        | _ -> raise (InvalidOperationException(
-            $"Error: Invalid delete policy '{value}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Cascade, Unlink, or Deletion as appropriate."))
-    | _ -> raise (InvalidOperationException(
-        $"Error: Invalid delete policy '{value}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Cascade, Unlink, or Deletion as appropriate."))
+    if String.IsNullOrWhiteSpace token then
+        raise (InvalidOperationException(
+            "Error: Invalid delete policy '<empty>'.\nReason: The policy value is missing.\nFix: Use Restrict, Cascade, Unlink, or Deletion as appropriate."))
+    elif StringComparer.OrdinalIgnoreCase.Equals(token, "Restrict") then
+        DeletePolicy.Restrict
+    elif StringComparer.OrdinalIgnoreCase.Equals(token, "Cascade") then
+        DeletePolicy.Cascade
+    elif StringComparer.OrdinalIgnoreCase.Equals(token, "Unlink") then
+        DeletePolicy.Unlink
+    elif StringComparer.OrdinalIgnoreCase.Equals(token, "Deletion") then
+        DeletePolicy.Deletion
+    else
+        raise (InvalidOperationException(
+            $"Error: Invalid delete policy '{token}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Cascade, Unlink, or Deletion as appropriate."))
 
 let internal parseOnDeletePolicy (value: string) =
-    let policy =
-        if String.IsNullOrWhiteSpace value then
-            DeletePolicy.Restrict
-        else
-            parseDeletePolicy value
+    if String.IsNullOrWhiteSpace value then
+        raise (InvalidOperationException(
+            "Error: Invalid delete policy '<empty>'.\nReason: OnDelete policy value is missing.\nFix: Use Restrict, Cascade, or Unlink for OnDelete."))
+    let policy = parseDeletePolicy value
     match policy with
     | DeletePolicy.Deletion ->
         raise (InvalidOperationException(
@@ -172,11 +174,10 @@ let internal parseOnDeletePolicy (value: string) =
             $"Error: Invalid delete policy '{policy}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Cascade, or Unlink for OnDelete."))
 
 let internal parseOnOwnerDeletePolicy (value: string) =
-    let policy =
-        if String.IsNullOrWhiteSpace value then
-            DeletePolicy.Deletion
-        else
-            parseDeletePolicy value
+    if String.IsNullOrWhiteSpace value then
+        raise (InvalidOperationException(
+            "Error: Invalid owner-delete policy '<empty>'.\nReason: OnOwnerDelete policy value is missing.\nFix: Use Restrict, Unlink, or Deletion for OnOwnerDelete."))
+    let policy = parseDeletePolicy value
     match policy with
     | DeletePolicy.Cascade ->
         raise (InvalidOperationException(

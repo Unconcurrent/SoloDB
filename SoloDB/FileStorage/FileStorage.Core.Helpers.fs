@@ -135,6 +135,9 @@ module FileStorageCore =
     /// <summary>
     /// Reduces the length of a file and deletes chunks beyond the new length.
     /// </summary>
+    /// <remarks>
+    /// Requires an active transaction at callsite to keep DELETE + UPDATE atomic.
+    /// </remarks>
     let internal downsetFileLength (db: SqliteConnection) (fileId: int64) (newFileLength: int64) =
         let lastChunkNumberKeep = ((float(newFileLength) / float(chunkSize)) |> Math.Ceiling |> int64) - 1L
 

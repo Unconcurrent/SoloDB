@@ -18,6 +18,10 @@ open SoloDatabase.QueryTranslatorVisitPost
 open SoloDatabase.QueryTranslatorVisitPostJoin
 
 module internal QueryTranslatorVisitDbRef =
+    [<Literal>]
+    let private dbRefManyAnyPredicateExtractionMessage =
+        "Error: Cannot extract predicate lambda for relation-backed DBRefMany.Any.\nReason: The predicate is not a simple lambda expression.\nFix: Use a simple lambda (e.g., x => ...) or move the operation after AsEnumerable()."
+
     /// preExpressionHandler for DBRef member access translation.
     let private handleDBRefExpression (qb: QueryBuilder) (exp: Expression) : bool =
         let tryMakeValueMemberFromInvokeArg (arg: Expression) =
@@ -232,7 +236,7 @@ module internal QueryTranslatorVisitDbRef =
                             qb.AppendRaw ")"
                             true
                         | ValueNone ->
-                            false
+                            raise (NotSupportedException(dbRefManyAnyPredicateExtractionMessage))
                 | ValueNone ->
                     false
             | ValueNone -> false

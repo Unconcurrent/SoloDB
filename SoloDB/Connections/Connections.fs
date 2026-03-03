@@ -21,6 +21,21 @@ module Connections =
 
     // Global savepoint counter for unique savepoint names across all connections and threads.
     let mutable private savepointCounter = 0L
+    let private threadEventHandlerDepth = new ThreadLocal<int>(fun () -> 0)
+
+    let private incrementThreadEventHandlerDepth () =
+        threadEventHandlerDepth.Value <- threadEventHandlerDepth.Value + 1
+
+    let private decrementThreadEventHandlerDepth () =
+        let depth = threadEventHandlerDepth.Value
+        if depth <= 0 then
+            threadEventHandlerDepth.Value <- 0
+            raise (InvalidOperationException("Event handler scope underflow detected. ExitEventHandlerScope was called without a matching EnterEventHandlerScope."))
+
+        threadEventHandlerDepth.Value <- depth - 1
+
+    let private isCurrentThreadInEventHandlerScope () =
+        threadEventHandlerDepth.Value > 0
 
     /// Wraps a synchronous operation in a SAVEPOINT scope.
     /// On success: RELEASE (merge into parent). On failure: ROLLBACK TO + RELEASE (undo nested, keep parent).
@@ -118,7 +133,7 @@ module Connections =
         /// Checks if the manager has been disposed and throws an exception if it has.
         /// </summary>
         let checkDisposed () =
-            if disposed then raise (ObjectDisposedException(nameof(ConnectionManager)))
+            if Volatile.Read(&disposed) then raise (ObjectDisposedException(nameof(ConnectionManager)))
 
         /// <summary>
         /// Returns a used connection to the pool. Before returning, it verifies that any
@@ -260,7 +275,17 @@ module Connections =
             Interlocked.Increment(&activeEventHandlerScopes) |> ignore
 
         member internal this.ExitEventHandlerScope() =
-            Interlocked.Decrement(&activeEventHandlerScopes) |> ignore
+            let rec decrementOrFail () =
+                let snapshot = Volatile.Read(&activeEventHandlerScopes)
+                if snapshot <= 0 then
+                    if Interlocked.CompareExchange(&activeEventHandlerScopes, 0, snapshot) = snapshot then
+                        raise (InvalidOperationException("Event handler scope underflow detected. ExitEventHandlerScope was called without a matching EnterEventHandlerScope."))
+                    else
+                        decrementOrFail ()
+                else if Interlocked.CompareExchange(&activeEventHandlerScopes, snapshot - 1, snapshot) <> snapshot then
+                    decrementOrFail ()
+
+            decrementOrFail ()
 
         member internal this.HasActiveEventHandlerScope =
             Volatile.Read(&activeEventHandlerScopes) > 0
@@ -270,7 +295,7 @@ module Connections =
         /// </summary>
         interface IDisposable with
             override this.Dispose() =
-                disposed <- true
+                Volatile.Write(&disposed, true)
                 for c in all do
                     c.DisposeReal()
                 all.Clear()
@@ -298,7 +323,7 @@ module Connections =
         member this.Get() : SqliteConnection =
             match this with
             | Pooled pool ->
-                if pool.HasActiveEventHandlerScope then
+                if isCurrentThreadInEventHandlerScope() then
                     ThrowOutsideEventContextUsage()
                 pool.Borrow()
             | Transactional conn -> conn
@@ -337,11 +362,35 @@ module Connections =
                 inner.WithAsyncTransaction f
 
     let internal EnterEventHandlerScope(connection: SqliteConnection) =
-        match connection with
-        | :? CachingDbConnection as c -> c.EnterEventHandlerScope()
-        | _ -> ()
+        incrementThreadEventHandlerDepth()
+        try
+            match connection with
+            | :? CachingDbConnection as c -> c.EnterEventHandlerScope()
+            | _ -> ()
+        with ex ->
+            threadEventHandlerDepth.Value <- threadEventHandlerDepth.Value - 1
+            reraiseAnywhere ex
 
     let internal ExitEventHandlerScope(connection: SqliteConnection) =
-        match connection with
-        | :? CachingDbConnection as c -> c.ExitEventHandlerScope()
-        | _ -> ()
+        let mutable primaryEx: exn option = None
+        let mutable cleanupEx: exn option = None
+
+        try
+            match connection with
+            | :? CachingDbConnection as c -> c.ExitEventHandlerScope()
+            | _ -> ()
+        with ex ->
+            primaryEx <- Some ex
+
+        try
+            decrementThreadEventHandlerDepth()
+        with ex ->
+            cleanupEx <- Some ex
+
+        match primaryEx, cleanupEx with
+        | Some p, Some c ->
+            p.Data["SoloDB.CleanupException"] <- c
+            raise p
+        | Some p, None -> raise p
+        | None, Some c -> raise c
+        | None, None -> ()

@@ -490,66 +490,78 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member this.TryGetById<'IdType when 'IdType : equality>(id: 'IdType) : 'T option =
         // Use this function only if you know that 'IdType = 'R.
         let inline genericReinterpret (a: 'IdType) = Unsafe.As<'IdType, 'R>(&Unsafe.AsRef(&a))
+        let inline int64FromUInt64OrThrow (value: uint64) =
+            if value > uint64 Int64.MaxValue then
+                raise (ArgumentOutOfRangeException(nameof id, "Identifier is out of range for Int64."))
+            int64 value
+        let tryGetByCustomId() =
+            let custom = CustomTypeId<'T>.Value
+            let idProp =
+                match custom with
+                | Some c -> c.Property
+                | None -> raise (InvalidOperationException("This collection has no custom [Id] property. Use the Int64 Id overload."))
+            let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
+            use connection = connection.Get()
+            match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
+            | json when Object.ReferenceEquals(json, null) -> None
+            | json ->
+                let entity = fromSQLite<'T> json
+                if this.HasRelations then
+                    let excludedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+                    let includedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+                    Relations.batchLoadDBRefProperties connection name typeof<'T> excludedPaths includedPaths [| (json.Id.Value, box entity) |]
+                    Relations.batchLoadDBRefManyProperties connection name typeof<'T> excludedPaths includedPaths [| (json.Id.Value, box entity) |] this.InTransaction
+                    Relations.captureRelationVersionForEntities connection name [| (json.Id.Value, box entity) |]
+                entity |> Some
 
-        // If someone uses the wrong TryGetById method, or the compiler uses this.
-        match typeof<'IdType> with
-        // x.Equals is faster that F#'s structural comparison (=)
-        | x when x.Equals typeof<int8> ->
-            let id: int8 = genericReinterpret id
-            this.TryGetById(int64 id)
+        // Primitive fallback should only run for direct int64 Id collections.
+        if HasTypeId<'T>.Value then
+            match typeof<'IdType> with
+            // x.Equals is faster than structural comparison (=)
+            | x when x.Equals typeof<int8> ->
+                let id: int8 = genericReinterpret id
+                this.TryGetById(int64 id)
 
-        | x when x.Equals typeof<int16> ->
-            let id: int16 = genericReinterpret id
-            this.TryGetById(int64 id)
+            | x when x.Equals typeof<int16> ->
+                let id: int16 = genericReinterpret id
+                this.TryGetById(int64 id)
 
-        | x when x.Equals typeof<int32> ->
-            let id: int32 = genericReinterpret id
-            this.TryGetById(int64 id)
+            | x when x.Equals typeof<int32> ->
+                let id: int32 = genericReinterpret id
+                this.TryGetById(int64 id)
 
-        | x when x.Equals typeof<nativeint> ->
-            let id: nativeint = genericReinterpret id
-            this.TryGetById(int64 id)
+            | x when x.Equals typeof<nativeint> ->
+                let id: nativeint = genericReinterpret id
+                this.TryGetById(int64 id)
 
-        | x when x.Equals typeof<int64> ->
-            let id: int64 = genericReinterpret id
-            this.TryGetById(id)
+            | x when x.Equals typeof<int64> ->
+                let id: int64 = genericReinterpret id
+                this.TryGetById(id)
 
-        | x when x.Equals typeof<uint8> ->
-            let id: uint8 = genericReinterpret id
-            this.TryGetById(int64 id)
+            | x when x.Equals typeof<uint8> ->
+                let id: uint8 = genericReinterpret id
+                this.TryGetById(int64 id)
 
-        | x when x.Equals typeof<uint16> ->
-            let id: uint16 = genericReinterpret id
-            this.TryGetById(int64 id)
+            | x when x.Equals typeof<uint16> ->
+                let id: uint16 = genericReinterpret id
+                this.TryGetById(int64 id)
 
-        | x when x.Equals typeof<uint32> ->
-            let id: uint32 = genericReinterpret id
-            this.TryGetById(int64 id)
+            | x when x.Equals typeof<uint32> ->
+                let id: uint32 = genericReinterpret id
+                this.TryGetById(int64 id)
 
-        | x when x.Equals typeof<unativeint> ->
-            let id: unativeint = genericReinterpret id
-            this.TryGetById(int64 id)
+            | x when x.Equals typeof<unativeint> ->
+                let id: unativeint = genericReinterpret id
+                this.TryGetById(id |> uint64 |> int64FromUInt64OrThrow)
 
-        | x when x.Equals typeof<uint64> ->
-            let id: uint64 = genericReinterpret id
-            this.TryGetById(int64 id)
+            | x when x.Equals typeof<uint64> ->
+                let id: uint64 = genericReinterpret id
+                this.TryGetById(id |> int64FromUInt64OrThrow)
 
-        | _ ->
-
-        let idProp = CustomTypeId<'T>.Value.Value.Property
-        let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
-        use connection = connection.Get()
-        match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
-        | json when Object.ReferenceEquals(json, null) -> None
-        | json ->
-            let entity = fromSQLite<'T> json
-            if this.HasRelations then
-                let excludedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
-                let includedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
-                Relations.batchLoadDBRefProperties connection name typeof<'T> excludedPaths includedPaths [| (json.Id.Value, box entity) |]
-                Relations.batchLoadDBRefManyProperties connection name typeof<'T> excludedPaths includedPaths [| (json.Id.Value, box entity) |] this.InTransaction
-                Relations.captureRelationVersionForEntities connection name [| (json.Id.Value, box entity) |]
-            entity |> Some
+            | _ ->
+                tryGetByCustomId()
+        else
+            tryGetByCustomId()
 
     /// <summary>
     /// Finds a document by its custom ID, as defined by the [Id] attribute on the document type.
@@ -572,76 +584,88 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member this.DeleteById<'IdType when 'IdType : equality>(id: 'IdType) : int =
         // Use this function only if you know that 'IdType = 'R.
         let inline genericReinterpret (a: 'IdType) = Unsafe.As<'IdType, 'R>(&Unsafe.AsRef(&a))
+        let inline int64FromUInt64OrThrow (value: uint64) =
+            if value > uint64 Int64.MaxValue then
+                raise (ArgumentOutOfRangeException(nameof id, "Identifier is out of range for Int64."))
+            int64 value
+        let deleteByCustomId() =
+            let custom = CustomTypeId<'T>.Value
+            let idProp =
+                match custom with
+                | Some c -> c.Property
+                | None -> raise (InvalidOperationException("This collection has no custom [Id] property. Use the Int64 Id overload."))
+            let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
+            connection.WithTransaction(fun conn ->
+                let requiresRelationHandling = this.RequiresRelationDeleteHandling(conn)
+                if requiresRelationHandling then
+                    let tx: Relations.RelationTxContext = {
+                        Connection = conn
+                        OwnerTable = name
+                        OwnerType = typeof<'T>
+                        InTransaction = true
+                    }
+                    Relations.ensureSchemaForOwnerType tx typeof<'T>
 
-        // If someone uses the wrong DeleteById method, or the compiler uses this.
-        match typeof<'IdType> with
-        // x.Equals is faster that F#'s structural comparison (=)
-        | x when x.Equals typeof<int8> ->
-            let id: int8 = genericReinterpret id
-            this.DeleteById(int64 id)
-
-        | x when x.Equals typeof<int16> ->
-            let id: int16 = genericReinterpret id
-            this.DeleteById(int64 id)
-
-        | x when x.Equals typeof<int32> ->
-            let id: int32 = genericReinterpret id
-            this.DeleteById(int64 id)
-
-        | x when x.Equals typeof<nativeint> ->
-            let id: nativeint = genericReinterpret id
-            this.DeleteById(int64 id)
-
-        | x when x.Equals typeof<int64> ->
-            let id: int64 = genericReinterpret id
-            this.DeleteById(id)
-
-        | x when x.Equals typeof<uint8> ->
-            let id: uint8 = genericReinterpret id
-            this.DeleteById(int64 id)
-
-        | x when x.Equals typeof<uint16> ->
-            let id: uint16 = genericReinterpret id
-            this.DeleteById(int64 id)
-
-        | x when x.Equals typeof<uint32> ->
-            let id: uint32 = genericReinterpret id
-            this.DeleteById(int64 id)
-
-        | x when x.Equals typeof<unativeint> ->
-            let id: unativeint = genericReinterpret id
-            this.DeleteById(int64 id)
-
-        | x when x.Equals typeof<uint64> ->
-            let id: uint64 = genericReinterpret id
-            this.DeleteById(int64 id)
-
-        | _ ->
-
-        let idProp = CustomTypeId<'T>.Value.Value.Property
-        let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
-        connection.WithTransaction(fun conn ->
-            let requiresRelationHandling = this.RequiresRelationDeleteHandling(conn)
-            if requiresRelationHandling then
-                let tx: Relations.RelationTxContext = {
-                    Connection = conn
-                    OwnerTable = name
-                    OwnerType = typeof<'T>
-                    InTransaction = true
-                }
-                Relations.ensureSchemaForOwnerType tx typeof<'T>
-
-                let oldRow = conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables)
-                if isNull oldRow then
-                    0
+                    let oldRow = conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables)
+                    if isNull oldRow then
+                        0
+                    else
+                        let owner = fromSQLite<'T> oldRow
+                        let deletePlan = Relations.prepareDeleteOwner tx oldRow.Id.Value (box owner)
+                        Relations.syncDeleteOwner tx deletePlan
+                        conn.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {| id = oldRow.Id.Value |})
                 else
-                    let owner = fromSQLite<'T> oldRow
-                    let deletePlan = Relations.prepareDeleteOwner tx oldRow.Id.Value (box owner)
-                    Relations.syncDeleteOwner tx deletePlan
-                    conn.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {| id = oldRow.Id.Value |})
-            else
-                conn.Execute ($"DELETE FROM \"{name}\" WHERE {filter}", variables)
-        )
+                    conn.Execute ($"DELETE FROM \"{name}\" WHERE {filter}", variables)
+            )
+
+        // Primitive fallback should only run for direct int64 Id collections.
+        if HasTypeId<'T>.Value then
+            match typeof<'IdType> with
+            // x.Equals is faster than structural comparison (=)
+            | x when x.Equals typeof<int8> ->
+                let id: int8 = genericReinterpret id
+                this.DeleteById(int64 id)
+
+            | x when x.Equals typeof<int16> ->
+                let id: int16 = genericReinterpret id
+                this.DeleteById(int64 id)
+
+            | x when x.Equals typeof<int32> ->
+                let id: int32 = genericReinterpret id
+                this.DeleteById(int64 id)
+
+            | x when x.Equals typeof<nativeint> ->
+                let id: nativeint = genericReinterpret id
+                this.DeleteById(int64 id)
+
+            | x when x.Equals typeof<int64> ->
+                let id: int64 = genericReinterpret id
+                this.DeleteById(id)
+
+            | x when x.Equals typeof<uint8> ->
+                let id: uint8 = genericReinterpret id
+                this.DeleteById(int64 id)
+
+            | x when x.Equals typeof<uint16> ->
+                let id: uint16 = genericReinterpret id
+                this.DeleteById(int64 id)
+
+            | x when x.Equals typeof<uint32> ->
+                let id: uint32 = genericReinterpret id
+                this.DeleteById(int64 id)
+
+            | x when x.Equals typeof<unativeint> ->
+                let id: unativeint = genericReinterpret id
+                this.DeleteById(id |> uint64 |> int64FromUInt64OrThrow)
+
+            | x when x.Equals typeof<uint64> ->
+                let id: uint64 = genericReinterpret id
+                this.DeleteById(id |> int64FromUInt64OrThrow)
+
+            | _ ->
+                deleteByCustomId()
+        else
+            deleteByCustomId()
 
     /// <summary>
     /// Updates an existing document in the collection. The document must have a valid ID.
