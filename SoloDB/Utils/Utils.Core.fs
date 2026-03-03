@@ -170,9 +170,14 @@ module Utils =
                                             | null -> 
                                                 match Type.GetType("System." + typeName) with
                                                 | null ->
-                                                    AppDomain.CurrentDomain.GetAssemblies() 
-                                                        |> Seq.collect(fun a -> a.GetTypes()) 
-                                                        |> Seq.find(fun t -> t.FullName = typeName)
+                                                    AppDomain.CurrentDomain.GetAssemblies()
+                                                        |> Seq.collect (fun a ->
+                                                            try
+                                                                a.GetTypes() :> seq<Type>
+                                                            with :? System.Reflection.ReflectionTypeLoadException as rtl ->
+                                                                rtl.Types |> Seq.choose (fun t -> if isNull t then None else Some t))
+                                                        |> Seq.tryFind (fun t -> t.FullName = typeName)
+                                                        |> Option.toObj
                                                 | fastType -> fastType
                                             | fastType -> fastType
                                             )

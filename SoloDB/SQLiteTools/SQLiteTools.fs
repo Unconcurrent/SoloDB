@@ -324,6 +324,7 @@ module SQLiteTools =
         interface IDisposable with
             override this.Dispose (): unit =
                 if not this.InsideTransaction then
+                    GC.SuppressFinalize(this)
                     onDispose this
 
     /// <summary>
