@@ -25,6 +25,9 @@ open SoloDatabase.Attributes
 /// Contains internal helper functions for database and collection management.
 /// </summary>
 module internal Helper =
+    let internal listCollectionNamesSnapshot (connection: SqliteConnection) : string array =
+        connection.Query<string>("SELECT Name FROM SoloDBCollections") |> Seq.toArray
+
     /// <summary>
     /// Checks if a collection with the specified name exists in the database.
     /// </summary>
