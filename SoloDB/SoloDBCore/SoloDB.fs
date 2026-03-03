@@ -1581,7 +1581,8 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         if File.Exists location then File.Delete location
 
         use dbConnection = connectionManager.Borrow()
-        dbConnection.Execute($"VACUUM INTO '{location}'")
+        let escapedLocation = location.Replace("'", "''")
+        dbConnection.Execute($"VACUUM INTO '{escapedLocation}'")
 
     /// <summary>
     /// Rebuilds the database file in-place to defragment it and reclaim free space.
