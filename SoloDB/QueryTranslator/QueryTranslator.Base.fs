@@ -295,9 +295,10 @@ module internal QueryTranslatorBase =
             (qb: QueryBuilder) : unit =
         match m.OriginalExpression with
         | None ->
+            let escapedMemberName = escapeSQLiteString m.MemberName
             qb.AppendRaw "jsonb_extract("
             visitFn m.Expression qb
-            qb.AppendRaw $", '$.{m.MemberName}')"
+            qb.AppendRaw $", '$.{escapedMemberName}')"
         | Some m ->
             if m.Expression = null then
                 let value = (m.Member :?> PropertyInfo).GetValue null
