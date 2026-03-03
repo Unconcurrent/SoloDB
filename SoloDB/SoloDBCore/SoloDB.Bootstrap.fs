@@ -48,12 +48,20 @@ module internal Bootstrap =
     /// <returns>A setup function for SqliteConnection.</returns>
     let createSetup (eventSystem: EventSystem) =
         let usCultureInfo = CultureInfo.GetCultureInfo("en-us")
+        let regexpTimeout = TimeSpan.FromMilliseconds(100)
         fun (connection: SqliteConnection) ->
             connection.CreateFunction("UNIXTIMESTAMP", Func<int64>(fun () -> DateTimeOffset.Now.ToUnixTimeMilliseconds()), false)
             connection.CreateFunction("SHA_HASH", Func<byte array, obj>(fun o -> Utils.shaHash o), true)
             connection.CreateFunction("TO_LOWER", Func<string, string>(_.ToLower(usCultureInfo)), true)
             connection.CreateFunction("TO_UPPER", Func<string, string>(_.ToUpper(usCultureInfo)), true)
-            connection.CreateFunction("REGEXP", Func<string, string, bool>(fun pattern input -> match isNull pattern || isNull input with true -> false | _ -> System.Text.RegularExpressions.Regex.IsMatch(input, pattern)), true)
+            connection.CreateFunction("REGEXP", Func<string, string, bool>(fun pattern input ->
+                if isNull pattern || isNull input then
+                    false
+                else
+                    try
+                        System.Text.RegularExpressions.Regex.IsMatch(input, pattern, System.Text.RegularExpressions.RegexOptions.None, regexpTimeout)
+                    with :? System.Text.RegularExpressions.RegexMatchTimeoutException ->
+                        false), true)
             eventSystem.CreateFunctions(connection)
             connection.CreateFunction("base64", Func<obj, obj>(Utils.sqlBase64), true) // https://www.sqlite.org/base64.html
             connection.Execute "PRAGMA recursive_triggers = ON; PRAGMA foreign_keys = on; PRAGMA busy_timeout = 5000;" |> ignore // This must be enabled on every connection separately.
