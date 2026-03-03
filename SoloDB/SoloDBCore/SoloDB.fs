@@ -21,6 +21,9 @@ open System.Globalization
 open System.Linq
 open SoloDatabase.Attributes
 
+let private listCollectionNamesSnapshot (connection: SqliteConnection) : string array =
+    connection.Query<string>("SELECT Name FROM SoloDBCollections") |> Seq.toArray
+
 /// <summary>
 /// Caches event-context database resources to avoid repeated allocations and redundant metadata queries.
 /// </summary>
@@ -211,7 +214,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 member _.DropCollection<'U>() =
                     cache.DropCollection(Helper.collectionNameOf<'U>)
                 member _.ListCollectionNames() =
-                    directConnection.Query<string>("SELECT Name FROM SoloDBCollections") |> Seq.toArray :> seq<string>
+                    listCollectionNamesSnapshot directConnection :> seq<string>
                 member _.Optimize() =
                     directConnection.Execute "PRAGMA optimize;" |> ignore
                 member _.WithTransaction<'R>(_func: Func<ISoloDB, 'R>) : 'R =
@@ -1294,7 +1297,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
     /// </summary>
     /// <returns>A sequence of collection names.</returns>
     member this.ListCollectionNames() =
-        connection.Query<string>("SELECT Name FROM SoloDBCollections") |> Seq.toArray
+        listCollectionNamesSnapshot connection
 
     /// <summary>
     /// Asks the SQLite engine to run analysis to optimize query plans within the current transaction.
@@ -1556,7 +1559,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     member this.ListCollectionNames() =
         this.CheckDisposed()
         use dbConnection = connectionManager.Borrow()
-        dbConnection.Query<string>("SELECT Name FROM SoloDBCollections") |> Seq.toArray
+        listCollectionNamesSnapshot dbConnection
 
     /// <summary>
     /// Performs an online backup of this database to another SoloDB instance.
