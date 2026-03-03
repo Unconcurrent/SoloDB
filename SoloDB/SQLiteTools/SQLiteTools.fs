@@ -40,7 +40,7 @@ module SQLiteTools =
                 let arr = preparedCache |> Seq.toArray
                 arr |> Array.sortInPlaceBy (fun (KeyValue(_sql, item)) -> !item.CallCount)
 
-                for i in 1..(maxCacheSize / 4) do
+                for i in 0..(maxCacheSize / 4 - 1) do
                     preparedCache.Remove (arr.[i].Key) |> ignore
                     arr.[i].Value.Command.Dispose()
 
