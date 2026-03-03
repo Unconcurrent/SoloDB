@@ -72,7 +72,10 @@ module Connections =
     let private shouldSuppressSavepointInHandler (conn: SqliteConnection) =
         match conn with
         | :? CachingDbConnection as c -> c.IsInEventHandlerScope
-        | _ -> false
+        | _ ->
+            match standaloneEventScopes.TryGetValue(conn) with
+            | true, counter when not (isNull counter) && counter.Depth > 0 -> true
+            | _ -> false
 
     let internal beginImmediateWithRetry (connection: SqliteConnection) =
         let mutable attempt = 0
