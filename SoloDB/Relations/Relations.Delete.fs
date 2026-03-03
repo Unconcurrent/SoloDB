@@ -17,8 +17,8 @@ let internal withDeleteGuard (deleteCtx: DeleteTraversalContext) (tableName: str
         ()
     else
         set.Add(key) |> ignore
-        try fn()
-        finally set.Remove(key) |> ignore
+        fn()
+        set.Remove(key) |> ignore
 
 let internal metadataLinkLayout (connection: SqliteConnection) (row: RelationMetadataRow) (relationKind: RelationKind) =
     match relationKind with
