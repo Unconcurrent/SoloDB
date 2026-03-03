@@ -1590,7 +1590,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         if File.Exists location then File.Delete location
 
         use dbConnection = connectionManager.Borrow()
-        let escapedLocation = location.Replace("'", "''")
+        let escapedLocation = QueryTranslator.escapeSQLiteString location
         dbConnection.Execute($"VACUUM INTO '{escapedLocation}'")
 
     /// <summary>
