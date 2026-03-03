@@ -22,6 +22,46 @@ module internal QueryTranslatorVisitDbRef =
     let private dbRefManyAnyPredicateExtractionMessage =
         "Error: Cannot extract predicate lambda for relation-backed DBRefMany.Any.\nReason: The predicate is not a simple lambda expression.\nFix: Use a simple lambda (e.g., x => ...) or move the operation after AsEnumerable()."
 
+    [<Literal>]
+    let private nestedDbRefManyNotSupportedMessage =
+        "Error: Nested DBRefMany query is not supported.\nReason: Relation-backed DBRefMany predicates cannot contain inner DBRefMany traversals.\nFix: Rewrite the predicate to a single DBRefMany level, or move nested traversal after AsEnumerable()."
+
+    let private predicateContainsDbRefManyTraversal (expr: Expression) =
+        let rec visitExpr (e: Expression) =
+            let e = unwrapConvert e
+            match e with
+            | null -> false
+            | :? MemberExpression as me ->
+                isDBRefManyType me.Type
+                || (not (isNull me.Expression) && visitExpr me.Expression)
+            | :? MethodCallExpression as mc ->
+                let sourceIsDbRefMany =
+                    if not (isNull mc.Object) then
+                        isDBRefManyType (unwrapConvert mc.Object).Type
+                    elif mc.Arguments.Count > 0 then
+                        isDBRefManyType (unwrapConvert mc.Arguments.[0]).Type
+                    else
+                        false
+                sourceIsDbRefMany
+                || (not (isNull mc.Object) && visitExpr mc.Object)
+                || (mc.Arguments |> Seq.exists visitExpr)
+            | :? BinaryExpression as be ->
+                visitExpr be.Left || visitExpr be.Right
+            | :? UnaryExpression as ue ->
+                visitExpr ue.Operand
+            | :? ConditionalExpression as ce ->
+                visitExpr ce.Test || visitExpr ce.IfTrue || visitExpr ce.IfFalse
+            | :? InvocationExpression as ie ->
+                visitExpr ie.Expression || (ie.Arguments |> Seq.exists visitExpr)
+            | :? LambdaExpression as le ->
+                visitExpr le.Body
+            | :? NewExpression as ne ->
+                ne.Arguments |> Seq.exists visitExpr
+            | :? NewArrayExpression as nae ->
+                nae.Expressions |> Seq.exists visitExpr
+            | _ -> false
+        visitExpr expr
+
     /// preExpressionHandler for DBRef member access translation.
     let private handleDBRefExpression (qb: QueryBuilder) (exp: Expression) : bool =
         let tryMakeValueMemberFromInvokeArg (arg: Expression) =
@@ -221,6 +261,9 @@ module internal QueryTranslatorVisitDbRef =
                         // Any(pred) with predicate — correlated EXISTS with INNER JOIN to target table.
                         match tryExtractLambdaExpression predicateExpr with
                         | ValueSome predExpr ->
+                            if predicateContainsDbRefManyTraversal predExpr.Body then
+                                raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
+
                             let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
                             let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
                             let tgtAlias = "_tgt"
@@ -265,6 +308,9 @@ module internal QueryTranslatorVisitDbRef =
                     | ValueSome predicateExpr ->
                         match tryExtractLambdaExpression predicateExpr with
                         | ValueSome predExpr ->
+                            if predicateContainsDbRefManyTraversal predExpr.Body then
+                                raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
+
                             let propName = ownerRef.PropertyExpr.Member.Name
                             let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
                             let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
