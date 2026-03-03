@@ -21,21 +21,19 @@ module Connections =
 
     // Global savepoint counter for unique savepoint names across all connections and threads.
     let mutable private savepointCounter = 0L
-    let private threadEventHandlerDepth = new ThreadLocal<int>(fun () -> 0)
+    type private EventScopeCounter() =
+        member val Depth = 0 with get, set
+    let private standaloneEventScopes = System.Runtime.CompilerServices.ConditionalWeakTable<SqliteConnection, EventScopeCounter>()
 
-    let private incrementThreadEventHandlerDepth () =
-        threadEventHandlerDepth.Value <- threadEventHandlerDepth.Value + 1
+    let private incrementStandaloneEventScope (connection: SqliteConnection) =
+        let counter = standaloneEventScopes.GetOrCreateValue(connection)
+        counter.Depth <- counter.Depth + 1
 
-    let private decrementThreadEventHandlerDepth () =
-        let depth = threadEventHandlerDepth.Value
-        if depth <= 0 then
-            threadEventHandlerDepth.Value <- 0
+    let private decrementStandaloneEventScopeOrFail (connection: SqliteConnection) =
+        let mutable counter = Unchecked.defaultof<EventScopeCounter>
+        if not (standaloneEventScopes.TryGetValue(connection, &counter)) || isNull counter || counter.Depth <= 0 then
             raise (InvalidOperationException("Event handler scope underflow detected. ExitEventHandlerScope was called without a matching EnterEventHandlerScope."))
-
-        threadEventHandlerDepth.Value <- depth - 1
-
-    let private isCurrentThreadInEventHandlerScope () =
-        threadEventHandlerDepth.Value > 0
+        counter.Depth <- counter.Depth - 1
 
     /// Wraps a synchronous operation in a SAVEPOINT scope.
     /// On success: RELEASE (merge into parent). On failure: ROLLBACK TO + RELEASE (undo nested, keep parent).
@@ -128,6 +126,7 @@ module Connections =
         /// <summary>A flag indicating whether the manager has been disposed.</summary>
         let mutable disposed = false
         let mutable activeEventHandlerScopes = 0
+        let mutable isCurrentThreadInHandlerDispatch = (fun () -> false)
 
         /// <summary>
         /// Checks if the manager has been disposed and throws an exception if it has.
@@ -150,6 +149,12 @@ module Connections =
                 ("Error: Connection returned to pool while a transaction is still active.\nReason: The transaction must be finished before returning the connection.\nFix: Commit or rollback the transaction before returning the connection.", se)
                 |> InvalidOperationException |> raise
 
+            if not pooledConn.IsEventDispatchStateClean then
+                pooledConn.ResetEventDispatchState()
+                raise (InvalidOperationException("Event dispatch state was not clean when returning a pooled connection. Ensure handler dispatch scopes always unwind and pending removals are flushed."))
+
+            pooledConn.ResetEventDispatchState()
+
             pool.Push pooledConn
 
         /// <summary>
@@ -160,6 +165,10 @@ module Connections =
             checkDisposed()
             match pool.TryPop() with
             | true, c -> 
+                if not c.IsEventDispatchStateClean then
+                    c.ResetEventDispatchState()
+                    raise (InvalidOperationException("Borrowed pooled connection had residual event dispatch state."))
+
                 if c.Inner.State <> ConnectionState.Open then
                     c.Inner.Open()
                 c
@@ -271,6 +280,9 @@ module Connections =
             return! this.WithTransactionBorrowedAsync f
         }
 
+        member internal this.SetHandlerDispatchGuard(guardFn: unit -> bool) =
+            isCurrentThreadInHandlerDispatch <- guardFn
+
         member internal this.EnterEventHandlerScope() =
             Interlocked.Increment(&activeEventHandlerScopes) |> ignore
 
@@ -284,11 +296,13 @@ module Connections =
                         decrementOrFail ()
                 else if Interlocked.CompareExchange(&activeEventHandlerScopes, snapshot - 1, snapshot) <> snapshot then
                     decrementOrFail ()
-
             decrementOrFail ()
 
         member internal this.HasActiveEventHandlerScope =
             Volatile.Read(&activeEventHandlerScopes) > 0
+
+        member internal this.IsCurrentThreadInEventHandlerScope =
+            isCurrentThreadInHandlerDispatch ()
 
         /// <summary>
         /// Disposes the connection manager, which closes and disposes all connections it has created.
@@ -323,7 +337,7 @@ module Connections =
         member this.Get() : SqliteConnection =
             match this with
             | Pooled pool ->
-                if isCurrentThreadInEventHandlerScope() then
+                if pool.IsCurrentThreadInEventHandlerScope then
                     ThrowOutsideEventContextUsage()
                 pool.Borrow()
             | Transactional conn -> conn
@@ -362,35 +376,20 @@ module Connections =
                 inner.WithAsyncTransaction f
 
     let internal EnterEventHandlerScope(connection: SqliteConnection) =
-        incrementThreadEventHandlerDepth()
-        try
-            match connection with
-            | :? CachingDbConnection as c -> c.EnterEventHandlerScope()
-            | _ -> ()
-        with ex ->
-            threadEventHandlerDepth.Value <- threadEventHandlerDepth.Value - 1
-            reraiseAnywhere ex
+        match connection with
+        | :? CachingDbConnection as c -> c.EnterEventHandlerScope()
+        | _ -> incrementStandaloneEventScope connection
 
     let internal ExitEventHandlerScope(connection: SqliteConnection) =
         let mutable primaryEx: exn option = None
-        let mutable cleanupEx: exn option = None
 
         try
             match connection with
             | :? CachingDbConnection as c -> c.ExitEventHandlerScope()
-            | _ -> ()
+            | _ -> decrementStandaloneEventScopeOrFail connection
         with ex ->
             primaryEx <- Some ex
 
-        try
-            decrementThreadEventHandlerDepth()
-        with ex ->
-            cleanupEx <- Some ex
-
-        match primaryEx, cleanupEx with
-        | Some p, Some c ->
-            p.Data["SoloDB.CleanupException"] <- c
-            raise p
-        | Some p, None -> raise p
-        | None, Some c -> raise c
-        | None, None -> ()
+        match primaryEx with
+        | Some p -> raise p
+        | None -> ()

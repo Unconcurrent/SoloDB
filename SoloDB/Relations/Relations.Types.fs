@@ -107,7 +107,12 @@ let internal emptyPlan (kind: RelationPlanKind) ownerType =
       Ops = [] }
 
 let internal relationSpecsCache = ConcurrentDictionary<Type, (PropertyInfo * RelationKind * Type * Type voption * DeletePolicy * DeletePolicy * bool * DBRefOrder) array>()
-let internal deleteGuard = new System.Threading.ThreadLocal<System.Collections.Generic.HashSet<string>>(fun () -> System.Collections.Generic.HashSet<string>(StringComparer.Ordinal))
+
+type internal DeleteTraversalContext =
+    { GuardSet: System.Collections.Generic.HashSet<string> }
+
+let internal createDeleteTraversalContext () =
+    { GuardSet = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal) }
 
 let internal quoteIdentifier (name: string) =
     "\"" + name.Replace("\"", "\"\"") + "\""

@@ -20,7 +20,6 @@ module internal QueryTranslatorBase =
     let appendVariable = QueryTranslatorBaseTypes.appendVariable
     let isPrimitiveSQLiteType = QueryTranslatorBaseTypes.isPrimitiveSQLiteType
     let escapeSQLiteString = QueryTranslatorBaseTypes.escapeSQLiteString
-    let activeQueryContext = QueryTranslatorBaseTypes.activeQueryContext
 
     let mathFunctionTransformation = QueryTranslatorBaseHelpers.mathFunctionTransformation
     let evaluateExpr<'O> = QueryTranslatorBaseHelpers.evaluateExpr<'O>

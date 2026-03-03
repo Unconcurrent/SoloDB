@@ -302,21 +302,21 @@ module private QueryHelper =
     /// </summary>
     /// <param name="builder">The query builder instance that accumulates the SQL and parameters.</param>
     /// <param name="expression">The expression to translate.</param>
-    let private aggregateTranslator (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) =
+    let private aggregateTranslator (sourceCtx: QueryContext) (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) =
         addSelector queries (Raw (fun tableName builder vars ->
             builder.Append "-1 AS Id, " |> ignore
             builder.Append fnName |> ignore
             builder.Append "(" |> ignore
 
             match args.Length with
-            | 0 -> QueryTranslator.translateQueryable tableName (method.ReturnType |> ExpressionHelper.id) builder vars
-            | 1 -> QueryTranslator.translateQueryable tableName args.[0] builder vars
+            | 0 -> QueryTranslator.translateQueryableWithContext sourceCtx tableName (method.ReturnType |> ExpressionHelper.id) builder vars
+            | 1 -> QueryTranslator.translateQueryableWithContext sourceCtx tableName args.[0] builder vars
             | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" method.Name other))
 
             builder.Append ") AS Value " |> ignore
         ))
 
-    let private zeroIfNullAggregateTranslator (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) =
+    let private zeroIfNullAggregateTranslator (sourceCtx: QueryContext) (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) =
         addSelector queries (Raw (fun tableName builder vars ->
             builder.Append "-1 AS Id, " |> ignore
             builder.Append "COALESCE(" |> ignore
@@ -324,8 +324,8 @@ module private QueryHelper =
             builder.Append "(" |> ignore
 
             match args.Length with
-            | 0 -> QueryTranslator.translateQueryable tableName (method.ReturnType |> ExpressionHelper.id) builder vars
-            | 1 -> QueryTranslator.translateQueryable tableName args.[0] builder vars
+            | 0 -> QueryTranslator.translateQueryableWithContext sourceCtx tableName (method.ReturnType |> ExpressionHelper.id) builder vars
+            | 1 -> QueryTranslator.translateQueryableWithContext sourceCtx tableName args.[0] builder vars
             | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" method.Name other))
 
             builder.Append "),0) AS Value " |> ignore
@@ -365,8 +365,8 @@ module private QueryHelper =
     /// <param name="builder">The query builder instance.</param>
     /// <param name="expression">The LINQ method call expression for the aggregate.</param>
     /// <param name="errorMsg">The error message to return if the aggregation result is NULL.</param>
-    let private raiseIfNullAggregateTranslator (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) (errorMsg: string) =
-        aggregateTranslator fnName queries method args
+    let private raiseIfNullAggregateTranslator (sourceCtx: QueryContext) (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) (errorMsg: string) =
+        aggregateTranslator sourceCtx fnName queries method args
         addSelector queries (Raw (fun tableName builder vars ->
             // In this case NULL is an invalid operation, therefore to emulate the .NET behavior 
             // of throwing an exception we return the Id = NULL, and Value = {exception message}
@@ -441,17 +441,13 @@ module private QueryHelper =
             raise (NotSupportedException(
                 $"Error: {directiveName} selector is not supported.\nReason: Only direct member-path selectors are supported for relation directives.\nFix: Use a selector like x => x.Ref or x => x.RefMany (member path only)."))
 
-    let private registerExcludePath path =
+    let private registerExcludePath (sourceCtx: QueryContext) path =
         if not (String.IsNullOrWhiteSpace path) then
-            match QueryTranslator.activeQueryContext.Value with
-            | ValueSome ctx -> ctx.ExcludedPaths.Add(path) |> ignore
-            | ValueNone -> ()
+            sourceCtx.ExcludedPaths.Add(path) |> ignore
 
-    let private registerIncludePath path =
+    let private registerIncludePath (sourceCtx: QueryContext) path =
         if not (String.IsNullOrWhiteSpace path) then
-            match QueryTranslator.activeQueryContext.Value with
-            | ValueSome ctx -> ctx.IncludedPaths.Add(path) |> ignore
-            | ValueNone -> ()
+            sourceCtx.IncludedPaths.Add(path) |> ignore
 
     let private validateIncludeExcludeConflicts (ctx: QueryContext) =
         for path in ctx.IncludedPaths do
@@ -459,9 +455,9 @@ module private QueryHelper =
                 raise (InvalidOperationException(
                     $"Error: Path '{path}' is both included and excluded.\nReason: Include/Exclude conflict on same relation path.\nFix: Keep only one directive for this path."))
 
-    let private shouldLoadRelationPath (ctx: QueryContext) (path: string) =
-        if ctx.ExcludedPaths.Contains(path) then false
-        elif ctx.IncludedPaths.Count > 0 then ctx.IncludedPaths.Contains(path)
+    let private shouldLoadRelationPath (sourceCtx: QueryContext) (path: string) =
+        if sourceCtx.ExcludedPaths.Contains(path) then false
+        elif sourceCtx.IncludedPaths.Count > 0 then sourceCtx.IncludedPaths.Contains(path)
         else true
 
     let private serializeForCollection (value: 'T) =
@@ -474,6 +470,7 @@ module private QueryHelper =
 
     /// Appends WHERE, ORDER BY, LIMIT/OFFSET directly to the main builder.
     let private writeClauses
+        (sourceCtx: QueryContext)
         (builder: QueryableBuilder)
         (statement: UsedSQLStatements)
         (contextTable: string) =
@@ -484,7 +481,7 @@ module private QueryHelper =
             |> Seq.iteri (fun j f ->
                 if j > 0 then builder.Append(" AND ") |> ignore
                 // write predicates straight into the main command
-                QueryTranslator.translateQueryable contextTable f builder.SQLiteCommand builder.Variables
+                QueryTranslator.translateQueryableWithContext sourceCtx contextTable f builder.SQLiteCommand builder.Variables
             )
 
         if statement.UnionAll.Count <> 0 then
@@ -502,7 +499,7 @@ module private QueryHelper =
             statement.Orders
             |> Seq.iteri (fun j o ->
                 if j > 0 then builder.Append(", ") |> ignore
-                QueryTranslator.translateQueryable contextTable o.OrderingRule builder.SQLiteCommand builder.Variables
+                QueryTranslator.translateQueryableWithContext sourceCtx contextTable o.OrderingRule builder.SQLiteCommand builder.Variables
                 if o.Descending then builder.Append(" DESC") |> ignore
             )
 
@@ -522,6 +519,7 @@ module private QueryHelper =
 
 
     let private writeLayers<'T>
+        (sourceCtx: QueryContext)
         (builder: QueryableBuilder)
         (layers: SQLSubquery ResizeArray)
         =
@@ -568,7 +566,7 @@ module private QueryHelper =
                     builder.Append "SELECT " |> ignore
                     builder.Append idColumn |> ignore
                     builder.Append ", " |> ignore
-                    QueryTranslator.translateQueryable layer.TableName selector builder.SQLiteCommand builder.Variables
+                    QueryTranslator.translateQueryableWithContext sourceCtx layer.TableName selector builder.SQLiteCommand builder.Variables
                     builder.Append "AS Value " |> ignore
                 | Some (Raw func) ->
                     builder.Append "SELECT " |> ignore
@@ -604,14 +602,14 @@ module private QueryHelper =
                         builder.Append ")" |> ignore
                         ValueNone
 
-                writeClauses builder layer layer.TableName
+                writeClauses sourceCtx builder layer layer.TableName
 
                 // After expression translation, emit LEFT JOINs + materialization SELECT rewriting.
                 // JOINs are discovered during writeClauses but appear between FROM "Table" and WHERE.
                 match joinInsertPoint with
                 | ValueSome pos ->
-                    match QueryTranslator.activeQueryContext.Value with
-                    | ValueSome ctx when ctx.Joins.Count > 0 ->
+                    match sourceCtx.Joins.Count > 0 with
+                    | true ->
                         // Step 1: Rewrite SELECT Value → json_set(Value, ...) for materialization.
                         // Do this FIRST because it's earlier in the string — adjusting joinInsertPoint afterward.
                         let mutable posAdjustment = 0
@@ -622,10 +620,10 @@ module private QueryHelper =
                             jsonSetSb.Append(layer.TableName) |> ignore
                             jsonSetSb.Append("\".Value") |> ignore
                             let mutable hasMaterialization = false
-                            for j in ctx.Joins do
+                            for j in sourceCtx.Joins do
                                 // Skip materialization for excluded paths — the DBRef stays as raw integer (Unloaded).
                                 // The JOIN itself is still emitted (needed for WHERE/ORDER BY).
-                                if shouldLoadRelationPath ctx j.PropertyPath then
+                                if shouldLoadRelationPath sourceCtx j.PropertyPath then
                                     hasMaterialization <- true
                                     jsonSetSb.Append(", '$.") |> ignore
                                     jsonSetSb.Append(j.PropertyPath) |> ignore
@@ -658,7 +656,7 @@ module private QueryHelper =
                         // Step 2: Insert LEFT JOIN clauses after FROM "TableName".
                         let adjustedPos = pos + posAdjustment
                         let joinSql = StringBuilder()
-                        for j in ctx.Joins do
+                        for j in sourceCtx.Joins do
                             joinSql.Append(' ') |> ignore
                             joinSql.Append(j.JoinKind) |> ignore
                             joinSql.Append(" \"") |> ignore
@@ -687,7 +685,7 @@ module private QueryHelper =
         writeLayer (layerCount - 1)
 
 
-    let rec private buildQuery<'T> (statements: SQLSubquery ResizeArray) (e: Expression) =
+    let rec private buildQuery<'T> (sourceCtx: QueryContext) (statements: SQLSubquery ResizeArray) (e: Expression) =
         statements.Add (emptySQLStatement () |> Simple)
 
         let mutable tableName = ""
@@ -701,13 +699,11 @@ module private QueryHelper =
                 let path =
                     if m.Value = Exclude then extractRelationPathOrThrow "Exclude" m.Expressions
                     else extractRelationPathOrThrow "Include" m.Expressions
-                if m.Value = Exclude then registerExcludePath path
-                else registerIncludePath path
+                if m.Value = Exclude then registerExcludePath sourceCtx path
+                else registerIncludePath sourceCtx path
             | _ -> ()
 
-        match QueryTranslator.activeQueryContext.Value with
-        | ValueSome ctx -> validateIncludeExcludeConflicts ctx
-        | ValueNone -> ()
+        validateIncludeExcludeConflicts sourceCtx
 
         for q in preprocessed |> Array.rev do
             match q with
@@ -741,16 +737,16 @@ module private QueryHelper =
                 | Sum ->
                     // SUM() return NULL if all elements are NULL, TOTAL() return 0.0.
                     // TOTAL() always returns a float, therefore we will just check for NULL
-                    zeroIfNullAggregateTranslator "SUM" statements m.OriginalMethod m.Expressions
+                    zeroIfNullAggregateTranslator sourceCtx "SUM" statements m.OriginalMethod m.Expressions
 
                 | Average ->
-                    raiseIfNullAggregateTranslator "AVG" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
+                    raiseIfNullAggregateTranslator sourceCtx "AVG" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
 
                 | Min ->
-                    raiseIfNullAggregateTranslator "MIN" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
+                    raiseIfNullAggregateTranslator sourceCtx "MIN" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
 
                 | Max ->
-                    raiseIfNullAggregateTranslator "MAX" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
+                    raiseIfNullAggregateTranslator sourceCtx "MAX" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
                 
                 | Distinct 
                 | DistinctBy ->
@@ -759,21 +755,21 @@ module private QueryHelper =
                         builder.WriteInner()
                         builder.Command.Append ") o GROUP BY " |> ignore
                         match m.Expressions.Length with
-                        | 0 -> QueryTranslator.translateQueryable builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
-                        | 1 -> QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                        | 0 -> QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
+                        | 1 -> QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName m.Expressions.[0] builder.Command builder.Vars
                         | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                     )
 
                 | GroupBy ->
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
                         builder.Command.Append "SELECT -1 as Id, json_object('Key', " |> ignore
-                        QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                        QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName m.Expressions.[0] builder.Command builder.Vars
                         // Create an array of all items with the same key
                         builder.Command.Append ", 'Items', json_group_array(Value)) as Value FROM (" |> ignore
                         builder.WriteInner()
                         // Group by the key selector
                         builder.Command.Append ") o GROUP BY " |> ignore
-                        QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                        QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName m.Expressions.[0] builder.Command builder.Vars
                     )
 
                 | Count
@@ -789,7 +785,7 @@ module private QueryHelper =
                         | 0 -> ()
                         | 1 -> 
                             builder.Command.Append "WHERE " |> ignore
-                            QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                            QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName m.Expressions.[0] builder.Command builder.Vars
                         | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                     )
                 
@@ -911,8 +907,8 @@ module private QueryHelper =
                         builder.WriteInner()
                         builder.Command.Append ") o WHERE (" |> ignore
                         match m.Expressions.Length with
-                        | 0 -> QueryTranslator.translateQueryable builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
-                        | 1 -> QueryTranslator.translateQueryable builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                        | 0 -> QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
+                        | 1 -> QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName m.Expressions.[0] builder.Command builder.Vars
                         | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                         builder.Command.Append ") " |> ignore
                     )
@@ -983,7 +979,7 @@ module private QueryHelper =
                         sb.Append (extractValueAsJsonIfNecesary (rhs.Type)) |> ignore
                         sb.Append "As Value FROM (" |> ignore
 
-                        translateQuery {
+                        translateQuery sourceCtx {
                             Subqueries = ResizeArray<SQLSubquery>()
                             SQLiteCommand = sb
                             Variables = vars
@@ -1004,7 +1000,7 @@ module private QueryHelper =
                         ctx.Command.Append "jsonb_extract(Value, '$') " |> ignore
                         ctx.Command.Append "As Value FROM (" |> ignore
 
-                        translateQuery {
+                        translateQuery sourceCtx {
                             Subqueries = ResizeArray<SQLSubquery>()
                             SQLiteCommand = ctx.Command
                             Variables = ctx.Vars
@@ -1025,7 +1021,7 @@ module private QueryHelper =
                         ctx.Command.Append "jsonb_extract(Value, '$') " |> ignore
                         ctx.Command.Append "As Value FROM (" |> ignore
 
-                        translateQuery {
+                        translateQuery sourceCtx {
                             Subqueries = ResizeArray<SQLSubquery>()
                             SQLiteCommand = ctx.Command
                             Variables = ctx.Vars
@@ -1042,7 +1038,7 @@ module private QueryHelper =
                         ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
                         ctx.WriteInner()
                         ctx.Command.Append ") o WHERE " |> ignore
-                        QueryTranslator.translateQueryable ctx.TableName keySelE ctx.Command ctx.Vars
+                        QueryTranslator.translateQueryableWithContext sourceCtx ctx.TableName keySelE ctx.Command ctx.Vars
                         ctx.Command.Append " NOT IN (" |> ignore
 
                         ctx.Command.Append "SELECT " |> ignore
@@ -1050,10 +1046,10 @@ module private QueryHelper =
                         match keySelE with
                         | keySelE when isIdentityLambda keySelE ->
                             ctx.Command.Append (extractValueAsJsonIfNecesary (rhs.Type)) |> ignore
-                        | _ -> QueryTranslator.translateQueryable ctx.TableName keySelE ctx.Command ctx.Vars
+                        | _ -> QueryTranslator.translateQueryableWithContext sourceCtx ctx.TableName keySelE ctx.Command ctx.Vars
                         ctx.Command.Append "As Value FROM (" |> ignore
                         
-                        translateQuery {
+                        translateQuery sourceCtx {
                             Subqueries = ResizeArray<SQLSubquery>()
                             SQLiteCommand = ctx.Command
                             Variables = ctx.Vars
@@ -1070,7 +1066,7 @@ module private QueryHelper =
                         ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
                         ctx.WriteInner()
                         ctx.Command.Append ") o WHERE " |> ignore
-                        QueryTranslator.translateQueryable ctx.TableName keySelE ctx.Command ctx.Vars
+                        QueryTranslator.translateQueryableWithContext sourceCtx ctx.TableName keySelE ctx.Command ctx.Vars
                         ctx.Command.Append " IN (" |> ignore
 
                         ctx.Command.Append "SELECT " |> ignore
@@ -1078,11 +1074,11 @@ module private QueryHelper =
                         match keySelE with
                         | keySelE when isIdentityLambda keySelE ->
                             ctx.Command.Append (extractValueAsJsonIfNecesary (rhs.Type)) |> ignore
-                        | _ -> QueryTranslator.translateQueryable ctx.TableName keySelE ctx.Command ctx.Vars
+                        | _ -> QueryTranslator.translateQueryableWithContext sourceCtx ctx.TableName keySelE ctx.Command ctx.Vars
                         ctx.Command.Append "As Value FROM (" |> ignore
                         
 
-                        translateQuery {
+                        translateQuery sourceCtx {
                             Subqueries = ResizeArray<SQLSubquery>()
                             SQLiteCommand = ctx.Command
                             Variables = ctx.Vars
@@ -1146,12 +1142,12 @@ module private QueryHelper =
                     // Extract property path from the selector lambda and add to ExcludedPaths.
                     // Exclude does not produce SQL — it only suppresses materialization for the specified path.
                     let path = extractRelationPathOrThrow "Exclude" m.Expressions
-                    registerExcludePath path
+                    registerExcludePath sourceCtx path
                 | Include ->
                     // Extract property path from the selector lambda and add to IncludedPaths.
                     // Include does not produce SQL — it only controls relation hydration whitelist.
                     let path = extractRelationPathOrThrow "Include" m.Expressions
-                    registerIncludePath path
+                    registerIncludePath sourceCtx path
 
                 | Aggregate ->
                     raise (NotSupportedException("Aggregate is not supported."))
@@ -1163,10 +1159,10 @@ module private QueryHelper =
         | Complex _ ->
             ()
 
-    and private translateQuery<'T> (builder: QueryableBuilder) (expression: Expression) =
+    and private translateQuery<'T> (sourceCtx: QueryContext) (builder: QueryableBuilder) (expression: Expression) =
         // Collect layers + possible terminal
-        buildQuery<'T> builder.Subqueries expression
-        writeLayers<'T> builder builder.Subqueries
+        buildQuery<'T> sourceCtx builder.Subqueries expression
+        writeLayers<'T> sourceCtx builder builder.Subqueries
     
     /// <summary>
     /// Determines if a given LINQ expression corresponds to a method that does not return the document ID (e.g., aggregate functions).
@@ -1290,8 +1286,6 @@ module private QueryHelper =
         HasManyRelations: bool
     }
 
-    let internal activeBatchLoadContext = new System.Threading.ThreadLocal<BatchLoadContext voption>(fun () -> ValueNone)
-
     let private preloadQueryContextMetadata (ctx: QueryContext) (connection: SqliteConnection) =
         let canonicalManyName (a: string) (b: string) =
             if StringComparer.Ordinal.Compare(a, b) <= 0 then $"{a}_{b}" else $"{b}_{a}"
@@ -1384,12 +1378,6 @@ module private QueryHelper =
 
         preloadQueryContextMetadata ctx metadataConnection
 
-        // Set up QueryContext for relation-aware translation.
-        // When no DBRef access occurs, Joins stays empty -> byte-identical SQL to pre-relation pipeline.
-        let prev = QueryTranslator.activeQueryContext.Value
-        QueryTranslator.activeQueryContext.Value <- ValueSome ctx
-        try
-
         if isExplainQueryPlan then
             builder.Append "EXPLAIN QUERY PLAN "
 
@@ -1399,13 +1387,13 @@ module private QueryHelper =
             builder.Append "SELECT -1 as Id, "
             builder.Append valueDecoded
             builder.Append "as ValueJSON FROM ("
-            translateQuery<'T> builder expression
+            translateQuery<'T> ctx builder expression
             builder.Append ")"
         else
             builder.Append "SELECT Id, "
             builder.Append valueDecoded
             builder.Append "as ValueJSON FROM ("
-            translateQuery<'T> builder expression
+            translateQuery<'T> ctx builder expression
             builder.Append ")"
 
         // Capture batch load context for DBRefMany post-query hydration.
@@ -1414,22 +1402,20 @@ module private QueryHelper =
         let hasSingleRelations = hasRelations && shape.HasSingle
         let hasManyRelations = hasRelations && shape.HasMany
 
-        if hasSingleRelations || hasManyRelations then
-            activeBatchLoadContext.Value <- ValueSome {
-                OwnerTable = source.Name
-                OwnerType = typeof<'T>
-                ExcludedPaths = new HashSet<string>(ctx.ExcludedPaths, StringComparer.Ordinal)
-                IncludedPaths = new HashSet<string>(ctx.IncludedPaths, StringComparer.Ordinal)
-                HasSingleRelations = hasSingleRelations
-                HasManyRelations = hasManyRelations
-            }
-        else
-            activeBatchLoadContext.Value <- ValueNone
+        let batchLoadContext =
+            if hasSingleRelations || hasManyRelations then
+                ValueSome {
+                    OwnerTable = source.Name
+                    OwnerType = typeof<'T>
+                    ExcludedPaths = new HashSet<string>(ctx.ExcludedPaths, StringComparer.Ordinal)
+                    IncludedPaths = new HashSet<string>(ctx.IncludedPaths, StringComparer.Ordinal)
+                    HasSingleRelations = hasSingleRelations
+                    HasManyRelations = hasManyRelations
+                }
+            else
+                ValueNone
 
-        builder.SQLiteCommand.ToString(), builder.Variables
-
-        finally
-            QueryTranslator.activeQueryContext.Value <- prev
+        builder.SQLiteCommand.ToString(), builder.Variables, batchLoadContext
 
 
 /// <summary>
@@ -1454,10 +1440,8 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
         override this.AdditionalData = data
 
     interface SoloDBQueryProvider
-    member internal this.ExecuteEnumetable<'Elem> (query: string) (par: obj) : IEnumerable<'Elem> =
-        // Capture batch load context before the lazy seq is enumerated.
-        let batchCtx = QueryHelper.activeBatchLoadContext.Value
-        QueryHelper.activeBatchLoadContext.Value <- ValueNone
+    member internal this.ExecuteEnumetable<'Elem> (query: string) (par: obj) (batchCtxObj: obj) : IEnumerable<'Elem> =
+        let batchCtx = batchCtxObj :?> QueryHelper.BatchLoadContext voption
         seq {
             use connection = source.GetInternalConnection()
             match batchCtx with
@@ -1513,10 +1497,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
             (this :> IQueryProvider).Execute<IEnumerable<'T>>(expression)
 
         member this.Execute<'TResult>(expression: Expression) : 'TResult =
-            let query, variables = QueryHelper.startTranslation source expression
-            // Capture batch load context (set during startTranslation, consumed here).
-            let batchCtx = QueryHelper.activeBatchLoadContext.Value
-            QueryHelper.activeBatchLoadContext.Value <- ValueNone
+            let query, variables, batchCtx = QueryHelper.startTranslation source expression
 
             #if DEBUG
             if System.Diagnostics.Debugger.IsAttached then
@@ -1541,13 +1522,9 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
             try
                 match typeof<'TResult> with
                 | t when t.IsGenericType && typeof<IEnumerable<'T>>.Equals typeof<'TResult> ->
-                    // Batch load context is consumed inside ExecuteEnumetable (passed via capture above).
-                    // Re-set it so ExecuteEnumetable can pick it up.
-                    QueryHelper.activeBatchLoadContext.Value <- batchCtx
-                    let result = this.ExecuteEnumetable<'T> query variables
+                    let result = this.ExecuteEnumetable<'T> query variables (box batchCtx)
                     result :> obj :?> 'TResult
                 | t when t.IsGenericType && typedefof<IEnumerable<_>>.Equals typedefof<'TResult> ->
-                    QueryHelper.activeBatchLoadContext.Value <- batchCtx
                     let elemType = (GenericTypeArgCache.Get t).[0]
                     let m : MethodInfo =
                         enumerableDispatchCache.GetOrAdd(elemType, Func<Type, MethodInfo>(fun et ->
@@ -1555,7 +1532,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                                 .GetMethod(nameof(this.ExecuteEnumetable), BindingFlags.NonPublic ||| BindingFlags.Instance)
                                 .MakeGenericMethod(et)
                         ))
-                    m.Invoke(this, [|query; variables|]) :?> 'TResult
+                    m.Invoke(this, [|query; variables; box batchCtx|]) :?> 'TResult
                     // When is explain query plan.
                 | t when t = typeof<string> && QueryHelper.isAggregateExplainQuery expression ->
                     use connection = source.GetInternalConnection()
@@ -1618,7 +1595,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                             batchLoadSingle connection row entity
 
             finally
-                QueryHelper.activeBatchLoadContext.Value <- ValueNone
+                ()
             
 /// <summary>
 /// The internal implementation of <c>IQueryable</c> and <c>IOrderedQueryable</c> for SoloDB collections.

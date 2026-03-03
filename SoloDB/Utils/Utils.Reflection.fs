@@ -100,6 +100,9 @@ module internal UtilsReflection =
         let mutable ownerTid = 0
         let mutable recursion = 0
 
+        member _.IsHeldByCurrentThread =
+            Volatile.Read(&ownerTid) = Thread.CurrentThread.ManagedThreadId
+
         member _.Enter() =
             let tid = Thread.CurrentThread.ManagedThreadId
             if Volatile.Read(&ownerTid) = tid then

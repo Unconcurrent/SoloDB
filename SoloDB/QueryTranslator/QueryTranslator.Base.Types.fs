@@ -95,10 +95,6 @@ module internal QueryTranslatorBaseTypes =
     let internal escapeSQLiteString (input: string) : string =
         input.Replace("'", "''").Replace("\0", "")
 
-    /// When set to ValueSome, QueryBuilder.New uses this shared context instead of constructing a fresh one.
-    /// Set by Queryable.fs startTranslation at query start; cleared after query execution.
-    let internal activeQueryContext = new System.Threading.ThreadLocal<QueryContext voption>(fun () -> ValueNone)
-
     /// <summary>
     /// A stateful builder for constructing a SQL query from an expression tree.
     /// </summary>
@@ -173,9 +169,9 @@ module internal QueryTranslatorBaseTypes =
         /// <param name="expression">The root expression being translated.</param>
         /// <param name="idIndex">The parameter index for the document ID.</param>
         /// <returns>A new QueryBuilder instance.</returns>
-        static member internal New(sb: StringBuilder)(variables: Dictionary<string, obj>)(updateMode: bool)(tableName)(expression: Expression)(idIndex: int) =
+        static member internal New(sb: StringBuilder)(variables: Dictionary<string, obj>)(updateMode: bool)(tableName)(expression: Expression)(idIndex: int)(sourceContext: QueryContext voption) =
             let sourceCtx =
-                match activeQueryContext.Value with
+                match sourceContext with
                 | ValueSome ctx -> ctx
                 | ValueNone -> QueryContext.SingleSource(tableName)
             {

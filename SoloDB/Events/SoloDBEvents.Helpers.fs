@@ -13,9 +13,6 @@ open System.Threading
 #nowarn "9"
 
 module internal SoloDBEventsHelpers =
-    let private callbackScopeDepth = new ThreadLocal<int>(fun () -> 0)
-    let private deferredRecursiveRemovals = new ThreadLocal<ResizeArray<obj * obj>>(fun () -> ResizeArray<obj * obj>())
-
     let private unregisterInsideHandlerMessage =
         "Cannot call Unregister from within a handler. Return SoloDBEventsResult.RemoveHandler instead."
 
@@ -57,6 +54,33 @@ module internal SoloDBEventsHelpers =
         let mutable restoreTransactionState = false
         let mutable previousTransactionState = false
         let mutable cachedConnection = Unchecked.defaultof<SQLiteTools.CachingDbConnection>
+        let mutable hasConnectionDispatchState = false
+        let mutable fallbackDispatchDepth = 0
+        let fallbackPendingRemovals = ResizeArray<obj * obj>()
+
+        let pendingRemovals () =
+            if hasConnectionDispatchState then cachedConnection.EventDispatchPendingRemovals
+            else fallbackPendingRemovals
+
+        let currentDispatchDepth () =
+            if hasConnectionDispatchState then cachedConnection.EventDispatchDepth
+            else fallbackDispatchDepth
+
+        let enterDispatchScope () =
+            if hasConnectionDispatchState then
+                cachedConnection.EnterEventDispatchScope()
+            else
+                fallbackDispatchDepth <- fallbackDispatchDepth + 1
+
+        let exitDispatchScope () =
+            if hasConnectionDispatchState then
+                cachedConnection.ExitEventDispatchScope()
+            else
+                if fallbackDispatchDepth <= 0 then
+                    fallbackDispatchDepth <- 0
+                    raise (InvalidOperationException("Event dispatch scope underflow detected. ExitEventDispatchScope was called without a matching EnterEventDispatchScope."))
+                fallbackDispatchDepth <- fallbackDispatchDepth - 1
+
         try
             // EVENT-PATH INVARIANT 1 of 3: GlobalLock serialization.
             // All handler invocations are serialized under ReentrantSpinLock.
@@ -75,6 +99,7 @@ module internal SoloDBEventsHelpers =
             match (connection :> obj) with
             | :? SQLiteTools.CachingDbConnection as cachingConn ->
                 cachedConnection <- cachingConn
+                hasConnectionDispatchState <- true
                 previousTransactionState <- cachingConn.InsideTransaction
                 if not previousTransactionState then
                     cachingConn.InsideTransaction <- true
@@ -85,10 +110,10 @@ module internal SoloDBEventsHelpers =
             // CachingDbConnection.Dispose() checks InsideTransaction and suppresses pool return
             // when true. Since invariant 2 above sets InsideTransaction = true, any `use conn = ...`
             // binding exit inside a handler callback is safe — Dispose becomes a no-op.
-            callbackScopeDepth.Value <- callbackScopeDepth.Value + 1
+            enterDispatchScope ()
 
             let session = Interlocked.Increment &sessionIndex
-            let isRecursiveDispatch = callbackScopeDepth.Value > 1
+            let isRecursiveDispatch = currentDispatchDepth () > 1
 
             try
                 try
@@ -102,7 +127,7 @@ module internal SoloDBEventsHelpers =
                             | Some RemoveHandler -> handlersToRemove.Add h
 
                         if handlersToRemove.Count > 0 then
-                            let pending = deferredRecursiveRemovals.Value
+                            let pending = pendingRemovals ()
                             let handlersObj = handlers :> obj
                             for removedHandler in handlersToRemove do
                                 pending.Add((handlersObj, box removedHandler))
@@ -137,8 +162,8 @@ module internal SoloDBEventsHelpers =
                     if not (String.IsNullOrWhiteSpace finalEx.Message) then
                         handlerFailureMessage <- finalEx.Message
             finally
-                if callbackScopeDepth.Value = 1 then
-                    let pending = deferredRecursiveRemovals.Value
+                if currentDispatchDepth () = 1 then
+                    let pending = pendingRemovals ()
                     if pending.Count > 0 then
                         let handlersObj = handlers :> obj
                         for idx = pending.Count - 1 downto 0 do
@@ -156,8 +181,7 @@ module internal SoloDBEventsHelpers =
             // EVENT-PATH CLEANUP: reverse order of invariant acquisition.
             // 1. Restore original InsideTransaction state (invariant 2).
             //    This also re-enables CachingDbConnection.Dispose pool-return (invariant 3).
-            let scopeDepthAfterExit = callbackScopeDepth.Value - 1
-            callbackScopeDepth.Value <- if scopeDepthAfterExit < 0 then 0 else scopeDepthAfterExit
+            exitDispatchScope ()
             if restoreTransactionState then
                 cachedConnection.InsideTransaction <- previousTransactionState
             // 2. Release GlobalLock (invariant 1).
@@ -171,7 +195,7 @@ module internal SoloDBEventsHelpers =
         (globalMapping: CowByteSpanMap<ResizeArray<'TSys>>)
         (localMap: Dictionary<'THandler, ResizeArray<'TSys>>)
         (handler: 'THandler) =
-        if callbackScopeDepth.Value > 0 then
+        if globalLock.IsHeldByCurrentThread then
             raise (InvalidOperationException(unregisterInsideHandlerMessage))
         let collectionNameBytes = System.Text.Encoding.UTF8.GetBytes collectionName
         try

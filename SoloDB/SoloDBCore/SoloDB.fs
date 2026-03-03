@@ -1392,6 +1392,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         let setup = Bootstrap.createSetup eventSystem
         let defaultConfig: SoloDBConfiguration = { CachingEnabled = true }
         let manager = new ConnectionManager(connectionString, setup, defaultConfig)
+        manager.SetHandlerDispatchGuard(fun () -> eventSystem.GlobalLock.IsHeldByCurrentThread)
 
         do
             use dbConnection = manager.Borrow()

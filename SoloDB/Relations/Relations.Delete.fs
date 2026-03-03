@@ -10,9 +10,9 @@ open RelationsTypes
 open RelationsSchema
 open RelationsEntity
 
-let internal withDeleteGuard (tableName: string) (id: int64) (fn: unit -> unit) =
+let internal withDeleteGuard (deleteCtx: DeleteTraversalContext) (tableName: string) (id: int64) (fn: unit -> unit) =
     let key = $"{tableName}|{id}"
-    let set = deleteGuard.Value
+    let set = deleteCtx.GuardSet
     if set.Contains(key) then
         ()
     else
@@ -38,7 +38,7 @@ let internal metadataLinkLayout (connection: SqliteConnection) (row: RelationMet
         let linkTable = if useShared then canonicalTable else linkTableFromRelationName row.Name
         linkTable, ownerColumn, targetColumn
 
-let internal hasOutgoingRestrictLinkToGuardedEntity (tx: RelationTxContext) (tableName: string) (entityId: int64) =
+let internal hasOutgoingRestrictLinkToGuardedEntity (deleteCtx: DeleteTraversalContext) (tx: RelationTxContext) (tableName: string) (entityId: int64) =
     ensureTxContext tx
     ensureTransaction tx
     if String.IsNullOrWhiteSpace tableName then
@@ -48,7 +48,7 @@ let internal hasOutgoingRestrictLinkToGuardedEntity (tx: RelationTxContext) (tab
 
     let ownerTable = formatName tableName
     let rows = readMetadataByOwner tx.Connection ownerTable
-    let guard = deleteGuard.Value
+    let guard = deleteCtx.GuardSet
     rows
     |> Array.exists (fun row ->
         let onDelete = parseOnDeletePolicy row.OnDelete
@@ -63,7 +63,7 @@ let internal hasOutgoingRestrictLinkToGuardedEntity (tx: RelationTxContext) (tab
                 let key = $"{formatName row.TargetCollection}|{targetId}"
                 guard.Contains(key)))
 
-let rec internal applyOwnerDeletePoliciesCore (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) (deleteTargets: bool) =
+let rec internal applyOwnerDeletePoliciesCore (deleteCtx: DeleteTraversalContext) (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) (deleteTargets: bool) =
     ensureTxContext tx
     ensureTransaction tx
     if String.IsNullOrWhiteSpace ownerTable then
@@ -75,7 +75,7 @@ let rec internal applyOwnerDeletePoliciesCore (tx: RelationTxContext) (ownerTabl
     let ownerTable = formatName ownerTable
     let rows = readMetadataByOwner tx.Connection ownerTable
 
-    withDeleteGuard ownerTable ownerId (fun () ->
+    withDeleteGuard deleteCtx ownerTable ownerId (fun () ->
         for row in rows do
             let relationKind = stringToRelationKind row.RefKind
             let linkTable, ownerColumn, targetColumn = metadataLinkLayout tx.Connection row relationKind
@@ -103,10 +103,10 @@ let rec internal applyOwnerDeletePoliciesCore (tx: RelationTxContext) (ownerTabl
                                 if globalRefCountCore tx row.TargetCollection targetId = 0L then
                                     let targetTable = formatName row.TargetCollection
                                     let targetKey = $"{targetTable}|{targetId}"
-                                    if not (deleteGuard.Value.Contains(targetKey)) &&
-                                       not (hasOutgoingRestrictLinkToGuardedEntity tx targetTable targetId) then
-                                        applyTargetDeletePoliciesCore tx targetTable targetId
-                                        applyOwnerDeletePoliciesCore tx targetTable targetId true
+                                    if not (deleteCtx.GuardSet.Contains(targetKey)) &&
+                                       not (hasOutgoingRestrictLinkToGuardedEntity deleteCtx tx targetTable targetId) then
+                                        applyTargetDeletePoliciesCore deleteCtx tx targetTable targetId
+                                        applyOwnerDeletePoliciesCore deleteCtx tx targetTable targetId true
                                         tx.Connection.Execute($"DELETE FROM {quoteIdentifier targetTable} WHERE Id = @id;", {| id = targetId |}) |> ignore
                 | DeletePolicy.Cascade ->
                     raise (InvalidOperationException(
@@ -133,10 +133,10 @@ let rec internal applyOwnerDeletePoliciesCore (tx: RelationTxContext) (ownerTabl
                                 if globalRefCountCore tx row.TargetCollection targetId = 0L then
                                     let targetTable = formatName row.TargetCollection
                                     let targetKey = $"{targetTable}|{targetId}"
-                                    if not (deleteGuard.Value.Contains(targetKey)) &&
-                                       not (hasOutgoingRestrictLinkToGuardedEntity tx targetTable targetId) then
-                                        applyTargetDeletePoliciesCore tx targetTable targetId
-                                        applyOwnerDeletePoliciesCore tx targetTable targetId true
+                                    if not (deleteCtx.GuardSet.Contains(targetKey)) &&
+                                       not (hasOutgoingRestrictLinkToGuardedEntity deleteCtx tx targetTable targetId) then
+                                        applyTargetDeletePoliciesCore deleteCtx tx targetTable targetId
+                                        applyOwnerDeletePoliciesCore deleteCtx tx targetTable targetId true
                                         tx.Connection.Execute($"DELETE FROM {quoteIdentifier targetTable} WHERE Id = @id;", {| id = targetId |}) |> ignore
                 | DeletePolicy.Cascade ->
                     raise (InvalidOperationException(
@@ -146,7 +146,7 @@ let rec internal applyOwnerDeletePoliciesCore (tx: RelationTxContext) (ownerTabl
                         $"Error: Invalid OnOwnerDelete policy on relation '{ownerTable}.{row.PropertyName}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Unlink, or Deletion."))
 )
 
-and internal applyTargetDeletePoliciesCore (tx: RelationTxContext) (targetTable: string) (targetId: int64) =
+and internal applyTargetDeletePoliciesCore (deleteCtx: DeleteTraversalContext) (tx: RelationTxContext) (targetTable: string) (targetId: int64) =
     ensureTxContext tx
     ensureTransaction tx
     if String.IsNullOrWhiteSpace targetTable then
@@ -158,7 +158,7 @@ and internal applyTargetDeletePoliciesCore (tx: RelationTxContext) (targetTable:
     let targetTable = formatName targetTable
     let rows = readMetadataByTarget tx.Connection targetTable
 
-    withDeleteGuard targetTable targetId (fun () ->
+    withDeleteGuard deleteCtx targetTable targetId (fun () ->
         for row in rows do
             let onDelete = parseOnDeletePolicy row.OnDelete
             let relationKind = stringToRelationKind row.RefKind
@@ -186,9 +186,9 @@ and internal applyTargetDeletePoliciesCore (tx: RelationTxContext) (targetTable:
                     let qOwner = quoteIdentifier ownerTable
                     for ownerId in ownerIds do
                         let ownerKey = $"{ownerTable}|{ownerId}"
-                        if not (deleteGuard.Value.Contains(ownerKey)) then
-                            applyTargetDeletePoliciesCore tx ownerTable ownerId
-                            applyOwnerDeletePoliciesCore tx ownerTable ownerId true
+                        if not (deleteCtx.GuardSet.Contains(ownerKey)) then
+                            applyTargetDeletePoliciesCore deleteCtx tx ownerTable ownerId
+                            applyOwnerDeletePoliciesCore deleteCtx tx ownerTable ownerId true
                             if globalRefCountCore tx ownerTable ownerId = 0L then
                                 tx.Connection.Execute($"DELETE FROM {qOwner} WHERE Id = @id;", {| id = ownerId |}) |> ignore
 

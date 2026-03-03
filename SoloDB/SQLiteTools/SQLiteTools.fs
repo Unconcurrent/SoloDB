@@ -70,6 +70,8 @@ module SQLiteTools =
         // Tracks how many nested handler invocations are active on THIS connection.
         // Strict Enter/Exit balance — no negative clamping (negative depth = bug signal).
         let mutable eventHandlerDepth = 0
+        let eventDispatchPendingRemovals = ResizeArray<obj * obj>()
+        let mutable eventDispatchDepth = 0
 
         /// <summary>The underlying SqliteConnection.</summary>
         member internal this.Inner = this :> SqliteConnection
@@ -100,6 +102,26 @@ module SQLiteTools =
         /// </summary>
         member internal this.IsInEventHandlerScope =
             Threading.Volatile.Read(&eventHandlerDepth) > 0
+
+        member internal this.EnterEventDispatchScope() =
+            eventDispatchDepth <- eventDispatchDepth + 1
+
+        member internal this.ExitEventDispatchScope() =
+            if eventDispatchDepth <= 0 then
+                eventDispatchDepth <- 0
+                raise (InvalidOperationException("Event dispatch scope underflow detected. ExitEventDispatchScope was called without a matching EnterEventDispatchScope."))
+
+            eventDispatchDepth <- eventDispatchDepth - 1
+
+        member internal this.EventDispatchDepth = eventDispatchDepth
+        member internal this.EventDispatchPendingRemovals = eventDispatchPendingRemovals
+
+        member internal this.IsEventDispatchStateClean =
+            eventDispatchDepth = 0 && eventDispatchPendingRemovals.Count = 0
+
+        member internal this.ResetEventDispatchState() =
+            eventDispatchDepth <- 0
+            eventDispatchPendingRemovals.Clear()
 
         /// <summary>
         /// Clears the prepared statement cache, waiting for any in-use commands to be released.

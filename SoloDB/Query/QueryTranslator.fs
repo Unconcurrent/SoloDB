@@ -16,9 +16,9 @@ open SoloDatabase.QueryTranslatorVisitDbRef
 module QueryTranslator =
     // Force module initialization to ensure DBRef handler registration.
     let private _dbrefInit = QueryTranslatorVisitDbRef.handlerCount
+    let private ensureDbRefHandlersInitialized () = ignore _dbrefInit
 
     // Re-export symbols from split modules for backward compatibility.
-    let internal activeQueryContext = QueryTranslatorBase.activeQueryContext
     let internal appendVariable sb vars value = QueryTranslatorBase.appendVariable sb vars value
     let internal escapeSQLiteString input = QueryTranslatorBase.escapeSQLiteString input
     let inline internal evaluateExpr<'O> (e: Expression) = QueryTranslatorBase.evaluateExpr<'O> e
@@ -34,10 +34,19 @@ module QueryTranslator =
     /// <param name="expression">The LINQ expression to translate.</param>
     /// <returns>A tuple containing the generated SQL string and a dictionary of parameters.</returns>
     let translate (tableName: string) (expression: Expression) =
+        ensureDbRefHandlersInitialized()
         let sb = StringBuilder()
         let variables = Dictionary<string, obj>()
-        let builder = QueryBuilder.New sb variables false tableName expression -1
+        let builder = QueryBuilder.New sb variables false tableName expression -1 ValueNone
 
+        visit expression builder
+        sb.ToString(), variables
+
+    let internal translateWithContext (sourceContext: QueryContext) (tableName: string) (expression: Expression) =
+        ensureDbRefHandlersInitialized()
+        let sb = StringBuilder()
+        let variables = Dictionary<string, obj>()
+        let builder = QueryBuilder.New sb variables false tableName expression -1 (ValueSome sourceContext)
         visit expression builder
         sb.ToString(), variables
 
@@ -49,7 +58,14 @@ module QueryTranslator =
     /// <param name="sb">The StringBuilder to append to.</param>
     /// <param name="variables">The dictionary of parameters.</param>
     let internal translateQueryable (tableName: string) (expression: Expression) (sb: StringBuilder) (variables: Dictionary<string, obj>) =
-        let builder = QueryBuilder.New sb variables false tableName expression -1
+        ensureDbRefHandlersInitialized()
+        let builder = QueryBuilder.New sb variables false tableName expression -1 ValueNone
+        visit expression builder
+        sb.Append " " |> ignore
+
+    let internal translateQueryableWithContext (sourceContext: QueryContext) (tableName: string) (expression: Expression) (sb: StringBuilder) (variables: Dictionary<string, obj>) =
+        ensureDbRefHandlersInitialized()
+        let builder = QueryBuilder.New sb variables false tableName expression -1 (ValueSome sourceContext)
         visit expression builder
         sb.Append " " |> ignore
 
@@ -61,7 +77,8 @@ module QueryTranslator =
     /// <param name="sb">The StringBuilder to append to.</param>
     /// <param name="variables">The dictionary of parameters.</param>
     let internal translateQueryableNotExtractSelfJson (tableName: string) (expression: Expression) (sb: StringBuilder) (variables: Dictionary<string, obj>) =
-        let builder = {(QueryBuilder.New sb variables false tableName expression -1) with JsonExtractSelfValue = false}
+        ensureDbRefHandlersInitialized()
+        let builder = {(QueryBuilder.New sb variables false tableName expression -1 ValueNone) with JsonExtractSelfValue = false}
         visit expression builder
         sb.Append " " |> ignore
 
@@ -73,9 +90,10 @@ module QueryTranslator =
     /// <param name="idParameterIndex">The index of the parameter that represents the ID.</param>
     /// <returns>A tuple containing the generated SQL string and a dictionary of parameters.</returns>
     let internal translateWithId (tableName: string) (expression: Expression) idParameterIndex =
+        ensureDbRefHandlersInitialized()
         let sb = StringBuilder()
         let variables = Dictionary<string, obj>()
-        let builder = QueryBuilder.New sb variables false tableName expression idParameterIndex
+        let builder = QueryBuilder.New sb variables false tableName expression idParameterIndex ValueNone
 
         visit expression builder
         sb.ToString(), variables
@@ -88,11 +106,12 @@ module QueryTranslator =
     /// <param name="fullSQL">The StringBuilder for the SQL command.</param>
     /// <param name="variableDict">The dictionary for parameters.</param>
     let internal translateUpdateMode (tableName: string) (expression: Expression) (fullSQL: StringBuilder) (variableDict: Dictionary<string, obj>) =
+        ensureDbRefHandlersInitialized()
         match tryTranslateUpdateManyRelationTransform expression with
         | ValueSome _ ->
             raise (NotSupportedException updateManyRelationUnsupportedMessage)
         | ValueNone -> ()
 
-        let builder = QueryBuilder.New fullSQL variableDict true tableName expression -1
+        let builder = QueryBuilder.New fullSQL variableDict true tableName expression -1 ValueNone
 
         visit expression builder
