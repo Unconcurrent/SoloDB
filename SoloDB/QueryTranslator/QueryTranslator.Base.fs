@@ -233,7 +233,7 @@ module internal QueryTranslatorBase =
         | _ -> accum
 
     let private formatMemberAccessPath (qb: QueryBuilder) (path: string) =
-        let path = path.Replace(".[", "[") // Replace array access.
+        let path = path.Replace(".[", "[") |> escapeSQLiteString // Replace array access and keep SQL literal safe.
         if qb.UpdateMode then sprintf "'$.%s'" path
         else sprintf "jsonb_extract(%sValue, '$.%s')" qb.TableNameDot path
 
