@@ -18,6 +18,8 @@ module Connections =
     let internal ThrowOutsideEventContextUsage() =
             raise (InvalidOperationException(
                 "Error: Event handler used a non-context SoloDB instance.\nReason: Event handlers must use the provided ctx (ISoloDB). Using another instance can lock the database.\nFix: Use the ctx parameter for all database operations inside handlers."))
+    let private eventHandlerScopeUnderflowMessage =
+        "Event handler scope underflow detected. ExitEventHandlerScope was called without a matching EnterEventHandlerScope."
 
     // Global savepoint counter for unique savepoint names across all connections and threads.
     let mutable private savepointCounter = 0L
@@ -32,7 +34,7 @@ module Connections =
     let private decrementStandaloneEventScopeOrFail (connection: SqliteConnection) =
         let mutable counter = Unchecked.defaultof<EventScopeCounter>
         if not (standaloneEventScopes.TryGetValue(connection, &counter)) || isNull counter || counter.Depth <= 0 then
-            raise (InvalidOperationException("Event handler scope underflow detected. ExitEventHandlerScope was called without a matching EnterEventHandlerScope."))
+            raise (InvalidOperationException(eventHandlerScopeUnderflowMessage))
         counter.Depth <- counter.Depth - 1
 
     /// Wraps a synchronous operation in a SAVEPOINT scope.
@@ -316,7 +318,7 @@ module Connections =
                 let snapshot = Volatile.Read(&activeEventHandlerScopes)
                 if snapshot <= 0 then
                     if Interlocked.CompareExchange(&activeEventHandlerScopes, 0, snapshot) = snapshot then
-                        raise (InvalidOperationException("Event handler scope underflow detected. ExitEventHandlerScope was called without a matching EnterEventHandlerScope."))
+                        raise (InvalidOperationException(eventHandlerScopeUnderflowMessage))
                     else
                         decrementOrFail ()
                 else if Interlocked.CompareExchange(&activeEventHandlerScopes, snapshot - 1, snapshot) <> snapshot then
