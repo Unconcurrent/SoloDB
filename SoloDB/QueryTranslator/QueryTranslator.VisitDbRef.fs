@@ -62,17 +62,17 @@ module internal QueryTranslatorVisitDbRef =
             | _ -> false
         visitExpr expr
 
-    let private tryMakeValueMemberFromExpression (expr: Expression) : MemberExpression voption =
-        match unwrapConvert expr with
-        | :? MemberExpression as dbrefPropExpr when isDBRefType dbrefPropExpr.Type ->
-            let valueProp = dbrefPropExpr.Type.GetProperty("Value", BindingFlags.Public ||| BindingFlags.Instance)
-            if isNull valueProp then ValueNone
-            else ValueSome (Expression.MakeMemberAccess(dbrefPropExpr, valueProp))
-        | _ ->
-            ValueNone
-
     /// preExpressionHandler for DBRef member access translation.
     let private handleDBRefExpression (qb: QueryBuilder) (exp: Expression) : bool =
+        let tryMakeValueMemberFromInvokeArg (arg: Expression) =
+            match unwrapConvert arg with
+            | :? MemberExpression as dbrefPropExpr when isDBRefType dbrefPropExpr.Type ->
+                let valueProp = dbrefPropExpr.Type.GetProperty("Value", BindingFlags.Public ||| BindingFlags.Instance)
+                if isNull valueProp then ValueNone
+                else ValueSome (Expression.MakeMemberAccess(dbrefPropExpr, valueProp))
+            | _ ->
+                ValueNone
+
         match exp with
         | :? MemberExpression as topMe when not (isNull topMe.Expression) ->
             let innerExpr = unwrapConvert topMe.Expression
@@ -106,7 +106,7 @@ module internal QueryTranslatorVisitDbRef =
                     | :? MemberExpression as me when not (isNull me.Expression) ->
                         findValueBoundary me.Expression (me.Member.Name :: above)
                     | :? MethodCallExpression as mc when mc.Method.Name = "Invoke" && mc.Arguments.Count = 1 ->
-                        match tryMakeValueMemberFromExpression mc.Arguments.[0] with
+                        match tryMakeValueMemberFromInvokeArg mc.Arguments.[0] with
                         | ValueSome valueME -> ValueSome struct(valueME, above)
                         | ValueNone when not (isNull mc.Object) -> findValueBoundary mc.Object above
                         | ValueNone -> ValueNone
@@ -151,7 +151,12 @@ module internal QueryTranslatorVisitDbRef =
     let private tryMakeValueMemberFromInvoke (invokeExpr: MethodCallExpression) : MemberExpression voption =
         if invokeExpr.Arguments.Count <> 1 then ValueNone
         else
-            tryMakeValueMemberFromExpression invokeExpr.Arguments.[0]
+            match unwrapConvert invokeExpr.Arguments.[0] with
+            | :? MemberExpression as dbrefPropExpr when isDBRefType dbrefPropExpr.Type ->
+                let valueProp = dbrefPropExpr.Type.GetProperty("Value", BindingFlags.Public ||| BindingFlags.Instance)
+                if isNull valueProp then ValueNone
+                else ValueSome (Expression.MakeMemberAccess(dbrefPropExpr, valueProp))
+            | _ -> ValueNone
 
     /// Extract DBRefMany source with owner resolution for both root and nested (through DBRef.Value) paths.
     /// Handles both C# MemberExpression chains and F# MethodCallExpression(Invoke) wrappers.
