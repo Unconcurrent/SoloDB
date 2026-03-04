@@ -14,9 +14,11 @@ open SoloDatabase.QueryTranslatorVisitDbRef
 /// Contains functions to translate .NET LINQ expression trees into SQLite SQL queries.
 /// </summary>
 module QueryTranslator =
-    // Force module initialization to ensure DBRef handler registration.
-    let private _dbrefInit = QueryTranslatorVisitDbRef.handlerCount
-    let private ensureDbRefHandlersInitialized () = ignore _dbrefInit
+    let private ensureDbRefHandlersInitialized () =
+        let count = QueryTranslatorVisitDbRef.handlerCount
+        if count < 3 then
+            raise (InvalidOperationException(
+                $"DBRef handler registration incomplete: count={count}, expected=3"))
 
     // Re-export symbols from split modules for backward compatibility.
     let internal appendVariable sb vars value = QueryTranslatorBase.appendVariable sb vars value
