@@ -651,7 +651,7 @@ type DBRefOrder =
 /// <remarks>
 /// <list type="bullet">
 /// <item><description><c>OnDelete</c>: what happens when the REFERENCED (target) entity is deleted.</description></item>
-/// <item><description><c>OnOwnerDelete</c>: what happens to linked entities when the OWNER is deleted (DBRefMany only).</description></item>
+/// <item><description><c>OnOwnerDelete</c>: what happens to linked entities when the OWNER is deleted.</description></item>
 /// <item><description><c>Unique</c>: enforce 1:1 cardinality on DBRef (UNIQUE on both SourceId and TargetId).</description></item>
 /// </list>
 /// </remarks>
@@ -669,7 +669,7 @@ type SoloRefAttribute() =
     member val OnDelete: DeletePolicy = DeletePolicy.Restrict with get, set
 
     /// <summary>
-    /// For DBRefMany: what happens to referenced entities when the OWNER is deleted.
+    /// What happens to referenced entities when the OWNER is deleted.
     /// <para>Deletion (default): unlink first, then delete each formerly-linked target entity
     /// ONLY IF its global reference count across all link tables is zero.</para>
     /// <para>Unlink: just remove link rows, referenced entities always survive.</para>
