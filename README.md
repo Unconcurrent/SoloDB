@@ -233,7 +233,6 @@ teams.Insert(team);
 
 Important constraints:
 
-- `SetNull` is **not** a `DeletePolicy` value in SoloDB.
 - `OnOwnerDelete = Cascade` is rejected by schema/build guards.
 
 #### Loading Semantics
