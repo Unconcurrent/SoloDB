@@ -173,16 +173,10 @@ public class Team
     public string Name { get; set; } = "";
 
     // Single relation
-    public DBRef<Lead> Lead { get; set; } = DBRef<Lead>.None;
+    public DBRef<Member> Lead { get; set; } = DBRef<Member>.None;
 
     // Many relation
     public DBRefMany<Member> Members { get; set; } = new();
-}
-
-public class Lead
-{
-    public long Id { get; set; }
-    public string Name { get; set; } = "";
 }
 
 public class Member
@@ -193,21 +187,21 @@ public class Member
 
 using var db = new SoloDB("memory:relations-basics");
 var teams = db.GetCollection<Team>();
-var leads = db.GetCollection<Lead>();
+var members = db.GetCollection<Member>();
 
 // DBRef.To(existingId): link to an already persisted target.
-var existingLeadId = leads.Insert(new Lead { Name = "Existing Alice" });
+var existingLeadId = members.Insert(new Member { Name = "Existing Alice" });
 teams.Insert(new Team
 {
     Name = "Ops",
-    Lead = DBRef<Lead>.To(existingLeadId)
+    Lead = DBRef<Member>.To(existingLeadId)
 });
 
 // DBRef.From(entity): insert target first, then link owner to inserted target.
 var team = new Team
 {
     Name = "Core",
-    Lead = DBRef<Lead>.From(new Lead { Name = "Alice" })
+    Lead = DBRef<Member>.From(new Member { Name = "Alice" })
 };
 
 // DBRefMany supports Add/Clear/Remove mutations tracked on Update.
@@ -215,6 +209,11 @@ team.Members.Add(new Member { Name = "Bob" });
 team.Members.Add(new Member { Name = "Carol" });
 
 teams.Insert(team);
+
+// Default policy behavior in this basics example:
+// - No [SoloRef(...)] overrides are applied here.
+// - One owner with one referenced Member: deleting the owner deletes that orphan Member (default OnOwnerDelete=Deletion).
+// - Two owners sharing the same Member: deleting one owner keeps the shared Member; deleting the last owner deletes it.
 ```
 
 #### SoloRef Policy Matrix
@@ -245,11 +244,11 @@ using System;
 using System.Linq;
 
 using var db = new SoloDB("memory:relations-loading");
-var leads = db.GetCollection<Lead>();
+var members = db.GetCollection<Member>();
 var teams = db.GetCollection<Team>();
 
-var leadId = leads.Insert(new Lead { Name = "Loaded Alice" });
-teams.Insert(new Team { Name = "Core", Lead = DBRef<Lead>.To(leadId) });
+var leadId = members.Insert(new Member { Name = "Loaded Alice" });
+teams.Insert(new Team { Name = "Core", Lead = DBRef<Member>.To(leadId) });
 
 // Default path: relation is loaded, so .Value is available.
 var loadedTeam = teams.AsQueryable().First(t => t.Name == "Core");
@@ -309,21 +308,20 @@ Key behavior:
 > Calling them directly outside `UpdateMany` is unsupported and will throw.
 
 ```csharp
-var leads = db.GetCollection<Lead>();
 var members = db.GetCollection<Member>();
 var teams = db.GetCollection<Team>();
 
-var leadId = leads.Insert(new Lead { Name = "Dora" });
+var leadId = members.Insert(new Member { Name = "Dora" });
 var member = new Member { Name = "Eve" };
 members.Insert(member);
 
 // Single ref set to an existing target
 teams.UpdateMany(t => t.Name == "Core",
-    t => t.Lead.Set(DBRef<Lead>.To(leadId)));
+    t => t.Lead.Set(DBRef<Member>.To(leadId)));
 
 // Clear single ref
 teams.UpdateMany(t => t.Name == "Core",
-    t => t.Lead.Set(DBRef<Lead>.None));
+    t => t.Lead.Set(DBRef<Member>.None));
 
 // Many relation add/remove/clear
 teams.UpdateMany(t => t.Name == "Core",
@@ -731,7 +729,7 @@ printfn "Deleted %d document(s)" deleteCount
 
 ### Backups
 
-Create live backups of your database without interrupting application operations.
+Create live backups of your database without interrupting application read operations.
 
 ```csharp
 // Back up to another SoloDB instance
