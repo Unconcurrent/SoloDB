@@ -86,9 +86,11 @@ type private PreprocessedQuery =
 /// <summary>
 /// Represents an ORDER BY statement captured during preprocessing.
 /// </summary>
-type private PreprocessedOrder = { 
+type private PreprocessedOrder = {
     OrderingRule: Expression;
     mutable Descending: bool
+    /// When set, emitted directly as raw SQL instead of translating OrderingRule.
+    RawSQL: string option
 }
 
 type private SQLSelector =
@@ -404,7 +406,7 @@ module private QueryHelper =
     let addOrder (statements: ResizeArray<SQLSubquery>) (ordering: Expression) (descending: bool) =
         let current = ifSelectorNewStatement statements
         current.Orders.Clear()
-        current.Orders.Add({ OrderingRule = ordering; Descending = descending })
+        current.Orders.Add({ OrderingRule = ordering; Descending = descending; RawSQL = None })
 
     let addSelector (statements: ResizeArray<SQLSubquery>) (selector: SQLSelector) =
         let last = statements.Last()
@@ -657,7 +659,9 @@ module private QueryHelper =
             statement.Orders
             |> Seq.iteri (fun j o ->
                 if j > 0 then builder.Append(", ") |> ignore
-                QueryTranslator.translateQueryableWithContext sourceCtx contextTable o.OrderingRule builder.SQLiteCommand builder.Variables
+                match o.RawSQL with
+                | Some raw -> builder.Append raw |> ignore
+                | None -> QueryTranslator.translateQueryableWithContext sourceCtx contextTable o.OrderingRule builder.SQLiteCommand builder.Variables
                 if o.Descending then builder.Append(" DESC") |> ignore
             )
 
@@ -897,7 +901,9 @@ module private QueryHelper =
             | Method m ->
                 let inline simpleCurrent() = simpleCurrent statements
 
-                if m.Value <> Select && m.Value <> DistinctBy then
+                if m.Value <> Select && m.Value <> DistinctBy
+                   && m.Value <> OrderBy && m.Value <> OrderByDescending
+                   && m.Value <> ThenBy && m.Value <> ThenByDescending then
                     pendingDistinctByScalarReuse <- None
 
                 match m.Value with
@@ -921,13 +927,24 @@ module private QueryHelper =
                 | Order | OrderDescending ->
                     addOrder statements (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) (m.Value = OrderDescending)
                 | OrderBy | OrderByDescending  ->
-                    addOrder statements m.Expressions.[0] (m.Value = OrderByDescending)
-                | ThenBy ->
+                    let descending = (m.Value = OrderByDescending)
+                    let orderFingerprint = expressionFingerprint m.Expressions.[0]
+                    match pendingDistinctByScalarReuse with
+                    | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = orderFingerprint ->
+                        let current = ifSelectorNewStatement statements
+                        current.Orders.Clear()
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawSQL = Some "__solodb_scalar_slot0" })
+                    | _ ->
+                        addOrder statements m.Expressions.[0] descending
+                | ThenBy | ThenByDescending ->
+                    let descending = (m.Value = ThenByDescending)
+                    let orderFingerprint = expressionFingerprint m.Expressions.[0]
                     let current = simpleCurrent()
-                    current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = false })
-                | ThenByDescending ->
-                    let current = simpleCurrent()
-                    current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = true })
+                    match pendingDistinctByScalarReuse with
+                    | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = orderFingerprint ->
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawSQL = Some "__solodb_scalar_slot0" })
+                    | _ ->
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawSQL = None })
                 | Skip ->
                     let current = simpleCurrent()
                     match current.Skip with
