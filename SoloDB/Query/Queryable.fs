@@ -121,6 +121,17 @@ type private SQLSubquery =
     | Simple of UsedSQLStatements
     | Complex of (struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|} -> unit)
 
+type private PredicateRole =
+| WherePredicate
+| AnyPredicate
+| AllPredicate
+| CountPredicate
+| LongCountPredicate
+
+type private LoweredPredicate = {
+    Role: PredicateRole
+    Predicate: Expression
+}
 
 /// <summary>
 /// A private, mutable builder used to construct an SQL query from a LINQ expression tree.
@@ -283,6 +294,17 @@ module private QueryHelper =
             last.Filters.Add filter
         | _ ->
             addNewQuery ()
+
+    let private lowerPredicateLambda (_sourceCtx: QueryContext) (_tableName: string) (expr: Expression) (role: PredicateRole) =
+        // First migration-family seam: centralize predicate lowering call sites
+        // while preserving the current translator and payload behavior byte-for-byte.
+        {
+            Role = role
+            Predicate = expr
+        }
+
+    let private addLoweredPredicate (statements: ResizeArray<SQLSubquery>) (lowered: LoweredPredicate) =
+        addFilter statements lowered.Predicate
 
     let addOrder (statements: ResizeArray<SQLSubquery>) (ordering: Expression) (descending: bool) =
         let current = ifSelectorNewStatement statements
@@ -769,7 +791,7 @@ module private QueryHelper =
 
                 match m.Value with
                 | Where -> 
-                    addFilter statements m.Expressions.[0]
+                    addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName m.Expressions.[0] WherePredicate)
                 | Select ->
                     addSelector statements (Expression m.Expressions.[0])
                 | Order | OrderDescending ->
@@ -836,7 +858,14 @@ module private QueryHelper =
                 | LongCount ->
                     match m.Expressions.Length with
                     | 0 -> ()
-                    | 1 -> addFilter statements m.Expressions.[0]
+                    | 1 ->
+                        let role =
+                            match m.Value with
+                            | Count
+                            | CountBy -> CountPredicate
+                            | LongCount -> LongCountPredicate
+                            | _ -> CountPredicate
+                        addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName m.Expressions.[0] role)
                     | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
@@ -959,7 +988,7 @@ module private QueryHelper =
                 | All ->
                     match m.Expressions.Length with
                     | 0 -> ()
-                    | 1 -> addFilter statements (negatePredicateExpression m.Expressions.[0])
+                    | 1 -> addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName (negatePredicateExpression m.Expressions.[0]) AllPredicate)
                     | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
                     addTake statements (ExpressionHelper.constant 1)
@@ -973,7 +1002,7 @@ module private QueryHelper =
                 | Any ->
                     match m.Expressions.Length with
                     | 0 -> ()
-                    | 1 -> addFilter statements m.Expressions.[0]
+                    | 1 -> addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName m.Expressions.[0] AnyPredicate)
                     | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
                     addTake statements (ExpressionHelper.constant 1)
