@@ -445,8 +445,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
             let entity = fromSQLite<'T> json
             // Batch-load Single and Many relation properties for full entity hydration.
             if this.HasRelations then
-                let excludedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
-                let includedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+                let excludedPaths, includedPaths = Collection<'T>.mkRelationPathSets()
                 Relations.batchLoadDBRefProperties connection name typeof<'T> excludedPaths includedPaths [| (id, box entity) |]
                 Relations.batchLoadDBRefManyProperties connection name typeof<'T> excludedPaths includedPaths [| (id, box entity) |] this.InTransaction
                 Relations.captureRelationVersionForEntities connection name [| (id, box entity) |]
@@ -472,13 +471,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         connection.WithTransaction(fun conn ->
             let requiresRelationHandling = this.RequiresRelationDeleteHandling(conn)
             if requiresRelationHandling then
-                let tx: Relations.RelationTxContext = {
-                    Connection = conn
-                    OwnerTable = name
-                    OwnerType = typeof<'T>
-                    InTransaction = true
-                }
-                Relations.ensureSchemaForOwnerType tx typeof<'T>
+                let tx = this.ensureRelationTx conn
                 let oldRow = conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {| id = id |})
                 if isNull oldRow then
                     0
@@ -517,8 +510,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
             | json ->
                 let entity = fromSQLite<'T> json
                 if this.HasRelations then
-                    let excludedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
-                    let includedPaths = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+                    let excludedPaths, includedPaths = Collection<'T>.mkRelationPathSets()
                     Relations.batchLoadDBRefProperties connection name typeof<'T> excludedPaths includedPaths [| (json.Id.Value, box entity) |]
                     Relations.batchLoadDBRefManyProperties connection name typeof<'T> excludedPaths includedPaths [| (json.Id.Value, box entity) |] this.InTransaction
                     Relations.captureRelationVersionForEntities connection name [| (json.Id.Value, box entity) |]
@@ -608,14 +600,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
             connection.WithTransaction(fun conn ->
                 let requiresRelationHandling = this.RequiresRelationDeleteHandling(conn)
                 if requiresRelationHandling then
-                    let tx: Relations.RelationTxContext = {
-                        Connection = conn
-                        OwnerTable = name
-                        OwnerType = typeof<'T>
-                        InTransaction = true
-                    }
-                    Relations.ensureSchemaForOwnerType tx typeof<'T>
-
+                    let tx = this.ensureRelationTx conn
                     let oldRow = conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables)
                     if isNull oldRow then
                         0
