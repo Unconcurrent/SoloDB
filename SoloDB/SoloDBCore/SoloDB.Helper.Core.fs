@@ -95,12 +95,23 @@ module internal Helper =
 
             // Edge case 2: outbound-only references — this collection owns relations. Clean up link tables + catalog rows.
             let outboundRows =
-                connection.Query<{| Name: string |}>(
-                    "SELECT Name FROM SoloDBRelation WHERE OwnerCollection = @name",
+                connection.Query<{| Name: string; TargetCollection: string; RefKind: string |}>(
+                    "SELECT Name, TargetCollection, RefKind FROM SoloDBRelation WHERE OwnerCollection = @name",
                     {| name = name |})
                 |> Seq.toArray
             for row in outboundRows do
-                let linkTable = "SoloDBRelLink_" + row.Name
+                let canonicalLinkTable =
+                    RelationsTypes.canonicalManyRelationName name row.TargetCollection
+                    |> RelationsTypes.linkTableFromRelationName
+                let useSharedManyLinkTable =
+                    row.RefKind = RelationsTypes.relationKindToString RelationsTypes.Many
+                    && (StringComparer.Ordinal.Equals(name, row.TargetCollection)
+                        || connection.QueryFirst<int64>(
+                            "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @name) THEN 1 ELSE 0 END",
+                            {| name = canonicalLinkTable |}) = 1L)
+                let linkTable =
+                    if useSharedManyLinkTable then canonicalLinkTable
+                    else "SoloDBRelLink_" + row.Name
                 connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" linkTable) |> ignore
             if outboundRows.Length > 0 then
                 connection.Execute("DELETE FROM SoloDBRelation WHERE OwnerCollection = @name", {| name = name |}) |> ignore
