@@ -284,6 +284,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="item">The document to insert.</param>
     /// <returns>The ID of the newly inserted document.</returns>
     member this.Insert (item: 'T) =
+        if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if this.HasRelations then
             connection.WithTransaction(fun conn ->
                 let tx: Relations.RelationTxContext = {
@@ -308,6 +309,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="item">The document to insert or replace.</param>
     /// <returns>The ID of the inserted or replaced document.</returns>
     member this.InsertOrReplace (item: 'T) =
+        if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if this.HasRelations then
             connection.WithTransaction(fun conn ->
                 let tx: Relations.RelationTxContext = {
@@ -363,6 +365,8 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member this.InsertBatch (items: 'T seq) =
         if isNull items then raise (ArgumentNullException(nameof(items)))
         let items = items |> Seq.toArray
+        for item in items do
+            if isNull (box item) then raise (ArgumentNullException(nameof(items), "Batch contains a null element."))
 
         this.WithRelationAutoTx (fun transientCollection ->
             let connection = transientCollection.Connection.Get()
@@ -398,6 +402,8 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member this.InsertOrReplaceBatch (items: 'T seq) =
         if isNull items then raise (ArgumentNullException(nameof(items)))
         let items = items |> Seq.toArray
+        for item in items do
+            if isNull (box item) then raise (ArgumentNullException(nameof(items), "Batch contains a null element."))
 
         this.WithRelationAutoTx (fun transientCollection ->
             let connection = transientCollection.Connection.Get()
@@ -705,6 +711,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <exception cref="KeyNotFoundException">Thrown if no document with the item's ID is found.</exception>
     /// <exception cref="InvalidOperationException">Thrown if the document type does not have a recognizable ID property.</exception>
     member this.Update(item: 'T) =
+        if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         let filter, variables =
             if HasTypeId<'T>.Value then
                 let id = HasTypeId<'T>.Read item
