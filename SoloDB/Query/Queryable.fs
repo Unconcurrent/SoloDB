@@ -133,6 +133,15 @@ type private LoweredPredicate = {
     Predicate: Expression
 }
 
+type private KeySelectorRole =
+| DistinctByKey
+| GroupByKey
+
+type private LoweredKeySelector = {
+    Role: KeySelectorRole
+    KeyExpression: Expression
+}
+
 /// <summary>
 /// A private, mutable builder used to construct an SQL query from a LINQ expression tree.
 /// </summary>
@@ -306,6 +315,14 @@ module private QueryHelper =
     let private addLoweredPredicate (statements: ResizeArray<SQLSubquery>) (lowered: LoweredPredicate) =
         addFilter statements lowered.Predicate
 
+    let private lowerKeySelectorLambda (_sourceCtx: QueryContext) (_tableName: string) (expr: Expression) (role: KeySelectorRole) =
+        // Second migration-family seam: centralize key-selector lowering call sites
+        // while preserving the current KeyProjection behavior for the inner layer.
+        {
+            Role = role
+            KeyExpression = expr
+        }
+
     let addOrder (statements: ResizeArray<SQLSubquery>) (ordering: Expression) (descending: bool) =
         let current = ifSelectorNewStatement statements
         current.Orders.Clear()
@@ -322,6 +339,9 @@ module private QueryHelper =
                 last.Selector <- Some selector
         | _ ->
             (statements.Add << Simple) { emptySQLStatement () with Selector = Some selector }
+
+    let private addLoweredKeySelector (statements: ResizeArray<SQLSubquery>) (lowered: LoweredKeySelector) =
+        addSelector statements (KeyProjection lowered.KeyExpression)
 
     let addTake (statements: ResizeArray<SQLSubquery>) (e: Expression) =
         let current = simpleCurrent statements
@@ -635,11 +655,17 @@ module private QueryHelper =
                     QueryTranslator.translateQueryableWithContext sourceCtx layer.TableName selector builder.SQLiteCommand builder.Variables
                     builder.Append "AS Value " |> ignore
                 | Some (KeyProjection selector) ->
+                    let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
                     builder.Append "SELECT " |> ignore
                     builder.Append idColumn |> ignore
                     builder.Append ", " |> ignore
-                    builder.Append valueColumn |> ignore
-                    builder.Append " AS Value, " |> ignore
+                    if isTypePrimitive then
+                        builder.Append "jsonb_extract(" |> ignore
+                        builder.Append valueColumn |> ignore
+                        builder.Append ", '$') AS Value, " |> ignore
+                    else
+                        builder.Append valueColumn |> ignore
+                        builder.Append " AS Value, " |> ignore
                     QueryTranslator.translateQueryableWithContext currentCtx effectiveTableName selector builder.SQLiteCommand builder.Variables
                     builder.Append " AS __solodb_group_key " |> ignore
                 | Some (Raw func) ->
@@ -835,15 +861,16 @@ module private QueryHelper =
                     )
 
                 | DistinctBy ->
+                    addLoweredKeySelector statements (lowerKeySelectorLambda sourceCtx tableName m.Expressions.[0] DistinctByKey)
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "SELECT -1 AS Id, Value FROM (" |> ignore
+                        builder.Command.Append "SELECT o.Id AS Id, o.Value AS Value FROM (" |> ignore
+                        builder.Command.Append "SELECT o.Id AS Id, o.Value AS Value, ROW_NUMBER() OVER (PARTITION BY o.__solodb_group_key ORDER BY o.Id) AS __solodb_rn FROM (" |> ignore
                         builder.WriteInner()
-                        builder.Command.Append ") o GROUP BY " |> ignore
-                        QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                        builder.Command.Append ") o) o WHERE o.__solodb_rn = 1" |> ignore
                     )
 
                 | GroupBy ->
-                    addSelector statements (KeyProjection m.Expressions.[0])
+                    addLoweredKeySelector statements (lowerKeySelectorLambda sourceCtx tableName m.Expressions.[0] GroupByKey)
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
                         builder.Command.Append "SELECT -1 as Id, json_object('Key', o.__solodb_group_key" |> ignore
                         // Create an array of all items with the same key
