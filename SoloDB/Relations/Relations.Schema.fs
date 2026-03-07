@@ -631,7 +631,7 @@ let internal relationSchemaRequiresEnsure (connection: SqliteConnection) (ownerT
 
     // Check each current spec against stored state.
     let mutable needsEnsure = false
-    for (prop, kind, targetType, _typedIdType, onDelete, _onOwnerDelete, isUnique, _orderBy) in specs do
+    for (prop, kind, targetType, _typedIdType, onDelete, onOwnerDelete, isUnique, _orderBy) in specs do
         if not needsEnsure then
             match storedByProp.TryGetValue prop.Name with
             | false, _ ->
@@ -644,10 +644,12 @@ let internal relationSchemaRequiresEnsure (connection: SqliteConnection) (ownerT
                 let expectedTarget =
                     resolveTargetCollectionName connection ownerTable prop.Name targetType
                 let expectedOnDelete = onDelete.ToString()
+                let expectedOnOwnerDelete = onOwnerDelete.ToString()
                 let expectedIsUnique = if isUnique then 1L else 0L
                 if stored.RefKind <> expectedKind
                    || not (StringComparer.OrdinalIgnoreCase.Equals(stored.TargetCollection, expectedTarget))
                    || stored.OnDelete <> expectedOnDelete
+                   || stored.OnOwnerDelete <> expectedOnOwnerDelete
                    || stored.IsUnique <> expectedIsUnique then
                     needsEnsure <- true
                 storedByProp.Remove prop.Name |> ignore
