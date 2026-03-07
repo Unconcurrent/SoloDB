@@ -93,6 +93,7 @@ type private PreprocessedOrder = {
 
 type private SQLSelector =
 | Expression of Expression
+| KeyProjection of Expression
 | Raw of (string -> StringBuilder -> Dictionary<string, obj> -> unit)
 
 type private UsedSQLStatements = 
@@ -474,6 +475,27 @@ module private QueryHelper =
         elif sourceCtx.IncludedPaths.Count > 0 then sourceCtx.IncludedPaths.Contains(path)
         else true
 
+    let private cloneQueryContext (sourceCtx: QueryContext) =
+        let typeCollections = Dictionary(System.StringComparer.Ordinal)
+        for kv in sourceCtx.TypeCollections do
+            typeCollections.[kv.Key] <- HashSet<string>(kv.Value, System.StringComparer.Ordinal)
+        {
+            RootTable = sourceCtx.RootTable
+            RootGraph =
+                {
+                    Roots = ResizeArray(sourceCtx.RootGraph.Roots |> Seq.map id)
+                    SourceAliasCounter = sourceCtx.RootGraph.SourceAliasCounter
+                }
+            Joins = ResizeArray()
+            AliasCounter = 0
+            ExcludedPaths = HashSet(sourceCtx.ExcludedPaths, System.StringComparer.Ordinal)
+            IncludedPaths = HashSet(sourceCtx.IncludedPaths, System.StringComparer.Ordinal)
+            RelationTargets = Dictionary(sourceCtx.RelationTargets, System.StringComparer.Ordinal)
+            RelationLinks = Dictionary(sourceCtx.RelationLinks, System.StringComparer.Ordinal)
+            RelationOwnerUsesSource = Dictionary(sourceCtx.RelationOwnerUsesSource, System.StringComparer.Ordinal)
+            TypeCollections = typeCollections
+        }
+
     let private serializeForCollection (value: 'T) =
         struct (
             match typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T> with
@@ -566,25 +588,35 @@ module private QueryHelper =
                     builder.Append "\""
                 
             | Simple layer ->
+                let currentCtx = cloneQueryContext sourceCtx
+                let effectiveTableName = if i = 0 then layer.TableName else "o"
                 // Track Value column position for potential json_set materialization.
                 // mutable because it's set inside the match below but used after JOIN discovery.
                 let mutable valueColumnRange = ValueNone
 
                 // Qualify column names with table name when present (needed for JOINed queries).
-                let hasTableName = not (String.IsNullOrEmpty layer.TableName)
-                let idColumn = if hasTableName then sprintf "\"%s\".Id" layer.TableName else "Id"
-                let valueColumn = if hasTableName then sprintf "\"%s\".Value" layer.TableName else "Value"
+                let hasTableName = not (String.IsNullOrEmpty effectiveTableName)
+                let idColumn = if hasTableName then sprintf "\"%s\".Id" effectiveTableName else "Id"
+                let valueColumn = if hasTableName then sprintf "\"%s\".Value" effectiveTableName else "Value"
 
                 match layer.Selector with
                 | Some (Expression selector) ->
                     builder.Append "SELECT " |> ignore
                     builder.Append idColumn |> ignore
                     builder.Append ", " |> ignore
-                    QueryTranslator.translateQueryableWithContext sourceCtx layer.TableName selector builder.SQLiteCommand builder.Variables
+                    QueryTranslator.translateQueryableWithContext currentCtx effectiveTableName selector builder.SQLiteCommand builder.Variables
                     builder.Append "AS Value " |> ignore
+                | Some (KeyProjection selector) ->
+                    builder.Append "SELECT " |> ignore
+                    builder.Append idColumn |> ignore
+                    builder.Append ", " |> ignore
+                    builder.Append valueColumn |> ignore
+                    builder.Append " AS Value, " |> ignore
+                    QueryTranslator.translateQueryableWithContext currentCtx effectiveTableName selector builder.SQLiteCommand builder.Variables
+                    builder.Append " AS __solodb_group_key " |> ignore
                 | Some (Raw func) ->
                     builder.Append "SELECT " |> ignore
-                    func layer.TableName builder.SQLiteCommand builder.Variables
+                    func effectiveTableName builder.SQLiteCommand builder.Variables
                 | None ->
                     let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
                     if isTypePrimitive then
@@ -613,16 +645,16 @@ module private QueryHelper =
                     else
                         builder.Append "(" |> ignore
                         writeLayer (i - 1)
-                        builder.Append ")" |> ignore
-                        ValueNone
+                        builder.Append ") AS \"o\"" |> ignore
+                        ValueSome builder.SQLiteCommand.Length
 
-                writeClauses sourceCtx builder layer layer.TableName
+                writeClauses currentCtx builder layer effectiveTableName
 
                 // After expression translation, emit LEFT JOINs + materialization SELECT rewriting.
                 // JOINs are discovered during writeClauses but appear between FROM "Table" and WHERE.
                 match joinInsertPoint with
                 | ValueSome pos ->
-                    match sourceCtx.Joins.Count > 0 with
+                    match currentCtx.Joins.Count > 0 with
                     | true ->
                         // Step 1: Rewrite SELECT Value → json_set(Value, ...) for materialization.
                         // Do this FIRST because it's earlier in the string — adjusting joinInsertPoint afterward.
@@ -631,13 +663,13 @@ module private QueryHelper =
                         | ValueSome struct(vStart, vEnd) ->
                             let jsonSetSb = StringBuilder()
                             jsonSetSb.Append("jsonb_set(\"") |> ignore
-                            jsonSetSb.Append(layer.TableName) |> ignore
+                            jsonSetSb.Append(effectiveTableName) |> ignore
                             jsonSetSb.Append("\".Value") |> ignore
                             let mutable hasMaterialization = false
-                            for j in sourceCtx.Joins do
+                            for j in currentCtx.Joins do
                                 // Skip materialization for excluded paths — the DBRef stays as raw integer (Unloaded).
                                 // The JOIN itself is still emitted (needed for WHERE/ORDER BY).
-                                if shouldLoadRelationPath sourceCtx j.PropertyPath then
+                                if shouldLoadRelationPath currentCtx j.PropertyPath then
                                     hasMaterialization <- true
                                     jsonSetSb.Append(", '$.") |> ignore
                                     jsonSetSb.Append(j.PropertyPath) |> ignore
@@ -648,7 +680,7 @@ module private QueryHelper =
                                     jsonSetSb.Append(".Id, ") |> ignore
                                     jsonSetSb.Append(j.TargetAlias) |> ignore
                                     jsonSetSb.Append(".Value) ELSE jsonb_extract(\"") |> ignore
-                                    jsonSetSb.Append(layer.TableName) |> ignore
+                                    jsonSetSb.Append(effectiveTableName) |> ignore
                                     jsonSetSb.Append("\".Value, '$.") |> ignore
                                     jsonSetSb.Append(j.PropertyPath) |> ignore
                                     jsonSetSb.Append("') END") |> ignore
@@ -658,7 +690,7 @@ module private QueryHelper =
                                 // All joins are excluded — no materialization needed, keep original qualified Value
                                 jsonSetSb.Clear() |> ignore
                                 jsonSetSb.Append("\"") |> ignore
-                                jsonSetSb.Append(layer.TableName) |> ignore
+                                jsonSetSb.Append(effectiveTableName) |> ignore
                                 jsonSetSb.Append("\".Value ") |> ignore
                             let replacement = jsonSetSb.ToString()
                             let originalLen = vEnd - vStart
@@ -670,7 +702,7 @@ module private QueryHelper =
                         // Step 2: Insert LEFT JOIN clauses after FROM "TableName".
                         let adjustedPos = pos + posAdjustment
                         let joinSql = StringBuilder()
-                        for j in sourceCtx.Joins do
+                        for j in currentCtx.Joins do
                             joinSql.Append(' ') |> ignore
                             joinSql.Append(j.JoinKind) |> ignore
                             joinSql.Append(" \"") |> ignore
@@ -762,28 +794,31 @@ module private QueryHelper =
                 | Max ->
                     raiseIfNullAggregateTranslator sourceCtx "MAX" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
                 
-                | Distinct 
+                | Distinct ->
+                    addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
+                        builder.Command.Append "SELECT -1 AS Id, Value FROM (" |> ignore
+                        builder.WriteInner()
+                        builder.Command.Append ") o GROUP BY " |> ignore
+                        QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
+                    )
+
                 | DistinctBy ->
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
                         builder.Command.Append "SELECT -1 AS Id, Value FROM (" |> ignore
                         builder.WriteInner()
                         builder.Command.Append ") o GROUP BY " |> ignore
-                        match m.Expressions.Length with
-                        | 0 -> QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
-                        | 1 -> QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName m.Expressions.[0] builder.Command builder.Vars
-                        | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
+                        QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName m.Expressions.[0] builder.Command builder.Vars
                     )
 
                 | GroupBy ->
+                    addSelector statements (KeyProjection m.Expressions.[0])
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "SELECT -1 as Id, json_object('Key', " |> ignore
-                        QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                        builder.Command.Append "SELECT -1 as Id, json_object('Key', o.__solodb_group_key" |> ignore
                         // Create an array of all items with the same key
-                        builder.Command.Append ", 'Items', json_group_array(Value)) as Value FROM (" |> ignore
+                        builder.Command.Append ", 'Items', json_group_array(o.Value)) as Value FROM (" |> ignore
                         builder.WriteInner()
                         // Group by the key selector
-                        builder.Command.Append ") o GROUP BY " |> ignore
-                        QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName m.Expressions.[0] builder.Command builder.Vars
+                        builder.Command.Append ") o GROUP BY o.__solodb_group_key" |> ignore
                     )
 
                 | Count
