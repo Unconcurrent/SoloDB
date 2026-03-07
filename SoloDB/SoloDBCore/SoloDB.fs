@@ -284,6 +284,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="item">The document to insert.</param>
     /// <returns>The ID of the newly inserted document.</returns>
     member this.Insert (item: 'T) =
+        if isNull (box item) then nullArg "item"
         if this.HasRelations then
             connection.WithTransaction(fun conn ->
                 let tx: Relations.RelationTxContext = {
@@ -703,6 +704,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <exception cref="KeyNotFoundException">Thrown if no document with the item's ID is found.</exception>
     /// <exception cref="InvalidOperationException">Thrown if the document type does not have a recognizable ID property.</exception>
     member this.Update(item: 'T) =
+        if isNull (box item) then nullArg "item"
         let filter, variables =
             if HasTypeId<'T>.Value then
                 let id = HasTypeId<'T>.Read item
@@ -910,6 +912,8 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member this.UpdateMany(transform: Expression<System.Action<'T>> array)(filter: Expression<Func<'T, bool>>) =
         let transform = nullArgCheck (nameof transform) transform
         let filter = nullArgCheck (nameof filter) filter
+        if transform |> Array.exists isNull then
+            raise (ArgumentException("transform cannot contain null elements.", nameof(transform)))
         match transform.Length with
         | 0 -> 0 // If no transformations provided.
         | _ ->
