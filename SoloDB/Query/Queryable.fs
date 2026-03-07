@@ -188,6 +188,29 @@ module private QueryHelper =
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote -> ue.Operand
         | _ -> expr
 
+    /// Try to extract a relation JSON path from a lambda expression.
+    /// For `o => o.Customer.Value.Rating`, returns Some "$.Customer[1].Rating".
+    /// Only handles DBRef<T>.Value.Property single-hop patterns.
+    /// Caller is responsible for guarding that the relation will be materialized.
+    let private tryExtractRelationJsonPath (expr: Expression) : string option =
+        let unwrapped = unwrapQuotedLambda expr
+        match unwrapped with
+        | :? LambdaExpression as lambda ->
+            // Pattern: param.RelProp.Value.ScalarProp
+            match lambda.Body with
+            | :? MemberExpression as outerMember ->
+                let scalarProp = outerMember.Member.Name
+                match outerMember.Expression with
+                | :? MemberExpression as valueMember when valueMember.Member.Name = "Value" ->
+                    match valueMember.Expression with
+                    | :? MemberExpression as _relMember ->
+                        let relProp = _relMember.Member.Name
+                        Some (sprintf "$.%s[1].%s" relProp scalarProp)
+                    | _ -> None
+                | _ -> None
+            | _ -> None
+        | _ -> None
+
     let private expressionFingerprint (expr: Expression) =
         let unwrapped = unwrapQuotedLambda expr
         match unwrapped with
@@ -748,8 +771,12 @@ module private QueryHelper =
                         builder.Append valueColumn |> ignore
                         builder.Append ", '$') AS Value, " |> ignore
                     else
+                        let vStart = builder.SQLiteCommand.Length
                         builder.Append valueColumn |> ignore
-                        builder.Append " AS Value, " |> ignore
+                        builder.Append " AS Value" |> ignore
+                        let vEnd = builder.SQLiteCommand.Length
+                        valueColumnRange <- ValueSome struct(vStart, vEnd)
+                        builder.Append ", " |> ignore
                     QueryTranslator.translateQueryableWithContext currentCtx effectiveTableName selector builder.SQLiteCommand builder.Variables
                     builder.Append " AS __solodb_group_key " |> ignore
                 | Some (Raw func) ->
@@ -925,6 +952,22 @@ module private QueryHelper =
                         ))
                         pendingDistinctByScalarReuse <- None
                         isPostScalarProjection <- true
+                    | Some lowered when lowered.RelationAccess = HasRelationAccess ->
+                        // C12 path: post-DistinctBy Select on a DIFFERENT relation scalar than
+                        // the DistinctBy key. The base layer will materialize the relation into
+                        // Value via jsonb_set, so we extract from the materialized JSON payload.
+                        match tryExtractRelationJsonPath m.Expressions.[0] with
+                        | Some jsonPath ->
+                            let capturedPath = jsonPath
+                            addSelector statements (Raw (fun _tableName builder _vars ->
+                                builder.Append "-1 AS Id, jsonb_extract(Value, '" |> ignore
+                                builder.Append capturedPath |> ignore
+                                builder.Append "') AS Value " |> ignore
+                            ))
+                            isPostScalarProjection <- true
+                        | None ->
+                            addSelector statements (Expression m.Expressions.[0])
+                        pendingDistinctByScalarReuse <- None
                     | _ ->
                         addSelector statements (Expression m.Expressions.[0])
                         pendingDistinctByScalarReuse <- None
