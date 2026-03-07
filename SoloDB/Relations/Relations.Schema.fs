@@ -248,6 +248,30 @@ let private validateConflictingPolicies (ownerType: Type) (descriptors: Relation
                     $"Error: Conflicting relation policies detected on '{ownerType.FullName}'.\nReason: {kindName} properties ({propNames}) targeting '{targetType.FullName}' do not agree on delete-policy settings.\nFix: Use consistent OnDelete/OnOwnerDelete/Unique settings for relations to the same target type."))
         )
 
+let private validateCrossKindConflictingPolicies (ownerType: Type) (descriptors: RelationDescriptor array) =
+    descriptors
+    |> Array.groupBy (fun d -> d.TargetType)
+    |> Array.iter (fun (targetType, grp) ->
+        if grp.Length > 1 then
+            let kinds =
+                grp
+                |> Array.map _.Kind
+                |> Array.distinct
+            if kinds.Length > 1 then
+                let variants =
+                    grp
+                    |> Array.map (fun d -> d.OnDelete, d.OnOwnerDelete, d.IsUnique)
+                    |> Array.distinct
+                if variants.Length > 1 then
+                    let propNames =
+                        grp
+                        |> Array.map (fun d -> d.Property.Name)
+                        |> Array.sort
+                    let propNames = String.Join(", ", propNames)
+                    raise (InvalidOperationException(
+                        $"Error: Conflicting relation policies detected on '{ownerType.FullName}'.\nReason: Mixed DBRef/DBRefMany properties ({propNames}) targeting '{targetType.FullName}' do not agree on delete-policy settings.\nFix: Use consistent OnDelete/OnOwnerDelete/Unique settings for relations to the same target type."))
+        )
+
 let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) =
     let ownerTable = formatName tx.OwnerTable
     let descriptors =
@@ -299,6 +323,7 @@ let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) 
 
     validateSharedManyContradictions ownerType ownerTable descriptors
     validateConflictingPolicies ownerType descriptors
+    validateCrossKindConflictingPolicies ownerType descriptors
     descriptors
 
 let private br05Message (ownerTable: string) (propertyName: string) (phase: string) =
