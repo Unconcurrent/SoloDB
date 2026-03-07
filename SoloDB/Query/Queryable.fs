@@ -879,6 +879,9 @@ module private QueryHelper =
 
         let mutable tableName = ""
         let mutable pendingDistinctByScalarReuse : LoweredKeySelector option = None
+        // Set when Select consumes a carried scalar slot (DistinctBy → Select reuse path).
+        // Terminal zero-arg aggregates use this to consume Value directly instead of retranslating.
+        let mutable isPostScalarProjection = false
         let preprocessed = preprocessQuery e |> Seq.toArray
 
         // Register Include/Exclude paths up-front so behavior is deterministic regardless method-call order.
@@ -921,6 +924,7 @@ module private QueryHelper =
                             builder.Append "__solodb_scalar_slot0 AS Value " |> ignore
                         ))
                         pendingDistinctByScalarReuse <- None
+                        isPostScalarProjection <- true
                     | _ ->
                         addSelector statements (Expression m.Expressions.[0])
                         pendingDistinctByScalarReuse <- None
@@ -954,18 +958,50 @@ module private QueryHelper =
                     addTake statements m.Expressions.[0]
 
                 | Sum ->
-                    // SUM() return NULL if all elements are NULL, TOTAL() return 0.0.
-                    // TOTAL() always returns a float, therefore we will just check for NULL
-                    zeroIfNullAggregateTranslator sourceCtx "SUM" statements m.OriginalMethod m.Expressions
+                    if isPostScalarProjection && m.Expressions.Length = 0 then
+                        addSelector statements (Raw (fun _tableName builder _vars ->
+                            builder.Append "-1 AS Id, COALESCE(SUM(jsonb_extract(Value, '$')),0) AS Value " |> ignore
+                        ))
+                    else
+                        // SUM() return NULL if all elements are NULL, TOTAL() return 0.0.
+                        // TOTAL() always returns a float, therefore we will just check for NULL
+                        zeroIfNullAggregateTranslator sourceCtx "SUM" statements m.OriginalMethod m.Expressions
 
                 | Average ->
-                    raiseIfNullAggregateTranslator sourceCtx "AVG" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
+                    if isPostScalarProjection && m.Expressions.Length = 0 then
+                        addSelector statements (Raw (fun _tableName builder _vars ->
+                            builder.Append "-1 AS Id, AVG(jsonb_extract(Value, '$')) AS Value " |> ignore
+                        ))
+                        addSelector statements (Raw (fun _tableName builder _vars ->
+                            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN NULL ELSE -1 END AS Id, " |> ignore
+                            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN 'Sequence contains no elements' ELSE Value END AS Value " |> ignore
+                        ))
+                    else
+                        raiseIfNullAggregateTranslator sourceCtx "AVG" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
 
                 | Min ->
-                    raiseIfNullAggregateTranslator sourceCtx "MIN" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
+                    if isPostScalarProjection && m.Expressions.Length = 0 then
+                        addSelector statements (Raw (fun _tableName builder _vars ->
+                            builder.Append "-1 AS Id, MIN(jsonb_extract(Value, '$')) AS Value " |> ignore
+                        ))
+                        addSelector statements (Raw (fun _tableName builder _vars ->
+                            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN NULL ELSE -1 END AS Id, " |> ignore
+                            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN 'Sequence contains no elements' ELSE Value END AS Value " |> ignore
+                        ))
+                    else
+                        raiseIfNullAggregateTranslator sourceCtx "MIN" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
 
                 | Max ->
-                    raiseIfNullAggregateTranslator sourceCtx "MAX" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
+                    if isPostScalarProjection && m.Expressions.Length = 0 then
+                        addSelector statements (Raw (fun _tableName builder _vars ->
+                            builder.Append "-1 AS Id, MAX(jsonb_extract(Value, '$')) AS Value " |> ignore
+                        ))
+                        addSelector statements (Raw (fun _tableName builder _vars ->
+                            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN NULL ELSE -1 END AS Id, " |> ignore
+                            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN 'Sequence contains no elements' ELSE Value END AS Value " |> ignore
+                        ))
+                    else
+                        raiseIfNullAggregateTranslator sourceCtx "MAX" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
                 
                 | Distinct ->
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
