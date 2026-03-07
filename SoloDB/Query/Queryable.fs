@@ -147,6 +147,8 @@ type private KeySelectorRole =
 type private LoweredKeySelector = {
     Role: KeySelectorRole
     KeyExpression: Expression
+    RelationAccess: RelationAccessKind
+    Fingerprint: string
 }
 
 /// <summary>
@@ -179,6 +181,69 @@ type private QueryableBuilder =
 /// Contains private helper functions for translating LINQ expression trees to SQL.
 /// </summary>
 module private QueryHelper =
+    let private unwrapQuotedLambda (expr: Expression) =
+        match expr with
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote -> ue.Operand
+        | _ -> expr
+
+    let private expressionFingerprint (expr: Expression) =
+        let unwrapped = unwrapQuotedLambda expr
+        match unwrapped with
+        | :? LambdaExpression as lambda -> lambda.Body.ToString()
+        | _ -> unwrapped.ToString()
+
+    let rec private detectRelationAccessNode (expr: Expression) =
+        if isNull expr then false
+        else
+            match expr with
+            | :? MemberExpression as m ->
+                let declaring = m.Member.DeclaringType
+                let hitsRelationMember =
+                    not (isNull declaring)
+                    && declaring.IsGenericType
+                    && (
+                        declaring.GetGenericTypeDefinition() = typedefof<DBRef<_>>
+                        || declaring.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
+                    )
+                hitsRelationMember || detectRelationAccessNode m.Expression
+            | :? MethodCallExpression as m ->
+                let declaring = m.Method.DeclaringType
+                let hitsRelationCall =
+                    not (isNull declaring)
+                    && declaring.IsGenericType
+                    && declaring.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
+                hitsRelationCall
+                || (not (isNull m.Object) && detectRelationAccessNode m.Object)
+                || (m.Arguments |> Seq.exists detectRelationAccessNode)
+            | :? LambdaExpression as l ->
+                detectRelationAccessNode l.Body
+            | :? UnaryExpression as u ->
+                detectRelationAccessNode u.Operand
+            | :? BinaryExpression as b ->
+                detectRelationAccessNode b.Left || detectRelationAccessNode b.Right
+            | :? ConditionalExpression as c ->
+                detectRelationAccessNode c.Test
+                || detectRelationAccessNode c.IfTrue
+                || detectRelationAccessNode c.IfFalse
+            | :? InvocationExpression as i ->
+                detectRelationAccessNode i.Expression || (i.Arguments |> Seq.exists detectRelationAccessNode)
+            | :? NewArrayExpression as na ->
+                na.Expressions |> Seq.exists detectRelationAccessNode
+            | :? NewExpression as n ->
+                n.Arguments |> Seq.exists detectRelationAccessNode
+            | :? MemberInitExpression as mi ->
+                detectRelationAccessNode mi.NewExpression
+                || (mi.Bindings |> Seq.exists (function
+                    | :? MemberAssignment as ma -> detectRelationAccessNode ma.Expression
+                    | _ -> false))
+            | :? ListInitExpression as li ->
+                detectRelationAccessNode li.NewExpression
+                || (li.Initializers |> Seq.exists (fun init -> init.Arguments |> Seq.exists detectRelationAccessNode))
+            | _ -> false
+
+    let private detectRelationAccess (expr: Expression) =
+        if detectRelationAccessNode expr then HasRelationAccess else NoRelationAccess
+
     /// <summary>
     /// Parses a method name string into a <c>SupportedLinqMethods</c> option.
     /// </summary>
@@ -312,56 +377,7 @@ module private QueryHelper =
             addNewQuery ()
 
     let private lowerPredicateLambda (_sourceCtx: QueryContext) (_tableName: string) (expr: Expression) (role: PredicateRole) =
-        let rec detectRelationAccessNode (expr: Expression) =
-            if isNull expr then false
-            else
-                match expr with
-                | :? MemberExpression as m ->
-                    let declaring = m.Member.DeclaringType
-                    let hitsRelationMember =
-                        not (isNull declaring)
-                        && declaring.IsGenericType
-                        && (
-                            declaring.GetGenericTypeDefinition() = typedefof<DBRef<_>>
-                            || declaring.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
-                        )
-                    hitsRelationMember || detectRelationAccessNode m.Expression
-                | :? MethodCallExpression as m ->
-                    let declaring = m.Method.DeclaringType
-                    let hitsRelationCall =
-                        not (isNull declaring)
-                        && declaring.IsGenericType
-                        && declaring.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
-                    hitsRelationCall
-                    || (not (isNull m.Object) && detectRelationAccessNode m.Object)
-                    || (m.Arguments |> Seq.exists detectRelationAccessNode)
-                | :? LambdaExpression as l ->
-                    detectRelationAccessNode l.Body
-                | :? UnaryExpression as u ->
-                    detectRelationAccessNode u.Operand
-                | :? BinaryExpression as b ->
-                    detectRelationAccessNode b.Left || detectRelationAccessNode b.Right
-                | :? ConditionalExpression as c ->
-                    detectRelationAccessNode c.Test
-                    || detectRelationAccessNode c.IfTrue
-                    || detectRelationAccessNode c.IfFalse
-                | :? InvocationExpression as i ->
-                    detectRelationAccessNode i.Expression || (i.Arguments |> Seq.exists detectRelationAccessNode)
-                | :? NewArrayExpression as na ->
-                    na.Expressions |> Seq.exists detectRelationAccessNode
-                | :? NewExpression as n ->
-                    n.Arguments |> Seq.exists detectRelationAccessNode
-                | :? MemberInitExpression as mi ->
-                    detectRelationAccessNode mi.NewExpression
-                    || (mi.Bindings |> Seq.exists (function
-                        | :? MemberAssignment as ma -> detectRelationAccessNode ma.Expression
-                        | _ -> false))
-                | :? ListInitExpression as li ->
-                    detectRelationAccessNode li.NewExpression
-                    || (li.Initializers |> Seq.exists (fun init -> init.Arguments |> Seq.exists detectRelationAccessNode))
-                | _ -> false
-        let relationAccess =
-            if detectRelationAccessNode expr then HasRelationAccess else NoRelationAccess
+        let relationAccess = detectRelationAccess expr
         // First migration-family seam: centralize predicate lowering call sites
         // while preserving the current translator and payload behavior byte-for-byte.
         {
@@ -381,6 +397,8 @@ module private QueryHelper =
         {
             Role = role
             KeyExpression = expr
+            RelationAccess = detectRelationAccess expr
+            Fingerprint = expressionFingerprint expr
         }
 
     let addOrder (statements: ResizeArray<SQLSubquery>) (ordering: Expression) (descending: bool) =
@@ -856,6 +874,7 @@ module private QueryHelper =
         statements.Add (emptySQLStatement () |> Simple)
 
         let mutable tableName = ""
+        let mutable pendingDistinctByScalarReuse : LoweredKeySelector option = None
         let preprocessed = preprocessQuery e |> Seq.toArray
 
         // Register Include/Exclude paths up-front so behavior is deterministic regardless method-call order.
@@ -878,11 +897,27 @@ module private QueryHelper =
             | Method m ->
                 let inline simpleCurrent() = simpleCurrent statements
 
+                if m.Value <> Select && m.Value <> DistinctBy then
+                    pendingDistinctByScalarReuse <- None
+
                 match m.Value with
                 | Where -> 
                     addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName m.Expressions.[0] WherePredicate)
                 | Select ->
-                    addSelector statements (Expression m.Expressions.[0])
+                    let selectFingerprint = expressionFingerprint m.Expressions.[0]
+                    match pendingDistinctByScalarReuse with
+                    | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = selectFingerprint ->
+                        addSelector statements (Raw (fun tableName builder _vars ->
+                            let hasTableName = not (String.IsNullOrEmpty tableName)
+                            let idColumn = if hasTableName then sprintf "\"%s\".Id" tableName else "Id"
+                            builder.Append idColumn |> ignore
+                            builder.Append " AS Id, " |> ignore
+                            builder.Append "__solodb_scalar_slot0 AS Value " |> ignore
+                        ))
+                        pendingDistinctByScalarReuse <- None
+                    | _ ->
+                        addSelector statements (Expression m.Expressions.[0])
+                        pendingDistinctByScalarReuse <- None
                 | Order | OrderDescending ->
                     addOrder statements (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) (m.Value = OrderDescending)
                 | OrderBy | OrderByDescending  ->
@@ -924,10 +959,21 @@ module private QueryHelper =
                     )
 
                 | DistinctBy ->
-                    addLoweredKeySelector statements (lowerKeySelectorLambda sourceCtx tableName m.Expressions.[0] DistinctByKey)
+                    let lowered = lowerKeySelectorLambda sourceCtx tableName m.Expressions.[0] DistinctByKey
+                    addLoweredKeySelector statements lowered
+                    pendingDistinctByScalarReuse <-
+                        match lowered.RelationAccess with
+                        | HasRelationAccess -> Some lowered
+                        | NoRelationAccess -> None
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "SELECT o.Id AS Id, o.Value AS Value FROM (" |> ignore
-                        builder.Command.Append "SELECT o.Id AS Id, o.Value AS Value, ROW_NUMBER() OVER (PARTITION BY o.__solodb_group_key ORDER BY o.Id) AS __solodb_rn FROM (" |> ignore
+                        builder.Command.Append "SELECT o.Id AS Id, o.Value AS Value" |> ignore
+                        if lowered.RelationAccess = HasRelationAccess then
+                            builder.Command.Append ", o.__solodb_scalar_slot0 AS __solodb_scalar_slot0" |> ignore
+                        builder.Command.Append " FROM (" |> ignore
+                        builder.Command.Append "SELECT o.Id AS Id, o.Value AS Value" |> ignore
+                        if lowered.RelationAccess = HasRelationAccess then
+                            builder.Command.Append ", o.__solodb_group_key AS __solodb_scalar_slot0" |> ignore
+                        builder.Command.Append ", ROW_NUMBER() OVER (PARTITION BY o.__solodb_group_key ORDER BY o.Id) AS __solodb_rn FROM (" |> ignore
                         builder.WriteInner()
                         builder.Command.Append ") o) o WHERE o.__solodb_rn = 1" |> ignore
                     )
