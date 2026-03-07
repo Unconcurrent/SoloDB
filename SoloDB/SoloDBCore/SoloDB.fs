@@ -1460,29 +1460,34 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         this.CheckDisposed()
         if name.StartsWith "SoloDB" then raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
-        lock ddlLock (fun () ->
-            // Transaction callback returns unit; Collection construction stays outside.
-            // Relation schema validation runs after createTableInner inside the transaction.
-            connectionManager.WithTransaction(fun connection ->
-                let shouldCreate = not (Helper.existsCollection name connection)
-                if shouldCreate then
-                    Helper.createTableInner<'T> name connection
+        let existsAlready =
+            use connection = connectionManager.Borrow()
+            Helper.existsCollection name connection
 
-                Helper.registerTypeCollection<'T> name connection
+        if not existsAlready then
+            lock ddlLock (fun () ->
+                // Transaction callback returns unit; Collection construction stays outside.
+                // Relation schema validation runs after createTableInner inside the transaction.
+                connectionManager.WithTransaction(fun connection ->
+                    let shouldCreate = not (Helper.existsCollection name connection)
+                    if shouldCreate then
+                        Helper.createTableInner<'T> name connection
 
-                // Validate relation topology after table creation but before returning.
-                // Must run after createTableInner so self-referential types don't hit "table already exists".
-                let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
-                if hasRelations then
-                    let relationTx: Relations.RelationTxContext = {
-                        Connection = connection
-                        OwnerTable = name
-                        OwnerType = typeof<'T>
-                        InTransaction = true
-                    }
-                    Relations.ensureSchemaForOwnerType relationTx typeof<'T>
+                    Helper.registerTypeCollection<'T> name connection
+
+                    // Validate relation topology after table creation but before returning.
+                    // Must run after createTableInner so self-referential types don't hit "table already exists".
+                    let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
+                    if hasRelations then
+                        let relationTx: Relations.RelationTxContext = {
+                            Connection = connection
+                            OwnerTable = name
+                            OwnerType = typeof<'T>
+                            InTransaction = true
+                        }
+                        Relations.ensureSchemaForOwnerType relationTx typeof<'T>
+                )
             )
-        )
 
         Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = this.ClearCache; EventSystem = this.Events }) :> ISoloDBCollection<'T>
 
