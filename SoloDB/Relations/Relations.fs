@@ -346,11 +346,7 @@ let private cloneOwnerForReplaceMany (ownerType: Type) (owner: obj) =
     clone
 
 let private incrementRelationVersion (tx: RelationTxContext) (ownerId: int64) =
-    let qOwner = quoteIdentifier tx.OwnerTable
-    tx.Connection.Execute(
-        $"UPDATE {qOwner} SET Metadata = jsonb_set(COALESCE(Metadata, jsonb('{{}}')), @path, " +
-        "jsonb(CAST(COALESCE(jsonb_extract(Metadata, @path), 0) + 1 AS TEXT))) WHERE Id = @id;",
-        {| path = relationVersionMetadataPath; id = ownerId |}) |> ignore
+    incrementRelationVersionForTable tx.Connection tx.OwnerTable ownerId
 
 let private runSyncWithOwnerIdGuard (opName: string) (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) (updateOwnerJson: bool) =
     ensureTxContext tx

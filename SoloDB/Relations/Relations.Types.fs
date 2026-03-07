@@ -259,6 +259,15 @@ let internal getLoadedRelationVersion (entity: obj) =
 
 let [<Literal>] internal relationVersionMetadataPath = "$.RelationVersion"
 
+/// Increment the RelationVersion in the Metadata column for a given owner table and entity id.
+/// Shared by Relations.fs (sync paths) and Relations.Delete.fs (delete traversal).
+let internal incrementRelationVersionForTable (connection: SqliteConnection) (ownerTable: string) (ownerId: int64) =
+    let qOwner = quoteIdentifier (formatName ownerTable)
+    connection.Execute(
+        $"UPDATE {qOwner} SET Metadata = jsonb_set(COALESCE(Metadata, jsonb('{{}}')), @path, " +
+        "jsonb(CAST(COALESCE(jsonb_extract(Metadata, @path), 0) + 1 AS TEXT))) WHERE Id = @id;",
+        {| path = relationVersionMetadataPath; id = ownerId |}) |> ignore
+
 /// Read the current persisted RelationVersion from the Metadata column. Returns 0 if not set.
 let internal readPersistedRelationVersion (connection: SqliteConnection) (ownerTable: string) (ownerId: int64) =
     let qOwner = quoteIdentifier ownerTable
