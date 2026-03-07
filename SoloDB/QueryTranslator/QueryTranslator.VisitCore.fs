@@ -966,7 +966,9 @@ module internal QueryTranslatorVisitCore =
         | ExpressionType.OrElse
         | ExpressionType.Or -> qb.AppendRaw(" OR ") |> ignore
         | ExpressionType.Equal -> if isAnyNull then qb.AppendRaw(" IS ") else qb.AppendRaw(" = ") |> ignore
-        | ExpressionType.NotEqual -> if isAnyNull then qb.AppendRaw(" IS NOT ") else qb.AppendRaw(" <> ") |> ignore
+        | ExpressionType.NotEqual ->
+            if isAnyNull || involvesDBRefValueAccess left || involvesDBRefValueAccess right
+            then qb.AppendRaw(" IS NOT ") else qb.AppendRaw(" <> ") |> ignore
         | ExpressionType.LessThan -> qb.AppendRaw(" < ") |> ignore
         | ExpressionType.LessThanOrEqual -> qb.AppendRaw(" <= ") |> ignore
         | ExpressionType.GreaterThan -> qb.AppendRaw(" > ") |> ignore

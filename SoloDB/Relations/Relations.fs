@@ -159,6 +159,11 @@ let prepareUpsert (tx: RelationTxContext) (oldOwner: obj voption) (newOwner: obj
                     if newId > 0L then ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, newId))
                     else ops.Add(SetDBRefToNone(descriptor.PropertyPath, descriptor.TargetType))
             | Many ->
+                let trackerObj = (RelationsAccessorCache.compiledPropGetter descriptor.Property).Invoke(newOwner)
+                if isNull trackerObj then
+                    raise (ArgumentNullException(
+                        descriptor.Property.Name,
+                        $"Error: DBRefMany property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' is null.\nReason: DBRefMany<T> properties must not be set to null.\nFix: Use an empty DBRefMany<T> (new()) or call Clear() to remove all links."))
                 match collectManyTargetIdsAndCascade tx descriptor newOwner true visited with
                 | ValueSome ids ->
                     resetMap.[descriptor.Property.Name] <- ids

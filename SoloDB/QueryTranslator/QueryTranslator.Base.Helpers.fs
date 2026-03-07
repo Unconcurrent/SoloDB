@@ -297,3 +297,19 @@ module internal QueryTranslatorBaseHelpers =
             | JsonSerializator.JsonValue.Number _
             | JsonSerializator.JsonValue.String _ ->
                 compareJson qb "$" json
+
+    /// Returns true if the expression traverses through DBRef<T>.Value,
+    /// indicating a LEFT JOIN that may produce NULL for None-ref rows.
+    let rec internal involvesDBRefValueAccess (expr: Expression) : bool =
+        let unwrap (e: Expression) =
+            match e with
+            | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> ue.Operand
+            | x -> x
+        match unwrap expr with
+        | :? MemberExpression as me when me.Member.Name = "Value" && not (isNull me.Expression) && DBRefTypeHelpers.isDBRefType (unwrap me.Expression).Type ->
+            true
+        | :? MemberExpression as me when not (isNull me.Expression) ->
+            involvesDBRefValueAccess me.Expression
+        | :? MethodCallExpression as mc when mc.Method.Name = "Invoke" && mc.Arguments.Count > 0 ->
+            mc.Arguments |> Seq.exists involvesDBRefValueAccess
+        | _ -> false
