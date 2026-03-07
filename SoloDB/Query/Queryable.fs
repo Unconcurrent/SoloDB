@@ -775,18 +775,16 @@ module private QueryHelper =
                 | Count
                 | CountBy
                 | LongCount ->
+                    match m.Expressions.Length with
+                    | 0 -> ()
+                    | 1 -> addFilter statements m.Expressions.[0]
+                    | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
+
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
                         builder.Command.Append "SELECT COUNT(Id) as Value FROM " |> ignore
                         builder.Command.Append "(" |> ignore
                         builder.WriteInner()
                         builder.Command.Append ") o " |> ignore
-
-                        match m.Expressions.Length with
-                        | 0 -> ()
-                        | 1 -> 
-                            builder.Command.Append "WHERE " |> ignore
-                            QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName m.Expressions.[0] builder.Command builder.Vars
-                        | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                     )
                 
                 
