@@ -226,42 +226,34 @@ module internal QueryTranslatorBaseHelpers =
                 else
                     qb.AppendRaw " AND "
 
+            let inline emitJsonExtractAtPath (qb: QueryBuilder) (path: string) =
+                writeAnd qb
+                qb.AppendRaw "jsonb_extract("
+                writeTarget qb
+                qb.AppendRaw ", '"
+                qb.AppendRaw path
+                qb.AppendRaw "')"
+
             let rec compareJson (qb: QueryBuilder) (path: string) (json: JsonSerializator.JsonValue) =
 
                 match json with
                 | JsonSerializator.JsonValue.Null ->
-                    writeAnd qb
-                    qb.AppendRaw "jsonb_extract("
-                    writeTarget qb
-                    qb.AppendRaw ", '"
-                    qb.AppendRaw path
-                    qb.AppendRaw "') IS NULL"
+                    emitJsonExtractAtPath qb path
+                    qb.AppendRaw " IS NULL"
 
                 | JsonSerializator.JsonValue.Boolean b ->
-                    writeAnd qb
-                    qb.AppendRaw "jsonb_extract("
-                    writeTarget qb
-                    qb.AppendRaw ", '"
-                    qb.AppendRaw path
-                    qb.AppendRaw "') = "
+                    emitJsonExtractAtPath qb path
+                    qb.AppendRaw " = "
                     qb.AppendVariable b
 
                 | JsonSerializator.JsonValue.Number n ->
-                    writeAnd qb
-                    qb.AppendRaw "jsonb_extract("
-                    writeTarget qb
-                    qb.AppendRaw ", '"
-                    qb.AppendRaw path
-                    qb.AppendRaw "') = "
+                    emitJsonExtractAtPath qb path
+                    qb.AppendRaw " = "
                     qb.AppendVariable n
 
                 | JsonSerializator.JsonValue.String s ->
-                    writeAnd qb
-                    qb.AppendRaw "jsonb_extract("
-                    writeTarget qb
-                    qb.AppendRaw ", '"
-                    qb.AppendRaw path
-                    qb.AppendRaw "') = "
+                    emitJsonExtractAtPath qb path
+                    qb.AppendRaw " = "
                     qb.AppendVariable s
 
                 | JsonSerializator.JsonValue.Object dict ->
