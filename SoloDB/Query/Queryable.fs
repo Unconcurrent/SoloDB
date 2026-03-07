@@ -874,7 +874,9 @@ module private QueryHelper =
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
                         builder.Command.Append "SELECT -1 as Id, json_object('Key', o.__solodb_group_key" |> ignore
                         // Create an array of all items with the same key
-                        builder.Command.Append ", 'Items', json_group_array(o.Value)) as Value FROM (" |> ignore
+                        // Inject row Id into each grouped item payload so deserialization
+                        // reconstructs correct entity identity (Id lives outside Value blob).
+                        builder.Command.Append ", 'Items', json_group_array(jsonb_set(o.Value, '$.Id', o.Id))) as Value FROM (" |> ignore
                         builder.WriteInner()
                         // Group by the key selector
                         builder.Command.Append ") o GROUP BY o.__solodb_group_key" |> ignore
