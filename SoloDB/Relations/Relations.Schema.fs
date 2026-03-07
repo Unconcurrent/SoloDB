@@ -76,6 +76,16 @@ let rec private containsNestedRelationRefType (t: Type) =
     else
         false
 
+let private validateRelationTargetType (ownerType: Type) (prop: PropertyInfo) (targetType: Type) =
+    if targetType.IsInterface then
+        raise (InvalidOperationException(
+            $"Error: Invalid relation target on {ownerType.FullName}.{prop.Name}.\nReason: Target type '{targetType.FullName}' is an interface.\nFix: Use a concrete class with a writable int64 Id property."))
+    elif targetType.IsAbstract then
+        raise (InvalidOperationException(
+            $"Error: Invalid relation target on {ownerType.FullName}.{prop.Name}.\nReason: Target type '{targetType.FullName}' is abstract.\nFix: Use a concrete class with a writable int64 Id property."))
+    else
+        getWritableInt64IdPropertyOrThrow targetType |> ignore
+
 let private buildRelationSpecs (ownerType: Type) =
     ownerType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
     |> Array.choose (fun prop ->
@@ -102,6 +112,8 @@ let private buildRelationSpecs (ownerType: Type) =
                     let onOwnerDelete = if isNull attr then DeletePolicy.Deletion else attr.OnOwnerDelete
                     let isUnique = not (isNull attr) && attr.Unique
                     let kind = if DBRefTypeHelpers.isDBRefManyDefinition generic then Many else Single
+
+                    validateRelationTargetType ownerType prop targetType
 
                     match kind, onOwnerDelete with
                     | Single, DeletePolicy.Cascade
@@ -216,6 +228,26 @@ let private validateSharedManyContradictions (ownerType: Type) (ownerTable: stri
             let propNames = grp |> Array.map (fun d -> d.Property.Name) |> Array.sort
             raise (InvalidOperationException(br04Message ownerType ownerTable linkTable propNames)))
 
+let private validateConflictingPolicies (ownerType: Type) (descriptors: RelationDescriptor array) =
+    descriptors
+    |> Array.groupBy (fun d -> d.Kind, d.TargetType)
+    |> Array.iter (fun ((kind, targetType), grp) ->
+        if grp.Length > 1 then
+            let variants =
+                grp
+                |> Array.map (fun d -> d.OnDelete, d.OnOwnerDelete, d.IsUnique)
+                |> Array.distinct
+            if variants.Length > 1 then
+                let propNames =
+                    grp
+                    |> Array.map (fun d -> d.Property.Name)
+                    |> Array.sort
+                let propNames = String.Join(", ", propNames)
+                let kindName = if kind = Single then "DBRef" else "DBRefMany"
+                raise (InvalidOperationException(
+                    $"Error: Conflicting relation policies detected on '{ownerType.FullName}'.\nReason: {kindName} properties ({propNames}) targeting '{targetType.FullName}' do not agree on delete-policy settings.\nFix: Use consistent OnDelete/OnOwnerDelete/Unique settings for relations to the same target type."))
+        )
+
 let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) =
     let ownerTable = formatName tx.OwnerTable
     let descriptors =
@@ -266,6 +298,7 @@ let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) 
         })
 
     validateSharedManyContradictions ownerType ownerTable descriptors
+    validateConflictingPolicies ownerType descriptors
     descriptors
 
 let private br05Message (ownerTable: string) (propertyName: string) (phase: string) =

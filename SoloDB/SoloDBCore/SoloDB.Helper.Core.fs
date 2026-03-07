@@ -32,7 +32,7 @@ module internal Helper =
         value.Replace("'", "''")
 
     let internal normalizeCatalogNameOrThrow (step: string) (name: string) =
-        let normalized = Utils.formatName name
+        let normalized = Utils.sanitizeName name
         if String.IsNullOrWhiteSpace name || normalized <> name then
             raise (InvalidOperationException($"Schema migration failed at {step}. Invalid collection name in SoloDBCollections: '{name}'."))
         normalized
@@ -220,7 +220,10 @@ module internal Helper =
     /// <param name="name">The raw collection name.</param>
     /// <returns>A sanitized name containing only letters, digits, and underscores.</returns>
     let internal formatName (name: string) =
-        Utils.formatName (name)
+        Utils.sanitizeName name
+
+    let internal validateUserCollectionName (name: string) =
+        Utils.validateUserCollectionName name
 
     /// <summary>
     /// Creates a Dictionary from a sequence of KeyValuePairs.

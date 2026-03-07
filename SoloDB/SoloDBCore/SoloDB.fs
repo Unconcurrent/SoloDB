@@ -1248,7 +1248,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
     /// <param name="name">The custom name for the collection.</param>
     /// <returns>An <c>ISoloDBCollection<'T></c> instance.</returns>
     member this.GetCollection<'T>(name) =       
-        this.InitializeCollection<'T>(Helper.formatName name)
+        this.InitializeCollection<'T>(Helper.validateUserCollectionName name)
 
     /// <summary>
     /// Gets a collection that stores untyped JSON data.
@@ -1256,7 +1256,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
     /// <param name="name">The name for the collection.</param>
     /// <returns>An <c>ISoloDBCollection<JsonValue></c> instance.</returns>
     member this.GetUntypedCollection(name: string) =
-        let name = name |> Helper.formatName
+        let name = name |> Helper.validateUserCollectionName
         
         this.InitializeCollection<JsonSerializator.JsonValue>(name)
 
@@ -1266,7 +1266,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
     /// <param name="name">The name of the collection.</param>
     /// <returns>True if the collection exists, otherwise false.</returns>
     member this.CollectionExists name =
-        let name = Helper.formatName name
+        let name = Helper.validateUserCollectionName name
         Helper.existsCollection name connection
 
     /// <summary>
@@ -1284,7 +1284,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
     /// <param name="name">The name of the collection to drop.</param>
     /// <returns>True if the collection was dropped, false if it did not exist.</returns>
     member this.DropCollectionIfExists name =
-        let name = Helper.formatName name
+        let name = Helper.validateUserCollectionName name
 
         if Helper.existsCollection name connection then
             Helper.dropCollection name connection
@@ -1499,7 +1499,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <param name="name">The custom name for the collection.</param>
     /// <returns>An <c>ISoloDBCollection<'T></c> instance.</returns>
     member this.GetCollection<'T>(name) =       
-        this.InitializeCollection<'T>(Helper.formatName name)
+        this.InitializeCollection<'T>(Helper.validateUserCollectionName name)
 
     /// <summary>
     /// Gets a collection that stores untyped JSON data.
@@ -1507,7 +1507,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <param name="name">The name for the collection.</param>
     /// <returns>An <c>ISoloDBCollection<JsonValue></c> instance.</returns>
     member this.GetUntypedCollection(name: string) =
-        let name = name |> Helper.formatName
+        let name = name |> Helper.validateUserCollectionName
         
         this.InitializeCollection<JsonSerializator.JsonValue>(name)
 
@@ -1518,6 +1518,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <returns>True if the collection exists, otherwise false.</returns>
     member this.CollectionExists name =
         this.CheckDisposed()
+        let name = Helper.validateUserCollectionName name
         use dbConnection = connectionManager.Borrow()
         Helper.existsCollection name dbConnection
 
@@ -1539,7 +1540,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <returns>True if the collection was dropped, false if it did not exist.</returns>
     member this.DropCollectionIfExists name =
         this.CheckDisposed()
-        let name = Helper.formatName name
+        let name = Helper.validateUserCollectionName name
 
         lock ddlLock (fun () ->
             connectionManager.WithTransaction(fun connection ->

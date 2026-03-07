@@ -113,7 +113,7 @@ module Utils =
         then Some fullname
         else None
 
-    let internal formatName (name: string) =
+    let internal sanitizeName (name: string) =
         let inline charOk (c: char) = Char.IsLetterOrDigit c || c = '_'
         let mutable allOk = true
         for i = 0 to name.Length - 1 do
@@ -124,8 +124,29 @@ module Utils =
         else
             String(name.ToCharArray() |> Array.filter(fun c -> charOk c)) // Anti SQL injection
 
+    let internal formatName (name: string) =
+        sanitizeName name
+
+    let internal validateUserCollectionName (name: string) =
+        if isNull name then
+            nullArg "name"
+        elif String.IsNullOrWhiteSpace name then
+            raise (ArgumentException("Collection name must not be empty or whitespace.", "name"))
+        else
+            let normalized = sanitizeName name
+            if normalized.Length = 0 || normalized <> name then
+                raise (ArgumentException(
+                    "Collection name may contain only ASCII letters, digits, and underscore.",
+                    "name"))
+            normalized
+
     let internal collectionNameOf<'T> =
-        let formattedName = typeof<'T>.Name |> formatName
+        let formattedName =
+            typeof<'T>.Name
+            |> sanitizeName
+        if String.IsNullOrWhiteSpace formattedName then
+            raise (InvalidOperationException(
+                $"Error: Type-derived collection name for '{typeof<'T>.FullName}' is empty after normalization.\nReason: The CLR type name contains no usable letters, digits, or underscore characters.\nFix: Use GetCollection<'T>(name) with an explicit valid collection name."))
         fun () -> formattedName
 
     let internal collectionNameOfBytes<'T> =
