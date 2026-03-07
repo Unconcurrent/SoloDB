@@ -343,7 +343,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     | ValueNone -> ValueNone, ValueNone
 
                 match oldOwnerId with
-                | ValueSome ownerId -> Relations.applyOwnerDeletePolicies tx name ownerId
+                | ValueSome ownerId -> Relations.applyOwnerReplacePolicies tx name ownerId
                 | ValueNone -> ()
 
                 let plan = Relations.prepareUpsert tx oldOwner (box item)
@@ -440,7 +440,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                         | ValueNone -> ValueNone, ValueNone
 
                     match oldOwnerId with
-                    | ValueSome ownerId -> Relations.applyOwnerDeletePolicies tx name ownerId
+                    | ValueSome ownerId -> Relations.applyOwnerReplacePolicies tx name ownerId
                     | ValueNone -> ()
 
                     let plan = Relations.prepareUpsert tx oldOwner (box item)

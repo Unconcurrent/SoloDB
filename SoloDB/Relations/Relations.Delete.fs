@@ -70,7 +70,7 @@ let internal hasOutgoingRestrictLinkToGuardedEntity (deleteCtx: DeleteTraversalC
                 let key = $"{formatName row.TargetCollection}|{targetId}"
                 guard.Contains(key)))
 
-let rec internal applyOwnerDeletePoliciesCore (deleteCtx: DeleteTraversalContext) (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) (deleteTargets: bool) =
+let rec internal applyOwnerDeletePoliciesCore (deleteCtx: DeleteTraversalContext) (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) (deleteTargets: bool) (skipRestrict: bool) =
     ensureTxContext tx
     ensureTransaction tx
     if String.IsNullOrWhiteSpace ownerTable then
@@ -96,8 +96,12 @@ let rec internal applyOwnerDeletePoliciesCore (deleteCtx: DeleteTraversalContext
                 match parseOnOwnerDeletePolicy row.OnOwnerDelete with
                 | DeletePolicy.Restrict ->
                     if hasLinks then
-                        raise (InvalidOperationException(
-                            $"Error: Cannot delete owner '{ownerTable}' Id={ownerId}.\nReason: Relation '{row.PropertyName}' uses OnOwnerDelete=Restrict and still has links.\nFix: Remove related links or change the delete policy before deleting."))
+                        if skipRestrict then
+                            tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
+                            incrementRelationVersionForOwner tx ownerTable ownerId
+                        else
+                            raise (InvalidOperationException(
+                                $"Error: Cannot delete owner '{ownerTable}' Id={ownerId}.\nReason: Relation '{row.PropertyName}' uses OnOwnerDelete=Restrict and still has links.\nFix: Remove related links or change the delete policy before deleting."))
                 | DeletePolicy.Unlink ->
                     if hasLinks then
                         tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
@@ -115,7 +119,7 @@ let rec internal applyOwnerDeletePoliciesCore (deleteCtx: DeleteTraversalContext
                                     if not (deleteCtx.GuardSet.Contains(targetKey)) &&
                                        not (hasOutgoingRestrictLinkToGuardedEntity deleteCtx tx targetTable targetId) then
                                         applyTargetDeletePoliciesCore deleteCtx tx targetTable targetId
-                                        applyOwnerDeletePoliciesCore deleteCtx tx targetTable targetId true
+                                        applyOwnerDeletePoliciesCore deleteCtx tx targetTable targetId true false
                                         tx.Connection.Execute($"DELETE FROM {quoteIdentifier targetTable} WHERE Id = @id;", {| id = targetId |}) |> ignore
                 | DeletePolicy.Cascade ->
                     raise (InvalidOperationException(
@@ -128,8 +132,12 @@ let rec internal applyOwnerDeletePoliciesCore (deleteCtx: DeleteTraversalContext
                 match parseOnOwnerDeletePolicy row.OnOwnerDelete with
                 | DeletePolicy.Restrict ->
                     if hasLinks then
-                        raise (InvalidOperationException(
-                            $"Error: Cannot delete owner '{ownerTable}' Id={ownerId}.\nReason: Relation '{row.PropertyName}' uses OnOwnerDelete=Restrict and still has links.\nFix: Remove related links or change the delete policy before deleting."))
+                        if skipRestrict then
+                            tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
+                            incrementRelationVersionForOwner tx ownerTable ownerId
+                        else
+                            raise (InvalidOperationException(
+                                $"Error: Cannot delete owner '{ownerTable}' Id={ownerId}.\nReason: Relation '{row.PropertyName}' uses OnOwnerDelete=Restrict and still has links.\nFix: Remove related links or change the delete policy before deleting."))
                 | DeletePolicy.Unlink ->
                     if hasLinks then
                         tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
@@ -147,7 +155,7 @@ let rec internal applyOwnerDeletePoliciesCore (deleteCtx: DeleteTraversalContext
                                     if not (deleteCtx.GuardSet.Contains(targetKey)) &&
                                        not (hasOutgoingRestrictLinkToGuardedEntity deleteCtx tx targetTable targetId) then
                                         applyTargetDeletePoliciesCore deleteCtx tx targetTable targetId
-                                        applyOwnerDeletePoliciesCore deleteCtx tx targetTable targetId true
+                                        applyOwnerDeletePoliciesCore deleteCtx tx targetTable targetId true false
                                         tx.Connection.Execute($"DELETE FROM {quoteIdentifier targetTable} WHERE Id = @id;", {| id = targetId |}) |> ignore
                 | DeletePolicy.Cascade ->
                     raise (InvalidOperationException(
@@ -201,7 +209,7 @@ and internal applyTargetDeletePoliciesCore (deleteCtx: DeleteTraversalContext) (
                         let ownerKey = $"{ownerTable}|{ownerId}"
                         if not (deleteCtx.GuardSet.Contains(ownerKey)) then
                             applyTargetDeletePoliciesCore deleteCtx tx ownerTable ownerId
-                            applyOwnerDeletePoliciesCore deleteCtx tx ownerTable ownerId true
+                            applyOwnerDeletePoliciesCore deleteCtx tx ownerTable ownerId true false
                             if globalRefCountCore tx ownerTable ownerId = 0L then
                                 tx.Connection.Execute($"DELETE FROM {qOwner} WHERE Id = @id;", {| id = ownerId |}) |> ignore
 

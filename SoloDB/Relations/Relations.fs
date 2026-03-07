@@ -419,7 +419,7 @@ let syncDeleteOwner (tx: RelationTxContext) (plan: RelationDeletePlan) =
     let deleteCtx = createDeleteTraversalContext()
     withRelationSqliteWrap "sync" "syncDeleteOwner" (fun () ->
         ensureRelationCatalogTable tx.Connection
-        applyOwnerDeletePoliciesCore deleteCtx tx tx.OwnerTable plan.OwnerId true
+        applyOwnerDeletePoliciesCore deleteCtx tx tx.OwnerTable plan.OwnerId true false
         applyTargetDeletePoliciesCore deleteCtx tx tx.OwnerTable plan.OwnerId
     )
 
@@ -437,7 +437,18 @@ let applyOwnerDeletePolicies (tx: RelationTxContext) (ownerTable: string) (owner
     let deleteCtx = createDeleteTraversalContext()
     withRelationSqliteWrap "delete" "applyOwnerDeletePolicies" (fun () ->
         ensureRelationCatalogTable tx.Connection
-        applyOwnerDeletePoliciesCore deleteCtx tx ownerTable ownerId false
+        applyOwnerDeletePoliciesCore deleteCtx tx ownerTable ownerId false false
+    )
+
+let applyOwnerReplacePolicies (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) =
+    ensureTxContext tx
+    ensureTransaction tx
+    if String.IsNullOrWhiteSpace ownerTable then raise (ArgumentException("ownerTable is required.", "ownerTable"))
+    if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
+    let deleteCtx = createDeleteTraversalContext()
+    withRelationSqliteWrap "replace" "applyOwnerReplacePolicies" (fun () ->
+        ensureRelationCatalogTable tx.Connection
+        applyOwnerDeletePoliciesCore deleteCtx tx ownerTable ownerId false true
     )
 
 let globalRefCount (tx: RelationTxContext) (targetTable: string) (targetId: int64) =
