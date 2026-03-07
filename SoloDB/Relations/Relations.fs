@@ -352,36 +352,25 @@ let private incrementRelationVersion (tx: RelationTxContext) (ownerId: int64) =
         "jsonb(CAST(COALESCE(jsonb_extract(Metadata, @path), 0) + 1 AS TEXT))) WHERE Id = @id;",
         {| path = relationVersionMetadataPath; id = ownerId |}) |> ignore
 
-let syncInsert (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) =
+let private runSyncWithOwnerIdGuard (opName: string) (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) (updateOwnerJson: bool) =
     ensureTxContext tx
     ensureTransaction tx
     if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
-    withRelationSqliteWrap "sync" "syncInsert" (fun () ->
+    withRelationSqliteWrap "sync" opName (fun () ->
         ensureSchemaForOwnerType tx tx.OwnerType
-        applyOps tx ownerId plan false
-        if plan.Ops.Length > 0 then incrementRelationVersion tx ownerId
-    )
-
-let syncUpsert (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) =
-    ensureTxContext tx
-    ensureTransaction tx
-    if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
-    withRelationSqliteWrap "sync" "syncUpsert" (fun () ->
-        ensureSchemaForOwnerType tx tx.OwnerType
-        applyOps tx ownerId plan false
-        if plan.Ops.Length > 0 then incrementRelationVersion tx ownerId
-    )
-
-let syncUpdate (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) =
-    ensureTxContext tx
-    ensureTransaction tx
-    if ownerId <= 0L then raise (ArgumentOutOfRangeException("ownerId", ownerId, "ownerId must be > 0."))
-    withRelationSqliteWrap "sync" "syncUpdate" (fun () ->
-        ensureSchemaForOwnerType tx tx.OwnerType
-        let updateOwnerJson = plan.Kind = RelationPlanKind.UpdateMany
         applyOps tx ownerId plan updateOwnerJson
         if plan.Ops.Length > 0 then incrementRelationVersion tx ownerId
     )
+
+let syncInsert (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) =
+    runSyncWithOwnerIdGuard "syncInsert" tx ownerId plan false
+
+let syncUpsert (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) =
+    runSyncWithOwnerIdGuard "syncUpsert" tx ownerId plan false
+
+let syncUpdate (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) =
+    let updateOwnerJson = plan.Kind = RelationPlanKind.UpdateMany
+    runSyncWithOwnerIdGuard "syncUpdate" tx ownerId plan updateOwnerJson
 
 let syncReplaceOne (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newOwner: obj) =
     ensureTxContext tx

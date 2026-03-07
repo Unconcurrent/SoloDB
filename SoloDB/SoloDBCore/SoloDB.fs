@@ -278,6 +278,52 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
             let transientCollection = Collection<'T>(directConnection, name, connectionString, parentData)
             f transientCollection)
 
+    member private this.mkRelationTx (conn: SqliteConnection) : Relations.RelationTxContext = {
+        Connection = conn
+        OwnerTable = name
+        OwnerType = typeof<'T>
+        InTransaction = true
+    }
+
+    member private this.ensureRelationTx (conn: SqliteConnection) : Relations.RelationTxContext =
+        let tx = this.mkRelationTx conn
+        Relations.ensureSchemaForOwnerType tx typeof<'T>
+        tx
+
+    member private this.tryEnsureRelationTx (conn: SqliteConnection) : Relations.RelationTxContext voption =
+        if this.HasRelations then
+            ValueSome (this.ensureRelationTx conn)
+        else
+            ValueNone
+
+    member private this.setSerializedItem (variables: IDictionary<string, obj>) (item: 'T) =
+        variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+
+    member private this.tryLoadExistingOwnerForUpsert (conn: SqliteConnection) (item: 'T) : obj voption * int64 voption =
+        let oldRow =
+            if HasTypeId<'T>.Value then
+                let id = HasTypeId<'T>.Read item
+                if id > 0L then
+                    match conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {| id = id |}) with
+                    | row when Object.ReferenceEquals(row, null) -> ValueNone
+                    | row -> ValueSome row
+                else
+                    ValueNone
+            else
+                match CustomTypeId<'T>.Value with
+                | Some customId ->
+                    let idValue = customId.GetId(item |> box)
+                    let idProp = customId.Property
+                    let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = idValue))
+                    match conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
+                    | row when Object.ReferenceEquals(row, null) -> ValueNone
+                    | row -> ValueSome row
+                | None -> ValueNone
+
+        match oldRow with
+        | ValueSome row -> ValueSome (fromSQLite<'T> row |> box), ValueSome row.Id.Value
+        | ValueNone -> ValueNone, ValueNone
+
     /// <summary>
     /// Inserts a new document into the collection.
     /// </summary>
@@ -287,13 +333,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if this.HasRelations then
             connection.WithTransaction(fun conn ->
-                let tx: Relations.RelationTxContext = {
-                    Connection = conn
-                    OwnerTable = name
-                    OwnerType = typeof<'T>
-                    InTransaction = true
-                }
-                Relations.ensureSchemaForOwnerType tx typeof<'T>
+                let tx = this.ensureRelationTx conn
                 let plan = Relations.prepareInsert tx (box item)
                 let id = Helper.insertInner this.IncludeType item conn name this
                 Relations.syncInsert tx id plan
@@ -312,37 +352,8 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if this.HasRelations then
             connection.WithTransaction(fun conn ->
-                let tx: Relations.RelationTxContext = {
-                    Connection = conn
-                    OwnerTable = name
-                    OwnerType = typeof<'T>
-                    InTransaction = true
-                }
-                Relations.ensureSchemaForOwnerType tx typeof<'T>
-
-                let oldRow =
-                    if HasTypeId<'T>.Value then
-                        let id = HasTypeId<'T>.Read item
-                        if id > 0L then
-                            match conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {| id = id |}) with
-                            | row when Object.ReferenceEquals(row, null) -> ValueNone
-                            | row -> ValueSome row
-                        else ValueNone
-                    else
-                        match CustomTypeId<'T>.Value with
-                        | Some customId ->
-                            let idValue = customId.GetId(item |> box)
-                            let idProp = customId.Property
-                            let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = idValue))
-                            match conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
-                            | row when Object.ReferenceEquals(row, null) -> ValueNone
-                            | row -> ValueSome row
-                        | None -> ValueNone
-
-                let oldOwner, oldOwnerId =
-                    match oldRow with
-                    | ValueSome row -> ValueSome (fromSQLite<'T> row |> box), ValueSome row.Id.Value
-                    | ValueNone -> ValueNone, ValueNone
+                let tx = this.ensureRelationTx conn
+                let oldOwner, oldOwnerId = this.tryLoadExistingOwnerForUpsert conn item
 
                 match oldOwnerId with
                 | ValueSome ownerId -> Relations.applyOwnerReplacePolicies tx name ownerId
@@ -370,17 +381,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
 
         this.WithRelationAutoTx (fun transientCollection ->
             let connection = transientCollection.Connection.Get()
-            let tx =
-                if this.HasRelations then
-                    let x: Relations.RelationTxContext = {
-                        Connection = connection
-                        OwnerTable = name
-                        OwnerType = typeof<'T>
-                        InTransaction = true
-                    }
-                    Relations.ensureSchemaForOwnerType x typeof<'T>
-                    ValueSome x
-                else ValueNone
+            let tx = this.tryEnsureRelationTx connection
 
             let ids = List<int64>()
             for item in items do
@@ -407,45 +408,13 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
 
         this.WithRelationAutoTx (fun transientCollection ->
             let connection = transientCollection.Connection.Get()
-            let tx =
-                if this.HasRelations then
-                    let x: Relations.RelationTxContext = {
-                        Connection = connection
-                        OwnerTable = name
-                        OwnerType = typeof<'T>
-                        InTransaction = true
-                    }
-                    Relations.ensureSchemaForOwnerType x typeof<'T>
-                    ValueSome x
-                else ValueNone
+            let tx = this.tryEnsureRelationTx connection
 
             let ids = List<int64>()
             for item in items do
                 match tx with
                 | ValueSome tx ->
-                    let oldRow =
-                        if HasTypeId<'T>.Value then
-                            let id = HasTypeId<'T>.Read item
-                            if id > 0L then
-                                match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {| id = id |}) with
-                                | row when Object.ReferenceEquals(row, null) -> ValueNone
-                                | row -> ValueSome row
-                            else ValueNone
-                        else
-                            match CustomTypeId<'T>.Value with
-                            | Some customId ->
-                                let idValue = customId.GetId(item |> box)
-                                let idProp = customId.Property
-                                let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = idValue))
-                                match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
-                                | row when Object.ReferenceEquals(row, null) -> ValueNone
-                                | row -> ValueSome row
-                            | None -> ValueNone
-
-                    let oldOwner, oldOwnerId =
-                        match oldRow with
-                        | ValueSome row -> ValueSome (fromSQLite<'T> row |> box), ValueSome row.Id.Value
-                        | ValueNone -> ValueNone, ValueNone
+                    let oldOwner, oldOwnerId = this.tryLoadExistingOwnerForUpsert connection item
 
                     match oldOwnerId with
                     | ValueSome ownerId -> Relations.applyOwnerReplacePolicies tx name ownerId
@@ -727,13 +696,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
 
         if this.HasRelations then
             connection.WithTransaction(fun conn ->
-                let tx: Relations.RelationTxContext = {
-                    Connection = conn
-                    OwnerTable = name
-                    OwnerType = typeof<'T>
-                    InTransaction = true
-                }
-                Relations.ensureSchemaForOwnerType tx typeof<'T>
+                let tx = this.ensureRelationTx conn
 
                 let oldRow = conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables)
                 if isNull oldRow then
@@ -745,7 +708,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths [| (oldRow.Id.Value, box oldOwner) |] true
                 let writePlan = Relations.prepareUpdate tx oldRow.Id.Value (box oldOwner) (box item)
 
-                variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+                this.setSerializedItem variables item
                 let count = conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
                 if count <= 0 then
                     raise (KeyNotFoundException "Could not Update any entities with specified Id.")
@@ -754,7 +717,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
             )
         else
             use conn = connection.Get()
-            variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+            this.setSerializedItem variables item
             let count = conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
             if count <= 0 then
                 raise (KeyNotFoundException "Could not Update any entities with specified Id.")
@@ -848,13 +811,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         let filter, variables = QueryTranslator.translate name filter
         if this.HasRelations then
             connection.WithTransaction(fun conn ->
-                let tx: Relations.RelationTxContext = {
-                    Connection = conn
-                    OwnerTable = name
-                    OwnerType = typeof<'T>
-                    InTransaction = true
-                }
-                Relations.ensureSchemaForOwnerType tx typeof<'T>
+                let tx = this.ensureRelationTx conn
 
                 let oldRows = conn.Query<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter}", variables) |> Seq.toArray
                 if oldRows.Length = 0 then
@@ -867,12 +824,12 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     let ownerPairs = Array.zip ownerIds oldOwners
                     Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths ownerPairs true
                     Relations.syncReplaceMany tx (ownerIds :> seq<_>) (oldOwners :> seq<_>) (box item)
-                    variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+                    this.setSerializedItem variables item
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
             )
         else
             use conn = connection.Get()
-            variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+            this.setSerializedItem variables item
             conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
 
     /// <summary>
@@ -887,13 +844,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         let filter, variables = QueryTranslator.translate name filter
         if this.HasRelations then
             connection.WithTransaction(fun conn ->
-                let tx: Relations.RelationTxContext = {
-                    Connection = conn
-                    OwnerTable = name
-                    OwnerType = typeof<'T>
-                    InTransaction = true
-                }
-                Relations.ensureSchemaForOwnerType tx typeof<'T>
+                let tx = this.ensureRelationTx conn
 
                 let oldRow = conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE ({filter}) LIMIT 1", variables)
                 if isNull oldRow then
@@ -904,12 +855,12 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     let includedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
                     Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths [| (oldRow.Id.Value, box oldOwner) |] true
                     Relations.syncReplaceOne tx oldRow.Id.Value (box oldOwner) (box item)
-                    variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+                    this.setSerializedItem variables item
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id = @id", {| item = variables.["item"]; id = oldRow.Id.Value |})
             )
         else
             use conn = connection.Get()
-            variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+            this.setSerializedItem variables item
             conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filter}) LIMIT 1)", variables)
 
     /// <summary>
@@ -937,13 +888,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
 
         if this.HasRelations then
             connection.WithTransaction(fun conn ->
-                let tx: Relations.RelationTxContext = {
-                    Connection = conn
-                    OwnerTable = name
-                    OwnerType = typeof<'T>
-                    InTransaction = true
-                }
-                Relations.ensureSchemaForOwnerType tx typeof<'T>
+                let tx = this.ensureRelationTx conn
 
                 let selectedRows =
                     if relationTransforms.Count = 0 && jsonTransforms.Count = 0 then
