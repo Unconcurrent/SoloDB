@@ -178,6 +178,42 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member private this.RequiresRelationDeleteHandling(connection: SqliteConnection) =
         this.HasRelations || this.HasIncomingRelations(connection)
 
+    member private this.SelectMutationRows(connection: SqliteConnection, filter: Expression<Func<'T, bool>>, takeOne: bool) =
+        let filtered = Queryable.Where(this.SoloDBQueryable, filter)
+        let expression =
+            if takeOne then Queryable.Take(filtered, 1).Expression
+            else filtered.Expression
+        let query, variables = QueryableTranslation.startFilterTranslationWithConnection connection this expression
+        connection.Query<DbObjectRow>(query, variables) |> Seq.toArray
+
+    member private this.ExecuteJsonUpdateManyByRows(connection: SqliteConnection, rows: DbObjectRow array, expressions: ResizeArray<Expression<System.Action<'T>>>) =
+        if expressions.Count = 0 || rows.Length = 0 then
+            0
+        else
+            let variables = Dictionary<string, obj>()
+            let fullSQL = StringBuilder()
+            let inline append (txt: string) = ignore (fullSQL.Append txt)
+
+            append "UPDATE \""
+            append name
+            append "\" SET Value = jsonb_set(Value, "
+
+            for expression in expressions do
+                QueryTranslator.translateUpdateMode name expression fullSQL variables
+
+            fullSQL.Remove(fullSQL.Length - 1, 1) |> ignore
+            append ") WHERE Id IN ("
+
+            for i in 0 .. rows.Length - 1 do
+                if i > 0 then append ","
+                let key = $"id{i}"
+                append "@"
+                append key
+                variables.[key] <- rows.[i].Id.Value :> obj
+
+            append ")"
+            connection.Execute(fullSQL.ToString(), variables)
+
     /// <summary>Gets the event registration API for this collection.</summary>
     member val private Events: ISoloDBCollectionEvents<'T> =
         let createDb (directConnection: SqliteConnection) (guard: unit -> unit) : ISoloDB =
@@ -723,7 +759,6 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
         connection.WithTransaction(fun conn ->
             let requiresRelationHandling = this.RequiresRelationDeleteHandling(conn)
-            let filter, variables = QueryTranslator.translate name filter
 
             if requiresRelationHandling then
                 let tx: Relations.RelationTxContext = {
@@ -734,7 +769,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 }
                 Relations.ensureSchemaForOwnerType tx typeof<'T>
 
-                let rows = conn.Query<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter}", variables) |> Seq.toArray
+                let rows = this.SelectMutationRows(conn, filter, false)
                 if rows.Length = 0 then
                     0
                 else
@@ -755,6 +790,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     let sql = $"DELETE FROM \"{name}\" WHERE Id IN ({idList})"
                     conn.Execute(sql, deleteVars)
             else
+                let filter, variables = QueryTranslator.translate name filter
                 conn.Execute ($"DELETE FROM \"{name}\" WHERE " + filter, variables)
         )
 
@@ -767,7 +803,6 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
         connection.WithTransaction(fun conn ->
             let requiresRelationHandling = this.RequiresRelationDeleteHandling(conn)
-            let filter, variables = QueryTranslator.translate name filter
 
             if requiresRelationHandling then
                 let tx: Relations.RelationTxContext = {
@@ -778,15 +813,17 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 }
                 Relations.ensureSchemaForOwnerType tx typeof<'T>
 
-                let oldRow = conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE ({filter}) LIMIT 1", variables)
-                if isNull oldRow then
+                let rows = this.SelectMutationRows(conn, filter, true)
+                if rows.Length = 0 then
                     0
                 else
+                    let oldRow = rows.[0]
                     let owner = fromSQLite<'T> oldRow
                     let deletePlan = Relations.prepareDeleteOwner tx oldRow.Id.Value (box owner)
                     Relations.syncDeleteOwner tx deletePlan
                     conn.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {| id = oldRow.Id.Value |})
             else
+                let filter, variables = QueryTranslator.translate name filter
                 conn.Execute ($"DELETE FROM \"{name}\" WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filter}) LIMIT 1)", variables)
         )
 
@@ -885,28 +922,6 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
             | ValueSome op -> relationTransforms.Add op
             | ValueNone -> jsonTransforms.Add expression
 
-        let executeJsonUpdates (conn: SqliteConnection) =
-            if jsonTransforms.Count = 0 then
-                0
-            else
-                let variables = Dictionary<string, obj>()
-                let fullSQL = StringBuilder()
-                let inline append (txt: string) = ignore (fullSQL.Append txt)
-
-                append "UPDATE \""
-                append name
-                append "\" SET Value = jsonb_set(Value, "
-
-                for expression in jsonTransforms do
-                    QueryTranslator.translateUpdateMode name expression fullSQL variables
-
-                fullSQL.Remove(fullSQL.Length - 1, 1) |> ignore // Remove the ',' at the end.
-
-                append ")  WHERE "
-                QueryTranslator.translateQueryable name filter fullSQL variables
-
-                conn.Execute (fullSQL.ToString(), variables)
-
         if this.HasRelations then
             connection.WithTransaction(fun conn ->
                 let tx: Relations.RelationTxContext = {
@@ -917,14 +932,13 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 }
                 Relations.ensureSchemaForOwnerType tx typeof<'T>
 
-                let relationRows =
-                    if relationTransforms.Count = 0 then
+                let selectedRows =
+                    if relationTransforms.Count = 0 && jsonTransforms.Count = 0 then
                         Array.empty
                     else
-                        let filterSql, filterVars = QueryTranslator.translate name filter
-                        conn.Query<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filterSql}", filterVars) |> Seq.toArray
+                        this.SelectMutationRows(conn, filter, false)
 
-                let mutable affected = executeJsonUpdates conn
+                let mutable affected = this.ExecuteJsonUpdateManyByRows(conn, selectedRows, jsonTransforms)
 
                 if relationTransforms.Count > 0 then
                     let mappedOps =
@@ -938,7 +952,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                             | QueryTranslatorBaseTypes.ClearDBRefMany(path, targetType) -> RelationsTypes.ClearDBRefMany(path, targetType))
                         |> Seq.toList
 
-                    for row in relationRows do
+                    for row in selectedRows do
                         let writePlan: Relations.RelationWritePlan = {
                             Kind = RelationsTypes.RelationPlanKind.UpdateMany
                             OwnerType = typeof<'T>
@@ -947,13 +961,29 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                         Relations.syncUpdate tx row.Id.Value writePlan
 
                     if jsonTransforms.Count = 0 then
-                        affected <- relationRows.Length
+                        affected <- selectedRows.Length
 
                 affected
             )
         else
             use conn = connection.Get()
-            executeJsonUpdates conn
+            let variables = Dictionary<string, obj>()
+            let fullSQL = StringBuilder()
+            let inline append (txt: string) = ignore (fullSQL.Append txt)
+
+            append "UPDATE \""
+            append name
+            append "\" SET Value = jsonb_set(Value, "
+
+            for expression in jsonTransforms do
+                QueryTranslator.translateUpdateMode name expression fullSQL variables
+
+            fullSQL.Remove(fullSQL.Length - 1, 1) |> ignore
+
+            append ")  WHERE "
+            QueryTranslator.translateQueryable name filter fullSQL variables
+
+            conn.Execute(fullSQL.ToString(), variables)
 
     /// <summary>
     /// Ensures that a non-unique index exists for the specified expression. Creates the index if it does not exist.

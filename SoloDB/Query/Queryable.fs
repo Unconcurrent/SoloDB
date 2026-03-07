@@ -1336,7 +1336,7 @@ module private QueryHelper =
     /// <param name="source">The source collection of the query.</param>
     /// <param name="expression">The LINQ expression to translate.</param>
     /// <returns>A tuple containing the generated SQL string and the dictionary of parameters.</returns>
-    let internal startTranslation (source: ISoloDBCollection<'T>) (expression: Expression) =
+    let private startTranslationCore (metadataConnection: SqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
         let builder = {
             SQLiteCommand = StringBuilder(256)
             Variables = Dictionary<string, obj>(16)
@@ -1358,7 +1358,6 @@ module private QueryHelper =
             | _ -> struct (false, expression)
 
         let ctx = QueryContext.SingleSource(source.Name)
-        use metadataConnection = source.GetInternalConnection()
         let hasRelations = hasRelationProperties typeof<'T>
         if hasRelations then
             let relationTx: Relations.RelationTxContext = {
@@ -1371,7 +1370,6 @@ module private QueryHelper =
                     | :? CachingDbConnection as cc -> cc.InsideTransaction
                     | _ -> false
             }
-            // Ensure relation schema exists before DBRefMany translation emits correlated subqueries.
             Relations.withRelationSqliteWrap "build" "startTranslation.ensureSchemaForOwnerType" (fun () ->
                 Relations.ensureSchemaForOwnerType relationTx typeof<'T>
             )
@@ -1380,8 +1378,6 @@ module private QueryHelper =
 
         if isExplainQueryPlan then
             builder.Append "EXPLAIN QUERY PLAN "
-
-
 
         if doesNotReturnIdFn expression then
             builder.Append "SELECT -1 as Id, "
@@ -1396,8 +1392,6 @@ module private QueryHelper =
             translateQuery<'T> ctx builder expression
             builder.Append ")"
 
-        // Capture batch load context for DBRefMany post-query hydration.
-        // ExcludedPaths are populated during translation, so capture AFTER translateQuery.
         let shape = getRelationShape typeof<'T>
         let hasSingleRelations = hasRelations && shape.HasSingle
         let hasManyRelations = hasRelations && shape.HasMany
@@ -1417,6 +1411,13 @@ module private QueryHelper =
 
         builder.SQLiteCommand.ToString(), builder.Variables, batchLoadContext
 
+    let internal startTranslation (source: ISoloDBCollection<'T>) (expression: Expression) =
+        use metadataConnection = source.GetInternalConnection()
+        startTranslationCore metadataConnection source expression
+
+    let internal startTranslationWithConnection (metadataConnection: SqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
+        startTranslationCore metadataConnection source expression
+
 
 /// <summary>
 /// An internal interface defining the contract for a SoloDB query provider.
@@ -1426,6 +1427,11 @@ type internal ISoloDBCollectionQueryProvider =
     abstract member Source: obj
     /// <summary>Gets additional data passed from the parent database instance.</summary>
     abstract member AdditionalData: obj
+
+module internal QueryableTranslation =
+    let startFilterTranslationWithConnection (metadataConnection: SqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
+        let query, variables, _ = QueryHelper.startTranslationWithConnection metadataConnection source expression
+        query, variables
 
 /// <summary>
 /// The internal implementation of <c>IQueryProvider</c> for SoloDB collections.
