@@ -602,3 +602,58 @@ ON CONFLICT(OwnerCollection, PropertyName) DO UPDATE SET
             onOwnerDelete = descriptor.OnOwnerDelete.ToString()
             isUnique = if descriptor.IsUnique then 1 else 0
         |}) |> ignore
+
+/// Read-only pre-flight check: returns true when the full write-locked ensure path
+/// is needed for an existing collection. Avoids BEGIN IMMEDIATE contention on
+/// concurrent readers during in-flight write transactions.
+let internal relationSchemaRequiresEnsure (connection: SqliteConnection) (ownerTable: string) (ownerType: Type) =
+    let ownerTable = formatName ownerTable
+    // If catalog table doesn't exist at all, ensure is needed.
+    let catalogExists =
+        connection.QueryFirst<int64>(
+            "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelation') THEN 1 ELSE 0 END") = 1L
+    if not catalogExists then true
+    else
+
+    let specs = getRelationSpecs ownerType
+    if specs.Length = 0 then false
+    else
+
+    // Load all stored catalog rows for this owner.
+    let storedRows =
+        connection.Query<{| PropertyName: string; RefKind: string; TargetCollection: string; OnDelete: string; OnOwnerDelete: string; IsUnique: int64 |}>(
+            "SELECT PropertyName, RefKind, TargetCollection, OnDelete, OnOwnerDelete, IsUnique FROM SoloDBRelation WHERE OwnerCollection = @owner;",
+            {| owner = ownerTable |})
+        |> Seq.toArray
+    let storedByProp = Dictionary<string, {| PropertyName: string; RefKind: string; TargetCollection: string; OnDelete: string; OnOwnerDelete: string; IsUnique: int64 |}>(StringComparer.Ordinal)
+    for row in storedRows do
+        storedByProp.[row.PropertyName] <- row
+
+    // Check each current spec against stored state.
+    let mutable needsEnsure = false
+    for (prop, kind, targetType, _typedIdType, onDelete, _onOwnerDelete, isUnique, _orderBy) in specs do
+        if not needsEnsure then
+            match storedByProp.TryGetValue prop.Name with
+            | false, _ ->
+                // Missing catalog row — check for BR-05 (link table without catalog = resurrection).
+                // Either way, ensure must run: to bootstrap or to reject.
+                needsEnsure <- true
+            | true, stored ->
+                // Check for evolution: kind change, target change, policy drift.
+                let expectedKind = relationKindToString kind
+                let expectedTarget =
+                    resolveTargetCollectionName connection ownerTable prop.Name targetType
+                let expectedOnDelete = onDelete.ToString()
+                let expectedIsUnique = if isUnique then 1L else 0L
+                if stored.RefKind <> expectedKind
+                   || not (StringComparer.OrdinalIgnoreCase.Equals(stored.TargetCollection, expectedTarget))
+                   || stored.OnDelete <> expectedOnDelete
+                   || stored.IsUnique <> expectedIsUnique then
+                    needsEnsure <- true
+                storedByProp.Remove prop.Name |> ignore
+
+    // Any remaining stored rows are orphans (removed properties) — need ensure for cleanup.
+    if not needsEnsure && storedByProp.Count > 0 then
+        needsEnsure <- true
+
+    needsEnsure

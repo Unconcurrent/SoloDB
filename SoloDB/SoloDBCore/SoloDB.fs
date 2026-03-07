@@ -1473,6 +1473,8 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             use connection = connectionManager.Borrow()
             Helper.existsCollection name connection
 
+        let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
+
         if not existsAlready then
             lock ddlLock (fun () ->
                 // Transaction callback returns unit; Collection construction stays outside.
@@ -1486,7 +1488,6 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
                     // Validate relation topology after table creation but before returning.
                     // Must run after createTableInner so self-referential types don't hit "table already exists".
-                    let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
                     if hasRelations then
                         let relationTx: Relations.RelationTxContext = {
                             Connection = connection
@@ -1497,6 +1498,29 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                         Relations.ensureSchemaForOwnerType relationTx typeof<'T>
                 )
             )
+        elif hasRelations then
+            // Existing collection with relations: run schema ensure for BR-05 guard,
+            // evolution migration, catalog upsert, and link-table bootstrap.
+            // Read-only pre-flight: skip the write-locked path if all relation catalog
+            // rows already exist with matching metadata (avoids BEGIN IMMEDIATE contention
+            // on concurrent readers during in-flight write transactions).
+            let needsEnsure =
+                use conn = connectionManager.Borrow()
+                RelationsSchema.relationSchemaRequiresEnsure conn name typeof<'T>
+            if needsEnsure then
+                lock ddlLock (fun () ->
+                    connectionManager.WithTransaction(fun connection ->
+                        Helper.registerTypeCollection<'T> name connection
+
+                        let relationTx: Relations.RelationTxContext = {
+                            Connection = connection
+                            OwnerTable = name
+                            OwnerType = typeof<'T>
+                            InTransaction = true
+                        }
+                        Relations.ensureSchemaForOwnerType relationTx typeof<'T>
+                    )
+                )
 
         Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = this.ClearCache; EventSystem = this.Events }) :> ISoloDBCollection<'T>
 
