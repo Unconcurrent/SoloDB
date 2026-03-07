@@ -105,17 +105,25 @@ let ensureSchemaForOwnerType (tx: RelationTxContext) (ownerType: Type) =
 let private asReadOnlyDict (input: Dictionary<string, int64 array>) =
     input :> IReadOnlyDictionary<string, int64 array>
 
+let private initPrepareContext (tx: RelationTxContext) (seedOwner: obj) =
+    let descriptors = buildRelationDescriptors tx tx.OwnerType
+    let ops = ResizeArray<RelationUpdateManyOp>()
+    let resetMap = Dictionary<string, int64 array>(StringComparer.Ordinal)
+    let visited = HashSet<obj>(refComparer)
+    visited.Add(seedOwner) |> ignore
+    let typeStack = HashSet<Type>()
+    typeStack.Add(tx.OwnerType) |> ignore
+    descriptors, ops, resetMap, visited, typeStack
+
+let private applyResetMapIfAny (owner: obj) (resetMap: Dictionary<string, int64 array>) =
+    if resetMap.Count > 0 then
+        resetDbRefManyTrackers owner (asReadOnlyDict resetMap)
+
 let prepareInsert (tx: RelationTxContext) (owner: obj) =
     ensureTxContext tx
     ensureOwnerInstance tx.OwnerType owner "owner"
     withRelationSqliteWrap "prepare" "prepareInsert" (fun () ->
-        let descriptors = buildRelationDescriptors tx tx.OwnerType
-        let ops = ResizeArray<RelationUpdateManyOp>()
-        let resetMap = Dictionary<string, int64 array>(StringComparer.Ordinal)
-        let visited = HashSet<obj>(refComparer)
-        visited.Add(owner) |> ignore
-        let typeStack = HashSet<Type>()
-        typeStack.Add(tx.OwnerType) |> ignore
+        let descriptors, ops, resetMap, visited, typeStack = initPrepareContext tx owner
 
         for descriptor in descriptors do
             match descriptor.Kind with
@@ -131,8 +139,7 @@ let prepareInsert (tx: RelationTxContext) (owner: obj) =
                         ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
                 | ValueNone -> ()
 
-        if resetMap.Count > 0 then
-            resetDbRefManyTrackers owner (asReadOnlyDict resetMap)
+        applyResetMapIfAny owner resetMap
 
         { Kind = RelationPlanKind.Insert; OwnerType = tx.OwnerType; Ops = ops |> Seq.toList }
     )
@@ -146,13 +153,7 @@ let prepareUpsert (tx: RelationTxContext) (oldOwner: obj voption) (newOwner: obj
 
     ensureOwnerInstance tx.OwnerType newOwner "newOwner"
     withRelationSqliteWrap "prepare" "prepareUpsert" (fun () ->
-        let descriptors = buildRelationDescriptors tx tx.OwnerType
-        let ops = ResizeArray<RelationUpdateManyOp>()
-        let resetMap = Dictionary<string, int64 array>(StringComparer.Ordinal)
-        let visited = HashSet<obj>(refComparer)
-        visited.Add(newOwner) |> ignore
-        let typeStack = HashSet<Type>()
-        typeStack.Add(tx.OwnerType) |> ignore
+        let descriptors, ops, resetMap, visited, typeStack = initPrepareContext tx newOwner
 
         for descriptor in descriptors do
             match descriptor.Kind with
@@ -176,8 +177,7 @@ let prepareUpsert (tx: RelationTxContext) (oldOwner: obj voption) (newOwner: obj
                 | ValueNone ->
                     if hadOldOwner then ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
 
-        if resetMap.Count > 0 then
-            resetDbRefManyTrackers newOwner (asReadOnlyDict resetMap)
+        applyResetMapIfAny newOwner resetMap
 
         { Kind = RelationPlanKind.Upsert; OwnerType = tx.OwnerType; Ops = ops |> Seq.toList }
     )
@@ -220,13 +220,7 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
         // Stale-version guard before any relation mutation planning.
         checkRelationVersionStale tx ownerId newOwner
 
-        let descriptors = buildRelationDescriptors tx tx.OwnerType
-        let ops = ResizeArray<RelationUpdateManyOp>()
-        let resetMap = Dictionary<string, int64 array>(StringComparer.Ordinal)
-        let visited = HashSet<obj>(refComparer)
-        visited.Add(newOwner) |> ignore
-        let typeStack = HashSet<Type>()
-        typeStack.Add(tx.OwnerType) |> ignore
+        let descriptors, ops, resetMap, visited, typeStack = initPrepareContext tx newOwner
 
         for descriptor in descriptors do
             match descriptor.Kind with
@@ -306,8 +300,7 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                     raise (InvalidOperationException(
                         $"Error: Property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' does not implement IDBRefManyInternal.\nReason: The relation property type is incorrect.\nFix: Use DBRefMany<T> for multi-relations."))
 
-        if resetMap.Count > 0 then
-            resetDbRefManyTrackers newOwner (asReadOnlyDict resetMap)
+        applyResetMapIfAny newOwner resetMap
 
         { Kind = RelationPlanKind.Update; OwnerType = tx.OwnerType; Ops = ops |> Seq.toList }
     )
