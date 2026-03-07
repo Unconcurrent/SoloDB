@@ -364,6 +364,29 @@ module private QueryHelper =
         | _ ->
             Expression.Not expr :> Expression
 
+    /// Null-safe negation for All() violation subquery.
+    /// Produces NOT (predicate) OR (predicate) IS NULL so that rows with
+    /// missing/null boolean fields are counted as violations instead of being
+    /// silently excluded by SQL three-valued NOT NULL → NULL semantics.
+    let private negatePredicateForAllExpression (expr: Expression) =
+        let wrapBody (body: Expression) (parameters: Collections.ObjectModel.ReadOnlyCollection<ParameterExpression>) =
+            let negated = Expression.Not(body)
+            let boxed = Expression.Convert(body, typeof<obj>)
+            let isNull = Expression.Equal(boxed, Expression.Constant(null, typeof<obj>))
+            let combined = Expression.OrElse(negated, isNull)
+            Expression.Lambda(combined, parameters)
+        match expr with
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote ->
+            match ue.Operand with
+            | :? LambdaExpression as lambda ->
+                Expression.Quote (wrapBody lambda.Body lambda.Parameters) :> Expression
+            | _ ->
+                Expression.Not expr :> Expression
+        | :? LambdaExpression as lambda ->
+            wrapBody lambda.Body lambda.Parameters :> Expression
+        | _ ->
+            Expression.Not expr :> Expression
+
     let private emptySQLStatement () =
         { Filters = ResizeArray(4); Orders = ResizeArray(1); Selector = None; Skip = None; Take = None; TableName = ""; UnionAll = ResizeArray(0) }
 
@@ -1222,7 +1245,7 @@ module private QueryHelper =
                 | All ->
                     match m.Expressions.Length with
                     | 0 -> ()
-                    | 1 -> addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName (negatePredicateExpression m.Expressions.[0]) AllPredicate)
+                    | 1 -> addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName (negatePredicateForAllExpression m.Expressions.[0]) AllPredicate)
                     | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
                     addTake statements (ExpressionHelper.constant 1)
