@@ -128,9 +128,16 @@ type private PredicateRole =
 | CountPredicate
 | LongCountPredicate
 
+type private RelationAccessKind =
+| NoRelationAccess
+| HasRelationAccess
+
 type private LoweredPredicate = {
     Role: PredicateRole
     Predicate: Expression
+    LayerPosition: LayerPosition
+    RelationAccess: RelationAccessKind
+    MaterializedPathsSnapshot: string array
 }
 
 type private KeySelectorRole =
@@ -305,11 +312,64 @@ module private QueryHelper =
             addNewQuery ()
 
     let private lowerPredicateLambda (_sourceCtx: QueryContext) (_tableName: string) (expr: Expression) (role: PredicateRole) =
+        let rec detectRelationAccessNode (expr: Expression) =
+            if isNull expr then false
+            else
+                match expr with
+                | :? MemberExpression as m ->
+                    let declaring = m.Member.DeclaringType
+                    let hitsRelationMember =
+                        not (isNull declaring)
+                        && declaring.IsGenericType
+                        && (
+                            declaring.GetGenericTypeDefinition() = typedefof<DBRef<_>>
+                            || declaring.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
+                        )
+                    hitsRelationMember || detectRelationAccessNode m.Expression
+                | :? MethodCallExpression as m ->
+                    let declaring = m.Method.DeclaringType
+                    let hitsRelationCall =
+                        not (isNull declaring)
+                        && declaring.IsGenericType
+                        && declaring.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
+                    hitsRelationCall
+                    || (not (isNull m.Object) && detectRelationAccessNode m.Object)
+                    || (m.Arguments |> Seq.exists detectRelationAccessNode)
+                | :? LambdaExpression as l ->
+                    detectRelationAccessNode l.Body
+                | :? UnaryExpression as u ->
+                    detectRelationAccessNode u.Operand
+                | :? BinaryExpression as b ->
+                    detectRelationAccessNode b.Left || detectRelationAccessNode b.Right
+                | :? ConditionalExpression as c ->
+                    detectRelationAccessNode c.Test
+                    || detectRelationAccessNode c.IfTrue
+                    || detectRelationAccessNode c.IfFalse
+                | :? InvocationExpression as i ->
+                    detectRelationAccessNode i.Expression || (i.Arguments |> Seq.exists detectRelationAccessNode)
+                | :? NewArrayExpression as na ->
+                    na.Expressions |> Seq.exists detectRelationAccessNode
+                | :? NewExpression as n ->
+                    n.Arguments |> Seq.exists detectRelationAccessNode
+                | :? MemberInitExpression as mi ->
+                    detectRelationAccessNode mi.NewExpression
+                    || (mi.Bindings |> Seq.exists (function
+                        | :? MemberAssignment as ma -> detectRelationAccessNode ma.Expression
+                        | _ -> false))
+                | :? ListInitExpression as li ->
+                    detectRelationAccessNode li.NewExpression
+                    || (li.Initializers |> Seq.exists (fun init -> init.Arguments |> Seq.exists detectRelationAccessNode))
+                | _ -> false
+        let relationAccess =
+            if detectRelationAccessNode expr then HasRelationAccess else NoRelationAccess
         // First migration-family seam: centralize predicate lowering call sites
         // while preserving the current translator and payload behavior byte-for-byte.
         {
             Role = role
             Predicate = expr
+            LayerPosition = _sourceCtx.LayerPosition
+            RelationAccess = relationAccess
+            MaterializedPathsSnapshot = _sourceCtx.MaterializedPaths |> Seq.toArray
         }
 
     let private addLoweredPredicate (statements: ResizeArray<SQLSubquery>) (lowered: LoweredPredicate) =
@@ -523,6 +583,7 @@ module private QueryHelper =
             typeCollections.[kv.Key] <- HashSet<string>(kv.Value, System.StringComparer.Ordinal)
         {
             RootTable = sourceCtx.RootTable
+            LayerPosition = OuterLayer
             RootGraph =
                 {
                     Roots = ResizeArray(sourceCtx.RootGraph.Roots |> Seq.map id)
@@ -532,6 +593,7 @@ module private QueryHelper =
             AliasCounter = 0
             ExcludedPaths = HashSet(sourceCtx.ExcludedPaths, System.StringComparer.Ordinal)
             IncludedPaths = HashSet(sourceCtx.IncludedPaths, System.StringComparer.Ordinal)
+            MaterializedPaths = HashSet(sourceCtx.MaterializedPaths, System.StringComparer.Ordinal)
             RelationTargets = Dictionary(sourceCtx.RelationTargets, System.StringComparer.Ordinal)
             RelationLinks = Dictionary(sourceCtx.RelationLinks, System.StringComparer.Ordinal)
             RelationOwnerUsesSource = Dictionary(sourceCtx.RelationOwnerUsesSource, System.StringComparer.Ordinal)
@@ -729,6 +791,7 @@ module private QueryHelper =
                                 // The JOIN itself is still emitted (needed for WHERE/ORDER BY).
                                 if shouldLoadRelationPath currentCtx j.PropertyPath then
                                     hasMaterialization <- true
+                                    currentCtx.MaterializedPaths.Add(j.PropertyPath) |> ignore
                                     jsonSetSb.Append(", '$.") |> ignore
                                     jsonSetSb.Append(j.PropertyPath) |> ignore
                                     jsonSetSb.Append("', CASE WHEN ") |> ignore

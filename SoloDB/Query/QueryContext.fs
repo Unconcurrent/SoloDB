@@ -2,6 +2,10 @@ namespace SoloDatabase
 
 open System.Collections.Generic
 
+type internal LayerPosition =
+| BaseLayer
+| OuterLayer
+
 /// Represents a named source root in a LINQ multi-source query graph.
 type internal QueryRootSource = {
     /// Logical source key (e.g., "orders", "authors")
@@ -68,6 +72,8 @@ type internal JoinEdge = {
 type internal QueryContext = {
     /// The primary (root) table name
     RootTable: string
+    /// Whether this context translates against a base table or an outer/subquery layer.
+    LayerPosition: LayerPosition
     /// Query source graph roots. Single-source queries keep exactly one root.
     RootGraph: QueryRootGraph
     /// Accumulated join edges (populated during expression translation)
@@ -78,6 +84,8 @@ type internal QueryContext = {
     ExcludedPaths: HashSet<string>
     /// Property paths included via Include() whitelist for hydration.
     IncludedPaths: HashSet<string>
+    /// Relation paths currently materialized into the payload Value column.
+    MaterializedPaths: HashSet<string>
     /// Relation target table mapping keyed by "OwnerCollection|PropertyName"
     RelationTargets: Dictionary<string, string>
     /// Relation link table mapping keyed by "OwnerCollection|PropertyName"
@@ -91,11 +99,13 @@ type internal QueryContext = {
     /// Create a single-source context (backward-compatible default).
     static member SingleSource(tableName: string) =
         { RootTable = tableName
+          LayerPosition = BaseLayer
           RootGraph = QueryRootGraph.Single(tableName)
           Joins = ResizeArray()
           AliasCounter = 0
           ExcludedPaths = HashSet()
           IncludedPaths = HashSet()
+          MaterializedPaths = HashSet(System.StringComparer.Ordinal)
           RelationTargets = Dictionary(System.StringComparer.Ordinal)
           RelationLinks = Dictionary(System.StringComparer.Ordinal)
           RelationOwnerUsesSource = Dictionary(System.StringComparer.Ordinal)
@@ -108,11 +118,13 @@ type internal QueryContext = {
             if not (System.String.Equals(sourceKey, "root", System.StringComparison.Ordinal)) then
                 graph.ResolveRoot(sourceKey, tableName) |> ignore
         { RootTable = rootTable
+          LayerPosition = BaseLayer
           RootGraph = graph
           Joins = ResizeArray()
           AliasCounter = 0
           ExcludedPaths = HashSet()
           IncludedPaths = HashSet()
+          MaterializedPaths = HashSet(System.StringComparer.Ordinal)
           RelationTargets = Dictionary(System.StringComparer.Ordinal)
           RelationLinks = Dictionary(System.StringComparer.Ordinal)
           RelationOwnerUsesSource = Dictionary(System.StringComparer.Ordinal)
