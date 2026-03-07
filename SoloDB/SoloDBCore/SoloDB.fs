@@ -285,6 +285,10 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         InTransaction = true
     }
 
+    static member private mkRelationPathSets() =
+        System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal),
+        System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
+
     member private this.ensureRelationTx (conn: SqliteConnection) : Relations.RelationTxContext =
         let tx = this.mkRelationTx conn
         Relations.ensureSchemaForOwnerType tx typeof<'T>
@@ -703,8 +707,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     raise (KeyNotFoundException "Could not Update any entities with specified Id.")
 
                 let oldOwner = fromSQLite<'T> oldRow
-                let excludedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
-                let includedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
+                let excludedPaths, includedPaths = Collection<'T>.mkRelationPathSets()
                 Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths [| (oldRow.Id.Value, box oldOwner) |] true
                 let writePlan = Relations.prepareUpdate tx oldRow.Id.Value (box oldOwner) (box item)
 
@@ -733,13 +736,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
             let requiresRelationHandling = this.RequiresRelationDeleteHandling(conn)
 
             if requiresRelationHandling then
-                let tx: Relations.RelationTxContext = {
-                    Connection = conn
-                    OwnerTable = name
-                    OwnerType = typeof<'T>
-                    InTransaction = true
-                }
-                Relations.ensureSchemaForOwnerType tx typeof<'T>
+                let tx = this.ensureRelationTx conn
 
                 let rows = this.SelectMutationRows(conn, filter, false)
                 if rows.Length = 0 then
@@ -777,13 +774,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
             let requiresRelationHandling = this.RequiresRelationDeleteHandling(conn)
 
             if requiresRelationHandling then
-                let tx: Relations.RelationTxContext = {
-                    Connection = conn
-                    OwnerTable = name
-                    OwnerType = typeof<'T>
-                    InTransaction = true
-                }
-                Relations.ensureSchemaForOwnerType tx typeof<'T>
+                let tx = this.ensureRelationTx conn
 
                 let rows = this.SelectMutationRows(conn, filter, true)
                 if rows.Length = 0 then
@@ -819,8 +810,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 else
                     let oldOwners = oldRows |> Array.map (fun row -> fromSQLite<'T> row |> box)
                     let ownerIds = oldRows |> Array.map (fun row -> row.Id.Value)
-                    let excludedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
-                    let includedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
+                    let excludedPaths, includedPaths = Collection<'T>.mkRelationPathSets()
                     let ownerPairs = Array.zip ownerIds oldOwners
                     Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths ownerPairs true
                     Relations.syncReplaceMany tx (ownerIds :> seq<_>) (oldOwners :> seq<_>) (box item)
@@ -851,8 +841,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     0
                 else
                     let oldOwner = fromSQLite<'T> oldRow
-                    let excludedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
-                    let includedPaths = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
+                    let excludedPaths, includedPaths = Collection<'T>.mkRelationPathSets()
                     Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths [| (oldRow.Id.Value, box oldOwner) |] true
                     Relations.syncReplaceOne tx oldRow.Id.Value (box oldOwner) (box item)
                     this.setSerializedItem variables item
