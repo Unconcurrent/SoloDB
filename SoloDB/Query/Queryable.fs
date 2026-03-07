@@ -232,6 +232,20 @@ module private QueryHelper =
             | _ -> false
         | _ -> false
 
+    let private negatePredicateExpression (expr: Expression) =
+        match expr with
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote ->
+            match ue.Operand with
+            | :? LambdaExpression as lambda ->
+                let negated = Expression.Lambda(Expression.Not(lambda.Body), lambda.Parameters)
+                Expression.Quote negated :> Expression
+            | _ ->
+                Expression.Not expr :> Expression
+        | :? LambdaExpression as lambda ->
+            Expression.Lambda(Expression.Not(lambda.Body), lambda.Parameters) :> Expression
+        | _ ->
+            Expression.Not expr :> Expression
+
     let private emptySQLStatement () =
         { Filters = ResizeArray(4); Orders = ResizeArray(1); Selector = None; Skip = None; Take = None; TableName = ""; UnionAll = ResizeArray(0) }
 
@@ -898,17 +912,17 @@ module private QueryHelper =
                     addTake statements (ExpressionHelper.constant 1)
 
                 | All ->
+                    match m.Expressions.Length with
+                    | 0 -> ()
+                    | 1 -> addFilter statements (negatePredicateExpression m.Expressions.[0])
+                    | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
+
+                    addTake statements (ExpressionHelper.constant 1)
+
                     addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "SELECT COUNT(*) = (SELECT COUNT(*) FROM (" |> ignore
+                        builder.Command.Append "SELECT -1 As Id, NOT EXISTS(SELECT 1 FROM (" |> ignore
                         builder.WriteInner()
-                        builder.Command.Append ")) as Value FROM (" |> ignore
-                        builder.WriteInner()
-                        builder.Command.Append ") o WHERE (" |> ignore
-                        match m.Expressions.Length with
-                        | 0 -> QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
-                        | 1 -> QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName m.Expressions.[0] builder.Command builder.Vars
-                        | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
-                        builder.Command.Append ") " |> ignore
+                        builder.Command.Append ")) as Value" |> ignore
                     )
 
                 | Any ->
