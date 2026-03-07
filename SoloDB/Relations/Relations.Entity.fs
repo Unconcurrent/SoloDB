@@ -188,6 +188,7 @@ let rec internal cascadeInsertDeep
     (targetType: Type)
     (entity: obj)
     (visited: HashSet<obj>)
+    (typeStack: HashSet<Type>)
     =
     // Circular guard: detect if this exact object instance was already visited.
     if not (visited.Add(entity)) then
@@ -240,8 +241,15 @@ let rec internal cascadeInsertDeep
                             updateDbRefJson childTx targetTable insertedId descriptor.PropertyPath entityId
                     else
                         // RECURSIVE cascade-insert.
+                        // Type-stack guard: detect semantic cycles through cloned instances.
+                        if not (typeStack.Add(descriptor.TargetType)) then
+                            raise (InvalidOperationException(
+                                $"Circular cascade-insert detected for type '{descriptor.TargetType.FullName}'. " +
+                                "Circular DBRef.From chains are not supported. Use DBRef.To(id) to break the cycle."))
                         ensureRelationSchema childTx descriptor
-                        let childId = cascadeInsertDeep childTx descriptor.TargetTable descriptor.TargetType pending visited
+                        let childId =
+                            try cascadeInsertDeep childTx descriptor.TargetTable descriptor.TargetType pending visited typeStack
+                            finally typeStack.Remove(descriptor.TargetType) |> ignore
                         let dbRef = createDbRefTo descriptor.Property.PropertyType childId
                         (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(entity, dbRef)
                         childTx.Connection.Execute(
@@ -262,7 +270,14 @@ let rec internal cascadeInsertDeep
                         let mutable itemId = readEntityIdOrZero descriptor.TargetType item
                         if itemId <= 0L then
                             // RECURSIVE cascade-insert for Many items.
-                            itemId <- cascadeInsertDeep childTx descriptor.TargetTable descriptor.TargetType item visited
+                            // Type-stack guard: detect semantic cycles through cloned instances.
+                            if not (typeStack.Add(descriptor.TargetType)) then
+                                raise (InvalidOperationException(
+                                    $"Circular cascade-insert detected for type '{descriptor.TargetType.FullName}'. " +
+                                    "Circular DBRef.From chains are not supported. Use DBRef.To(id) to break the cycle."))
+                            itemId <-
+                                try cascadeInsertDeep childTx descriptor.TargetTable descriptor.TargetType item visited typeStack
+                                finally typeStack.Remove(descriptor.TargetType) |> ignore
                         if itemId > 0L then
                             let sourceId, targetId =
                                 if descriptor.OwnerUsesSourceColumn then insertedId, itemId
@@ -274,7 +289,7 @@ let rec internal cascadeInsertDeep
 
     insertedId
 
-let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor: RelationDescriptor) (owner: obj) (visited: HashSet<obj>) =
+let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor: RelationDescriptor) (owner: obj) (visited: HashSet<obj>) (typeStack: HashSet<Type>) =
     let value = (RelationsAccessorCache.compiledPropGetter descriptor.Property).Invoke(owner)
     let id = readDbRefId value
     if id > 0L then
@@ -301,14 +316,21 @@ let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor
                     (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(owner, dbRef)
                     entityId
                 else
-                    let insertedId = cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType pending visited
+                    // Type-stack guard: detect semantic cycles through cloned instances.
+                    if not (typeStack.Add(descriptor.TargetType)) then
+                        raise (InvalidOperationException(
+                            $"Circular cascade-insert detected for type '{descriptor.TargetType.FullName}'. " +
+                            "Circular DBRef.From chains are not supported. Use DBRef.To(id) to break the cycle."))
+                    let insertedId =
+                        try cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType pending visited typeStack
+                        finally typeStack.Remove(descriptor.TargetType) |> ignore
                     let dbRef = createDbRefTo descriptor.Property.PropertyType insertedId
                     (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(owner, dbRef)
                     insertedId
             | ValueNone ->
                 0L
 
-let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor: RelationDescriptor) (owner: obj) (includeWhenUnloaded: bool) (visited: HashSet<obj>) =
+let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor: RelationDescriptor) (owner: obj) (includeWhenUnloaded: bool) (visited: HashSet<obj>) (typeStack: HashSet<Type>) =
     let trackerObj = (RelationsAccessorCache.compiledPropGetter descriptor.Property).Invoke(owner)
     if isNull trackerObj then
         if includeWhenUnloaded then ValueSome [||] else ValueNone
@@ -325,7 +347,14 @@ let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor:
                     else
                         let mutable id = readEntityIdOrZero descriptor.TargetType item
                         if id <= 0L then
-                            id <- cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType item visited
+                            // Type-stack guard: detect semantic cycles through cloned instances.
+                            if not (typeStack.Add(descriptor.TargetType)) then
+                                raise (InvalidOperationException(
+                                    $"Circular cascade-insert detected for type '{descriptor.TargetType.FullName}'. " +
+                                    "Circular DBRef.From chains are not supported. Use DBRef.To(id) to break the cycle."))
+                            id <-
+                                try cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType item visited typeStack
+                                finally typeStack.Remove(descriptor.TargetType) |> ignore
                         elif id > 0L then
                             // Preflight target-exists for pre-existing many items before owner mutation.
                             ensureTargetExists tx descriptor.TargetTable id

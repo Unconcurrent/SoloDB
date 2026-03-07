@@ -114,15 +114,17 @@ let prepareInsert (tx: RelationTxContext) (owner: obj) =
         let resetMap = Dictionary<string, int64 array>(StringComparer.Ordinal)
         let visited = HashSet<obj>(refComparer)
         visited.Add(owner) |> ignore
+        let typeStack = HashSet<Type>()
+        typeStack.Add(tx.OwnerType) |> ignore
 
         for descriptor in descriptors do
             match descriptor.Kind with
             | Single ->
-                let targetId = resolveSingleTargetIdAndCascade tx descriptor owner visited
+                let targetId = resolveSingleTargetIdAndCascade tx descriptor owner visited typeStack
                 if targetId > 0L then
                     ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, targetId))
             | Many ->
-                match collectManyTargetIdsAndCascade tx descriptor owner true visited with
+                match collectManyTargetIdsAndCascade tx descriptor owner true visited typeStack with
                 | ValueSome ids ->
                     resetMap.[descriptor.Property.Name] <- ids
                     for id in ids do
@@ -149,12 +151,14 @@ let prepareUpsert (tx: RelationTxContext) (oldOwner: obj voption) (newOwner: obj
         let resetMap = Dictionary<string, int64 array>(StringComparer.Ordinal)
         let visited = HashSet<obj>(refComparer)
         visited.Add(newOwner) |> ignore
+        let typeStack = HashSet<Type>()
+        typeStack.Add(tx.OwnerType) |> ignore
 
         for descriptor in descriptors do
             match descriptor.Kind with
             | Single ->
                 let oldId = match oldOwner with | ValueSome old -> readSingleIdNoCascade descriptor old | ValueNone -> 0L
-                let newId = resolveSingleTargetIdAndCascade tx descriptor newOwner visited
+                let newId = resolveSingleTargetIdAndCascade tx descriptor newOwner visited typeStack
                 if oldId <> newId then
                     if newId > 0L then ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, newId))
                     else ops.Add(SetDBRefToNone(descriptor.PropertyPath, descriptor.TargetType))
@@ -164,7 +168,7 @@ let prepareUpsert (tx: RelationTxContext) (oldOwner: obj voption) (newOwner: obj
                     raise (ArgumentNullException(
                         descriptor.Property.Name,
                         $"Error: DBRefMany property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' is null.\nReason: DBRefMany<T> properties must not be set to null.\nFix: Use an empty DBRefMany<T> (new()) or call Clear() to remove all links."))
-                match collectManyTargetIdsAndCascade tx descriptor newOwner true visited with
+                match collectManyTargetIdsAndCascade tx descriptor newOwner true visited typeStack with
                 | ValueSome ids ->
                     resetMap.[descriptor.Property.Name] <- ids
                     if hadOldOwner then ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
@@ -221,12 +225,14 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
         let resetMap = Dictionary<string, int64 array>(StringComparer.Ordinal)
         let visited = HashSet<obj>(refComparer)
         visited.Add(newOwner) |> ignore
+        let typeStack = HashSet<Type>()
+        typeStack.Add(tx.OwnerType) |> ignore
 
         for descriptor in descriptors do
             match descriptor.Kind with
             | Single ->
                 let oldId = readSingleIdNoCascade descriptor oldOwner
-                let newId = resolveSingleTargetIdAndCascade tx descriptor newOwner visited
+                let newId = resolveSingleTargetIdAndCascade tx descriptor newOwner visited typeStack
                 if oldId <> newId then
                     if newId > 0L then ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, newId))
                     else ops.Add(SetDBRefToNone(descriptor.PropertyPath, descriptor.TargetType))
@@ -234,7 +240,7 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                 match (RelationsAccessorCache.compiledPropGetter descriptor.Property).Invoke(newOwner) with
                 | :? IDBRefManyInternal as tracker when tracker.IsLoaded ->
                     // Loaded tracker: diff against OriginalIds
-                    match collectManyTargetIdsAndCascade tx descriptor newOwner false visited with
+                    match collectManyTargetIdsAndCascade tx descriptor newOwner false visited typeStack with
                     | ValueNone -> ()
                     | ValueSome newIds ->
                         resetMap.[descriptor.Property.Name] <- newIds
@@ -257,7 +263,7 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                 | :? IDBRefManyInternal as tracker when not tracker.IsLoaded && tracker.HasPendingMutations ->
                     if tracker.WasCleared then
                         // Unloaded + Clear(): collect post-clear items to detect Clear()+Add() pattern.
-                        match collectManyTargetIdsAndCascade tx descriptor newOwner true visited with
+                        match collectManyTargetIdsAndCascade tx descriptor newOwner true visited typeStack with
                         | ValueNone | ValueSome [||] ->
                             // Pure clear — no items after clear.
                             resetMap.[descriptor.Property.Name] <- [||]
@@ -279,7 +285,7 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                                 $"Error: Cannot apply add-only mutation on unloaded relation '{descriptor.PropertyPath}'.\nReason: The DBRefMany tracker is unloaded and has pending mutations without Clear(), which is ambiguous.\nFix: Load the relation first, or call Clear() then Add(...) before saving."))
                         else
                             // Deterministic replace payload on unloaded tracker with persisted targets.
-                            match collectManyTargetIdsAndCascade tx descriptor newOwner true visited with
+                            match collectManyTargetIdsAndCascade tx descriptor newOwner true visited typeStack with
                             | ValueNone -> ()
                             | ValueSome newIds ->
                                 resetMap.[descriptor.Property.Name] <- newIds
