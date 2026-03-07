@@ -836,6 +836,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="filter">A LINQ expression to filter the documents to replace.</param>
     /// <returns>The number of documents replaced.</returns>
     member this.ReplaceMany(item: 'T)(filter: Expression<Func<'T, bool>>) =
+        if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
         let filter, variables = QueryTranslator.translate name filter
         if this.HasRelations then
@@ -874,6 +875,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="filter">A LINQ expression to filter the document to replace.</param>
     /// <returns>The number of documents replaced (0 or 1).</returns>
     member this.ReplaceOne(item: 'T)(filter: Expression<Func<'T, bool>>) =
+        if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
         let filter, variables = QueryTranslator.translate name filter
         if this.HasRelations then
