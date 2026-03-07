@@ -19,10 +19,6 @@ open SoloDatabase.QueryTranslatorVisitPostJoin
 
 module internal QueryTranslatorVisitDbRef =
     [<Literal>]
-    let private dbRefManyAnyPredicateExtractionMessage =
-        "Error: Cannot extract predicate lambda for relation-backed DBRefMany.Any.\nReason: The predicate is not a simple lambda expression.\nFix: Use a simple lambda (e.g., x => ...) or move the operation after AsEnumerable()."
-
-    [<Literal>]
     let private nestedDbRefManyNotSupportedMessage =
         "Error: Nested DBRefMany query is not supported.\nReason: Relation-backed DBRefMany predicates cannot contain inner DBRefMany traversals.\nFix: Rewrite the predicate to a single DBRefMany level, or move nested traversal after AsEnumerable()."
 
@@ -208,6 +204,55 @@ module internal QueryTranslatorVisitDbRef =
             | _ -> ValueNone
         | _ -> ValueNone
 
+    /// Extract source expression and optional predicate from Any/All MethodCallExpression,
+    /// handling both instance-call (mce.Object.Any(pred)) and extension-call (Enumerable.Any(source, pred)) forms.
+    let private extractSourceAndPredicate (mce: MethodCallExpression) =
+        if not (isNull mce.Object) then
+            let pred = if mce.Arguments.Count >= 1 then ValueSome mce.Arguments.[0] else ValueNone
+            ValueSome mce.Object, pred
+        elif mce.Arguments.Count >= 1 then
+            let pred = if mce.Arguments.Count >= 2 then ValueSome mce.Arguments.[1] else ValueNone
+            ValueSome mce.Arguments.[0], pred
+        else
+            ValueNone, ValueNone
+
+    /// Emit a correlated EXISTS or NOT EXISTS subquery for a DBRefMany quantifier with a predicate.
+    /// When isAll=false: EXISTS(SELECT 1 FROM link INNER JOIN target ... WHERE owner AND predicate)
+    /// When isAll=true:  NOT EXISTS(SELECT 1 FROM link INNER JOIN target ... WHERE owner AND NOT(predicate))
+    let private emitQuantifierWithPredicate (qb: QueryBuilder) (ownerRef: DBRefManyOwnerRef) (predicateExpr: Expression) (isAll: bool) =
+        let methodName = if isAll then "All" else "Any"
+        match tryExtractLambdaExpression predicateExpr with
+        | ValueSome predExpr ->
+            if predicateContainsDbRefManyTraversal predExpr.Body then
+                raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
+
+            let propName = ownerRef.PropertyExpr.Member.Name
+            let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
+            let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
+            let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
+            let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
+            let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
+            let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
+            let tgtAlias = "_tgt"
+            let lnkAlias = "_lnk"
+
+            if isAll then
+                qb.AppendRaw (sprintf "NOT EXISTS(SELECT 1 FROM \"%s\" AS %s INNER JOIN \"%s\" AS %s ON %s.Id = %s.%s WHERE %s.%s = %s.Id AND NOT ("
+                    linkTable lnkAlias targetTable tgtAlias tgtAlias lnkAlias targetColumn lnkAlias ownerColumn ownerRef.OwnerAliasSql)
+            else
+                qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" AS %s INNER JOIN \"%s\" AS %s ON %s.Id = %s.%s WHERE %s.%s = %s.Id AND "
+                    linkTable lnkAlias targetTable tgtAlias tgtAlias lnkAlias targetColumn lnkAlias ownerColumn ownerRef.OwnerAliasSql)
+
+            let subQb = qb.ForSubquery(tgtAlias, predExpr)
+            visit predExpr.Body subQb
+
+            if isAll then qb.AppendRaw "))"
+            else qb.AppendRaw ")"
+            true
+        | ValueNone ->
+            raise (NotSupportedException(
+                sprintf "Error: Cannot extract predicate lambda for relation-backed DBRefMany.%s.\nReason: The predicate is not a simple lambda expression.\nFix: Use a simple lambda (e.g., x => ...) or move the operation after AsEnumerable()." methodName))
+
     /// preExpressionHandler for DBRefMany.Count, Any(), Any(pred) as correlated subqueries.
     let private handleDBRefManyExpression (qb: QueryBuilder) (exp: Expression) : bool =
         match exp with
@@ -228,77 +273,30 @@ module internal QueryTranslatorVisitDbRef =
 
         // Case 2/3: Any() / Any(pred) over DBRefMany in either extension-call or instance-call form.
         | :? MethodCallExpression as mce when mce.Method.Name = "Any" ->
-            let sourceArg, predArg =
-                if not (isNull mce.Object) then
-                    let pred =
-                        if mce.Arguments.Count >= 1 then ValueSome mce.Arguments.[0]
-                        else ValueNone
-                    ValueSome mce.Object, pred
-                elif mce.Arguments.Count >= 1 then
-                    let pred =
-                        if mce.Arguments.Count >= 2 then ValueSome mce.Arguments.[1]
-                        else ValueNone
-                    ValueSome mce.Arguments.[0], pred
-                else
-                    ValueNone, ValueNone
+            let sourceArg, predArg = extractSourceAndPredicate mce
 
             match sourceArg with
             | ValueSome sourceExpr ->
                 match tryGetDBRefManyOwnerRef qb sourceExpr with
                 | ValueSome ownerRef ->
-                    let propName = ownerRef.PropertyExpr.Member.Name
-                    let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
-                    let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
-                    let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
-                    let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
-
                     match predArg with
                     | ValueNone ->
                         // Any() without predicate.
+                        let propName = ownerRef.PropertyExpr.Member.Name
+                        let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
+                        let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
+                        let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
                         qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" WHERE %s = %s.Id)" linkTable ownerColumn ownerRef.OwnerAliasSql)
                         true
                     | ValueSome predicateExpr ->
-                        // Any(pred) with predicate — correlated EXISTS with INNER JOIN to target table.
-                        match tryExtractLambdaExpression predicateExpr with
-                        | ValueSome predExpr ->
-                            if predicateContainsDbRefManyTraversal predExpr.Body then
-                                raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
-
-                            let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
-                            let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
-                            let tgtAlias = "_tgt"
-                            let lnkAlias = "_lnk"
-
-                            qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" AS %s INNER JOIN \"%s\" AS %s ON %s.Id = %s.%s WHERE %s.%s = %s.Id AND "
-                                linkTable lnkAlias targetTable tgtAlias tgtAlias lnkAlias targetColumn lnkAlias ownerColumn ownerRef.OwnerAliasSql)
-
-                            // Translate predicate body with target table as context
-                            let subQb = qb.ForSubquery(tgtAlias, predExpr)
-                            visit predExpr.Body subQb
-
-                            qb.AppendRaw ")"
-                            true
-                        | ValueNone ->
-                            raise (NotSupportedException(dbRefManyAnyPredicateExtractionMessage))
+                        emitQuantifierWithPredicate qb ownerRef predicateExpr false
                 | ValueNone ->
                     false
             | ValueNone -> false
 
         // Case 4: All(pred) over DBRefMany — relation-aware NOT EXISTS with negated predicate.
         | :? MethodCallExpression as mce when mce.Method.Name = "All" ->
-            let sourceArg, predArg =
-                if not (isNull mce.Object) then
-                    let pred =
-                        if mce.Arguments.Count >= 1 then ValueSome mce.Arguments.[0]
-                        else ValueNone
-                    ValueSome mce.Object, pred
-                elif mce.Arguments.Count >= 1 then
-                    let pred =
-                        if mce.Arguments.Count >= 2 then ValueSome mce.Arguments.[1]
-                        else ValueNone
-                    ValueSome mce.Arguments.[0], pred
-                else
-                    ValueNone, ValueNone
+            let sourceArg, predArg = extractSourceAndPredicate mce
 
             match sourceArg with
             | ValueSome sourceExpr ->
@@ -306,32 +304,7 @@ module internal QueryTranslatorVisitDbRef =
                 | ValueSome ownerRef ->
                     match predArg with
                     | ValueSome predicateExpr ->
-                        match tryExtractLambdaExpression predicateExpr with
-                        | ValueSome predExpr ->
-                            if predicateContainsDbRefManyTraversal predExpr.Body then
-                                raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
-
-                            let propName = ownerRef.PropertyExpr.Member.Name
-                            let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
-                            let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
-                            let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
-                            let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
-                            let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
-                            let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
-                            let tgtAlias = "_tgt"
-                            let lnkAlias = "_lnk"
-
-                            qb.AppendRaw (sprintf "NOT EXISTS(SELECT 1 FROM \"%s\" AS %s INNER JOIN \"%s\" AS %s ON %s.Id = %s.%s WHERE %s.%s = %s.Id AND NOT ("
-                                linkTable lnkAlias targetTable tgtAlias tgtAlias lnkAlias targetColumn lnkAlias ownerColumn ownerRef.OwnerAliasSql)
-
-                            let subQb = qb.ForSubquery(tgtAlias, predExpr)
-                            visit predExpr.Body subQb
-
-                            qb.AppendRaw "))"
-                            true
-                        | ValueNone ->
-                            raise (NotSupportedException(
-                                "Error: Cannot extract predicate lambda for relation-backed DBRefMany.All.\nReason: The predicate is not a simple lambda expression.\nFix: Use a simple lambda (e.g., x => ...) or move the operation after AsEnumerable()."))
+                        emitQuantifierWithPredicate qb ownerRef predicateExpr true
                     | ValueNone ->
                         // All() without predicate is trivially true; emit literal 1.
                         qb.AppendRaw "1"
