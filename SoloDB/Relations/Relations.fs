@@ -288,7 +288,9 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                     // Unloaded + no mutations: no relation operation required.
                     ()
                 | null ->
-                    ()
+                    raise (ArgumentNullException(
+                        descriptor.Property.Name,
+                        $"Error: DBRefMany property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' is null.\nReason: DBRefMany<T> properties must not be set to null.\nFix: Use an empty DBRefMany<T> (new()) or call Clear() to remove all links."))
                 | _ ->
                     raise (InvalidOperationException(
                         $"Error: Property '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' does not implement IDBRefManyInternal.\nReason: The relation property type is incorrect.\nFix: Use DBRefMany<T> for multi-relations."))
