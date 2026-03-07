@@ -16,6 +16,7 @@ open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.QueryTranslatorVisitCore
 open SoloDatabase.QueryTranslatorVisitPost
 open SoloDatabase.QueryTranslatorVisitPostJoin
+open DBRefTypeHelpers
 
 module internal QueryTranslatorVisitDbRef =
     [<Literal>]
@@ -97,7 +98,7 @@ module internal QueryTranslatorVisitDbRef =
             else
                 let rec findValueBoundary (expr: Expression) (above: string list) =
                     match expr with
-                    | :? MemberExpression as me when not (isNull me.Expression) && isDBRefType (unwrapConvert me.Expression).Type && me.Member.Name = "Value" ->
+                    | :? MemberExpression as me when isDBRefValueBoundary me ->
                         ValueSome struct(me, above)
                     | :? MemberExpression as me when not (isNull me.Expression) ->
                         findValueBoundary me.Expression (me.Member.Name :: above)
@@ -178,7 +179,7 @@ module internal QueryTranslatorVisitDbRef =
                     OwnerAliasSql = sourceAlias
                     PropertyExpr = me
                 }
-            | :? MemberExpression as valueMe when valueMe.Member.Name = "Value" && isDBRefType (unwrapConvert valueMe.Expression).Type ->
+            | :? MemberExpression as valueMe when isDBRefValueBoundary valueMe ->
                 // Nested C#: o.Ref.Value.Items — resolve via DBRef JOIN chain.
                 let alias = ensureDBRefJoin qb valueMe
                 let parentDbRefExpr = unwrapConvert valueMe.Expression :?> MemberExpression

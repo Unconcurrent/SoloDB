@@ -298,15 +298,21 @@ module internal QueryTranslatorBaseHelpers =
             | JsonSerializator.JsonValue.String _ ->
                 compareJson qb "$" json
 
+    /// Unwrap a single Convert node to get the actual expression.
+    let internal unwrapConvert (expr: Expression) =
+        match expr with
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> ue.Operand
+        | e -> e
+
+    /// Returns true if the expression is a DBRef<T>.Value member access boundary.
+    let internal isDBRefValueBoundary (expr: MemberExpression) =
+        expr.Member.Name = "Value" && not (isNull expr.Expression) && DBRefTypeHelpers.isDBRefType (unwrapConvert expr.Expression).Type
+
     /// Returns true if the expression traverses through DBRef<T>.Value,
     /// indicating a LEFT JOIN that may produce NULL for None-ref rows.
     let rec internal involvesDBRefValueAccess (expr: Expression) : bool =
-        let unwrap (e: Expression) =
-            match e with
-            | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> ue.Operand
-            | x -> x
-        match unwrap expr with
-        | :? MemberExpression as me when me.Member.Name = "Value" && not (isNull me.Expression) && DBRefTypeHelpers.isDBRefType (unwrap me.Expression).Type ->
+        match unwrapConvert expr with
+        | :? MemberExpression as me when isDBRefValueBoundary me ->
             true
         | :? MemberExpression as me when not (isNull me.Expression) ->
             involvesDBRefValueAccess me.Expression

@@ -5,8 +5,10 @@ open System.Linq.Expressions
 open System.Reflection
 open Utils
 open SoloDatabase.QueryTranslatorBaseTypes
+open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.QueryTranslatorVisitPost
+open DBRefTypeHelpers
 
 module internal QueryTranslatorVisitPostJoin =
     /// Compute a stable path key for a member expression chain from root parameter.
@@ -21,12 +23,6 @@ module internal QueryTranslatorVisitPostJoin =
             raise (NotSupportedException(
                 sprintf "Unsupported relation path expression node: %A. Rewrite the query to use direct member access from the query root." expr.NodeType))
 
-    /// Unwrap Convert nodes to get the actual expression.
-    let internal unwrapConvert (expr: Expression) =
-        match expr with
-        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> ue.Operand
-        | e -> e
-
     // Count DBRef chain depth by relation hops, not by total JOIN count.
     // This avoids false positives when a predicate touches many independent DBRefs.
     let rec private dbRefChainDepth (expr: Expression) =
@@ -38,7 +34,7 @@ module internal QueryTranslatorVisitPostJoin =
 
     and private dbRefOwnerDepth (expr: Expression) =
         match unwrapConvert expr with
-        | :? MemberExpression as me when me.Member.Name = "Value" && isDBRefType (unwrapConvert me.Expression).Type ->
+        | :? MemberExpression as me when isDBRefValueBoundary me ->
             dbRefChainDepth (unwrapConvert me.Expression)
         | _ ->
             0
@@ -49,7 +45,7 @@ module internal QueryTranslatorVisitPostJoin =
         match dbrefPropExpr.Expression with
         | :? ParameterExpression ->
             struct(qb.TableNameDot, dbrefPropExpr.Member.Name)
-        | :? MemberExpression as parentMe when parentMe.Member.Name = "Value" && isDBRefType (unwrapConvert parentMe.Expression).Type ->
+        | :? MemberExpression as parentMe when isDBRefValueBoundary parentMe ->
             let parentAlias = ensureDBRefJoin qb parentMe
             struct(parentAlias + ".", dbrefPropExpr.Member.Name)
         | _ ->
@@ -60,7 +56,7 @@ module internal QueryTranslatorVisitPostJoin =
         match dbrefPropExpr.Expression with
         | :? ParameterExpression ->
             struct(qb.SourceContext.RootTable, dbrefPropExpr.Member.Name)
-        | :? MemberExpression as parentMe when parentMe.Member.Name = "Value" && isDBRefType (unwrapConvert parentMe.Expression).Type ->
+        | :? MemberExpression as parentMe when isDBRefValueBoundary parentMe ->
             let parentDbRefExpr = unwrapConvert parentMe.Expression
             let parentPath = computePathKey parentDbRefExpr
             ensureDBRefJoin qb parentMe |> ignore

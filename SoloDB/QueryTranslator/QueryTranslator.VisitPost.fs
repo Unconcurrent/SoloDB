@@ -15,12 +15,6 @@ open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBase
 
 module internal QueryTranslatorVisitPost =
-    let internal isDBRefType (t: Type) =
-        DBRefTypeHelpers.isDBRefType t
-
-    let internal isDBRefManyType (t: Type) =
-        DBRefTypeHelpers.isDBRefManyType t
-
     [<Literal>]
     let internal updateManyRelationUnsupportedMessage =
         "Error: UpdateMany relation transform is not supported.\nReason: Only specific relation mutations are allowed in UpdateMany.\nFix: Use Ref.Set(DBRef.To/None) or RefMany.Add/Append/Remove/Clear, or apply changes outside UpdateMany."
@@ -45,13 +39,13 @@ module internal QueryTranslatorVisitPost =
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote -> ue.Operand
         | _ -> expr
 
-    let rec private unwrapConvertForUpdate (expr: Expression) =
+    let rec private unwrapConvertAll (expr: Expression) =
         match expr with
-        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> unwrapConvertForUpdate ue.Operand
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> unwrapConvertAll ue.Operand
         | _ -> expr
 
     let rec private normalizeUpdateManyBody (expr: Expression) =
-        let expr = unwrapConvertForUpdate expr
+        let expr = unwrapConvertAll expr
         match expr with
         | :? MethodCallExpression as mc when mc.Method.Name = "op_PipeRight" && mc.Arguments.Count >= 1 ->
             // F# "(x |> ignore)" wraps side-effecting call in op_PipeRight; keep the source call.
@@ -76,7 +70,7 @@ module internal QueryTranslatorVisitPost =
             with _ ->
                 ValueNone
 
-        match unwrapConvertForUpdate expr with
+        match unwrapConvertAll expr with
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote || ue.NodeType = ExpressionType.Convert ->
             tryExtractLambdaExpression ue.Operand
         | :? LambdaExpression as le ->
@@ -127,13 +121,13 @@ module internal QueryTranslatorVisitPost =
             let isBoundary =
                 me.Member.Name = "Value" &&
                 not (isNull me.Expression) &&
-                isDBRefType (unwrapConvertForUpdate me.Expression).Type
+                DBRefTypeHelpers.isDBRefType (unwrapConvertAll me.Expression).Type
             isBoundary || containsDBRefValueMutationPath me.Expression
         | :? MethodCallExpression as mc ->
             let isBoundaryCall =
                 mc.Method.Name = "get_Value" &&
-                ((not (isNull mc.Object) && isDBRefType (unwrapConvertForUpdate mc.Object).Type)
-                 || (mc.Arguments.Count > 0 && isDBRefType (unwrapConvertForUpdate mc.Arguments.[0]).Type))
+                ((not (isNull mc.Object) && DBRefTypeHelpers.isDBRefType (unwrapConvertAll mc.Object).Type)
+                 || (mc.Arguments.Count > 0 && DBRefTypeHelpers.isDBRefType (unwrapConvertAll mc.Arguments.[0]).Type))
             isBoundaryCall ||
             containsDBRefValueMutationPath mc.Object ||
             (mc.Arguments |> Seq.exists containsDBRefValueMutationPath)
@@ -164,7 +158,7 @@ module internal QueryTranslatorVisitPost =
         | _ -> ValueNone
 
     let private tryGetRootRelationMember (expr: Expression) =
-        let expr = unwrapConvertForUpdate expr
+        let expr = unwrapConvertAll expr
         match expr with
         | :? MemberExpression as me when not (isNull me.Expression) && isRootParameter me.Expression -> ValueSome me
         | _ -> ValueNone
@@ -181,7 +175,7 @@ module internal QueryTranslatorVisitPost =
         let dbRefDef = dbRefType.GetGenericTypeDefinition()
         let args = dbRefType.GetGenericArguments()
         let targetType = args.[0]
-        let valueExpr = unwrapConvertForUpdate valueExpr
+        let valueExpr = unwrapConvertAll valueExpr
 
         match valueExpr with
         | :? MethodCallExpression as mc
@@ -243,7 +237,7 @@ module internal QueryTranslatorVisitPost =
         match body with
         | :? BinaryExpression as be when be.NodeType = ExpressionType.Assign ->
             match tryGetRootRelationMember be.Left with
-            | ValueSome me when isDBRefType me.Type || isDBRefManyType me.Type ->
+            | ValueSome me when DBRefTypeHelpers.isDBRefType me.Type || DBRefTypeHelpers.isDBRefManyType me.Type ->
                 raise (NotSupportedException updateManyRelationUnsupportedMessage)
             | _ -> ValueNone
 
@@ -258,10 +252,10 @@ module internal QueryTranslatorVisitPost =
 
             if isNull oldValue || isNull newValue then ValueNone else
             match tryGetRootRelationMember oldValue with
-            | ValueSome me when isDBRefType me.Type ->
+            | ValueSome me when DBRefTypeHelpers.isDBRefType me.Type ->
                 let propertyPath = computePathKeyForUpdate me
                 parseDbRefSetValue me.Type propertyPath newValue |> ValueSome
-            | ValueSome me when isDBRefManyType me.Type ->
+            | ValueSome me when DBRefTypeHelpers.isDBRefManyType me.Type ->
                 raise (NotSupportedException updateManyRelationUnsupportedMessage)
             | _ -> ValueNone
 
@@ -269,7 +263,7 @@ module internal QueryTranslatorVisitPost =
             match tryGetCallSourceAndArgStart mc with
             | ValueSome struct (sourceExpr, argStart) ->
                 match tryGetRootRelationMember sourceExpr with
-                | ValueSome me when isDBRefManyType me.Type ->
+                | ValueSome me when DBRefTypeHelpers.isDBRefManyType me.Type ->
                     let propertyPath = computePathKeyForUpdate me
                     let targetType = me.Type.GetGenericArguments().[0]
                     match mc.Method.Name with
@@ -288,7 +282,7 @@ module internal QueryTranslatorVisitPost =
                         ClearDBRefMany(propertyPath, targetType) |> ValueSome
                     | _ ->
                         raise (NotSupportedException updateManyRelationUnsupportedMessage)
-                | ValueSome me when isDBRefType me.Type ->
+                | ValueSome me when DBRefTypeHelpers.isDBRefType me.Type ->
                     raise (NotSupportedException updateManyRelationUnsupportedMessage)
                 | _ -> ValueNone
             | ValueNone -> ValueNone
