@@ -588,8 +588,14 @@ module private QueryHelper =
                     builder.Append "\""
                 
             | Simple layer ->
-                let currentCtx = cloneQueryContext sourceCtx
-                let effectiveTableName = if i = 0 then layer.TableName else "o"
+                let isLocalKeyProjection =
+                    match layer.Selector with
+                    | Some (KeyProjection _) -> true
+                    | _ -> false
+                let currentCtx =
+                    if isLocalKeyProjection then cloneQueryContext sourceCtx
+                    else sourceCtx
+                let effectiveTableName = layer.TableName
                 // Track Value column position for potential json_set materialization.
                 // mutable because it's set inside the match below but used after JOIN discovery.
                 let mutable valueColumnRange = ValueNone
@@ -604,7 +610,7 @@ module private QueryHelper =
                     builder.Append "SELECT " |> ignore
                     builder.Append idColumn |> ignore
                     builder.Append ", " |> ignore
-                    QueryTranslator.translateQueryableWithContext currentCtx effectiveTableName selector builder.SQLiteCommand builder.Variables
+                    QueryTranslator.translateQueryableWithContext sourceCtx layer.TableName selector builder.SQLiteCommand builder.Variables
                     builder.Append "AS Value " |> ignore
                 | Some (KeyProjection selector) ->
                     builder.Append "SELECT " |> ignore
@@ -616,7 +622,7 @@ module private QueryHelper =
                     builder.Append " AS __solodb_group_key " |> ignore
                 | Some (Raw func) ->
                     builder.Append "SELECT " |> ignore
-                    func effectiveTableName builder.SQLiteCommand builder.Variables
+                    func layer.TableName builder.SQLiteCommand builder.Variables
                 | None ->
                     let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
                     if isTypePrimitive then
@@ -645,10 +651,14 @@ module private QueryHelper =
                     else
                         builder.Append "(" |> ignore
                         writeLayer (i - 1)
-                        builder.Append ") AS \"o\"" |> ignore
-                        ValueSome builder.SQLiteCommand.Length
+                        builder.Append ")" |> ignore
+                        ValueNone
 
-                writeClauses currentCtx builder layer effectiveTableName
+                writeClauses
+                    (if isLocalKeyProjection then currentCtx else sourceCtx)
+                    builder
+                    layer
+                    (if isLocalKeyProjection then effectiveTableName else layer.TableName)
 
                 // After expression translation, emit LEFT JOINs + materialization SELECT rewriting.
                 // JOINs are discovered during writeClauses but appear between FROM "Table" and WHERE.
