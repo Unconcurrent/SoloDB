@@ -309,6 +309,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="item">The document to insert or replace.</param>
     /// <returns>The ID of the inserted or replaced document.</returns>
     member this.InsertOrReplace (item: 'T) =
+        if isNull (box item) then nullArg "item"
         if this.HasRelations then
             connection.WithTransaction(fun conn ->
                 let tx: Relations.RelationTxContext = {
@@ -363,6 +364,12 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>A list of IDs for the newly inserted documents.</returns>
     member this.InsertBatch (items: 'T seq) =
         if isNull items then raise (ArgumentNullException(nameof(items)))
+        let items =
+            items
+            |> Seq.map (fun item ->
+                if isNull (box item) then nullArg "items"
+                item)
+            |> Seq.toArray
 
         this.WithRelationAutoTx (fun transientCollection ->
             let connection = transientCollection.Connection.Get()
@@ -397,6 +404,12 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <returns>A list of IDs for the inserted or replaced documents.</returns>
     member this.InsertOrReplaceBatch (items: 'T seq) =
         if isNull items then raise (ArgumentNullException(nameof(items)))
+        let items =
+            items
+            |> Seq.map (fun item ->
+                if isNull (box item) then nullArg "items"
+                item)
+            |> Seq.toArray
 
         this.WithRelationAutoTx (fun transientCollection ->
             let connection = transientCollection.Connection.Get()
