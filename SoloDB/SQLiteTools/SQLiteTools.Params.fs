@@ -15,6 +15,10 @@ open System.Data.Common
 /// Internal helpers for SQLiteTools: parameter processing, command creation, and type-mapper building blocks.
 /// </summary>
 module internal SQLiteToolsParams =
+    /// Optional SQL trace callback for corpus capture and diagnostics.
+    /// Set by test harnesses to intercept all SQL at the execution boundary.
+    let mutable internal sqlTraceCallback: Action<string> voption = ValueNone
+
     /// <summary>
     /// Caches PropertyInfo for Nullable types' 'HasValue' and 'Value' properties for performance.
     /// </summary>
@@ -158,6 +162,7 @@ module internal SQLiteToolsParams =
     /// <param name="parameters">The parameters for the command.</param>
     /// <returns>A new IDbCommand.</returns>
     let internal createCommand (this: SqliteConnection) (sql: string) (parameters: obj) =
+        match sqlTraceCallback with ValueSome cb -> cb.Invoke(sql) | ValueNone -> ()
         let command = this.CreateCommand()
         command.CommandText <- sql
         processParameters addParameter command parameters

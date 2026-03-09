@@ -16,6 +16,8 @@ open Connections
 open SoloDatabase.RelationsTypes
 open SoloDatabase.JsonSerializator
 open Microsoft.Data.Sqlite
+open SqlDu.Engine.C1.Spec
+open SoloDatabase.QueryTranslatorBaseTypes
 
 /// <summary>
 /// An internal discriminated union that enumerates the LINQ methods supported by the query translator.
@@ -89,14 +91,14 @@ type private PreprocessedQuery =
 type private PreprocessedOrder = {
     OrderingRule: Expression;
     mutable Descending: bool
-    /// When set, emitted directly as raw SQL instead of translating OrderingRule.
-    RawSQL: string option
+    /// When set, used as DU expression instead of translating OrderingRule.
+    RawExpr: SqlExpr option
 }
 
 type private SQLSelector =
 | Expression of Expression
 | KeyProjection of Expression
-| Raw of (string -> StringBuilder -> Dictionary<string, obj> -> unit)
+| DuSelector of (string -> Dictionary<string, obj> -> Projection list)
 
 type private UsedSQLStatements = 
     {
@@ -107,7 +109,7 @@ type private UsedSQLStatements =
         // These will account for the fact that in SQLite, the OFFSET clause cannot be used independently without the LIMIT clause.
         mutable Skip: Expression option
         mutable Take: Expression option
-        UnionAll: (string -> StringBuilder -> Dictionary<string, obj> -> unit) ResizeArray
+        UnionAll: (string -> Dictionary<string, obj> -> SelectCore) ResizeArray
         TableName: string
     }
     member this.IsEmptyWithTableName =
@@ -121,7 +123,7 @@ type private UsedSQLStatements =
 
 type private SQLSubquery =
     | Simple of UsedSQLStatements
-    | Complex of (struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|} -> unit)
+    | ComplexDu of (struct {|Vars: Dictionary<string, obj>; Inner: SqlSelect; TableName: string|} -> SqlSelect)
 
 type private PredicateRole =
 | WherePredicate
@@ -157,32 +159,77 @@ type private LoweredKeySelector = {
 /// A private, mutable builder used to construct an SQL query from a LINQ expression tree.
 /// </summary>
 /// <remarks>This type holds the state of the translation process, including the SQL command being built and any parameters.</remarks>
-type private QueryableBuilder = 
+type private QueryableBuilder =
     {
-        /// The StringBuilder that accumulates the generated SQL string.
-        SQLiteCommand: StringBuilder
         /// A dictionary of parameters to be passed to the SQLite command.
         Variables: Dictionary<string, obj>
         /// This list will be using to know if it is necessary to create another SQLite subquery to finish the translation, by checking if all the available slots have been used.
         Subqueries: ResizeArray<SQLSubquery>
     }
-    /// <summary>Appends a string to the current SQL command.</summary>
-    member this.Append(text: string) =
-        ignore (this.SQLiteCommand.Append text)
-
-    /// <summary>Appends a StringBuilder to the current SQL command.</summary>
-    member this.Append(text: StringBuilder) =
-        ignore (this.SQLiteCommand.Append text)
-
-    /// <summary>Adds a variable to the parameters dictionary and appends its placeholder to the SQL command.</summary>
-    member this.AppendVar(variable: obj) =
-        QueryTranslator.appendVariable this.SQLiteCommand this.Variables variable
 
 
 /// <summary>
 /// Contains private helper functions for translating LINQ expression trees to SQL.
 /// </summary>
 module private QueryHelper =
+    /// Allocate a parameter in the shared Variables dict and return a SqlExpr referencing it.
+    let private allocateParam (variables: Dictionary<string, obj>) (value: obj) : SqlExpr =
+        let value = match value with :? bool as b -> box (if b then 1 else 0) | _ -> value
+        let jsonValue, shouldEncode = toSQLJson value
+        let name = sprintf "dp%d" variables.Count
+        variables.[name] <- jsonValue
+        if shouldEncode then SqlExpr.FunctionCall("jsonb", [SqlExpr.Parameter name])
+        else SqlExpr.Parameter name
+
+    /// Translate a LINQ expression to SqlExpr DU via the QueryTranslator DU path.
+    let private translateExprDu (sourceCtx: QueryContext) (tableName: string) (expr: Expression) (vars: Dictionary<string, obj>) : SqlExpr =
+        QueryTranslator.translateToSqlExpr sourceCtx tableName expr vars
+
+    /// Return the DU expression for extracting Value as JSON if the type is not a primitive SQLite type.
+    let private extractValueAsJsonDu (x: Type) : SqlExpr =
+        let isPrimitive = QueryTranslator.isPrimitiveSQLiteType x
+        if isPrimitive then
+            SqlExpr.Column(None, "Value")
+        elif x = typeof<obj> || typeof<JsonValue>.IsAssignableFrom x then
+            SqlExpr.CaseExpr(
+                [(SqlExpr.Binary(
+                    SqlExpr.FunctionCall("typeof", [SqlExpr.Column(None, "Value")]),
+                    BinaryOperator.Eq,
+                    SqlExpr.Literal(SqlLiteral.String "blob")),
+                  SqlExpr.FunctionCall("json_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")]))],
+                Some(SqlExpr.Column(None, "Value")))
+        else
+            SqlExpr.FunctionCall("json_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
+
+    /// Emit a SqlSelect to a StringBuilder via the minimal emitter.
+    let private emitSelectToSb (sb: StringBuilder) (variables: Dictionary<string, obj>) (sel: SqlSelect) =
+        let qb : QueryBuilder = {
+            StringBuilder = sb
+            Variables = variables
+            AppendVariable = appendVariable sb variables
+            RollBack = fun N -> sb.Remove(sb.Length - (int)N, (int)N) |> ignore
+            UpdateMode = false
+            TableNameDot = ""
+            JsonExtractSelfValue = true
+            Parameters = System.Collections.ObjectModel.ReadOnlyCollection(Array.empty)
+            IdParameterIndex = -1
+            SourceContext = QueryContext.SingleSource("")
+            ParamCounter = ref 0
+        }
+        SqlDuMinimalEmit.emitSelect qb sel
+
+    /// Helper to build a simple SelectCore with default empty fields.
+    let private mkCore projections source =
+        { Distinct = false; Projections = projections; Source = source
+          Joins = []; Where = None; GroupBy = []; Having = None
+          OrderBy = []; Limit = None; Offset = None }
+
+    /// Wrap a SelectCore in a SqlSelect.
+    let private wrapCore core = { Ctes = []; Body = SingleSelect core }
+
+    /// Build a DerivedTable source from a SqlSelect with alias "o".
+    let private derivedO sel = DerivedTable(sel, "o")
+
     let private unwrapQuotedLambda (expr: Expression) =
         match expr with
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote -> ue.Operand
@@ -388,12 +435,12 @@ module private QueryHelper =
             Expression.Not expr :> Expression
 
     let private emptySQLStatement () =
-        { Filters = ResizeArray(4); Orders = ResizeArray(1); Selector = None; Skip = None; Take = None; TableName = ""; UnionAll = ResizeArray(0) }
+        { Filters = ResizeArray(4); Orders = ResizeArray(1); Selector = None; Skip = None; Take = None; TableName = ""; UnionAll = ResizeArray<string -> Dictionary<string, obj> -> SelectCore>(0) }
 
     let inline private simpleCurrent (statements: ResizeArray<SQLSubquery>) =
         match statements.Last() with
         | Simple s -> s
-        | Complex _ ->
+        | ComplexDu _ ->
             let n = emptySQLStatement ()
             statements.Add (Simple n)
             n
@@ -408,7 +455,7 @@ module private QueryHelper =
                 n
             | None ->
                 current
-        | Complex _ ->
+        | ComplexDu _ ->
             let n = emptySQLStatement ()
             statements.Add (Simple n)
             n
@@ -452,7 +499,7 @@ module private QueryHelper =
     let addOrder (statements: ResizeArray<SQLSubquery>) (ordering: Expression) (descending: bool) =
         let current = ifSelectorNewStatement statements
         current.Orders.Clear()
-        current.Orders.Add({ OrderingRule = ordering; Descending = descending; RawSQL = None })
+        current.Orders.Add({ OrderingRule = ordering; Descending = descending; RawExpr = None })
 
     let addSelector (statements: ResizeArray<SQLSubquery>) (selector: SQLSelector) =
         let last = statements.Last()
@@ -475,9 +522,9 @@ module private QueryHelper =
         | Some e2 -> current.Take <- Some (ExpressionHelper.min e2 e)
         | None   -> current.Take <- Some e
 
-    /// The Complex subquery will be the last subquery processes, it has the WriteInner function to place the inner subqueries where necesary.
-    let addComplexFinal (statements: ResizeArray<SQLSubquery>) (writeFunc: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|} -> unit) =
-        statements.Add (Complex writeFunc)
+    /// The ComplexDu subquery will be the last subquery processed. It receives the inner SqlSelect and returns a new SqlSelect.
+    let addComplexFinal (statements: ResizeArray<SQLSubquery>) (buildFunc: struct {|Vars: Dictionary<string, obj>; Inner: SqlSelect; TableName: string|} -> SqlSelect) =
+        statements.Add (ComplexDu buildFunc)
 
     /// <summary>
     /// Recursively translates a LINQ expression tree into an SQL query.
@@ -486,32 +533,25 @@ module private QueryHelper =
     /// <param name="builder">The query builder instance that accumulates the SQL and parameters.</param>
     /// <param name="expression">The expression to translate.</param>
     let private aggregateTranslator (sourceCtx: QueryContext) (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) =
-        addSelector queries (Raw (fun tableName builder vars ->
-            builder.Append "-1 AS Id, " |> ignore
-            builder.Append fnName |> ignore
-            builder.Append "(" |> ignore
-
-            match args.Length with
-            | 0 -> QueryTranslator.translateQueryableWithContext sourceCtx tableName (method.ReturnType |> ExpressionHelper.id) builder vars
-            | 1 -> QueryTranslator.translateQueryableWithContext sourceCtx tableName args.[0] builder vars
-            | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" method.Name other))
-
-            builder.Append ") AS Value " |> ignore
+        addSelector queries (DuSelector (fun tableName vars ->
+            let innerExpr =
+                match args.Length with
+                | 0 -> translateExprDu sourceCtx tableName (method.ReturnType |> ExpressionHelper.id) vars
+                | 1 -> translateExprDu sourceCtx tableName args.[0] vars
+                | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" method.Name other))
+            [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+             { Alias = Some "Value"; Expr = SqlExpr.FunctionCall(fnName, [innerExpr]) }]
         ))
 
     let private zeroIfNullAggregateTranslator (sourceCtx: QueryContext) (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) =
-        addSelector queries (Raw (fun tableName builder vars ->
-            builder.Append "-1 AS Id, " |> ignore
-            builder.Append "COALESCE(" |> ignore
-            builder.Append fnName |> ignore
-            builder.Append "(" |> ignore
-
-            match args.Length with
-            | 0 -> QueryTranslator.translateQueryableWithContext sourceCtx tableName (method.ReturnType |> ExpressionHelper.id) builder vars
-            | 1 -> QueryTranslator.translateQueryableWithContext sourceCtx tableName args.[0] builder vars
-            | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" method.Name other))
-
-            builder.Append "),0) AS Value " |> ignore
+        addSelector queries (DuSelector (fun tableName vars ->
+            let innerExpr =
+                match args.Length with
+                | 0 -> translateExprDu sourceCtx tableName (method.ReturnType |> ExpressionHelper.id) vars
+                | 1 -> translateExprDu sourceCtx tableName args.[0] vars
+                | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" method.Name other))
+            [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+             { Alias = Some "Value"; Expr = SqlExpr.Coalesce([SqlExpr.FunctionCall(fnName, [innerExpr]); SqlExpr.Literal(SqlLiteral.Integer 0L)]) }]
         ))
 
     /// <summary>
@@ -533,7 +573,7 @@ module private QueryHelper =
             mcl
         | _other -> raise (NotSupportedException(unsupportedConcatMessage))
 
-    let private addUnionAll (queries: SQLSubquery ResizeArray) (fn: string -> StringBuilder -> Dictionary<string, obj> -> unit) =
+    let private addUnionAll (queries: SQLSubquery ResizeArray) (fn: string -> Dictionary<string, obj> -> SelectCore) =
         match queries.Last() with
         | Simple last when last.Orders.Count = 0 ->
             last.UnionAll.Add fn
@@ -550,14 +590,14 @@ module private QueryHelper =
     /// <param name="errorMsg">The error message to return if the aggregation result is NULL.</param>
     let private raiseIfNullAggregateTranslator (sourceCtx: QueryContext) (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) (errorMsg: string) =
         aggregateTranslator sourceCtx fnName queries method args
-        addSelector queries (Raw (fun tableName builder vars ->
-            // In this case NULL is an invalid operation, therefore to emulate the .NET behavior 
+        let jsonExtractValue = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
+        let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, jsonExtractValue)
+        addSelector queries (DuSelector (fun _tableName _vars ->
+            // In this case NULL is an invalid operation, therefore to emulate the .NET behavior
             // of throwing an exception we return the Id = NULL, and Value = {exception message}
             // And downstream the pipeline it will be checked and throwed.
-            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN NULL ELSE -1 END AS Id, " |> ignore
-            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN '" |> ignore
-            builder.Append (QueryTranslator.escapeSQLiteString errorMsg) |> ignore
-            builder.Append "' ELSE Value END AS Value " |> ignore
+            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.Null))], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
+             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.String errorMsg))], Some(SqlExpr.Column(None, "Value"))) }]
         ))
 
     /// <summary>
@@ -674,91 +714,160 @@ module private QueryHelper =
             |> _.ToJsonString(), HasTypeId<'T>.Value
         )
 
-    /// Appends WHERE, ORDER BY, LIMIT/OFFSET directly to the main builder.
-    let private writeClauses
+    /// Build WHERE, ORDER BY, LIMIT, OFFSET, UnionAll from a UsedSQLStatements layer as DU values.
+    /// Returns (where, orderBy, limit, offset, unionAlls).
+    let private buildClausesDu
         (sourceCtx: QueryContext)
-        (builder: QueryableBuilder)
+        (vars: Dictionary<string, obj>)
         (statement: UsedSQLStatements)
         (contextTable: string) =
-        
-        if statement.Filters.Count <> 0 then
-            builder.Append(" WHERE ") |> ignore
-            statement.Filters
-            |> Seq.iteri (fun j f ->
-                if j > 0 then builder.Append(" AND ") |> ignore
-                // write predicates straight into the main command
-                QueryTranslator.translateQueryableWithContext sourceCtx contextTable f builder.SQLiteCommand builder.Variables
-            )
 
-        if statement.UnionAll.Count <> 0 then
-            // If there are UNION ALL statements, we need to append them to the main command.
-            builder.Append(" UNION ALL ") |> ignore
-            statement.UnionAll
-            |> Seq.iteri (fun j unionAll ->
-                if j > 0 then builder.Append(" UNION ALL ") |> ignore
-                unionAll contextTable builder.SQLiteCommand builder.Variables
-            )
-            |> ignore
+        let where =
+            if statement.Filters.Count = 0 then None
+            else
+                let exprs =
+                    statement.Filters
+                    |> Seq.map (fun f -> translateExprDu sourceCtx contextTable f vars)
+                    |> Seq.toList
+                match exprs with
+                | [single] -> Some single
+                | multiple -> Some (multiple |> List.reduce (fun a b -> SqlExpr.Binary(a, BinaryOperator.And, b)))
 
-        if statement.Orders.Count <> 0 then
-            builder.Append(" ORDER BY ") |> ignore
-            statement.Orders
-            |> Seq.iteri (fun j o ->
-                if j > 0 then builder.Append(", ") |> ignore
-                match o.RawSQL with
-                | Some raw -> builder.Append raw |> ignore
-                | None -> QueryTranslator.translateQueryableWithContext sourceCtx contextTable o.OrderingRule builder.SQLiteCommand builder.Variables
-                if o.Descending then builder.Append(" DESC") |> ignore
-            )
+        let unionAlls =
+            statement.UnionAll |> Seq.map (fun buildFn -> buildFn contextTable vars) |> Seq.toList
 
-        match statement.Take, statement.Skip with
-        | Some take, Some skip ->
-            builder.Append(" LIMIT ") |> ignore
-            builder.AppendVar (QueryTranslator.evaluateExpr<obj> take) |> ignore
-            builder.Append(" OFFSET ") |> ignore
-            builder.AppendVar (QueryTranslator.evaluateExpr<obj> skip) |> ignore
-        | Some take, None ->
-            builder.Append(" LIMIT ") |> ignore
-            builder.AppendVar (QueryTranslator.evaluateExpr<obj> take) |> ignore
-        | None, Some skip ->
-            builder.Append(" LIMIT -1 OFFSET ") |> ignore
-            builder.AppendVar (QueryTranslator.evaluateExpr<obj> skip) |> ignore
-        | None, None -> ()
+        let orderBy =
+            statement.Orders |> Seq.map (fun o ->
+                let expr =
+                    match o.RawExpr with
+                    | Some duExpr -> duExpr
+                    | None -> translateExprDu sourceCtx contextTable o.OrderingRule vars
+                { Expr = expr; Direction = if o.Descending then SortDirection.Desc else SortDirection.Asc }
+            ) |> Seq.toList
 
+        let limit =
+            match statement.Take with
+            | Some take -> Some (allocateParam vars (QueryTranslator.evaluateExpr<obj> take))
+            | None ->
+                match statement.Skip with
+                | Some _ -> Some (SqlExpr.Literal(SqlLiteral.Integer -1L))
+                | None -> None
 
-    let private writeLayers<'T>
+        let offset =
+            match statement.Skip with
+            | Some skip -> Some (allocateParam vars (QueryTranslator.evaluateExpr<obj> skip))
+            | None -> None
+
+        struct (where, orderBy, limit, offset, unionAlls)
+
+    /// Parse a JoinKind string from the handler mechanism into a DU JoinKind.
+    let private parseJoinKind (kind: string) =
+        match kind.Trim().ToUpperInvariant() with
+        | s when s.Contains("LEFT") -> JoinKind.Left
+        | s when s.Contains("INNER") -> JoinKind.Inner
+        | s when s.Contains("CROSS") -> JoinKind.Cross
+        | _ -> JoinKind.Left
+
+    /// Build materialized Value projection (jsonb_set with JOIN data) for relation materialization.
+    let private buildMaterializedValueExpr (ctx: QueryContext) (effectiveTableName: string) (valueColumnExpr: SqlExpr) =
+        let materializedJoins =
+            ctx.Joins
+            |> Seq.filter (fun j -> shouldLoadRelationPath ctx j.PropertyPath)
+            |> Seq.toList
+        if materializedJoins.IsEmpty then
+            // All joins are excluded — no materialization needed, keep original qualified Value
+            valueColumnExpr
+        else
+            // jsonb_set("Table".Value, '$.Prop1', CASE WHEN a1.Id IS NOT NULL THEN jsonb_array(a1.Id, a1.Value) ELSE jsonb_extract("Table".Value, '$.Prop1') END, ...)
+            let args = ResizeArray<SqlExpr>()
+            args.Add(SqlExpr.Column(Some effectiveTableName, "Value"))
+            for j in materializedJoins do
+                ctx.MaterializedPaths.Add(j.PropertyPath) |> ignore
+                args.Add(SqlExpr.Literal(SqlLiteral.String ("$." + j.PropertyPath)))
+                args.Add(SqlExpr.CaseExpr(
+                    [(SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some j.TargetAlias, "Id")),
+                      SqlExpr.FunctionCall("jsonb_array", [SqlExpr.Column(Some j.TargetAlias, "Id"); SqlExpr.Column(Some j.TargetAlias, "Value")]))],
+                    Some (SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(Some effectiveTableName, "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + j.PropertyPath))]))))
+            SqlExpr.FunctionCall("jsonb_set", args |> Seq.toList)
+
+    /// Wrap a SelectBody with optional ORDER BY, LIMIT, OFFSET.
+    /// For SingleSelect, these are already on the core (identity pass-through).
+    /// For UnionAllSelect, wrapping is needed if ordering/limit is present.
+    /// Strip source aliases from SqlExpr so column references become unqualified.
+    /// Required when ORDER BY expressions translated against a base table (e.g. "Int32")
+    /// are lifted to an outer derived-table wrapper where those aliases don't exist.
+    let rec private stripSourceAlias (expr: SqlExpr) : SqlExpr =
+        match expr with
+        | SqlExpr.Column(Some _, col) -> SqlExpr.Column(None, col)
+        | SqlExpr.JsonExtractExpr(Some _, col, path) -> SqlExpr.JsonExtractExpr(None, col, path)
+        | SqlExpr.FunctionCall(name, args) -> SqlExpr.FunctionCall(name, args |> List.map stripSourceAlias)
+        | SqlExpr.Unary(op, inner) -> SqlExpr.Unary(op, stripSourceAlias inner)
+        | SqlExpr.Binary(l, op, r) -> SqlExpr.Binary(stripSourceAlias l, op, stripSourceAlias r)
+        | SqlExpr.CaseExpr(branches, elseExpr) ->
+            SqlExpr.CaseExpr(
+                branches |> List.map (fun (w, t) -> (stripSourceAlias w, stripSourceAlias t)),
+                elseExpr |> Option.map stripSourceAlias)
+        | SqlExpr.Coalesce exprs -> SqlExpr.Coalesce(exprs |> List.map stripSourceAlias)
+        | SqlExpr.Cast(inner, ty) -> SqlExpr.Cast(stripSourceAlias inner, ty)
+        | other -> other
+
+    let private wrapCoreBody (body: SelectBody) (orderBy: OrderBy list) (limit: SqlExpr option) (offset: SqlExpr option) : SqlSelect =
+        match body with
+        | SingleSelect core ->
+            { Ctes = []; Body = SingleSelect core }
+        | UnionAllSelect(head, tail) ->
+            if orderBy.IsEmpty && limit.IsNone && offset.IsNone then
+                { Ctes = []; Body = UnionAllSelect(head, tail) }
+            else
+                // Wrap the UNION ALL in a derived table to apply ORDER BY / LIMIT.
+                // Strip source aliases from ORDER BY: expressions were translated against
+                // the base table (e.g. "Int32") but the outer wrapper's columns are unqualified.
+                let strippedOrderBy = orderBy |> List.map (fun o -> { o with Expr = stripSourceAlias o.Expr })
+                let innerSelect = { Ctes = []; Body = UnionAllSelect(head, tail) }
+                let outerCore =
+                    { mkCore
+                        [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
+                         { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
+                        (Some (DerivedTable(innerSelect, "o")))
+                      with OrderBy = strippedOrderBy; Limit = limit; Offset = offset }
+                { Ctes = []; Body = SingleSelect outerCore }
+
+    /// Build SqlSelect from collected layers (DU construction path — no StringBuilder).
+    let private buildLayersDu<'T>
         (sourceCtx: QueryContext)
-        (builder: QueryableBuilder)
+        (vars: Dictionary<string, obj>)
         (layers: SQLSubquery ResizeArray)
-        =
+        : SqlSelect =
 
         let layerCount = layers.Count
 
         let tableName =
             if layerCount > 0 then
                 match layers.[0] with
-                | Simple layer ->
-                    layer.TableName
-                | Complex _ ->
-                    ""
+                | Simple layer -> layer.TableName
+                | ComplexDu _ -> ""
             else
                 ""
 
-        let rec writeLayer (i: int) =
+        let rec buildLayer (i: int) : SqlSelect =
             let layer = layers.[i]
             match layer with
+            // Edge case 1: Empty query (root table only)
             | Simple layer when layer.IsEmptyWithTableName ->
                 let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
                 if isTypePrimitive then
-                    builder.Append "SELECT Id, jsonb_extract(Value, '$') as Value FROM " |> ignore
-                    builder.Append "\""
-                    builder.Append layer.TableName
-                    builder.Append "\""
+                    // Edge case 2: Primitive type extraction — jsonb_extract(Value, '$')
+                    wrapCore (mkCore
+                        [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
+                         { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")]) }]
+                        (Some (BaseTable(layer.TableName, None))))
                 else
-                    builder.Append "\""
-                    builder.Append layer.TableName
-                    builder.Append "\""
-                
+                    // Non-primitive: bare table reference (Id and Value are columns)
+                    wrapCore (mkCore
+                        [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
+                         { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
+                        (Some (BaseTable(layer.TableName, None))))
+
             | Simple layer ->
                 let isLocalKeyProjection =
                     match layer.Selector with
@@ -768,161 +877,122 @@ module private QueryHelper =
                     if isLocalKeyProjection then cloneQueryContext sourceCtx
                     else sourceCtx
                 let effectiveTableName = layer.TableName
-                // Track Value column position for potential json_set materialization.
-                // mutable because it's set inside the match below but used after JOIN discovery.
-                let mutable valueColumnRange = ValueNone
-
-                // Qualify column names with table name when present (needed for JOINed queries).
                 let hasTableName = not (String.IsNullOrEmpty effectiveTableName)
-                let idColumn = if hasTableName then sprintf "\"%s\".Id" effectiveTableName else "Id"
-                let valueColumn = if hasTableName then sprintf "\"%s\".Value" effectiveTableName else "Value"
+                let quotedTableName = "\"" + effectiveTableName + "\""
+                let idColumnExpr = if hasTableName then SqlExpr.Column(Some quotedTableName, "Id") else SqlExpr.Column(None, "Id")
+                let valueColumnExpr = if hasTableName then SqlExpr.Column(Some quotedTableName, "Value") else SqlExpr.Column(None, "Value")
 
-                match layer.Selector with
-                | Some (Expression selector) ->
-                    builder.Append "SELECT " |> ignore
-                    builder.Append idColumn |> ignore
-                    builder.Append ", " |> ignore
-                    QueryTranslator.translateQueryableWithContext sourceCtx layer.TableName selector builder.SQLiteCommand builder.Variables
-                    builder.Append "AS Value " |> ignore
-                | Some (KeyProjection selector) ->
-                    let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
-                    builder.Append "SELECT " |> ignore
-                    builder.Append idColumn |> ignore
-                    builder.Append ", " |> ignore
-                    if isTypePrimitive then
-                        builder.Append "jsonb_extract(" |> ignore
-                        builder.Append valueColumn |> ignore
-                        builder.Append ", '$') AS Value, " |> ignore
+                // Track whether the Value projection can be rewritten for JOIN materialization.
+                let mutable needsValueMaterialization = false
+
+                // Build projections based on selector.
+                let projections =
+                    match layer.Selector with
+                    | Some (Expression selector) ->
+                        let selectorExpr = translateExprDu sourceCtx layer.TableName selector vars
+                        [{ Alias = None; Expr = idColumnExpr }
+                         { Alias = Some "Value"; Expr = selectorExpr }]
+                    | Some (KeyProjection selector) ->
+                        let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
+                        let keyExpr = translateExprDu currentCtx effectiveTableName selector vars
+                        if isTypePrimitive then
+                            [{ Alias = None; Expr = idColumnExpr }
+                             { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("jsonb_extract", [valueColumnExpr; SqlExpr.Literal(SqlLiteral.String "$")]) }
+                             { Alias = Some "__solodb_group_key"; Expr = keyExpr }]
+                        else
+                            needsValueMaterialization <- true
+                            [{ Alias = None; Expr = idColumnExpr }
+                             { Alias = Some "Value"; Expr = valueColumnExpr }
+                             { Alias = Some "__solodb_group_key"; Expr = keyExpr }]
+                    | Some (DuSelector buildProjections) ->
+                        buildProjections layer.TableName vars
+                    | None ->
+                        let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
+                        if isTypePrimitive then
+                            [{ Alias = None; Expr = idColumnExpr }
+                             { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("jsonb_extract", [valueColumnExpr; SqlExpr.Literal(SqlLiteral.String "$")]) }]
+                        else
+                            needsValueMaterialization <- true
+                            [{ Alias = None; Expr = idColumnExpr }
+                             { Alias = None; Expr = valueColumnExpr }]
+
+                // Build source.
+                let isBaseTable = (i = 0)
+                let source =
+                    if isBaseTable then
+                        Some (BaseTable(layer.TableName, None))
                     else
-                        let vStart = builder.SQLiteCommand.Length
-                        builder.Append valueColumn |> ignore
-                        builder.Append " AS Value" |> ignore
-                        let vEnd = builder.SQLiteCommand.Length
-                        valueColumnRange <- ValueSome struct(vStart, vEnd)
-                        builder.Append ", " |> ignore
-                    QueryTranslator.translateQueryableWithContext currentCtx effectiveTableName selector builder.SQLiteCommand builder.Variables
-                    builder.Append " AS __solodb_group_key " |> ignore
-                | Some (Raw func) ->
-                    builder.Append "SELECT " |> ignore
-                    func layer.TableName builder.SQLiteCommand builder.Variables
-                | None ->
-                    let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
-                    if isTypePrimitive then
-                        builder.Append "SELECT " |> ignore
-                        builder.Append idColumn |> ignore
-                        builder.Append ", jsonb_extract(" |> ignore
-                        builder.Append valueColumn |> ignore
-                        builder.Append ", '$') as Value " |> ignore
+                        let innerSel = buildLayer (i - 1)
+                        Some (DerivedTable(innerSel, "o"))
+
+                // Build clauses (WHERE, ORDER BY, LIMIT, OFFSET, UNION ALL).
+                // Side effect: expression translation discovers JOINs via QueryContext.
+                let clauseCtx = if isLocalKeyProjection then currentCtx else sourceCtx
+                let clauseTable = if isLocalKeyProjection then effectiveTableName else layer.TableName
+                let struct (where, orderBy, limit, offset, unionAlls) =
+                    buildClausesDu clauseCtx vars layer clauseTable
+
+                // Edge case 8: JOIN materialization (DBRef) — discovered during clause translation.
+                let mutable finalProjections = projections
+                let mutable joins = []
+
+                if isBaseTable && currentCtx.Joins.Count > 0 then
+                    // Build JoinShape list from discovered JoinEdges.
+                    joins <-
+                        currentCtx.Joins
+                        |> Seq.map (fun j ->
+                            { Kind = parseJoinKind j.JoinKind
+                              Source = BaseTable(j.TargetTable, Some j.TargetAlias)
+                              On = Some (SqlExpr.FunctionCall("__raw__", [SqlExpr.Literal(SqlLiteral.String j.OnCondition)])) })
+                        |> Seq.toList
+
+                    // Rewrite Value projection for materialization (jsonb_set).
+                    if needsValueMaterialization then
+                        let materializedValueExpr = buildMaterializedValueExpr currentCtx quotedTableName valueColumnExpr
+                        finalProjections <-
+                            finalProjections |> List.map (fun p ->
+                                // Replace bare Value column with materialized expression.
+                                match p.Alias, p.Expr with
+                                | None, SqlExpr.Column(_, "Value") ->
+                                    { Alias = Some "Value"; Expr = materializedValueExpr }
+                                | Some "Value", _ ->
+                                    { Alias = Some "Value"; Expr = materializedValueExpr }
+                                | _ -> p)
+
+                // Assemble the SelectCore.
+                let body =
+                    match unionAlls with
+                    | [] ->
+                        let core =
+                            { mkCore finalProjections source with
+                                Joins = joins
+                                Where = where
+                                OrderBy = orderBy
+                                Limit = limit
+                                Offset = offset }
+                        SingleSelect core
+                    | _ ->
+                        // Edge case 4: UNION ALL chains
+                        let headCore =
+                            { mkCore finalProjections source with
+                                Joins = joins
+                                Where = where }
+                        UnionAllSelect(headCore, unionAlls)
+
+                wrapCoreBody body orderBy limit offset
+
+            | ComplexDu buildFunc ->
+                let tn =
+                    if i = 0 then tableName
+                    else ""
+                let innerSel =
+                    if i > 0 then buildLayer (i - 1)
                     else
-                        builder.Append "SELECT " |> ignore
-                        builder.Append idColumn |> ignore
-                        builder.Append ", " |> ignore
-                        let vStart = builder.SQLiteCommand.Length
-                        builder.Append valueColumn |> ignore
-                        builder.Append " " |> ignore
-                        let vEnd = builder.SQLiteCommand.Length
-                        valueColumnRange <- ValueSome struct(vStart, vEnd)
+                        // No inner layers — provide an empty select (shouldn't happen in practice)
+                        wrapCore (mkCore [] None)
+                buildFunc {| Vars = vars; Inner = innerSel; TableName = tn |}
 
-                builder.Append "FROM " |> ignore
-                let joinInsertPoint =
-                    if i = 0 then
-                        builder.Append "\""
-                        builder.Append layer.TableName
-                        builder.Append "\""
-                        ValueSome builder.SQLiteCommand.Length
-                    else
-                        builder.Append "(" |> ignore
-                        writeLayer (i - 1)
-                        builder.Append ")" |> ignore
-                        ValueNone
-
-                writeClauses
-                    (if isLocalKeyProjection then currentCtx else sourceCtx)
-                    builder
-                    layer
-                    (if isLocalKeyProjection then effectiveTableName else layer.TableName)
-
-                // After expression translation, emit LEFT JOINs + materialization SELECT rewriting.
-                // JOINs are discovered during writeClauses but appear between FROM "Table" and WHERE.
-                match joinInsertPoint with
-                | ValueSome pos ->
-                    match currentCtx.Joins.Count > 0 with
-                    | true ->
-                        // Step 1: Rewrite SELECT Value → json_set(Value, ...) for materialization.
-                        // Do this FIRST because it's earlier in the string — adjusting joinInsertPoint afterward.
-                        let mutable posAdjustment = 0
-                        match valueColumnRange with
-                        | ValueSome struct(vStart, vEnd) ->
-                            let jsonSetSb = StringBuilder()
-                            jsonSetSb.Append("jsonb_set(\"") |> ignore
-                            jsonSetSb.Append(effectiveTableName) |> ignore
-                            jsonSetSb.Append("\".Value") |> ignore
-                            let mutable hasMaterialization = false
-                            for j in currentCtx.Joins do
-                                // Skip materialization for excluded paths — the DBRef stays as raw integer (Unloaded).
-                                // The JOIN itself is still emitted (needed for WHERE/ORDER BY).
-                                if shouldLoadRelationPath currentCtx j.PropertyPath then
-                                    hasMaterialization <- true
-                                    currentCtx.MaterializedPaths.Add(j.PropertyPath) |> ignore
-                                    jsonSetSb.Append(", '$.") |> ignore
-                                    jsonSetSb.Append(j.PropertyPath) |> ignore
-                                    jsonSetSb.Append("', CASE WHEN ") |> ignore
-                                    jsonSetSb.Append(j.TargetAlias) |> ignore
-                                    jsonSetSb.Append(".Id IS NOT NULL THEN jsonb_array(") |> ignore
-                                    jsonSetSb.Append(j.TargetAlias) |> ignore
-                                    jsonSetSb.Append(".Id, ") |> ignore
-                                    jsonSetSb.Append(j.TargetAlias) |> ignore
-                                    jsonSetSb.Append(".Value) ELSE jsonb_extract(\"") |> ignore
-                                    jsonSetSb.Append(effectiveTableName) |> ignore
-                                    jsonSetSb.Append("\".Value, '$.") |> ignore
-                                    jsonSetSb.Append(j.PropertyPath) |> ignore
-                                    jsonSetSb.Append("') END") |> ignore
-                            if hasMaterialization then
-                                jsonSetSb.Append(") as Value ") |> ignore
-                            else
-                                // All joins are excluded — no materialization needed, keep original qualified Value
-                                jsonSetSb.Clear() |> ignore
-                                jsonSetSb.Append("\"") |> ignore
-                                jsonSetSb.Append(effectiveTableName) |> ignore
-                                jsonSetSb.Append("\".Value ") |> ignore
-                            let replacement = jsonSetSb.ToString()
-                            let originalLen = vEnd - vStart
-                            builder.SQLiteCommand.Remove(vStart, originalLen) |> ignore
-                            builder.SQLiteCommand.Insert(vStart, replacement) |> ignore
-                            posAdjustment <- replacement.Length - originalLen
-                        | ValueNone -> ()
-
-                        // Step 2: Insert LEFT JOIN clauses after FROM "TableName".
-                        let adjustedPos = pos + posAdjustment
-                        let joinSql = StringBuilder()
-                        for j in currentCtx.Joins do
-                            joinSql.Append(' ') |> ignore
-                            joinSql.Append(j.JoinKind) |> ignore
-                            joinSql.Append(" \"") |> ignore
-                            joinSql.Append(j.TargetTable) |> ignore
-                            joinSql.Append("\" AS ") |> ignore
-                            joinSql.Append(j.TargetAlias) |> ignore
-                            joinSql.Append(" ON ") |> ignore
-                            joinSql.Append(j.OnCondition) |> ignore
-                        builder.SQLiteCommand.Insert(adjustedPos, joinSql.ToString()) |> ignore
-                    | _ -> ()
-                | ValueNone -> ()
-            | Complex writeFunc ->
-                let tableName =
-                    if i = 0 then
-                        tableName
-                    else
-                        ""
-
-                writeFunc {|
-                    Command = builder.SQLiteCommand 
-                    Vars = builder.Variables
-                    WriteInner = fun () -> writeLayer (i - 1)
-                    TableName = tableName
-                |}
-
-        writeLayer (layerCount - 1)
-
+        buildLayer (layerCount - 1)
 
     let rec private buildQuery<'T> (sourceCtx: QueryContext) (statements: SQLSubquery ResizeArray) (e: Expression) =
         statements.Add (emptySQLStatement () |> Simple)
@@ -966,12 +1036,12 @@ module private QueryHelper =
                     let selectFingerprint = expressionFingerprint m.Expressions.[0]
                     match pendingDistinctByScalarReuse with
                     | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = selectFingerprint ->
-                        addSelector statements (Raw (fun tableName builder _vars ->
+                        // Edge case 13: PostScalarProjection path — DistinctBy → Select reuse consuming __solodb_scalar_slot0
+                        addSelector statements (DuSelector (fun tableName _vars ->
                             let hasTableName = not (String.IsNullOrEmpty tableName)
-                            let idColumn = if hasTableName then sprintf "\"%s\".Id" tableName else "Id"
-                            builder.Append idColumn |> ignore
-                            builder.Append " AS Id, " |> ignore
-                            builder.Append "__solodb_scalar_slot0 AS Value " |> ignore
+                            let idExpr = if hasTableName then SqlExpr.Column(Some tableName, "Id") else SqlExpr.Column(None, "Id")
+                            [{ Alias = Some "Id"; Expr = idExpr }
+                             { Alias = Some "Value"; Expr = SqlExpr.Column(None, "__solodb_scalar_slot0") }]
                         ))
                         pendingDistinctByScalarReuse <- None
                         isPostScalarProjection <- true
@@ -979,13 +1049,13 @@ module private QueryHelper =
                         // C12 path: post-DistinctBy Select on a DIFFERENT relation scalar than
                         // the DistinctBy key. The base layer will materialize the relation into
                         // Value via jsonb_set, so we extract from the materialized JSON payload.
+                        // Edge case 20: Relation-backed DistinctBy scalar slot reuse
                         match tryExtractRelationJsonPath m.Expressions.[0] with
                         | Some jsonPath ->
                             let capturedPath = jsonPath
-                            addSelector statements (Raw (fun _tableName builder _vars ->
-                                builder.Append "-1 AS Id, jsonb_extract(Value, '" |> ignore
-                                builder.Append capturedPath |> ignore
-                                builder.Append "') AS Value " |> ignore
+                            addSelector statements (DuSelector (fun _tableName _vars ->
+                                [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                                 { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String capturedPath)]) }]
                             ))
                             isPostScalarProjection <- true
                         | None ->
@@ -1003,7 +1073,7 @@ module private QueryHelper =
                     | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = orderFingerprint ->
                         let current = ifSelectorNewStatement statements
                         current.Orders.Clear()
-                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawSQL = Some "__solodb_scalar_slot0" })
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = Some (SqlExpr.Column(None, "__solodb_scalar_slot0")) })
                     | _ ->
                         addOrder statements m.Expressions.[0] descending
                 | ThenBy | ThenByDescending ->
@@ -1012,9 +1082,9 @@ module private QueryHelper =
                     let current = simpleCurrent()
                     match pendingDistinctByScalarReuse with
                     | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = orderFingerprint ->
-                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawSQL = Some "__solodb_scalar_slot0" })
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = Some (SqlExpr.Column(None, "__solodb_scalar_slot0")) })
                     | _ ->
-                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawSQL = None })
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = None })
                 | Skip ->
                     let current = simpleCurrent()
                     match current.Skip with
@@ -1025,8 +1095,10 @@ module private QueryHelper =
 
                 | Sum ->
                     if isPostScalarProjection && m.Expressions.Length = 0 then
-                        addSelector statements (Raw (fun _tableName builder _vars ->
-                            builder.Append "-1 AS Id, COALESCE(SUM(jsonb_extract(Value, '$')),0) AS Value " |> ignore
+                        let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                             { Alias = Some "Value"; Expr = SqlExpr.Coalesce([SqlExpr.FunctionCall("SUM", [extractVal]); SqlExpr.Literal(SqlLiteral.Integer 0L)]) }]
                         ))
                     else
                         // SUM() return NULL if all elements are NULL, TOTAL() return 0.0.
@@ -1035,79 +1107,125 @@ module private QueryHelper =
 
                 | Average ->
                     if isPostScalarProjection && m.Expressions.Length = 0 then
-                        addSelector statements (Raw (fun _tableName builder _vars ->
-                            builder.Append "-1 AS Id, AVG(jsonb_extract(Value, '$')) AS Value " |> ignore
+                        let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
+                        let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, extractVal)
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                             { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("AVG", [extractVal]) }]
                         ))
-                        addSelector statements (Raw (fun _tableName builder _vars ->
-                            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN NULL ELSE -1 END AS Id, " |> ignore
-                            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN 'Sequence contains no elements' ELSE Value END AS Value " |> ignore
+                        // Edge case 14: Aggregate NULL handling — error message for empty sequences
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.Null))], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
+                             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements"))], Some(SqlExpr.Column(None, "Value"))) }]
                         ))
                     else
                         raiseIfNullAggregateTranslator sourceCtx "AVG" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
 
                 | Min ->
                     if isPostScalarProjection && m.Expressions.Length = 0 then
-                        addSelector statements (Raw (fun _tableName builder _vars ->
-                            builder.Append "-1 AS Id, MIN(jsonb_extract(Value, '$')) AS Value " |> ignore
+                        let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
+                        let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, extractVal)
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                             { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("MIN", [extractVal]) }]
                         ))
-                        addSelector statements (Raw (fun _tableName builder _vars ->
-                            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN NULL ELSE -1 END AS Id, " |> ignore
-                            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN 'Sequence contains no elements' ELSE Value END AS Value " |> ignore
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.Null))], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
+                             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements"))], Some(SqlExpr.Column(None, "Value"))) }]
                         ))
                     else
                         raiseIfNullAggregateTranslator sourceCtx "MIN" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
 
                 | Max ->
                     if isPostScalarProjection && m.Expressions.Length = 0 then
-                        addSelector statements (Raw (fun _tableName builder _vars ->
-                            builder.Append "-1 AS Id, MAX(jsonb_extract(Value, '$')) AS Value " |> ignore
+                        let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
+                        let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, extractVal)
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                             { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("MAX", [extractVal]) }]
                         ))
-                        addSelector statements (Raw (fun _tableName builder _vars ->
-                            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN NULL ELSE -1 END AS Id, " |> ignore
-                            builder.Append "CASE WHEN jsonb_extract(Value, '$') IS NULL THEN 'Sequence contains no elements' ELSE Value END AS Value " |> ignore
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.Null))], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
+                             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements"))], Some(SqlExpr.Column(None, "Value"))) }]
                         ))
                     else
                         raiseIfNullAggregateTranslator sourceCtx "MAX" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
                 
                 | Distinct ->
-                    addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "SELECT -1 AS Id, Value FROM (" |> ignore
-                        builder.WriteInner()
-                        builder.Command.Append ") o GROUP BY " |> ignore
-                        QueryTranslator.translateQueryableWithContext sourceCtx builder.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) builder.Command builder.Vars
+                    addComplexFinal statements (fun ctx ->
+                        // SELECT -1 AS Id, Value FROM (inner) o GROUP BY {identity expr}
+                        let groupByExpr = translateExprDu sourceCtx ctx.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) ctx.Vars
+                        let core =
+                            { mkCore
+                                [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                                 { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
+                                (Some (DerivedTable(ctx.Inner, "o")))
+                              with GroupBy = [groupByExpr] }
+                        wrapCore core
                     )
 
                 | DistinctBy ->
+                    // Edge case 7: DistinctBy with ROW_NUMBER OVER — window function + derived table
                     let lowered = lowerKeySelectorLambda sourceCtx tableName m.Expressions.[0] DistinctByKey
                     addLoweredKeySelector statements lowered
                     pendingDistinctByScalarReuse <-
                         match lowered.RelationAccess with
                         | HasRelationAccess -> Some lowered
                         | NoRelationAccess -> None
-                    addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "SELECT o.Id AS Id, o.Value AS Value" |> ignore
-                        if lowered.RelationAccess = HasRelationAccess then
-                            builder.Command.Append ", o.__solodb_scalar_slot0 AS __solodb_scalar_slot0" |> ignore
-                        builder.Command.Append " FROM (" |> ignore
-                        builder.Command.Append "SELECT o.Id AS Id, o.Value AS Value" |> ignore
-                        if lowered.RelationAccess = HasRelationAccess then
-                            builder.Command.Append ", o.__solodb_group_key AS __solodb_scalar_slot0" |> ignore
-                        builder.Command.Append ", ROW_NUMBER() OVER (PARTITION BY o.__solodb_group_key ORDER BY o.Id) AS __solodb_rn FROM (" |> ignore
-                        builder.WriteInner()
-                        builder.Command.Append ") o) o WHERE o.__solodb_rn = 1" |> ignore
+                    addComplexFinal statements (fun ctx ->
+                        // Inner: SELECT o.Id, o.Value, [o.__solodb_group_key AS __solodb_scalar_slot0,] ROW_NUMBER() OVER (PARTITION BY o.__solodb_group_key ORDER BY o.Id) AS __solodb_rn FROM (inner) o
+                        let innerProjs =
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }
+                             { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") }]
+                            @ (if lowered.RelationAccess = HasRelationAccess then
+                                   [{ Alias = Some "__solodb_scalar_slot0"; Expr = SqlExpr.Column(Some "o", "__solodb_group_key") }]
+                               else [])
+                            @ [{ Alias = Some "__solodb_rn"; Expr = SqlExpr.WindowCall({
+                                    Kind = WindowFunctionKind.RowNumber
+                                    Arguments = []
+                                    PartitionBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
+                                    OrderBy = [(SqlExpr.Column(Some "o", "Id"), SortDirection.Asc)]
+                                }) }]
+                        let innerCore = mkCore innerProjs (Some (DerivedTable(ctx.Inner, "o")))
+                        let innerSel = wrapCore innerCore
+
+                        // Outer: SELECT o.Id, o.Value [, o.__solodb_scalar_slot0] FROM (inner) o WHERE o.__solodb_rn = 1
+                        let outerProjs =
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }
+                             { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") }]
+                            @ (if lowered.RelationAccess = HasRelationAccess then
+                                   [{ Alias = Some "__solodb_scalar_slot0"; Expr = SqlExpr.Column(Some "o", "__solodb_scalar_slot0") }]
+                               else [])
+                        let outerCore =
+                            { mkCore outerProjs (Some (DerivedTable(innerSel, "o")))
+                              with Where = Some (SqlExpr.Binary(SqlExpr.Column(Some "o", "__solodb_rn"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L))) }
+                        wrapCore outerCore
                     )
 
                 | GroupBy ->
+                    // Edge case 6: GroupBy with json_group_array — custom projection
                     addLoweredKeySelector statements (lowerKeySelectorLambda sourceCtx tableName m.Expressions.[0] GroupByKey)
-                    addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "SELECT -1 as Id, json_object('Key', o.__solodb_group_key" |> ignore
-                        // Create an array of all items with the same key
-                        // Inject row Id into each grouped item payload so deserialization
-                        // reconstructs correct entity identity (Id lives outside Value blob).
-                        builder.Command.Append ", 'Items', json_group_array(jsonb_set(o.Value, '$.Id', o.Id))) as Value FROM (" |> ignore
-                        builder.WriteInner()
-                        // Group by the key selector
-                        builder.Command.Append ") o GROUP BY o.__solodb_group_key" |> ignore
+                    addComplexFinal statements (fun ctx ->
+                        // SELECT -1 as Id, json_object('Key', o.__solodb_group_key, 'Items', json_group_array(jsonb_set(o.Value, '$.Id', o.Id))) as Value FROM (inner) o GROUP BY o.__solodb_group_key
+                        let core =
+                            { mkCore
+                                [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                                 { Alias = Some "Value"; Expr =
+                                    SqlExpr.FunctionCall("json_object", [
+                                        SqlExpr.Literal(SqlLiteral.String "Key")
+                                        SqlExpr.Column(Some "o", "__solodb_group_key")
+                                        SqlExpr.Literal(SqlLiteral.String "Items")
+                                        SqlExpr.FunctionCall("json_group_array", [
+                                            SqlExpr.FunctionCall("jsonb_set", [
+                                                SqlExpr.Column(Some "o", "Value")
+                                                SqlExpr.Literal(SqlLiteral.String "$.Id")
+                                                SqlExpr.Column(Some "o", "Id")
+                                            ])
+                                        ])
+                                    ]) }]
+                                (Some (DerivedTable(ctx.Inner, "o")))
+                              with GroupBy = [SqlExpr.Column(Some "o", "__solodb_group_key")] }
+                        wrapCore core
                     )
 
                 | Count
@@ -1125,51 +1243,51 @@ module private QueryHelper =
                         addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName m.Expressions.[0] role)
                     | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
-                    addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "SELECT COUNT(Id) as Value FROM " |> ignore
-                        builder.Command.Append "(" |> ignore
-                        builder.WriteInner()
-                        builder.Command.Append ") o " |> ignore
+                    addComplexFinal statements (fun ctx ->
+                        // SELECT COUNT(Id) as Value FROM (inner) o
+                        let projs = [{ Alias = Some "Value"; Expr = SqlExpr.FunctionCall("COUNT", [SqlExpr.Column(None, "Id")]) }]
+                        let core = mkCore projs (Some (DerivedTable(ctx.Inner, "o")))
+                        wrapCore core
                     )
-                
-                
+
+
                 | SelectMany ->
-                    addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
+                    // Edge case 15: SelectMany with json_each — JOIN json_each on inner source
+                    addComplexFinal statements (fun ctx ->
                         match m.Expressions.Length with
                         | 1 ->
                             let generics = GenericMethodArgCache.Get m.OriginalMethod
                             if generics.[1] (*output*) = typeof<byte> then
                                 raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit the SQLite context with .AsEnumerable().")
-                            let innerSourceName = Utils.getVarName builder.Command.Length
-                            builder.Command.Append "SELECT " |> ignore
-                            builder.Command.Append innerSourceName |> ignore
-                            builder.Command.Append ".Id AS Id, json_each.Value as Value FROM (" |> ignore
-                            // Evaluate and emit the outer source query (produces Id, Value)
-                            builder.WriteInner()
-                            builder.Command.Append ") AS " |> ignore
-                            builder.Command.Append innerSourceName |> ignore
-                            builder.Command.Append " " |> ignore
-                            // Extract the path to the collection selector (e.g., "$.Values")
-                            match m.Expressions.[0] with
-                            | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
-                                let lambda = ue.Operand :?> LambdaExpression
-                                match lambda.Body with
-                                | :? MemberExpression as me ->
-                                    builder.Command.Append "JOIN json_each(jsonb_extract(" |> ignore
-                                    builder.Command.Append innerSourceName |> ignore
-                                    builder.Command.Append ".Value, '$." |> ignore
-                                    builder.Command.Append me.Member.Name |> ignore
-                                    builder.Command.Append "'))" |> ignore
-                                | :? ParameterExpression as _pe ->
-                                    builder.Command.Append "JOIN json_each(" |> ignore
-                                    builder.Command.Append innerSourceName |> ignore
-                                    builder.Command.Append ".Value)" |> ignore
+                            // Use a stable inner source alias based on the inner select structure
+                            let innerSourceName = Utils.getVarName (hash ctx.Inner.Body % 10000 |> abs)
+                            // Build the json_each join source expression
+                            let jsonEachExpr =
+                                match m.Expressions.[0] with
+                                | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
+                                    let lambda = ue.Operand :?> LambdaExpression
+                                    match lambda.Body with
+                                    | :? MemberExpression as me ->
+                                        SqlExpr.FunctionCall("jsonb_extract", [
+                                            SqlExpr.Column(Some innerSourceName, "Value")
+                                            SqlExpr.Literal(SqlLiteral.String ("$." + me.Member.Name))
+                                        ])
+                                    | :? ParameterExpression ->
+                                        SqlExpr.Column(Some innerSourceName, "Value")
+                                    | _ ->
+                                        raise (NotSupportedException(
+                                            "Error: Unsupported SelectMany selector structure.\nReason: The selector cannot be translated to SQL.\nFix: Simplify the selector or move SelectMany after AsEnumerable()."))
                                 | _ ->
                                     raise (NotSupportedException(
-                                        "Error: Unsupported SelectMany selector structure.\nReason: The selector cannot be translated to SQL.\nFix: Simplify the selector or move SelectMany after AsEnumerable()."))
-                            | _ ->
-                                raise (NotSupportedException(
-                                    "Error: Invalid SelectMany structure.\nReason: The SelectMany arguments are not a supported query pattern.\nFix: Rewrite the query or move SelectMany after AsEnumerable()."))
+                                        "Error: Invalid SelectMany structure.\nReason: The SelectMany arguments are not a supported query pattern.\nFix: Rewrite the query or move SelectMany after AsEnumerable()."))
+                            // SELECT innerSource.Id AS Id, json_each.Value as Value FROM (inner) AS innerSource JOIN json_each(expr)
+                            let core =
+                                { mkCore
+                                    [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some innerSourceName, "Id") }
+                                     { Alias = Some "Value"; Expr = SqlExpr.Column(Some "json_each", "Value") }]
+                                    (Some (DerivedTable(ctx.Inner, innerSourceName)))
+                                  with Joins = [{ Kind = JoinKind.Inner; Source = FromJsonEach(jsonEachExpr, None); On = None }] }
+                            wrapCore core
                         | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                     )
                 
@@ -1192,38 +1310,35 @@ module private QueryHelper =
                     addTake statements (ExpressionHelper.constant limit)
 
                 | DefaultIfEmpty ->
-                    addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "SELECT Id, Value FROM (" |> ignore
-                        builder.WriteInner()
-                        builder.Command.Append ") o UNION ALL SELECT -1 as Id, " |> ignore
-                        match m.Expressions.Length with
-                        | 0 -> 
-                            // If no default value is provided, then provide .NET's default.
-                            let genericArg = (GenericMethodArgCache.Get m.OriginalMethod).[0]
-                            if genericArg.IsValueType then
-                                let defaultValueType = Activator.CreateInstance(genericArg)
-                                let jsonObj = JsonSerializator.JsonValue.Serialize defaultValueType
+                    // Edge case 11: DefaultIfEmpty with UNION ALL — synthetic row when result set empty
+                    addComplexFinal statements (fun ctx ->
+                        let defaultValueExpr =
+                            match m.Expressions.Length with
+                            | 0 ->
+                                let genericArg = (GenericMethodArgCache.Get m.OriginalMethod).[0]
+                                if genericArg.IsValueType then
+                                    let defaultValueType = Activator.CreateInstance(genericArg)
+                                    let jsonObj = JsonSerializator.JsonValue.Serialize defaultValueType
+                                    let jsonText = jsonObj.ToJsonString()
+                                    SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.FunctionCall("jsonb", [SqlExpr.Literal(SqlLiteral.String jsonText)]); SqlExpr.Literal(SqlLiteral.String "$")])
+                                else
+                                    SqlExpr.Literal(SqlLiteral.Null)
+                            | 1 ->
+                                let o = QueryTranslator.evaluateExpr<obj> m.Expressions.[0]
+                                let jsonObj = JsonSerializator.JsonValue.Serialize o
                                 let jsonText = jsonObj.ToJsonString()
-                                let escapedJsonText = QueryTranslator.escapeSQLiteString jsonText
-                                builder.Command.Append "jsonb_extract(jsonb('" |> ignore
-                                builder.Command.Append escapedJsonText |> ignore
-                                builder.Command.Append "'), '$') " |> ignore
-                            else
-                                builder.Command.Append "NULL " |> ignore
-                        | 1 -> 
-                            // If a default value is provided, return it when the result set is empty
-            
-                            let o = QueryTranslator.evaluateExpr<obj> m.Expressions.[0]
-                            let jsonObj = JsonSerializator.JsonValue.Serialize o
-                            let jsonText = jsonObj.ToJsonString()
-                            let escapedJsonText = QueryTranslator.escapeSQLiteString jsonText
-                            builder.Command.Append "jsonb_extract(jsonb('" |> ignore
-                            builder.Command.Append escapedJsonText |> ignore
-                            builder.Command.Append "'), '$') " |> ignore
-                        | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
-                        builder.Command.Append " WHERE NOT EXISTS (SELECT 1 FROM (" |> ignore
-                        builder.WriteInner()
-                        builder.Command.Append ") o)" |> ignore
+                                SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.FunctionCall("jsonb", [SqlExpr.Literal(SqlLiteral.String jsonText)]); SqlExpr.Literal(SqlLiteral.String "$")])
+                            | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
+
+                        // SELECT Id, Value FROM (inner) o
+                        let mainProjs = [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }; { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
+                        let mainCore = mkCore mainProjs (Some (DerivedTable(ctx.Inner, "o")))
+                        // UNION ALL SELECT -1 as Id, defaultValue WHERE NOT EXISTS (SELECT 1 FROM (inner) o)
+                        let defaultProjs = [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }; { Alias = None; Expr = defaultValueExpr }]
+                        let defaultCore =
+                            { mkCore defaultProjs None
+                              with Where = Some (SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists(ctx.Inner))) }
+                        { Ctes = []; Body = UnionAllSelect(mainCore, [defaultCore]) }
                     )
                 
                 | Last | LastOrDefault ->
@@ -1250,10 +1365,11 @@ module private QueryHelper =
 
                     addTake statements (ExpressionHelper.constant 1)
 
-                    addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "SELECT -1 As Id, NOT EXISTS(SELECT 1 FROM (" |> ignore
-                        builder.WriteInner()
-                        builder.Command.Append ")) as Value" |> ignore
+                    addComplexFinal statements (fun ctx ->
+                        // SELECT -1 As Id, NOT EXISTS(SELECT 1 FROM (inner)) as Value
+                        let existsSubquery = wrapCore (mkCore [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] (Some (DerivedTable(ctx.Inner, "o"))))
+                        let projs = [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }; { Alias = Some "Value"; Expr = SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists(existsSubquery)) }]
+                        wrapCore (mkCore projs None)
                     )
 
                 | Any ->
@@ -1264,15 +1380,15 @@ module private QueryHelper =
 
                     addTake statements (ExpressionHelper.constant 1)
 
-                    addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "SELECT -1 As Id, EXISTS(SELECT 1 FROM (" |> ignore
-                        builder.WriteInner()
-                        builder.Command.Append ")) as Value" |> ignore
+                    addComplexFinal statements (fun ctx ->
+                        let existsSubquery = wrapCore (mkCore [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] (Some (DerivedTable(ctx.Inner, "o"))))
+                        let projs = [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }; { Alias = Some "Value"; Expr = SqlExpr.Exists(existsSubquery) }]
+                        wrapCore (mkCore projs None)
                     )
 
 
                 | Contains ->
-                    let struct (t, value) = 
+                    let struct (t, value) =
                         match m.Expressions.[0] with
                         | :? ConstantExpression as ce -> struct (ce.Type, ce.Value)
                         | other -> raise (NotSupportedException(sprintf "Invalid Contains(...) parameter: %A" other))
@@ -1281,124 +1397,100 @@ module private QueryHelper =
                     addFilter statements filter
                     addTake statements (ExpressionHelper.constant 1)
 
-                    addComplexFinal statements (fun (builder: struct {|Command: StringBuilder; Vars: Dictionary<string, obj>; WriteInner: unit -> unit; TableName: string|}) ->
-                        builder.Command.Append "SELECT -1 As Id, EXISTS(SELECT 1 FROM (" |> ignore
-                        builder.WriteInner()
-                        builder.Command.Append ")) as Value" |> ignore
+                    addComplexFinal statements (fun ctx ->
+                        let existsSubquery = wrapCore (mkCore [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] (Some (DerivedTable(ctx.Inner, "o"))))
+                        let projs = [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }; { Alias = Some "Value"; Expr = SqlExpr.Exists(existsSubquery) }]
+                        wrapCore (mkCore projs None)
                     )
-                
-                | Append ->
-                    addUnionAll statements (fun tableName builder vars ->
-                        builder.Append "SELECT " |> ignore
-                        let appendingObj = QueryTranslator.evaluateExpr<'T> m.Expressions.[0]
 
+                | Append ->
+                    addUnionAll statements (fun _tableName vars ->
+                        let appendingObj = QueryTranslator.evaluateExpr<'T> m.Expressions.[0]
                         match QueryTranslator.isPrimitiveSQLiteType typeof<'T> with
                         | false ->
                             let struct (jsonStringElement, hasId) = serializeForCollection appendingObj
-                            match hasId with
-                            | false ->
-                                builder.Append "-1 as Id," |> ignore
-                            | true ->
-                                let id = HasTypeId<'T>.Read appendingObj
-                                builder.Append (sprintf "%i" id) |> ignore
-                                builder.Append " as Id," |> ignore
-
-                            let escapedString = QueryTranslator.escapeSQLiteString jsonStringElement
-                            builder.Append "jsonb_extract('" |> ignore
-                            builder.Append escapedString |> ignore
-                            builder.Append "', '$')" |> ignore
-                            builder.Append " As Value " |> ignore
+                            let idExpr =
+                                if hasId then
+                                    let id = HasTypeId<'T>.Read appendingObj
+                                    SqlExpr.Literal(SqlLiteral.Integer id)
+                                else
+                                    SqlExpr.Literal(SqlLiteral.Integer -1L)
+                            let valueExpr = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Literal(SqlLiteral.String jsonStringElement); SqlExpr.Literal(SqlLiteral.String "$")])
+                            mkCore [{ Alias = Some "Id"; Expr = idExpr }; { Alias = Some "Value"; Expr = valueExpr }] None
                         | true ->
-                            QueryTranslator.appendVariable builder vars appendingObj
-                            builder.Append " As Value " |> ignore
+                            let valueExpr = allocateParam vars (box appendingObj)
+                            mkCore [{ Alias = Some "Value"; Expr = valueExpr }] None
                     )
                 
                 
                 | Concat ->
                     // Left side is the current pipeline; append the right side as UNION ALL.
-                    addUnionAll statements (fun _tableName sb vars ->
+                    addUnionAll statements (fun _tableName vars ->
                         let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
-                        sb.Append "SELECT Id, " |> ignore
-                        sb.Append (extractValueAsJsonIfNecesary (rhs.Type)) |> ignore
-                        sb.Append "As Value FROM (" |> ignore
-
-                        translateQuery sourceCtx {
-                            Subqueries = ResizeArray<SQLSubquery>()
-                            SQLiteCommand = sb
-                            Variables = vars
-                        } rhs
-
-                        sb.Append ") o " |> ignore
+                        let rhsSelect = translateQuery<'T> sourceCtx vars rhs
+                        let valueExpr = extractValueAsJsonDu rhs.Type
+                        mkCore
+                            [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
+                             { Alias = Some "Value"; Expr = valueExpr }]
+                            (Some (DerivedTable(rhsSelect, "o")))
                     )
 
                 | Except ->
-                    // Project left, remove rows whose JSON value appears in the right.
+                    // Edge case 16: ExceptBy/IntersectBy key selector — NOT IN subquery
                     addComplexFinal statements (fun ctx ->
-                        ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
-                        ctx.WriteInner()
-                        ctx.Command.Append ") o WHERE jsonb_extract(Value, '$') NOT IN (" |> ignore
-
                         let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
-                        ctx.Command.Append "SELECT " |> ignore
-                        ctx.Command.Append "jsonb_extract(Value, '$') " |> ignore
-                        ctx.Command.Append "As Value FROM (" |> ignore
-
-                        translateQuery sourceCtx {
-                            Subqueries = ResizeArray<SQLSubquery>()
-                            SQLiteCommand = ctx.Command
-                            Variables = ctx.Vars
-                        } rhs
-
-                        ctx.Command.Append ") o )" |> ignore
+                        let rhsSelect = translateQuery<'T> sourceCtx ctx.Vars rhs
+                        let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
+                        let rhsSubquery = wrapCore (mkCore
+                            [{ Alias = Some "Value"; Expr = extractVal }]
+                            (Some (DerivedTable(rhsSelect, "o"))))
+                        let core =
+                            { mkCore
+                                [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
+                                 { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
+                                (Some (DerivedTable(ctx.Inner, "o")))
+                              with Where = Some (SqlExpr.Binary(extractVal, BinaryOperator.NotInOp, SqlExpr.ScalarSubquery(rhsSubquery))) }
+                        wrapCore core
                     )
 
                 | Intersect ->
-                    // Keep only rows whose JSON value appears in the right.
                     addComplexFinal statements (fun ctx ->
-                        ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
-                        ctx.WriteInner()
-                        ctx.Command.Append ") o WHERE jsonb_extract(Value, '$') IN (" |> ignore
-
                         let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
-                        ctx.Command.Append "SELECT " |> ignore
-                        ctx.Command.Append "jsonb_extract(Value, '$') " |> ignore
-                        ctx.Command.Append "As Value FROM (" |> ignore
-
-                        translateQuery sourceCtx {
-                            Subqueries = ResizeArray<SQLSubquery>()
-                            SQLiteCommand = ctx.Command
-                            Variables = ctx.Vars
-                        } rhs
-
-                        ctx.Command.Append ") o )" |> ignore
+                        let rhsSelect = translateQuery<'T> sourceCtx ctx.Vars rhs
+                        let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
+                        let rhsSubquery = wrapCore (mkCore
+                            [{ Alias = Some "Value"; Expr = extractVal }]
+                            (Some (DerivedTable(rhsSelect, "o"))))
+                        let core =
+                            { mkCore
+                                [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
+                                 { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
+                                (Some (DerivedTable(ctx.Inner, "o")))
+                              with Where = Some (SqlExpr.InSubquery(extractVal, rhsSubquery)) }
+                        wrapCore core
                     )
 
                 | ExceptBy ->
                     // Arguments: other, keySelector
                     if m.Expressions.Length <> 2 then raise (NotSupportedException(sprintf "Invalid number of arguments, expected 2, in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
-                    let keySelE =  m.Expressions.[1]
+                    let keySelE = m.Expressions.[1]
                     addComplexFinal statements (fun ctx ->
-                        ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
-                        ctx.WriteInner()
-                        ctx.Command.Append ") o WHERE " |> ignore
-                        QueryTranslator.translateQueryableWithContext sourceCtx ctx.TableName keySelE ctx.Command ctx.Vars
-                        ctx.Command.Append " NOT IN (" |> ignore
-
-                        ctx.Command.Append "SELECT " |> ignore
+                        let keyExpr = translateExprDu sourceCtx ctx.TableName keySelE ctx.Vars
                         let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
-                        match keySelE with
-                        | keySelE when isIdentityLambda keySelE ->
-                            ctx.Command.Append (extractValueAsJsonIfNecesary (rhs.Type)) |> ignore
-                        | _ -> QueryTranslator.translateQueryableWithContext sourceCtx ctx.TableName keySelE ctx.Command ctx.Vars
-                        ctx.Command.Append "As Value FROM (" |> ignore
-                        
-                        translateQuery sourceCtx {
-                            Subqueries = ResizeArray<SQLSubquery>()
-                            SQLiteCommand = ctx.Command
-                            Variables = ctx.Vars
-                        } rhs
-
-                        ctx.Command.Append ") o )" |> ignore
+                        let rhsSelect = translateQuery<'T> sourceCtx ctx.Vars rhs
+                        let rhsValueExpr =
+                            if isIdentityLambda keySelE then extractValueAsJsonDu rhs.Type
+                            else translateExprDu sourceCtx ctx.TableName keySelE ctx.Vars
+                        let rhsSubquery = wrapCore (mkCore
+                            [{ Alias = Some "Value"; Expr = rhsValueExpr }]
+                            (Some (DerivedTable(rhsSelect, "o"))))
+                        let core =
+                            { mkCore
+                                [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
+                                 { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
+                                (Some (DerivedTable(ctx.Inner, "o")))
+                              with Where = Some (SqlExpr.Binary(keyExpr, BinaryOperator.NotInOp, SqlExpr.ScalarSubquery(rhsSubquery))) }
+                        wrapCore core
                     )
 
                 | IntersectBy ->
@@ -1406,28 +1498,22 @@ module private QueryHelper =
                     if m.Expressions.Length <> 2 then raise (NotSupportedException(sprintf "Invalid number of arguments, expected 2, in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
                     let keySelE = m.Expressions.[1]
                     addComplexFinal statements (fun ctx ->
-                        ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
-                        ctx.WriteInner()
-                        ctx.Command.Append ") o WHERE " |> ignore
-                        QueryTranslator.translateQueryableWithContext sourceCtx ctx.TableName keySelE ctx.Command ctx.Vars
-                        ctx.Command.Append " IN (" |> ignore
-
-                        ctx.Command.Append "SELECT " |> ignore
+                        let keyExpr = translateExprDu sourceCtx ctx.TableName keySelE ctx.Vars
                         let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
-                        match keySelE with
-                        | keySelE when isIdentityLambda keySelE ->
-                            ctx.Command.Append (extractValueAsJsonIfNecesary (rhs.Type)) |> ignore
-                        | _ -> QueryTranslator.translateQueryableWithContext sourceCtx ctx.TableName keySelE ctx.Command ctx.Vars
-                        ctx.Command.Append "As Value FROM (" |> ignore
-                        
-
-                        translateQuery sourceCtx {
-                            Subqueries = ResizeArray<SQLSubquery>()
-                            SQLiteCommand = ctx.Command
-                            Variables = ctx.Vars
-                        } rhs
-
-                        ctx.Command.Append ") o )" |> ignore
+                        let rhsSelect = translateQuery<'T> sourceCtx ctx.Vars rhs
+                        let rhsValueExpr =
+                            if isIdentityLambda keySelE then extractValueAsJsonDu rhs.Type
+                            else translateExprDu sourceCtx ctx.TableName keySelE ctx.Vars
+                        let rhsSubquery = wrapCore (mkCore
+                            [{ Alias = Some "Value"; Expr = rhsValueExpr }]
+                            (Some (DerivedTable(rhsSelect, "o"))))
+                        let core =
+                            { mkCore
+                                [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
+                                 { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
+                                (Some (DerivedTable(ctx.Inner, "o")))
+                              with Where = Some (SqlExpr.InSubquery(keyExpr, rhsSubquery)) }
+                        wrapCore core
                     )
 
                 // --- Type filtering / casting over polymorphic payloads ---
@@ -1443,23 +1529,25 @@ module private QueryHelper =
                         match t |> typeToName with
                         | None -> raise (NotSupportedException("Incompatible type from Cast<T> method."))
                         | Some typeName ->
+                            // Edge case 12: Cast/OfType with $type discrimination
                             addComplexFinal statements (fun ctx ->
-                                ctx.Command.Append "SELECT " |> ignore
-                                // Id: preserve only if type info present and matches; else NULL
-                                ctx.Command.Append "CASE WHEN jsonb_extract(Value, '$.$type') IS NULL THEN NULL " |> ignore
-                                ctx.Command.Append "WHEN jsonb_extract(Value, '$.$type') <> " |> ignore
-                                QueryTranslator.appendVariable ctx.Command ctx.Vars typeName
-                                ctx.Command.Append " THEN NULL ELSE Id END AS Id, " |> ignore
-
-                                // Value: propagate or attach error string
-                                ctx.Command.Append "CASE " |> ignore
-                                ctx.Command.Append "WHEN jsonb_extract(Value, '$.$type') IS NULL THEN json_quote('The type of item is not stored in the database, if you want to include it, then add the Polymorphic attribute to the type and reinsert all elements.') " |> ignore
-                                ctx.Command.Append "WHEN jsonb_extract(Value, '$.$type') <> " |> ignore
-                                QueryTranslator.appendVariable ctx.Command ctx.Vars typeName
-                                ctx.Command.Append " THEN json_quote('Unable to cast object to the specified type, because the types are different.') " |> ignore
-                                ctx.Command.Append "ELSE Value END AS Value FROM (" |> ignore
-                                ctx.WriteInner()
-                                ctx.Command.Append ") o " |> ignore
+                                let typeExtract = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$.$type")])
+                                let typeIsNull = SqlExpr.Unary(UnaryOperator.IsNull, typeExtract)
+                                let typeParam = allocateParam ctx.Vars typeName
+                                let typeMismatch = SqlExpr.Binary(typeExtract, BinaryOperator.Ne, typeParam)
+                                // Id: NULL when type missing or mismatched, else preserve Id
+                                let idExpr = SqlExpr.CaseExpr(
+                                    [(typeIsNull, SqlExpr.Literal(SqlLiteral.Null))
+                                     (typeMismatch, SqlExpr.Literal(SqlLiteral.Null))],
+                                    Some(SqlExpr.Column(None, "Id")))
+                                // Value: error string when type missing/mismatched, else preserve Value
+                                let valueExpr = SqlExpr.CaseExpr(
+                                    [(typeIsNull, SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String "The type of item is not stored in the database, if you want to include it, then add the Polymorphic attribute to the type and reinsert all elements.")]))
+                                     (typeMismatch, SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String "Unable to cast object to the specified type, because the types are different.")]))],
+                                    Some(SqlExpr.Column(None, "Value")))
+                                let projs = [{ Alias = Some "Id"; Expr = idExpr }; { Alias = Some "Value"; Expr = valueExpr }]
+                                let core = mkCore projs (Some (DerivedTable(ctx.Inner, "o")))
+                                wrapCore core
                             )
 
                 | OfType ->
@@ -1474,11 +1562,15 @@ module private QueryHelper =
                         | None -> raise (NotSupportedException("Incompatible type from OfType<T> method."))
                         | Some typeName ->
                             addComplexFinal statements (fun ctx ->
-                                ctx.Command.Append "SELECT Id, Value FROM (" |> ignore
-                                ctx.WriteInner()
-                                ctx.Command.Append ") o WHERE jsonb_extract(Value, '$.$type') = " |> ignore
-                                QueryTranslator.appendVariable ctx.Command ctx.Vars typeName
-                                ctx.Command.Append " " |> ignore
+                                let typeExtract = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$.$type")])
+                                let typeParam = allocateParam ctx.Vars typeName
+                                let core =
+                                    { mkCore
+                                        [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
+                                         { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
+                                        (Some (DerivedTable(ctx.Inner, "o")))
+                                      with Where = Some (SqlExpr.Binary(typeExtract, BinaryOperator.Eq, typeParam)) }
+                                wrapCore core
                             )
 
                 | Exclude ->
@@ -1499,13 +1591,13 @@ module private QueryHelper =
         match statements.[0] with
         | Simple s ->
             statements.[0] <- Simple {s with TableName = tableName}
-        | Complex _ ->
+        | ComplexDu _ ->
             ()
 
-    and private translateQuery<'T> (sourceCtx: QueryContext) (builder: QueryableBuilder) (expression: Expression) =
-        // Collect layers + possible terminal
-        buildQuery<'T> sourceCtx builder.Subqueries expression
-        writeLayers<'T> sourceCtx builder builder.Subqueries
+    and private translateQuery<'T> (sourceCtx: QueryContext) (vars: Dictionary<string, obj>) (expression: Expression) : SqlSelect =
+        let statements = ResizeArray<SQLSubquery>()
+        buildQuery<'T> sourceCtx statements expression
+        buildLayersDu<'T> sourceCtx vars statements
     
     /// <summary>
     /// Determines if a given LINQ expression corresponds to a method that does not return the document ID (e.g., aggregate functions).
@@ -1680,17 +1772,13 @@ module private QueryHelper =
     /// <param name="expression">The LINQ expression to translate.</param>
     /// <returns>A tuple containing the generated SQL string and the dictionary of parameters.</returns>
     let private startTranslationCore (metadataConnection: SqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
-        let builder = {
-            SQLiteCommand = StringBuilder(256)
-            Variables = Dictionary<string, obj>(16)
-            Subqueries = ResizeArray()
-        }
+        let variables = Dictionary<string, obj>(16)
 
-        let valueDecoded =
+        let valueDecodedType =
             if typedefof<IQueryable>.IsAssignableFrom expression.Type then
-                extractValueAsJsonIfNecesary (GenericTypeArgCache.Get expression.Type |> Array.head)
+                GenericTypeArgCache.Get expression.Type |> Array.head
             else
-                extractValueAsJsonIfNecesary expression.Type
+                expression.Type
 
         let struct (isExplainQueryPlan, expression) =
             match expression with
@@ -1719,21 +1807,27 @@ module private QueryHelper =
 
         preloadQueryContextMetadata ctx metadataConnection
 
-        if isExplainQueryPlan then
-            builder.Append "EXPLAIN QUERY PLAN "
+        // Build the inner query as a SqlSelect DU.
+        let innerSelect = translateQuery<'T> ctx variables expression
 
-        if doesNotReturnIdFn expression then
-            builder.Append "SELECT -1 as Id, "
-            builder.Append valueDecoded
-            builder.Append "as ValueJSON FROM ("
-            translateQuery<'T> ctx builder expression
-            builder.Append ")"
-        else
-            builder.Append "SELECT Id, "
-            builder.Append valueDecoded
-            builder.Append "as ValueJSON FROM ("
-            translateQuery<'T> ctx builder expression
-            builder.Append ")"
+        // Build the outer wrapper: SELECT Id/(-1), valueDecoded as ValueJSON FROM (inner)
+        let valueDecodedExpr = extractValueAsJsonDu valueDecodedType
+        let outerProjections =
+            if doesNotReturnIdFn expression then
+                [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                 { Alias = Some "ValueJSON"; Expr = valueDecodedExpr }]
+            else
+                [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
+                 { Alias = Some "ValueJSON"; Expr = valueDecodedExpr }]
+        let outerCore = mkCore outerProjections (Some (DerivedTable(innerSelect, "o")))
+        let outerSelect = wrapCore outerCore
+
+        // Emit to string via the minimal emitter.
+        let sb = StringBuilder(256)
+        // Edge case 18: ExplainQueryPlan prefix
+        if isExplainQueryPlan then
+            sb.Append "EXPLAIN QUERY PLAN " |> ignore
+        emitSelectToSb sb variables outerSelect
 
         let shape = getRelationShape typeof<'T>
         let hasSingleRelations = hasRelations && shape.HasSingle
@@ -1752,7 +1846,7 @@ module private QueryHelper =
             else
                 ValueNone
 
-        builder.SQLiteCommand.ToString(), builder.Variables, batchLoadContext
+        sb.ToString(), variables, batchLoadContext
 
     let internal startTranslation (source: ISoloDBCollection<'T>) (expression: Expression) =
         use metadataConnection = source.GetInternalConnection()

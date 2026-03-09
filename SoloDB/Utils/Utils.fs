@@ -6,4 +6,6 @@ open System.Runtime.CompilerServices
 [<assembly: InternalsVisibleTo("Tests.EventApi")>]
 [<assembly: InternalsVisibleTo("CSharpTests")>]
 [<assembly: InternalsVisibleTo("BenchMaster")>]
+[<assembly: InternalsVisibleTo("SqlDu.Engine.C1.Spec")>]
+[<assembly: InternalsVisibleTo("SqlDu.C1.Corpus")>]
 do ()

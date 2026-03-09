@@ -9,6 +9,7 @@ open System.Runtime.InteropServices
 open JsonFunctions
 open Utils
 open QueryTranslatorBaseTypes
+open SqlDu.Engine.C1.Spec
 
 module internal QueryTranslatorBaseHelpers =
     /// <summary>
@@ -201,94 +202,55 @@ module internal QueryTranslatorBaseHelpers =
             body
 
 
-    /// <summary>
-    /// Generates SQL to compare a database value with a known .NET object.
-    /// For primitive types, it performs a direct comparison.
-    /// For complex types, it serializes the object to JSON and generates a deep comparison using jsonb_extract.
-    /// </summary>
-    /// <param name="qb">The query builder.</param>
-    /// <param name="writeTarget">A function that writes the SQL for the database-side value (e.g., a column name).</param>
-    /// <param name="targetType">The .NET type of the target value.</param>
-    /// <param name="knownObject">The .NET object to compare against.</param>
-    let inline internal compareKnownJson (qb: QueryBuilder) (writeTarget: QueryBuilder -> unit) (targetType: Type) (knownObject: obj) =
+    /// Compares a database value with a known .NET object, returning an SqlExpr conjunction.
+    let inline internal compareKnownJsonDu (qb: QueryBuilder) (targetExpr: SqlExpr) (targetType: Type) (knownObject: obj) : SqlExpr =
         if isPrimitiveSQLiteType targetType then
-            writeTarget qb
-            qb.AppendRaw " = "
-            qb.AppendVariable knownObject
-            qb.AppendRaw ""
+            SqlExpr.Binary(targetExpr, BinaryOperator.Eq, qb.AllocateParamExpr knownObject)
         else
             let json = JsonSerializator.JsonValue.Serialize knownObject
 
-            let mutable first = true
-            let inline writeAnd (qb: QueryBuilder) =
-                if first then
-                    first <- false
-                else
-                    qb.AppendRaw " AND "
+            let rec buildConjunction (comparisons: SqlExpr list) : SqlExpr =
+                match comparisons with
+                | [] -> SqlExpr.Literal(SqlLiteral.Boolean true)
+                | [single] -> single
+                | head :: tail -> SqlExpr.Binary(head, BinaryOperator.And, buildConjunction tail)
 
-            let inline emitJsonExtractAtPath (qb: QueryBuilder) (path: string) =
-                writeAnd qb
-                qb.AppendRaw "jsonb_extract("
-                writeTarget qb
-                qb.AppendRaw ", '"
-                qb.AppendRaw path
-                qb.AppendRaw "')"
-
-            let rec compareJson (qb: QueryBuilder) (path: string) (json: JsonSerializator.JsonValue) =
-
+            let rec compareJsonDu (path: string) (json: JsonSerializator.JsonValue) : SqlExpr list =
+                let extract = SqlExpr.FunctionCall("jsonb_extract", [targetExpr; SqlExpr.Literal(SqlLiteral.String path)])
                 match json with
                 | JsonSerializator.JsonValue.Null ->
-                    emitJsonExtractAtPath qb path
-                    qb.AppendRaw " IS NULL"
-
+                    [SqlExpr.Unary(UnaryOperator.IsNull, extract)]
                 | JsonSerializator.JsonValue.Boolean b ->
-                    emitJsonExtractAtPath qb path
-                    qb.AppendRaw " = "
-                    qb.AppendVariable b
-
+                    [SqlExpr.Binary(extract, BinaryOperator.Eq, qb.AllocateParamExpr b)]
                 | JsonSerializator.JsonValue.Number n ->
-                    emitJsonExtractAtPath qb path
-                    qb.AppendRaw " = "
-                    qb.AppendVariable n
-
+                    [SqlExpr.Binary(extract, BinaryOperator.Eq, qb.AllocateParamExpr n)]
                 | JsonSerializator.JsonValue.String s ->
-                    emitJsonExtractAtPath qb path
-                    qb.AppendRaw " = "
-                    qb.AppendVariable s
-
+                    [SqlExpr.Binary(extract, BinaryOperator.Eq, qb.AllocateParamExpr s)]
                 | JsonSerializator.JsonValue.Object dict ->
-                    for KeyValue(k, v) in dict do
-                        let escapedKey = escapeSQLiteString k
-                        let newPath = if path = "$" then $"$.{escapedKey}" else $"{path}.{escapedKey}"
-                        compareJson qb newPath v
-
+                    [for KeyValue(k, v) in dict do
+                        // Do NOT escapeSQLiteString here — the emitter escapes SqlLiteral.String on output.
+                        let newPath = if path = "$" then $"$.{k}" else $"{path}.{k}"
+                        yield! compareJsonDu newPath v]
                 | JsonSerializator.JsonValue.List items ->
-                    writeAnd qb
-                    // For arrays, check that both arrays have the same length
-                    // and each element matches at the corresponding index
-                    qb.AppendRaw "json_array_length(jsonb_extract("
-                    writeTarget qb
-                    qb.AppendRaw ", '"
-                    qb.AppendRaw path
-                    qb.AppendRaw "')) = "
-                    qb.AppendVariable items.Count
-
-                    for i, item in items |> Seq.indexed do
+                    let lengthCheck =
+                        SqlExpr.Binary(
+                            SqlExpr.FunctionCall("json_array_length", [SqlExpr.FunctionCall("jsonb_extract", [targetExpr; SqlExpr.Literal(SqlLiteral.String path)])]),
+                            BinaryOperator.Eq,
+                            qb.AllocateParamExpr items.Count)
+                    [yield lengthCheck
+                     for i in 0 .. items.Count - 1 do
                         let newPath = if path = "$" then $"$[{i}]" else $"{path}[{i}]"
-                        compareJson qb newPath item
+                        yield! compareJsonDu newPath items.[i]]
 
-            match json with
-            | JsonSerializator.JsonValue.Object d ->
-                for KeyValue(k, v) in d do
-                    if k = "$type" then () else
-                    compareJson qb $"$.{escapeSQLiteString k}" v
-            | JsonSerializator.JsonValue.List _items ->
-                compareJson qb "$" json
-            | JsonSerializator.JsonValue.Null
-            | JsonSerializator.JsonValue.Boolean _
-            | JsonSerializator.JsonValue.Number _
-            | JsonSerializator.JsonValue.String _ ->
-                compareJson qb "$" json
+            let comparisons =
+                match json with
+                | JsonSerializator.JsonValue.Object d ->
+                    [for KeyValue(k, v) in d do
+                        if k <> "$type" then
+                            yield! compareJsonDu $"$.{k}" v]
+                | _ -> compareJsonDu "$" json
+
+            buildConjunction comparisons
 
     /// Unwrap a single Convert node to get the actual expression.
     let internal unwrapConvert (expr: Expression) =

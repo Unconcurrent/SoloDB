@@ -8,6 +8,7 @@ open System.Reflection
 open System.Text
 open JsonFunctions
 open Utils
+open SqlDu.Engine.C1.Spec
 
 module internal QueryTranslatorBaseTypes =
     /// <summary>
@@ -120,6 +121,8 @@ module internal QueryTranslatorBaseTypes =
             IdParameterIndex: int
             /// <summary>Query source context for multi-source (JOIN) support. When Joins is empty, behavior is identical to pre-relation pipeline.</summary>
             SourceContext: QueryContext
+            /// <summary>Placeholder field — DU parameter names now derived from Variables.Count.</summary>
+            ParamCounter: int ref
         }
         /// <summary>
         /// Appends a raw string to the query being built.
@@ -152,6 +155,22 @@ module internal QueryTranslatorBaseTypes =
                 IdParameterIndex = -1 }
 
         // Whitelisted internal accessors for cross-file visitor split boundary.
+        /// Allocate a DU parameter: stores value in Variables dict, returns SqlExpr.Parameter or FunctionCall("jsonb", [Parameter]).
+        member internal this.AllocateParamExpr(value: obj) : SqlExpr =
+            let value =
+                match value with
+                | :? bool as b -> box (if b then 1 else 0)
+                | _other -> value
+            let jsonValue, shouldEncode = toSQLJson value
+            // Use Variables.Count for unique naming: monotonically increasing even when
+            // multiple QueryBuilder instances share the same Variables dict (Queryable pipeline).
+            let name = sprintf "dp%d" this.Variables.Count
+            this.Variables.[name] <- jsonValue
+            if shouldEncode then
+                SqlExpr.FunctionCall("jsonb", [SqlExpr.Parameter name])
+            else
+                SqlExpr.Parameter name
+
         member internal this.GetSourceContext() = this.SourceContext
         member internal this.GetIdParameterIndex() = this.IdParameterIndex
         member internal this.IsUpdateMode() = this.UpdateMode
@@ -190,4 +209,5 @@ module internal QueryTranslatorBaseTypes =
                     in (expression :?> LambdaExpression).Parameters
                 IdParameterIndex = idIndex
                 SourceContext = sourceCtx
+                ParamCounter = ref 0
             }

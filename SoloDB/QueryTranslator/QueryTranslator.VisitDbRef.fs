@@ -14,6 +14,7 @@ open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.QueryTranslatorVisitCore
+open SqlDu.Engine.C1.Spec
 open SoloDatabase.QueryTranslatorVisitPost
 open SoloDatabase.QueryTranslatorVisitPostJoin
 open DBRefTypeHelpers
@@ -245,7 +246,8 @@ module internal QueryTranslatorVisitDbRef =
                     linkTable lnkAlias targetTable tgtAlias tgtAlias lnkAlias targetColumn lnkAlias ownerColumn ownerRef.OwnerAliasSql)
 
             let subQb = qb.ForSubquery(tgtAlias, predExpr)
-            visit predExpr.Body subQb
+            let duExpr = visitDu predExpr.Body subQb
+            SqlDuMinimalEmit.emitExpr subQb duExpr
 
             if isAll then qb.AppendRaw "))"
             else qb.AppendRaw ")"

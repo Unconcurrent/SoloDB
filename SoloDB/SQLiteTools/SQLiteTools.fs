@@ -64,6 +64,7 @@ module SQLiteTools =
             item.InUse := true
 
             processParameters setOrAddParameter item.Command parameters
+            match sqlTraceCallback with ValueSome cb -> cb.Invoke(sql) | ValueNone -> ()
             struct (item.Command, item.ColumnDict, item.InUse) |> ValueSome
 
         // Per-connection event-handler depth counter for savepoint suppression.

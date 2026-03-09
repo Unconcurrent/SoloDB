@@ -9,9 +9,11 @@ open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.QueryTranslatorVisitCore
 open SoloDatabase.QueryTranslatorVisitPost
 open SoloDatabase.QueryTranslatorVisitDbRef
+open SqlDu.Engine.C1.Spec
 
 /// <summary>
 /// Contains functions to translate .NET LINQ expression trees into SQLite SQL queries.
+/// All entry points route through the DU construction path (visitDu) + DU emission (SqlDuMinimalEmit).
 /// </summary>
 module QueryTranslator =
     let private ensureDbRefHandlersInitialized () =
@@ -20,8 +22,7 @@ module QueryTranslator =
             raise (InvalidOperationException(
                 $"DBRef handler registration incomplete: count={count}, expected=3"))
 
-    // Re-export symbols from split modules for backward compatibility.
-    let internal appendVariable sb vars value = QueryTranslatorBase.appendVariable sb vars value
+    // Re-export symbols from split modules used by Queryable.fs, Helper.Schema.fs, and other product code.
     let internal escapeSQLiteString input = QueryTranslatorBase.escapeSQLiteString input
     let inline internal evaluateExpr<'O> (e: Expression) = QueryTranslatorBase.evaluateExpr<'O> e
     let internal isAnyConstant expr = QueryTranslatorBase.isAnyConstant expr
@@ -30,7 +31,7 @@ module QueryTranslator =
 
     /// <summary>
     /// Translates a LINQ expression into a SQL string and a dictionary of parameters.
-    /// This is a primary public entry point for the translator.
+    /// Routes through DU construction (visitDu) and DU emission (SqlDuMinimalEmit).
     /// </summary>
     /// <param name="tableName">The name of the table to query.</param>
     /// <param name="expression">The LINQ expression to translate.</param>
@@ -40,73 +41,37 @@ module QueryTranslator =
         let sb = StringBuilder()
         let variables = Dictionary<string, obj>()
         let builder = QueryBuilder.New sb variables false tableName expression -1 ValueNone
-
-        visit expression builder
+        let duExpr = visitDu expression builder
+        sb.Length <- 0
+        SqlDuMinimalEmit.emitExpr builder duExpr
         sb.ToString(), variables
 
-    let internal translateWithContext (sourceContext: QueryContext) (tableName: string) (expression: Expression) =
+    /// Returns a SqlExpr DU node for an expression without emitting to any StringBuilder.
+    /// Used by the Queryable DU construction path (Batch 2) to build SqlSelect trees.
+    /// Side effects: allocates parameters in the provided Variables dict; may populate sourceContext.Joins.
+    let internal translateToSqlExpr (sourceContext: QueryContext) (tableName: string) (expression: Expression) (variables: Dictionary<string, obj>) : SqlExpr =
         ensureDbRefHandlersInitialized()
         let sb = StringBuilder()
-        let variables = Dictionary<string, obj>()
         let builder = QueryBuilder.New sb variables false tableName expression -1 (ValueSome sourceContext)
-        visit expression builder
-        sb.ToString(), variables
+        visitDu expression builder
 
     /// <summary>
-    /// Internal function to translate a part of a queryable expression.
+    /// Translates an expression and appends the result to an existing StringBuilder.
+    /// Routes through DU construction (visitDu) and DU emission (SqlDuMinimalEmit).
     /// </summary>
-    /// <param name="tableName">The name of the table.</param>
-    /// <param name="expression">The expression to translate.</param>
-    /// <param name="sb">The StringBuilder to append to.</param>
-    /// <param name="variables">The dictionary of parameters.</param>
     let internal translateQueryable (tableName: string) (expression: Expression) (sb: StringBuilder) (variables: Dictionary<string, obj>) =
         ensureDbRefHandlersInitialized()
+        let sbStart = sb.Length
         let builder = QueryBuilder.New sb variables false tableName expression -1 ValueNone
-        visit expression builder
-        sb.Append " " |> ignore
-
-    let internal translateQueryableWithContext (sourceContext: QueryContext) (tableName: string) (expression: Expression) (sb: StringBuilder) (variables: Dictionary<string, obj>) =
-        ensureDbRefHandlersInitialized()
-        let builder = QueryBuilder.New sb variables false tableName expression -1 (ValueSome sourceContext)
-        visit expression builder
+        let duExpr = visitDu expression builder
+        sb.Length <- sbStart
+        SqlDuMinimalEmit.emitExpr builder duExpr
         sb.Append " " |> ignore
 
     /// <summary>
-    /// Internal function similar to translateQueryable, but prevents wrapping the root parameter in json_extract.
+    /// Translates an expression in "update" mode, generating SQL fragments for jsonb_set arguments.
+    /// Routes through DU construction (visitDu with UpdateMode) and DU emission (SqlDuMinimalEmit).
     /// </summary>
-    /// <param name="tableName">The name of the table.</param>
-    /// <param name="expression">The expression to translate.</param>
-    /// <param name="sb">The StringBuilder to append to.</param>
-    /// <param name="variables">The dictionary of parameters.</param>
-    let internal translateQueryableNotExtractSelfJson (tableName: string) (expression: Expression) (sb: StringBuilder) (variables: Dictionary<string, obj>) =
-        ensureDbRefHandlersInitialized()
-        let builder = {(QueryBuilder.New sb variables false tableName expression -1 ValueNone) with JsonExtractSelfValue = false}
-        visit expression builder
-        sb.Append " " |> ignore
-
-    /// <summary>
-    /// Internal function to translate an expression that involves the document ID, using a specific parameter index for the ID.
-    /// </summary>
-    /// <param name="tableName">The name of the table.</param>
-    /// <param name="expression">The LINQ expression to translate.</param>
-    /// <param name="idParameterIndex">The index of the parameter that represents the ID.</param>
-    /// <returns>A tuple containing the generated SQL string and a dictionary of parameters.</returns>
-    let internal translateWithId (tableName: string) (expression: Expression) idParameterIndex =
-        ensureDbRefHandlersInitialized()
-        let sb = StringBuilder()
-        let variables = Dictionary<string, obj>()
-        let builder = QueryBuilder.New sb variables false tableName expression idParameterIndex ValueNone
-
-        visit expression builder
-        sb.ToString(), variables
-
-    /// <summary>
-    /// Internal function to translate an expression in "update" mode, which generates SQL fragments for jsonb_set or jsonb_insert.
-    /// </summary>
-    /// <param name="tableName">The name of the table.</param>
-    /// <param name="expression">The expression to translate.</param>
-    /// <param name="fullSQL">The StringBuilder for the SQL command.</param>
-    /// <param name="variableDict">The dictionary for parameters.</param>
     let internal translateUpdateMode (tableName: string) (expression: Expression) (fullSQL: StringBuilder) (variableDict: Dictionary<string, obj>) =
         ensureDbRefHandlersInitialized()
         match tryTranslateUpdateManyRelationTransform expression with
@@ -114,6 +79,8 @@ module QueryTranslator =
             raise (NotSupportedException updateManyRelationUnsupportedMessage)
         | ValueNone -> ()
 
+        let sbStart = fullSQL.Length
         let builder = QueryBuilder.New fullSQL variableDict true tableName expression -1 ValueNone
-
-        visit expression builder
+        let duExpr = visitDu expression builder
+        fullSQL.Length <- sbStart
+        SqlDuMinimalEmit.emitExpr builder duExpr

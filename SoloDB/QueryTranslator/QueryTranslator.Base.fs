@@ -11,6 +11,7 @@ open JsonFunctions
 open Utils
 open QueryTranslatorBaseTypes
 open QueryTranslatorBaseHelpers
+open SqlDu.Engine.C1.Spec
 
 module internal QueryTranslatorBase =
     type MemberAccess = QueryTranslatorBaseTypes.MemberAccess
@@ -27,8 +28,8 @@ module internal QueryTranslatorBase =
     let isFullyConstant = QueryTranslatorBaseHelpers.isFullyConstant
     let isAnyConstant = QueryTranslatorBaseHelpers.isAnyConstant
     let inlineLambdaInvocation = QueryTranslatorBaseHelpers.inlineLambdaInvocation
-    let inline compareKnownJson (qb: QueryBuilder) (writeTarget: QueryBuilder -> unit) (targetType: Type) (knownObject: obj) =
-        QueryTranslatorBaseHelpers.compareKnownJson qb writeTarget targetType knownObject
+    let inline compareKnownJsonDu (qb: QueryBuilder) (targetExpr: SqlExpr) (targetType: Type) (knownObject: obj) : SqlExpr =
+        QueryTranslatorBaseHelpers.compareKnownJsonDu qb targetExpr targetType knownObject
 
     [<return: Struct>]
     let internal (|OfShape0|_|) (_retType: ('any1 -> 'T) | null) (_objType: ('any2 -> 'O) | null) (name: string) (m: MethodCallExpression) =
@@ -185,134 +186,7 @@ module internal QueryTranslatorBase =
             index <- index - 1
         handled
 
-    /// Helper for nested array predicate methods (Any, All).
-    /// isAll=false: EXISTS (SELECT 1 FROM json_each(...) WHERE predicate)
-    /// isAll=true:  NOT EXISTS (SELECT 1 FROM json_each(...) WHERE NOT (predicate))
-    let internal visitNestedArrayPredicateHelper
-            (visitFn: Expression -> QueryBuilder -> unit)
-            (qb: QueryBuilder)
-            (array: Expression)
-            (whereFuncExpr: Expression)
-            (isAll: bool) =
-        // Extract the lambda expression from the argument.
-        // It may be: 1) A Quote containing a lambda, 2) A lambda directly, 3) A constant with delegate.
-        let expr =
-            match whereFuncExpr with
-            | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote ->
-                // Quoted lambda (from Queryable methods).
-                ue.Operand
-            | :? LambdaExpression as le ->
-                // Direct lambda.
-                le :> Expression
-            | _ ->
-                // Try the original approach for backwards compatibility.
-                let exprFunc = Expression.Lambda<Func<Expression>>(whereFuncExpr).Compile(true)
-                exprFunc.Invoke()
-
-        if isAll then qb.AppendRaw "NOT "
-        qb.AppendRaw "EXISTS (SELECT 1 FROM json_each("
-
-        do
-            let qb = if qb.TableNameDot = "" then {qb with TableNameDot = "o."} else qb
-            visitFn array qb
-
-        qb.AppendRaw ") WHERE "
-        if isAll then qb.AppendRaw "NOT ("
-
-        let innerQb = {qb with TableNameDot = "json_each."; JsonExtractSelfValue = false}
-        visitFn expr innerQb
-
-        if isAll then qb.AppendRaw ")"
-        qb.AppendRaw ")"
-
-    let rec private buildJsonPathFromMemberExpression (expr: Expression) (accum: string list) : string list =
-        match expr with
-        | :? MemberExpression as inner ->
-            let currentField = inner.Member.Name
-            buildJsonPathFromMemberExpression inner.Expression (currentField :: accum)
-        | _ -> accum
-
-    let private formatMemberAccessPath (qb: QueryBuilder) (path: string) =
-        let path = path.Replace(".[", "[") |> escapeSQLiteString // Replace array access and keep SQL literal safe.
-        if qb.UpdateMode then sprintf "'$.%s'" path
-        else sprintf "jsonb_extract(%sValue, '$.%s')" qb.TableNameDot path
-
-    let internal tryHandleCollectionOrGroupingMemberAccess
-            (visitFn: Expression -> QueryBuilder -> unit)
-            (m: MemberAccess)
-            (qb: QueryBuilder) : bool =
-        if m.MemberName = "Length" && (* All cases below implement IEnumerable*) m.InputType.GetInterface (typeof<IEnumerable>.FullName) <> null then
-            if m.InputType = typeof<string> then
-                qb.AppendRaw "length("
-                visitFn m.Expression qb
-                qb.AppendRaw ")"
-            elif m.InputType = typeof<byte array> then
-                qb.AppendRaw "length(base64("
-                visitFn m.Expression qb
-                qb.AppendRaw "))"
-            else
-                // json len
-                qb.AppendRaw "json_array_length("
-                visitFn m.Expression qb
-                qb.AppendRaw ")"
-            true
-        elif m.MemberName = "Count" && m.InputType.GetInterface (typeof<IEnumerable>.FullName) <> null then
-            qb.AppendRaw "json_array_length("
-            visitFn m.Expression qb
-            qb.AppendRaw ")"
-            true
-        elif typedefof<System.Linq.IGrouping<_,_>>.IsAssignableFrom (m.InputType) then
-            match m.MemberName with
-            | "Key" -> qb.AppendRaw "jsonb_extract(Value, '$.Key')"
-            | other ->
-                qb.AppendRaw "jsonb_extract(Value, '$.Items."
-                qb.AppendRaw (escapeSQLiteString other)
-                qb.AppendRaw "')"
-            true
-        elif (m.ReturnType = typeof<int64> && m.MemberName = "Id") || (m.MemberName = "Id" && m.Expression.NodeType = ExpressionType.Parameter && m.Expression.Type.FullName = "SoloDatabase.JsonSerializator.JsonValue") then
-            qb.AppendRaw $"{qb.TableNameDot}Id " |> ignore
-            true
-        else
-            false
-
-    let internal tryHandleRootParameterMemberAccess (m: MemberAccess) (qb: QueryBuilder) : bool =
-        if m.Expression <> null && isRootParameter m.Expression then
-            let jsonPath = buildJsonPathFromMemberExpression m.Expression [m.MemberName]
-            match jsonPath with
-            | [] -> ()
-            | [single] ->
-                qb.AppendRaw(formatMemberAccessPath qb single) |> ignore
-            | paths ->
-                let pathStr = String.concat "." (List.map (sprintf "%s") paths)
-                qb.AppendRaw(formatMemberAccessPath qb pathStr) |> ignore
-            true
-        else
-            false
-
-    let internal emitFallbackMemberAccess
-            (visitFn: Expression -> QueryBuilder -> unit)
-            (m: MemberAccess)
-            (qb: QueryBuilder) : unit =
-        match m.OriginalExpression with
-        | None ->
-            let escapedMemberName = escapeSQLiteString m.MemberName
-            qb.AppendRaw "jsonb_extract("
-            visitFn m.Expression qb
-            qb.AppendRaw $", '$.{escapedMemberName}')"
-        | Some m ->
-            if m.Expression = null then
-                let value = (m.Member :?> PropertyInfo).GetValue null
-                qb.AppendVariable value
-            else if isFullyConstant m then
-                let value = evaluateExpr m
-                qb.AppendVariable value
-            else
-                raise (NotSupportedException(
-                    sprintf "Error: Member access '%O' is not supported.\nReason: The member cannot be translated to SQL in this context.\nFix: Simplify the expression or move it after AsEnumerable()." m.Member.Name))
-
-    /// <summary>
-    /// The main recursive visitor function that traverses the expression tree.
-    /// It dispatches to specific visit methods based on the expression's NodeType.
-    /// </summary>
-    /// <param name="exp">The expression to visit and translate.</param>
-    /// <param name="qb">The query builder state.</param>
+    // Legacy string-builder visitor helpers removed in Batch 3:
+    // visitNestedArrayPredicateHelper, buildJsonPathFromMemberExpression, formatMemberAccessPath,
+    // tryHandleCollectionOrGroupingMemberAccess, tryHandleRootParameterMemberAccess, emitFallbackMemberAccess.
+    // All callers now use the DU visitor path (visitDu + SqlDuMinimalEmit.emitExpr).
