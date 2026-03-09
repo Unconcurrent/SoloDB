@@ -77,6 +77,9 @@
     <Compile Include="QueryTranslator/SqlDu.FlattenSafety.fs" />
     <Compile Include="QueryTranslator/SqlDu.FlattenTransform.fs" />
     <Compile Include="QueryTranslator/SqlDu.FlattenPass.fs" />
+    <Compile Include="QueryTranslator/SqlDu.PushdownSafety.fs" />
+    <Compile Include="QueryTranslator/SqlDu.PushdownTransform.fs" />
+    <Compile Include="QueryTranslator/SqlDu.PushdownPass.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Types.fs" />
     <Compile Include="QueryTranslator/SqlDu.MinimalEmit.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Helpers.fs" />
