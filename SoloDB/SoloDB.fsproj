@@ -62,6 +62,14 @@
     <Compile Include="Core/CustomTypeId.fs" />
     <Compile Include="Query/QueryContext.fs" />
     <Compile Include="QueryTranslator/SqlDu.ContractTypes.fs" />
+    <Compile Include="QueryTranslator/SqlDu.EmitTypes.fs" />
+    <Compile Include="QueryTranslator/SqlDu.EmitContext.fs" />
+    <Compile Include="QueryTranslator/SqlDu.EmitJson.fs" />
+    <Compile Include="QueryTranslator/SqlDu.EmitWindow.fs" />
+    <Compile Include="QueryTranslator/SqlDu.EmitExpr.fs" />
+    <Compile Include="QueryTranslator/SqlDu.EmitSelect.fs" />
+    <Compile Include="QueryTranslator/SqlDu.EmitUnion.fs" />
+    <Compile Include="QueryTranslator/SqlDu.EmitStatement.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Types.fs" />
     <Compile Include="QueryTranslator/SqlDu.MinimalEmit.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Helpers.fs" />

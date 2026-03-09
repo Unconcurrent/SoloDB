@@ -1,0 +1,255 @@
+module SoloDatabase.EmitExpr
+
+open SqlDu.Engine.C1.Spec
+
+/// Escape single quotes and null characters for inline string literals.
+let private escapeSQLiteString (input: string) : string =
+    input.Replace("'", "''").Replace("\0", "")
+
+/// Emit a binary operator as SQL text.
+let private emitBinaryOp (op: BinaryOperator) : string =
+    match op with
+    | Eq -> "="
+    | Ne -> "<>"
+    | Lt -> "<"
+    | Le -> "<="
+    | Gt -> ">"
+    | Ge -> ">="
+    | And -> "AND"
+    | Or -> "OR"
+    | Add -> "+"
+    | Sub -> "-"
+    | Mul -> "*"
+    | Div -> "/"
+    | Mod -> "%"
+    | Like -> "LIKE"
+    | Glob -> "GLOB"
+    | Regexp -> "REGEXP"
+    | Is -> "IS"
+    | IsNot -> "IS NOT"
+    | In -> "IN"
+    | NotInOp -> "NOT IN"
+
+/// Emit a SQL literal value.
+/// When ctx.InlineLiterals is true, Integer/Float/String are emitted inline (product behavior).
+/// When false, they are parameterized (C2 spec behavior).
+/// NULL and Boolean are always emitted inline regardless of the flag.
+let private emitLiteral (ctx: EmitContext) (lit: SqlLiteral) : Emitted =
+    match lit with
+    | SqlLiteral.Null -> { Sql = "NULL"; Parameters = [] }
+    | SqlLiteral.Boolean true -> { Sql = "1"; Parameters = [] }
+    | SqlLiteral.Boolean false -> { Sql = "0"; Parameters = [] }
+    | SqlLiteral.Integer v ->
+        if ctx.InlineLiterals then
+            { Sql = string v; Parameters = [] }
+        else
+            ctx.AllocParam(box v)
+    | SqlLiteral.Float v ->
+        if ctx.InlineLiterals then
+            { Sql = sprintf "%g" v; Parameters = [] }
+        else
+            ctx.AllocParam(box v)
+    | SqlLiteral.String v ->
+        if ctx.InlineLiterals then
+            { Sql = sprintf "'%s'" (escapeSQLiteString v); Parameters = [] }
+        else
+            ctx.AllocParam(box v)
+    | SqlLiteral.Blob v -> ctx.AllocParam(box v)
+
+/// Emit an aggregate function kind as SQL function name.
+let private emitAggregateKind (kind: AggregateKind) : string =
+    match kind with
+    | Count -> "COUNT"
+    | Sum -> "SUM"
+    | Avg -> "AVG"
+    | Min -> "MIN"
+    | Max -> "MAX"
+    | GroupConcat -> "GROUP_CONCAT"
+    | JsonGroupArray -> "json_group_array"
+
+/// Emit a SqlExpr to SQL text with parameters.
+/// Exhaustive pattern match over all 21 SqlExpr cases.
+/// The emitSubSelect parameter resolves the circular dependency between
+/// expression and select emission — EmitSelect passes itself here.
+let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: EmitContext) (expr: SqlExpr) : Emitted =
+    let emitE ctx expr = emitExprWith emitSubSelect ctx expr
+
+    match expr with
+    // Case 1: Column reference
+    | Column(sourceAlias, column) ->
+        match sourceAlias with
+        | Some alias -> { Sql = sprintf "%s.%s" alias column; Parameters = [] }
+        | None -> { Sql = column; Parameters = [] }
+
+    // Case 2: Literal value
+    | Literal lit ->
+        emitLiteral ctx lit
+
+    // Case 3: Named parameter reference
+    | Parameter name ->
+        { Sql = sprintf "@%s" name; Parameters = [] }
+
+    // Case 4: JSON extract expression — jsonb_extract(source, '$.path')
+    | JsonExtractExpr(sourceAlias, column, jsonPath) ->
+        EmitJson.emitJsonExtract ctx "jsonb_extract" sourceAlias column jsonPath
+
+    // Case 5: JSON set expression — jsonb_set(target, path, value)
+    | JsonSetExpr(target, assignments) ->
+        EmitJson.emitJsonSet ctx emitE target assignments
+
+    // Case 6: JSON array expression — json_array(e1, e2, ...)
+    | JsonArrayExpr elements ->
+        EmitJson.emitJsonArray ctx emitE elements
+
+    // Case 7: JSON object expression — jsonb_object('k1', v1, 'k2', v2, ...)
+    | JsonObjectExpr properties ->
+        EmitJson.emitJsonObject ctx emitE properties
+
+    // Case 8: Function call — name(arg1, arg2, ...)
+    // Includes product-specific escape hatches: __raw__ and __update_fragment__
+    | FunctionCall(name, arguments) ->
+        // __raw__: handler-captured SQL escape hatch — emit raw SQL from string literal
+        if name = "__raw__" then
+            match arguments with
+            | [Literal(SqlLiteral.String rawSql)] -> { Sql = rawSql; Parameters = [] }
+            | _ -> Emitted.empty
+        // __update_fragment__: UpdateMode path/value pair — emit "path,value,"
+        elif name = "__update_fragment__" then
+            match arguments with
+            | [path; value] ->
+                let pathE = emitE ctx path
+                let valueE = emitE ctx value
+                { Sql = sprintf "%s,%s," pathE.Sql valueE.Sql
+                  Parameters = pathE.Parameters @ valueE.Parameters }
+            | _ -> Emitted.empty
+        else
+            let argsEmitted = arguments |> List.map (emitE ctx)
+            let argsSql = argsEmitted |> List.map (fun e -> e.Sql) |> String.concat ", "
+            let parms = argsEmitted |> List.collect (fun e -> e.Parameters)
+            { Sql = sprintf "%s(%s)" name argsSql; Parameters = parms }
+
+    // Case 9: Aggregate call
+    | AggregateCall(kind, argument, distinct, separator) ->
+        let funcName = emitAggregateKind kind
+        match kind, argument with
+        | Count, None ->
+            { Sql = sprintf "%s(*)" funcName; Parameters = [] }
+        | _, Some argExpr ->
+            let argEmitted = emitE ctx argExpr
+            let distinctStr = if distinct then "DISTINCT " else ""
+            match separator with
+            | Some sepExpr ->
+                let sepEmitted = emitE ctx sepExpr
+                { Sql = sprintf "%s(%s%s, %s)" funcName distinctStr argEmitted.Sql sepEmitted.Sql
+                  Parameters = argEmitted.Parameters @ sepEmitted.Parameters }
+            | None ->
+                { Sql = sprintf "%s(%s%s)" funcName distinctStr argEmitted.Sql
+                  Parameters = argEmitted.Parameters }
+        | _, None ->
+            { Sql = sprintf "%s()" funcName; Parameters = [] }
+
+    // Case 10: Window call
+    | WindowCall spec ->
+        EmitWindow.emitWindowCall ctx emitE spec
+
+    // Case 11: Unary operator
+    | Unary(op, operand) ->
+        let operandEmitted = emitE ctx operand
+        match op with
+        | Not ->
+            { Sql = sprintf "NOT (%s)" operandEmitted.Sql
+              Parameters = operandEmitted.Parameters }
+        | Neg ->
+            { Sql = sprintf "-%s" operandEmitted.Sql
+              Parameters = operandEmitted.Parameters }
+        | IsNull ->
+            { Sql = sprintf "%s IS NULL" operandEmitted.Sql
+              Parameters = operandEmitted.Parameters }
+        | IsNotNull ->
+            { Sql = sprintf "%s IS NOT NULL" operandEmitted.Sql
+              Parameters = operandEmitted.Parameters }
+
+    // Case 12: Binary operator — handles precedence via parenthesization
+    | Binary(left, op, right) ->
+        let leftEmitted = emitE ctx left
+        let rightEmitted = emitE ctx right
+        let opStr = emitBinaryOp op
+        let leftSql =
+            match left with
+            | Binary(_, (Or), _) when op = And -> sprintf "(%s)" leftEmitted.Sql
+            | _ -> leftEmitted.Sql
+        let rightSql =
+            match right with
+            | Binary(_, (Or), _) when op = And -> sprintf "(%s)" rightEmitted.Sql
+            | _ -> rightEmitted.Sql
+        { Sql = sprintf "(%s %s %s)" leftSql opStr rightSql
+          Parameters = leftEmitted.Parameters @ rightEmitted.Parameters }
+
+    // Case 13: BETWEEN
+    | Between(expr, lower, upper) ->
+        let exprEmitted = emitE ctx expr
+        let lowerEmitted = emitE ctx lower
+        let upperEmitted = emitE ctx upper
+        { Sql = sprintf "%s BETWEEN %s AND %s" exprEmitted.Sql lowerEmitted.Sql upperEmitted.Sql
+          Parameters = exprEmitted.Parameters @ lowerEmitted.Parameters @ upperEmitted.Parameters }
+
+    // Case 14: IN list
+    | InList(expr, values) ->
+        let exprEmitted = emitE ctx expr
+        let valuesEmitted = values |> List.map (emitE ctx)
+        let valuesSql = valuesEmitted |> List.map (fun e -> e.Sql) |> String.concat ", "
+        let parms = valuesEmitted |> List.collect (fun e -> e.Parameters)
+        { Sql = sprintf "%s IN (%s)" exprEmitted.Sql valuesSql
+          Parameters = exprEmitted.Parameters @ parms }
+
+    // Case 15: IN subquery
+    | InSubquery(expr, subSelect) ->
+        let exprEmitted = emitE ctx expr
+        let subEmitted = emitSubSelect ctx subSelect
+        { Sql = sprintf "%s IN (%s)" exprEmitted.Sql subEmitted.Sql
+          Parameters = exprEmitted.Parameters @ subEmitted.Parameters }
+
+    // Case 16: CAST
+    | Cast(expr, sqlType) ->
+        let exprEmitted = emitE ctx expr
+        { Sql = sprintf "CAST(%s AS %s)" exprEmitted.Sql sqlType
+          Parameters = exprEmitted.Parameters }
+
+    // Case 17: COALESCE
+    | Coalesce exprs ->
+        let partsEmitted = exprs |> List.map (emitE ctx)
+        let sql = partsEmitted |> List.map (fun e -> e.Sql) |> String.concat ", "
+        let parms = partsEmitted |> List.collect (fun e -> e.Parameters)
+        { Sql = sprintf "COALESCE(%s)" sql; Parameters = parms }
+
+    // Case 18: EXISTS
+    | Exists subSelect ->
+        let subEmitted = emitSubSelect ctx subSelect
+        { Sql = sprintf "EXISTS (%s)" subEmitted.Sql
+          Parameters = subEmitted.Parameters }
+
+    // Case 19: Scalar subquery
+    | ScalarSubquery subSelect ->
+        let subEmitted = emitSubSelect ctx subSelect
+        { Sql = sprintf "(%s)" subEmitted.Sql
+          Parameters = subEmitted.Parameters }
+
+    // Case 20: CASE expression
+    | CaseExpr(branches, elseExpr) ->
+        let branchParts =
+            branches
+            |> List.map (fun (cond, result) ->
+                let condEmitted = emitE ctx cond
+                let resultEmitted = emitE ctx result
+                { Sql = sprintf "WHEN %s THEN %s" condEmitted.Sql resultEmitted.Sql
+                  Parameters = condEmitted.Parameters @ resultEmitted.Parameters })
+        let branchSql = branchParts |> List.map (fun e -> e.Sql) |> String.concat " "
+        let branchParams = branchParts |> List.collect (fun e -> e.Parameters)
+        match elseExpr with
+        | Some elseE ->
+            let elseEmitted = emitE ctx elseE
+            { Sql = sprintf "CASE %s ELSE %s END" branchSql elseEmitted.Sql
+              Parameters = branchParams @ elseEmitted.Parameters }
+        | None ->
+            { Sql = sprintf "CASE %s END" branchSql
+              Parameters = branchParams }
