@@ -86,6 +86,11 @@
     <Compile Include="QueryTranslator/SqlDu.JoinGraph.fs" />
     <Compile Include="QueryTranslator/SqlDu.JoinReorder.fs" />
     <Compile Include="QueryTranslator/SqlDu.JoinReorderPass.fs" />
+    <Compile Include="QueryTranslator/SqlDu.IndexModel.fs" />
+    <Compile Include="QueryTranslator/SqlDu.ExpressionMatcher.fs" />
+    <Compile Include="QueryTranslator/SqlDu.IndexPlanShaping.fs" />
+    <Compile Include="QueryTranslator/SqlDu.ShapingTrace.fs" />
+    <Compile Include="QueryTranslator/SqlDu.IndexPlanShapingPass.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Types.fs" />
     <Compile Include="QueryTranslator/SqlDu.MinimalEmit.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Helpers.fs" />
