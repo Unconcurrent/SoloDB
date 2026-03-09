@@ -123,6 +123,8 @@ module internal QueryTranslatorBaseTypes =
             SourceContext: QueryContext
             /// <summary>Placeholder field — DU parameter names now derived from Variables.Count.</summary>
             ParamCounter: int ref
+            /// <summary>DU result from pre-expression/unknown handler — replaces __raw__ StringBuilder capture.</summary>
+            DuHandlerResult: SqlExpr voption ref
         }
         /// <summary>
         /// Appends a raw string to the query being built.
@@ -210,4 +212,5 @@ module internal QueryTranslatorBaseTypes =
                 IdParameterIndex = idIndex
                 SourceContext = sourceCtx
                 ParamCounter = ref 0
+                DuHandlerResult = ref ValueNone
             }

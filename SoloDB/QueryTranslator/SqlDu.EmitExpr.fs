@@ -106,15 +106,11 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
         EmitJson.emitJsonObject ctx emitE properties
 
     // Case 8: Function call — name(arg1, arg2, ...)
-    // Includes product-specific escape hatches: __raw__ and __update_fragment__
+    // Includes product-specific internal protocol: __update_fragment__
     | FunctionCall(name, arguments) ->
-        // __raw__: handler-captured SQL escape hatch — emit raw SQL from string literal
-        if name = "__raw__" then
-            match arguments with
-            | [Literal(SqlLiteral.String rawSql)] -> { Sql = rawSql; Parameters = [] }
-            | _ -> Emitted.empty
         // __update_fragment__: UpdateMode path/value pair — emit "path,value,"
-        elif name = "__update_fragment__" then
+        // (explicit named internal protocol between VisitCore UpdateMode and emitter)
+        if name = "__update_fragment__" then
             match arguments with
             | [path; value] ->
                 let pathE = emitE ctx path

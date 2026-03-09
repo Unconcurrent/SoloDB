@@ -75,6 +75,10 @@ module internal QueryTranslatorVisitDbRef =
         | :? MemberExpression as topMe when not (isNull topMe.Expression) ->
             let innerExpr = unwrapConvert topMe.Expression
 
+            let inline prefixToAlias (prefix: string) =
+                if String.IsNullOrEmpty prefix then None
+                else Some(prefix.TrimEnd('.'))
+
             // Case 1: Direct member on DBRef<T> — o.Ref.Id, o.Ref.HasValue
             if isDBRefType innerExpr.Type then
                 match topMe.Member.Name with
@@ -82,15 +86,19 @@ module internal QueryTranslatorVisitDbRef =
                     match innerExpr with
                     | :? MemberExpression as dbrefPropExpr ->
                         let struct(prefix, prop) = resolveDBRefPropertyLocation qb dbrefPropExpr
-                        qb.AppendRaw (sprintf "jsonb_extract(%sValue, '$.%s')" prefix prop)
+                        qb.DuHandlerResult.Value <- ValueSome(SqlExpr.JsonExtractExpr(prefixToAlias prefix, "Value", JsonPath [prop]))
                         true
                     | _ -> false
                 | "HasValue" ->
                     match innerExpr with
                     | :? MemberExpression as dbrefPropExpr ->
                         let struct(prefix, prop) = resolveDBRefPropertyLocation qb dbrefPropExpr
-                        let extract = sprintf "jsonb_extract(%sValue, '$.%s')" prefix prop
-                        qb.AppendRaw (sprintf "(%s IS NOT NULL AND %s <> 0)" extract extract)
+                        let extract = SqlExpr.JsonExtractExpr(prefixToAlias prefix, "Value", JsonPath [prop])
+                        qb.DuHandlerResult.Value <- ValueSome(
+                            SqlExpr.Binary(
+                                SqlExpr.Unary(UnaryOperator.IsNotNull, extract),
+                                BinaryOperator.And,
+                                SqlExpr.Binary(extract, BinaryOperator.Ne, SqlExpr.Literal(SqlLiteral.Integer 0L))))
                         true
                     | _ -> false
                 | _ -> false
@@ -115,8 +123,7 @@ module internal QueryTranslatorVisitDbRef =
                 match findValueBoundary topMe.Expression [topMe.Member.Name] with
                 | ValueSome struct(valueME, propParts) ->
                     let alias = ensureDBRefJoin qb valueME
-                    let targetPath = String.concat "." propParts
-                    qb.AppendRaw (sprintf "jsonb_extract(%s.Value, '$.%s')" alias targetPath)
+                    qb.DuHandlerResult.Value <- ValueSome(SqlExpr.JsonExtractExpr(Some alias, "Value", JsonPath propParts))
                     true
                 | ValueNone -> false
         | _ -> false
@@ -218,10 +225,26 @@ module internal QueryTranslatorVisitDbRef =
         else
             ValueNone, ValueNone
 
-    /// Emit a correlated EXISTS or NOT EXISTS subquery for a DBRefMany quantifier with a predicate.
+    /// Helper to build a simple SelectCore for link-table subqueries.
+    let private mkSubCore projections source where =
+        { Distinct = false; Projections = projections; Source = source
+          Joins = []; Where = where; GroupBy = []; Having = None
+          OrderBy = []; Limit = None; Offset = None }
+
+    /// Helper: build a simple link-table subquery (no join to target).
+    /// Pattern: SELECT <proj> FROM "linkTable" WHERE ownerColumn = ownerAlias.Id
+    let private linkSubquery (linkTable: string) (ownerColumn: string) (ownerAlias: string) (proj: Projection list) =
+        let where =
+            SqlExpr.Binary(
+                SqlExpr.Column(None, ownerColumn),
+                BinaryOperator.Eq,
+                SqlExpr.Column(Some ownerAlias, "Id"))
+        { Ctes = []; Body = SingleSelect(mkSubCore proj (Some(BaseTable(linkTable, None))) (Some where)) }
+
+    /// Build a correlated EXISTS or NOT EXISTS subquery for a DBRefMany quantifier with a predicate.
     /// When isAll=false: EXISTS(SELECT 1 FROM link INNER JOIN target ... WHERE owner AND predicate)
     /// When isAll=true:  NOT EXISTS(SELECT 1 FROM link INNER JOIN target ... WHERE owner AND NOT(predicate))
-    let private emitQuantifierWithPredicate (qb: QueryBuilder) (ownerRef: DBRefManyOwnerRef) (predicateExpr: Expression) (isAll: bool) =
+    let private buildQuantifierWithPredicate (qb: QueryBuilder) (ownerRef: DBRefManyOwnerRef) (predicateExpr: Expression) (isAll: bool) =
         let methodName = if isAll then "All" else "Any"
         match tryExtractLambdaExpression predicateExpr with
         | ValueSome predExpr ->
@@ -238,20 +261,37 @@ module internal QueryTranslatorVisitDbRef =
             let tgtAlias = "_tgt"
             let lnkAlias = "_lnk"
 
-            if isAll then
-                qb.AppendRaw (sprintf "NOT EXISTS(SELECT 1 FROM \"%s\" AS %s INNER JOIN \"%s\" AS %s ON %s.Id = %s.%s WHERE %s.%s = %s.Id AND NOT ("
-                    linkTable lnkAlias targetTable tgtAlias tgtAlias lnkAlias targetColumn lnkAlias ownerColumn ownerRef.OwnerAliasSql)
-            else
-                qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" AS %s INNER JOIN \"%s\" AS %s ON %s.Id = %s.%s WHERE %s.%s = %s.Id AND "
-                    linkTable lnkAlias targetTable tgtAlias tgtAlias lnkAlias targetColumn lnkAlias ownerColumn ownerRef.OwnerAliasSql)
-
+            // Visit the predicate body to get a DU expression.
             let subQb = qb.ForSubquery(tgtAlias, predExpr)
-            let duExpr = visitDu predExpr.Body subQb
-            SqlDuMinimalEmit.emitExpr subQb duExpr
+            let predicateDu = visitDu predExpr.Body subQb
 
-            if isAll then qb.AppendRaw "))"
-            else qb.AppendRaw ")"
-            true
+            // Build: SELECT 1 FROM "linkTable" AS _lnk INNER JOIN "targetTable" AS _tgt
+            //   ON _tgt.Id = _lnk.targetColumn
+            //   WHERE _lnk.ownerColumn = ownerAlias.Id AND [NOT] predicate
+            let joinOn =
+                SqlExpr.Binary(
+                    SqlExpr.Column(Some tgtAlias, "Id"),
+                    BinaryOperator.Eq,
+                    SqlExpr.Column(Some lnkAlias, targetColumn))
+            let ownerWhere =
+                SqlExpr.Binary(
+                    SqlExpr.Column(Some lnkAlias, ownerColumn),
+                    BinaryOperator.Eq,
+                    SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
+            let fullPredicate =
+                if isAll then SqlExpr.Unary(UnaryOperator.Not, predicateDu)
+                else predicateDu
+            let fullWhere = SqlExpr.Binary(ownerWhere, BinaryOperator.And, fullPredicate)
+            let core =
+                { mkSubCore
+                    [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                    (Some(BaseTable(linkTable, Some lnkAlias)))
+                    (Some fullWhere) with
+                    Joins = [{ Kind = Inner; Source = BaseTable(targetTable, Some tgtAlias); On = Some joinOn }] }
+            let subSelect = { Ctes = []; Body = SingleSelect core }
+            let existsExpr = SqlExpr.Exists subSelect
+            if isAll then SqlExpr.Unary(UnaryOperator.Not, existsExpr)
+            else existsExpr
         | ValueNone ->
             raise (NotSupportedException(
                 sprintf "Error: Cannot extract predicate lambda for relation-backed DBRefMany.%s.\nReason: The predicate is not a simple lambda expression.\nFix: Use a simple lambda (e.g., x => ...) or move the operation after AsEnumerable()." methodName))
@@ -269,7 +309,8 @@ module internal QueryTranslatorVisitDbRef =
                     let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
                     let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
                     let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
-                    qb.AppendRaw (sprintf "(SELECT COUNT(*) FROM \"%s\" WHERE %s = %s.Id)" linkTable ownerColumn ownerRef.OwnerAliasSql)
+                    let countProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
+                    qb.DuHandlerResult.Value <- ValueSome(SqlExpr.ScalarSubquery(linkSubquery linkTable ownerColumn ownerRef.OwnerAliasSql countProj))
                     true
                 | ValueNone -> false
             else false
@@ -289,10 +330,12 @@ module internal QueryTranslatorVisitDbRef =
                         let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
                         let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
                         let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
-                        qb.AppendRaw (sprintf "EXISTS(SELECT 1 FROM \"%s\" WHERE %s = %s.Id)" linkTable ownerColumn ownerRef.OwnerAliasSql)
+                        let oneProj = [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                        qb.DuHandlerResult.Value <- ValueSome(SqlExpr.Exists(linkSubquery linkTable ownerColumn ownerRef.OwnerAliasSql oneProj))
                         true
                     | ValueSome predicateExpr ->
-                        emitQuantifierWithPredicate qb ownerRef predicateExpr false
+                        qb.DuHandlerResult.Value <- ValueSome(buildQuantifierWithPredicate qb ownerRef predicateExpr false)
+                        true
                 | ValueNone ->
                     false
             | ValueNone -> false
@@ -307,10 +350,11 @@ module internal QueryTranslatorVisitDbRef =
                 | ValueSome ownerRef ->
                     match predArg with
                     | ValueSome predicateExpr ->
-                        emitQuantifierWithPredicate qb ownerRef predicateExpr true
+                        qb.DuHandlerResult.Value <- ValueSome(buildQuantifierWithPredicate qb ownerRef predicateExpr true)
+                        true
                     | ValueNone ->
                         // All() without predicate is trivially true; emit literal 1.
-                        qb.AppendRaw "1"
+                        qb.DuHandlerResult.Value <- ValueSome(SqlExpr.Literal(SqlLiteral.Integer 1L))
                         true
                 | ValueNone ->
                     false

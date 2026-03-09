@@ -8,6 +8,7 @@ open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.QueryTranslatorVisitPost
+open SqlDu.Engine.C1.Spec
 open DBRefTypeHelpers
 
 module internal QueryTranslatorVisitPostJoin =
@@ -107,12 +108,15 @@ module internal QueryTranslatorVisitPostJoin =
 
             let targetTable = resolveTargetCollectionForRelation ctx ownerCollection relationPropertyName targetType
 
-            let onCondition = sprintf "%s.Id = jsonb_extract(%sValue, '$.%s')" alias sourcePrefix propName
+            let sourceAlias =
+                if String.IsNullOrEmpty sourcePrefix then None
+                else Some(sourcePrefix.TrimEnd('.'))
             ctx.Joins.Add({
                 TargetAlias = alias
                 TargetTable = targetTable
                 JoinKind = "LEFT JOIN"
-                OnCondition = onCondition
+                OnSourceAlias = sourceAlias
+                OnPropertyName = propName
                 PropertyPath = pathKey
             })
             alias

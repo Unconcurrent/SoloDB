@@ -215,6 +215,7 @@ module private QueryHelper =
             IdParameterIndex = -1
             SourceContext = QueryContext.SingleSource("")
             ParamCounter = ref 0
+            DuHandlerResult = ref ValueNone
         }
         SqlDuMinimalEmit.emitSelect qb sel
 
@@ -943,7 +944,10 @@ module private QueryHelper =
                         |> Seq.map (fun j ->
                             { Kind = parseJoinKind j.JoinKind
                               Source = BaseTable(j.TargetTable, Some j.TargetAlias)
-                              On = Some (SqlExpr.FunctionCall("__raw__", [SqlExpr.Literal(SqlLiteral.String j.OnCondition)])) })
+                              On = Some(SqlExpr.Binary(
+                                SqlExpr.Column(Some j.TargetAlias, "Id"),
+                                BinaryOperator.Eq,
+                                SqlExpr.JsonExtractExpr(j.OnSourceAlias, "Value", JsonPath [j.OnPropertyName]))) })
                         |> Seq.toList
 
                     // Rewrite Value projection for materialization (jsonb_set).

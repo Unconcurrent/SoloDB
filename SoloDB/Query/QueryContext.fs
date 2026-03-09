@@ -61,8 +61,10 @@ type internal JoinEdge = {
     TargetTable: string
     /// JOIN kind (e.g., "LEFT JOIN")
     JoinKind: string
-    /// Full ON condition (e.g., "_ref0.Id = jsonb_extract(\"Orders\".Value, '$.Customer')")
-    OnCondition: string
+    /// Source table alias for the ON condition (e.g., Some "\"Orders\"")
+    OnSourceAlias: string option
+    /// Property name for the jsonb_extract in ON condition (e.g., "Customer")
+    OnPropertyName: string
     /// The property path that triggered this join (e.g., "Customer")
     PropertyPath: string
 }

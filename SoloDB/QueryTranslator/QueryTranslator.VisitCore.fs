@@ -18,8 +18,7 @@ open SqlDu.Engine.C1.Spec
 module internal QueryTranslatorVisitCore =
     // ─── DU-constructing visitor (Batch 3: legacy visit path removed) ─────────
     // All expression families produce SqlExpr DU nodes via visitDu.
-    // Remaining __raw__: pre-expression handler + unknown handler API boundaries
-    // (external Func<QB, Expr, bool> callbacks whose type signature cannot change).
+    // Pre-expression and unknown-expression handlers now return DU via DuHandlerResult.
 
     /// Placeholder: legacy visit removed in Batch 3. All callers now use visitDu + emitExpr.
     let internal visit (_exp: Expression) (_qb: QueryBuilder) : unit =
@@ -31,11 +30,7 @@ module internal QueryTranslatorVisitCore =
     // visitLambda, newObject, containsImpl, emitStringOperand).
     // All callers now use visitDu + SqlDuMinimalEmit.emitExpr.
 
-    let rec private captureHandlerRawDu (qb: QueryBuilder) (sbBefore: int) : SqlExpr =
-        let rawSql = qb.StringBuilder.ToString(sbBefore, qb.StringBuilder.Length - sbBefore)
-        SqlExpr.FunctionCall("__raw__", [SqlExpr.Literal(SqlLiteral.String rawSql)])
-
-    and private emitStringOperandDu (qb: QueryBuilder) (ignoreCase: bool) (expr: Expression) : SqlExpr =
+    let rec private emitStringOperandDu (qb: QueryBuilder) (ignoreCase: bool) (expr: Expression) : SqlExpr =
         if ignoreCase then SqlExpr.FunctionCall("TO_LOWER", [visitDu expr qb])
         else visitDu expr qb
 
@@ -433,14 +428,15 @@ module internal QueryTranslatorVisitCore =
                 sprintf "Error: Method '%s' is not supported.\nReason: The method has no SQL translation.\nFix: Rewrite the query or call AsEnumerable() before using this method." m.Method.Name))
 
     /// DU-constructing visitor: builds SqlExpr tree from expression tree.
-    /// ALL non-UpdateMode expression families return proper SqlExpr DU nodes.
-    /// Only pre-expression/unknown handler callbacks (external API) use __raw__.
-    /// Entry points clear SB after this returns and re-emit via SqlDuMinimalEmit.
+    /// ALL expression families return proper SqlExpr DU nodes.
+    /// Pre-expression handlers return DU via qb.DuHandlerResult.
     and internal visitDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
-        // Pre-expression handlers (DBRef etc.) — external API boundary, captured as __raw__
-        let sbBefore = qb.StringBuilder.Length
+        // Pre-expression handlers (DBRef etc.) — return DU directly via DuHandlerResult
+        qb.DuHandlerResult.Value <- ValueNone
         if runHandler preExpressionHandler qb exp then
-            captureHandlerRawDu qb sbBefore
+            match qb.DuHandlerResult.Value with
+            | ValueSome duResult -> duResult
+            | ValueNone -> raise (InvalidOperationException "Pre-expression handler returned true but did not set DuHandlerResult")
         else
 
         // Fully-constant early-out (same guard as legacy visit)
@@ -520,10 +516,13 @@ module internal QueryTranslatorVisitCore =
         | ExpressionType.ListInit ->
             let listExp = exp :?> ListInitExpression
             SqlExpr.FunctionCall("jsonb_array", [for item in listExp.Initializers -> visitDu (item.Arguments |> Seq.exactlyOne) qb])
-        // Unknown handler fallback — external API boundary, captured as __raw__
+        // Unknown handler fallback — returns DU via DuHandlerResult
         | _ ->
+            qb.DuHandlerResult.Value <- ValueNone
             if not (runHandler unknownExpressionHandler qb exp) then
                 raise (ArgumentOutOfRangeException $"QueryTranslator.{nameof unknownExpressionHandler} did not handle the expression of type: {exp.NodeType}")
-            captureHandlerRawDu qb sbBefore
+            match qb.DuHandlerResult.Value with
+            | ValueSome duResult -> duResult
+            | ValueNone -> raise (InvalidOperationException $"Unknown expression handler returned true but did not set DuHandlerResult for: {exp.NodeType}")
 
     // ─── DBRef relation query translation ────────────────────────────────────────
