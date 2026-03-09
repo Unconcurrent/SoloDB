@@ -80,6 +80,12 @@
     <Compile Include="QueryTranslator/SqlDu.PushdownSafety.fs" />
     <Compile Include="QueryTranslator/SqlDu.PushdownTransform.fs" />
     <Compile Include="QueryTranslator/SqlDu.PushdownPass.fs" />
+    <Compile Include="QueryTranslator/SqlDu.ProjectionLiveness.fs" />
+    <Compile Include="QueryTranslator/SqlDu.ProjectionPushdown.fs" />
+    <Compile Include="QueryTranslator/SqlDu.ProjectionPass.fs" />
+    <Compile Include="QueryTranslator/SqlDu.JoinGraph.fs" />
+    <Compile Include="QueryTranslator/SqlDu.JoinReorder.fs" />
+    <Compile Include="QueryTranslator/SqlDu.JoinReorderPass.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Types.fs" />
     <Compile Include="QueryTranslator/SqlDu.MinimalEmit.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Helpers.fs" />
