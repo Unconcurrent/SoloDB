@@ -70,6 +70,10 @@
     <Compile Include="QueryTranslator/SqlDu.EmitSelect.fs" />
     <Compile Include="QueryTranslator/SqlDu.EmitUnion.fs" />
     <Compile Include="QueryTranslator/SqlDu.EmitStatement.fs" />
+    <Compile Include="QueryTranslator/SqlDu.PassTypes.fs" />
+    <Compile Include="QueryTranslator/SqlDu.PassRunner.fs" />
+    <Compile Include="QueryTranslator/SqlDu.IdentityPass.fs" />
+    <Compile Include="QueryTranslator/SqlDu.ConstantFoldPass.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Types.fs" />
     <Compile Include="QueryTranslator/SqlDu.MinimalEmit.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Helpers.fs" />
