@@ -91,6 +91,13 @@
     <Compile Include="QueryTranslator/SqlDu.IndexPlanShaping.fs" />
     <Compile Include="QueryTranslator/SqlDu.ShapingTrace.fs" />
     <Compile Include="QueryTranslator/SqlDu.IndexPlanShapingPass.fs" />
+    <Compile Include="QueryTranslator/SqlDu.PolicyModel.fs" />
+    <Compile Include="QueryTranslator/SqlDu.PathCanonicalizer.fs" />
+    <Compile Include="QueryTranslator/SqlDu.SetChainAnalyzer.fs" />
+    <Compile Include="QueryTranslator/SqlDu.MaterializationPolicy.fs" />
+    <Compile Include="QueryTranslator/SqlDu.JsonbRewritePolicy.fs" />
+    <Compile Include="QueryTranslator/SqlDu.JsonbRewritePolicyPass.fs" />
+    <Compile Include="QueryTranslator/SqlDu.C9DecisionTrace.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Types.fs" />
     <Compile Include="QueryTranslator/SqlDu.MinimalEmit.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Helpers.fs" />

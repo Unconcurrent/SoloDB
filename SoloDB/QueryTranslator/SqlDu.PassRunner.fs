@@ -6,7 +6,7 @@ open SoloDatabase.PassTypes
 /// Compute a structural fingerprint of a SqlStatement by emitting SQL and hashing.
 /// Uses the canonical product emitter for deterministic emission, then FNV-1a 64-bit hash.
 let fingerprint (stmt: SqlStatement) : string =
-    let emitted = EmitStatement.emitStatement (EmitContext()) stmt
+    let emitted = EmitStatement.emitStatement (EmitContext(InlineLiterals = true)) stmt
     let mutable h = 14695981039346656037UL
     for c in emitted.Sql do
         h <- (h ^^^ uint64 c) * 1099511628211UL
