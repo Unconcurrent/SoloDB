@@ -56,6 +56,7 @@ let rec collectColumnRefs (expr: SqlExpr) : (string option * string) list =
     | InSubquery _ | Exists _ | ScalarSubquery _ ->
         // Subquery references are self-contained; treat as correlated (P-S6 blocks)
         [("__correlated__" |> Some, "__subquery__")]
+    | UpdateFragment(path, value) -> collectColumnRefs path @ collectColumnRefs value
     | Literal _ | Parameter _ -> []
 
 /// Check if an expression contains an aggregate call (P-S7).

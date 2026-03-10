@@ -251,7 +251,7 @@ module internal QueryTranslatorVisitCore =
         | OfShape1 null null "Set" null (oldValue, newValue) when qb.UpdateMode ->
             let pathExpr = visitDu oldValue qb
             let valueExpr = visitDu newValue qb
-            SqlExpr.FunctionCall("__update_fragment__", [pathExpr; valueExpr])
+            SqlExpr.UpdateFragment(pathExpr, valueExpr)
 
         | OfShape1 null null "Append" null (array, newValue)
         | OfShape1 null null "Add" null (array, newValue) when qb.UpdateMode ->
@@ -261,7 +261,7 @@ module internal QueryTranslatorVisitCore =
                 | SqlExpr.Literal(SqlLiteral.String path) -> SqlExpr.Literal(SqlLiteral.String $"{path}[#]")
                 | other -> other
             let valueExpr = visitDu newValue qb
-            SqlExpr.FunctionCall("__update_fragment__", [modifiedPath; valueExpr])
+            SqlExpr.UpdateFragment(modifiedPath, valueExpr)
 
         | OfShape2 null null "SetAt" null null (array, indexExpr, newValue) when qb.UpdateMode ->
             let arrayPathExpr = visitDu array qb
@@ -271,7 +271,7 @@ module internal QueryTranslatorVisitCore =
                 | SqlExpr.Literal(SqlLiteral.String path) -> SqlExpr.Literal(SqlLiteral.String $"{path}[{indexVal}]")
                 | other -> other
             let valueExpr = visitDu newValue qb
-            SqlExpr.FunctionCall("__update_fragment__", [modifiedPath; valueExpr])
+            SqlExpr.UpdateFragment(modifiedPath, valueExpr)
 
         | OfShape1 null null "RemoveAt" null (array, indexExpr) when qb.UpdateMode ->
             let arrayPathExpr = visitDu array qb
@@ -283,7 +283,7 @@ module internal QueryTranslatorVisitCore =
                     SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(alias, "Value"); arrayPathExpr])
                     SqlExpr.Literal(SqlLiteral.String $"$[{indexVal}]")
                 ])
-            SqlExpr.FunctionCall("__update_fragment__", [arrayPathExpr; valueExpr])
+            SqlExpr.UpdateFragment(arrayPathExpr, valueExpr)
         | OfShape1 null null "op_Dynamic" null (o, propExpr) ->
             visitPropertyDu o (propExpr |> unbox<ConstantExpression>).Value m qb
         | OfShape1 null null "Any" null (array, whereFuncExpr) ->

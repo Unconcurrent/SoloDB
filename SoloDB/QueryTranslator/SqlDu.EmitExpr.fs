@@ -68,7 +68,7 @@ let private emitAggregateKind (kind: AggregateKind) : string =
     | JsonGroupArray -> "json_group_array"
 
 /// Emit a SqlExpr to SQL text with parameters.
-/// Exhaustive pattern match over all 21 SqlExpr cases.
+/// Exhaustive pattern match over all 21 SqlExpr cases (including typed UpdateFragment).
 /// The emitSubSelect parameter resolves the circular dependency between
 /// expression and select emission — EmitSelect passes itself here.
 let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: EmitContext) (expr: SqlExpr) : Emitted =
@@ -106,23 +106,11 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
         EmitJson.emitJsonObject ctx emitE properties
 
     // Case 8: Function call — name(arg1, arg2, ...)
-    // Includes product-specific internal protocol: __update_fragment__
     | FunctionCall(name, arguments) ->
-        // __update_fragment__: UpdateMode path/value pair — emit "path,value,"
-        // (explicit named internal protocol between VisitCore UpdateMode and emitter)
-        if name = "__update_fragment__" then
-            match arguments with
-            | [path; value] ->
-                let pathE = emitE ctx path
-                let valueE = emitE ctx value
-                { Sql = sprintf "%s,%s," pathE.Sql valueE.Sql
-                  Parameters = pathE.Parameters @ valueE.Parameters }
-            | args -> failwith $"Internal error: __update_fragment__ requires exactly 2 arguments (path, value), got {args.Length}"
-        else
-            let argsEmitted = arguments |> List.map (emitE ctx)
-            let argsSql = argsEmitted |> List.map (fun e -> e.Sql) |> String.concat ", "
-            let parms = argsEmitted |> List.collect (fun e -> e.Parameters)
-            { Sql = sprintf "%s(%s)" name argsSql; Parameters = parms }
+        let argsEmitted = arguments |> List.map (emitE ctx)
+        let argsSql = argsEmitted |> List.map (fun e -> e.Sql) |> String.concat ", "
+        let parms = argsEmitted |> List.collect (fun e -> e.Parameters)
+        { Sql = sprintf "%s(%s)" name argsSql; Parameters = parms }
 
     // Case 9: Aggregate call
     | AggregateCall(kind, argument, distinct, separator) ->
@@ -249,3 +237,11 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
         | None ->
             { Sql = sprintf "CASE %s END" branchSql
               Parameters = branchParams }
+
+    // Case 21: Update fragment — typed path/value pair for jsonb_set arguments
+    // Emits "path,value," format consumed by SoloDB.fs jsonb_set wrapper
+    | UpdateFragment(path, value) ->
+        let pathE = emitE ctx path
+        let valueE = emitE ctx value
+        { Sql = sprintf "%s,%s," pathE.Sql valueE.Sql
+          Parameters = pathE.Parameters @ valueE.Parameters }

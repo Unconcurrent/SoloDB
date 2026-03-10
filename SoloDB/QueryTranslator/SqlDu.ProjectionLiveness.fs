@@ -93,6 +93,8 @@ let rec collectReferencedColumns (derivedAlias: string) (expr: SqlExpr) : Set<st
         elems |> List.map (collectReferencedColumns derivedAlias) |> Set.unionMany
     | JsonObjectExpr(props) ->
         props |> List.map (fun (_, v) -> collectReferencedColumns derivedAlias v) |> Set.unionMany
+    | UpdateFragment(path, value) ->
+        Set.union (collectReferencedColumns derivedAlias path) (collectReferencedColumns derivedAlias value)
     | Literal _ | Parameter _ ->
         Set.empty
 

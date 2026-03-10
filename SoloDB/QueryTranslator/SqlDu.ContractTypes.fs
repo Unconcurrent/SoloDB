@@ -150,6 +150,7 @@ type SqlExpr =
     | Exists of SqlSelect
     | ScalarSubquery of SqlSelect
     | CaseExpr of branches: (SqlExpr * SqlExpr) list * elseExpr: SqlExpr option
+    | UpdateFragment of path: SqlExpr * value: SqlExpr
 
 and WindowSpec = {
     Kind: WindowFunctionKind
