@@ -117,7 +117,7 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
                 let valueE = emitE ctx value
                 { Sql = sprintf "%s,%s," pathE.Sql valueE.Sql
                   Parameters = pathE.Parameters @ valueE.Parameters }
-            | _ -> Emitted.empty
+            | args -> failwith $"Internal error: __update_fragment__ requires exactly 2 arguments (path, value), got {args.Length}"
         else
             let argsEmitted = arguments |> List.map (emitE ctx)
             let argsSql = argsEmitted |> List.map (fun e -> e.Sql) |> String.concat ", "
