@@ -127,20 +127,6 @@ module internal QueryTranslatorBaseTypes =
             DuHandlerResult: SqlExpr voption ref
         }
         /// <summary>
-        /// Appends a raw string to the query being built.
-        /// </summary>
-        /// <param name="s">The string to append.</param>
-        member this.AppendRaw (s: string) =
-            this.StringBuilder.Append s |> ignore
-
-        /// <summary>
-        /// Appends a raw character to the query being built.
-        /// </summary>
-        /// <param name="s">The character to append.</param>
-        member this.AppendRaw (s: char) =
-            this.StringBuilder.Append s |> ignore
-
-        /// <summary>
         /// Returns the generated SQL query string.
         /// </summary>
         /// <returns>The SQL query as a string.</returns>
