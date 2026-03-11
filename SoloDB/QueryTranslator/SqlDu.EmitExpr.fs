@@ -65,7 +65,7 @@ let private emitAggregateKind (kind: AggregateKind) : string =
     | Min -> "MIN"
     | Max -> "MAX"
     | GroupConcat -> "GROUP_CONCAT"
-    | JsonGroupArray -> "json_group_array"
+    | JsonGroupArray -> "jsonb_group_array"
 
 /// Emit a SqlExpr to SQL text with parameters.
 /// Exhaustive pattern match over all 21 SqlExpr cases (including typed UpdateFragment).

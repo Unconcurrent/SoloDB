@@ -506,7 +506,7 @@ module internal QueryTranslatorVisitCore =
             let typeIsExp = exp :?> TypeBinaryExpression
             if not (mustIncludeTypeInformationInSerializationFn typeIsExp.Expression.Type) then
                 raise (NotSupportedException(sprintf "Cannot translate TypeIs expression, because the DB will not store its type information for %A" typeIsExp.Type))
-            let typeExpr = SqlExpr.FunctionCall("json_extract", [visitDu typeIsExp.Expression qb; SqlExpr.Literal(SqlLiteral.String "$.$type")])
+            let typeExpr = SqlExpr.FunctionCall("jsonb_extract", [visitDu typeIsExp.Expression qb; SqlExpr.Literal(SqlLiteral.String "$.$type")])
             match typeIsExp.TypeOperand |> typeToName with
             | None -> raise (NotSupportedException(sprintf "Cannot translate TypeIs expression with the TypeOperand: %A" typeIsExp.TypeOperand))
             | Some typeName -> SqlExpr.Binary(typeExpr, BinaryOperator.Eq, qb.AllocateParamExpr typeName)

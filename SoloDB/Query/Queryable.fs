@@ -1215,11 +1215,11 @@ module private QueryHelper =
                             { mkCore
                                 [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
                                  { Alias = Some "Value"; Expr =
-                                    SqlExpr.FunctionCall("json_object", [
+                                    SqlExpr.FunctionCall("jsonb_object", [
                                         SqlExpr.Literal(SqlLiteral.String "Key")
                                         SqlExpr.Column(Some "o", "__solodb_group_key")
                                         SqlExpr.Literal(SqlLiteral.String "Items")
-                                        SqlExpr.FunctionCall("json_group_array", [
+                                        SqlExpr.FunctionCall("jsonb_group_array", [
                                             SqlExpr.FunctionCall("jsonb_set", [
                                                 SqlExpr.Column(Some "o", "Value")
                                                 SqlExpr.Literal(SqlLiteral.String "$.Id")

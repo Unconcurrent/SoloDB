@@ -83,7 +83,7 @@ module internal HelperSchema =
         let whereSQL =
             match expressionBody with
             | :? NewExpression as ne when isTuple ne.Type ->
-                whereSQL.Substring("json_array".Length)
+                whereSQL.Substring("jsonb_array".Length)
             | :? MethodCallExpression
             | :? MemberExpression ->
                 $"({whereSQL})"

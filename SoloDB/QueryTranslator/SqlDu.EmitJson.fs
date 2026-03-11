@@ -26,12 +26,13 @@ let emitJsonSet (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emitte
               Parameters = result.Parameters @ valueEmitted.Parameters }
     result
 
-/// Emit a JSON array expression: json_array(e1, e2, ...)
+/// Emit a JSON array expression: jsonb_array(e1, e2, ...)
+/// Uses jsonb_array for JSONB storage format (product requirement).
 let emitJsonArray (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emitted) (elements: SqlExpr list) : Emitted =
     let parts = elements |> List.map (emitExprFn ctx)
     let sql = parts |> List.map (fun p -> p.Sql) |> String.concat ", "
     let parms = parts |> List.collect (fun p -> p.Parameters)
-    { Sql = sprintf "json_array(%s)" sql; Parameters = parms }
+    { Sql = sprintf "jsonb_array(%s)" sql; Parameters = parms }
 
 /// Emit a JSON object expression: jsonb_object('key1', val1, 'key2', val2, ...)
 /// Uses jsonb_object for JSONB storage format (product requirement).
