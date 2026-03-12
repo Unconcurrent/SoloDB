@@ -27,6 +27,8 @@ type internal SupportedLinqMethods =
 | Average
 | Min
 | Max
+| MinBy
+| MaxBy
 | Distinct
 | DistinctBy
 | Count
@@ -328,6 +330,8 @@ module private QueryHelper =
         | "Average" -> Some Average
         | "Min" -> Some Min
         | "Max" -> Some Max
+        | "MinBy" -> Some MinBy
+        | "MaxBy" -> Some MaxBy
         | "Distinct" -> Some Distinct
         | "DistinctBy" -> Some DistinctBy
         | "Count" -> Some Count
@@ -638,6 +642,27 @@ module private QueryHelper =
                 raise (NotSupportedException(
                     sprintf "Error: Cannot preprocess expression of type %A.\nReason: The expression shape is not supported for SQL translation.\nFix: Simplify the expression or switch to AsEnumerable() before this operation." e.NodeType))
     }
+
+    let private isExpressionLikeArgument (expr: Expression) =
+        match expr with
+        | :? LambdaExpression -> true
+        | _ -> typeof<Expression>.IsAssignableFrom expr.Type
+
+    let private tryGetTerminalDefaultValueExpression (expression: Expression) =
+        match expression with
+        | :? MethodCallExpression as mce ->
+            let args = Array.init (mce.Arguments.Count - 1) (fun i -> mce.Arguments.[i + 1])
+            match mce.Method.Name, args with
+            | ("FirstOrDefault" | "SingleOrDefault"), [| defaultValue |]
+                when not (isExpressionLikeArgument defaultValue) ->
+                Some defaultValue
+            | ("FirstOrDefault" | "SingleOrDefault"), [| predicate; defaultValue |]
+                when isExpressionLikeArgument predicate ->
+                Some defaultValue
+            | _ ->
+                None
+        | _ ->
+            None
 
     let private tryExtractExcludePath (expressions: Expression array) =
         if expressions.Length < 1 then
@@ -1108,6 +1133,16 @@ module private QueryHelper =
             | RootQuery rq -> tableName <- rq.SourceTableName
             | Method m ->
                 let inline simpleCurrent() = simpleCurrent statements
+                let inline installTerminalOrdering (ordering: Expression) (descending: bool) (rawExpr: SqlExpr option) =
+                    let current = ifSelectorNewStatement statements
+                    let existingOrders = current.Orders |> Seq.toList
+                    current.Orders.Clear()
+                    current.Orders.Add({ OrderingRule = ordering; Descending = descending; RawExpr = rawExpr })
+                    if List.isEmpty existingOrders then
+                        current.Orders.Add({ OrderingRule = ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id")); Descending = false; RawExpr = None })
+                    else
+                        for order in existingOrders do
+                            current.Orders.Add(order)
 
                 if m.Value <> Select && m.Value <> DistinctBy
                    && m.Value <> OrderBy && m.Value <> OrderByDescending
@@ -1236,6 +1271,24 @@ module private QueryHelper =
                         ))
                     else
                         raiseIfNullAggregateTranslator sourceCtx "MAX" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
+
+                | MinBy | MaxBy ->
+                    match m.Expressions.Length with
+                    | 1 ->
+                        let descending = (m.Value = MaxBy)
+                        let orderFingerprint = expressionFingerprint m.Expressions.[0]
+                        let rawExpr =
+                            match pendingDistinctByScalarReuse with
+                            | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = orderFingerprint ->
+                                Some (SqlExpr.Column(None, "__solodb_scalar_slot0"))
+                            | _ ->
+                                None
+                        installTerminalOrdering m.Expressions.[0] descending rawExpr
+                        addTake statements (ExpressionHelper.constant 1)
+                    | 2 ->
+                        raise (NotSupportedException("MinBy/MaxBy comparer overloads are not supported."))
+                    | other ->
+                        raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                 
                 | Distinct ->
                     addComplexFinal statements (fun ctx ->
@@ -1379,14 +1432,19 @@ module private QueryHelper =
                 
                 | Single | SingleOrDefault
                 | First | FirstOrDefault ->
-                    match m.Expressions.Length with
-                    | 0 -> ()
-                    | 1 ->
-                        match m.Expressions.[0] with
-                        | :? LambdaExpression as expr -> addFilter statements expr
-                        | expr when typeof<Expression>.IsAssignableFrom expr.Type -> addFilter statements expr
-                        | _ -> raise (NotSupportedException("SingleOrDefault and FirstOrDefault are not supported with a default value argument."))
-                    | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
+                    match m.Value, m.Expressions with
+                    | (Single | First), [||] -> ()
+                    | (Single | First), [| predicate |] when isExpressionLikeArgument predicate ->
+                        addFilter statements predicate
+                    | (SingleOrDefault | FirstOrDefault), [||] -> ()
+                    | (SingleOrDefault | FirstOrDefault), [| predicateOrDefault |] ->
+                        if isExpressionLikeArgument predicateOrDefault then
+                            addFilter statements predicateOrDefault
+                    | (SingleOrDefault | FirstOrDefault), [| predicate; _defaultValue |]
+                        when isExpressionLikeArgument predicate ->
+                        addFilter statements predicate
+                    | _ ->
+                        raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
 
                     let limit =
                         match m.Value with
@@ -1708,6 +1766,8 @@ module private QueryHelper =
                 -> true
             | Min
             | Max
+            | MinBy
+            | MaxBy
             | Average
             | Distinct
             | DistinctBy
@@ -2076,6 +2136,29 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         match expression with
                         | :? MethodCallExpression as mce -> mce.Method.Name
                         | _ -> "Execute"
+                    let getTerminalDefaultValue() =
+                        let isExpressionLikeArgument (expr: Expression) =
+                            match expr with
+                            | :? LambdaExpression -> true
+                            | _ -> typeof<Expression>.IsAssignableFrom expr.Type
+                        let defaultExprOpt =
+                            match expression with
+                            | :? MethodCallExpression as mce ->
+                                let args = Array.init (mce.Arguments.Count - 1) (fun i -> mce.Arguments.[i + 1])
+                                match mce.Method.Name, args with
+                                | ("FirstOrDefault" | "SingleOrDefault"), [| defaultValue |]
+                                    when not (isExpressionLikeArgument defaultValue) ->
+                                    Some defaultValue
+                                | ("FirstOrDefault" | "SingleOrDefault"), [| predicate; defaultValue |]
+                                    when isExpressionLikeArgument predicate ->
+                                    Some defaultValue
+                                | _ ->
+                                    None
+                            | _ ->
+                                None
+                        match defaultExprOpt with
+                        | Some defaultExpr -> QueryTranslator.evaluateExpr<'TResult> defaultExpr
+                        | None -> Unchecked.defaultof<'TResult>
 
                     // Add Single, First, and the OrDefault Variant here.
                     let query = connection.Query<Types.DbObjectRow>(query, variables)
@@ -2089,7 +2172,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         // Emulate query.SingleOrDefault()
                         use enumerator = query.GetEnumerator()
                         match enumerator.MoveNext() with
-                        | false -> Unchecked.defaultof<'TResult>
+                        | false -> getTerminalDefaultValue()
                         | true ->
                             let prevElement = enumerator.Current
                             match enumerator.MoveNext() with
@@ -2105,14 +2188,25 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         batchLoadSingle connection row entity
                     | "FirstOrDefault" ->
                         match query |> Seq.tryHead with
-                        | None -> Unchecked.defaultof<'TResult>
+                        | None -> getTerminalDefaultValue()
                         | Some row ->
                             let entity = JsonFunctions.fromSQLite<'TResult> row
                             batchLoadSingle connection row entity
 
+                    | "MinBy"
+                    | "MaxBy" ->
+                        match query |> Seq.tryHead with
+                        | Some row ->
+                            let entity = JsonFunctions.fromSQLite<'TResult> row
+                            batchLoadSingle connection row entity
+                        | None when typeof<'TResult>.IsValueType && isNull (Nullable.GetUnderlyingType(typeof<'TResult>)) ->
+                            raise (InvalidOperationException("Sequence contains no elements"))
+                        | None ->
+                            Unchecked.defaultof<'TResult>
+
                     | methodName when methodName.EndsWith("OrDefault", StringComparison.Ordinal) ->
                         match query |> Seq.tryHead with
-                        | None -> Unchecked.defaultof<'TResult>
+                        | None -> getTerminalDefaultValue()
                         | Some row ->
                             let entity = JsonFunctions.fromSQLite<'TResult> row
                             batchLoadSingle connection row entity
