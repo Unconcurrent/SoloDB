@@ -811,17 +811,87 @@ module private QueryHelper =
     let rec private stripSourceAlias (expr: SqlExpr) : SqlExpr =
         match expr with
         | SqlExpr.Column(Some _, col) -> SqlExpr.Column(None, col)
+        | SqlExpr.Column(None, _) -> expr
+        | SqlExpr.Literal _ -> expr
+        | SqlExpr.Parameter _ -> expr
         | SqlExpr.JsonExtractExpr(Some _, col, path) -> SqlExpr.JsonExtractExpr(None, col, path)
-        | SqlExpr.FunctionCall(name, args) -> SqlExpr.FunctionCall(name, args |> List.map stripSourceAlias)
+        | SqlExpr.JsonExtractExpr(None, _, _) -> expr
+        | SqlExpr.JsonSetExpr(target, assignments) ->
+            SqlExpr.JsonSetExpr(
+                stripSourceAlias target,
+                assignments |> List.map (fun (path, value) -> path, stripSourceAlias value))
+        | SqlExpr.JsonArrayExpr elements ->
+            SqlExpr.JsonArrayExpr(elements |> List.map stripSourceAlias)
+        | SqlExpr.JsonObjectExpr properties ->
+            SqlExpr.JsonObjectExpr(properties |> List.map (fun (name, value) -> name, stripSourceAlias value))
+        | SqlExpr.FunctionCall(name, args) ->
+            SqlExpr.FunctionCall(name, args |> List.map stripSourceAlias)
+        | SqlExpr.AggregateCall(kind, argument, distinct, separator) ->
+            SqlExpr.AggregateCall(kind, argument |> Option.map stripSourceAlias, distinct, separator |> Option.map stripSourceAlias)
+        | SqlExpr.WindowCall spec ->
+            SqlExpr.WindowCall {
+                spec with
+                    Arguments = spec.Arguments |> List.map stripSourceAlias
+                    PartitionBy = spec.PartitionBy |> List.map stripSourceAlias
+                    OrderBy = spec.OrderBy |> List.map (fun (e, d) -> stripSourceAlias e, d)
+            }
         | SqlExpr.Unary(op, inner) -> SqlExpr.Unary(op, stripSourceAlias inner)
         | SqlExpr.Binary(l, op, r) -> SqlExpr.Binary(stripSourceAlias l, op, stripSourceAlias r)
+        | SqlExpr.Between(e, lower, upper) -> SqlExpr.Between(stripSourceAlias e, stripSourceAlias lower, stripSourceAlias upper)
+        | SqlExpr.InList(e, values) -> SqlExpr.InList(stripSourceAlias e, values |> List.map stripSourceAlias)
+        | SqlExpr.InSubquery(e, subquery) -> SqlExpr.InSubquery(stripSourceAlias e, stripSourceAliasInSelect subquery)
+        | SqlExpr.Cast(inner, ty) -> SqlExpr.Cast(stripSourceAlias inner, ty)
+        | SqlExpr.Coalesce exprs -> SqlExpr.Coalesce(exprs |> List.map stripSourceAlias)
+        | SqlExpr.Exists subquery -> SqlExpr.Exists(stripSourceAliasInSelect subquery)
+        | SqlExpr.ScalarSubquery subquery -> SqlExpr.ScalarSubquery(stripSourceAliasInSelect subquery)
         | SqlExpr.CaseExpr(branches, elseExpr) ->
             SqlExpr.CaseExpr(
-                branches |> List.map (fun (w, t) -> (stripSourceAlias w, stripSourceAlias t)),
+                branches |> List.map (fun (w, t) -> stripSourceAlias w, stripSourceAlias t),
                 elseExpr |> Option.map stripSourceAlias)
-        | SqlExpr.Coalesce exprs -> SqlExpr.Coalesce(exprs |> List.map stripSourceAlias)
-        | SqlExpr.Cast(inner, ty) -> SqlExpr.Cast(stripSourceAlias inner, ty)
-        | other -> other
+        | SqlExpr.UpdateFragment(path, value) -> SqlExpr.UpdateFragment(stripSourceAlias path, stripSourceAlias value)
+
+    and private stripSourceAliasInTableSource (source: TableSource) : TableSource =
+        match source with
+        | BaseTable _ -> source
+        | DerivedTable(query, alias) -> DerivedTable(stripSourceAliasInSelect query, alias)
+        | FromJsonEach(valueExpr, alias) -> FromJsonEach(stripSourceAlias valueExpr, alias)
+
+    and private stripSourceAliasInJoin (join: JoinShape) : JoinShape =
+        {
+            join with
+                Source = stripSourceAliasInTableSource join.Source
+                On = join.On |> Option.map stripSourceAlias
+        }
+
+    and private stripSourceAliasInProjection (projection: Projection) : Projection =
+        { projection with Expr = stripSourceAlias projection.Expr }
+
+    and private stripSourceAliasInOrderBy (orderBy: OrderBy) : OrderBy =
+        { orderBy with Expr = stripSourceAlias orderBy.Expr }
+
+    and private stripSourceAliasInCore (core: SelectCore) : SelectCore =
+        {
+            core with
+                Source = core.Source |> Option.map stripSourceAliasInTableSource
+                Joins = core.Joins |> List.map stripSourceAliasInJoin
+                Projections = core.Projections |> List.map stripSourceAliasInProjection
+                Where = core.Where |> Option.map stripSourceAlias
+                GroupBy = core.GroupBy |> List.map stripSourceAlias
+                Having = core.Having |> Option.map stripSourceAlias
+                OrderBy = core.OrderBy |> List.map stripSourceAliasInOrderBy
+                Limit = core.Limit |> Option.map stripSourceAlias
+                Offset = core.Offset |> Option.map stripSourceAlias
+        }
+
+    and private stripSourceAliasInSelect (select: SqlSelect) : SqlSelect =
+        {
+            select with
+                Ctes = select.Ctes |> List.map (fun cte -> { cte with Query = stripSourceAliasInSelect cte.Query })
+                Body =
+                    match select.Body with
+                    | SingleSelect core -> SingleSelect(stripSourceAliasInCore core)
+                    | UnionAllSelect(head, tail) -> UnionAllSelect(stripSourceAliasInCore head, tail |> List.map stripSourceAliasInCore)
+        }
 
     let private wrapCoreBody (body: SelectBody) (orderBy: OrderBy list) (limit: SqlExpr option) (offset: SqlExpr option) : SqlSelect =
         match body with

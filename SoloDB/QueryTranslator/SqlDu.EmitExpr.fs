@@ -120,10 +120,12 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
     // Case 9: Aggregate call
     | AggregateCall(kind, argument, distinct, separator) ->
         let funcName = emitAggregateKind kind
-        match kind, argument with
-        | Count, None ->
+        match kind, argument, distinct, separator with
+        | Count, None, false, None ->
             { Sql = sprintf "%s(*)" funcName; Parameters = [] }
-        | _, Some argExpr ->
+        | Count, None, _, _ ->
+            raise (System.NotSupportedException("COUNT with no argument must emit COUNT(*) only."))
+        | _, Some argExpr, _, _ ->
             let argEmitted = emitE ctx argExpr
             let distinctStr = if distinct then "DISTINCT " else ""
             match separator with
@@ -134,8 +136,8 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
             | None ->
                 { Sql = sprintf "%s(%s%s)" funcName distinctStr argEmitted.Sql
                   Parameters = argEmitted.Parameters }
-        | _, None ->
-            { Sql = sprintf "%s()" funcName; Parameters = [] }
+        | _, None, _, _ ->
+            raise (System.NotSupportedException($"Aggregate '{funcName}' requires an argument."))
 
     // Case 10: Window call
     | WindowCall spec ->
