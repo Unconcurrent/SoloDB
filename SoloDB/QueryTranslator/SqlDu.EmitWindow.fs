@@ -13,7 +13,7 @@ let emitWindowCall (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emi
 
     let argsEmitted = spec.Arguments |> List.map (emitExprFn ctx)
     let argsSql = argsEmitted |> List.map (fun e -> e.Sql) |> String.concat ", "
-    let argsParams = argsEmitted |> List.collect (fun e -> e.Parameters)
+    let argsParams = Emitted.collectParameters argsEmitted
 
     let partitionParts = spec.PartitionBy |> List.map (emitExprFn ctx)
     let partitionSql =
@@ -22,27 +22,27 @@ let emitWindowCall (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emi
         | parts ->
             let sql = parts |> List.map (fun e -> e.Sql) |> String.concat ", "
             sprintf "PARTITION BY %s" sql
-    let partitionParams = partitionParts |> List.collect (fun e -> e.Parameters)
+    let partitionParams = Emitted.collectParameters partitionParts
 
     let orderParts =
         spec.OrderBy
         |> List.map (fun (expr, dir) ->
             let e = emitExprFn ctx expr
             let dirStr = match dir with Asc -> "ASC" | Desc -> "DESC"
-            { Sql = sprintf "%s %s" e.Sql dirStr; Parameters = e.Parameters })
+            { Sql = sprintf "%s %s" e.Sql dirStr; Parameters = Emitted.copyParameters e.Parameters })
     let orderSql =
         match orderParts with
         | [] -> ""
         | parts ->
             let sql = parts |> List.map (fun e -> e.Sql) |> String.concat ", "
             sprintf "ORDER BY %s" sql
-    let orderParams = orderParts |> List.collect (fun e -> e.Parameters)
+    let orderParams = Emitted.collectParameters orderParts
 
     let overParts =
         [ partitionSql; orderSql ]
         |> List.filter (fun s -> s <> "")
         |> String.concat " "
 
-    let allParams = argsParams @ partitionParams @ orderParams
+    let allParams = Emitted.concatParameterSets [ argsParams; partitionParams; orderParams ]
     { Sql = sprintf "%s(%s) OVER (%s)" funcName argsSql overParts
       Parameters = allParams }

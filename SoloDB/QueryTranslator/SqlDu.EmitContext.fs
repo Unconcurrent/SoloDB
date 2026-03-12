@@ -18,7 +18,9 @@ type EmitContext() =
     member _.AllocParam(value: obj) : Emitted =
         let name = sprintf "@p%d" paramCounter
         paramCounter <- paramCounter + 1
-        { Sql = name; Parameters = [ (name, value) ] }
+        let ps = ResizeArray<string * obj>(1)
+        ps.Add(name, value)
+        { Sql = name; Parameters = ps }
 
     /// Quote an identifier using SQLite double-quote convention.
     member _.QuoteIdent(name: string) : string =

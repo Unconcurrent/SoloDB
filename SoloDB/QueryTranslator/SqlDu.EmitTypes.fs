@@ -1,31 +1,49 @@
 namespace SoloDatabase
 
-/// Immutable result payload for all emission operations.
+/// Mutable result payload for all emission operations.
 /// Sql contains the emitted SQL text with named parameter placeholders.
 /// Parameters contains the ordered list of (name, value) pairs.
 type Emitted = {
     Sql: string
-    Parameters: (string * obj) list
+    Parameters: ResizeArray<string * obj>
 }
 
 module Emitted =
+    let emptyParameters () = ResizeArray<string * obj>()
+
+    let copyParameters (ps: ResizeArray<string * obj>) =
+        let copy = ResizeArray<string * obj>(ps.Count)
+        copy.AddRange(ps)
+        copy
+
+    let concatParameterSets (parts: seq<ResizeArray<string * obj>>) =
+        let parts = parts |> Seq.toArray
+        let total = parts |> Array.sumBy (fun ps -> ps.Count)
+        let combined = ResizeArray<string * obj>(total)
+        for ps in parts do
+            combined.AddRange(ps)
+        combined
+
+    let collectParameters (parts: seq<Emitted>) =
+        parts |> Seq.map (fun e -> e.Parameters) |> concatParameterSets
+
     /// Empty emission result — used as identity for combining.
-    let empty = { Sql = ""; Parameters = [] }
+    let empty = { Sql = ""; Parameters = emptyParameters () }
 
     /// Combine two emission results by concatenating SQL with a separator
     /// and merging parameter lists in order.
     let combine (sep: string) (a: Emitted) (b: Emitted) =
         { Sql = a.Sql + sep + b.Sql
-          Parameters = a.Parameters @ b.Parameters }
+          Parameters = concatParameterSets [ a.Parameters; b.Parameters ] }
 
     /// Wrap emission SQL in parentheses, preserving parameters.
     let parens (e: Emitted) =
-        { Sql = "(" + e.Sql + ")"; Parameters = e.Parameters }
+        { Sql = "(" + e.Sql + ")"; Parameters = copyParameters e.Parameters }
 
     /// Prefix SQL text, preserving parameters.
     let prefix (p: string) (e: Emitted) =
-        { Sql = p + e.Sql; Parameters = e.Parameters }
+        { Sql = p + e.Sql; Parameters = copyParameters e.Parameters }
 
     /// Suffix SQL text, preserving parameters.
     let suffix (s: string) (e: Emitted) =
-        { Sql = e.Sql + s; Parameters = e.Parameters }
+        { Sql = e.Sql + s; Parameters = copyParameters e.Parameters }

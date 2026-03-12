@@ -20,7 +20,7 @@ let emitJsonExtract (ctx: EmitContext) (funcName: string) (sourceAlias: string o
         | None -> quoteIdentifier ctx column
     let path = ctx.FormatJsonPath(segments)
     { Sql = sprintf "%s(%s, %s)" funcName src path
-      Parameters = [] }
+      Parameters = Emitted.emptyParameters () }
 
 /// Emit a jsonb_set expression: jsonb_set(target, path, value[, path2, value2, ...])
 /// Each assignment is (JsonPath, SqlExpr). The target and value expressions
@@ -32,7 +32,7 @@ let emitJsonSet (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emitte
         let valueEmitted = emitExprFn ctx valueExpr
         result <-
             { Sql = sprintf "jsonb_set(%s, %s, %s)" result.Sql path valueEmitted.Sql
-              Parameters = result.Parameters @ valueEmitted.Parameters }
+              Parameters = Emitted.concatParameterSets [ result.Parameters; valueEmitted.Parameters ] }
     result
 
 /// Emit a JSON array expression: jsonb_array(e1, e2, ...)
@@ -40,7 +40,7 @@ let emitJsonSet (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emitte
 let emitJsonArray (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emitted) (elements: SqlExpr list) : Emitted =
     let parts = elements |> List.map (emitExprFn ctx)
     let sql = parts |> List.map (fun p -> p.Sql) |> String.concat ", "
-    let parms = parts |> List.collect (fun p -> p.Parameters)
+    let parms = Emitted.collectParameters parts
     { Sql = sprintf "jsonb_array(%s)" sql; Parameters = parms }
 
 /// Emit a JSON object expression: jsonb_object('key1', val1, 'key2', val2, ...)
@@ -50,7 +50,8 @@ let emitJsonObject (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emi
         properties
         |> List.collect (fun (key, valueExpr) ->
             let valueEmitted = emitExprFn ctx valueExpr
-            [ { Sql = sprintf "'%s'" (escapeSQLiteStringLiteral key); Parameters = [] }; valueEmitted ])
+            [ { Sql = sprintf "'%s'" (escapeSQLiteStringLiteral key); Parameters = Emitted.emptyParameters () }
+              valueEmitted ])
     let sql = parts |> List.map (fun p -> p.Sql) |> String.concat ", "
-    let parms = parts |> List.collect (fun p -> p.Parameters)
+    let parms = Emitted.collectParameters parts
     { Sql = sprintf "jsonb_object(%s)" sql; Parameters = parms }
