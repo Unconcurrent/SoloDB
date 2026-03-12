@@ -23,47 +23,76 @@ module Connections =
 
     // Global savepoint counter for unique savepoint names across all connections and threads.
     let mutable private savepointCounter = 0L
-    type private EventScopeCounter() =
-        member val Depth = 0 with get, set
-    let private standaloneEventScopes = System.Runtime.CompilerServices.ConditionalWeakTable<SqliteConnection, EventScopeCounter>()
 
-    let private incrementStandaloneEventScope (connection: SqliteConnection) =
-        let counter = standaloneEventScopes.GetOrCreateValue(connection)
-        counter.Depth <- counter.Depth + 1
+    let internal takeHandlerFaultCommitException (connection: SqliteConnection) : exn option =
+        match takeHandlerFault connection with
+        | Some handlerEx ->
+            let commitEx = InvalidOperationException(
+                "Error: Transaction cannot commit because handler-scoped database work failed.
+Reason: Event handlers run on the active connection while SAVEPOINT is suppressed, so swallowed database faults would otherwise leak partial side effects.
+Fix: Let handler-side database faults abort the outer transaction, or avoid swallowing them.",
+                handlerEx)
+            commitEx.Data["SoloDB.HandlerScopedFault"] <- handlerEx
+            Some commitEx
+        | None -> None
 
-    let private decrementStandaloneEventScopeOrFail (connection: SqliteConnection) =
-        let mutable counter = Unchecked.defaultof<EventScopeCounter>
-        if not (standaloneEventScopes.TryGetValue(connection, &counter)) || isNull counter || counter.Depth <= 0 then
-            raise (InvalidOperationException(eventHandlerScopeUnderflowMessage))
-        counter.Depth <- counter.Depth - 1
+    let private cleanupSavepointRollback (conn: SqliteConnection) (sp: string) (ex: exn) =
+        let faultDepth = tryGetRecordedHandlerFaultDepth conn ex
+        let mutable rollbackCompleted = true
+        try conn.Execute(sprintf "ROLLBACK TO \"%s\";" sp) |> ignore with _ -> rollbackCompleted <- false
+        try conn.Execute(sprintf "RELEASE \"%s\";" sp) |> ignore with _ -> rollbackCompleted <- false
+        if rollbackCompleted then
+            match faultDepth with
+            | Some depth -> clearNonSwallowedHandlerFaultsAtDepth conn depth
+            | None -> ()
+
+    let private rollbackBorrowedTransaction (conn: CachingDbConnection) (primaryEx: exn option ref) (cleanupEx: exn option ref) (ex: exn) =
+        primaryEx := Some ex
+        try conn.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx := Some rb
+
+    let private commitOrRollbackBorrowedTransaction (conn: CachingDbConnection) (primaryEx: exn option ref) (cleanupEx: exn option ref) =
+        match takeHandlerFaultCommitException conn with
+        | Some ex -> rollbackBorrowedTransaction conn primaryEx cleanupEx ex
+        | None -> conn.Execute "COMMIT;" |> ignore
+
+    let private cleanupBorrowedTransaction (conn: CachingDbConnection) (cleanupEx: exn option ref) =
+        conn.InsideTransaction <- false
+        clearHandlerFault conn
+        try (conn :> IDisposable).Dispose() with ex ->
+            match !cleanupEx with
+            | None -> cleanupEx := Some ex
+            | Some _ -> ()
+
+    let private withPooledTransactionCore isInHandlerScope runner f =
+        if isInHandlerScope() then
+            ThrowOutsideEventContextUsage()
+        runner f
 
     /// Wraps a synchronous operation in a SAVEPOINT scope.
     /// On success: RELEASE (merge into parent). On failure: ROLLBACK TO + RELEASE (undo nested, keep parent).
     let internal withSavepoint (conn: SqliteConnection) (f: SqliteConnection -> 'T) =
         let sp = $"sp_{Interlocked.Increment(&savepointCounter)}"
-        conn.Execute($"SAVEPOINT \"{sp}\";") |> ignore
+        conn.Execute(sprintf "SAVEPOINT \"%s\";" sp) |> ignore
         try
             let ret = f conn
-            conn.Execute($"RELEASE \"{sp}\";") |> ignore
+            conn.Execute(sprintf "RELEASE \"%s\";" sp) |> ignore
             ret
-        with _ex ->
-            try conn.Execute($"ROLLBACK TO \"{sp}\";") |> ignore with _ -> ()
-            try conn.Execute($"RELEASE \"{sp}\";") |> ignore with _ -> ()
+        with ex ->
+            cleanupSavepointRollback conn sp ex
             reraise()
 
     /// Wraps an asynchronous operation in a SAVEPOINT scope.
     /// On success: RELEASE (merge into parent). On failure: ROLLBACK TO + RELEASE (undo nested, keep parent).
     let internal withSavepointAsync (conn: SqliteConnection) (f: SqliteConnection -> Task<'T>) = task {
         let sp = $"sp_{Interlocked.Increment(&savepointCounter)}"
-        conn.Execute($"SAVEPOINT \"{sp}\";") |> ignore
+        conn.Execute(sprintf "SAVEPOINT \"%s\";" sp) |> ignore
         try
             let! ret = f conn
-            conn.Execute($"RELEASE \"{sp}\";") |> ignore
+            conn.Execute(sprintf "RELEASE \"%s\";" sp) |> ignore
             return ret
-        with _ex ->
-            try conn.Execute($"ROLLBACK TO \"{sp}\";") |> ignore with _ -> ()
-            try conn.Execute($"RELEASE \"{sp}\";") |> ignore with _ -> ()
-            return reraiseAnywhere _ex
+        with ex ->
+            cleanupSavepointRollback conn sp ex
+            return reraiseAnywhere ex
     }
 
     // Handler-context savepoint suppression.
@@ -72,14 +101,10 @@ module Connections =
     // INSERT/UPDATE/DELETE statement is still active, and opening a SAVEPOINT would
     // fail with SQLite Error 5 ("cannot open savepoint - SQL statements in progress").
     let private shouldSuppressSavepointInHandler (conn: SqliteConnection) =
-        match conn with
-        | :? CachingDbConnection as c -> c.IsInEventHandlerScope
-        | _ ->
-            match standaloneEventScopes.TryGetValue(conn) with
-            | true, counter when not (isNull counter) && counter.Depth > 0 -> true
-            | _ -> false
+        isInEventHandlerScope conn
 
     let internal beginImmediateWithRetry (connection: SqliteConnection) =
+        clearHandlerFault connection
         let mutable attempt = 0
         let mutable started = false
         while not started && attempt < 5 do
@@ -240,26 +265,21 @@ module Connections =
         /// <returns>The result of the function <paramref name="f"/>.</returns>
         member private this.WithTransactionBorrowed(f: CachingDbConnection -> 'T) =
             let conn = this.Borrow()
-            let mutable primaryEx: exn option = None
-            let mutable cleanupEx: exn option = None
+            let primaryEx = ref None
+            let cleanupEx = ref None
             let mutable result = Unchecked.defaultof<'T>
             try
                 beginImmediateWithRetry conn
                 conn.InsideTransaction <- true
                 try
                     result <- f conn
-                    conn.Execute "COMMIT;" |> ignore
+                    commitOrRollbackBorrowedTransaction conn primaryEx cleanupEx
                 with ex ->
-                    primaryEx <- Some ex
-                    try conn.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
+                    rollbackBorrowedTransaction conn primaryEx cleanupEx ex
             finally
-                conn.InsideTransaction <- false
-                try (conn :> IDisposable).Dispose() with ex ->
-                    match cleanupEx with
-                    | None -> cleanupEx <- Some ex
-                    | Some _ -> () // keep first cleanup error
+                cleanupBorrowedTransaction conn cleanupEx
 
-            match resolveTxOutcome primaryEx cleanupEx with
+            match resolveTxOutcome !primaryEx !cleanupEx with
             | Some ex -> raise ex
             | None -> result
 
@@ -270,8 +290,8 @@ module Connections =
         /// <returns>A task that represents the asynchronous operation, containing the result of the function <paramref name="f"/>.</returns>
         member private this.WithTransactionBorrowedAsync(f: CachingDbConnection -> Task<'T>) = task {
             let conn = this.Borrow()
-            let mutable primaryEx: exn option = None
-            let mutable cleanupEx: exn option = None
+            let primaryEx = ref None
+            let cleanupEx = ref None
             let mutable result = Unchecked.defaultof<'T>
             try
                 beginImmediateWithRetry conn
@@ -279,18 +299,13 @@ module Connections =
                 try
                     let! ret = f conn
                     result <- ret
-                    conn.Execute "COMMIT;" |> ignore
+                    commitOrRollbackBorrowedTransaction conn primaryEx cleanupEx
                 with ex ->
-                    primaryEx <- Some ex
-                    try conn.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
+                    rollbackBorrowedTransaction conn primaryEx cleanupEx ex
             finally
-                conn.InsideTransaction <- false
-                try (conn :> IDisposable).Dispose() with ex ->
-                    match cleanupEx with
-                    | None -> cleanupEx <- Some ex
-                    | Some _ -> ()
+                cleanupBorrowedTransaction conn cleanupEx
 
-            match resolveTxOutcome primaryEx cleanupEx with
+            match resolveTxOutcome !primaryEx !cleanupEx with
             | Some ex -> return reraiseAnywhere ex
             | None -> return result
         }
@@ -385,7 +400,7 @@ module Connections =
         /// <returns>The result of the function.</returns>
         member this.WithTransaction(f: SqliteConnection -> 'T) =
             match this with
-            | Pooled pool -> pool.WithTransaction f
+            | Pooled pool -> withPooledTransactionCore (fun () -> pool.IsCurrentThreadInEventHandlerScope) pool.WithTransaction f
             | Transactional conn when shouldSuppressSavepointInHandler conn -> f conn
             | Transactional conn -> withSavepoint conn f
             | Guarded (guard, inner) ->
@@ -400,7 +415,7 @@ module Connections =
         /// <returns>A task representing the asynchronous operation.</returns>
         member this.WithAsyncTransaction(f: SqliteConnection -> Task<'T>) =
             match this with
-            | Pooled pool -> pool.WithAsyncTransaction f
+            | Pooled pool -> withPooledTransactionCore (fun () -> pool.IsCurrentThreadInEventHandlerScope) pool.WithAsyncTransaction f
             | Transactional conn when shouldSuppressSavepointInHandler conn -> f conn
             | Transactional conn -> withSavepointAsync conn f
             | Guarded (guard, inner) ->
@@ -410,7 +425,7 @@ module Connections =
     let internal EnterEventHandlerScope(connection: SqliteConnection) =
         match connection with
         | :? CachingDbConnection as c -> c.EnterEventHandlerScope()
-        | _ -> incrementStandaloneEventScope connection
+        | _ -> enterStandaloneEventHandlerScope connection
 
     let internal ExitEventHandlerScope(connection: SqliteConnection) =
         let mutable primaryEx: exn option = None
@@ -418,7 +433,7 @@ module Connections =
         try
             match connection with
             | :? CachingDbConnection as c -> c.ExitEventHandlerScope()
-            | _ -> decrementStandaloneEventScopeOrFail connection
+            | _ -> exitStandaloneEventHandlerScopeOrFail connection
         with ex ->
             primaryEx <- Some ex
 

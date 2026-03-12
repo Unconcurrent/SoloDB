@@ -16,15 +16,15 @@ open SoloDatabase.QueryTranslatorBase
 open SqlDu.Engine.C1.Spec
 
 module internal QueryTranslatorVisitCore =
-    // ─── DU-constructing visitor (Batch 3: legacy visit path removed) ─────────
+    // ─── DU-constructing visitor (legacy visit path removed) ─────────
     // All expression families produce SqlExpr DU nodes via visitDu.
     // Pre-expression and unknown-expression handlers now return DU via DuHandlerResult.
 
-    /// Placeholder: legacy visit removed in Batch 3. All callers now use visitDu + emitExpr.
+    /// Placeholder: legacy visit removed. All callers now use visitDu + emitExpr.
     let internal visit (_exp: Expression) (_qb: QueryBuilder) : unit =
-        raise (NotSupportedException "Legacy visit path removed in Batch 3. Use visitDu + SqlDuMinimalEmit.emitExpr.")
+        raise (NotSupportedException "Legacy visit path removed. Use visitDu + SqlDuMinimalEmit.emitExpr.")
 
-    // Legacy visitor functions removed in Batch 3 (visitBinary, visitMemberAccess, visitMethodCall,
+    // Legacy visitor functions removed (visitBinary, visitMemberAccess, visitMethodCall,
     // visitParameter, visitNot, visitNegate, visitNew, visitMemberInit, visitConvert, visitConstant,
     // visitListInit, visitTypeIs, visitIfElse, arrayIndex, visitProperty, castTo, visitMathMethod,
     // visitLambda, newObject, containsImpl, emitStringOperand).
@@ -247,7 +247,7 @@ module internal QueryTranslatorVisitCore =
         | OfShape1 null null "GetArray" null (array, index) -> arrayIndexDu array index qb
         | OfShape1 null null "Like" null (str, likeWhat) ->
             SqlExpr.Binary(visitDu str qb, BinaryOperator.Like, visitDu likeWhat qb)
-        // UpdateMode methods — DU path (Batch 3: replaces legacy visit-based UpdateMode handlers).
+        // UpdateMode methods — DU path replacing legacy visit-based UpdateMode handlers.
         | OfShape1 null null "Set" null (oldValue, newValue) when qb.UpdateMode ->
             let pathExpr = visitDu oldValue qb
             let valueExpr = visitDu newValue qb

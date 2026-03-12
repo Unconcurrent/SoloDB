@@ -3,19 +3,20 @@ module SoloDatabase.IndexPlanShaping
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.IndexModel
 open SoloDatabase.ExpressionMatcher
+open SoloDatabase.ExpressionPredicates
 
 // ══════════════════════════════════════════════════════════════
-// Index Plan Shaping Transform (C8c)
+// Index plan shaping transform.
 //
 // Makes rewrites explicitly index-informed. Chooses between
 // equivalent forms based on index availability.
 //
-// Legal adjustments (ADJ-1 through ADJ-3; ADJ-4 deferred):
-//   ADJ-1: Predicate canonicalization — normalize WHERE/ON
+// Legal adjustments in this transform:
+//   Predicate canonicalization — normalize WHERE/ON
 //          expression form to match known index
-//   ADJ-2: ORDER BY alignment — normalize sort expression
+//   ORDER BY alignment — normalize sort expression
 //          form to match index key order
-//   ADJ-3: Join probe selection — choose among C7-legal
+//   Join probe selection — choose among already-legal
 //          INNER JOIN orderings using index knowledge
 //
 // Must-not-shape boundaries:
@@ -36,7 +37,7 @@ let private resolveTableName (source: TableSource) : string option =
     | FromJsonEach _ -> None
 
 /// Check if a SelectCore has must-not-shape boundaries.
-/// When these are present, C8 refuses all adjustments.
+/// When these are present, shaping refuses all adjustments.
 let private hasMustNotShapeBoundary (core: SelectCore) : bool =
     // GROUP BY
     not core.GroupBy.IsEmpty
@@ -48,32 +49,21 @@ let private hasMustNotShapeBoundary (core: SelectCore) : bool =
     || (match core.Source with Some(FromJsonEach _) -> true | _ -> false)
 
 /// Check if any projection contains an aggregate or window call.
-let rec private hasAggregateOrWindowInExpr (expr: SqlExpr) : bool =
-    match expr with
-    | AggregateCall _ -> true
-    | WindowCall _ -> true
-    | Binary(l, _, r) -> hasAggregateOrWindowInExpr l || hasAggregateOrWindowInExpr r
-    | Unary(_, e) -> hasAggregateOrWindowInExpr e
-    | FunctionCall(_, args) -> args |> List.exists hasAggregateOrWindowInExpr
-    | Coalesce(exprs) -> exprs |> List.exists hasAggregateOrWindowInExpr
-    | Cast(e, _) -> hasAggregateOrWindowInExpr e
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) -> hasAggregateOrWindowInExpr c || hasAggregateOrWindowInExpr r)
-        || (elseE |> Option.map hasAggregateOrWindowInExpr |> Option.defaultValue false)
-    | _ -> false
+let private hasAggregateOrWindowInExpr (expr: SqlExpr) : bool =
+    hasAggregateCall expr || hasWindowFunction expr
 
 /// Check if a core has aggregate or window functions in projections.
 let private hasAggregateOrWindowProjections (core: SelectCore) : bool =
     core.Projections |> List.exists (fun p -> hasAggregateOrWindowInExpr p.Expr)
 
-/// ADJ-1: Canonicalize a single expression for index matching.
+/// Canonicalize a single expression for index matching.
 /// Returns the expression unchanged if no canonicalization is needed.
 let private canonicalizeExpr (model: IndexModel) (tableName: string) (expr: SqlExpr) : SqlExpr =
     match canonicalizeForIndex model tableName expr with
     | Some canonicalized -> canonicalized
     | None -> expr
 
-/// ADJ-1: Canonicalize WHERE predicate expressions.
+/// Canonicalize WHERE predicate expressions.
 /// Walks the binary tree of AND/OR and canonicalizes leaf comparison operands.
 let rec private canonicalizePredicate (model: IndexModel) (tableName: string) (expr: SqlExpr) : SqlExpr =
     match expr with
@@ -93,7 +83,7 @@ let rec private canonicalizePredicate (model: IndexModel) (tableName: string) (e
         InList(canonicalizeExpr model tableName e, list)
     | _ -> expr
 
-/// ADJ-2: Canonicalize ORDER BY expressions for index alignment.
+/// Canonicalize ORDER BY expressions for index alignment.
 let private canonicalizeOrderBy (model: IndexModel) (tableName: string) (orderBy: OrderBy list) : OrderBy list =
     orderBy |> List.map (fun ob ->
         { ob with Expr = canonicalizeExpr model tableName ob.Expr })
@@ -137,13 +127,13 @@ let rec private expressionMatchesIndexWithAlias (model: IndexModel) (tableName: 
             | Unary(_, e) -> expressionMatchesIndexWithAlias model tableName alias e
             | Cast(_, _) ->
                 // The Cast wrapper itself was already checked above via hasMatchingIndex/aliasMatch.
-                // Do NOT recurse into Cast inner to avoid CAST trap (matching bare inner
+                // Do not recurse into Cast inner to avoid false-positive cast matching (matching bare inner
                 // against a CAST index).
                 false
             | FunctionCall(_, args) -> args |> List.exists (expressionMatchesIndexWithAlias model tableName alias)
             | _ -> false
 
-/// ADJ-3: Reorder INNER JOIN chain based on index knowledge.
+/// Reorder INNER JOIN chain based on index knowledge.
 /// Among C7-legal orderings, prefer probing the side with a matching
 /// index on its join key. Only operates on pure INNER JOIN chains.
 let private reshapeJoinsForIndex (model: IndexModel) (core: SelectCore) : SelectCore =
@@ -153,7 +143,7 @@ let private reshapeJoinsForIndex (model: IndexModel) (core: SelectCore) : Select
     else
         // Check if any join has ON clause referencing an indexed expression
         // and reorder to put indexed-probe joins earlier.
-        // For C8, use a simple stable sort: joins whose ON clause references
+        // Use a simple stable sort: joins whose ON clause references
         // an indexed expression on the join source table sort before others.
         let scoreJoin (j: JoinShape) : int =
             match j.Source, j.On with
@@ -183,7 +173,7 @@ let private shapeInCore (model: IndexModel) (core: SelectCore) : SelectCore =
         | Some tName ->
             let mutable shaped = core
 
-            // ADJ-1: Canonicalize WHERE predicate
+            // Canonicalize WHERE predicate
             shaped <-
                 match shaped.Where with
                 | Some where ->
@@ -192,7 +182,7 @@ let private shapeInCore (model: IndexModel) (core: SelectCore) : SelectCore =
                     else { shaped with Where = Some canonical }
                 | None -> shaped
 
-            // ADJ-1: Canonicalize JOIN ON clauses
+            // Canonicalize JOIN ON clauses
             shaped <-
                 let newJoins =
                     shaped.Joins |> List.map (fun j ->
@@ -212,7 +202,7 @@ let private shapeInCore (model: IndexModel) (core: SelectCore) : SelectCore =
                 if newJoins = shaped.Joins then shaped
                 else { shaped with Joins = newJoins }
 
-            // ADJ-2: Canonicalize ORDER BY
+            // Canonicalize ORDER BY
             shaped <-
                 if shaped.OrderBy.IsEmpty then shaped
                 else
@@ -220,7 +210,7 @@ let private shapeInCore (model: IndexModel) (core: SelectCore) : SelectCore =
                     if canonical = shaped.OrderBy then shaped
                     else { shaped with OrderBy = canonical }
 
-            // ADJ-3: Reshape joins for index
+            // Reshape joins for index
             shaped <- reshapeJoinsForIndex model shaped
 
             shaped
@@ -252,7 +242,7 @@ let rec shapeIndexSelect (model: IndexModel) (sel: SqlSelect) : SqlSelect =
 
         | UnionAllSelect(head, tail) ->
             // UNION ALL is a must-not-shape boundary — return entirely unchanged.
-            // No arm-level shaping. C8 contract: hard fence.
+            // No arm-level shaping. Hard fence.
             UnionAllSelect(head, tail)
 
     let shapedCtes =
@@ -263,5 +253,5 @@ let rec shapeIndexSelect (model: IndexModel) (sel: SqlSelect) : SqlSelect =
 let shapeIndexStatement (model: IndexModel) (stmt: SqlStatement) : SqlStatement =
     match stmt with
     | SelectStmt sel -> SelectStmt(shapeIndexSelect model sel)
-    // DML passthrough — out of scope for C8.
+    // DML passthrough — out of scope for index shaping.
     | InsertStmt _ | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> stmt

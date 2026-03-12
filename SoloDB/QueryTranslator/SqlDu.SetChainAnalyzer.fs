@@ -3,9 +3,9 @@ module SoloDatabase.SetChainAnalyzer
 open SqlDu.Engine.C1.Spec
 
 // ══════════════════════════════════════════════════════════════
-// C9c: Set-Chain Analyzer
+// Set-chain analyzer.
 //
-// JR-3: Flatten nested jsonb_set chains when writes are non-conflicting
+// Flatten nested jsonb_set chains when writes are non-conflicting
 // and order-safe.
 //
 // Legal flatten: jsonb_set(jsonb_set(V, '$.A', x), '$.B', y) where

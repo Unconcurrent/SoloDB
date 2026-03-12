@@ -12,17 +12,17 @@ and private emitTableSource (ctx: EmitContext) (source: TableSource) : Emitted =
     | BaseTable(table, alias) ->
         let tableSql = ctx.QuoteIdent(table)
         match alias with
-        | Some a -> { Sql = sprintf "%s AS %s" tableSql a; Parameters = [] }
+        | Some a -> { Sql = sprintf "%s AS %s" tableSql (EmitJson.quoteIdentifier ctx a); Parameters = [] }
         | None -> { Sql = tableSql; Parameters = [] }
     | DerivedTable(query, alias) ->
         let queryEmitted = emitSelect ctx query
-        { Sql = sprintf "(%s) %s" queryEmitted.Sql alias
+        { Sql = sprintf "(%s) %s" queryEmitted.Sql (EmitJson.quoteIdentifier ctx alias)
           Parameters = queryEmitted.Parameters }
     | FromJsonEach(valueExpr, alias) ->
         let exprEmitted = emitE ctx valueExpr
         match alias with
         | Some a ->
-            { Sql = sprintf "json_each(%s) AS %s" exprEmitted.Sql a
+            { Sql = sprintf "json_each(%s) AS %s" exprEmitted.Sql (EmitJson.quoteIdentifier ctx a)
               Parameters = exprEmitted.Parameters }
         | None ->
             { Sql = sprintf "json_each(%s)" exprEmitted.Sql
@@ -50,7 +50,7 @@ and private emitProjection (ctx: EmitContext) (proj: Projection) : Emitted =
     let exprEmitted = emitE ctx proj.Expr
     match proj.Alias with
     | Some alias ->
-        { Sql = sprintf "%s AS %s" exprEmitted.Sql alias
+        { Sql = sprintf "%s AS %s" exprEmitted.Sql (EmitJson.quoteIdentifier ctx alias)
           Parameters = exprEmitted.Parameters }
     | None -> exprEmitted
 
@@ -136,7 +136,7 @@ and private emitSelectCore (ctx: EmitContext) (core: SelectCore) : Emitted =
 /// Emit a CTE binding: name AS (SELECT ...)
 and private emitCteBinding (ctx: EmitContext) (cte: CteBinding) : Emitted =
     let queryEmitted = emitSelect ctx cte.Query
-    { Sql = sprintf "%s AS (%s)" cte.Name queryEmitted.Sql
+    { Sql = sprintf "%s AS (%s)" (EmitJson.quoteIdentifier ctx cte.Name) queryEmitted.Sql
       Parameters = queryEmitted.Parameters }
 
 /// Emit a full SqlSelect (CTEs + body).

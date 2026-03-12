@@ -17,7 +17,7 @@ let emitInsert (ctx: EmitContext) (ins: InsertStatement) : Emitted =
         | OrReplace -> "INSERT OR REPLACE"
 
     let tableSql = ctx.QuoteIdent(ins.TableName)
-    let colsSql = ins.Columns |> String.concat ", "
+    let colsSql = ins.Columns |> List.map (EmitJson.quoteIdentifier ctx) |> String.concat ", "
 
     let rowsSql =
         ins.Values
@@ -53,7 +53,7 @@ let emitUpdate (ctx: EmitContext) (upd: UpdateStatement) : Emitted =
         |> List.map (fun (col, expr) ->
             let exprEmitted = emitE ctx expr
             allParams <- allParams @ exprEmitted.Parameters
-            sprintf "%s = %s" col exprEmitted.Sql)
+            sprintf "%s = %s" (EmitJson.quoteIdentifier ctx col) exprEmitted.Sql)
         |> String.concat ", "
 
     let mutable sql = sprintf "UPDATE %s SET %s" tableSql setClauses

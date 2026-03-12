@@ -11,11 +11,11 @@ open SoloDatabase.IndexModel
 //   1. Alias normalization: qualified "T".col matches unqualified col
 //      when the source table is "T"
 //   2. CAST preservation: Cast(expr, type) matches only if index also
-//      has Cast. Must NOT add CAST (Sherlock CAST trap).
+//      has Cast. The matcher must not introduce CAST during matching.
 //   3. JsonPath exact match: path segments must be identical.
 //
 // The matcher is form-exact: SQLite expression indexes are
-// form-sensitive (Sherlock Trap 1).
+// form-sensitive.
 // ══════════════════════════════════════════════════════════════
 
 /// Resolve the table name from a source alias.

@@ -2,10 +2,6 @@ module SoloDatabase.EmitExpr
 
 open SqlDu.Engine.C1.Spec
 
-/// Escape single quotes and null characters for inline string literals.
-let private escapeSQLiteString (input: string) : string =
-    input.Replace("'", "''").Replace("\0", "")
-
 /// Emit a binary operator as SQL text.
 let private emitBinaryOp (op: BinaryOperator) : string =
     match op with
@@ -51,7 +47,7 @@ let private emitLiteral (ctx: EmitContext) (lit: SqlLiteral) : Emitted =
             ctx.AllocParam(box v)
     | SqlLiteral.String v ->
         if ctx.InlineLiterals then
-            { Sql = sprintf "'%s'" (escapeSQLiteString v); Parameters = [] }
+            { Sql = sprintf "'%s'" (EmitJson.escapeSQLiteStringLiteral v); Parameters = [] }
         else
             ctx.AllocParam(box v)
     | SqlLiteral.Blob v -> ctx.AllocParam(box v)
@@ -77,9 +73,18 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
     match expr with
     // Case 1: Column reference
     | Column(sourceAlias, column) ->
-        match sourceAlias with
-        | Some alias -> { Sql = sprintf "%s.%s" alias column; Parameters = [] }
-        | None -> { Sql = column; Parameters = [] }
+        if column = "*" then
+            match sourceAlias with
+            | Some alias -> { Sql = sprintf "%s.*" (EmitJson.quoteIdentifier ctx alias); Parameters = [] }
+            | None -> { Sql = "*"; Parameters = [] }
+        else
+            match sourceAlias with
+            | Some alias ->
+                { Sql = sprintf "%s.%s" (EmitJson.quoteIdentifier ctx alias) (EmitJson.quoteIdentifier ctx column)
+                  Parameters = [] }
+            | None ->
+                { Sql = EmitJson.quoteIdentifier ctx column
+                  Parameters = [] }
 
     // Case 2: Literal value
     | Literal lit ->

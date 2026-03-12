@@ -47,7 +47,7 @@ module QueryTranslator =
         sb.ToString(), variables
 
     /// Returns a SqlExpr DU node for an expression without emitting to any StringBuilder.
-    /// Used by the Queryable DU construction path (Batch 2) to build SqlSelect trees.
+    /// Used by the Queryable DU construction path to build SqlSelect trees.
     /// Side effects: allocates parameters in the provided Variables dict; may populate sourceContext.Joins.
     let internal translateToSqlExpr (sourceContext: QueryContext) (tableName: string) (expression: Expression) (variables: Dictionary<string, obj>) : SqlExpr =
         ensureDbRefHandlersInitialized()

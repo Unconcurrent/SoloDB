@@ -24,6 +24,44 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
     let insertedHandlerMap = Dictionary<InsertedHandler<'T>, ResizeArray<InsertingHandlerSystem>>(HashIdentity.Reference)
     let deletedHandlerMap = Dictionary<DeletedHandler<'T>, ResizeArray<DeletingHandlerSystem>>(HashIdentity.Reference)
     let updatedHandlerMap = Dictionary<UpdatedHandler<'T>, ResizeArray<UpdatingHandlerSystem>>(HashIdentity.Reference)
+
+    let withHandlerFaultProtocol (conn: SqliteConnection) (f: unit -> SoloDBEventsResult) : SoloDBEventsResult =
+        Connections.EnterEventHandlerScope(conn)
+        try
+            try
+                let result = f ()
+                SQLiteTools.markCurrentHandlerFaultsAsSwallowed conn
+                SQLiteTools.clearNonSwallowedHandlerFaultsDeeperThanCurrent conn
+                result
+            with _ ->
+                SQLiteTools.captureCurrentHandlerFaultDepth conn
+                reraise()
+        finally
+            Connections.ExitEventHandlerScope(conn)
+
+    let withItemContext (ctxs: ConcurrentStack<SoloDBItemEventContext<'T>>) (conn: SqliteConnection) (session: int64) (json: ReadOnlySpan<byte>) (f: SoloDBItemEventContext<'T> -> SoloDBEventsResult) : SoloDBEventsResult =
+        let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
+        if not (ctxs.TryPop(&ctx)) then ctx <- new SoloDBItemEventContext<'T>(collectionName, createDb)
+        let jsonPtr =
+            if json.IsEmpty then NativePtr.nullPtr<byte>
+            else NativePtr.ofVoidPtr (Unsafe.AsPointer(&MemoryMarshal.GetReference json))
+        try
+            ctx.Reset(conn, session, jsonPtr, json.Length)
+            f ctx
+        finally
+            ctx.MarkDisposed()
+            ctxs.Push ctx
+
+    let withUpdatingContext (ctxs: ConcurrentStack<SoloDBUpdatingEventContext<'T>>) (conn: SqliteConnection) (session: int64) (jsonOld: nativeptr<byte>) (jsonOldSize: int) (jsonNew: nativeptr<byte>) (jsonNewSize: int) (f: SoloDBUpdatingEventContext<'T> -> SoloDBEventsResult) : SoloDBEventsResult =
+        let mutable ctx = Unchecked.defaultof<SoloDBUpdatingEventContext<'T> | null>
+        if not (ctxs.TryPop(&ctx)) then ctx <- new SoloDBUpdatingEventContext<'T>(collectionName, createDb)
+        try
+            ctx.Reset(conn, session, jsonOld, jsonOldSize, jsonNew, jsonNewSize)
+            f ctx
+        finally
+            ctx.MarkDisposed()
+            ctxs.Push ctx
+
     interface ISoloDBCollectionEvents<'T> with
         member this.OnInserting(handler: InsertingHandler<'T>): unit =
             let collectionNameBytes = Encoding.UTF8.GetBytes collectionName
@@ -39,18 +77,10 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         if handlers.Count = 0 then insertingHandlerMap.Remove handler |> ignore
                     | _ -> ()
                 let sysHandler = InsertingHandlerSystem(fun conn session json ->
-                    let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
-                    if not (ctxs.TryPop(&ctx)) then ctx <- new SoloDBItemEventContext<'T>(collectionName, createDb)
-                    let jsonPtr =
-                        if json.IsEmpty then NativePtr.nullPtr<byte>
-                        else NativePtr.ofVoidPtr (Unsafe.AsPointer(&MemoryMarshal.GetReference json))
                     let result =
-                        try
-                            ctx.Reset (conn, session, jsonPtr, json.Length)
-                            Connections.EnterEventHandlerScope(conn)
-                            try handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
-                            finally Connections.ExitEventHandlerScope(conn)
-                        finally ctx.MarkDisposed(); ctxs.Push ctx
+                        withItemContext ctxs conn session json (fun ctx ->
+                            withHandlerFaultProtocol conn (fun () ->
+                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled))
                     if result = RemoveHandler then removeFromMap ()
                     result)
                 sysHandlerRef <- sysHandler
@@ -78,18 +108,10 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         if handlers.Count = 0 then deletingHandlerMap.Remove handler |> ignore
                     | _ -> ()
                 let sysHandler = DeletingHandlerSystem(fun conn session json ->
-                    let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
-                    if not (ctxs.TryPop(&ctx)) then ctx <- new SoloDBItemEventContext<'T>(collectionName, createDb)
-                    let jsonPtr =
-                        if json.IsEmpty then NativePtr.nullPtr<byte>
-                        else NativePtr.ofVoidPtr (Unsafe.AsPointer(&MemoryMarshal.GetReference json))
                     let result =
-                        try
-                            ctx.Reset (conn, session, jsonPtr, json.Length)
-                            Connections.EnterEventHandlerScope(conn)
-                            try handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
-                            finally Connections.ExitEventHandlerScope(conn)
-                        finally ctx.MarkDisposed(); ctxs.Push ctx
+                        withItemContext ctxs conn session json (fun ctx ->
+                            withHandlerFaultProtocol conn (fun () ->
+                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled))
                     if result = RemoveHandler then removeFromMap ()
                     result)
                 sysHandlerRef <- sysHandler
@@ -117,15 +139,10 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         if handlers.Count = 0 then updatingHandlerMap.Remove handler |> ignore
                     | _ -> ()
                 let sysHandler = UpdatingHandlerSystem(fun conn session jsonOld jsonOldSize jsonNew jsonNewSize ->
-                    let mutable ctx = Unchecked.defaultof<SoloDBUpdatingEventContext<'T> | null>
-                    if not (ctxs.TryPop(&ctx)) then ctx <- new SoloDBUpdatingEventContext<'T>(collectionName, createDb)
                     let result =
-                        try
-                            ctx.Reset (conn, session, jsonOld, jsonOldSize, jsonNew, jsonNewSize)
-                            Connections.EnterEventHandlerScope(conn)
-                            try handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
-                            finally Connections.ExitEventHandlerScope(conn)
-                        finally ctx.MarkDisposed(); ctxs.Push ctx
+                        withUpdatingContext ctxs conn session jsonOld jsonOldSize jsonNew jsonNewSize (fun ctx ->
+                            withHandlerFaultProtocol conn (fun () ->
+                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled))
                     if result = RemoveHandler then removeFromMap ()
                     result)
                 sysHandlerRef <- sysHandler
@@ -153,18 +170,10 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         if handlers.Count = 0 then insertedHandlerMap.Remove handler |> ignore
                     | _ -> ()
                 let sysHandler = InsertingHandlerSystem(fun conn session json ->
-                    let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
-                    if not (ctxs.TryPop(&ctx)) then ctx <- new SoloDBItemEventContext<'T>(collectionName, createDb)
-                    let jsonPtr =
-                        if json.IsEmpty then NativePtr.nullPtr<byte>
-                        else NativePtr.ofVoidPtr (Unsafe.AsPointer(&MemoryMarshal.GetReference json))
                     let result =
-                        try
-                            ctx.Reset (conn, session, jsonPtr, json.Length)
-                            Connections.EnterEventHandlerScope(conn)
-                            try handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
-                            finally Connections.ExitEventHandlerScope(conn)
-                        finally ctx.MarkDisposed(); ctxs.Push ctx
+                        withItemContext ctxs conn session json (fun ctx ->
+                            withHandlerFaultProtocol conn (fun () ->
+                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled))
                     if result = RemoveHandler then removeFromMap ()
                     result)
                 sysHandlerRef <- sysHandler
@@ -192,18 +201,10 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         if handlers.Count = 0 then deletedHandlerMap.Remove handler |> ignore
                     | _ -> ()
                 let sysHandler = DeletingHandlerSystem(fun conn session json ->
-                    let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
-                    if not (ctxs.TryPop(&ctx)) then ctx <- new SoloDBItemEventContext<'T>(collectionName, createDb)
-                    let jsonPtr =
-                        if json.IsEmpty then NativePtr.nullPtr<byte>
-                        else NativePtr.ofVoidPtr (Unsafe.AsPointer(&MemoryMarshal.GetReference json))
                     let result =
-                        try
-                            ctx.Reset (conn, session, jsonPtr, json.Length)
-                            Connections.EnterEventHandlerScope(conn)
-                            try handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
-                            finally Connections.ExitEventHandlerScope(conn)
-                        finally ctx.MarkDisposed(); ctxs.Push ctx
+                        withItemContext ctxs conn session json (fun ctx ->
+                            withHandlerFaultProtocol conn (fun () ->
+                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled))
                     if result = RemoveHandler then removeFromMap ()
                     result)
                 sysHandlerRef <- sysHandler
@@ -231,15 +232,10 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                         if handlers.Count = 0 then updatedHandlerMap.Remove handler |> ignore
                     | _ -> ()
                 let sysHandler = UpdatingHandlerSystem(fun conn session jsonOld jsonOldSize jsonNew jsonNewSize ->
-                    let mutable ctx = Unchecked.defaultof<SoloDBUpdatingEventContext<'T> | null>
-                    if not (ctxs.TryPop(&ctx)) then ctx <- new SoloDBUpdatingEventContext<'T>(collectionName, createDb)
                     let result =
-                        try
-                            ctx.Reset (conn, session, jsonOld, jsonOldSize, jsonNew, jsonNewSize)
-                            Connections.EnterEventHandlerScope(conn)
-                            try handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled
-                            finally Connections.ExitEventHandlerScope(conn)
-                        finally ctx.MarkDisposed(); ctxs.Push ctx
+                        withUpdatingContext ctxs conn session jsonOld jsonOldSize jsonNew jsonNewSize (fun ctx ->
+                            withHandlerFaultProtocol conn (fun () ->
+                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled))
                     if result = RemoveHandler then removeFromMap ()
                     result)
                 sysHandlerRef <- sysHandler

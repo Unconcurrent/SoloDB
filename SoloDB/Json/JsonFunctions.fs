@@ -58,7 +58,7 @@ module JsonFunctions =
     let internal mustIncludeTypeInformationInSerialization<'T> =
         mustIncludeTypeInformationInSerializationFn typeof<'T>
 
-    /// Used internally, do not touch!
+    /// Internal serialization helper. Not part of the public API.
     let toJson<'T> o = 
         let element = JsonValue.Serialize<'T> o
         // Remove the int64 Id property from the json format, as it is stored as a separate column.
@@ -77,7 +77,7 @@ module JsonFunctions =
             | _ -> ()
         element.ToJsonString()
 
-    /// Used internally, do not touch!
+    /// Internal serialization helper. Not part of the public API.
     let toSQLJson (item: obj) = 
         match box item with
         | :? string as s -> s :> obj, false
@@ -124,7 +124,7 @@ module JsonFunctions =
             raise (InvalidOperationException "Invalid operation on a value type.") 
         | json -> json.ToObject<'T>()    
 
-    /// Used internally, do not touch!
+    /// Internal serialization helper. Not part of the public API.
     let fromIdJson<'T> (element: JsonValue) =
         let id = element.["Id"].ToObject<int64>()
         let value = element.GetProperty("Value") |> fromJson<'T>

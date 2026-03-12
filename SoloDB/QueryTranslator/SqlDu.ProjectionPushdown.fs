@@ -2,6 +2,7 @@ module SoloDatabase.ProjectionPushdown
 
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.ProjectionLiveness
+open SoloDatabase.ExpressionPredicates
 
 // ══════════════════════════════════════════════════════════════
 // Projection Pushdown Transform (C7b)
@@ -22,42 +23,14 @@ open SoloDatabase.ProjectionLiveness
 //   - All inner projections are live (nothing to remove)
 // ══════════════════════════════════════════════════════════════
 
-/// Check if expression contains an aggregate call.
-let rec private hasAggregateInExpr (expr: SqlExpr) : bool =
-    match expr with
-    | AggregateCall _ -> true
-    | Binary(l, _, r) -> hasAggregateInExpr l || hasAggregateInExpr r
-    | Unary(_, e) -> hasAggregateInExpr e
-    | FunctionCall(_, args) -> args |> List.exists hasAggregateInExpr
-    | Coalesce(exprs) -> exprs |> List.exists hasAggregateInExpr
-    | Cast(e, _) -> hasAggregateInExpr e
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) -> hasAggregateInExpr c || hasAggregateInExpr r)
-        || (elseE |> Option.map hasAggregateInExpr |> Option.defaultValue false)
-    | _ -> false
-
-/// Check if expression contains a window call.
-let rec private hasWindowInExpr (expr: SqlExpr) : bool =
-    match expr with
-    | WindowCall _ -> true
-    | Binary(l, _, r) -> hasWindowInExpr l || hasWindowInExpr r
-    | Unary(_, e) -> hasWindowInExpr e
-    | FunctionCall(_, args) -> args |> List.exists hasWindowInExpr
-    | Coalesce(exprs) -> exprs |> List.exists hasWindowInExpr
-    | Cast(e, _) -> hasWindowInExpr e
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) -> hasWindowInExpr c || hasWindowInExpr r)
-        || (elseE |> Option.map hasWindowInExpr |> Option.defaultValue false)
-    | _ -> false
-
 /// Check if the outer (consuming) layer has evaluation-order boundaries
 /// that make projection narrowing of the inner layer unsafe.
 let private hasOuterEvaluationBoundary (outer: SelectCore) : bool =
     not outer.GroupBy.IsEmpty
     || outer.Having.IsSome
     || outer.Distinct
-    || outer.Projections |> List.exists (fun p -> hasFunctionCall p.Expr && hasAggregateInExpr p.Expr)
-    || outer.Projections |> List.exists (fun p -> hasWindowInExpr p.Expr)
+    || outer.Projections |> List.exists (fun p -> hasFunctionCall p.Expr && hasAggregateCall p.Expr)
+    || outer.Projections |> List.exists (fun p -> hasWindowFunction p.Expr)
 
 /// Narrow inner projections to only those that are live.
 /// Returns None if no narrowing is possible or allowed.

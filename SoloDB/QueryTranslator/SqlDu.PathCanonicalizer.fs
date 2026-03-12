@@ -3,20 +3,20 @@ module SoloDatabase.PathCanonicalizer
 open SqlDu.Engine.C1.Spec
 
 // ══════════════════════════════════════════════════════════════
-// C9b: Path Canonicalization Engine
+// Path canonicalization engine.
 //
-// JR-1: Normalize equivalent JSON path forms to canonical DU form.
+// Normalize equivalent JSON path forms to canonical DU form.
 //   - Nested jsonb_extract(jsonb_extract(V, '$.A'), '$.B') -> jsonb_extract(V, '$.A.B')
 //   - Path quoting normalization (if applicable)
 //
-// JR-2: Simplify equivalent extract wrapper composition.
+// Simplify equivalent extract wrapper composition.
 //   - json_extract(jsonb_extract(V, '$.X'), '$') -> jsonb_extract(V, '$.X')
 //   - Identity extractions on base column
 //
-// PROHIBITION: No json_*/jsonb_* variant interchange (Sherlock Trap 4).
+// No json_*/jsonb_* variant interchange.
 // ══════════════════════════════════════════════════════════════
 
-/// JR-1: Attempt to merge nested jsonb_extract expressions into a single extraction.
+/// Attempt to merge nested jsonb_extract expressions into a single extraction.
 /// jsonb_extract(jsonb_extract(source, '$.A'), '$.B') -> jsonb_extract(source, '$.A.B')
 /// Returns Some(merged) if mergeable, None otherwise.
 let mergeNestedExtract (expr: SqlExpr) : SqlExpr option =
@@ -36,10 +36,10 @@ let mergeNestedExtract (expr: SqlExpr) : SqlExpr option =
             None
     | _ -> None
 
-/// JR-2: Attempt to simplify redundant json_extract wrapper around jsonb_extract.
+/// Attempt to simplify redundant json_extract wrapper around jsonb_extract.
 /// json_extract(jsonb_extract(V, '$.X'), '$') -> jsonb_extract(V, '$.X')
 /// NOTE: This ONLY removes json_extract wrappers with identity path '$'.
-/// It does NOT interchange jsonb_extract <-> json_extract (Sherlock Trap 4).
+/// It does NOT interchange jsonb_extract <-> json_extract.
 let simplifyIdentityWrapper (expr: SqlExpr) : SqlExpr option =
     match expr with
     | FunctionCall("json_extract", [inner; Literal(String "$")]) ->
@@ -49,19 +49,19 @@ let simplifyIdentityWrapper (expr: SqlExpr) : SqlExpr option =
             // an identity extraction on the result of jsonb_extract.
             // HOWEVER: json_extract returns TEXT, jsonb_extract returns BLOB.
             // Removing the wrapper changes the return type.
-            // Per Sherlock Trap 4: MUST NOT interchange. PRESERVE.
+            // The wrapper changes the return type and must be preserved.
             None
         | _ -> None
     | _ -> None
 
-/// Apply all JR-1/JR-2 canonicalization rules to a single expression.
+/// Apply all canonicalization rules to a single expression.
 /// Returns Some(canonical) if any rule fired, None if no change.
 let rec canonicalizeJsonbExpr (expr: SqlExpr) : SqlExpr option =
-    // Try JR-1: nested extract merge
+    // Try nested extract merge
     match mergeNestedExtract expr with
     | Some merged -> Some merged
     | None ->
-        // JR-2 is effectively disabled due to Sherlock Trap 4
+        // Wrapper simplification is effectively disabled due to the return-type change
         // (json_extract wrapper removal would change return type).
         // Recurse into sub-expressions to find nested candidates.
         match expr with

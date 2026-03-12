@@ -555,6 +555,17 @@ module private QueryHelper =
              { Alias = Some "Value"; Expr = SqlExpr.Coalesce([SqlExpr.FunctionCall(fnName, [innerExpr]); SqlExpr.Literal(SqlLiteral.Integer 0L)]) }]
         ))
 
+    let private isDecimalOrNullableDecimal (t: Type) =
+        t = typeof<decimal> ||
+        (t.IsGenericType &&
+         t.GetGenericTypeDefinition() = typedefof<Nullable<_>> &&
+         t.GetGenericArguments().[0] = typeof<decimal>)
+
+    let private rejectDecimalAverageIfNeeded (method: MethodInfo) =
+        if isDecimalOrNullableDecimal method.ReturnType then
+            raise (NotSupportedException(
+                "Decimal Average is not supported on the SQL route because SQLite AVG uses REAL arithmetic and loses decimal precision. Call AsEnumerable() before Average for exact decimal semantics."))
+
     /// <summary>
     /// Extracts the expression for a collection that is an argument to a set-based method like Concat or Except.
     /// </summary>
@@ -1110,6 +1121,7 @@ module private QueryHelper =
                         zeroIfNullAggregateTranslator sourceCtx "SUM" statements m.OriginalMethod m.Expressions
 
                 | Average ->
+                    rejectDecimalAverageIfNeeded m.OriginalMethod
                     if isPostScalarProjection && m.Expressions.Length = 0 then
                         let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
                         let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, extractVal)

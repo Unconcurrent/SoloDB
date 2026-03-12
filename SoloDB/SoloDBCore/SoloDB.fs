@@ -344,8 +344,8 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 id
             )
         else
-            use conn = connection.Get()
-            Helper.insertInner this.IncludeType item conn name this
+            connection.WithTransaction(fun conn ->
+                Helper.insertInner this.IncludeType item conn name this)
 
     /// <summary>
     /// Inserts a new document or replaces an existing one if a document with the same ID already exists.
@@ -369,8 +369,8 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 id
             )
         else
-            use conn = connection.Get()
-            Helper.insertOrReplaceInner this.IncludeType item conn name this
+            connection.WithTransaction(fun conn ->
+                Helper.insertOrReplaceInner this.IncludeType item conn name this)
 
     /// <summary>
     /// Inserts a sequence of documents in a single transaction for efficiency.
@@ -704,11 +704,11 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                 Relations.syncUpdate tx oldRow.Id.Value writePlan
             )
         else
-            use conn = connection.Get()
-            this.setSerializedItem variables item
-            let count = conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
-            if count <= 0 then
-                raise (KeyNotFoundException "Could not Update any entities with specified Id.")
+            connection.WithTransaction(fun conn ->
+                this.setSerializedItem variables item
+                let count = conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
+                if count <= 0 then
+                    raise (KeyNotFoundException "Could not Update any entities with specified Id."))
 
     /// <summary>
     /// Deletes all documents that match the specified filter.
@@ -803,9 +803,9 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
             )
         else
-            use conn = connection.Get()
-            this.setSerializedItem variables item
-            conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
+            connection.WithTransaction(fun conn ->
+                this.setSerializedItem variables item
+                conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables))
 
     /// <summary>
     /// Replaces the content of the first document matching the filter with a new document.
@@ -833,9 +833,9 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id = @id", {| item = variables.["item"]; id = oldRow.Id.Value |})
             )
         else
-            use conn = connection.Get()
-            this.setSerializedItem variables item
-            conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filter}) LIMIT 1)", variables)
+            connection.WithTransaction(fun conn ->
+                this.setSerializedItem variables item
+                conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filter}) LIMIT 1)", variables))
 
     /// <summary>
     /// Applies a set of transformations to update all documents that match the specified filter.
@@ -1609,11 +1609,18 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
 
             try
                 result <- func.Invoke transactionalDb
-                connectionForTransaction.Execute "COMMIT;" |> ignore
+                match Connections.takeHandlerFaultCommitException connectionForTransaction with
+                | Some ex ->
+                    primaryEx <- Some ex
+                    try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
+                | None ->
+                    connectionForTransaction.Execute "COMMIT;" |> ignore
             with ex ->
                 primaryEx <- Some ex
                 try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
-        finally connectionForTransaction.DisposeReal(true)
+        finally
+            clearHandlerFault connectionForTransaction
+            connectionForTransaction.DisposeReal(true)
 
         match Connections.resolveTxOutcome primaryEx cleanupEx with
         | Some ex -> raise ex
@@ -1645,11 +1652,18 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             try
                 let! ret = func.Invoke transactionalDb
                 result <- ret
-                connectionForTransaction.Execute "COMMIT;" |> ignore
+                match Connections.takeHandlerFaultCommitException connectionForTransaction with
+                | Some ex ->
+                    primaryEx <- Some ex
+                    try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
+                | None ->
+                    connectionForTransaction.Execute "COMMIT;" |> ignore
             with ex ->
                 primaryEx <- Some ex
                 try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
-        finally connectionForTransaction.DisposeReal(true)
+        finally
+            clearHandlerFault connectionForTransaction
+            connectionForTransaction.DisposeReal(true)
 
         match Connections.resolveTxOutcome primaryEx cleanupEx with
         | Some ex -> return reraiseAnywhere ex

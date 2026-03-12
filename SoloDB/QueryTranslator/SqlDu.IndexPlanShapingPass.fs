@@ -5,7 +5,7 @@ open SoloDatabase.IndexModel
 open SoloDatabase.IndexPlanShaping
 
 // ══════════════════════════════════════════════════════════════
-// Index Plan Shaping Pass Registration (C8 closure capture)
+// Index plan shaping pass registration.
 //
 // The pass factory takes an IndexModel and returns a standard
 // C4 Pass via closure capture. The C4 framework sees a standard

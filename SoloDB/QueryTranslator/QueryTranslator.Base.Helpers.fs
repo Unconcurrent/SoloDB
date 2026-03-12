@@ -246,8 +246,7 @@ module internal QueryTranslatorBaseHelpers =
                 match json with
                 | JsonSerializator.JsonValue.Object d ->
                     [for KeyValue(k, v) in d do
-                        if k <> "$type" then
-                            yield! compareJsonDu $"$.{k}" v]
+                        yield! compareJsonDu $"$.{k}" v]
                 | _ -> compareJsonDu "$" json
 
             buildConjunction comparisons

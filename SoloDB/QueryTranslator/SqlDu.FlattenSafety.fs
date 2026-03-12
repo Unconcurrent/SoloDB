@@ -1,6 +1,7 @@
 module SoloDatabase.FlattenSafety
 
 open SqlDu.Engine.C1.Spec
+open SoloDatabase.ExpressionPredicates
 
 // ══════════════════════════════════════════════════════════════
 // Flatten-Safety Predicate
@@ -19,44 +20,6 @@ open SqlDu.Engine.C1.Spec
 //   F7: Inner has no aggregate calls in projections
 //   F8: Outer has no conflicting GROUP BY that would change merge semantics
 // ══════════════════════════════════════════════════════════════
-
-/// Check if an expression contains a window function call.
-let rec private hasWindowFunction (expr: SqlExpr) : bool =
-    match expr with
-    | WindowCall _ -> true
-    | Binary(l, _, r) -> hasWindowFunction l || hasWindowFunction r
-    | Unary(_, e) -> hasWindowFunction e
-    | FunctionCall(_, args) -> args |> List.exists hasWindowFunction
-    | Coalesce(exprs) -> exprs |> List.exists hasWindowFunction
-    | Cast(e, _) -> hasWindowFunction e
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) -> hasWindowFunction c || hasWindowFunction r)
-        || (elseE |> Option.map hasWindowFunction |> Option.defaultValue false)
-    | JsonSetExpr(t, assignments) ->
-        hasWindowFunction t || assignments |> List.exists (fun (_, e) -> hasWindowFunction e)
-    | JsonArrayExpr(elems) -> elems |> List.exists hasWindowFunction
-    | JsonObjectExpr(props) -> props |> List.exists (fun (_, v) -> hasWindowFunction v)
-    | AggregateCall _ -> false // aggregate, not window
-    | _ -> false
-
-/// Check if an expression contains an aggregate call.
-let rec private hasAggregateCall (expr: SqlExpr) : bool =
-    match expr with
-    | AggregateCall _ -> true
-    | Binary(l, _, r) -> hasAggregateCall l || hasAggregateCall r
-    | Unary(_, e) -> hasAggregateCall e
-    | FunctionCall(_, args) -> args |> List.exists hasAggregateCall
-    | Coalesce(exprs) -> exprs |> List.exists hasAggregateCall
-    | Cast(e, _) -> hasAggregateCall e
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) -> hasAggregateCall c || hasAggregateCall r)
-        || (elseE |> Option.map hasAggregateCall |> Option.defaultValue false)
-    | JsonSetExpr(t, assignments) ->
-        hasAggregateCall t || assignments |> List.exists (fun (_, e) -> hasAggregateCall e)
-    | JsonArrayExpr(elems) -> elems |> List.exists hasAggregateCall
-    | JsonObjectExpr(props) -> props |> List.exists (fun (_, v) -> hasAggregateCall v)
-    | WindowCall _ -> false
-    | _ -> false
 
 /// Check if the outer SelectCore is a pure projection wrapper:
 /// no WHERE, no GROUP BY, no HAVING, no DISTINCT, no LIMIT/OFFSET, no ORDER BY.

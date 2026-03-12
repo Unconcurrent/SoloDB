@@ -164,66 +164,89 @@ module FileStorage =
             fileStream.BaseStream.Position <- offset
             fileStream.ReadBytes len
 
+        member private _.WithFileAt(path: string, f: SqliteConnection -> SoloDBFileHeader -> 'T) =
+            connection.WithTransaction(fun tx ->
+                let file = match tryGetFileAt tx path with | Some x -> x | None -> raise (FileNotFoundException("File not found.", path))
+                f tx file
+            )
+
+        member private _.WithDirectoryAt(path: string, f: SqliteConnection -> SoloDBDirectoryHeader -> 'T) =
+            connection.WithTransaction(fun tx ->
+                let dir = match tryGetDir tx path with | Some x -> x | None -> raise (DirectoryNotFoundException("Directory not found at: " + path))
+                f tx dir
+            )
+
         member this.SetFileModificationDate(path, date) =
-            let file = this.GetAt path
-            use db = connection.Get()
-            setFileModifiedById db file.Id date
+            this.WithFileAt(path, fun tx file ->
+                setFileModifiedById tx file.Id date
+            )
 
         member this.SetFileCreationDate(path, date) =
-            let file = this.GetAt path
-            use db = connection.Get()
-            setFileCreatedById db file.Id date
+            this.WithFileAt(path, fun tx file ->
+                setFileCreatedById tx file.Id date
+            )
 
         member this.SetMetadata(file: SoloDBFileHeader, key, value) =
-            use db = connection.Get()
-            setSoloDBFileMetadata db file key value
+            connection.WithTransaction(fun tx ->
+                setSoloDBFileMetadata tx file key value
+            )
 
         member this.SetMetadata(path: string, key, value) =
-            let file = this.GetAt path
-            this.SetMetadata(file, key, value)
+            this.WithFileAt(path, fun tx file ->
+                setSoloDBFileMetadata tx file key value
+            )
 
         member this.DeleteMetadata(file: SoloDBFileHeader, key) =
-            use db = connection.Get()
-            deleteSoloDBFileMetadata db file key
+            connection.WithTransaction(fun tx ->
+                deleteSoloDBFileMetadata tx file key
+            )
 
         member this.DeleteMetadata(path: string, key) =
-            let file = this.GetAt path
-            this.DeleteMetadata(file, key)
+            this.WithFileAt(path, fun tx file ->
+                deleteSoloDBFileMetadata tx file key
+            )
 
         member this.SetDirectoryMetadata(dir: SoloDBDirectoryHeader, key, value) =
-            use db = connection.Get()
-            setDirMetadata db dir key value
+            connection.WithTransaction(fun tx ->
+                setDirMetadata tx dir key value
+            )
 
         member this.SetDirectoryMetadata(path: string, key, value) =
-            let dir = this.GetDirAt path
-            this.SetDirectoryMetadata(dir, key, value)
+            this.WithDirectoryAt(path, fun tx dir ->
+                setDirMetadata tx dir key value
+            )
 
         member this.DeleteDirectoryMetadata(dir: SoloDBDirectoryHeader, key) =
-            use db = connection.Get()
-            deleteDirMetadata db dir key
+            connection.WithTransaction(fun tx ->
+                deleteDirMetadata tx dir key
+            )
 
         member this.DeleteDirectoryMetadata(path: string, key) =
-            let dir = this.GetDirAt path
-            this.DeleteDirectoryMetadata(dir, key)
+            this.WithDirectoryAt(path, fun tx dir ->
+                deleteDirMetadata tx dir key
+            )
 
         member this.Delete(file: SoloDBFileHeader) =
-            use db = connection.Get()
-            deleteFile db file |> ignore
+            connection.WithTransaction(fun tx ->
+                deleteFile tx file |> ignore
+            )
 
         member this.Delete(dir: SoloDBDirectoryHeader) =
-            use db = connection.Get()
-            deleteDirectory db dir
+            connection.WithTransaction(fun tx ->
+                deleteDirectory tx dir
+            )
 
         member this.DeleteFileAt(path) =
-            match this.TryGetAt path with
-            | None -> false
-            | Some file ->
-            use db = connection.Get()
-            deleteFile db file
+            connection.WithTransaction(fun tx ->
+                match tryGetFileAt tx path with
+                | None -> false
+                | Some file -> deleteFile tx file
+            )
 
         member this.DeleteDirAt(path) =
-            use db = connection.Get()
-            deleteDirectoryAt db path
+            connection.WithTransaction(fun tx ->
+                deleteDirectoryAt tx path
+            )
 
         member this.ListFilesAt(path) =
             use db = connection.Get()

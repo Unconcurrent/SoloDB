@@ -6,7 +6,7 @@ open System
 
 
 [<Struct; StructLayout(LayoutKind.Sequential)>]
-// <summary >Internal only, do not touch </summary>
+// <summary>Internal fixed-size stack. Not part of the public API.</summary>
 type internal InternalStack128<'T> =
     // 128 contiguous fields
     val mutable V000 : 'T

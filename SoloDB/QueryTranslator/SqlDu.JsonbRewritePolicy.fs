@@ -5,22 +5,23 @@ open SoloDatabase.IndexModel
 open SoloDatabase.PathCanonicalizer
 open SoloDatabase.SetChainAnalyzer
 open SoloDatabase.MaterializationPolicy
+open SoloDatabase.ExpressionPredicates
 
 // ══════════════════════════════════════════════════════════════
-// C9e: JSONB Rewrite Policy Pass
+// JSONB rewrite policy pass.
 //
 // 8th pass in pipeline:
 //   Identity -> ConstantFold -> SubqueryFlatten -> PredicatePushdown
 //   -> ProjectionPushdown -> JoinReorder -> IndexPlanShaping
 //   -> JsonbRewritePolicy
 //
-// Legal adjustments (JR-1 through JR-4):
-//   JR-1: Path canonicalization (nested extract merge)
-//   JR-2: Extract wrapper normalization (disabled: Sherlock Trap 4)
-//   JR-3: jsonb_set chain flattening (disjoint paths only)
-//   JR-4: Materialization flatten/preserve policy (identity assignment removal)
+// Legal adjustments:
+//   Path canonicalization (nested extract merge)
+//   Extract wrapper normalization (disabled: return-type change risk)
+//   jsonb_set chain flattening (disjoint paths only)
+//   Materialization flatten/preserve policy (identity assignment removal)
 //
-// Must-not boundaries (same fence pattern as C8):
+// Must-not boundaries (same fence pattern as index shaping):
 //   - GROUP BY / HAVING / AGGREGATE scopes
 //   - WINDOW scopes
 //   - UNION ALL / set-op compositions
@@ -29,9 +30,9 @@ open SoloDatabase.MaterializationPolicy
 //   - json_each boundaries
 //   - All DML statements
 //
-// Index visibility guard (C8 integration):
+// Index visibility guard:
 //   Before rewriting a JSONB expression, checks if any sub-expression
-//   matches a C8 index entry. If so, preserves the expression to
+//   matches a known index entry. If so, preserves the expression to
 //   protect index visibility (PRESERVED_FOR_PLAN / IndexVisibilityRisk).
 // ══════════════════════════════════════════════════════════════
 
@@ -43,19 +44,8 @@ let private hasMustNotBoundary (core: SelectCore) : bool =
     || (match core.Source with Some(FromJsonEach _) -> true | _ -> false)
 
 /// Check if any projection has aggregate or window calls.
-let rec private hasAggOrWindow (expr: SqlExpr) : bool =
-    match expr with
-    | AggregateCall _ -> true
-    | WindowCall _ -> true
-    | Binary(l, _, r) -> hasAggOrWindow l || hasAggOrWindow r
-    | Unary(_, e) -> hasAggOrWindow e
-    | FunctionCall(_, args) -> args |> List.exists hasAggOrWindow
-    | Coalesce(exprs) -> exprs |> List.exists hasAggOrWindow
-    | Cast(e, _) -> hasAggOrWindow e
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) -> hasAggOrWindow c || hasAggOrWindow r)
-        || (elseE |> Option.map hasAggOrWindow |> Option.defaultValue false)
-    | _ -> false
+let private hasAggOrWindow (expr: SqlExpr) : bool =
+    hasAggregateCall expr || hasWindowFunction expr
 
 /// Check if an expression matches a specific index entry.
 /// Ignores table qualifier during matching (indexes are stored unqualified).
@@ -67,7 +57,7 @@ let private exprMatchesIndexEntry (indexExpr: SqlExpr) (expr: SqlExpr) : bool =
         c1 = c2 && p1 = p2 && t1 = t2
     | _ -> indexExpr = expr
 
-/// Check if an expression or any sub-expression matches any C8 index entry.
+/// Check if an expression or any sub-expression matches any known index entry.
 /// Used as a guard to prevent rewrites that would break index visibility.
 let rec exprContainsIndexedForm (model: IndexModel) (expr: SqlExpr) : bool =
     model.Indexes |> List.exists (fun idx -> exprMatchesIndexEntry idx.Expression expr)
@@ -82,19 +72,19 @@ let rec exprContainsIndexedForm (model: IndexModel) (expr: SqlExpr) : bool =
            || (elseE |> Option.map (exprContainsIndexedForm model) |> Option.defaultValue false)
        | _ -> false
 
-/// Apply JR-1/JR-3 rewrites to a single expression.
-/// JR-2 is disabled (Sherlock Trap 4).
+/// Apply path-canonicalization and set-chain rewrites to a single expression.
+/// Extract-wrapper normalization is disabled due to return-type change risk.
 /// Skips rewrite if expression contains an indexed form (index visibility guard).
 let private rewriteExpr (model: IndexModel) (expr: SqlExpr) : SqlExpr =
     // Index visibility guard: if any sub-expression matches an index, preserve
     if exprContainsIndexedForm model expr then expr
     else
-        // First try JR-3: set chain flattening
+        // First try set-chain flattening
         let afterChain =
             match flattenSetChain expr with
             | Some flattened -> flattened
             | None -> expr
-        // Then try JR-1: path canonicalization
+        // Then try path canonicalization
         match canonicalizeJsonbExpr afterChain with
         | Some canonical -> canonical
         | None -> afterChain
@@ -110,7 +100,7 @@ let rec private rewritePredicate (model: IndexModel) (expr: SqlExpr) : SqlExpr =
         Unary(Not, rewritePredicate model e)
     | _ -> rewriteExpr model expr
 
-/// Apply C9 rewrite policy to a single SelectCore.
+/// Apply the JSONB rewrite policy to a single SelectCore.
 let private rewriteInCore (model: IndexModel) (core: SelectCore) : SelectCore =
     // Refuse at must-not boundaries
     if hasMustNotBoundary core then core
@@ -123,7 +113,7 @@ let private rewriteInCore (model: IndexModel) (core: SelectCore) : SelectCore =
         else
             let mutable shaped = core
 
-            // Rewrite WHERE predicate (JR-1/JR-3, with index guard)
+            // Rewrite WHERE predicate (with index guard)
             shaped <-
                 match shaped.Where with
                 | Some where ->
@@ -132,7 +122,7 @@ let private rewriteInCore (model: IndexModel) (core: SelectCore) : SelectCore =
                     else { shaped with Where = Some rewritten }
                 | None -> shaped
 
-            // Rewrite JOIN ON clauses (JR-1/JR-3, with index guard)
+            // Rewrite JOIN ON clauses (with index guard)
             shaped <-
                 let newJoins =
                     shaped.Joins |> List.map (fun j ->
@@ -145,7 +135,7 @@ let private rewriteInCore (model: IndexModel) (core: SelectCore) : SelectCore =
                 if newJoins = shaped.Joins then shaped
                 else { shaped with Joins = newJoins }
 
-            // Rewrite ORDER BY expressions (JR-1, with index guard)
+            // Rewrite ORDER BY expressions (with index guard)
             shaped <-
                 if shaped.OrderBy.IsEmpty then shaped
                 else
@@ -157,7 +147,7 @@ let private rewriteInCore (model: IndexModel) (core: SelectCore) : SelectCore =
                     if newOrderBy = shaped.OrderBy then shaped
                     else { shaped with OrderBy = newOrderBy }
 
-            // Rewrite projections (JR-1/JR-3/JR-4, excluding materialization patterns)
+            // Rewrite projections, excluding protected materialization patterns
             shaped <-
                 let newProjs =
                     shaped.Projections |> List.map (fun p ->
@@ -166,7 +156,7 @@ let private rewriteInCore (model: IndexModel) (core: SelectCore) : SelectCore =
                         elif isGroupMaterializationExpr p.Expr then p
                         elif isCoalesceInitializationExpr p.Expr then p
                         else
-                            // JR-4: try identity assignment flatten first
+                            // Try identity-assignment flattening first
                             match flattenIdentityAssignments p.Expr with
                             | Some flattened -> { p with Expr = flattened }
                             | None ->
@@ -178,7 +168,7 @@ let private rewriteInCore (model: IndexModel) (core: SelectCore) : SelectCore =
 
             shaped
 
-/// Recursively apply C9 rewrite policy to a SqlSelect.
+/// Recursively apply the JSONB rewrite policy to a SqlSelect.
 let rec rewriteSelectWithModel (model: IndexModel) (sel: SqlSelect) : SqlSelect =
     let rewrittenBody =
         match sel.Body with
@@ -211,13 +201,13 @@ let rec rewriteSelectWithModel (model: IndexModel) (sel: SqlSelect) : SqlSelect 
         sel.Ctes |> List.map (fun cte -> { cte with Query = rewriteSelectWithModel model cte.Query })
     { Ctes = rewrittenCtes; Body = rewrittenBody }
 
-/// Apply C9 JSONB rewrite policy to a SqlStatement with index model.
+/// Apply the JSONB rewrite policy to a SqlStatement with index model.
 let rewriteStatementWithModel (model: IndexModel) (stmt: SqlStatement) : SqlStatement =
     match stmt with
     | SelectStmt sel -> SelectStmt(rewriteSelectWithModel model sel)
-    // DML passthrough — out of scope for C9
+    // DML passthrough — out of scope for JSONB rewrite policy
     | InsertStmt _ | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> stmt
 
-/// Apply C9 JSONB rewrite policy to a SqlStatement (no index model — empty).
+/// Apply the JSONB rewrite policy to a SqlStatement (no index model — empty).
 let rewriteStatement (stmt: SqlStatement) : SqlStatement =
     rewriteStatementWithModel emptyModel stmt

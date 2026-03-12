@@ -6,12 +6,13 @@ open SoloDatabase.IndexModel
 open SoloDatabase.PolicyModel
 open SoloDatabase.MaterializationPolicy
 open SoloDatabase.JsonbRewritePolicy
+open SoloDatabase.ExpressionPredicates
 
 // ══════════════════════════════════════════════════════════════
 // C9f: Decision Trace Integration
 //
 // Per-shape classification: policy class + verdict + reason code.
-// Maps Bellard policy classes to Carmack audit verdicts.
+// Maps internal policy classes to the trace verdict vocabulary.
 //
 // Vocabulary mapping (approved):
 //   FLATTEN_ALLOWED + changed -> JSONB_REWRITTEN or MATERIALIZATION_FLATTENED
@@ -32,19 +33,8 @@ let private coreHasMustNotBoundary (core: SelectCore) : bool =
     || (match core.Source with Some(FromJsonEach _) -> true | _ -> false)
 
 /// Check if any projection has aggregate or window calls.
-let rec private hasAggOrWindow (expr: SqlExpr) : bool =
-    match expr with
-    | AggregateCall _ -> true
-    | WindowCall _ -> true
-    | Binary(l, _, r) -> hasAggOrWindow l || hasAggOrWindow r
-    | Unary(_, e) -> hasAggOrWindow e
-    | FunctionCall(_, args) -> args |> List.exists hasAggOrWindow
-    | Coalesce(exprs) -> exprs |> List.exists hasAggOrWindow
-    | Cast(e, _) -> hasAggOrWindow e
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) -> hasAggOrWindow c || hasAggOrWindow r)
-        || (elseE |> Option.map hasAggOrWindow |> Option.defaultValue false)
-    | _ -> false
+let private hasAggOrWindow (expr: SqlExpr) : bool =
+    hasAggregateCall expr || hasWindowFunction expr
 
 /// Check if an expression contains any JsonSetExpr or JsonArrayExpr
 /// (JSONB-relevant for materialization classification).

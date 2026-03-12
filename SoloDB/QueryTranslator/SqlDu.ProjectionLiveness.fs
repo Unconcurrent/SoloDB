@@ -1,6 +1,7 @@
 module SoloDatabase.ProjectionLiveness
 
 open SqlDu.Engine.C1.Spec
+open SoloDatabase.ExpressionPredicates
 
 // ══════════════════════════════════════════════════════════════
 // Projection Liveness Analysis (C7a)
@@ -164,19 +165,8 @@ let collectGroupByKeys (innerCore: SelectCore) : Set<string> =
 
 /// Check if a projection expression contains a function call
 /// (defensive for PROJ-2: side-effect preservation).
-let rec hasFunctionCall (expr: SqlExpr) : bool =
-    match expr with
-    | FunctionCall _ -> true
-    | AggregateCall _ -> true
-    | WindowCall _ -> true
-    | Binary(l, _, r) -> hasFunctionCall l || hasFunctionCall r
-    | Unary(_, e) -> hasFunctionCall e
-    | Coalesce(exprs) -> exprs |> List.exists hasFunctionCall
-    | Cast(e, _) -> hasFunctionCall e
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) -> hasFunctionCall c || hasFunctionCall r)
-        || (elseE |> Option.map hasFunctionCall |> Option.defaultValue false)
-    | _ -> false
+let hasFunctionCall (expr: SqlExpr) : bool =
+    ExpressionPredicates.hasFunctionCall expr
 
 /// Determine which inner projections are dead (can be removed).
 /// Returns the set of projection aliases that are NOT live.

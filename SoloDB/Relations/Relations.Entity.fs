@@ -220,7 +220,7 @@ let rec internal cascadeInsertDeep
                 ensureRelationSchema childTx descriptor
                 ensureTargetExists childTx descriptor.TargetTable refId
                 childTx.Connection.Execute(
-                    $"INSERT OR REPLACE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
+                    $"INSERT INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
                     {| sourceId = insertedId; targetId = refId |}) |> ignore
                 if shouldSyncDbRefJson descriptor then
                     updateDbRefJson childTx targetTable insertedId descriptor.PropertyPath refId
@@ -235,7 +235,7 @@ let rec internal cascadeInsertDeep
                         ensureRelationSchema childTx descriptor
                         ensureTargetExists childTx descriptor.TargetTable entityId
                         childTx.Connection.Execute(
-                            $"INSERT OR REPLACE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
+                            $"INSERT INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
                             {| sourceId = insertedId; targetId = entityId |}) |> ignore
                         if shouldSyncDbRefJson descriptor then
                             updateDbRefJson childTx targetTable insertedId descriptor.PropertyPath entityId
@@ -391,7 +391,7 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
 
     let insertSingleLink (descriptor: RelationDescriptor) (targetId: int64) =
         tx.Connection.Execute(
-            $"INSERT OR REPLACE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
+            $"INSERT INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
             {| sourceId = ownerId; targetId = targetId |}) |> ignore
 
     let applySingleSetAndSync (descriptor: RelationDescriptor) (targetId: int64) =

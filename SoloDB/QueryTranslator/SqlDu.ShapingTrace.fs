@@ -4,28 +4,29 @@ open SqlDu.Engine.C1.Spec
 open SoloDatabase.PassRunner
 open SoloDatabase.IndexModel
 open SoloDatabase.ExpressionMatcher
+open SoloDatabase.ExpressionPredicates
 
 // ══════════════════════════════════════════════════════════════
-// C8 Decision Trace (I6 Compliance)
+// Index-shaping decision trace.
 //
 // Per-shape audit artifact with verdict, reason code,
 // before/after fingerprints, and changed flag.
 //
 // Verdict taxonomy:
-//   RESHAPED_FOR_INDEX  — C8 canonicalized expression form(s)
+//   RESHAPED_FOR_INDEX  — index-aware canonicalized expression form(s)
 //   PRESERVED_FOR_INDEX — expressions already match index form
 //   NO_CHANGE           — no index-relevant adjustment possible
 //
 // Reason codes enumerate WHY the verdict was reached.
 // ══════════════════════════════════════════════════════════════
 
-/// C8 shaping verdict: what happened to the statement.
+/// Shaping verdict: what happened to the statement.
 type ShapingVerdict =
     | ReshapedForIndex
     | PreservedForIndex
     | NoChange
 
-/// C8 reason code: why the verdict was reached.
+/// Reason code: why the verdict was reached.
 type ShapingReason =
     | PredicateCanonicalized
     | OrderByAligned
@@ -37,7 +38,7 @@ type ShapingReason =
     | NoMatchingIndex
     | ExpressionMismatch
 
-/// A single C8 decision trace record.
+/// A single shaping decision trace record.
 type ShapingDecisionRecord = {
     ShapeId: string
     Verdict: ShapingVerdict
@@ -57,19 +58,8 @@ let private coreHasMustNotBoundary (core: SelectCore) : bool =
     || (match core.Source with Some(FromJsonEach _) -> true | _ -> false)
 
 /// Check if any projection contains aggregate or window call.
-let rec private hasAggOrWindow (expr: SqlExpr) : bool =
-    match expr with
-    | AggregateCall _ -> true
-    | WindowCall _ -> true
-    | Binary(l, _, r) -> hasAggOrWindow l || hasAggOrWindow r
-    | Unary(_, e) -> hasAggOrWindow e
-    | FunctionCall(_, args) -> args |> List.exists hasAggOrWindow
-    | Coalesce(exprs) -> exprs |> List.exists hasAggOrWindow
-    | Cast(e, _) -> hasAggOrWindow e
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) -> hasAggOrWindow c || hasAggOrWindow r)
-        || (elseE |> Option.map hasAggOrWindow |> Option.defaultValue false)
-    | _ -> false
+let private hasAggOrWindow (expr: SqlExpr) : bool =
+    hasAggregateCall expr || hasWindowFunction expr
 
 /// Recursively check if any sub-expression matches an index.
 let rec private exprOrOperandMatchesIndex (model: IndexModel) (tableName: string) (expr: SqlExpr) : bool =
@@ -81,7 +71,7 @@ let rec private exprOrOperandMatchesIndex (model: IndexModel) (tableName: string
             || exprOrOperandMatchesIndex model tableName r
         | Cast(inner, _) ->
             // Check the full Cast first (already done above), then don't recurse
-            // into inner to avoid CAST trap false positives
+            // into inner to avoid false-positive cast matches
             false
         | Unary(_, e) -> exprOrOperandMatchesIndex model tableName e
         | _ -> false

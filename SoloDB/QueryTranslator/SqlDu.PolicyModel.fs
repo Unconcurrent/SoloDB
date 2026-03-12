@@ -4,35 +4,35 @@ module SoloDatabase.PolicyModel
 // C9a: Policy Decision Model
 //
 // Types for JSONB rewrite and materialization flatten/preserve
-// policy decisions. Maps to Bellard policy classes and Carmack
-// audit verdicts per the approved vocabulary mapping.
+// policy decisions. Maps internal policy classes to the
+// approved verdict vocabulary.
 //
-// Policy classes (Bellard):
+// Policy classes:
 //   FLATTEN_ALLOWED — rewrite/flatten is legal and behavior-preserving
 //   PRESERVE_REQUIRED — must remain as-is for behavior/contract/plan
-//   OUT_OF_SCOPE_REFUSAL — belongs to later cycle or outside C9 surface
+//   OUT_OF_SCOPE_REFUSAL — belongs outside the current C9 surface
 //
-// Audit verdicts (Carmack M6):
+// Audit verdicts:
 //   JSONB_REWRITTEN — JR-1/2/3 path/chain rewrite executed
 //   MATERIALIZATION_FLATTENED — JR-4 wrapper removal executed
 //   PRESERVED_FOR_BEHAVIOR — preserved due to behavior risk
 //   PRESERVED_FOR_PLAN — preserved due to index visibility risk
 //   NO_CHANGE — no rewrite candidate found or out of scope
 //
-// Reason codes (Carmack M6):
+// Reason codes:
 //   BehaviorRisk, PathSemanticsRisk, MaterializationContract,
 //   IndexVisibilityRisk, NoKnownBenefit, OutOfScope,
 //   JsonJsonbVariantRisk, ConflictingPaths, MustNotBoundary,
 //   DmlPassthrough, UnionAllBoundary
 // ══════════════════════════════════════════════════════════════
 
-/// Bellard policy class: the decision.
+/// Policy class: the decision.
 type PolicyClass =
     | FlattenAllowed
     | PreserveRequired
     | OutOfScopeRefusal
 
-/// Carmack audit verdict: what was done.
+/// Audit verdict: what was done.
 type C9Verdict =
     | JsonbRewritten
     | MaterializationFlattened
@@ -40,7 +40,7 @@ type C9Verdict =
     | PreservedForPlan
     | C9NoChange
 
-/// Carmack reason code: why the verdict was reached.
+/// Reason code: why the verdict was reached.
 type C9Reason =
     | BehaviorRisk
     | PathSemanticsRisk

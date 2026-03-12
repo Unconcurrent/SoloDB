@@ -186,7 +186,7 @@ module internal QueryTranslatorBase =
             index <- index - 1
         handled
 
-    // Legacy string-builder visitor helpers removed in Batch 3:
+    // Legacy string-builder visitor helpers removed:
     // visitNestedArrayPredicateHelper, buildJsonPathFromMemberExpression, formatMemberAccessPath,
     // tryHandleCollectionOrGroupingMemberAccess, tryHandleRootParameterMemberAccess, emitFallbackMemberAccess.
     // All callers now use the DU visitor path (visitDu + SqlDuMinimalEmit.emitExpr).

@@ -3,9 +3,9 @@ module SoloDatabase.MaterializationPolicy
 open SqlDu.Engine.C1.Spec
 
 // ══════════════════════════════════════════════════════════════
-// C9d: Materialization Policy Engine
+// Materialization policy engine.
 //
-// JR-4: Flatten-or-preserve decision for materialization wrappers.
+// Flatten-or-preserve decision for materialization wrappers.
 //
 // Policy:
 //   - DBRef/relation materialization patterns (CASE WHEN + jsonb_set +

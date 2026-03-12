@@ -1,6 +1,7 @@
 module SoloDatabase.PushdownSafety
 
 open SqlDu.Engine.C1.Spec
+open SoloDatabase.ExpressionPredicates
 
 // ══════════════════════════════════════════════════════════════
 // Pushdown-Safety Predicate
@@ -60,65 +61,12 @@ let rec collectColumnRefs (expr: SqlExpr) : (string option * string) list =
     | Literal _ | Parameter _ -> []
 
 /// Check if an expression contains an aggregate call (P-S7).
-let rec hasAggregateCall (expr: SqlExpr) : bool =
-    match expr with
-    | AggregateCall _ -> true
-    | Binary(l, _, r) -> hasAggregateCall l || hasAggregateCall r
-    | Unary(_, e) -> hasAggregateCall e
-    | FunctionCall(_, args) -> args |> List.exists hasAggregateCall
-    | Coalesce(exprs) -> exprs |> List.exists hasAggregateCall
-    | Cast(e, _) -> hasAggregateCall e
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) -> hasAggregateCall c || hasAggregateCall r)
-        || (elseE |> Option.map hasAggregateCall |> Option.defaultValue false)
-    | Between(e, lo, hi) -> hasAggregateCall e || hasAggregateCall lo || hasAggregateCall hi
-    | InList(e, list) -> hasAggregateCall e || (list |> List.exists hasAggregateCall)
-    | JsonSetExpr(t, assignments) ->
-        hasAggregateCall t || (assignments |> List.exists (fun (_, e) -> hasAggregateCall e))
-    | JsonArrayExpr(elems) -> elems |> List.exists hasAggregateCall
-    | JsonObjectExpr(props) -> props |> List.exists (fun (_, v) -> hasAggregateCall v)
-    | _ -> false
+let hasAggregateCall (expr: SqlExpr) : bool =
+    ExpressionPredicates.hasAggregateCall expr
 
 /// Check if an expression contains correlated references (subqueries) (P-S6).
-let rec hasCorrelatedRef (expr: SqlExpr) : bool =
-    match expr with
-    | InSubquery _ | Exists _ | ScalarSubquery _ -> true
-    | Binary(l, _, r) -> hasCorrelatedRef l || hasCorrelatedRef r
-    | Unary(_, e) -> hasCorrelatedRef e
-    | FunctionCall(_, args) -> args |> List.exists hasCorrelatedRef
-    | AggregateCall(_, arg, _, sep) ->
-        (arg |> Option.map hasCorrelatedRef |> Option.defaultValue false)
-        || (sep |> Option.map hasCorrelatedRef |> Option.defaultValue false)
-    | Coalesce(exprs) -> exprs |> List.exists hasCorrelatedRef
-    | Cast(e, _) -> hasCorrelatedRef e
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) -> hasCorrelatedRef c || hasCorrelatedRef r)
-        || (elseE |> Option.map hasCorrelatedRef |> Option.defaultValue false)
-    | Between(e, lo, hi) -> hasCorrelatedRef e || hasCorrelatedRef lo || hasCorrelatedRef hi
-    | InList(e, list) -> hasCorrelatedRef e || (list |> List.exists hasCorrelatedRef)
-    | JsonSetExpr(t, assignments) ->
-        hasCorrelatedRef t || (assignments |> List.exists (fun (_, e) -> hasCorrelatedRef e))
-    | JsonArrayExpr(elems) -> elems |> List.exists hasCorrelatedRef
-    | JsonObjectExpr(props) -> props |> List.exists (fun (_, v) -> hasCorrelatedRef v)
-    | WindowCall(spec) ->
-        (spec.Arguments |> List.exists hasCorrelatedRef)
-        || (spec.PartitionBy |> List.exists hasCorrelatedRef)
-        || (spec.OrderBy |> List.exists (fun (e, _) -> hasCorrelatedRef e))
-    | _ -> false
-
-/// Check if an expression contains a window function call (P-S3).
-let rec private hasWindowFunction (expr: SqlExpr) : bool =
-    match expr with
-    | WindowCall _ -> true
-    | Binary(l, _, r) -> hasWindowFunction l || hasWindowFunction r
-    | Unary(_, e) -> hasWindowFunction e
-    | FunctionCall(_, args) -> args |> List.exists hasWindowFunction
-    | Coalesce(exprs) -> exprs |> List.exists hasWindowFunction
-    | Cast(e, _) -> hasWindowFunction e
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) -> hasWindowFunction c || hasWindowFunction r)
-        || (elseE |> Option.map hasWindowFunction |> Option.defaultValue false)
-    | _ -> false
+let hasCorrelatedRef (expr: SqlExpr) : bool =
+    ExpressionPredicates.hasCorrelatedRef expr
 
 /// Build the set of column names available in the inner query's projections.
 /// Maps alias (or raw column name if unaliased) to the projection expression.

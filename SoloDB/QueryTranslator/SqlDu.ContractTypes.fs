@@ -9,9 +9,9 @@ namespace SqlDu.Engine.C1.Spec
 //
 // LIFECYCLE:
 // - Batch 0.5: types move here for product compilation
-// - Batch 1 (B1b): QueryTranslator constructs these types
-// - Batch 2: Queryable constructs these types
-// - Batch 4: full runtime/emitter/passes join them in SoloDB
+// - QueryTranslator constructs these types
+// - Queryable constructs these types
+// - Full runtime/emitter/pass layers join them in SoloDB
 //
 // NO runtime behavior routes through these types yet.
 // The adapter seam (Batch 0) converts DU values back to strings

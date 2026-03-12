@@ -5,14 +5,14 @@ open SoloDatabase.IndexModel
 open SoloDatabase.JsonbRewritePolicy
 
 // ══════════════════════════════════════════════════════════════
-// JSONB Rewrite Policy Pass Registration (C9 closure capture)
+// JSONB rewrite policy pass registration.
 //
-// Zero C4 changes. Standard pass factory pattern (same as C8).
-// Closure-captures the read-only C8 IndexModel to inform
+// No contract changes. Standard pass factory pattern.
+// Closure-captures the read-only index model to inform
 // index visibility preservation decisions.
 // ══════════════════════════════════════════════════════════════
 
-/// Create a JsonbRewritePolicy pass with C8 index model.
+/// Create a JsonbRewritePolicy pass with an index model.
 let jsonbRewritePolicy (model: IndexModel) : Pass = {
     Name = "JsonbRewritePolicy"
     Transform = fun stmt -> rewriteStatementWithModel model stmt
