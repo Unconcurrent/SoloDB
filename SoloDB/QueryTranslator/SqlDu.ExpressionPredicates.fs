@@ -13,10 +13,13 @@ let rec hasWindowFunction (expr: SqlExpr) : bool =
     | CaseExpr(branches, elseE) ->
         branches |> List.exists (fun (c, r) -> hasWindowFunction c || hasWindowFunction r)
         || (elseE |> Option.map hasWindowFunction |> Option.defaultValue false)
+    | Between(e, lo, hi) -> hasWindowFunction e || hasWindowFunction lo || hasWindowFunction hi
+    | InList(e, list) -> hasWindowFunction e || (list |> List.exists hasWindowFunction)
     | JsonSetExpr(t, assignments) ->
         hasWindowFunction t || assignments |> List.exists (fun (_, e) -> hasWindowFunction e)
     | JsonArrayExpr(elems) -> elems |> List.exists hasWindowFunction
     | JsonObjectExpr(props) -> props |> List.exists (fun (_, v) -> hasWindowFunction v)
+    | UpdateFragment(path, value) -> hasWindowFunction path || hasWindowFunction value
     | AggregateCall _ -> false
     | _ -> false
 
