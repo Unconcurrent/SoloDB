@@ -55,6 +55,7 @@ type internal SupportedLinqMethods =
 | All
 | Any
 | Contains
+| Join
 | Append
 | Concat
 | GroupBy
@@ -358,6 +359,7 @@ module private QueryHelper =
         | "All" -> Some All
         | "Any" -> Some Any
         | "Contains" -> Some Contains
+        | "Join" -> Some Join
         | "Append" -> Some Append
         | "Concat" -> Some Concat
         | "GroupBy" -> Some GroupBy
@@ -588,6 +590,194 @@ module private QueryHelper =
         | :? MethodCallExpression as mcl ->
             mcl
         | _other -> raise (NotSupportedException(unsupportedConcatMessage))
+
+    let private readSoloDBQueryableUntyped (methodArg: Expression) =
+        let unsupportedJoinMessage = "Join is supported only when the inner source is another SoloDB IQueryable. To do this anyway, use AsEnumerable() first."
+
+        let rec isSoloDBQueryableExpression (expr: Expression) =
+            match expr with
+            | :? ConstantExpression as ce ->
+                match ce.Value with
+                | :? IQueryable as q -> q.Provider :? SoloDBQueryProvider
+                | :? IRootQueryable -> true
+                | _ -> false
+            | :? MethodCallExpression as mce when mce.Arguments.Count > 0 ->
+                isSoloDBQueryableExpression mce.Arguments.[0]
+            | _ -> false
+
+        match methodArg with
+        | :? ConstantExpression as ce ->
+            match ce.Value with
+            | :? IQueryable as q when (match q.Provider with | :? SoloDBQueryProvider -> true | _ -> false) ->
+                q.Expression
+            | :? IRootQueryable as rq ->
+                Expression.Constant(rq, typeof<IRootQueryable>)
+            | _ ->
+                raise (NotSupportedException(unsupportedJoinMessage))
+        | :? MethodCallExpression as mcl when isSoloDBQueryableExpression mcl ->
+            raise (NotSupportedException(
+                "Error: Join inner source is not supported.
+Reason: Composed inner SoloDB queries are deferred in this cycle.
+Fix: Join directly against a root SoloDB collection or move the join after AsEnumerable()."))
+        | _ ->
+            raise (NotSupportedException(unsupportedJoinMessage))
+
+    type private JoinSourceBinding =
+    | NoJoinSource
+    | OuterJoinSource
+    | InnerJoinSource
+    | MixedJoinSource
+
+    let private combineJoinSourceBinding left right =
+        match left, right with
+        | MixedJoinSource, _
+        | _, MixedJoinSource -> MixedJoinSource
+        | NoJoinSource, other
+        | other, NoJoinSource -> other
+        | OuterJoinSource, OuterJoinSource -> OuterJoinSource
+        | InnerJoinSource, InnerJoinSource -> InnerJoinSource
+        | _ -> MixedJoinSource
+
+    let private unwrapLambdaExpressionOrThrow (operationName: string) (expr: Expression) =
+        match unwrapQuotedLambda expr with
+        | :? LambdaExpression as lambda -> lambda
+        | _ ->
+            raise (NotSupportedException(
+                $"Error: {operationName} is not supported.
+Reason: Expected a quoted lambda expression.
+Fix: Rewrite the query to use direct lambda arguments or move it after AsEnumerable()."))
+
+    let private isCompositeJoinKeyBody (expr: Expression) =
+        match expr with
+        | :? NewExpression
+        | :? MemberInitExpression
+        | :? NewArrayExpression -> true
+        | _ -> false
+
+    let rec private classifyJoinResultExpression (outerParam: ParameterExpression) (innerParam: ParameterExpression) (expr: Expression) =
+        if isNull expr then
+            NoJoinSource
+        else
+            match expr with
+            | :? ParameterExpression as p ->
+                if Object.ReferenceEquals(p, outerParam) then OuterJoinSource
+                elif Object.ReferenceEquals(p, innerParam) then InnerJoinSource
+                else NoJoinSource
+            | :? MemberExpression as m ->
+                classifyJoinResultExpression outerParam innerParam m.Expression
+            | :? UnaryExpression as u ->
+                classifyJoinResultExpression outerParam innerParam u.Operand
+            | :? BinaryExpression as b ->
+                combineJoinSourceBinding
+                    (classifyJoinResultExpression outerParam innerParam b.Left)
+                    (classifyJoinResultExpression outerParam innerParam b.Right)
+            | :? ConditionalExpression as c ->
+                [ classifyJoinResultExpression outerParam innerParam c.Test
+                  classifyJoinResultExpression outerParam innerParam c.IfTrue
+                  classifyJoinResultExpression outerParam innerParam c.IfFalse ]
+                |> List.reduce combineJoinSourceBinding
+            | :? MethodCallExpression as m ->
+                let objectBinding =
+                    if isNull m.Object then NoJoinSource
+                    else classifyJoinResultExpression outerParam innerParam m.Object
+                m.Arguments
+                |> Seq.map (classifyJoinResultExpression outerParam innerParam)
+                |> Seq.fold combineJoinSourceBinding objectBinding
+            | :? NewExpression as n ->
+                n.Arguments
+                |> Seq.map (classifyJoinResultExpression outerParam innerParam)
+                |> Seq.fold combineJoinSourceBinding NoJoinSource
+            | :? MemberInitExpression as mi ->
+                let start = classifyJoinResultExpression outerParam innerParam mi.NewExpression
+                mi.Bindings
+                |> Seq.fold (fun acc binding ->
+                    match binding with
+                    | :? MemberAssignment as ma ->
+                        combineJoinSourceBinding acc (classifyJoinResultExpression outerParam innerParam ma.Expression)
+                    | _ -> MixedJoinSource) start
+            | :? NewArrayExpression as na ->
+                na.Expressions
+                |> Seq.map (classifyJoinResultExpression outerParam innerParam)
+                |> Seq.fold combineJoinSourceBinding NoJoinSource
+            | :? InvocationExpression as i ->
+                let exprBinding = classifyJoinResultExpression outerParam innerParam i.Expression
+                i.Arguments
+                |> Seq.map (classifyJoinResultExpression outerParam innerParam)
+                |> Seq.fold combineJoinSourceBinding exprBinding
+            | :? ListInitExpression as li ->
+                let start = classifyJoinResultExpression outerParam innerParam li.NewExpression
+                li.Initializers
+                |> Seq.collect (fun init -> init.Arguments)
+                |> Seq.map (classifyJoinResultExpression outerParam innerParam)
+                |> Seq.fold combineJoinSourceBinding start
+            | :? ConstantExpression -> NoJoinSource
+            | _ -> MixedJoinSource
+
+    let private translateJoinSingleSourceExpression (ctx: QueryContext) (tableAlias: string) (vars: Dictionary<string, obj>) (parameter: ParameterExpression option) (expr: Expression) =
+        let lambdaExpr =
+            match parameter with
+            | Some p -> Expression.Lambda(expr, p) :> Expression
+            | None -> Expression.Lambda(expr) :> Expression
+        translateExprDu ctx tableAlias lambdaExpr vars
+
+    let rec private translateJoinResultSelectorExpression
+        (outerCtx: QueryContext)
+        (innerCtx: QueryContext)
+        (vars: Dictionary<string, obj>)
+        (outerAlias: string)
+        (innerAlias: string)
+        (outerParam: ParameterExpression)
+        (innerParam: ParameterExpression)
+        (expr: Expression) =
+
+        match classifyJoinResultExpression outerParam innerParam expr with
+        | NoJoinSource ->
+            translateJoinSingleSourceExpression outerCtx outerAlias vars None expr
+        | OuterJoinSource ->
+            translateJoinSingleSourceExpression outerCtx outerAlias vars (Some outerParam) expr
+        | InnerJoinSource ->
+            translateJoinSingleSourceExpression innerCtx innerAlias vars (Some innerParam) expr
+        | MixedJoinSource ->
+            match expr with
+            | :? NewExpression as n ->
+                let memberNames =
+                    if isNull n.Members then
+                        [| for i in 0 .. n.Arguments.Count - 1 -> $"Item{i + 1}" |]
+                    else
+                        n.Members |> Seq.map (fun m -> m.Name) |> Seq.toArray
+                SqlExpr.JsonObjectExpr(
+                    [ for i in 0 .. n.Arguments.Count - 1 ->
+                        memberNames.[i],
+                        translateJoinResultSelectorExpression outerCtx innerCtx vars outerAlias innerAlias outerParam innerParam n.Arguments.[i] ])
+            | :? MemberInitExpression as mi ->
+                SqlExpr.JsonObjectExpr(
+                    [ for binding in mi.Bindings do
+                        match binding with
+                        | :? MemberAssignment as ma ->
+                            yield ma.Member.Name,
+                                  translateJoinResultSelectorExpression outerCtx innerCtx vars outerAlias innerAlias outerParam innerParam ma.Expression
+                        | _ ->
+                            raise (NotSupportedException(
+                                "Error: Join result selector is not supported.
+Reason: Only direct member assignments are supported for mixed-source object initialization.
+Fix: Use an anonymous object, tuple, or move the projection after AsEnumerable().")) ])
+            | _ ->
+                raise (NotSupportedException(
+                    "Error: Join result selector is not supported.
+Reason: Mixed-source selector expressions are limited to object and tuple construction in this cycle.
+Fix: Project outer and inner members into an anonymous object or move the projection after AsEnumerable()."))
+
+    let private tryGetJoinRootSourceTable (expression: Expression) =
+        let rec loop (expr: Expression) =
+            match expr with
+            | :? ConstantExpression as ce ->
+                match ce.Value with
+                | :? IRootQueryable as rq -> Some rq.SourceTableName
+                | _ -> None
+            | :? MethodCallExpression as mce when mce.Arguments.Count > 0 ->
+                loop mce.Arguments.[0]
+            | _ -> None
+        loop expression
 
     let private addUnionAll (queries: SQLSubquery ResizeArray) (fn: string -> Dictionary<string, obj> -> SelectCore) =
         match queries.Last() with
@@ -1430,6 +1620,69 @@ module private QueryHelper =
                         | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                     )
                 
+                | Join ->
+                    match m.Expressions.Length with
+                    | 5 ->
+                        raise (NotSupportedException(
+                            "Error: Join comparer overload is not supported.
+Reason: SoloDB only supports SQL-translatable equality without custom comparers in this cycle.
+Fix: Remove the comparer or move the join after AsEnumerable()."))
+                    | 4 ->
+                        let innerExpression = readSoloDBQueryableUntyped m.Expressions.[0]
+                        let outerKeySelector = unwrapLambdaExpressionOrThrow "Join outer key selector" m.Expressions.[1]
+                        let innerKeySelector = unwrapLambdaExpressionOrThrow "Join inner key selector" m.Expressions.[2]
+                        let resultSelector = unwrapLambdaExpressionOrThrow "Join result selector" m.Expressions.[3]
+
+                        if isCompositeJoinKeyBody outerKeySelector.Body || isCompositeJoinKeyBody innerKeySelector.Body then
+                            raise (NotSupportedException(
+                                "Error: Join composite key selectors are not supported.
+Reason: Anonymous-type and composite key equality lowering is deferred in this cycle.
+Fix: Join on a single scalar key or move the join after AsEnumerable()."))
+
+                        let innerRootTable =
+                            match tryGetJoinRootSourceTable innerExpression with
+                            | Some tableName -> tableName
+                            | None ->
+                                raise (NotSupportedException(
+                                    "Error: Join inner source is not supported.
+Reason: The inner query does not resolve to a SoloDB root collection.
+Fix: Use another SoloDB IQueryable rooted in a collection or move the join after AsEnumerable()."))
+
+                        addComplexFinal statements (fun ctx ->
+                            let outerAlias = "o"
+                            let innerAlias = "j"
+                            let innerCtx = QueryContext.SingleSource(innerRootTable)
+                            let outerKeyExpr =
+                                translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars (Some outerKeySelector.Parameters.[0]) outerKeySelector.Body
+                            let innerKeyExpr =
+                                translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body
+                            let resultExpr =
+                                translateJoinResultSelectorExpression
+                                    sourceCtx
+                                    innerCtx
+                                    ctx.Vars
+                                    outerAlias
+                                    innerAlias
+                                    resultSelector.Parameters.[0]
+                                    resultSelector.Parameters.[1]
+                                    resultSelector.Body
+
+                            let core =
+                                { mkCore
+                                    [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some outerAlias, "Id") }
+                                     { Alias = Some "Value"; Expr = resultExpr }]
+                                    (Some (DerivedTable(ctx.Inner, outerAlias)))
+                                  with
+                                      Joins =
+                                          [{ Kind = JoinKind.Inner
+                                             Source = BaseTable(innerRootTable, Some innerAlias)
+                                             On = Some (SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr)) }] }
+                            wrapCore core
+                        )
+                    | other ->
+                        raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
+                
+                
                 | Single | SingleOrDefault
                 | First | FirstOrDefault ->
                     match m.Value, m.Expressions with
@@ -1773,6 +2026,7 @@ module private QueryHelper =
             | DistinctBy
             | Where
             | Select
+            | Join
             | SelectMany
             | ThenBy
             | ThenByDescending
