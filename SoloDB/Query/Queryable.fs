@@ -779,6 +779,129 @@ Fix: Project outer and inner members into an anonymous object or move the projec
             | _ -> None
         loop expression
 
+    type private GroupJoinCarrierMembers = {
+        OuterMember: MemberInfo
+        GroupMember: MemberInfo
+    }
+
+    let private tryExtractGroupJoinCarrierMembers (lambda: LambdaExpression) =
+        if lambda.Parameters.Count <> 2 then
+            None
+        else
+            let outerParam = lambda.Parameters.[0]
+            let groupParam = lambda.Parameters.[1]
+            let mutable outerMember: MemberInfo option = None
+            let mutable groupMember: MemberInfo option = None
+
+            let recordBinding (memberInfo: MemberInfo) (expr: Expression) =
+                if Object.ReferenceEquals(expr, outerParam) then
+                    outerMember <- Some memberInfo
+                    true
+                elif Object.ReferenceEquals(expr, groupParam) then
+                    groupMember <- Some memberInfo
+                    true
+                else
+                    false
+
+            let exactlyTwoBindings count ok =
+                count = 2 && ok && outerMember.IsSome && groupMember.IsSome
+
+            match lambda.Body with
+            | :? NewExpression as n when not (isNull n.Members) ->
+                let ok =
+                    [ for i in 0 .. n.Arguments.Count - 1 -> recordBinding n.Members.[i] n.Arguments.[i] ]
+                    |> List.forall id
+                if exactlyTwoBindings n.Arguments.Count ok then
+                    Some { OuterMember = outerMember.Value; GroupMember = groupMember.Value }
+                else
+                    None
+            | :? MemberInitExpression as mi ->
+                let ok =
+                    mi.Bindings
+                    |> Seq.map (function
+                        | :? MemberAssignment as ma -> recordBinding ma.Member ma.Expression
+                        | _ -> false)
+                    |> Seq.forall id
+                if exactlyTwoBindings mi.Bindings.Count ok then
+                    Some { OuterMember = outerMember.Value; GroupMember = groupMember.Value }
+                else
+                    None
+            | _ -> None
+
+    let private tryMatchGroupCarrierDefaultIfEmpty (groupMember: MemberInfo) (lambda: LambdaExpression) =
+        if lambda.Parameters.Count <> 1 then
+            false
+        else
+            match lambda.Body with
+            | :? MethodCallExpression as mce when mce.Method.Name = "DefaultIfEmpty" && mce.Arguments.Count = 1 ->
+                match mce.Arguments.[0] with
+                | :? MemberExpression as me ->
+                    Object.ReferenceEquals(me.Expression, lambda.Parameters.[0]) && me.Member = groupMember
+                | _ -> false
+            | _ -> false
+
+    type private LeftJoinCompositeResultRewriter
+        (carrierParam: ParameterExpression, outerMember: MemberInfo, groupMember: MemberInfo, outerParam: ParameterExpression) =
+        inherit ExpressionVisitor()
+
+        let mutable touchesGroup = false
+        let mutable touchesCarrier = false
+
+        member _.TouchesGroup = touchesGroup
+        member _.TouchesCarrier = touchesCarrier
+
+        override _.VisitParameter(node: ParameterExpression) =
+            if Object.ReferenceEquals(node, carrierParam) then
+                touchesCarrier <- true
+            base.VisitParameter(node)
+
+        override _.VisitMember(node: MemberExpression) =
+            if not (isNull node.Expression) && Object.ReferenceEquals(node.Expression, carrierParam) then
+                if node.Member = outerMember then
+                    outerParam :> Expression
+                elif node.Member = groupMember then
+                    touchesGroup <- true
+                    node :> Expression
+                else
+                    touchesCarrier <- true
+                    node :> Expression
+            else
+                base.VisitMember(node)
+
+    type private CanonicalLeftJoinComposite = {
+        InnerExpression: Expression
+        OuterKeySelector: LambdaExpression
+        InnerKeySelector: LambdaExpression
+        ResultSelector: LambdaExpression
+        CarrierOuterMember: MemberInfo
+        CarrierGroupMember: MemberInfo
+    }
+
+    let private tryMatchCanonicalLeftJoinComposite (expressions: Expression array) =
+        match expressions with
+        | [| (:? MethodCallExpression as groupJoin); collectionSelectorExpr; resultSelectorExpr |] when groupJoin.Method.Name = "GroupJoin" ->
+            if groupJoin.Arguments.Count <> 5 then
+                None
+            else
+                let outerKeySelector = unwrapLambdaExpressionOrThrow "GroupJoin outer key selector" groupJoin.Arguments.[2]
+                let innerKeySelector = unwrapLambdaExpressionOrThrow "GroupJoin inner key selector" groupJoin.Arguments.[3]
+                let groupJoinResultSelector = unwrapLambdaExpressionOrThrow "GroupJoin result selector" groupJoin.Arguments.[4]
+                let collectionSelector = unwrapLambdaExpressionOrThrow "GroupJoin SelectMany collection selector" collectionSelectorExpr
+                let resultSelector = unwrapLambdaExpressionOrThrow "GroupJoin SelectMany result selector" resultSelectorExpr
+
+                match tryExtractGroupJoinCarrierMembers groupJoinResultSelector with
+                | Some carrierMembers when tryMatchGroupCarrierDefaultIfEmpty carrierMembers.GroupMember collectionSelector ->
+                    Some {
+                        InnerExpression = groupJoin.Arguments.[1]
+                        OuterKeySelector = outerKeySelector
+                        InnerKeySelector = innerKeySelector
+                        ResultSelector = resultSelector
+                        CarrierOuterMember = carrierMembers.OuterMember
+                        CarrierGroupMember = carrierMembers.GroupMember
+                    }
+                | _ -> None
+        | _ -> None
+
     let private addUnionAll (queries: SQLSubquery ResizeArray) (fn: string -> Dictionary<string, obj> -> SelectCore) =
         match queries.Last() with
         | Simple last when last.Orders.Count = 0 ->
@@ -818,6 +941,16 @@ Fix: Project outer and inner members into an anonymous object or move the projec
             match expression with
             | :? MethodCallExpression as mce ->
                 match parseSupportedMethod mce.Method.Name with
+                | Some SelectMany when mce.Arguments.Count = 3 ->
+                    match mce.Arguments.[0] with
+                    | :? MethodCallExpression as groupJoin when groupJoin.Method.Name = "GroupJoin" ->
+                        expression <- groupJoin.Arguments.[0]
+                        let exprs = [| groupJoin :> Expression; mce.Arguments.[1]; mce.Arguments.[2] |]
+                        Method {| Value = SelectMany; Expressions = exprs; OriginalMethod = mce.Method |}
+                    | _ ->
+                        expression <- mce.Arguments.[0]
+                        let exprs = Array.init (mce.Arguments.Count - 1) (fun i -> mce.Arguments.[i + 1])
+                        Method {| Value = SelectMany; Expressions = exprs; OriginalMethod = mce.Method |}
                 | Some value ->
                     expression <- mce.Arguments.[0]
                     let exprs = Array.init (mce.Arguments.Count - 1) (fun i -> mce.Arguments.[i + 1])
@@ -1581,45 +1714,116 @@ Fix: Project outer and inner members into an anonymous object or move the projec
 
 
                 | SelectMany ->
-                    // Edge case 15: SelectMany with json_each — JOIN json_each on inner source
-                    addComplexFinal statements (fun ctx ->
-                        match m.Expressions.Length with
-                        | 1 ->
-                            let generics = GenericMethodArgCache.Get m.OriginalMethod
-                            if generics.[1] (*output*) = typeof<byte> then
-                                raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit the SQLite context with .AsEnumerable().")
-                            // Use a stable inner source alias based on the inner select structure
-                            let innerSourceName = Utils.getVarName (hash ctx.Inner.Body % 10000 |> abs)
-                            // Build the json_each join source expression
-                            let jsonEachExpr =
-                                match m.Expressions.[0] with
-                                | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
-                                    let lambda = ue.Operand :?> LambdaExpression
-                                    match lambda.Body with
-                                    | :? MemberExpression as me ->
-                                        SqlExpr.FunctionCall("jsonb_extract", [
-                                            SqlExpr.Column(Some innerSourceName, "Value")
-                                            SqlExpr.Literal(SqlLiteral.String ("$." + me.Member.Name))
-                                        ])
-                                    | :? ParameterExpression ->
-                                        SqlExpr.Column(Some innerSourceName, "Value")
-                                    | _ ->
-                                        raise (NotSupportedException(
-                                            "Error: Unsupported SelectMany selector structure.\nReason: The selector cannot be translated to SQL.\nFix: Simplify the selector or move SelectMany after AsEnumerable()."))
-                                | _ ->
-                                    raise (NotSupportedException(
-                                        "Error: Invalid SelectMany structure.\nReason: The SelectMany arguments are not a supported query pattern.\nFix: Rewrite the query or move SelectMany after AsEnumerable()."))
-                            // SELECT innerSource.Id AS Id, json_each.Value as Value FROM (inner) AS innerSource JOIN json_each(expr)
+                    match tryMatchCanonicalLeftJoinComposite m.Expressions with
+                    | Some composite ->
+                        if composite.ResultSelector.Parameters.Count <> 2 then
+                            raise (NotSupportedException(
+                                "Error: GroupJoin SelectMany result selector is not supported.
+Reason: The canonical left-join composite requires a two-parameter result selector.
+Fix: Use SelectMany with the standard (carrier, inner) result selector or move the query after AsEnumerable()."))
+
+                        if isCompositeJoinKeyBody composite.OuterKeySelector.Body || isCompositeJoinKeyBody composite.InnerKeySelector.Body then
+                            raise (NotSupportedException(
+                                "Error: Left-join composite key selectors are not supported.
+Reason: Anonymous-type and composite key equality lowering is deferred in this cycle.
+Fix: Join on a single scalar key or move the query after AsEnumerable()."))
+
+                        let innerExpression = readSoloDBQueryableUntyped composite.InnerExpression
+                        let innerRootTable =
+                            match tryGetJoinRootSourceTable innerExpression with
+                            | Some tableName -> tableName
+                            | None ->
+                                raise (NotSupportedException(
+                                    "Error: Left-join inner source is not supported.
+Reason: The inner query does not resolve to a SoloDB root collection.
+Fix: Use another SoloDB IQueryable rooted in a collection or move the query after AsEnumerable()."))
+
+                        let outerResultParam = composite.ResultSelector.Parameters.[0]
+                        let innerResultParam = composite.ResultSelector.Parameters.[1]
+                        let rewriter = LeftJoinCompositeResultRewriter(outerResultParam, composite.CarrierOuterMember, composite.CarrierGroupMember, composite.OuterKeySelector.Parameters.[0])
+                        let rewrittenResultBody = rewriter.Visit(composite.ResultSelector.Body)
+
+                        if rewriter.TouchesGroup || rewriter.TouchesCarrier then
+                            raise (NotSupportedException(
+                                "Error: Left-join result selector is not supported.
+Reason: Only projections over the outer row and the matched inner row are supported; grouped-sequence and carrier-shaped projections are deferred in this cycle.
+Fix: Project scalar members from the outer row and the DefaultIfEmpty inner row, or move the query after AsEnumerable()."))
+
+                        addComplexFinal statements (fun ctx ->
+                            let outerAlias = "o"
+                            let innerAlias = "j"
+                            let innerCtx = QueryContext.SingleSource(innerRootTable)
+                            let outerKeyExpr =
+                                translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars (Some composite.OuterKeySelector.Parameters.[0]) composite.OuterKeySelector.Body
+                            let innerKeyExpr =
+                                translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some composite.InnerKeySelector.Parameters.[0]) composite.InnerKeySelector.Body
+                            let resultExpr =
+                                translateJoinResultSelectorExpression
+                                    sourceCtx
+                                    innerCtx
+                                    ctx.Vars
+                                    outerAlias
+                                    innerAlias
+                                    composite.OuterKeySelector.Parameters.[0]
+                                    innerResultParam
+                                    rewrittenResultBody
+
                             let core =
                                 { mkCore
-                                    [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some innerSourceName, "Id") }
-                                     { Alias = Some "Value"; Expr = SqlExpr.Column(Some "json_each", "Value") }]
-                                    (Some (DerivedTable(ctx.Inner, innerSourceName)))
-                                  with Joins = [{ Kind = JoinKind.Inner; Source = FromJsonEach(jsonEachExpr, None); On = None }] }
+                                    [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some outerAlias, "Id") }
+                                     { Alias = Some "Value"; Expr = resultExpr }]
+                                    (Some (DerivedTable(ctx.Inner, outerAlias)))
+                                  with
+                                      Joins =
+                                          [{ Kind = JoinKind.Left
+                                             Source = BaseTable(innerRootTable, Some innerAlias)
+                                             On = Some (SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr)) }] }
                             wrapCore core
-                        | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
-                    )
-                
+                        )
+                    | None ->
+                        // Edge case 15: SelectMany with json_each — JOIN json_each on inner source
+                        addComplexFinal statements (fun ctx ->
+                            match m.Expressions.Length with
+                            | 1 ->
+                                let generics = GenericMethodArgCache.Get m.OriginalMethod
+                                if generics.[1] (*output*) = typeof<byte> then
+                                    raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit the SQLite context with .AsEnumerable().")
+                                // Use a stable inner source alias based on the inner select structure
+                                let innerSourceName = Utils.getVarName (hash ctx.Inner.Body % 10000 |> abs)
+                                // Build the json_each join source expression
+                                let jsonEachExpr =
+                                    match m.Expressions.[0] with
+                                    | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
+                                        let lambda = ue.Operand :?> LambdaExpression
+                                        match lambda.Body with
+                                        | :? MemberExpression as me ->
+                                            SqlExpr.FunctionCall("jsonb_extract", [
+                                                SqlExpr.Column(Some innerSourceName, "Value")
+                                                SqlExpr.Literal(SqlLiteral.String ("$." + me.Member.Name))
+                                            ])
+                                        | :? ParameterExpression ->
+                                            SqlExpr.Column(Some innerSourceName, "Value")
+                                        | _ ->
+                                            raise (NotSupportedException(
+                                                "Error: Unsupported SelectMany selector structure.
+Reason: The selector cannot be translated to SQL.
+Fix: Simplify the selector or move SelectMany after AsEnumerable()."))
+                                    | _ ->
+                                        raise (NotSupportedException(
+                                            "Error: Invalid SelectMany structure.
+Reason: The SelectMany arguments are not a supported query pattern.
+Fix: Rewrite the query or move SelectMany after AsEnumerable()."))
+                                // SELECT innerSource.Id AS Id, json_each.Value as Value FROM (inner) AS innerSource JOIN json_each(expr)
+                                let core =
+                                    { mkCore
+                                        [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some innerSourceName, "Id") }
+                                         { Alias = Some "Value"; Expr = SqlExpr.Column(Some "json_each", "Value") }]
+                                        (Some (DerivedTable(ctx.Inner, innerSourceName)))
+                                      with Joins = [{ Kind = JoinKind.Inner; Source = FromJsonEach(jsonEachExpr, None); On = None }] }
+                                wrapCore core
+                            | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
+                        )
+
                 | Join ->
                     match m.Expressions.Length with
                     | 5 ->
