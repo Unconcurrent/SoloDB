@@ -153,7 +153,21 @@ module internal HelperSchema =
     let private ensureDeclaredIndexesFieldsLocal<'T> (name: string) (conn: SqliteConnection) =
         for (pi, indexed) in getIndexesFieldsShared<'T>() do
             let isSoloId = not (isNull (pi.GetCustomAttribute<SoloDatabase.Attributes.SoloId>(true)))
-            if isSoloId then
+            let isGeneratedPrimaryId = isSoloId && pi.Name = "Id"
+            let usesPhysicalIdColumn = isGeneratedPrimaryId && pi.PropertyType = typeof<int64>
+            if usesPhysicalIdColumn then
+                ()
+            elif isGeneratedPrimaryId then
+                let whereSQL = "(jsonb_extract(Value, '$.Id'))"
+                let expressionStr = whereSQL.ToCharArray() |> Seq.filter (fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""
+                let indexName = $"{name}_index_{expressionStr}"
+                let createSql =
+                    if indexed.Unique then
+                        $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON \"{name}\"{whereSQL}"
+                    else
+                        $"CREATE INDEX IF NOT EXISTS {indexName} ON \"{name}\"{whereSQL}"
+                conn.Execute(createSql) |> ignore
+            elif isSoloId then
                 let indexName, whereSQL = getIndexWhereAndNameForPropertyShared name typeof<'T> pi
                 let createSql =
                     if indexed.Unique then
