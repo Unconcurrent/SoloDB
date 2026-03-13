@@ -207,13 +207,26 @@ module internal QueryTranslatorBaseHelpers =
         if isPrimitiveSQLiteType targetType then
             SqlExpr.Binary(targetExpr, BinaryOperator.Eq, qb.AllocateParamExpr knownObject)
         else
-            let json = JsonSerializator.JsonValue.Serialize knownObject
+            let json =
+                match knownObject with
+                | :? JsonSerializator.JsonValue as json -> json
+                | _ -> JsonSerializator.JsonValue.Serialize knownObject
 
             let rec buildConjunction (comparisons: SqlExpr list) : SqlExpr =
                 match comparisons with
                 | [] -> SqlExpr.Literal(SqlLiteral.Boolean true)
                 | [single] -> single
                 | head :: tail -> SqlExpr.Binary(head, BinaryOperator.And, buildConjunction tail)
+
+            let appendObjectPathSegment (path: string) (key: string) =
+                let key = key.Replace("\000", "")
+                let needsQuoted =
+                    key |> Seq.exists (fun c -> not (Char.IsLetterOrDigit c || c = '_' || c = '$'))
+
+                if needsQuoted then
+                    if path = "$" then sprintf "$.\"%s\"" key else sprintf "%s.\"%s\"" path key
+                else
+                    if path = "$" then sprintf "$.%s" key else sprintf "%s.%s" path key
 
             let rec compareJsonDu (path: string) (json: JsonSerializator.JsonValue) : SqlExpr list =
                 let extract = SqlExpr.FunctionCall("jsonb_extract", [targetExpr; SqlExpr.Literal(SqlLiteral.String path)])
@@ -228,8 +241,7 @@ module internal QueryTranslatorBaseHelpers =
                     [SqlExpr.Binary(extract, BinaryOperator.Eq, qb.AllocateParamExpr s)]
                 | JsonSerializator.JsonValue.Object dict ->
                     [for KeyValue(k, v) in dict do
-                        // Do NOT escapeSQLiteString here — the emitter escapes SqlLiteral.String on output.
-                        let newPath = if path = "$" then $"$.{k}" else $"{path}.{k}"
+                        let newPath = appendObjectPathSegment path k
                         yield! compareJsonDu newPath v]
                 | JsonSerializator.JsonValue.List items ->
                     let lengthCheck =
@@ -246,7 +258,7 @@ module internal QueryTranslatorBaseHelpers =
                 match json with
                 | JsonSerializator.JsonValue.Object d ->
                     [for KeyValue(k, v) in d do
-                        yield! compareJsonDu $"$.{k}" v]
+                        yield! compareJsonDu (appendObjectPathSegment "$" k) v]
                 | _ -> compareJsonDu "$" json
 
             buildConjunction comparisons
