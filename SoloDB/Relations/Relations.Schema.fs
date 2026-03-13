@@ -540,7 +540,7 @@ SELECT CASE WHEN EXISTS (
       AND tbl_name = @tableName
       AND sql IS NOT NULL
       AND instr(lower(sql), 'create unique index') > 0
-      AND instr(replace(replace(replace(lower(sql), ' ', ''), char(10), ''), char(9), ''), @needle) > 0
+      AND instr(replace(replace(replace(replace(lower(sql), ' ', ''), char(10), ''), char(9), ''), '"', ''), @needle) > 0
 ) THEN 1 ELSE 0 END;
 """,
                 {| tableName = descriptor.TargetTable; needle = needle |}) = 1L

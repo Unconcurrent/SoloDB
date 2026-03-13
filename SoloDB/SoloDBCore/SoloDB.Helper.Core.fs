@@ -286,9 +286,19 @@ module internal Helper =
     /// </summary>
     let internal ensureDeclaredIndexesFields<'T> (name: string) (conn: SqliteConnection) =
         for (pi, indexed) in getIndexesFields<'T>() do
-            let ensureIndexesFn = if indexed.Unique then ensureUniqueAndIndex else ensureIndex
-            let _code = ensureIndexesFn name conn (ExpressionHelper.get<obj, obj>(fun row -> row.Dyn<obj>(pi.Name)))
-            ()
+            let isSoloId = not (isNull (pi.GetCustomAttribute<SoloDatabase.Attributes.SoloId>(true)))
+            if isSoloId then
+                let indexName, whereSQL = HelperSchema.getIndexWhereAndNameForPropertyShared name typeof<'T> pi
+                let indexSQL =
+                    if indexed.Unique then
+                        $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON \"{name}\"{whereSQL}"
+                    else
+                        $"CREATE INDEX IF NOT EXISTS {indexName} ON \"{name}\"{whereSQL}"
+                conn.Execute(indexSQL) |> ignore
+            else
+                let ensureIndexesFn = if indexed.Unique then ensureUniqueAndIndex else ensureIndex
+                let _code = ensureIndexesFn name conn (ExpressionHelper.get<obj, obj>(fun row -> row.Dyn<obj>(pi.Name)))
+                ()
 
     let internal getSQLForTriggersForTable (name: string) =
         HelperSchema.getSQLForTriggersForTable name

@@ -9,13 +9,19 @@ open Utils
 open SQLiteTools
 
 module internal HelperSchema =
+    let private tryGetIndexedAttribute (p: PropertyInfo) =
+        p.GetCustomAttributes(true)
+        |> Array.tryPick (function
+            | :? SoloDatabase.Attributes.IndexedAttribute as a -> Some a
+            | _ -> None)
+
     let internal getIndexesFieldsShared<'a>() =
         typeof<'a>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
         |> Array.choose(
             fun p ->
-                match p.GetCustomAttribute<SoloDatabase.Attributes.IndexedAttribute>(true) with
-                | a when isNull a -> None
-                | a -> Some(p, a))
+                match tryGetIndexedAttribute p with
+                | None -> None
+                | Some a -> Some(p, a))
 
     /// Recursively checks whether an expression tree references a relation type
     /// (DBRefMany member access or DBRef.Value navigation) that cannot produce a
@@ -103,11 +109,62 @@ module internal HelperSchema =
         let indexSQL = $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
         conn.Execute(indexSQL) |> ignore
 
+    let private buildPropertyLambda (entityType: Type) (pi: PropertyInfo) =
+        let parameter = Expression.Parameter(entityType, "row")
+        let body = Expression.Property(parameter, pi)
+        Expression.Lambda(body, parameter)
+
+    let internal getIndexWhereAndNameForPropertyShared (name: string) (entityType: Type) (pi: PropertyInfo) =
+        let expression = buildPropertyLambda entityType pi
+
+        let isDirectIdAccess =
+            match expression.Body with
+            | :? MemberExpression as me ->
+                me.Member.Name = "Id" &&
+                match me.Expression with
+                | :? ParameterExpression -> true
+                | _ -> false
+            | _ -> false
+
+        if isDirectIdAccess then raise (ArgumentException "The Id of a collection is always stored in an index.")
+
+        if containsRelationSubExpression expression.Body then
+            raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
+
+        let whereSQL, variables = QueryTranslator.translate name expression
+        let whereSQL = whereSQL.Replace($"\"{name}\".", "")
+        if variables.Count > 0 then raise (ArgumentException "Cannot have variables in index.")
+        if whereSQL.Contains "SELECT" then
+            raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
+
+        let whereSQL =
+            match expression.Body with
+            | :? NewExpression as ne when isTuple ne.Type ->
+                whereSQL.Substring("jsonb_array".Length)
+            | :? MethodCallExpression
+            | :? MemberExpression ->
+                $"({whereSQL})"
+            | other -> raise (ArgumentException (sprintf "Cannot index an expression with type: %s" (other.GetType().FullName)))
+
+        let expressionStr = whereSQL.ToCharArray() |> Seq.filter (fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""
+        let indexName = $"{name}_index_{expressionStr}"
+        indexName, whereSQL
+
     let private ensureDeclaredIndexesFieldsLocal<'T> (name: string) (conn: SqliteConnection) =
         for (pi, indexed) in getIndexesFieldsShared<'T>() do
-            let ensureIndexesFn = if indexed.Unique then ensureUniqueAndIndexLocal else ensureIndexLocal
-            let _code = ensureIndexesFn name conn (ExpressionHelper.get<obj, obj>(fun row -> row.Dyn<obj>(pi.Name)))
-            ()
+            let isSoloId = not (isNull (pi.GetCustomAttribute<SoloDatabase.Attributes.SoloId>(true)))
+            if isSoloId then
+                let indexName, whereSQL = getIndexWhereAndNameForPropertyShared name typeof<'T> pi
+                let createSql =
+                    if indexed.Unique then
+                        $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON \"{name}\"{whereSQL}"
+                    else
+                        $"CREATE INDEX IF NOT EXISTS {indexName} ON \"{name}\"{whereSQL}"
+                conn.Execute(createSql) |> ignore
+            else
+                let ensureIndexesFn = if indexed.Unique then ensureUniqueAndIndexLocal else ensureIndexLocal
+                let _code = ensureIndexesFn name conn (ExpressionHelper.get<obj, obj>(fun row -> row.Dyn<obj>(pi.Name)))
+                ()
 
     /// <summary>
     /// Returns the SQL that creates the event triggers for a collection table.
