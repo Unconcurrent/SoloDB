@@ -227,6 +227,7 @@ module private QueryHelper =
                 PushdownPass.predicatePushdown
                 ProjectionPass.projectionPushdown
                 IndexPlanShapingPass.indexPlanShaping indexModel
+                JsonbRewritePolicyPass.jsonbRewritePolicy indexModel
             ] (SelectStmt sel)
         match pipelineResult.Output with
         | SelectStmt outSel -> SqlDuMinimalEmit.emitSelect qb outSel
