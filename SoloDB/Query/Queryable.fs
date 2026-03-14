@@ -245,6 +245,27 @@ module private QueryHelper =
     /// Build a DerivedTable source from a SqlSelect with alias "o".
     let private derivedO sel = DerivedTable(sel, "o")
 
+    let private collectIndexModelTableNames (sourceTableName: string) (select: SqlSelect) : string list =
+        let tableNames = HashSet<string>(StringComparer.Ordinal)
+        tableNames.Add(sourceTableName) |> ignore
+
+        let addJoinSource = function
+            | BaseTable(name, _) ->
+                tableNames.Add(name) |> ignore
+            | _ -> ()
+
+        let addCoreJoinTables (core: SelectCore) =
+            core.Joins |> List.iter (fun join -> addJoinSource join.Source)
+
+        match select.Body with
+        | SingleSelect core ->
+            addCoreJoinTables core
+        | UnionAllSelect(head, tail) ->
+            addCoreJoinTables head
+            tail |> List.iter addCoreJoinTables
+
+        tableNames |> Seq.toList
+
     let private unwrapQuotedLambda (expr: Expression) =
         match expr with
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote -> ue.Operand
@@ -2439,7 +2460,8 @@ Fix: Use another SoloDB IQueryable rooted in a collection or move the join after
 
         // Emit to string via the minimal emitter.
         let sb = StringBuilder(256)
-        let indexModel = SoloDatabase.IndexModel.loadModelForTables metadataConnection [source.Name]
+        let modelTableNames = collectIndexModelTableNames source.Name outerSelect
+        let indexModel = SoloDatabase.IndexModel.loadModelForTables metadataConnection modelTableNames
         // Edge case 18: ExplainQueryPlan prefix
         if isExplainQueryPlan then
             sb.Append "EXPLAIN QUERY PLAN " |> ignore
