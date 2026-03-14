@@ -93,8 +93,21 @@ let predicateRefsAvailable (predicate: SqlExpr) (innerColumns: Set<string>) (der
 let isInnerPushdownSafe (innerSel: SqlSelect) : bool =
     match innerSel.Body with
     | SingleSelect innerCore ->
+        let conservativeSourceOk =
+            match innerCore.Source with
+            | Some(BaseTable _) -> true
+            | _ -> false
+        let conservativeProjectionOk =
+            innerCore.Projections
+            |> List.forall (fun p ->
+                match p.Expr with
+                | Column(Some _, _)
+                | JsonExtractExpr(Some _, _, _) -> true
+                | _ -> false)
+        conservativeSourceOk
+        && conservativeProjectionOk
         // P-S2: No GROUP BY
-        innerCore.GroupBy.IsEmpty
+        && innerCore.GroupBy.IsEmpty
         // P-S3: No window functions in projections
         && not (innerCore.Projections |> List.exists (fun p -> hasWindowFunction p.Expr))
         // P-S4: No LIMIT/OFFSET

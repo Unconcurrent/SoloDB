@@ -221,7 +221,12 @@ module private QueryHelper =
             DuHandlerResult = ref ValueNone
         }
         let pipelineResult =
-            PassRunner.runPipeline [ConstantFoldPass.constantFold; FlattenPass.subqueryFlatten] (SelectStmt sel)
+            PassRunner.runPipeline [
+                ConstantFoldPass.constantFold
+                FlattenPass.subqueryFlatten
+                PushdownPass.predicatePushdown
+                ProjectionPass.projectionPushdown
+            ] (SelectStmt sel)
         match pipelineResult.Output with
         | SelectStmt outSel -> SqlDuMinimalEmit.emitSelect qb outSel
         | _ -> failwith "R15 invariant violation: expected SelectStmt from identity pipeline"

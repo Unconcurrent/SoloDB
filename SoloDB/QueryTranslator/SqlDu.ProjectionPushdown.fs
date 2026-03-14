@@ -32,6 +32,31 @@ let private hasOuterEvaluationBoundary (outer: SelectCore) : bool =
     || outer.Projections |> List.exists (fun p -> hasFunctionCall p.Expr && hasAggregateCall p.Expr)
     || outer.Projections |> List.exists (fun p -> hasWindowFunction p.Expr)
 
+let private isSimpleProjectionExpr (expr: SqlExpr) : bool =
+    match expr with
+    | Column(Some _, _)
+    | JsonExtractExpr(Some _, _, _) -> true
+    | _ -> false
+
+let private isConservativeOuterWrapper (outer: SelectCore) : bool =
+    outer.Where.IsNone
+    && outer.GroupBy.IsEmpty
+    && outer.Having.IsNone
+    && not outer.Distinct
+    && outer.OrderBy.IsEmpty
+    && outer.Limit.IsNone
+    && outer.Offset.IsNone
+    && outer.Joins.IsEmpty
+    && (outer.Projections |> List.forall (fun p -> isSimpleProjectionExpr p.Expr))
+
+let private hasBaseTableInnerSource (innerSel: SqlSelect) : bool =
+    match innerSel.Body with
+    | SingleSelect innerCore ->
+        match innerCore.Source with
+        | Some(BaseTable _) -> true
+        | _ -> false
+    | UnionAllSelect _ -> false
+
 /// Narrow inner projections to only those that are live.
 /// Returns None if no narrowing is possible or allowed.
 let private narrowProjections
@@ -40,6 +65,8 @@ let private narrowProjections
     (derivedAlias: string) : SelectCore option =
     if not (isProjectionPushdownAllowed innerSel) then None
     elif hasOuterEvaluationBoundary outer then None
+    elif not (isConservativeOuterWrapper outer) then None
+    elif not (hasBaseTableInnerSource innerSel) then None
     else
         match innerSel.Body with
         | SingleSelect innerCore ->
