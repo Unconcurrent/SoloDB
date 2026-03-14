@@ -3,7 +3,7 @@ module SoloDatabase.IndexPlanShaping
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.IndexModel
 open SoloDatabase.ExpressionMatcher
-open SoloDatabase.ExpressionPredicates
+open SoloDatabase.SelectCoreBoundary
 
 // ══════════════════════════════════════════════════════════════
 // Index plan shaping transform.
@@ -35,26 +35,6 @@ let private resolveTableName (source: TableSource) : string option =
     | BaseTable(name, _) -> Some name
     | DerivedTable _ -> None
     | FromJsonEach _ -> None
-
-/// Check if a SelectCore has must-not-shape boundaries.
-/// When these are present, shaping refuses all adjustments.
-let private hasMustNotShapeBoundary (core: SelectCore) : bool =
-    // GROUP BY
-    not core.GroupBy.IsEmpty
-    // HAVING
-    || core.Having.IsSome
-    // DISTINCT
-    || core.Distinct
-    // json_each source
-    || (match core.Source with Some(FromJsonEach _) -> true | _ -> false)
-
-/// Check if any projection contains an aggregate or window call.
-let private hasAggregateOrWindowInExpr (expr: SqlExpr) : bool =
-    hasAggregateCall expr || hasWindowFunction expr
-
-/// Check if a core has aggregate or window functions in projections.
-let private hasAggregateOrWindowProjections (core: SelectCore) : bool =
-    core.Projections |> List.exists (fun p -> hasAggregateOrWindowInExpr p.Expr)
 
 /// Canonicalize a single expression for index matching.
 /// Returns the expression unchanged if no canonicalization is needed.
@@ -160,7 +140,7 @@ let private reshapeJoinsForIndex (model: IndexModel) (core: SelectCore) : Select
 /// Apply index plan shaping to a single SelectCore.
 let private shapeInCore (model: IndexModel) (core: SelectCore) : SelectCore =
     // Refuse at must-not-shape boundaries
-    if hasMustNotShapeBoundary core then core
+    if hasMustNotBoundary core then core
     elif hasAggregateOrWindowProjections core then core
     else
         // Resolve the base table name for index lookup

@@ -29,36 +29,25 @@ open SoloDatabase.ExpressionPredicates
 
 /// Collect all column references from a predicate expression.
 /// Returns (sourceAlias option * columnName) pairs.
-let rec collectColumnRefs (expr: SqlExpr) : (string option * string) list =
-    match expr with
-    | Column(src, col) -> [(src, col)]
-    | JsonExtractExpr(src, col, _) -> [(src, col)]
-    | Binary(l, _, r) -> collectColumnRefs l @ collectColumnRefs r
-    | Unary(_, e) -> collectColumnRefs e
-    | FunctionCall(_, args) -> args |> List.collect collectColumnRefs
-    | AggregateCall(_, arg, _, sep) ->
-        (arg |> Option.map collectColumnRefs |> Option.defaultValue [])
-        @ (sep |> Option.map collectColumnRefs |> Option.defaultValue [])
-    | Coalesce(exprs) -> exprs |> List.collect collectColumnRefs
-    | Cast(e, _) -> collectColumnRefs e
-    | CaseExpr(branches, elseE) ->
-        (branches |> List.collect (fun (c, r) -> collectColumnRefs c @ collectColumnRefs r))
-        @ (elseE |> Option.map collectColumnRefs |> Option.defaultValue [])
-    | Between(e, lo, hi) -> collectColumnRefs e @ collectColumnRefs lo @ collectColumnRefs hi
-    | InList(e, list) -> collectColumnRefs e @ (list |> List.collect collectColumnRefs)
-    | JsonSetExpr(t, assignments) ->
-        collectColumnRefs t @ (assignments |> List.collect (fun (_, e) -> collectColumnRefs e))
-    | JsonArrayExpr(elems) -> elems |> List.collect collectColumnRefs
-    | JsonObjectExpr(props) -> props |> List.collect (fun (_, v) -> collectColumnRefs v)
-    | WindowCall(spec) ->
-        (spec.Arguments |> List.collect collectColumnRefs)
-        @ (spec.PartitionBy |> List.collect collectColumnRefs)
-        @ (spec.OrderBy |> List.collect (fun (e, _) -> collectColumnRefs e))
-    | InSubquery _ | Exists _ | ScalarSubquery _ ->
-        // Subquery references are self-contained; treat as correlated (P-S6 blocks)
-        [("__correlated__" |> Some, "__subquery__")]
-    | UpdateFragment(path, value) -> collectColumnRefs path @ collectColumnRefs value
-    | Literal _ | Parameter _ -> []
+let collectColumnRefs (expr: SqlExpr) : (string option * string) list =
+    let marker = (Some "__correlated__", "__subquery__")
+    let maskedSubqueryExpr =
+        SqlExpr.map
+            (fun node ->
+                match node with
+                | InSubquery(_, sel) -> InSubquery(Literal Null, sel)
+                | _ -> node)
+            expr
+    SqlExpr.fold
+        (fun acc node ->
+            match node with
+            | Column(src, col) -> (src, col) :: acc
+            | JsonExtractExpr(src, col, _) -> (src, col) :: acc
+            | InSubquery _ | Exists _ | ScalarSubquery _ -> marker :: acc
+            | _ -> acc)
+        []
+        maskedSubqueryExpr
+    |> List.rev
 
 /// Check if an expression contains an aggregate call (P-S7).
 let hasAggregateCall (expr: SqlExpr) : bool =

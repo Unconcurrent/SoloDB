@@ -4,7 +4,7 @@ open SqlDu.Engine.C1.Spec
 open SoloDatabase.PassRunner
 open SoloDatabase.IndexModel
 open SoloDatabase.ExpressionMatcher
-open SoloDatabase.ExpressionPredicates
+open SoloDatabase.SelectCoreBoundary
 
 // ══════════════════════════════════════════════════════════════
 // Index-shaping decision trace.
@@ -50,31 +50,26 @@ type ShapingDecisionRecord = {
 
 // ── Classification helpers ──────────────────────────────────
 
-/// Check if a SelectCore has must-not-shape indicators.
-let private coreHasMustNotBoundary (core: SelectCore) : bool =
-    not core.GroupBy.IsEmpty
-    || core.Having.IsSome
-    || core.Distinct
-    || (match core.Source with Some(FromJsonEach _) -> true | _ -> false)
-
-/// Check if any projection contains aggregate or window call.
-let private hasAggOrWindow (expr: SqlExpr) : bool =
-    hasAggregateCall expr || hasWindowFunction expr
-
-/// Recursively check if any sub-expression matches an index.
-let rec private exprOrOperandMatchesIndex (model: IndexModel) (tableName: string) (expr: SqlExpr) : bool =
-    if hasMatchingIndex model tableName expr then true
+/// Check if an expression or operand matches an index.
+/// Cast nodes are matched as whole nodes only; inner cast operands are excluded.
+let private exprOrOperandMatchesIndex (model: IndexModel) (tableName: string) (expr: SqlExpr) : bool =
+    let hasCastMatch =
+        SqlExpr.exists
+            (fun node ->
+                match node with
+                | Cast _ -> hasMatchingIndex model tableName node
+                | _ -> false)
+            expr
+    if hasCastMatch then true
     else
-        match expr with
-        | Binary(l, _, r) ->
-            exprOrOperandMatchesIndex model tableName l
-            || exprOrOperandMatchesIndex model tableName r
-        | Cast(inner, _) ->
-            // Check the full Cast first (already done above), then don't recurse
-            // into inner to avoid false-positive cast matches
-            false
-        | Unary(_, e) -> exprOrOperandMatchesIndex model tableName e
-        | _ -> false
+        let withoutCastSubtrees =
+            SqlExpr.map
+                (fun node ->
+                    match node with
+                    | Cast _ -> Literal Null
+                    | _ -> node)
+                expr
+        SqlExpr.exists (fun node -> hasMatchingIndex model tableName node) withoutCastSubtrees
 
 /// Check if any expression in a list has a matching index (including sub-expressions).
 let private anyExprMatchesIndex (model: IndexModel) (tableName: string) (exprs: SqlExpr list) : bool =
@@ -111,9 +106,9 @@ let classifyShaping (model: IndexModel) (shapeId: string) (input: SqlStatement) 
 
             | SingleSelect core ->
                 // Must-not-shape boundary
-                if coreHasMustNotBoundary core then
+                if hasMustNotBoundary core then
                     NoChange, MustNotShapeBoundary
-                elif core.Projections |> List.exists (fun p -> hasAggOrWindow p.Expr) then
+                elif hasAggregateOrWindowProjections core then
                     NoChange, MustNotShapeBoundary
                 else
                     let tableName =

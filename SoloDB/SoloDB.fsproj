@@ -75,6 +75,7 @@
     <Compile Include="QueryTranslator/SqlDu.IdentityPass.fs" />
     <Compile Include="QueryTranslator/SqlDu.ConstantFoldPass.fs" />
     <Compile Include="QueryTranslator/SqlDu.ExpressionPredicates.fs" />
+    <Compile Include="QueryTranslator/SqlDu.SelectCoreBoundary.fs" />
     <Compile Include="QueryTranslator/SqlDu.AliasRewrite.fs" />
     <Compile Include="QueryTranslator/SqlDu.FlattenSafety.fs" />
     <Compile Include="QueryTranslator/SqlDu.FlattenTransform.fs" />

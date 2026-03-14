@@ -39,27 +39,15 @@ let tableSortKey (source: TableSource) : string =
 
 /// Collect all column source aliases referenced in a JOIN ON expression.
 /// Returns the set of source aliases (table aliases or table names) used.
-let rec collectOnClauseAliases (expr: SqlExpr) : Set<string> =
-    match expr with
-    | Column(Some src, _) -> Set.singleton src
-    | Column(None, _) -> Set.empty
-    | JsonExtractExpr(Some src, _, _) -> Set.singleton src
-    | JsonExtractExpr(None, _, _) -> Set.empty
-    | Binary(l, _, r) ->
-        Set.union (collectOnClauseAliases l) (collectOnClauseAliases r)
-    | Unary(_, e) -> collectOnClauseAliases e
-    | FunctionCall(_, args) ->
-        args |> List.map collectOnClauseAliases |> Set.unionMany
-    | Coalesce(exprs) ->
-        exprs |> List.map collectOnClauseAliases |> Set.unionMany
-    | Cast(e, _) -> collectOnClauseAliases e
-    | CaseExpr(branches, elseE) ->
-        let branchRefs =
-            branches |> List.collect (fun (c, r) -> [collectOnClauseAliases c; collectOnClauseAliases r])
-            |> Set.unionMany
-        let elseRefs = elseE |> Option.map collectOnClauseAliases |> Option.defaultValue Set.empty
-        Set.union branchRefs elseRefs
-    | _ -> Set.empty
+let collectOnClauseAliases (expr: SqlExpr) : Set<string> =
+    SqlExpr.fold
+        (fun acc node ->
+            match node with
+            | Column(Some src, _) -> Set.add src acc
+            | JsonExtractExpr(Some src, _, _) -> Set.add src acc
+            | _ -> acc)
+        Set.empty
+        expr
 
 /// Check if a join chain is a pure INNER JOIN chain (JOIN-1).
 /// Returns false if any join in the chain is not INNER.

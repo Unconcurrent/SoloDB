@@ -32,72 +32,22 @@ open SoloDatabase.ExpressionPredicates
 /// For qualified references (alias.col), if the alias matches the given
 /// derivedAlias, we collect the column name. Unqualified columns are
 /// always collected.
-let rec collectReferencedColumns (derivedAlias: string) (expr: SqlExpr) : Set<string> =
-    match expr with
-    | Column(Some src, col) when src = derivedAlias || src = "" ->
-        Set.singleton col
-    | Column(None, col) ->
-        Set.singleton col
-    | Column(Some _, _) ->
+let collectReferencedColumns (derivedAlias: string) (expr: SqlExpr) : Set<string> =
+    SqlExpr.fold
+        (fun acc node ->
+            match node with
+            | Column(Some src, col) when src = derivedAlias || src = "" ->
+                Set.add col acc
+            | Column(None, col) ->
+                Set.add col acc
+            | JsonExtractExpr(Some src, col, _) when src = derivedAlias || src = "" ->
+                Set.add col acc
+            | JsonExtractExpr(None, col, _) ->
+                Set.add col acc
+            | _ ->
+                acc)
         Set.empty
-    | JsonExtractExpr(Some src, col, _) when src = derivedAlias || src = "" ->
-        Set.singleton col
-    | JsonExtractExpr(None, col, _) ->
-        Set.singleton col
-    | JsonExtractExpr(Some _, _, _) ->
-        Set.empty
-    | Binary(l, _, r) ->
-        Set.union (collectReferencedColumns derivedAlias l) (collectReferencedColumns derivedAlias r)
-    | Unary(_, e) ->
-        collectReferencedColumns derivedAlias e
-    | FunctionCall(_, args) ->
-        args |> List.map (collectReferencedColumns derivedAlias) |> Set.unionMany
-    | AggregateCall(_, arg, _, sep) ->
-        let argRefs = arg |> Option.map (collectReferencedColumns derivedAlias) |> Option.defaultValue Set.empty
-        let sepRefs = sep |> Option.map (collectReferencedColumns derivedAlias) |> Option.defaultValue Set.empty
-        Set.union argRefs sepRefs
-    | WindowCall(spec) ->
-        let argRefs = spec.Arguments |> List.map (collectReferencedColumns derivedAlias) |> Set.unionMany
-        let partRefs = spec.PartitionBy |> List.map (collectReferencedColumns derivedAlias) |> Set.unionMany
-        let ordRefs = spec.OrderBy |> List.map (fun (e, _) -> collectReferencedColumns derivedAlias e) |> Set.unionMany
-        Set.unionMany [argRefs; partRefs; ordRefs]
-    | Coalesce(exprs) ->
-        exprs |> List.map (collectReferencedColumns derivedAlias) |> Set.unionMany
-    | Cast(e, _) ->
-        collectReferencedColumns derivedAlias e
-    | CaseExpr(branches, elseE) ->
-        let branchRefs =
-            branches |> List.collect (fun (c, r) ->
-                [collectReferencedColumns derivedAlias c; collectReferencedColumns derivedAlias r])
-            |> Set.unionMany
-        let elseRefs = elseE |> Option.map (collectReferencedColumns derivedAlias) |> Option.defaultValue Set.empty
-        Set.union branchRefs elseRefs
-    | Between(e, lo, hi) ->
-        Set.unionMany [
-            collectReferencedColumns derivedAlias e
-            collectReferencedColumns derivedAlias lo
-            collectReferencedColumns derivedAlias hi
-        ]
-    | InList(e, list) ->
-        let eRefs = collectReferencedColumns derivedAlias e
-        let listRefs = list |> List.map (collectReferencedColumns derivedAlias) |> Set.unionMany
-        Set.union eRefs listRefs
-    | InSubquery(e, _) ->
-        collectReferencedColumns derivedAlias e
-    | Exists _ | ScalarSubquery _ ->
-        Set.empty
-    | JsonSetExpr(target, assignments) ->
-        let targetRefs = collectReferencedColumns derivedAlias target
-        let assignRefs = assignments |> List.map (fun (_, e) -> collectReferencedColumns derivedAlias e) |> Set.unionMany
-        Set.union targetRefs assignRefs
-    | JsonArrayExpr(elems) ->
-        elems |> List.map (collectReferencedColumns derivedAlias) |> Set.unionMany
-    | JsonObjectExpr(props) ->
-        props |> List.map (fun (_, v) -> collectReferencedColumns derivedAlias v) |> Set.unionMany
-    | UpdateFragment(path, value) ->
-        Set.union (collectReferencedColumns derivedAlias path) (collectReferencedColumns derivedAlias value)
-    | Literal _ | Parameter _ ->
-        Set.empty
+        expr
 
 /// Compute the set of inner projection aliases that are live —
 /// referenced by outer query components.

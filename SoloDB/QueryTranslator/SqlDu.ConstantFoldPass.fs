@@ -18,79 +18,30 @@ open SoloDatabase.PassTypes
 //   - Any expression involving columns, parameters, or function calls
 // ══════════════════════════════════════════════════════════════
 
-/// Recursively fold constant expressions in a SqlExpr tree.
-let rec private foldExpr (expr: SqlExpr) : SqlExpr =
-    match expr with
+let private foldArithmeticNode (node: SqlExpr) : SqlExpr =
+    match node with
     // Integer binary arithmetic
     | Binary(Literal(Integer a), Add, Literal(Integer b)) -> Literal(Integer(a + b))
     | Binary(Literal(Integer a), Sub, Literal(Integer b)) -> Literal(Integer(a - b))
     | Binary(Literal(Integer a), Mul, Literal(Integer b)) -> Literal(Integer(a * b))
+    | _ -> node
 
-    // Recurse into compound expressions, fold children first then retry
-    | Binary(left, op, right) ->
-        let left' = foldExpr left
-        let right' = foldExpr right
-        let folded = Binary(left', op, right')
-        match folded with
-        | Binary(Literal(Integer a), Add, Literal(Integer b)) -> Literal(Integer(a + b))
-        | Binary(Literal(Integer a), Sub, Literal(Integer b)) -> Literal(Integer(a - b))
-        | Binary(Literal(Integer a), Mul, Literal(Integer b)) -> Literal(Integer(a * b))
-        | other -> other
-
-    | Unary(op, inner) ->
-        Unary(op, foldExpr inner)
-
-    | FunctionCall(name, args) ->
-        FunctionCall(name, args |> List.map foldExpr)
-
-    | AggregateCall(kind, arg, distinct, sep) ->
-        AggregateCall(kind, arg |> Option.map foldExpr, distinct, sep |> Option.map foldExpr)
-
-    | Coalesce(exprs) ->
-        Coalesce(exprs |> List.map foldExpr)
-
-    | Cast(inner, sqlType) ->
-        Cast(foldExpr inner, sqlType)
-
-    | CaseExpr(branches, elseExpr) ->
-        CaseExpr(
-            branches |> List.map (fun (cond, result) -> (foldExpr cond, foldExpr result)),
-            elseExpr |> Option.map foldExpr)
-
-    | InList(expr, list) ->
-        InList(foldExpr expr, list |> List.map foldExpr)
-
-    | InSubquery(expr, sel) ->
-        InSubquery(foldExpr expr, foldSelect sel)
-
-    | Exists(sel) ->
-        Exists(foldSelect sel)
-
-    | ScalarSubquery(sel) ->
-        ScalarSubquery(foldSelect sel)
-
-    | Between(expr, low, high) ->
-        Between(foldExpr expr, foldExpr low, foldExpr high)
-
-    | WindowCall(spec) ->
-        WindowCall({
-            spec with
-                Arguments = spec.Arguments |> List.map foldExpr
-                PartitionBy = spec.PartitionBy |> List.map foldExpr
-                OrderBy = spec.OrderBy |> List.map (fun (e, d) -> (foldExpr e, d))
-        })
-
-    | JsonSetExpr(target, assignments) ->
-        JsonSetExpr(foldExpr target, assignments |> List.map (fun (p, e) -> (p, foldExpr e)))
-
-    | JsonArrayExpr(elements) ->
-        JsonArrayExpr(elements |> List.map foldExpr)
-
-    | JsonObjectExpr(props) ->
-        JsonObjectExpr(props |> List.map (fun (k, v) -> (k, foldExpr v)))
-
-    // Leaf nodes: Column, Literal, Parameter, JsonExtractExpr — no folding
-    | other -> other
+/// Fold constant expressions in a SqlExpr tree.
+let rec private foldExpr (expr: SqlExpr) : SqlExpr =
+    SqlExpr.map
+        (fun node ->
+            let withSelects =
+                match node with
+                | InSubquery(valueExpr, sel) ->
+                    InSubquery(valueExpr, foldSelect sel)
+                | Exists(sel) ->
+                    Exists(foldSelect sel)
+                | ScalarSubquery(sel) ->
+                    ScalarSubquery(foldSelect sel)
+                | _ ->
+                    node
+            foldArithmeticNode withSelects)
+        expr
 
 /// Fold constants in a SelectCore.
 and private foldCore (core: SelectCore) : SelectCore =

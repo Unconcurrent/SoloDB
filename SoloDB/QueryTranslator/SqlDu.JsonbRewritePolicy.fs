@@ -6,6 +6,7 @@ open SoloDatabase.PathCanonicalizer
 open SoloDatabase.SetChainAnalyzer
 open SoloDatabase.MaterializationPolicy
 open SoloDatabase.ExpressionPredicates
+open SoloDatabase.SelectCoreBoundary
 
 // ══════════════════════════════════════════════════════════════
 // JSONB rewrite policy pass.
@@ -36,17 +37,6 @@ open SoloDatabase.ExpressionPredicates
 //   protect index visibility (PRESERVED_FOR_PLAN / IndexVisibilityRisk).
 // ══════════════════════════════════════════════════════════════
 
-/// Check if a SelectCore has must-not-rewrite boundaries.
-let private hasMustNotBoundary (core: SelectCore) : bool =
-    not core.GroupBy.IsEmpty
-    || core.Having.IsSome
-    || core.Distinct
-    || (match core.Source with Some(FromJsonEach _) -> true | _ -> false)
-
-/// Check if any projection has aggregate or window calls.
-let private hasAggOrWindow (expr: SqlExpr) : bool =
-    hasAggregateCall expr || hasWindowFunction expr
-
 /// Check if an expression matches a specific index entry.
 /// Ignores table qualifier during matching (indexes are stored unqualified).
 let private exprMatchesIndexEntry (indexExpr: SqlExpr) (expr: SqlExpr) : bool =
@@ -59,18 +49,11 @@ let private exprMatchesIndexEntry (indexExpr: SqlExpr) (expr: SqlExpr) : bool =
 
 /// Check if an expression or any sub-expression matches any known index entry.
 /// Used as a guard to prevent rewrites that would break index visibility.
-let rec exprContainsIndexedForm (model: IndexModel) (expr: SqlExpr) : bool =
-    model.Indexes |> List.exists (fun idx -> exprMatchesIndexEntry idx.Expression expr)
-    || match expr with
-       | Binary(l, _, r) -> exprContainsIndexedForm model l || exprContainsIndexedForm model r
-       | FunctionCall(_, args) -> args |> List.exists (exprContainsIndexedForm model)
-       | Cast(e, _) -> exprContainsIndexedForm model e
-       | Unary(_, e) -> exprContainsIndexedForm model e
-       | Coalesce(exprs) -> exprs |> List.exists (exprContainsIndexedForm model)
-       | CaseExpr(branches, elseE) ->
-           branches |> List.exists (fun (c, r) -> exprContainsIndexedForm model c || exprContainsIndexedForm model r)
-           || (elseE |> Option.map (exprContainsIndexedForm model) |> Option.defaultValue false)
-       | _ -> false
+let exprContainsIndexedForm (model: IndexModel) (expr: SqlExpr) : bool =
+    SqlExpr.exists
+        (fun node ->
+            model.Indexes |> List.exists (fun idx -> exprMatchesIndexEntry idx.Expression node))
+        expr
 
 /// Apply path-canonicalization and set-chain rewrites to a single expression.
 /// Extract-wrapper normalization is disabled due to return-type change risk.
@@ -104,7 +87,7 @@ let rec private rewritePredicate (model: IndexModel) (expr: SqlExpr) : SqlExpr =
 let private rewriteInCore (model: IndexModel) (core: SelectCore) : SelectCore =
     // Refuse at must-not boundaries
     if hasMustNotBoundary core then core
-    elif core.Projections |> List.exists (fun p -> hasAggOrWindow p.Expr) then core
+    elif hasAggregateOrWindowProjections core then core
     else
         // Check for relation materialization — PRESERVE_REQUIRED
         if coreHasRelationMaterialization core then core

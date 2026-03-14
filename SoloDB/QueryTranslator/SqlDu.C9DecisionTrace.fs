@@ -7,6 +7,7 @@ open SoloDatabase.PolicyModel
 open SoloDatabase.MaterializationPolicy
 open SoloDatabase.JsonbRewritePolicy
 open SoloDatabase.ExpressionPredicates
+open SoloDatabase.SelectCoreBoundary
 
 // ══════════════════════════════════════════════════════════════
 // C9f: Decision Trace Integration
@@ -25,32 +26,16 @@ open SoloDatabase.ExpressionPredicates
 //   with IndexVisibilityRisk reason.
 // ══════════════════════════════════════════════════════════════
 
-/// Check if a SelectCore has must-not-rewrite boundary indicators.
-let private coreHasMustNotBoundary (core: SelectCore) : bool =
-    not core.GroupBy.IsEmpty
-    || core.Having.IsSome
-    || core.Distinct
-    || (match core.Source with Some(FromJsonEach _) -> true | _ -> false)
-
-/// Check if any projection has aggregate or window calls.
-let private hasAggOrWindow (expr: SqlExpr) : bool =
-    hasAggregateCall expr || hasWindowFunction expr
-
 /// Check if an expression contains any JsonSetExpr or JsonArrayExpr
 /// (JSONB-relevant for materialization classification).
-let rec private hasJsonbMaterialization (expr: SqlExpr) : bool =
-    match expr with
-    | JsonSetExpr _ -> true
-    | JsonArrayExpr _ -> true
-    | Binary(l, _, r) -> hasJsonbMaterialization l || hasJsonbMaterialization r
-    | Unary(_, e) -> hasJsonbMaterialization e
-    | Cast(e, _) -> hasJsonbMaterialization e
-    | FunctionCall(_, args) -> args |> List.exists hasJsonbMaterialization
-    | Coalesce(exprs) -> exprs |> List.exists hasJsonbMaterialization
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) -> hasJsonbMaterialization c || hasJsonbMaterialization r)
-        || (elseE |> Option.map hasJsonbMaterialization |> Option.defaultValue false)
-    | _ -> false
+let private hasJsonbMaterialization (expr: SqlExpr) : bool =
+    SqlExpr.exists
+        (fun node ->
+            match node with
+            | JsonSetExpr _ -> true
+            | JsonArrayExpr _ -> true
+            | _ -> false)
+        expr
 
 /// Check if a SelectCore has any JSONB extraction forms matching C8 index entries.
 /// Checks WHERE, JOIN ON, and ORDER BY — the expression sites where index
@@ -81,9 +66,9 @@ let classifyC9WithModel (model: IndexModel) (shapeId: string) (input: SqlStateme
 
             | SingleSelect core ->
                 // Must-not boundary
-                if coreHasMustNotBoundary core then
+                if hasMustNotBoundary core then
                     OutOfScopeRefusal, C9NoChange, MustNotBoundary
-                elif core.Projections |> List.exists (fun p -> hasAggOrWindow p.Expr) then
+                elif hasAggregateOrWindowProjections core then
                     OutOfScopeRefusal, C9NoChange, MustNotBoundary
                 // Relation materialization — PRESERVE_REQUIRED
                 elif coreHasRelationMaterialization core then

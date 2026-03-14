@@ -56,74 +56,10 @@ let simplifyIdentityWrapper (expr: SqlExpr) : SqlExpr option =
 
 /// Apply all canonicalization rules to a single expression.
 /// Returns Some(canonical) if any rule fired, None if no change.
-let rec canonicalizeJsonbExpr (expr: SqlExpr) : SqlExpr option =
-    // Try nested extract merge
-    match mergeNestedExtract expr with
-    | Some merged -> Some merged
-    | None ->
-        // Wrapper simplification is effectively disabled due to the return-type change
-        // (json_extract wrapper removal would change return type).
-        // Recurse into sub-expressions to find nested candidates.
-        match expr with
-        | Binary(l, op, r) ->
-            let cl = canonicalizeJsonbExpr l
-            let cr = canonicalizeJsonbExpr r
-            match cl, cr with
-            | None, None -> None
-            | _ ->
-                Some(Binary(cl |> Option.defaultValue l, op, cr |> Option.defaultValue r))
-        | Cast(inner, sqlType) ->
-            match canonicalizeJsonbExpr inner with
-            | Some c -> Some(Cast(c, sqlType))
-            | None -> None
-        | Unary(op, inner) ->
-            match canonicalizeJsonbExpr inner with
-            | Some c -> Some(Unary(op, c))
-            | None -> None
-        | FunctionCall(name, args) ->
-            let canonArgs = args |> List.map (fun a ->
-                match canonicalizeJsonbExpr a with
-                | Some c -> c
-                | None -> a)
-            if canonArgs = args then None
-            else
-                // Re-check mergeNestedExtract on updated FunctionCall.
-                // Handles multi-level nesting: after inner merge, outer
-                // may now match the merge pattern.
-                let updated = FunctionCall(name, canonArgs)
-                match mergeNestedExtract updated with
-                | Some merged -> Some merged
-                | None -> Some updated
-        | Coalesce(exprs) ->
-            let canonExprs = exprs |> List.map (fun e ->
-                match canonicalizeJsonbExpr e with
-                | Some c -> c
-                | None -> e)
-            if canonExprs = exprs then None
-            else Some(Coalesce(canonExprs))
-        | CaseExpr(branches, elseE) ->
-            let canonBranches = branches |> List.map (fun (c, r) ->
-                let cc = canonicalizeJsonbExpr c |> Option.defaultValue c
-                let cr = canonicalizeJsonbExpr r |> Option.defaultValue r
-                (cc, cr))
-            let canonElse = elseE |> Option.map (fun e ->
-                canonicalizeJsonbExpr e |> Option.defaultValue e)
-            if canonBranches = branches && canonElse = elseE then None
-            else Some(CaseExpr(canonBranches, canonElse))
-        | JsonSetExpr(target, assignments) ->
-            let ct = canonicalizeJsonbExpr target |> Option.defaultValue target
-            let cas = assignments |> List.map (fun (p, e) ->
-                (p, canonicalizeJsonbExpr e |> Option.defaultValue e))
-            if ct = target && cas = assignments then None
-            else Some(JsonSetExpr(ct, cas))
-        | JsonArrayExpr(elements) ->
-            let ce = elements |> List.map (fun e ->
-                canonicalizeJsonbExpr e |> Option.defaultValue e)
-            if ce = elements then None
-            else Some(JsonArrayExpr(ce))
-        | JsonObjectExpr(properties) ->
-            let cp = properties |> List.map (fun (k, e) ->
-                (k, canonicalizeJsonbExpr e |> Option.defaultValue e))
-            if cp = properties then None
-            else Some(JsonObjectExpr(cp))
-        | _ -> None
+let canonicalizeJsonbExpr (expr: SqlExpr) : SqlExpr option =
+    SqlExpr.tryMap
+        (fun node ->
+            match mergeNestedExtract node with
+            | Some merged -> Some merged
+            | None -> simplifyIdentityWrapper node)
+        expr

@@ -44,26 +44,14 @@ let hasConflictingPaths (paths: JsonPath list) : bool =
 /// This detects data dependencies like: jsonb_set(V, '$.B', jsonb_extract(V, '$.A'))
 /// when '$.A' is also being written. Conservative: any reference to any written path
 /// in any value expression means preserve.
-let rec private exprReferencesAnyPath (writtenPaths: JsonPath list) (expr: SqlExpr) : bool =
-    match expr with
-    | JsonExtractExpr(_, _, path) ->
-        writtenPaths |> List.exists (fun wp -> pathsConflict wp path)
-    | Binary(l, _, r) ->
-        exprReferencesAnyPath writtenPaths l || exprReferencesAnyPath writtenPaths r
-    | Unary(_, e) -> exprReferencesAnyPath writtenPaths e
-    | Cast(e, _) -> exprReferencesAnyPath writtenPaths e
-    | FunctionCall(_, args) -> args |> List.exists (exprReferencesAnyPath writtenPaths)
-    | Coalesce(exprs) -> exprs |> List.exists (exprReferencesAnyPath writtenPaths)
-    | CaseExpr(branches, elseE) ->
-        branches |> List.exists (fun (c, r) ->
-            exprReferencesAnyPath writtenPaths c || exprReferencesAnyPath writtenPaths r)
-        || (elseE |> Option.map (exprReferencesAnyPath writtenPaths) |> Option.defaultValue false)
-    | JsonSetExpr(t, assigns) ->
-        exprReferencesAnyPath writtenPaths t
-        || assigns |> List.exists (fun (_, e) -> exprReferencesAnyPath writtenPaths e)
-    | JsonArrayExpr(elems) -> elems |> List.exists (exprReferencesAnyPath writtenPaths)
-    | JsonObjectExpr(props) -> props |> List.exists (fun (_, e) -> exprReferencesAnyPath writtenPaths e)
-    | _ -> false
+let private exprReferencesAnyPath (writtenPaths: JsonPath list) (expr: SqlExpr) : bool =
+    SqlExpr.exists
+        (fun node ->
+            match node with
+            | JsonExtractExpr(_, _, path) ->
+                writtenPaths |> List.exists (fun wp -> pathsConflict wp path)
+            | _ -> false)
+        expr
 
 /// Attempt to flatten a nested FunctionCall chain of jsonb_set calls into a
 /// single JsonSetExpr with multiple assignments.
