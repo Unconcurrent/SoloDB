@@ -39,8 +39,7 @@ let private isSimpleProjectionExpr (expr: SqlExpr) : bool =
     | _ -> false
 
 let private isConservativeOuterWrapper (outer: SelectCore) : bool =
-    outer.Where.IsNone
-    && outer.GroupBy.IsEmpty
+    outer.GroupBy.IsEmpty
     && outer.Having.IsNone
     && not outer.Distinct
     && outer.OrderBy.IsEmpty
