@@ -20,6 +20,26 @@ open System.Data
 open System.Globalization
 open System.Linq
 open SoloDatabase.Attributes
+open System.Collections.Concurrent
+
+module private RuntimeIndexModelCache =
+    let private snapshots = ConcurrentDictionary<string, SoloDatabase.IndexModel.IndexModel>()
+
+    let private mkKey (connectionString: string) (collectionName: string) =
+        $"{connectionString}\u001F{collectionName}"
+
+    let tryGet (connectionString: string) (collectionName: string) =
+        match snapshots.TryGetValue(mkKey connectionString collectionName) with
+        | true, model -> Some model
+        | _ -> None
+
+    let invalidate (connectionString: string) (collectionName: string) =
+        snapshots.TryRemove(mkKey connectionString collectionName) |> ignore
+
+    let loadAndStore (connection: SqliteConnection) (connectionString: string) (collectionName: string) =
+        let model = SoloDatabase.IndexModel.loadModelForTables connection [collectionName]
+        snapshots.[mkKey connectionString collectionName] <- model
+        model
 
 /// <summary>
 /// Caches event-context database resources to avoid repeated allocations and redundant metadata queries.
@@ -269,6 +289,19 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <summary>Gets the internal connection provider for this collection.</summary>
     member val internal Connection = connection
 
+    member internal this.RefreshIndexModelSnapshot(conn: SqliteConnection) =
+        RuntimeIndexModelCache.loadAndStore conn connectionString name |> ignore
+
+    member internal this.InvalidateIndexModelSnapshot() =
+        RuntimeIndexModelCache.invalidate connectionString name
+
+    member internal this.GetIndexModelSnapshot() =
+        match RuntimeIndexModelCache.tryGet connectionString name with
+        | Some model -> model
+        | None ->
+            use conn = connection.Get()
+            RuntimeIndexModelCache.loadAndStore conn connectionString name
+
     /// Wraps an operation in a relation-safe auto-transaction when not already in one.
     /// Routes through Connection.WithTransaction (hybrid: BEGIN IMMEDIATE top-level, SAVEPOINT nested).
     /// Used by Insert, Update, Replace, and batch methods that need relation atomicity.
@@ -292,6 +325,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member private this.ensureRelationTx (conn: SqliteConnection) : Relations.RelationTxContext =
         let tx = this.mkRelationTx conn
         Relations.ensureSchemaForOwnerType tx typeof<'T>
+        this.InvalidateIndexModelSnapshot()
         tx
 
     member private this.tryEnsureRelationTx (conn: SqliteConnection) : Relations.RelationTxContext voption =
@@ -924,7 +958,9 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="expression">A LINQ expression that selects the property to be indexed.</param>
     member this.EnsureIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
         use connection = connection.Get()
-        Helper.ensureIndex name connection expression
+        let result = Helper.ensureIndex name connection expression
+        this.InvalidateIndexModelSnapshot()
+        result
 
     /// <summary>
     /// Ensures that a unique index exists for the specified expression. Creates the index if it does not exist.
@@ -933,7 +969,9 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="expression">A LINQ expression that selects the property to be indexed.</param>
     member this.EnsureUniqueAndIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
         use connection = connection.Get()
-        Helper.ensureUniqueAndIndex name connection expression
+        let result = Helper.ensureUniqueAndIndex name connection expression
+        this.InvalidateIndexModelSnapshot()
+        result
 
     /// <summary>
     /// Drops an index if it exists for the specified expression.
@@ -947,7 +985,9 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         let indexSQL = $"DROP INDEX IF EXISTS \"{indexName}\""
 
         use connection = connection.Get()
-        connection.Execute(indexSQL)
+        let result = connection.Execute(indexSQL)
+        this.InvalidateIndexModelSnapshot()
+        result
         
     /// <summary>
     /// Ensures that all indexes declared on the document type 'T using the [Indexed] attribute exist in the database.
@@ -957,6 +997,7 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
         if not (typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T>) then
             use conn = connection.Get()
             Helper.ensureDeclaredIndexesFields<'T> name conn
+            this.InvalidateIndexModelSnapshot()
 
     /// <summary>
     /// Registers a handler invoked before an item insert.
@@ -1161,7 +1202,9 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
             }
             Relations.ensureSchemaForOwnerType relationTx typeof<'T>
 
-        Collection<'T>(Transactional connection, name, connectionString, { ClearCacheFunction = ignore; EventSystem = parentData.EventSystem }) :> ISoloDBCollection<'T>
+        let collection = Collection<'T>(Transactional connection, name, connectionString, { ClearCacheFunction = ignore; EventSystem = parentData.EventSystem })
+        collection.RefreshIndexModelSnapshot(connection)
+        collection :> ISoloDBCollection<'T>
 
     /// <summary>
     /// Gets a collection of a specified type, using the type's name as the collection name. Creates the collection if it doesn't exist.
@@ -1220,6 +1263,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
 
         if Helper.existsCollection name connection then
             Helper.dropCollection name connection
+            RuntimeIndexModelCache.invalidate connectionString name
             true
         else false
 
@@ -1441,7 +1485,10 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
                     )
                 )
 
-        Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = this.ClearCache; EventSystem = this.Events }) :> ISoloDBCollection<'T>
+        let collection = Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = this.ClearCache; EventSystem = this.Events })
+        use snapshotConnection = connectionManager.Borrow()
+        collection.RefreshIndexModelSnapshot(snapshotConnection)
+        collection :> ISoloDBCollection<'T>
 
     /// <summary>
     /// Gets a collection of a specified type, using the type's name as the collection name. Creates the collection if it doesn't exist.
@@ -1507,6 +1554,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
             connectionManager.WithTransaction(fun connection ->
                 if Helper.existsCollection name connection then
                     Helper.dropCollection name connection
+                    RuntimeIndexModelCache.invalidate connectionString name
                     true
                 else
                     false
