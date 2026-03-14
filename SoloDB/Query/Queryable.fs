@@ -220,7 +220,8 @@ module private QueryHelper =
             ParamCounter = ref 0
             DuHandlerResult = ref ValueNone
         }
-        let pipelineResult = PassRunner.runPipeline [IdentityPass.identity] (SelectStmt sel)
+        let pipelineResult =
+            PassRunner.runPipeline [ConstantFoldPass.constantFold; FlattenPass.subqueryFlatten] (SelectStmt sel)
         match pipelineResult.Output with
         | SelectStmt outSel -> SqlDuMinimalEmit.emitSelect qb outSel
         | _ -> failwith "R15 invariant violation: expected SelectStmt from identity pipeline"

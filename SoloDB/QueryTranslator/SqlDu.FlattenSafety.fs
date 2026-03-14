@@ -33,6 +33,20 @@ let private isPureProjectionWrapper (outer: SelectCore) : bool =
     && outer.OrderBy.IsEmpty
     && outer.Joins.IsEmpty
 
+let private isSimpleProjectionExpr (expr: SqlExpr) : bool =
+    match expr with
+    | Column(Some _, _)
+    | JsonExtractExpr(Some _, _, _) -> true
+    | _ -> false
+
+let private hasSimpleOuterProjections (outer: SelectCore) : bool =
+    outer.Projections |> List.forall (fun p -> isSimpleProjectionExpr p.Expr)
+
+let private hasBaseTableInnerSource (innerCore: SelectCore) : bool =
+    match innerCore.Source with
+    | Some(BaseTable _) -> true
+    | _ -> false
+
 /// Determine if a DerivedTable's inner SelectCore can be safely flattened
 /// into the given outer SelectCore.
 let isFlattenSafe (outer: SelectCore) (innerCore: SelectCore) : bool =
@@ -50,6 +64,16 @@ let isFlattenSafe (outer: SelectCore) (innerCore: SelectCore) : bool =
     && not (innerCore.Projections |> List.exists (fun p -> hasAggregateCall p.Expr))
     // F8: Outer has no conflicting GROUP BY
     && outer.GroupBy.IsEmpty
+    // F9: Outer has no structural clauses that would be dropped by merge
+    && outer.OrderBy.IsEmpty
+    && outer.Limit.IsNone
+    && outer.Offset.IsNone
+    && outer.Joins.IsEmpty
+    // Conservative live enablement: flatten only pure projection wrappers.
+    && isPureProjectionWrapper outer
+    // Conservative live enablement: flatten only direct projection wrappers over base tables.
+    && hasSimpleOuterProjections outer
+    && hasBaseTableInnerSource innerCore
 
 /// Check if a SqlSelect's body is a SingleSelect with a DerivedTable source,
 /// and if so, whether it's flatten-safe.
