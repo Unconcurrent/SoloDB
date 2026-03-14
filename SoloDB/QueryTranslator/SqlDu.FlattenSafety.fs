@@ -66,8 +66,6 @@ let isFlattenSafe (outer: SelectCore) (innerCore: SelectCore) : bool =
     && outer.GroupBy.IsEmpty
     // F9: Outer joins remain fail-closed in R25 (join merge deferred)
     && outer.Joins.IsEmpty
-    // Conservative live enablement: flatten only pure projection wrappers.
-    && isPureProjectionWrapper outer
     // Conservative live enablement: flatten only direct projection wrappers over base tables.
     && hasSimpleOuterProjections outer
     && hasBaseTableInnerSource innerCore
