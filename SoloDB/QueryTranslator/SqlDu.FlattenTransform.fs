@@ -52,15 +52,38 @@ and private flattenCore (outer: SelectCore) (innerCore: SelectCore) (derivedAlia
         | w, None -> w
         | Some ow, Some iw -> Some(Binary(ow, And, iw))
 
+    let rewrittenOuterOrderBy =
+        outer.OrderBy
+        |> List.map (fun ob -> { ob with Expr = rewriteExpr aliasMap derivedAlias ob.Expr })
+
+    let mergedOrderBy =
+        if rewrittenOuterOrderBy.IsEmpty then innerCore.OrderBy else rewrittenOuterOrderBy
+
+    let rewrittenOuterLimit =
+        outer.Limit |> Option.map (rewriteExpr aliasMap derivedAlias)
+
+    let mergedLimit =
+        match rewrittenOuterLimit with
+        | Some lim -> Some lim
+        | None -> innerCore.Limit
+
+    let rewrittenOuterOffset =
+        outer.Offset |> Option.map (rewriteExpr aliasMap derivedAlias)
+
+    let mergedOffset =
+        match rewrittenOuterOffset with
+        | Some off -> Some off
+        | None -> innerCore.Offset
+
     { Source = innerCore.Source
       Joins = innerCore.Joins
       Projections = rewrittenProjections
       Where = mergedWhere
       GroupBy = innerCore.GroupBy  // Should be empty per safety check
       Having = innerCore.Having    // Should be None per safety check
-      OrderBy = innerCore.OrderBy
-      Limit = innerCore.Limit
-      Offset = innerCore.Offset
+      OrderBy = mergedOrderBy
+      Limit = mergedLimit
+      Offset = mergedOffset
       Distinct = innerCore.Distinct || outer.Distinct }
 
 /// Recursively flatten a SqlSelect. Applies flattening at every nesting level.

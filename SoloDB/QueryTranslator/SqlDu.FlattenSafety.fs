@@ -64,10 +64,7 @@ let isFlattenSafe (outer: SelectCore) (innerCore: SelectCore) : bool =
     && not (innerCore.Projections |> List.exists (fun p -> hasAggregateCall p.Expr))
     // F8: Outer has no conflicting GROUP BY
     && outer.GroupBy.IsEmpty
-    // F9: Outer has no structural clauses that would be dropped by merge
-    && outer.OrderBy.IsEmpty
-    && outer.Limit.IsNone
-    && outer.Offset.IsNone
+    // F9: Outer joins remain fail-closed in R25 (join merge deferred)
     && outer.Joins.IsEmpty
     // Conservative live enablement: flatten only pure projection wrappers.
     && isPureProjectionWrapper outer
