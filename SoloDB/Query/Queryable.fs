@@ -220,7 +220,10 @@ module private QueryHelper =
             ParamCounter = ref 0
             DuHandlerResult = ref ValueNone
         }
-        SqlDuMinimalEmit.emitSelect qb sel
+        let pipelineResult = PassRunner.runPipeline [IdentityPass.identity] (SelectStmt sel)
+        match pipelineResult.Output with
+        | SelectStmt outSel -> SqlDuMinimalEmit.emitSelect qb outSel
+        | _ -> failwith "R15 invariant violation: expected SelectStmt from identity pipeline"
 
     /// Helper to build a simple SelectCore with default empty fields.
     let private mkCore projections source =
