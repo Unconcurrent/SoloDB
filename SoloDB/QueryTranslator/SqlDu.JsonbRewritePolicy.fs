@@ -11,9 +11,9 @@ open SoloDatabase.SelectCoreBoundary
 // ══════════════════════════════════════════════════════════════
 // JSONB rewrite policy pass.
 //
-// 8th pass in pipeline:
+// 7th pass in pipeline:
 //   Identity -> ConstantFold -> SubqueryFlatten -> PredicatePushdown
-//   -> ProjectionPushdown -> JoinReorder -> IndexPlanShaping
+//   -> ProjectionPushdown -> IndexPlanShaping
 //   -> JsonbRewritePolicy
 //
 // Legal adjustments:

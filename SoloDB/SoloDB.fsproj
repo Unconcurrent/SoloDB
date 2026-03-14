@@ -86,9 +86,6 @@
     <Compile Include="QueryTranslator/SqlDu.ProjectionLiveness.fs" />
     <Compile Include="QueryTranslator/SqlDu.ProjectionPushdown.fs" />
     <Compile Include="QueryTranslator/SqlDu.ProjectionPass.fs" />
-    <Compile Include="QueryTranslator/SqlDu.JoinGraph.fs" />
-    <Compile Include="QueryTranslator/SqlDu.JoinReorder.fs" />
-    <Compile Include="QueryTranslator/SqlDu.JoinReorderPass.fs" />
     <Compile Include="QueryTranslator/SqlDu.IndexModel.fs" />
     <Compile Include="QueryTranslator/SqlDu.ExpressionMatcher.fs" />
     <Compile Include="QueryTranslator/SqlDu.IndexPlanShaping.fs" />

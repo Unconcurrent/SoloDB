@@ -205,7 +205,7 @@ module private QueryHelper =
             SqlExpr.FunctionCall("json_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
 
     /// Emit a SqlSelect to a StringBuilder via the minimal emitter.
-    let private emitSelectToSb (sb: StringBuilder) (variables: Dictionary<string, obj>) (sel: SqlSelect) =
+    let private emitSelectToSb (sb: StringBuilder) (variables: Dictionary<string, obj>) (indexModel: SoloDatabase.IndexModel.IndexModel) (sel: SqlSelect) =
         let qb : QueryBuilder = {
             StringBuilder = sb
             Variables = variables
@@ -226,6 +226,7 @@ module private QueryHelper =
                 FlattenPass.subqueryFlatten
                 PushdownPass.predicatePushdown
                 ProjectionPass.projectionPushdown
+                IndexPlanShapingPass.indexPlanShaping indexModel
             ] (SelectStmt sel)
         match pipelineResult.Output with
         | SelectStmt outSel -> SqlDuMinimalEmit.emitSelect qb outSel
@@ -2437,10 +2438,11 @@ Fix: Use another SoloDB IQueryable rooted in a collection or move the join after
 
         // Emit to string via the minimal emitter.
         let sb = StringBuilder(256)
+        let indexModel = SoloDatabase.IndexModel.loadModelForTables metadataConnection [source.Name]
         // Edge case 18: ExplainQueryPlan prefix
         if isExplainQueryPlan then
             sb.Append "EXPLAIN QUERY PLAN " |> ignore
-        emitSelectToSb sb variables outerSelect
+        emitSelectToSb sb variables indexModel outerSelect
 
         let shape = getRelationShape typeof<'T>
         let hasSingleRelations = hasRelations && shape.HasSingle
