@@ -57,6 +57,7 @@
     <Compile Include="FileStorage/FileStorage.Core.Chunks.fs" />
     <Compile Include="FileStorage/FileStorage.Core.fs" />
     <Compile Include="QueryTranslator/DBRef.fs" />
+    <Compile Include="QueryTranslator/DBRefMany.fs" />
     <Compile Include="Interfaces/SoloDBInterfaces.fs" />
     <Compile Include="Core/IdGenerator.fs" />
     <Compile Include="Core/CustomTypeId.fs" />
