@@ -128,6 +128,9 @@
 		    <Compile Include="Relations/Relations.Schema.Validator.fs" />
 		    <Compile Include="Relations/Relations.Schema.LinkTableDDL.fs" />
 		    <Compile Include="Relations/Relations.Schema.fs" />
+	    <Compile Include="Relations/Relations.Entity.Sync.fs" />
+	    <Compile Include="Relations/Relations.Entity.Cascade.fs" />
+	    <Compile Include="Relations/Relations.Entity.ApplyOps.fs" />
 	    <Compile Include="Relations/Relations.Entity.fs" />
 	    <Compile Include="Relations/Relations.Delete.fs" />
 	    <Compile Include="Relations/Relations.BatchLoad.fs" />
