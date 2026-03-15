@@ -22,86 +22,29 @@ open System.Linq
 open SoloDatabase.Attributes
 open System.Collections.Concurrent
 
-module private RuntimeIndexModelCache =
-    let private snapshots = ConcurrentDictionary<string, SoloDatabase.IndexModel.IndexModel>()
-
-    let private mkKey (connectionString: string) (collectionName: string) =
-        $"{connectionString}\u001F{collectionName}"
-
-    let tryGet (connectionString: string) (collectionName: string) =
-        match snapshots.TryGetValue(mkKey connectionString collectionName) with
-        | true, model -> Some model
-        | _ -> None
-
-    let invalidate (connectionString: string) (collectionName: string) =
-        snapshots.TryRemove(mkKey connectionString collectionName) |> ignore
-
-    let loadAndStore (connection: SqliteConnection) (connectionString: string) (collectionName: string) =
-        let model = SoloDatabase.IndexModel.loadModelForTables connection [collectionName]
-        snapshots.[mkKey connectionString collectionName] <- model
-        model
+type internal IEventDbCollectionFactory =
+    abstract CreateCollection<'U> : collectionName: string -> ISoloDBCollection<'U>
 
 /// <summary>
 /// Caches event-context database resources to avoid repeated allocations and redundant metadata queries.
 /// </summary>
-type internal EventDbCache(connectionString: string, directConnection: SqliteConnection, guardedConnection: Connection, parentData: SoloDBToCollectionData, knownCollectionName: string) =
+type internal EventDbCache(connectionString: string, directConnection: SqliteConnection, guardedConnection: Connection, parentData: SoloDBToCollectionData, knownCollectionName: string, collectionFactory: IEventDbCollectionFactory) =
     let knownCollectionName = Helper.formatName knownCollectionName
     let mutable knownCollectionExists = true
-    let maxCachedCollections = 4
-    let cachedCollections = Array.zeroCreate<obj> maxCachedCollections
-    let cachedCollectionNames = Array.zeroCreate<string> maxCachedCollections
-    let cachedCollectionTypes = Array.zeroCreate<Type> maxCachedCollections
-    let mutable cachedCount = 0
+    let cacheStore = EventDbCacheStore(4)
     let mutable cachedFileSystem: IFileSystem | null = null
 
     member private this.TryGetCached<'U>(collectionName: string) =
-        let targetType = typeof<'U>
-        let mutable found = Unchecked.defaultof<ISoloDBCollection<'U> | null>
-        let mutable i = 0
-        while isNull found && i < cachedCount do
-            let cached = cachedCollections.[i]
-            if not (isNull cached) && cachedCollectionNames.[i] = collectionName && cachedCollectionTypes.[i] = targetType then
-                found <- cached :?> ISoloDBCollection<'U>
-            i <- i + 1
-        if isNull found then None else Some found
+        cacheStore.TryGetCached<'U>(collectionName)
 
     member private this.InvalidateIfCached(collectionName: string) =
-        for i in 0 .. cachedCount - 1 do
-            let cached = cachedCollections.[i]
-            if not (isNull cached) && cachedCollectionNames.[i] = collectionName then
-                cachedCollections.[i] <- null
-                cachedCollectionNames.[i] <- null
-                cachedCollectionTypes.[i] <- null
+        cacheStore.InvalidateIfCached(collectionName)
 
     member private this.TryStoreCached<'U>(collectionName: string) (collection: ISoloDBCollection<'U>) =
-        let targetType = typeof<'U>
-        let mutable slot = -1
-        let mutable i = 0
-        while slot < 0 && i < cachedCount do
-            if isNull cachedCollections.[i] then
-                slot <- i
-            i <- i + 1
-
-        if slot < 0 && cachedCount < maxCachedCollections then
-            slot <- cachedCount
-            cachedCount <- cachedCount + 1
-
-        if slot >= 0 then
-            cachedCollections.[slot] <- collection :> obj
-            cachedCollectionNames.[slot] <- collectionName
-            cachedCollectionTypes.[slot] <- targetType
-            true
-        else false
+        cacheStore.TryStoreCached<'U>(collectionName) collection
 
     member private this.IsCachedName(collectionName: string) =
-        let mutable found = false
-        let mutable i = 0
-        while not found && i < cachedCount do
-            let cached = cachedCollections.[i]
-            if not (isNull cached) && cachedCollectionNames.[i] = collectionName then
-                found <- true
-            i <- i + 1
-        found
+        cacheStore.IsCachedName(collectionName)
 
     member private this.EnsureExists<'U>(collectionName: string) =
         if collectionName = knownCollectionName then
@@ -139,7 +82,7 @@ type internal EventDbCache(connectionString: string, directConnection: SqliteCon
         | Some cached -> cached
         | None ->
             this.EnsureExists<'U>(collectionName)
-            let collection = Collection<'U>(guardedConnection, collectionName, connectionString, parentData) :> ISoloDBCollection<'U>
+            let collection = collectionFactory.CreateCollection<'U>(collectionName)
             this.TryStoreCached<'U>(collectionName) collection |> ignore
             collection
 
@@ -164,7 +107,12 @@ type internal EventDbCache(connectionString: string, directConnection: SqliteCon
 /// <param name="name">The name of the collection (table name).</param>
 /// <param name="connectionString">The database connection string.</param>
 /// <param name="parentData">Data from the parent SoloDB instance.</param>
-and internal Collection<'T>(connection: Connection, name: string, connectionString: string, parentData: SoloDBToCollectionData) as this =
+type internal Collection<'T>(connection: Connection, name: string, connectionString: string, parentData: SoloDBToCollectionData) as this =
+    let hasRelations =
+        typeof<'T>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+        |> Array.exists (fun p -> DBRefTypeHelpers.isAnyRelationRefType p.PropertyType)
+    let scaffold = CollectionScaffold<'T>(connection, connectionString, name, hasRelations)
+
     member val private SoloDBQueryable = SoloDBCollectionQueryable<'T, 'T>(SoloDBCollectionQueryProvider(this, parentData), Expression.Constant(RootQueryable<'T>(this))) :> IOrderedQueryable<'T>
     member val private ConnectionString = connectionString
     /// <summary>Gets the name of the collection.</summary>
@@ -181,22 +129,13 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <summary>Gets a value indicating whether type information should be included during serialization for documents in this collection.</summary>
     member val IncludeType = mustIncludeTypeInformationInSerialization<'T>
     /// <summary>True when the document type declares DBRef/DBRefMany properties.</summary>
-    member val private HasRelations =
-        typeof<'T>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-        |> Array.exists (fun p -> DBRefTypeHelpers.isAnyRelationRefType p.PropertyType)
+    member val private HasRelations = hasRelations
 
     member private this.HasIncomingRelations(connection: SqliteConnection) =
-        let relationCatalogExists =
-            connection.QueryFirst<int64>(
-                "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelation') THEN 1 ELSE 0 END") = 1L
-
-        relationCatalogExists &&
-            connection.QueryFirst<int64>(
-                "SELECT CASE WHEN EXISTS (SELECT 1 FROM SoloDBRelation WHERE TargetCollection = @name LIMIT 1) THEN 1 ELSE 0 END",
-                {| name = name |}) = 1L
+        scaffold.HasIncomingRelations(connection)
 
     member private this.RequiresRelationDeleteHandling(connection: SqliteConnection) =
-        this.HasRelations || this.HasIncomingRelations(connection)
+        scaffold.RequiresRelationDeleteHandling(connection)
 
     member private this.SelectMutationRows(connection: SqliteConnection, filter: Expression<Func<'T, bool>>, takeOne: bool) =
         let filtered = Queryable.Where(this.SoloDBQueryable, filter)
@@ -238,7 +177,11 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member val private Events: ISoloDBCollectionEvents<'T> =
         let createDb (directConnection: SqliteConnection) (guard: unit -> unit) : ISoloDB =
             let guardedConnection = Guarded(guard, Transactional directConnection)
-            let cache = EventDbCache(connectionString, directConnection, guardedConnection, parentData, name)
+            let collectionFactory =
+                { new IEventDbCollectionFactory with
+                    member _.CreateCollection<'U>(collectionName: string) =
+                        Collection<'U>(guardedConnection, collectionName, connectionString, parentData) :> ISoloDBCollection<'U> }
+            let cache = EventDbCache(connectionString, directConnection, guardedConnection, parentData, name, collectionFactory)
             let throwNestedTxInEventContext () =
                 raise (NotSupportedException(
                     "Error: Nested transactions are not supported inside event handler contexts.\n" +
@@ -290,17 +233,13 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     member val internal Connection = connection
 
     member internal this.RefreshIndexModelSnapshot(conn: SqliteConnection) =
-        RuntimeIndexModelCache.loadAndStore conn connectionString name |> ignore
+        scaffold.RefreshIndexModelSnapshot(conn)
 
     member internal this.InvalidateIndexModelSnapshot() =
-        RuntimeIndexModelCache.invalidate connectionString name
+        scaffold.InvalidateIndexModelSnapshot()
 
     member internal this.GetIndexModelSnapshot() =
-        match RuntimeIndexModelCache.tryGet connectionString name with
-        | Some model -> model
-        | None ->
-            use conn = connection.Get()
-            RuntimeIndexModelCache.loadAndStore conn connectionString name
+        scaffold.GetIndexModelSnapshot()
 
     /// Wraps an operation in a relation-safe auto-transaction when not already in one.
     /// Routes through Connection.WithTransaction (hybrid: BEGIN IMMEDIATE top-level, SAVEPOINT nested).
@@ -311,28 +250,17 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
             let transientCollection = Collection<'T>(directConnection, name, connectionString, parentData)
             f transientCollection)
 
-    member private this.mkRelationTx (conn: SqliteConnection) : Relations.RelationTxContext = {
-        Connection = conn
-        OwnerTable = name
-        OwnerType = typeof<'T>
-        InTransaction = true
-    }
+    member private this.mkRelationTx (conn: SqliteConnection) : Relations.RelationTxContext =
+        scaffold.MkRelationTx(conn)
 
     static member private mkRelationPathSets() =
-        System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal),
-        System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
+        CollectionScaffold<'T>.MkRelationPathSets()
 
     member private this.ensureRelationTx (conn: SqliteConnection) : Relations.RelationTxContext =
-        let tx = this.mkRelationTx conn
-        Relations.ensureSchemaForOwnerType tx typeof<'T>
-        this.InvalidateIndexModelSnapshot()
-        tx
+        scaffold.EnsureRelationTx(conn)
 
     member private this.tryEnsureRelationTx (conn: SqliteConnection) : Relations.RelationTxContext voption =
-        if this.HasRelations then
-            ValueSome (this.ensureRelationTx conn)
-        else
-            ValueNone
+        scaffold.TryEnsureRelationTx(conn)
 
     member private this.setSerializedItem (variables: IDictionary<string, obj>) (item: 'T) =
         variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
@@ -368,18 +296,12 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="item">The document to insert.</param>
     /// <returns>The ID of the newly inserted document.</returns>
     member this.Insert (item: 'T) =
-        if isNull (box item) then raise (ArgumentNullException(nameof(item)))
-        if this.HasRelations then
-            connection.WithTransaction(fun conn ->
-                let tx = this.ensureRelationTx conn
-                let plan = Relations.prepareInsert tx (box item)
-                let id = Helper.insertInner this.IncludeType item conn name this
-                Relations.syncInsert tx id plan
-                id
-            )
-        else
-            connection.WithTransaction(fun conn ->
-                Helper.insertInner this.IncludeType item conn name this)
+        CollectionInsertOps<'T>.Insert
+            item
+            this.HasRelations
+            connection.WithTransaction
+            this.ensureRelationTx
+            (fun conn -> Helper.insertInner this.IncludeType item conn name this)
 
     /// <summary>
     /// Inserts a new document or replaces an existing one if a document with the same ID already exists.
@@ -387,24 +309,14 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="item">The document to insert or replace.</param>
     /// <returns>The ID of the inserted or replaced document.</returns>
     member this.InsertOrReplace (item: 'T) =
-        if isNull (box item) then raise (ArgumentNullException(nameof(item)))
-        if this.HasRelations then
-            connection.WithTransaction(fun conn ->
-                let tx = this.ensureRelationTx conn
-                let oldOwner, oldOwnerId = this.tryLoadExistingOwnerForUpsert conn item
-
-                match oldOwnerId with
-                | ValueSome ownerId -> Relations.applyOwnerReplacePolicies tx name ownerId
-                | ValueNone -> ()
-
-                let plan = Relations.prepareUpsert tx oldOwner (box item)
-                let id = Helper.insertOrReplaceInner this.IncludeType item conn name this
-                Relations.syncUpsert tx id plan
-                id
-            )
-        else
-            connection.WithTransaction(fun conn ->
-                Helper.insertOrReplaceInner this.IncludeType item conn name this)
+        CollectionInsertOps<'T>.InsertOrReplace
+            item
+            this.HasRelations
+            name
+            connection.WithTransaction
+            this.ensureRelationTx
+            (fun conn -> this.tryLoadExistingOwnerForUpsert conn item)
+            (fun conn -> Helper.insertOrReplaceInner this.IncludeType item conn name this)
 
     /// <summary>
     /// Inserts a sequence of documents in a single transaction for efficiency.
@@ -412,26 +324,14 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="items">The sequence of documents to insert.</param>
     /// <returns>A list of IDs for the newly inserted documents.</returns>
     member this.InsertBatch (items: 'T seq) =
-        if isNull items then raise (ArgumentNullException(nameof(items)))
-        let items = items |> Seq.toArray
-        for item in items do
-            if isNull (box item) then raise (ArgumentNullException(nameof(items), "Batch contains a null element."))
-
+        let items = CollectionInsertOps<'T>.ValidateBatchItems(items)
         this.WithRelationAutoTx (fun transientCollection ->
             let connection = transientCollection.Connection.Get()
             let tx = this.tryEnsureRelationTx connection
-
-            let ids = List<int64>()
-            for item in items do
-                match tx with
-                | ValueSome tx ->
-                    let plan = Relations.prepareInsert tx (box item)
-                    let id = Helper.insertInner this.IncludeType item connection name transientCollection
-                    Relations.syncInsert tx id plan
-                    ids.Add id
-                | ValueNone ->
-                    Helper.insertInner this.IncludeType item connection name transientCollection |> ids.Add
-            ids)
+            CollectionInsertOps<'T>.InsertBatchCore
+                items
+                tx
+                (fun item -> Helper.insertInner this.IncludeType item connection name transientCollection))
 
     /// <summary>
     /// Inserts or replaces a sequence of documents in a single transaction.
@@ -439,32 +339,16 @@ and internal Collection<'T>(connection: Connection, name: string, connectionStri
     /// <param name="items">The sequence of documents to insert or replace.</param>
     /// <returns>A list of IDs for the inserted or replaced documents.</returns>
     member this.InsertOrReplaceBatch (items: 'T seq) =
-        if isNull items then raise (ArgumentNullException(nameof(items)))
-        let items = items |> Seq.toArray
-        for item in items do
-            if isNull (box item) then raise (ArgumentNullException(nameof(items), "Batch contains a null element."))
-
+        let items = CollectionInsertOps<'T>.ValidateBatchItems(items)
         this.WithRelationAutoTx (fun transientCollection ->
             let connection = transientCollection.Connection.Get()
             let tx = this.tryEnsureRelationTx connection
-
-            let ids = List<int64>()
-            for item in items do
-                match tx with
-                | ValueSome tx ->
-                    let oldOwner, oldOwnerId = this.tryLoadExistingOwnerForUpsert connection item
-
-                    match oldOwnerId with
-                    | ValueSome ownerId -> Relations.applyOwnerReplacePolicies tx name ownerId
-                    | ValueNone -> ()
-
-                    let plan = Relations.prepareUpsert tx oldOwner (box item)
-                    let id = Helper.insertOrReplaceInner this.IncludeType item connection name transientCollection
-                    Relations.syncUpsert tx id plan
-                    ids.Add id
-                | ValueNone ->
-                    Helper.insertOrReplaceInner this.IncludeType item connection name transientCollection |> ids.Add
-            ids)
+            CollectionInsertOps<'T>.InsertOrReplaceBatchCore
+                items
+                tx
+                name
+                (fun item -> this.tryLoadExistingOwnerForUpsert connection item)
+                (fun item -> Helper.insertOrReplaceInner this.IncludeType item connection name transientCollection))
 
     /// <summary>
     /// Tries to find a document by its 64-bit integer ID.

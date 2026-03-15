@@ -1,0 +1,254 @@
+namespace SoloDatabase
+
+open System
+open System.Collections
+open System.Collections.Generic
+open System.Linq
+open System.Linq.Expressions
+open System.Reflection
+open System.Text
+open System.Runtime.CompilerServices
+open Microsoft.Data.Sqlite
+open SQLiteTools
+open Utils
+open JsonFunctions
+open Connections
+open SoloDatabase
+open SoloDatabase.JsonSerializator
+open SoloDatabase.RelationsTypes
+open SoloDatabase.QueryTranslatorBaseTypes
+open SqlDu.Engine.C1.Spec
+
+module internal QueryableBuildQueryPartA =
+    open QueryableHelperState
+    open QueryableHelperJoin
+    open QueryableHelperPreprocess
+    open QueryableLayerBuild
+    open QueryableHelperBase
+    let internal apply<'T>
+        (sourceCtx: QueryContext)
+        (tableName: string)
+        (statements: ResizeArray<SQLSubquery>)
+        (pendingDistinctByScalarReuse: byref<LoweredKeySelector option>)
+        (isPostScalarProjection: byref<bool>)
+        (simpleCurrent: unit -> UsedSQLStatements)
+        (installTerminalOrdering: Expression -> bool -> SqlExpr option -> unit)
+        (m: {| Value: SupportedLinqMethods; OriginalMethod: MethodInfo; Expressions: Expression array |}) =
+                match m.Value with
+                | SupportedLinqMethods.Where -> 
+                    addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName m.Expressions.[0] WherePredicate)
+                | SupportedLinqMethods.Select ->
+                    let selectFingerprint = expressionFingerprint m.Expressions.[0]
+                    match pendingDistinctByScalarReuse with
+                    | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = selectFingerprint ->
+                        // Edge case 13: PostScalarProjection path — SupportedLinqMethods.DistinctBy → Select reuse consuming __solodb_scalar_slot0
+                        addSelector statements (DuSelector (fun tableName _vars ->
+                            let hasTableName = not (String.IsNullOrEmpty tableName)
+                            let idExpr = if hasTableName then SqlExpr.Column(Some tableName, "Id") else SqlExpr.Column(None, "Id")
+                            [{ Alias = Some "Id"; Expr = idExpr }
+                             { Alias = Some "Value"; Expr = SqlExpr.Column(None, "__solodb_scalar_slot0") }]
+                        ))
+                        pendingDistinctByScalarReuse <- None
+                        isPostScalarProjection <- true
+                    | Some lowered when lowered.RelationAccess = HasRelationAccess ->
+                        // C12 path: post-SupportedLinqMethods.DistinctBy Select on a DIFFERENT relation scalar than
+                        // the SupportedLinqMethods.DistinctBy key. The base layer will materialize the relation into
+                        // Value via jsonb_set, so we extract from the materialized JSON payload.
+                        // Edge case 20: Relation-backed SupportedLinqMethods.DistinctBy scalar slot reuse
+                        match tryExtractRelationJsonPath m.Expressions.[0] with
+                        | Some jsonPath ->
+                            let capturedPath = jsonPath
+                            addSelector statements (DuSelector (fun _tableName _vars ->
+                                [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                                 { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String capturedPath)]) }]
+                            ))
+                            isPostScalarProjection <- true
+                        | None ->
+                            addSelector statements (Expression m.Expressions.[0])
+                        pendingDistinctByScalarReuse <- None
+                    | _ ->
+                        addSelector statements (Expression m.Expressions.[0])
+                        pendingDistinctByScalarReuse <- None
+                | SupportedLinqMethods.Order | SupportedLinqMethods.OrderDescending ->
+                    addOrder statements (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) (m.Value = SupportedLinqMethods.OrderDescending)
+                | SupportedLinqMethods.OrderBy | SupportedLinqMethods.OrderByDescending  ->
+                    let descending = (m.Value = SupportedLinqMethods.OrderByDescending)
+                    let orderFingerprint = expressionFingerprint m.Expressions.[0]
+                    match pendingDistinctByScalarReuse with
+                    | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = orderFingerprint ->
+                        let current = ifSelectorNewStatement statements
+                        current.Orders.Clear()
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = Some (SqlExpr.Column(None, "__solodb_scalar_slot0")) })
+                    | _ ->
+                        addOrder statements m.Expressions.[0] descending
+                | SupportedLinqMethods.ThenBy | SupportedLinqMethods.ThenByDescending ->
+                    let descending = (m.Value = SupportedLinqMethods.ThenByDescending)
+                    let orderFingerprint = expressionFingerprint m.Expressions.[0]
+                    let current = simpleCurrent()
+                    match pendingDistinctByScalarReuse with
+                    | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = orderFingerprint ->
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = Some (SqlExpr.Column(None, "__solodb_scalar_slot0")) })
+                    | _ ->
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = None })
+                | SupportedLinqMethods.Skip ->
+                    let current = simpleCurrent()
+                    match current.Skip with
+                    | Some _ -> statements.Add(Simple { emptySQLStatement () with Skip = Some m.Expressions.[0] })
+                    | None   -> current.Skip <- Some m.Expressions.[0]
+                | SupportedLinqMethods.Take ->
+                    addTake statements m.Expressions.[0]
+
+                | SupportedLinqMethods.Sum ->
+                    if isPostScalarProjection && m.Expressions.Length = 0 then
+                        let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                             { Alias = Some "Value"; Expr = SqlExpr.Coalesce([SqlExpr.FunctionCall("SUM", [extractVal]); SqlExpr.Literal(SqlLiteral.Integer 0L)]) }]
+                        ))
+                    else
+                        // SUM() return NULL if all elements are NULL, TOTAL() return 0.0.
+                        // TOTAL() always returns a float, therefore we will just check for NULL
+                        zeroIfNullAggregateTranslator sourceCtx "SUM" statements m.OriginalMethod m.Expressions
+
+                | SupportedLinqMethods.Average ->
+                    rejectDecimalAverageIfNeeded m.OriginalMethod
+                    if isPostScalarProjection && m.Expressions.Length = 0 then
+                        let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
+                        let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, extractVal)
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                             { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("AVG", [extractVal]) }]
+                        ))
+                        // Edge case 14: Aggregate NULL handling — error message for empty sequences
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.Null))], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
+                             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements"))], Some(SqlExpr.Column(None, "Value"))) }]
+                        ))
+                    else
+                        raiseIfNullAggregateTranslator sourceCtx "AVG" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
+
+                | SupportedLinqMethods.Min ->
+                    if isPostScalarProjection && m.Expressions.Length = 0 then
+                        let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
+                        let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, extractVal)
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                             { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("MIN", [extractVal]) }]
+                        ))
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.Null))], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
+                             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements"))], Some(SqlExpr.Column(None, "Value"))) }]
+                        ))
+                    else
+                        raiseIfNullAggregateTranslator sourceCtx "MIN" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
+
+                | SupportedLinqMethods.Max ->
+                    if isPostScalarProjection && m.Expressions.Length = 0 then
+                        let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
+                        let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, extractVal)
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                             { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("MAX", [extractVal]) }]
+                        ))
+                        addSelector statements (DuSelector (fun _tableName _vars ->
+                            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.Null))], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
+                             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements"))], Some(SqlExpr.Column(None, "Value"))) }]
+                        ))
+                    else
+                        raiseIfNullAggregateTranslator sourceCtx "MAX" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
+
+                | SupportedLinqMethods.MinBy | SupportedLinqMethods.MaxBy ->
+                    match m.Expressions.Length with
+                    | 1 ->
+                        let descending = (m.Value = SupportedLinqMethods.MaxBy)
+                        let orderFingerprint = expressionFingerprint m.Expressions.[0]
+                        let rawExpr =
+                            match pendingDistinctByScalarReuse with
+                            | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = orderFingerprint ->
+                                Some (SqlExpr.Column(None, "__solodb_scalar_slot0"))
+                            | _ ->
+                                None
+                        installTerminalOrdering m.Expressions.[0] descending rawExpr
+                        addTake statements (ExpressionHelper.constant 1)
+                    | 2 ->
+                        raise (NotSupportedException("MinBy/MaxBy comparer overloads are not supported."))
+                    | other ->
+                        raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
+                
+                | SupportedLinqMethods.Distinct ->
+                    addComplexFinal statements (fun ctx ->
+                        // SELECT -1 AS Id, Value FROM (inner) o GROUP BY {identity expr}
+                        let groupByExpr = translateExprDu sourceCtx ctx.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) ctx.Vars
+                        let core =
+                            { mkCore
+                                [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                                 { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
+                                (Some (DerivedTable(ctx.Inner, "o")))
+                              with GroupBy = [groupByExpr] }
+                        wrapCore core
+                    )
+
+                | SupportedLinqMethods.DistinctBy ->
+                    // Edge case 7: SupportedLinqMethods.DistinctBy with ROW_NUMBER OVER — window function + derived table
+                    let lowered = lowerKeySelectorLambda sourceCtx tableName m.Expressions.[0] DistinctByKey
+                    addLoweredKeySelector statements lowered
+                    pendingDistinctByScalarReuse <-
+                        match lowered.RelationAccess with
+                        | HasRelationAccess -> Some lowered
+                        | NoRelationAccess -> None
+                    addComplexFinal statements (fun ctx ->
+                        // Inner: SELECT o.Id, o.Value, [o.__solodb_group_key AS __solodb_scalar_slot0,] ROW_NUMBER() OVER (PARTITION BY o.__solodb_group_key ORDER BY o.Id) AS __solodb_rn FROM (inner) o
+                        let innerProjs =
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }
+                             { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") }]
+                            @ (if lowered.RelationAccess = HasRelationAccess then
+                                   [{ Alias = Some "__solodb_scalar_slot0"; Expr = SqlExpr.Column(Some "o", "__solodb_group_key") }]
+                               else [])
+                            @ [{ Alias = Some "__solodb_rn"; Expr = SqlExpr.WindowCall({
+                                    Kind = WindowFunctionKind.RowNumber
+                                    Arguments = []
+                                    PartitionBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
+                                    OrderBy = [(SqlExpr.Column(Some "o", "Id"), SortDirection.Asc)]
+                                }) }]
+                        let innerCore = mkCore innerProjs (Some (DerivedTable(ctx.Inner, "o")))
+                        let innerSel = wrapCore innerCore
+
+                        // Outer: SELECT o.Id, o.Value [, o.__solodb_scalar_slot0] FROM (inner) o WHERE o.__solodb_rn = 1
+                        let outerProjs =
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }
+                             { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") }]
+                            @ (if lowered.RelationAccess = HasRelationAccess then
+                                   [{ Alias = Some "__solodb_scalar_slot0"; Expr = SqlExpr.Column(Some "o", "__solodb_scalar_slot0") }]
+                               else [])
+                        let outerCore =
+                            { mkCore outerProjs (Some (DerivedTable(innerSel, "o")))
+                              with Where = Some (SqlExpr.Binary(SqlExpr.Column(Some "o", "__solodb_rn"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L))) }
+                        wrapCore outerCore
+                    )
+
+                | SupportedLinqMethods.GroupBy ->
+                    // Edge case 6: GroupBy with json_group_array — custom projection
+                    addLoweredKeySelector statements (lowerKeySelectorLambda sourceCtx tableName m.Expressions.[0] GroupByKey)
+                    addComplexFinal statements (fun ctx ->
+                        // SELECT -1 as Id, json_object('Key', o.__solodb_group_key, 'Items', json_group_array(jsonb_set(o.Value, '$.Id', o.Id))) as Value FROM (inner) o GROUP BY o.__solodb_group_key
+                        let core =
+                            { mkCore
+                                [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                                 { Alias = Some "Value"; Expr =
+                                    SqlExpr.FunctionCall("jsonb_object", [
+                                        SqlExpr.Literal(SqlLiteral.String "Key")
+                                        SqlExpr.Column(Some "o", "__solodb_group_key")
+                                        SqlExpr.Literal(SqlLiteral.String "Items")
+                                        SqlExpr.FunctionCall("jsonb_group_array", [
+                                            SqlExpr.FunctionCall("jsonb_set", [
+                                                SqlExpr.Column(Some "o", "Value")
+                                                SqlExpr.Literal(SqlLiteral.String "$.Id")
+                                                SqlExpr.Column(Some "o", "Id")
+                                            ])
+                                        ])
+                                    ]) }]
+                                (Some (DerivedTable(ctx.Inner, "o")))
+                              with GroupBy = [SqlExpr.Column(Some "o", "__solodb_group_key")] }
+                        wrapCore core
+                    )
+                | _ -> ()
