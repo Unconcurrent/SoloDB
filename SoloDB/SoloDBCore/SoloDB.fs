@@ -558,10 +558,11 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     /// <typeparam name="'R">The type of the indexed property.</typeparam>
     /// <param name="expression">A LINQ expression that selects the property to be indexed.</param>
     member this.EnsureIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
-        use connection = connection.Get()
-        let result = Helper.ensureIndex name connection expression
-        this.InvalidateIndexModelSnapshot()
-        result
+        CollectionSurfaceOps.ensureIndex<'T, 'R>
+            name
+            (fun () -> connection.Get())
+            this.InvalidateIndexModelSnapshot
+            expression
 
     /// <summary>
     /// Ensures that a unique index exists for the specified expression. Creates the index if it does not exist.
@@ -569,10 +570,11 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     /// <typeparam name="'R">The type of the indexed property.</typeparam>
     /// <param name="expression">A LINQ expression that selects the property to be indexed.</param>
     member this.EnsureUniqueAndIndex<'R>(expression: Expression<System.Func<'T, 'R>>) =
-        use connection = connection.Get()
-        let result = Helper.ensureUniqueAndIndex name connection expression
-        this.InvalidateIndexModelSnapshot()
-        result
+        CollectionSurfaceOps.ensureUniqueAndIndex<'T, 'R>
+            name
+            (fun () -> connection.Get())
+            this.InvalidateIndexModelSnapshot
+            expression
 
     /// <summary>
     /// Drops an index if it exists for the specified expression.
@@ -580,97 +582,92 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     /// <typeparam name="'R">The type of the indexed property.</typeparam>
     /// <param name="expression">A LINQ expression that selects the property on which the index is defined.</param>
     member this.DropIndexIfExists<'R>(expression: Expression<System.Func<'T, 'R>>) =
-        if isNull expression then raise (ArgumentNullException(nameof(expression)))
-        let indexName, _whereSQL = Helper.getIndexWhereAndName<'T, 'R> name expression
-
-        let indexSQL = $"DROP INDEX IF EXISTS \"{indexName}\""
-
-        use connection = connection.Get()
-        let result = connection.Execute(indexSQL)
-        this.InvalidateIndexModelSnapshot()
-        result
+        CollectionSurfaceOps.dropIndexIfExists<'T, 'R>
+            name
+            (fun () -> connection.Get())
+            this.InvalidateIndexModelSnapshot
+            expression
         
     /// <summary>
     /// Ensures that all indexes declared on the document type 'T using the [Indexed] attribute exist in the database.
     /// </summary>
     member this.EnsureAddedAttributeIndexes() =
-        // Ignore the untyped collections.
-        if not (typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T>) then
-            use conn = connection.Get()
-            Helper.ensureDeclaredIndexesFields<'T> name conn
-            this.InvalidateIndexModelSnapshot()
+        CollectionSurfaceOps.ensureAddedAttributeIndexes<'T>
+            name
+            (fun () -> connection.Get())
+            this.InvalidateIndexModelSnapshot
 
     /// <summary>
     /// Registers a handler invoked before an item insert.
     /// </summary>
     member this.OnInserting(handler) =
-        this.Events.OnInserting(handler)
+        CollectionSurfaceOps.onInserting this.Events handler
 
     /// <summary>
     /// Registers a handler invoked before an item delete.
     /// </summary>
     member this.OnDeleting(handler) =
-        this.Events.OnDeleting(handler)
+        CollectionSurfaceOps.onDeleting this.Events handler
 
     /// <summary>
     /// Registers a handler invoked before an item update.
     /// </summary>
     member this.OnUpdating(handler) =
-        this.Events.OnUpdating(handler)
+        CollectionSurfaceOps.onUpdating this.Events handler
 
     /// <summary>
     /// Registers a handler invoked after an item insert.
     /// </summary>
     member this.OnInserted(handler) =
-        this.Events.OnInserted(handler)
+        CollectionSurfaceOps.onInserted this.Events handler
 
     /// <summary>
     /// Registers a handler invoked after an item delete.
     /// </summary>
     member this.OnDeleted(handler) =
-        this.Events.OnDeleted(handler)
+        CollectionSurfaceOps.onDeleted this.Events handler
 
     /// <summary>
     /// Registers a handler invoked after an item update.
     /// </summary>
     member this.OnUpdated(handler) =
-        this.Events.OnUpdated(handler)
+        CollectionSurfaceOps.onUpdated this.Events handler
 
     /// <summary>
     /// Unregisters a previously registered insert handler.
     /// </summary>
     member this.Unregister(handler: InsertingHandler<'T>) =
-        this.Events.Unregister(handler)
+        CollectionSurfaceOps.unregisterInserting this.Events handler
 
     /// <summary>
     /// Unregisters a previously registered delete handler.
     /// </summary>
     member this.Unregister(handler: DeletingHandler<'T>) =
-        this.Events.Unregister(handler)
+        CollectionSurfaceOps.unregisterDeleting this.Events handler
 
     /// <summary>
     /// Unregisters a previously registered update handler.
     /// </summary>
     member this.Unregister(handler: UpdatingHandler<'T>) =
-        this.Events.Unregister(handler)
+        CollectionSurfaceOps.unregisterUpdating this.Events handler
 
     /// <summary>
     /// Unregisters a previously registered after-insert handler.
     /// </summary>
     member this.Unregister(handler: InsertedHandler<'T>) =
-        this.Events.Unregister(handler)
+        CollectionSurfaceOps.unregisterInserted this.Events handler
 
     /// <summary>
     /// Unregisters a previously registered after-delete handler.
     /// </summary>
     member this.Unregister(handler: DeletedHandler<'T>) =
-        this.Events.Unregister(handler)
+        CollectionSurfaceOps.unregisterDeleted this.Events handler
 
     /// <summary>
     /// Unregisters a previously registered after-update handler.
     /// </summary>
     member this.Unregister(handler: UpdatedHandler<'T>) =
-        this.Events.Unregister(handler)
+        CollectionSurfaceOps.unregisterUpdated this.Events handler
 
 
     override this.Equals(other) = 
@@ -764,644 +761,3 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 
         member this.Unregister (handler: UpdatedHandler<'T>) =
             this.Unregister handler
-
-
-/// <summary>
-/// Represents a database context within an explicit transaction. All operations are part of the same transaction.
-/// </summary>
-/// <param name="connection">The transactional connection.</param>
-type TransactionalSoloDB internal (connection: TransactionalConnection, parentData: SoloDBToCollectionData) =
-    let connectionString = connection.ConnectionString
-
-    /// <summary>
-    /// Gets the underlying transactional connection.
-    /// </summary>
-    member val Connection = connection
-    /// <summary>
-    /// Gets the SQLite connection string used by this transactional context.
-    /// </summary>
-    member val ConnectionString = connectionString
-    /// <summary>
-    /// Gets a file system instance that operates within the current transaction.
-    /// </summary>
-    member val FileSystem: IFileSystem = FileSystem (Connection.Transactional connection) :> IFileSystem
-
-    member private this.InitializeCollection<'T> name =
-        if not (Helper.existsCollection name connection) then
-            Helper.createTableInner<'T> name connection
-
-        Helper.registerTypeCollection<'T> name connection
-
-        // Validate relation topology after table creation.
-        let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
-        if hasRelations then
-            let relationTx: Relations.RelationTxContext = {
-                Connection = connection
-                OwnerTable = name
-                OwnerType = typeof<'T>
-                InTransaction = true // TransactionalSoloDB is always inside a transaction.
-            }
-            Relations.ensureSchemaForOwnerType relationTx typeof<'T>
-
-        let collection = Collection<'T>(Transactional connection, name, connectionString, { ClearCacheFunction = ignore; EventSystem = parentData.EventSystem })
-        collection.RefreshIndexModelSnapshot(connection)
-        collection :> ISoloDBCollection<'T>
-
-    /// <summary>
-    /// Gets a collection of a specified type, using the type's name as the collection name. Creates the collection if it doesn't exist.
-    /// </summary>
-    /// <typeparam name="'T">The type of the documents in the collection.</typeparam>
-    /// <returns>An <c>ISoloDBCollection<'T></c> instance.</returns>
-    member this.GetCollection<'T>() =
-        let name = Helper.collectionNameOf<'T>
-        
-        this.InitializeCollection<'T>(name)
-
-    /// <summary>
-    /// Gets a collection of a specified type with a custom name. Creates the collection if it doesn't exist.
-    /// </summary>
-    /// <typeparam name="'T">The type of the documents in the collection.</typeparam>
-    /// <param name="name">The custom name for the collection.</param>
-    /// <returns>An <c>ISoloDBCollection<'T></c> instance.</returns>
-    member this.GetCollection<'T>(name) =       
-        this.InitializeCollection<'T>(Helper.validateUserCollectionName name)
-
-    /// <summary>
-    /// Gets a collection that stores untyped JSON data.
-    /// </summary>
-    /// <param name="name">The name for the collection.</param>
-    /// <returns>An <c>ISoloDBCollection<JsonValue></c> instance.</returns>
-    member this.GetUntypedCollection(name: string) =
-        let name = name |> Helper.validateUserCollectionName
-        
-        this.InitializeCollection<JsonSerializator.JsonValue>(name)
-
-    /// <summary>
-    /// Checks if a collection with the specified name exists.
-    /// </summary>
-    /// <param name="name">The name of the collection.</param>
-    /// <returns>True if the collection exists, otherwise false.</returns>
-    member this.CollectionExists name =
-        let name = Helper.validateUserCollectionName name
-        Helper.existsCollection name connection
-
-    /// <summary>
-    /// Checks if a collection for the specified type exists.
-    /// </summary>
-    /// <typeparam name="'T">The document type.</typeparam>
-    /// <returns>True if the collection exists, otherwise false.</returns>
-    member this.CollectionExists<'T>() =
-        let name = Helper.collectionNameOf<'T>
-        Helper.existsCollection name connection
-
-    /// <summary>
-    /// Drops a collection if it exists.
-    /// </summary>
-    /// <param name="name">The name of the collection to drop.</param>
-    /// <returns>True if the collection was dropped, false if it did not exist.</returns>
-    member this.DropCollectionIfExists name =
-        let name = Helper.validateUserCollectionName name
-
-        if Helper.existsCollection name connection then
-            Helper.dropCollection name connection
-            RuntimeIndexModelCache.invalidate connectionString name
-            true
-        else false
-
-    /// <summary>
-    /// Drops a collection for the specified type if it exists.
-    /// </summary>
-    /// <typeparam name="'T">The document type.</typeparam>
-    /// <returns>True if the collection was dropped, false if it did not exist.</returns>
-    member this.DropCollectionIfExists<'T>() =
-        let name = Helper.collectionNameOf<'T>
-        this.DropCollectionIfExists name
-
-    /// <summary>
-    /// Drops a collection for the specified type.
-    /// </summary>
-    /// <typeparam name="'T">The document type.</typeparam>
-    /// <exception cref="KeyNotFoundException">Thrown if the collection does not exist.</exception>
-    member this.DropCollection<'T>() =
-        if this.DropCollectionIfExists<'T>() = false then
-            let name = Helper.collectionNameOf<'T>
-            raise (KeyNotFoundException (sprintf "Collection %s does not exists." name))
-
-    /// <summary>
-    /// Drops a collection with the specified name.
-    /// </summary>
-    /// <param name="name">The name of the collection to drop.</param>
-    /// <exception cref="KeyNotFoundException">Thrown if the collection does not exist.</exception>
-    member this.DropCollection name =
-        if this.DropCollectionIfExists name = false then
-            raise (KeyNotFoundException (sprintf "Collection %s does not exists." name))
-
-    /// <summary>
-    /// Lists the names of all existing collections in the database.
-    /// </summary>
-    /// <returns>A sequence of collection names.</returns>
-    member this.ListCollectionNames() =
-        Helper.listCollectionNamesSnapshot connection
-
-    /// <summary>
-    /// Asks the SQLite engine to run analysis to optimize query plans within the current transaction.
-    /// </summary>
-    member this.Optimize() =
-        connection.Execute "PRAGMA optimize;" |> ignore
-
-    /// <summary>
-    /// Executes a series of database operations within a nested savepoint.
-    /// On success the savepoint is released (merged into the parent transaction).
-    /// On exception the savepoint is rolled back without affecting the outer transaction.
-    /// </summary>
-    /// <param name="func">A function that takes a transactional <c>ISoloDB</c> context and returns a result.</param>
-    /// <typeparam name="'R">The return type of the function.</typeparam>
-    /// <returns>The result of the function.</returns>
-    member this.WithTransaction<'R>(func: Func<ISoloDB, 'R>) : 'R =
-        withSavepoint connection (fun _conn -> func.Invoke(this :> ISoloDB))
-
-    /// <summary>
-    /// Executes a series of database operations within a nested savepoint.
-    /// On success the savepoint is released. On exception the savepoint is rolled back.
-    /// </summary>
-    /// <param name="func">An action that takes a transactional <c>ISoloDB</c> context.</param>
-    member this.WithTransaction(func: Action<ISoloDB>) : unit =
-        this.WithTransaction<unit>(fun ctx -> func.Invoke ctx)
-
-    /// <summary>
-    /// Executes an asynchronous series of database operations within a nested savepoint.
-    /// On success the savepoint is released. On exception the savepoint is rolled back.
-    /// </summary>
-    /// <param name="func">An async function that takes a transactional <c>ISoloDB</c> context and returns a result.</param>
-    /// <typeparam name="'R">The return type of the function.</typeparam>
-    /// <returns>A task representing the asynchronous operation.</returns>
-    member this.WithTransactionAsync<'R>(func: Func<ISoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> =
-        withSavepointAsync connection (fun _conn -> func.Invoke(this :> ISoloDB))
-
-    /// <summary>
-    /// Executes an asynchronous series of database operations within a nested savepoint.
-    /// On success the savepoint is released. On exception the savepoint is rolled back.
-    /// </summary>
-    /// <param name="func">An async function that takes a transactional <c>ISoloDB</c> context.</param>
-    /// <returns>A task representing the asynchronous operation.</returns>
-    member this.WithTransactionAsync(func: Func<ISoloDB, Threading.Tasks.Task>) : Threading.Tasks.Task =
-        withSavepointAsync connection (fun _conn -> task { do! func.Invoke(this :> ISoloDB) }) :> Threading.Tasks.Task
-
-    interface ISoloDB with
-        member this.ConnectionString = this.ConnectionString
-        member this.FileSystem = this.FileSystem
-        member this.GetCollection<'T>() = this.GetCollection<'T>()
-        member this.GetCollection<'T>(name) = this.GetCollection<'T>(name)
-        member this.GetUntypedCollection(name) = this.GetUntypedCollection(name)
-        member this.CollectionExists(name) = this.CollectionExists(name)
-        member this.CollectionExists<'T>() = this.CollectionExists<'T>()
-        member this.DropCollectionIfExists(name) = this.DropCollectionIfExists(name)
-        member this.DropCollectionIfExists<'T>() = this.DropCollectionIfExists<'T>()
-        member this.DropCollection(name) = this.DropCollection(name)
-        member this.DropCollection<'T>() = this.DropCollection<'T>()
-        member this.ListCollectionNames() = this.ListCollectionNames()
-        member this.Optimize() = this.Optimize()
-        member this.WithTransaction<'R>(func: Func<ISoloDB, 'R>) : 'R = this.WithTransaction(func)
-        member this.WithTransaction(func: Action<ISoloDB>) : unit = this.WithTransaction(func)
-        member this.WithTransactionAsync<'R>(func: Func<ISoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> = this.WithTransactionAsync(func)
-        member this.WithTransactionAsync(func: Func<ISoloDB, Threading.Tasks.Task>) : Threading.Tasks.Task = this.WithTransactionAsync(func)
-        member this.Dispose() = ()
-
-/// <summary>
-/// The main database class, representing a single SQLite database file or in-memory instance.
-/// Provides access to collections and file system storage.
-/// </summary>
-type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation, config: SoloDBConfiguration, eventSystem: EventSystem) =
-    let mutable disposed = false
-    // Serializes DDL operations (InitializeCollection, DropCollectionIfExists) to prevent
-    // concurrent sqlite3_prepare_v2 calls from racing with schema changes in the ADO.NET layer.
-    // Static because multiple SoloDB instances on the same shared-cache database share the
-    // same sqlite3 schema state.
-    static let ddlLock = obj()
-
-    /// <summary>
-    /// Initializes a new instance of the SoloDB class.
-    /// </summary>
-    /// <param name="source">
-    /// The path to the database file, or an in-memory identifier prefixed with "memory:".
-    /// For example: "C:\data\mydb.db" or "memory:shared_db".
-    /// </param>
-    new(source: string) =
-        let connectionString, location = Bootstrap.parseSource source
-        let eventSystem = EventSystem ()
-        let setup = Bootstrap.createSetup eventSystem
-        let defaultConfig: SoloDBConfiguration = { CachingEnabled = true }
-        let manager = new ConnectionManager(connectionString, setup, defaultConfig)
-        manager.SetHandlerDispatchGuard(fun () -> eventSystem.GlobalLock.IsHeldByCurrentThread)
-
-        do
-            use dbConnection = manager.Borrow()
-            Bootstrap.initializeSchema dbConnection
-
-        new SoloDB(manager, connectionString, location, defaultConfig, eventSystem)
-
-    /// <summary>
-    /// Gets the underlying connection manager for the database.
-    /// </summary>
-    member this.Connection = connectionManager
-    /// <summary>
-    /// Gets the connection string used by this database instance.
-    /// </summary>
-    member this.ConnectionString = connectionString
-    /// <summary>
-    /// Gets the storage location (File or Memory) of the database.
-    /// </summary>
-    member val internal DataLocation = location
-    /// <summary>
-    /// Gets the configuration settings for this database instance.
-    /// </summary>
-    member val Config = config
-    /// <summary>
-    /// Gets an API for interacting with the virtual file system within the database.
-    /// </summary>
-    member val FileSystem: IFileSystem = FileSystem (Connection.Pooled connectionManager) :> IFileSystem
-
-    /// <summary>Gets the internal event system for this database instance.</summary>
-    member val internal Events = eventSystem
-
-    member private this.GetNewConnection() = connectionManager.Borrow()
-    member private this.CheckDisposed() =
-        if System.Threading.Volatile.Read(&disposed) then
-            raise (ObjectDisposedException(nameof(SoloDB)))
-        
-    member private this.InitializeCollection<'T> (name: string) =
-        this.CheckDisposed()
-        if name.StartsWith "SoloDB" then raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
-
-        let existsAlready =
-            use connection = connectionManager.Borrow()
-            Helper.existsCollection name connection
-
-        let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
-
-        if not existsAlready then
-            lock ddlLock (fun () ->
-                // Transaction callback returns unit; Collection construction stays outside.
-                // Relation schema validation runs after createTableInner inside the transaction.
-                connectionManager.WithTransaction(fun connection ->
-                    let shouldCreate = not (Helper.existsCollection name connection)
-                    if shouldCreate then
-                        Helper.createTableInner<'T> name connection
-
-                    Helper.registerTypeCollection<'T> name connection
-
-                    // Validate relation topology after table creation but before returning.
-                    // Must run after createTableInner so self-referential types don't hit "table already exists".
-                    if hasRelations then
-                        let relationTx: Relations.RelationTxContext = {
-                            Connection = connection
-                            OwnerTable = name
-                            OwnerType = typeof<'T>
-                            InTransaction = true
-                        }
-                        Relations.ensureSchemaForOwnerType relationTx typeof<'T>
-                )
-            )
-        elif hasRelations then
-            // Existing collection with relations: run schema ensure for BR-05 guard,
-            // evolution migration, catalog upsert, and link-table bootstrap.
-            // Read-only pre-flight: skip the write-locked path if all relation catalog
-            // rows already exist with matching metadata (avoids BEGIN IMMEDIATE contention
-            // on concurrent readers during in-flight write transactions).
-            let needsEnsure =
-                use conn = connectionManager.Borrow()
-                RelationsSchema.relationSchemaRequiresEnsure conn name typeof<'T>
-            if needsEnsure then
-                lock ddlLock (fun () ->
-                    connectionManager.WithTransaction(fun connection ->
-                        Helper.registerTypeCollection<'T> name connection
-
-                        let relationTx: Relations.RelationTxContext = {
-                            Connection = connection
-                            OwnerTable = name
-                            OwnerType = typeof<'T>
-                            InTransaction = true
-                        }
-                        Relations.ensureSchemaForOwnerType relationTx typeof<'T>
-                    )
-                )
-
-        let collection = Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = this.ClearCache; EventSystem = this.Events })
-        use snapshotConnection = connectionManager.Borrow()
-        collection.RefreshIndexModelSnapshot(snapshotConnection)
-        collection :> ISoloDBCollection<'T>
-
-    /// <summary>
-    /// Gets a collection of a specified type, using the type's name as the collection name. Creates the collection if it doesn't exist.
-    /// </summary>
-    /// <typeparam name="'T">The type of the documents in the collection.</typeparam>
-    /// <returns>An <c>ISoloDBCollection<'T></c> instance.</returns>
-    member this.GetCollection<'T>() =
-        let name = Helper.collectionNameOf<'T>
-        
-        this.InitializeCollection<'T>(name)
-
-    /// <summary>
-    /// Gets a collection of a specified type with a custom name. Creates the collection if it doesn't exist.
-    /// </summary>
-    /// <typeparam name="'T">The type of the documents in the collection.</typeparam>
-    /// <param name="name">The custom name for the collection.</param>
-    /// <returns>An <c>ISoloDBCollection<'T></c> instance.</returns>
-    member this.GetCollection<'T>(name) =       
-        this.InitializeCollection<'T>(Helper.validateUserCollectionName name)
-
-    /// <summary>
-    /// Gets a collection that stores untyped JSON data.
-    /// </summary>
-    /// <param name="name">The name for the collection.</param>
-    /// <returns>An <c>ISoloDBCollection<JsonValue></c> instance.</returns>
-    member this.GetUntypedCollection(name: string) =
-        let name = name |> Helper.validateUserCollectionName
-        
-        this.InitializeCollection<JsonSerializator.JsonValue>(name)
-
-    /// <summary>
-    /// Checks if a collection with the specified name exists.
-    /// </summary>
-    /// <param name="name">The name of the collection.</param>
-    /// <returns>True if the collection exists, otherwise false.</returns>
-    member this.CollectionExists name =
-        this.CheckDisposed()
-        let name = Helper.validateUserCollectionName name
-        use dbConnection = connectionManager.Borrow()
-        Helper.existsCollection name dbConnection
-
-    /// <summary>
-    /// Checks if a collection for the specified type exists.
-    /// </summary>
-    /// <typeparam name="'T">The document type.</typeparam>
-    /// <returns>True if the collection exists, otherwise false.</returns>
-    member this.CollectionExists<'T>() =
-        this.CheckDisposed()
-        let name = Helper.collectionNameOf<'T>
-        use dbConnection = connectionManager.Borrow()
-        Helper.existsCollection name dbConnection
-
-    /// <summary>
-    /// Drops a collection if it exists.
-    /// </summary>
-    /// <param name="name">The name of the collection to drop.</param>
-    /// <returns>True if the collection was dropped, false if it did not exist.</returns>
-    member this.DropCollectionIfExists name =
-        this.CheckDisposed()
-        let name = Helper.validateUserCollectionName name
-
-        lock ddlLock (fun () ->
-            connectionManager.WithTransaction(fun connection ->
-                if Helper.existsCollection name connection then
-                    Helper.dropCollection name connection
-                    RuntimeIndexModelCache.invalidate connectionString name
-                    true
-                else
-                    false
-            )
-        )
-
-    /// <summary>
-    /// Drops a collection for the specified type if it exists.
-    /// </summary>
-    /// <typeparam name="'T">The document type.</typeparam>
-    /// <returns>True if the collection was dropped, false if it did not exist.</returns>
-    member this.DropCollectionIfExists<'T>() =
-        let name = Helper.collectionNameOf<'T>
-        this.DropCollectionIfExists name
-
-    /// <summary>
-    /// Drops a collection for the specified type.
-    /// </summary>
-    /// <typeparam name="'T">The document type.</typeparam>
-    /// <exception cref="KeyNotFoundException">Thrown if the collection does not exist.</exception>
-    member this.DropCollection<'T>() =
-        if this.DropCollectionIfExists<'T>() = false then
-            let name = Helper.collectionNameOf<'T>
-            raise (KeyNotFoundException (sprintf "Collection %s does not exists." name))
-
-    /// <summary>
-    /// Drops a collection with the specified name.
-    /// </summary>
-    /// <param name="name">The name of the collection to drop.</param>
-    /// <exception cref="KeyNotFoundException">Thrown if the collection does not exist.</exception>
-    member this.DropCollection name =
-        if this.DropCollectionIfExists name = false then
-            raise (KeyNotFoundException (sprintf "Collection %s does not exists." name))
-
-    /// <summary>
-    /// Lists the names of all existing collections in the database.
-    /// </summary>
-    /// <returns>A sequence of collection names.</returns>
-    member this.ListCollectionNames() =
-        this.CheckDisposed()
-        use dbConnection = connectionManager.Borrow()
-        Helper.listCollectionNamesSnapshot dbConnection
-
-    /// <summary>
-    /// Performs an online backup of this database to another SoloDB instance.
-    /// </summary>
-    /// <param name="otherDb">The destination database instance.</param>
-    member this.BackupTo(otherDb: SoloDB) =
-        this.CheckDisposed()
-        use dbConnection = connectionManager.Borrow()
-        use otherConnection = otherDb.GetNewConnection()
-        dbConnection.Inner.BackupDatabase otherConnection.Inner
-
-    /// <summary>
-    /// Rebuilds the database file and writes it to a new location, defragmenting and optimizing it.
-    /// </summary>
-    /// <param name="location">The file path for the new, vacuumed database file.</param>
-    /// <exception cref="InvalidOperationException">Thrown if the source database is in-memory.</exception>
-    member this.VacuumTo(location: string) =
-        this.CheckDisposed()
-        match this.DataLocation with
-        | Memory _ -> (raise << InvalidOperationException) "Cannot vacuum backup from or to memory."
-        | other ->
-
-        let location = Path.GetFullPath location
-        if File.Exists location then File.Delete location
-
-        use dbConnection = connectionManager.Borrow()
-        let escapedLocation = QueryTranslator.escapeSQLiteString location
-        dbConnection.Execute($"VACUUM INTO '{escapedLocation}'")
-
-    /// <summary>
-    /// Rebuilds the database file in-place to defragment it and reclaim free space.
-    /// </summary>
-    /// <exception cref="InvalidOperationException">Thrown if the database is in-memory.</exception>
-    member this.Vacuum() =
-        this.CheckDisposed()
-        match this.DataLocation with
-        | Memory _ -> (raise << InvalidOperationException) "Cannot vacuum memory databases."
-        | other ->
-
-        use dbConnection = connectionManager.Borrow()
-        dbConnection.Execute($"VACUUM;")
-
-    /// <summary>
-    /// Executes a series of database operations within a single atomic transaction.
-    /// </summary>
-    /// <param name="func">A function that takes a <c>TransactionalSoloDB</c> instance and returns a result.</param>
-    /// <typeparam name="'R">The return type of the function.</typeparam>
-    /// <returns>The result of the function.</returns>
-    member this.WithTransaction<'R>(func: Func<TransactionalSoloDB, 'R>) : 'R =
-        this.CheckDisposed()
-        use connectionForTransaction = connectionManager.CreateForTransaction()
-        let mutable primaryEx: exn option = None
-        let mutable cleanupEx: exn option = None
-        let mutable result = Unchecked.defaultof<'R>
-        try
-            Connections.beginImmediateWithRetry connectionForTransaction
-            let transactionalDb = new TransactionalSoloDB(connectionForTransaction, { ClearCacheFunction = ignore; EventSystem = this.Events })
-
-            try
-                result <- func.Invoke transactionalDb
-                match Connections.takeHandlerFaultCommitException connectionForTransaction with
-                | Some ex ->
-                    primaryEx <- Some ex
-                    try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
-                | None ->
-                    connectionForTransaction.Execute "COMMIT;" |> ignore
-            with ex ->
-                primaryEx <- Some ex
-                try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
-        finally
-            clearHandlerFault connectionForTransaction
-            connectionForTransaction.DisposeReal(true)
-
-        match Connections.resolveTxOutcome primaryEx cleanupEx with
-        | Some ex -> raise ex
-        | None -> result
-
-    /// <summary>
-    /// Executes a series of database operations within a single atomic transaction.
-    /// </summary>
-    /// <param name="func">An action that takes a <c>TransactionalSoloDB</c> instance.</param>
-    member this.WithTransaction(func: Action<TransactionalSoloDB>) : unit =
-        this.WithTransaction<unit>(fun tx -> func.Invoke tx)
-
-    /// <summary>
-    /// Executes an asynchronous series of database operations within a single atomic transaction.
-    /// </summary>
-    /// <param name="func">An async function that takes a <c>TransactionalSoloDB</c> instance and returns a result.</param>
-    /// <typeparam name="'R">The return type of the function.</typeparam>
-    /// <returns>A task representing the asynchronous transactional operation.</returns>
-    member this.WithTransactionAsync<'R>(func: Func<TransactionalSoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> = task {
-        this.CheckDisposed()
-        use connectionForTransaction = connectionManager.CreateForTransaction()
-        let mutable primaryEx: exn option = None
-        let mutable cleanupEx: exn option = None
-        let mutable result = Unchecked.defaultof<'R>
-        try
-            Connections.beginImmediateWithRetry connectionForTransaction
-            let transactionalDb = new TransactionalSoloDB(connectionForTransaction, { ClearCacheFunction = ignore; EventSystem = this.Events })
-
-            try
-                let! ret = func.Invoke transactionalDb
-                result <- ret
-                match Connections.takeHandlerFaultCommitException connectionForTransaction with
-                | Some ex ->
-                    primaryEx <- Some ex
-                    try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
-                | None ->
-                    connectionForTransaction.Execute "COMMIT;" |> ignore
-            with ex ->
-                primaryEx <- Some ex
-                try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
-        finally
-            clearHandlerFault connectionForTransaction
-            connectionForTransaction.DisposeReal(true)
-
-        match Connections.resolveTxOutcome primaryEx cleanupEx with
-        | Some ex -> return reraiseAnywhere ex
-        | None -> return result
-    }
-
-    /// <summary>
-    /// Executes an asynchronous series of database operations within a single atomic transaction.
-    /// </summary>
-    /// <param name="func">An async function that takes a <c>TransactionalSoloDB</c> instance.</param>
-    /// <returns>A task representing the asynchronous transactional operation.</returns>
-    member this.WithTransactionAsync(func: Func<TransactionalSoloDB, Threading.Tasks.Task>) : Threading.Tasks.Task =
-        this.WithTransactionAsync<unit>(fun tx -> task { do! func.Invoke tx }) :> Threading.Tasks.Task
-
-    /// <summary>
-    /// Asks the database engine to run analysis to optimize query plans.
-    /// It is recommended to run this after making significant changes to data or indexes.
-    /// </summary>
-    member this.Optimize() =
-        this.CheckDisposed()
-        use dbConnection = connectionManager.Borrow()
-        dbConnection.Execute "PRAGMA optimize;" |> ignore
-
-    /// <summary>
-    /// Disables the in-memory cache of prepared SQL commands for all connections.
-    /// </summary>
-    member this.DisableCaching() =
-        this.CheckDisposed()
-        config.CachingEnabled <- false
-
-    /// <summary>
-    /// Clears the in-memory cache of prepared SQL commands across all connections without disabling it.
-    /// </summary>
-    member this.ClearCache() =
-        this.CheckDisposed()
-        connectionManager.All |> Seq.iter _.ClearCache()
-
-    /// <summary>
-    /// Enables the in-memory cache of prepared SQL commands for all connections. Caching is enabled by default.
-    /// </summary>
-    member this.EnableCaching() =
-        this.CheckDisposed()
-        config.CachingEnabled <- true
-
-    /// <summary>
-    /// Disposes the database instance, closing all connections and releasing resources.
-    /// </summary>
-    member this.Dispose() =
-        System.Threading.Volatile.Write(&disposed, true)
-        (connectionManager :> IDisposable).Dispose()
-
-    interface IDisposable with
-        member this.Dispose() = this.Dispose()
-
-    interface ISoloDB with
-        member this.ConnectionString = this.ConnectionString
-        member this.FileSystem = this.FileSystem
-        member this.GetCollection<'T>() = this.GetCollection<'T>()
-        member this.GetCollection<'T>(name) = this.GetCollection<'T>(name)
-        member this.GetUntypedCollection(name) = this.GetUntypedCollection(name)
-        member this.CollectionExists(name) = this.CollectionExists(name)
-        member this.CollectionExists<'T>() = this.CollectionExists<'T>()
-        member this.DropCollectionIfExists(name) = this.DropCollectionIfExists(name)
-        member this.DropCollectionIfExists<'T>() = this.DropCollectionIfExists<'T>()
-        member this.DropCollection(name) = this.DropCollection(name)
-        member this.DropCollection<'T>() = this.DropCollection<'T>()
-        member this.ListCollectionNames() = this.ListCollectionNames()
-        member this.Optimize() = this.Optimize()
-        member this.WithTransaction<'R>(func: Func<ISoloDB, 'R>) : 'R =
-            this.WithTransaction(fun (tx: TransactionalSoloDB) -> func.Invoke(tx :> ISoloDB))
-        member this.WithTransaction(func: Action<ISoloDB>) : unit =
-            this.WithTransaction(fun (tx: TransactionalSoloDB) -> func.Invoke(tx :> ISoloDB))
-        member this.WithTransactionAsync<'R>(func: Func<ISoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> =
-            this.WithTransactionAsync(fun (tx: TransactionalSoloDB) -> func.Invoke(tx :> ISoloDB))
-        member this.WithTransactionAsync(func: Func<ISoloDB, Threading.Tasks.Task>) : Threading.Tasks.Task =
-            this.WithTransactionAsync(fun (tx: TransactionalSoloDB) -> func.Invoke(tx :> ISoloDB))
-
-
-    /// <summary>
-    /// Analyzes the provided LINQ query and returns the query plan that SQLite would use to execute it.
-    /// </summary>
-    /// <remarks>Calling this function will clear the in-memory cache of prepared SQL commands.</remarks>
-    /// <param name="query">The LINQ query to analyze.</param>
-    /// <returns>A string describing the query plan.</returns>
-    static member ExplainQueryPlan(query: IQueryable<'T>) = QueryUtils.explainQueryPlan query
-
-    /// <summary>
-    /// Translates the provided LINQ query into its corresponding SQL statement.
-    /// </summary>
-    /// <param name="query">The LINQ query to translate.</param>
-    /// <returns>The generated SQL string.</returns>
-    static member GetSQL(query: IQueryable<'T>) = QueryUtils.getSQL query

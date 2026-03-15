@@ -144,7 +144,11 @@
     <Compile Include="SoloDBCore/SoloDB.Collection.Insert.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.ReadDelete.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.Mutation.fs" />
+    <Compile Include="SoloDBCore/SoloDB.Collection.Surface.fs" />
     <Compile Include="SoloDBCore/SoloDB.fs" />
+    <Compile Include="SoloDBCore/SoloDB.TransactionalSoloDB.fs" />
+    <Compile Include="SoloDBCore/SoloDB.Root.Helpers.fs" />
+    <Compile Include="SoloDBCore/SoloDB.Root.fs" />
     <Compile Include="MongoEmulation/MongoEmulation.BsonDocument.fs" />
     <Compile Include="MongoEmulation/MongoEmulation.CollectionExt.fs" />
     <Compile Include="MongoEmulation/MongoEmulation.Builders.fs" />
