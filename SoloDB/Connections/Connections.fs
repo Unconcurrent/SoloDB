@@ -38,13 +38,28 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
 
     let private cleanupSavepointRollback (conn: SqliteConnection) (sp: string) (ex: exn) =
         let faultDepth = tryGetRecordedHandlerFaultDepth conn ex
-        let mutable rollbackCompleted = true
-        try conn.Execute(sprintf "ROLLBACK TO \"%s\";" sp) |> ignore with _ -> rollbackCompleted <- false
-        try conn.Execute(sprintf "RELEASE \"%s\";" sp) |> ignore with _ -> rollbackCompleted <- false
-        if rollbackCompleted then
+        let mutable rollbackFailure: exn option = None
+        let mutable releaseFailure: exn option = None
+        try conn.Execute(sprintf "ROLLBACK TO \"%s\";" sp) |> ignore with rb -> rollbackFailure <- Some rb
+        try conn.Execute(sprintf "RELEASE \"%s\";" sp) |> ignore with rel -> releaseFailure <- Some rel
+        match rollbackFailure, releaseFailure with
+        | None, None ->
             match faultDepth with
             | Some depth -> clearNonSwallowedHandlerFaultsAtDepth conn depth
             | None -> ()
+        | Some rb, Some rel ->
+            let wrapped = InvalidOperationException("SAVEPOINT rollback cleanup failed: both ROLLBACK TO and RELEASE failed.", rb)
+            wrapped.Data["SoloDB.SavepointReleaseException"] <- rel
+            wrapped.Data["SoloDB.PrimaryException"] <- ex
+            raise wrapped
+        | Some rb, None ->
+            let wrapped = InvalidOperationException("SAVEPOINT rollback cleanup failed: ROLLBACK TO failed.", rb)
+            wrapped.Data["SoloDB.PrimaryException"] <- ex
+            raise wrapped
+        | None, Some rel ->
+            let wrapped = InvalidOperationException("SAVEPOINT rollback cleanup failed: RELEASE failed.", rel)
+            wrapped.Data["SoloDB.PrimaryException"] <- ex
+            raise wrapped
 
     let private rollbackBorrowedTransaction (conn: CachingDbConnection) (primaryEx: exn option ref) (cleanupEx: exn option ref) (ex: exn) =
         primaryEx := Some ex

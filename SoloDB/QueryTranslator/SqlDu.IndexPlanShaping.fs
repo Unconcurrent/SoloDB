@@ -152,39 +152,46 @@ let private shapeInCore (model: IndexModel) (core: SelectCore) : SelectCore =
         | None -> core // No base table — nothing to shape (DerivedTable, json_each, etc.)
         | Some tName ->
             let mutable shaped = core
+            // Keep qualification intact on joined cores: canonicalization can
+            // de-qualify expressions and produce ambiguous column references.
+            let canCanonicalize = shaped.Joins.IsEmpty
 
             // Canonicalize WHERE predicate
             shaped <-
-                match shaped.Where with
-                | Some where ->
-                    let canonical = canonicalizePredicate model tName where
-                    if canonical = where then shaped
-                    else { shaped with Where = Some canonical }
-                | None -> shaped
+                if not canCanonicalize then shaped
+                else
+                    match shaped.Where with
+                    | Some where ->
+                        let canonical = canonicalizePredicate model tName where
+                        if canonical = where then shaped
+                        else { shaped with Where = Some canonical }
+                    | None -> shaped
 
             // Canonicalize JOIN ON clauses
             shaped <-
-                let newJoins =
-                    shaped.Joins |> List.map (fun j ->
-                        match j.On with
-                        | Some onExpr ->
-                            // For JOIN ON, we canonicalize against the join source's table
-                            let joinTableName =
-                                match resolveTableName j.Source with
-                                | Some n -> n
-                                | None -> tName // Fallback to FROM table
-                            let canonical = canonicalizePredicate model joinTableName onExpr
-                            // Also canonicalize against the FROM table
-                            let canonical2 = canonicalizePredicate model tName canonical
-                            if canonical2 = onExpr then j
-                            else { j with On = Some canonical2 }
-                        | None -> j)
-                if newJoins = shaped.Joins then shaped
-                else { shaped with Joins = newJoins }
+                if not canCanonicalize then shaped
+                else
+                    let newJoins =
+                        shaped.Joins |> List.map (fun j ->
+                            match j.On with
+                            | Some onExpr ->
+                                // For JOIN ON, we canonicalize against the join source's table
+                                let joinTableName =
+                                    match resolveTableName j.Source with
+                                    | Some n -> n
+                                    | None -> tName // Fallback to FROM table
+                                let canonical = canonicalizePredicate model joinTableName onExpr
+                                // Also canonicalize against the FROM table
+                                let canonical2 = canonicalizePredicate model tName canonical
+                                if canonical2 = onExpr then j
+                                else { j with On = Some canonical2 }
+                            | None -> j)
+                    if newJoins = shaped.Joins then shaped
+                    else { shaped with Joins = newJoins }
 
             // Canonicalize ORDER BY
             shaped <-
-                if shaped.OrderBy.IsEmpty then shaped
+                if (not canCanonicalize) || shaped.OrderBy.IsEmpty then shaped
                 else
                     let canonical = canonicalizeOrderBy model tName shaped.OrderBy
                     if canonical = shaped.OrderBy then shaped
