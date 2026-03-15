@@ -141,6 +141,16 @@ let internal updateDbRefJson (tx: RelationTxContext) (ownerTable: string) (owner
 let internal shouldSyncDbRefJson (descriptor: RelationDescriptor) =
     isNull (descriptor.Property.GetCustomAttribute<IgnoreDataMemberAttribute>(true))
 
+let internal ensureLinkWriteApplied (tx: RelationTxContext) (linkTable: string) (sourceId: int64) (targetId: int64) (opName: string) (rowsAffected: int) =
+    if rowsAffected <= 0 then
+        let exists =
+            tx.Connection.QueryFirst<int64>(
+                $"SELECT CASE WHEN EXISTS (SELECT 1 FROM {quoteIdentifier linkTable} WHERE SourceId = @sourceId AND TargetId = @targetId) THEN 1 ELSE 0 END",
+                {| sourceId = sourceId; targetId = targetId |}) = 1L
+        if not exists then
+            raise (InvalidOperationException(
+                $"Error: Relation link write failed in '{linkTable}'.\nReason: {opName} reported no affected rows and no link row exists for ({sourceId}, {targetId}).\nFix: Verify relation mutation inputs and constraints before retrying."))
+
 let internal resolveTypedIdToTargetId (tx: RelationTxContext) (descriptor: RelationDescriptor) (typedId: obj) =
     match descriptor.TypedIdType, descriptor.TargetSoloIdProperty with
     | ValueSome idType, ValueSome soloIdProp ->
@@ -252,9 +262,11 @@ let rec internal cascadeInsertDeep
                             finally typeStack.Remove(descriptor.TargetType) |> ignore
                         let dbRef = createDbRefTo descriptor.Property.PropertyType childId
                         (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(entity, dbRef)
-                        childTx.Connection.Execute(
-                            $"INSERT OR REPLACE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
-                            {| sourceId = insertedId; targetId = childId |}) |> ignore
+                        let rowsAffected =
+                            childTx.Connection.Execute(
+                                $"INSERT OR REPLACE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
+                                {| sourceId = insertedId; targetId = childId |})
+                        ensureLinkWriteApplied childTx descriptor.LinkTable insertedId childId "INSERT OR REPLACE" rowsAffected
                         if shouldSyncDbRefJson descriptor then
                             updateDbRefJson childTx targetTable insertedId descriptor.PropertyPath childId
                 | ValueNone -> ()
@@ -282,9 +294,11 @@ let rec internal cascadeInsertDeep
                             let sourceId, targetId =
                                 if descriptor.OwnerUsesSourceColumn then insertedId, itemId
                                 else itemId, insertedId
-                            childTx.Connection.Execute(
-                                $"INSERT OR IGNORE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
-                                {| sourceId = sourceId; targetId = targetId |}) |> ignore
+                            let rowsAffected =
+                                childTx.Connection.Execute(
+                                    $"INSERT OR IGNORE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
+                                    {| sourceId = sourceId; targetId = targetId |})
+                            ensureLinkWriteApplied childTx descriptor.LinkTable sourceId targetId "INSERT OR IGNORE" rowsAffected
             | _ -> ()
 
     insertedId
@@ -460,9 +474,11 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
             let sourceId, targetIdValue =
                 if descriptor.OwnerUsesSourceColumn then ownerId, targetId
                 else targetId, ownerId
-            tx.Connection.Execute(
-                $"INSERT OR IGNORE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
-                {| sourceId = sourceId; targetId = targetIdValue |}) |> ignore
+            let rowsAffected =
+                tx.Connection.Execute(
+                    $"INSERT OR IGNORE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
+                    {| sourceId = sourceId; targetId = targetIdValue |})
+            ensureLinkWriteApplied tx descriptor.LinkTable sourceId targetIdValue "INSERT OR IGNORE" rowsAffected
 
         | RemoveDBRefMany(propertyPath, targetType, targetId) ->
             let descriptor = resolveDescriptor propertyPath

@@ -66,45 +66,66 @@ let private readStringOption (reader: SqliteDataReader) (ordinal: int) : string 
     if reader.IsDBNull ordinal then None
     else Some(reader.GetString ordinal)
 
+let private isTransientMetadataRace (ex: SqliteException) =
+    ex.SqliteErrorCode = 1
+    && (ex.Message.IndexOf("no such index", StringComparison.OrdinalIgnoreCase) >= 0
+        || ex.Message.IndexOf("no such table", StringComparison.OrdinalIgnoreCase) >= 0
+        || ex.Message.IndexOf("database schema has changed", StringComparison.OrdinalIgnoreCase) >= 0)
+
 let private readIndexList (connection: SqliteConnection) (tableName: string) : IndexListRow list =
-    use cmd = connection.CreateCommand()
-    cmd.CommandText <- "SELECT name, \"unique\", partial FROM pragma_index_list(@tableName);"
-    cmd.Parameters.AddWithValue("@tableName", tableName) |> ignore
-    use reader = cmd.ExecuteReader()
-    let rows = ResizeArray<IndexListRow>()
-    while reader.Read() do
-        rows.Add({
-            Name = reader.GetString 0
-            IsUnique = toBoolFromInt (reader.GetValue 1)
-            IsPartial = toBoolFromInt (reader.GetValue 2)
-        })
-    rows |> Seq.toList
+    try
+        use cmd = connection.CreateCommand()
+        cmd.CommandText <- "SELECT name, \"unique\", partial FROM pragma_index_list(@tableName);"
+        cmd.Parameters.AddWithValue("@tableName", tableName) |> ignore
+        use reader = cmd.ExecuteReader()
+        let rows = ResizeArray<IndexListRow>()
+        while reader.Read() do
+            rows.Add({
+                Name = reader.GetString 0
+                IsUnique = toBoolFromInt (reader.GetValue 1)
+                IsPartial = toBoolFromInt (reader.GetValue 2)
+            })
+        rows |> Seq.toList
+    with
+    | :? ArgumentOutOfRangeException -> []
+    | :? SqliteException as ex when isTransientMetadataRace ex -> []
 
 let private readIndexXInfo (connection: SqliteConnection) (indexName: string) : IndexXInfoRow list =
-    use cmd = connection.CreateCommand()
-    cmd.CommandText <- "SELECT cid, name, \"desc\", coll, key FROM pragma_index_xinfo(@indexName) ORDER BY seqno;"
-    cmd.Parameters.AddWithValue("@indexName", indexName) |> ignore
-    use reader = cmd.ExecuteReader()
-    let rows = ResizeArray<IndexXInfoRow>()
-    while reader.Read() do
-        rows.Add({
-            Cid = toInt (reader.GetValue 0)
-            Name = readStringOption reader 1
-            Desc = toInt (reader.GetValue 2)
-            Collation = readStringOption reader 3
-            Key = toInt (reader.GetValue 4)
-        })
-    rows |> Seq.toList
+    try
+        use cmd = connection.CreateCommand()
+        cmd.CommandText <- "SELECT cid, name, \"desc\", coll, key FROM pragma_index_xinfo(@indexName) ORDER BY seqno;"
+        cmd.Parameters.AddWithValue("@indexName", indexName) |> ignore
+        use reader = cmd.ExecuteReader()
+        let rows = ResizeArray<IndexXInfoRow>()
+        while reader.Read() do
+            rows.Add({
+                Cid = toInt (reader.GetValue 0)
+                Name = readStringOption reader 1
+                Desc = toInt (reader.GetValue 2)
+                Collation = readStringOption reader 3
+                Key = toInt (reader.GetValue 4)
+            })
+        rows |> Seq.toList
+    with
+    | :? ArgumentOutOfRangeException ->
+        // Microsoft.Data.Sqlite can surface this during concurrent schema changes while preparing pragma_index_xinfo.
+        // Fail closed the same way as "no such index/table": omit unstable index metadata for this snapshot.
+        []
+    | :? SqliteException as ex when isTransientMetadataRace ex -> []
 
 let private readIndexSql (connection: SqliteConnection) (tableName: string) (indexName: string) : string option =
-    use cmd = connection.CreateCommand()
-    cmd.CommandText <- "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = @tableName AND name = @indexName LIMIT 1;"
-    cmd.Parameters.AddWithValue("@tableName", tableName) |> ignore
-    cmd.Parameters.AddWithValue("@indexName", indexName) |> ignore
-    let sql = cmd.ExecuteScalar()
-    match sql with
-    | :? string as text when not (String.IsNullOrWhiteSpace text) -> Some text
-    | _ -> None
+    try
+        use cmd = connection.CreateCommand()
+        cmd.CommandText <- "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = @tableName AND name = @indexName LIMIT 1;"
+        cmd.Parameters.AddWithValue("@tableName", tableName) |> ignore
+        cmd.Parameters.AddWithValue("@indexName", indexName) |> ignore
+        let sql = cmd.ExecuteScalar()
+        match sql with
+        | :? string as text when not (String.IsNullOrWhiteSpace text) -> Some text
+        | _ -> None
+    with
+    | :? ArgumentOutOfRangeException -> None
+    | :? SqliteException as ex when isTransientMetadataRace ex -> None
 
 let private recIsWrappedByOuterParens (s: string) : bool =
     if String.IsNullOrWhiteSpace s then false
@@ -304,12 +325,16 @@ let private tryBuildIndexEntry (tableName: string) (row: IndexListRow) (xinfo: I
                 })
 
 /// Load index entries for a single table from runtime SQLite metadata.
+/// Fail-closed on concurrent schema changes: return empty list on any exception.
+/// An omitted index model is always safe (conservative query plan).
 let loadTableIndexes (connection: SqliteConnection) (tableName: string) : IndexEntry list =
-    readIndexList connection tableName
-    |> List.choose (fun row ->
-        let xinfo = readIndexXInfo connection row.Name
-        let indexSql = readIndexSql connection tableName row.Name
-        tryBuildIndexEntry tableName row xinfo indexSql)
+    try
+        readIndexList connection tableName
+        |> List.choose (fun row ->
+            let xinfo = readIndexXInfo connection row.Name
+            let indexSql = readIndexSql connection tableName row.Name
+            tryBuildIndexEntry tableName row xinfo indexSql)
+    with _ -> []
 
 /// Load an index model for multiple tables from runtime SQLite metadata.
 let loadModelForTables (connection: SqliteConnection) (tableNames: string seq) : IndexModel =

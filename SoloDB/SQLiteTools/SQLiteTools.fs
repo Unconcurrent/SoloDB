@@ -235,7 +235,11 @@ Fix: Let handler-side database faults abort the outer operation, or avoid swallo
                     let command = this.CreateCommand()
                     command.CommandText <- sql
                     processParameters addParameter command parameters
-                    command.Prepare()
+                    // SQLITE_SCHEMA compensation: Microsoft.Data.Sqlite throws ArgumentOutOfRangeException
+                    // from PrepareAndEnumerateStatements when concurrent DDL invalidates the schema cache.
+                    // SQLite re-prepares on SQLITE_SCHEMA internally; the .NET wrapper does not. Single retry.
+                    try command.Prepare()
+                    with :? ArgumentOutOfRangeException -> command.Prepare()
 
                     let item = {| Command = command; ColumnDict = Dictionary<string, int>(); CallCount = ref 0L; InUse = ref false |}
                     preparedCache.[sql] <- item
@@ -359,7 +363,8 @@ Fix: Let handler-side database faults abort the outer operation, or avoid swallo
                         inUse := false
                 | ValueNone ->
                     use command = createCommand this sql parameters
-                    command.Prepare() // To throw all errors, not silently fail them.
+                    try command.Prepare()
+                    with :? ArgumentOutOfRangeException -> command.Prepare()
                     let affected = command.ExecuteNonQuery()
                     raiseIfHandlerFaultRecorded (this :> SqliteConnection)
                     affected
@@ -393,7 +398,8 @@ Fix: Let handler-side database faults abort the outer operation, or avoid swallo
                     reraise()
             | ValueNone ->
                 let command = createCommand this sql parameters
-                command.Prepare()
+                try command.Prepare()
+                with :? ArgumentOutOfRangeException -> command.Prepare()
                 let reader = command.ExecuteReader()
                 outReader <- reader
                 readerActive <- true
@@ -556,7 +562,8 @@ Fix: Let handler-side database faults abort the outer operation, or avoid swallo
                 // Route through CachingDbConnection member to get reader-active guard.
                 c.CheckNoActiveReader()
                 let command = createCommand this sql parameters
-                command.Prepare()
+                try command.Prepare()
+                with :? ArgumentOutOfRangeException -> command.Prepare()
                 let reader = command.ExecuteReader()
                 outReader <- reader
                 c.ReaderActive <- true
@@ -568,7 +575,8 @@ Fix: Let handler-side database faults abort the outer operation, or avoid swallo
                 }
             | _ ->
                 let command = createCommand this sql parameters
-                command.Prepare()
+                try command.Prepare()
+                with :? ArgumentOutOfRangeException -> command.Prepare()
                 let reader = command.ExecuteReader()
                 outReader <- reader
                 { new IDisposable with
@@ -587,7 +595,9 @@ Fix: Let handler-side database faults abort the outer operation, or avoid swallo
                 | :? CachingDbConnection as c -> c.Execute(sql, parameters)
                 | _ ->
                     use command = createCommand this sql parameters
-                    command.Prepare() // To throw all errors, not silently fail them.
+                    // SQLITE_SCHEMA compensation (same as tryCachedCommand path).
+                    try command.Prepare()
+                    with :? ArgumentOutOfRangeException -> command.Prepare()
                     let affected = command.ExecuteNonQuery()
                     raiseIfHandlerFaultRecorded this
                     affected

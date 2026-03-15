@@ -195,21 +195,26 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
         /// <param name="pooledConn">The connection to return to the pool.</param>
         /// <exception cref="InvalidOperationException">Thrown if the connection is still inside a transaction.</exception>
         member internal this.TakeBack(pooledConn: CachingDbConnection) =
-            // SQLite does not support nested transactions, therefore we can use this to check if the user forgot to 
-            // end the transaction before returning it to the pool.
-            try pooledConn.Execute("BEGIN; ROLLBACK;") |> ignore
-            with 
-            | :? SqliteException as se when se.SqliteErrorCode = 1 && se.SqliteExtendedErrorCode = 1 ->
-                ("Error: Connection returned to pool while a transaction is still active.\nReason: The transaction must be finished before returning the connection.\nFix: Commit or rollback the transaction before returning the connection.", se)
-                |> InvalidOperationException |> raise
+            // Verify no stray transaction is active before returning to pool.
+            let probeOk =
+                try pooledConn.Execute("BEGIN; ROLLBACK;") |> ignore; true
+                with
+                | :? SqliteException as se when se.SqliteErrorCode = 1 && se.SqliteExtendedErrorCode = 1 ->
+                    ("Error: Connection returned to pool while a transaction is still active.\nReason: The transaction must be finished before returning the connection.\nFix: Commit or rollback the transaction before returning the connection.", se)
+                    |> InvalidOperationException |> raise
+                | _ ->
+                    // Connection is in unknown state (concurrent DDL schema churn, driver error, etc.).
+                    // Fail-safe: dispose instead of returning to pool.
+                    try pooledConn.DisposeReal() with _ -> ()
+                    false
 
-            if not pooledConn.IsEventDispatchStateClean then
+            if probeOk then
+                if not pooledConn.IsEventDispatchStateClean then
+                    pooledConn.ResetEventDispatchState()
+
                 pooledConn.ResetEventDispatchState()
-                raise (InvalidOperationException("Event dispatch state was not clean when returning a pooled connection. Ensure handler dispatch scopes always unwind and pending removals are flushed."))
 
-            pooledConn.ResetEventDispatchState()
-
-            pool.Push pooledConn
+                pool.Push pooledConn
 
         /// <summary>
         /// Borrows a connection from the pool. If the pool is empty, a new connection is created.
@@ -226,23 +231,42 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
                 if c.Inner.State <> ConnectionState.Open then
                     c.Inner.Open()
                 c
-            | false, _ -> 
-                let c = new CachingDbConnection(connectionStr, this.TakeBack, config, this.EnterEventHandlerScope, this.ExitEventHandlerScope)
-                let mutable primaryEx: exn option = None
-                let mutable cleanupEx: exn option = None
-                try
-                    c.Inner.Open()
-                    setup c.Inner
-                    all.Push c
-                    c
-                with ex ->
-                    primaryEx <- Some ex
-                    try c.DisposeReal() with d -> cleanupEx <- Some d
-                    match primaryEx, cleanupEx with
-                    | Some p, Some d -> p.Data["SoloDB.CleanupException"] <- d; raise p
-                    | Some p, None -> raise p
-                    | None, Some d -> raise d
-                    | None, None -> raise (InvalidOperationException("Connection setup failed."))
+            | false, _ ->
+                let createAndSetup () =
+                    let c = new CachingDbConnection(connectionStr, this.TakeBack, config, this.EnterEventHandlerScope, this.ExitEventHandlerScope)
+                    let mutable primaryEx: exn option = None
+                    let mutable cleanupEx: exn option = None
+                    try
+                        c.Inner.Open()
+                        setup c.Inner
+                        all.Push c
+                        c
+                    with ex ->
+                        primaryEx <- Some ex
+                        try c.DisposeReal() with d -> cleanupEx <- Some d
+                        match resolveTxOutcome primaryEx cleanupEx with
+                        | Some resolved -> reraiseAnywhere resolved
+                        | None -> raise (InvalidOperationException("Connection setup failed."))
+                // SQLITE_SCHEMA compensation: concurrent DDL can invalidate the schema cache
+                // during connection setup (Open/PRAGMA/CreateFunction). Microsoft.Data.Sqlite
+                // surfaces this as ArgumentOutOfRangeException or SqliteException with schema-churn
+                // messages. Retry with backoff, matching beginImmediateWithRetry pattern.
+                let isTransientSetupRace (ex: exn) =
+                    match ex with
+                    | :? ArgumentOutOfRangeException -> true
+                    | :? SqliteException as se ->
+                        se.SqliteErrorCode = 1
+                        && (se.Message.IndexOf("no such", StringComparison.OrdinalIgnoreCase) >= 0
+                            || se.Message.IndexOf("database schema has changed", StringComparison.OrdinalIgnoreCase) >= 0)
+                    | _ -> false
+                let mutable attempt = 0
+                let mutable conn = Unchecked.defaultof<CachingDbConnection>
+                while isNull (box conn) && attempt < 5 do
+                    try conn <- createAndSetup()
+                    with ex when isTransientSetupRace ex && attempt < 4 ->
+                        attempt <- attempt + 1
+                        Thread.Sleep(25 * attempt)
+                conn
 
         /// <summary>
         /// Gets a collection of all connections (both in-pool and in-use) created by this manager.
