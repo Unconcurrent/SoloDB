@@ -48,7 +48,9 @@
     <Compile Include="Json/JsonFunctions.fs" />
     <Compile Include="SQLiteTools/SQLiteTools.Params.fs" />
     <Compile Include="SQLiteTools/SQLiteTools.Mapper.fs" />
-    <Compile Include="SQLiteTools/SQLiteTools.fs" />
+    <Compile Include="SQLiteTools/SQLiteTools.HandlerFaultState.fs" />
+    <Compile Include="SQLiteTools/SQLiteTools.Extensions.fs" />
+    <Compile Include="SQLiteTools/SQLiteTools.CachingDbConnection.fs" />
     <Compile Include="RawSqliteFunctions/RawSqliteFunctions.Types.fs" />
     <Compile Include="RawSqliteFunctions/RawSqliteFunctions.fs" />
     <Compile Include="RawSqliteFunctions/RawSqliteFunctions.Extensions.fs" />
