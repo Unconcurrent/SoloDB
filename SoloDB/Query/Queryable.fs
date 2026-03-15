@@ -231,7 +231,7 @@ module private QueryHelper =
             ] (SelectStmt sel)
         match pipelineResult.Output with
         | SelectStmt outSel -> SqlDuMinimalEmit.emitSelect qb outSel
-        | _ -> failwith "R15 invariant violation: expected SelectStmt from identity pipeline"
+        | _ -> failwith "internal invariant violation: expected SelectStmt from optimizer pipeline"
 
     /// Helper to build a simple SelectCore with default empty fields.
     let private mkCore projections source =
