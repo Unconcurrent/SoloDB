@@ -143,6 +143,7 @@
     <Compile Include="SoloDBCore/SoloDB.Collection.Core.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.Insert.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.ReadDelete.fs" />
+    <Compile Include="SoloDBCore/SoloDB.Collection.Mutation.fs" />
     <Compile Include="SoloDBCore/SoloDB.fs" />
     <Compile Include="MongoEmulation/MongoEmulation.BsonDocument.fs" />
     <Compile Include="MongoEmulation/MongoEmulation.CollectionExt.fs" />
