@@ -119,6 +119,9 @@
 		    <Compile Include="Relations/Relations.SharedSql.fs" />
 		    <Compile Include="SoloDBCore/SoloDB.Helper.Schema.fs" />
 		    <Compile Include="SoloDBCore/SoloDB.Helper.Core.fs" />
+		    <Compile Include="Relations/Relations.Schema.Builder.fs" />
+		    <Compile Include="Relations/Relations.Schema.Validator.fs" />
+		    <Compile Include="Relations/Relations.Schema.LinkTableDDL.fs" />
 		    <Compile Include="Relations/Relations.Schema.fs" />
 	    <Compile Include="Relations/Relations.Entity.fs" />
 	    <Compile Include="Relations/Relations.Delete.fs" />
