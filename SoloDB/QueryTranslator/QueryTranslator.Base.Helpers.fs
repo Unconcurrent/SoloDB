@@ -281,6 +281,7 @@ module internal QueryTranslatorBaseHelpers =
             true
         | :? MemberExpression as me when not (isNull me.Expression) ->
             involvesDBRefValueAccess me.Expression
-        | :? MethodCallExpression as mc when mc.Method.Name = "Invoke" && mc.Arguments.Count > 0 ->
-            mc.Arguments |> Seq.exists involvesDBRefValueAccess
+        | :? MethodCallExpression as mc ->
+            (not (isNull mc.Object) && involvesDBRefValueAccess mc.Object)
+            || mc.Arguments |> Seq.exists involvesDBRefValueAccess
         | _ -> false

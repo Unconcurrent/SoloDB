@@ -34,6 +34,30 @@ module internal QueryTranslatorVisitCore =
         if ignoreCase then SqlExpr.FunctionCall("TO_LOWER", [visitDu expr qb])
         else visitDu expr qb
 
+    and private stripTypeDiscriminatorDu (json: JsonSerializator.JsonValue) : JsonSerializator.JsonValue =
+        match json with
+        | JsonSerializator.JsonValue.Object dict ->
+            let normalized = Dictionary<string, JsonSerializator.JsonValue>()
+            for KeyValue(k, v) in dict do
+                if not (StringComparer.Ordinal.Equals(k, "$type")) then
+                    normalized.[k] <- stripTypeDiscriminatorDu v
+            JsonSerializator.JsonValue.Object normalized
+        | JsonSerializator.JsonValue.List items ->
+            let normalized = ResizeArray<JsonSerializator.JsonValue>(items.Count)
+            for item in items do
+                normalized.Add(stripTypeDiscriminatorDu item)
+            JsonSerializator.JsonValue.List normalized
+        | _ -> json
+
+    and private normalizeKnownJsonForJsonEachValueDu (targetExpr: SqlExpr) (knownObject: obj) : obj =
+        match targetExpr with
+        | SqlExpr.Column(Some sourceAlias, "Value") when StringComparer.Ordinal.Equals(sourceAlias, "json_each") ->
+            knownObject
+            |> JsonSerializator.JsonValue.Serialize
+            |> stripTypeDiscriminatorDu
+            :> obj
+        | _ -> knownObject
+
     and private castToDu (qb: QueryBuilder) (castToType: Type) (o: Expression) : SqlExpr =
         let sqlType =
             match castToType with
@@ -163,7 +187,10 @@ module internal QueryTranslatorVisitCore =
             else
                 if not (isFullyConstant value) then
                     raise (ArgumentException $"Cannot translate contains with this type of expression: {value.Type}")
-                compareKnownJsonDu qb (SqlExpr.Column(Some "json_each", "Value")) value.Type (evaluateExpr<obj> value)
+                let normalizedKnownJson =
+                    evaluateExpr<obj> value
+                    |> normalizeKnownJsonForJsonEachValueDu (SqlExpr.Column(Some "json_each", "Value"))
+                compareKnownJsonDu qb (SqlExpr.Column(Some "json_each", "Value")) value.Type normalizedKnownJson
         SqlExpr.Exists({ Ctes = []; Body = SelectBody.SingleSelect {
             Distinct = false; Projections = [{ Expr = SqlExpr.Literal(SqlLiteral.Integer 1L); Alias = None }]
             Source = Some(TableSource.FromJsonEach(arrayExpr, None)); Joins = []
@@ -199,10 +226,14 @@ module internal QueryTranslatorVisitCore =
         match struct(shouldUseComplex, b.NodeType) with
         | struct(true, ExpressionType.Equal) ->
             let struct(constant, expression) = if isFullyConstant left then struct(left, right) else struct(right, left)
-            compareKnownJsonDu qb (visitDu expression qb) expression.Type (evaluateExpr<obj> constant)
+            let targetExpr = visitDu expression qb
+            let knownObject = evaluateExpr<obj> constant |> normalizeKnownJsonForJsonEachValueDu targetExpr
+            compareKnownJsonDu qb targetExpr expression.Type knownObject
         | struct(true, ExpressionType.NotEqual) ->
             let struct(constant, expression) = if isFullyConstant left then struct(left, right) else struct(right, left)
-            SqlExpr.Unary(UnaryOperator.Not, compareKnownJsonDu qb (visitDu expression qb) expression.Type (evaluateExpr<obj> constant))
+            let targetExpr = visitDu expression qb
+            let knownObject = evaluateExpr<obj> constant |> normalizeKnownJsonForJsonEachValueDu targetExpr
+            SqlExpr.Unary(UnaryOperator.Not, compareKnownJsonDu qb targetExpr expression.Type knownObject)
         | _ ->
         let leftDu = visitDu left qb
         let rightDu = visitDu right qb
@@ -210,7 +241,9 @@ module internal QueryTranslatorVisitCore =
             match b.NodeType with
             | ExpressionType.And | ExpressionType.AndAlso -> BinaryOperator.And
             | ExpressionType.Or | ExpressionType.OrElse -> BinaryOperator.Or
-            | ExpressionType.Equal -> if isAnyNull then BinaryOperator.Is else BinaryOperator.Eq
+            | ExpressionType.Equal ->
+                if isAnyNull || involvesDBRefValueAccess left || involvesDBRefValueAccess right
+                then BinaryOperator.Is else BinaryOperator.Eq
             | ExpressionType.NotEqual ->
                 if isAnyNull || involvesDBRefValueAccess left || involvesDBRefValueAccess right
                 then BinaryOperator.IsNot else BinaryOperator.Ne
