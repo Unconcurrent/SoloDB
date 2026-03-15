@@ -103,7 +103,10 @@
     <Compile Include="QueryTranslator/SqlDu.MinimalEmit.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Helpers.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.fs" />
-    <Compile Include="QueryTranslator/QueryTranslator.VisitCore.fs" />
+    <Compile Include="QueryTranslator/QueryTranslator.VisitCore.CastAggregate.fs" />
+    <Compile Include="QueryTranslator/QueryTranslator.VisitCore.Binary.fs" />
+    <Compile Include="QueryTranslator/QueryTranslator.VisitCore.MethodCall.fs" />
+    <Compile Include="QueryTranslator/QueryTranslator.VisitCore.Dispatch.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitPost.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitPostJoin.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.fs" />
