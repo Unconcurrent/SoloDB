@@ -66,6 +66,7 @@
     <Compile Include="Query/QueryContext.fs" />
     <Compile Include="QueryTranslator/SqlDu.Contract.Primitives.fs" />
     <Compile Include="QueryTranslator/SqlDu.Contract.ExprTypes.fs" />
+    <Compile Include="QueryTranslator/SqlDu.Contract.ExprCombinators.fs" />
     <Compile Include="QueryTranslator/SqlDu.Contract.StatementTypes.fs" />
     <Compile Include="QueryTranslator/SqlDu.EmitTypes.fs" />
     <Compile Include="QueryTranslator/SqlDu.EmitContext.fs" />
