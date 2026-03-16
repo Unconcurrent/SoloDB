@@ -18,12 +18,67 @@ open SoloDatabase.PassTypes
 //   - Any expression involving columns, parameters, or function calls
 // ══════════════════════════════════════════════════════════════
 
-let private foldArithmeticNode (node: SqlExpr) : SqlExpr =
+let private foldNode (node: SqlExpr) : SqlExpr =
     match node with
-    // Integer binary arithmetic
+    // T1: Integer binary arithmetic
     | Binary(Literal(Integer a), Add, Literal(Integer b)) -> Literal(Integer(a + b))
     | Binary(Literal(Integer a), Sub, Literal(Integer b)) -> Literal(Integer(a - b))
     | Binary(Literal(Integer a), Mul, Literal(Integer b)) -> Literal(Integer(a * b))
+    // T1b: Integer division/modulo (non-zero divisor, no min-int/-1 overflow)
+    | Binary(Literal(Integer a), Div, Literal(Integer b)) when b <> 0L && not (a = System.Int64.MinValue && b = -1L) -> Literal(Integer(a / b))
+    | Binary(Literal(Integer a), Mod, Literal(Integer b)) when b <> 0L && not (a = System.Int64.MinValue && b = -1L) -> Literal(Integer(a % b))
+    // T2b: SQLite 3VL edges (must come before general boolean identity to avoid shadowing)
+    | Binary(Literal Null, And, Literal(Boolean false)) -> Literal(Boolean false)
+    | Binary(Literal(Boolean false), And, Literal Null) -> Literal(Boolean false)
+    | Binary(Literal Null, Or, Literal(Boolean true)) -> Literal(Boolean true)
+    | Binary(Literal(Boolean true), Or, Literal Null) -> Literal(Boolean true)
+    // T2: Boolean identity
+    | Binary(x, And, Literal(Boolean true)) -> x
+    | Binary(Literal(Boolean true), And, x) -> x
+    | Binary(_, And, Literal(Boolean false)) -> Literal(Boolean false)
+    | Binary(Literal(Boolean false), And, _) -> Literal(Boolean false)
+    | Binary(x, Or, Literal(Boolean false)) -> x
+    | Binary(Literal(Boolean false), Or, x) -> x
+    | Binary(_, Or, Literal(Boolean true)) -> Literal(Boolean true)
+    | Binary(Literal(Boolean true), Or, _) -> Literal(Boolean true)
+    | Unary(Not, Literal(Boolean true)) -> Literal(Boolean false)
+    | Unary(Not, Literal(Boolean false)) -> Literal(Boolean true)
+    | Unary(Not, Unary(Not, x)) -> x
+    // T3: Null propagation (comparison with NULL → NULL)
+    | Binary(Literal Null, (Eq | Ne | Lt | Le | Gt | Ge), _) -> Literal Null
+    | Binary(_, (Eq | Ne | Lt | Le | Gt | Ge), Literal Null) -> Literal Null
+    // T4: Integer comparison simplification
+    | Binary(Literal(Integer a), Eq, Literal(Integer b)) -> Literal(Boolean(a = b))
+    | Binary(Literal(Integer a), Ne, Literal(Integer b)) -> Literal(Boolean(a <> b))
+    | Binary(Literal(Integer a), Lt, Literal(Integer b)) -> Literal(Boolean(a < b))
+    | Binary(Literal(Integer a), Le, Literal(Integer b)) -> Literal(Boolean(a <= b))
+    | Binary(Literal(Integer a), Gt, Literal(Integer b)) -> Literal(Boolean(a > b))
+    | Binary(Literal(Integer a), Ge, Literal(Integer b)) -> Literal(Boolean(a >= b))
+    // T4b: String equality/inequality (collation-safe)
+    | Binary(Literal(String a), Eq, Literal(String b)) -> Literal(Boolean(a = b))
+    | Binary(Literal(String a), Ne, Literal(String b)) -> Literal(Boolean(a <> b))
+    // T5: CASE dead-branch elimination
+    | CaseExpr(firstBranch, restBranches, elseExpr) ->
+        let allBranches = firstBranch :: restBranches
+        let liveBranches = allBranches |> List.filter (fun (cond, _) -> cond <> Literal(Boolean false))
+        match liveBranches with
+        | [] -> elseExpr |> Option.defaultValue (Literal Null)
+        | (Literal(Boolean true), result) :: _ -> result
+        | first :: rest -> CaseExpr(first, rest, elseExpr)
+    // T6: Whitelist pure function folds (literal args only)
+    | FunctionCall("typeof", [Literal Null]) -> Literal(String "null")
+    | FunctionCall("typeof", [Literal(Integer _)]) -> Literal(String "integer")
+    | FunctionCall("typeof", [Literal(Boolean _)]) -> Literal(String "integer")
+    | FunctionCall("typeof", [Literal(Float _)]) -> Literal(String "real")
+    | FunctionCall("typeof", [Literal(String _)]) -> Literal(String "text")
+    | FunctionCall("typeof", [Literal(Blob _)]) -> Literal(String "blob")
+    | FunctionCall("length", [Literal(String s)]) -> Literal(Integer(int64 s.Length))
+    | FunctionCall("abs", [Literal(Integer n)]) when n <> System.Int64.MinValue -> Literal(Integer(abs n))
+    | FunctionCall("abs", [Literal(Float n)]) -> Literal(Float(abs n))
+    // T6b: CONCAT literal fold (string concatenation)
+    | FunctionCall("CONCAT", args) when args |> List.forall (function Literal(String _) -> true | _ -> false) ->
+        let result = args |> List.map (function Literal(String s) -> s | _ -> "") |> String.concat ""
+        Literal(String result)
     | _ -> node
 
 /// Fold constant expressions in a SqlExpr tree.
@@ -40,7 +95,7 @@ let rec private foldExpr (expr: SqlExpr) : SqlExpr =
                     ScalarSubquery(foldSelect sel)
                 | _ ->
                     node
-            foldArithmeticNode withSelects)
+            foldNode withSelects)
         expr
 
 /// Fold constants in a SelectCore.
