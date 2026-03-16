@@ -65,7 +65,11 @@ let private narrowProjections
     if not (isProjectionPushdownAllowed innerSel) then None
     elif hasOuterEvaluationBoundary outer then None
     elif not (isConservativeOuterWrapper outer) then None
-    elif not (hasBaseTableInnerSource innerSel) then None
+    // Provenance-backed source check: accept BaseTable OR DerivedTable with fully resolved projections.
+    elif not (hasBaseTableInnerSource innerSel ||
+              (match innerSel.Body with
+               | SingleSelect innerCore -> Provenance.allProjectionsResolved innerCore
+               | _ -> false)) then None
     else
         match innerSel.Body with
         | SingleSelect innerCore ->

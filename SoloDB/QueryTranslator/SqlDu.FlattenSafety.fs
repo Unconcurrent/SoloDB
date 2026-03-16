@@ -64,11 +64,11 @@ let isFlattenSafe (outer: SelectCore) (innerCore: SelectCore) : bool =
     && not (innerCore.Projections |> ProjectionSetOps.toList |> List.exists (fun p -> hasAggregateCall p.Expr))
     // F8: Outer has no conflicting GROUP BY
     && outer.GroupBy.IsEmpty
-    // F9: Outer joins remain fail-closed in R25 (join merge deferred)
+    // F9: Outer joins remain fail-closed (join merge deferred)
     && outer.Joins.IsEmpty
-    // Conservative live enablement: flatten only direct projection wrappers over base tables.
+    // Expression-complexity guard: outer projections must be simple (Column/JsonExtractExpr).
+    // hasBaseTableInnerSource removed — provenance-backed resolution handles DerivedTable sources.
     && hasSimpleOuterProjections outer
-    && hasBaseTableInnerSource innerCore
 
 /// Check if a SqlSelect's body is a SingleSelect with a DerivedTable source,
 /// and if so, whether it's flatten-safe.
