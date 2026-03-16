@@ -180,9 +180,16 @@ let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) 
             | _ -> proposedRelName
 
         let canonicalSharedLinkTable = linkTableFromRelationName canonicalManyName
+        let existingCanonicalTableIsManyKind =
+            sqliteTableExistsByName tx.Connection canonicalSharedLinkTable
+            && (let storedKind =
+                    tx.Connection.QueryFirstOrDefault<string>(
+                        "SELECT RefKind FROM SoloDBRelation WHERE Name = @name LIMIT 1;",
+                        {| name = canonicalManyName |})
+                storedKind = "Many")
         let isSharedMany =
             kind = Many
-            && (isMutualMany || sqliteTableExistsByName tx.Connection canonicalSharedLinkTable)
+            && (isMutualMany || existingCanonicalTableIsManyKind)
         let ownerUsesSourceColumn =
             if isSharedMany then
                 StringComparer.Ordinal.Compare(ownerTable, targetTable) <= 0
