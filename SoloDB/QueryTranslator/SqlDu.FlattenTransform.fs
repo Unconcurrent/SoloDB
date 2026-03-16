@@ -19,8 +19,20 @@ open SoloDatabase.AliasRewrite
 // ══════════════════════════════════════════════════════════════
 
 /// Build a mapping from inner projection aliases to their expressions.
+/// For DerivedTable inner sources, uses provenance-backed transitive resolution
+/// to resolve aliases through nested levels. For BaseTable sources, uses the
+/// raw inner expressions directly (single-level is already correct).
 let private buildAliasMap (innerCore: SelectCore) : Map<string, SqlExpr> =
-    buildProjectionAliasMap innerCore
+    let baseMap = buildProjectionAliasMap innerCore
+    match innerCore.Source with
+    | Some(DerivedTable _) ->
+        // Enrich with provenance for DerivedTable inner sources only
+        let prov = Provenance.buildForCore innerCore
+        baseMap |> Map.map (fun alias expr ->
+            match Provenance.tryResolveColumn prov "" alias with
+            | Some(Provenance.BaseColumn(table, col)) -> Column(Some table, col)
+            | _ -> expr)
+    | _ -> baseMap
 
 /// Rewrite an expression, substituting alias references with inner expressions.
 let rec private rewriteExpr (aliasMap: Map<string, SqlExpr>) (derivedAlias: string) (expr: SqlExpr) : SqlExpr =
