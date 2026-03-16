@@ -29,8 +29,8 @@ let private hasOuterEvaluationBoundary (outer: SelectCore) : bool =
     not outer.GroupBy.IsEmpty
     || outer.Having.IsSome
     || outer.Distinct
-    || outer.Projections |> List.exists (fun p -> hasFunctionCall p.Expr && hasAggregateCall p.Expr)
-    || outer.Projections |> List.exists (fun p -> hasWindowFunction p.Expr)
+    || outer.Projections |> ProjectionSetOps.toList |> List.exists (fun p -> hasFunctionCall p.Expr && hasAggregateCall p.Expr)
+    || outer.Projections |> ProjectionSetOps.toList |> List.exists (fun p -> hasWindowFunction p.Expr)
 
 let private isSimpleProjectionExpr (expr: SqlExpr) : bool =
     match expr with
@@ -46,7 +46,7 @@ let private isConservativeOuterWrapper (outer: SelectCore) : bool =
     && outer.Limit.IsNone
     && outer.Offset.IsNone
     && outer.Joins.IsEmpty
-    && (outer.Projections |> List.forall (fun p -> isSimpleProjectionExpr p.Expr))
+    && (outer.Projections |> ProjectionSetOps.toList |> List.forall (fun p -> isSimpleProjectionExpr p.Expr))
 
 let private hasBaseTableInnerSource (innerSel: SqlSelect) : bool =
     match innerSel.Body with
@@ -76,13 +76,14 @@ let private narrowProjections
                 else
                     let narrowed =
                         innerCore.Projections
+                        |> ProjectionSetOps.toList
                         |> List.filter (fun p ->
                             match projectionAlias p with
                             | Some alias -> not (Set.contains alias dead)
                             | None -> true)
                     if narrowed.IsEmpty then None
                     else
-                        let newInnerCore = { innerCore with Projections = narrowed }
+                        let newInnerCore = { innerCore with Projections = ProjectionSetOps.ofList narrowed }
                         let newInnerSel = { innerSel with Body = SingleSelect newInnerCore }
                         Some { outer with Source = Some(DerivedTable(newInnerSel, derivedAlias)) }
         | UnionAllSelect _ -> None
@@ -110,10 +111,14 @@ let rec pushdownProjectionSelect (sel: SqlSelect) : SqlSelect =
             let outerWithRecursedJoins =
                 { outerWithRecursedSource with
                     Joins = outerWithRecursedSource.Joins |> List.map (fun j ->
-                        match j.Source with
-                        | DerivedTable(jSel, jAlias) ->
-                            { j with Source = DerivedTable(pushdownProjectionSelect jSel, jAlias) }
-                        | _ -> j
+                        match j with
+                        | CrossJoin(DerivedTable(jSel, jAlias)) ->
+                            CrossJoin(DerivedTable(pushdownProjectionSelect jSel, jAlias))
+                        | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
+                            ConditionedJoin(kind, DerivedTable(pushdownProjectionSelect jSel, jAlias), onExpr)
+                        | CrossJoin _
+                        | ConditionedJoin _ ->
+                            j
                     )
                 }
 

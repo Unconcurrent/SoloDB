@@ -212,13 +212,13 @@ module internal QueryableBuildQueryPartC =
                                 let typeMismatch = SqlExpr.Binary(typeExtract, BinaryOperator.Ne, typeParam)
                                 // Id: NULL when type missing or mismatched, else preserve Id
                                 let idExpr = SqlExpr.CaseExpr(
-                                    [(typeIsNull, SqlExpr.Literal(SqlLiteral.Null))
-                                     (typeMismatch, SqlExpr.Literal(SqlLiteral.Null))],
+                                    (typeIsNull, SqlExpr.Literal(SqlLiteral.Null)),
+                                    [(typeMismatch, SqlExpr.Literal(SqlLiteral.Null))],
                                     Some(SqlExpr.Column(None, "Id")))
                                 // Value: error string when type missing/mismatched, else preserve Value
                                 let valueExpr = SqlExpr.CaseExpr(
-                                    [(typeIsNull, SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String "The type of item is not stored in the database, if you want to include it, then add the Polymorphic attribute to the type and reinsert all elements.")]))
-                                     (typeMismatch, SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String "Unable to cast object to the specified type, because the types are different.")]))],
+                                    (typeIsNull, SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String "The type of item is not stored in the database, if you want to include it, then add the Polymorphic attribute to the type and reinsert all elements.")])),
+                                    [(typeMismatch, SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String "Unable to cast object to the specified type, because the types are different.")]))],
                                     Some(SqlExpr.Column(None, "Value")))
                                 let projs = [{ Alias = Some "Id"; Expr = idExpr }; { Alias = Some "Value"; Expr = valueExpr }]
                                 let core = mkCore projs (Some (DerivedTable(ctx.Inner, "o")))

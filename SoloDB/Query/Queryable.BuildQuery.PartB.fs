@@ -117,9 +117,10 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                     (Some (DerivedTable(ctx.Inner, outerAlias)))
                                   with
                                       Joins =
-                                          [{ Kind = JoinKind.Left
-                                             Source = BaseTable(innerRootTable, Some innerAlias)
-                                             On = Some (SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr)) }] }
+                                          [ConditionedJoin(
+                                              JoinKind.Left,
+                                              BaseTable(innerRootTable, Some innerAlias),
+                                              SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr))] }
                             wrapCore core
                         )
                     | None ->
@@ -161,7 +162,7 @@ Fix: Rewrite the query or move SelectMany after AsEnumerable()."))
                                         [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some innerSourceName, "Id") }
                                          { Alias = Some "Value"; Expr = SqlExpr.Column(Some "json_each", "Value") }]
                                         (Some (DerivedTable(ctx.Inner, innerSourceName)))
-                                      with Joins = [{ Kind = JoinKind.Inner; Source = FromJsonEach(jsonEachExpr, None); On = None }] }
+                                      with Joins = [CrossJoin(FromJsonEach(jsonEachExpr, None))] }
                                 wrapCore core
                             | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                         )
@@ -220,9 +221,10 @@ Fix: Use another SoloDB IQueryable rooted in a collection or move the join after
                                     (Some (DerivedTable(ctx.Inner, outerAlias)))
                                   with
                                       Joins =
-                                          [{ Kind = JoinKind.Inner
-                                             Source = BaseTable(innerRootTable, Some innerAlias)
-                                             On = Some (SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr)) }] }
+                                          [ConditionedJoin(
+                                              JoinKind.Inner,
+                                              BaseTable(innerRootTable, Some innerAlias),
+                                              SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr))] }
                             wrapCore core
                         )
                     | other ->

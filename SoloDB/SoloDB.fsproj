@@ -76,7 +76,7 @@
     <Compile Include="QueryTranslator/SqlDu.EmitUnion.fs" />
     <Compile Include="QueryTranslator/SqlDu.EmitStatement.fs" />
     <Compile Include="QueryTranslator/SqlDu.PassTypes.fs" />
-    <Compile Include="QueryTranslator/SqlDu.PassRunner.fs" />
+    <Compile Include="QueryTranslator/SqlDu.Provenance.fs" />
     <Compile Include="QueryTranslator/SqlDu.ConstantFoldPass.fs" />
     <Compile Include="QueryTranslator/SqlDu.ExpressionPredicates.fs" />
     <Compile Include="QueryTranslator/SqlDu.SelectCoreBoundary.fs" />
@@ -99,6 +99,7 @@
     <Compile Include="QueryTranslator/SqlDu.MaterializationPolicy.fs" />
     <Compile Include="QueryTranslator/SqlDu.JsonbRewritePolicy.fs" />
     <Compile Include="QueryTranslator/SqlDu.JsonbRewritePolicyPass.fs" />
+    <Compile Include="QueryTranslator/SqlDu.PassRunner.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Types.fs" />
     <Compile Include="QueryTranslator/SqlDu.MinimalEmit.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.Base.Helpers.fs" />

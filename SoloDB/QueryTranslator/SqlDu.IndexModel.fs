@@ -273,7 +273,7 @@ let private tryNormalizeJsonExtractExpr (expr: string) : SqlExpr option =
                 path.Substring(2).Split('.')
                 |> Array.toList
             if segments.IsEmpty || segments |> List.exists String.IsNullOrWhiteSpace then None
-            else Some(JsonExtractExpr(None, "Value", JsonPath segments))
+            else Some(JsonExtractExpr(None, "Value", JsonPathOps.ofList segments))
 
 let private tryNormalizeCastJsonExtractExpr (expr: string) : SqlExpr option =
     let m = castRegex.Match(stripOuterParens expr)

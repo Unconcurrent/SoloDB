@@ -86,14 +86,14 @@ module internal QueryTranslatorVisitDbRef =
                     match innerExpr with
                     | :? MemberExpression as dbrefPropExpr ->
                         let struct(prefix, prop) = resolveDBRefPropertyLocation qb dbrefPropExpr
-                        qb.DuHandlerResult.Value <- ValueSome(SqlExpr.JsonExtractExpr(prefixToAlias prefix, "Value", JsonPath [prop]))
+                        qb.DuHandlerResult.Value <- ValueSome(SqlExpr.JsonExtractExpr(prefixToAlias prefix, "Value", JsonPath(prop, [])))
                         true
                     | _ -> false
                 | "HasValue" ->
                     match innerExpr with
                     | :? MemberExpression as dbrefPropExpr ->
                         let struct(prefix, prop) = resolveDBRefPropertyLocation qb dbrefPropExpr
-                        let extract = SqlExpr.JsonExtractExpr(prefixToAlias prefix, "Value", JsonPath [prop])
+                        let extract = SqlExpr.JsonExtractExpr(prefixToAlias prefix, "Value", JsonPath(prop, []))
                         qb.DuHandlerResult.Value <- ValueSome(
                             SqlExpr.Binary(
                                 SqlExpr.Unary(UnaryOperator.IsNotNull, extract),
@@ -123,7 +123,7 @@ module internal QueryTranslatorVisitDbRef =
                 match findValueBoundary topMe.Expression [topMe.Member.Name] with
                 | ValueSome struct(valueME, propParts) ->
                     let alias = ensureDBRefJoin qb valueME
-                    qb.DuHandlerResult.Value <- ValueSome(SqlExpr.JsonExtractExpr(Some alias, "Value", JsonPath propParts))
+                    qb.DuHandlerResult.Value <- ValueSome(SqlExpr.JsonExtractExpr(Some alias, "Value", JsonPathOps.ofList propParts))
                     true
                 | ValueNone -> false
         | _ -> false
@@ -227,7 +227,7 @@ module internal QueryTranslatorVisitDbRef =
 
     /// Helper to build a simple SelectCore for link-table subqueries.
     let private mkSubCore projections source where =
-        { Distinct = false; Projections = projections; Source = source
+        { Distinct = false; Projections = ProjectionSetOps.ofList projections; Source = source
           Joins = []; Where = where; GroupBy = []; Having = None
           OrderBy = []; Limit = None; Offset = None }
 
@@ -287,7 +287,7 @@ module internal QueryTranslatorVisitDbRef =
                     [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
                     (Some(BaseTable(linkTable, Some lnkAlias)))
                     (Some fullWhere) with
-                    Joins = [{ Kind = Inner; Source = BaseTable(targetTable, Some tgtAlias); On = Some joinOn }] }
+                    Joins = [ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), joinOn)] }
             let subSelect = { Ctes = []; Body = SingleSelect core }
             let existsExpr = SqlExpr.Exists subSelect
             if isAll then SqlExpr.Unary(UnaryOperator.Not, existsExpr)

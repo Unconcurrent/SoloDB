@@ -40,7 +40,7 @@ let private isSimpleProjectionExpr (expr: SqlExpr) : bool =
     | _ -> false
 
 let private hasSimpleOuterProjections (outer: SelectCore) : bool =
-    outer.Projections |> List.forall (fun p -> isSimpleProjectionExpr p.Expr)
+    outer.Projections |> ProjectionSetOps.toList |> List.forall (fun p -> isSimpleProjectionExpr p.Expr)
 
 let private hasBaseTableInnerSource (innerCore: SelectCore) : bool =
     match innerCore.Source with
@@ -59,9 +59,9 @@ let isFlattenSafe (outer: SelectCore) (innerCore: SelectCore) : bool =
     // F5: No DISTINCT
     && not innerCore.Distinct
     // F6: No window functions in projections
-    && not (innerCore.Projections |> List.exists (fun p -> hasWindowFunction p.Expr))
+    && not (innerCore.Projections |> ProjectionSetOps.toList |> List.exists (fun p -> hasWindowFunction p.Expr))
     // F7: No aggregate calls in projections
-    && not (innerCore.Projections |> List.exists (fun p -> hasAggregateCall p.Expr))
+    && not (innerCore.Projections |> ProjectionSetOps.toList |> List.exists (fun p -> hasAggregateCall p.Expr))
     // F8: Outer has no conflicting GROUP BY
     && outer.GroupBy.IsEmpty
     // F9: Outer joins remain fail-closed in R25 (join merge deferred)

@@ -214,7 +214,8 @@ module internal QueryableHelperPreprocess =
         match kind.Trim().ToUpperInvariant() with
         | s when s.Contains("LEFT") -> JoinKind.Left
         | s when s.Contains("INNER") -> JoinKind.Inner
-        | s when s.Contains("CROSS") -> JoinKind.Cross
+        | s when s.Contains("CROSS") ->
+            raise (InvalidOperationException("CROSS JOIN must use the CrossJoin DU constructor directly."))
         | _ -> JoinKind.Left
 
     /// Build materialized Value projection (jsonb_set with JOIN data) for relation materialization.
@@ -234,8 +235,9 @@ module internal QueryableHelperPreprocess =
                 ctx.MaterializedPaths.Add(j.PropertyPath) |> ignore
                 args.Add(SqlExpr.Literal(SqlLiteral.String ("$." + j.PropertyPath)))
                 args.Add(SqlExpr.CaseExpr(
-                    [(SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some j.TargetAlias, "Id")),
-                      SqlExpr.FunctionCall("jsonb_array", [SqlExpr.Column(Some j.TargetAlias, "Id"); SqlExpr.Column(Some j.TargetAlias, "Value")]))],
+                    (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some j.TargetAlias, "Id")),
+                     SqlExpr.FunctionCall("jsonb_array", [SqlExpr.Column(Some j.TargetAlias, "Id"); SqlExpr.Column(Some j.TargetAlias, "Value")])),
+                    [],
                     Some (SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(Some effectiveTableName, "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + j.PropertyPath))]))))
             SqlExpr.FunctionCall("jsonb_set", args |> Seq.toList)
 
@@ -253,6 +255,8 @@ module internal QueryableHelperPreprocess =
         | SqlExpr.Parameter _ -> expr
         | SqlExpr.JsonExtractExpr(Some _, col, path) -> SqlExpr.JsonExtractExpr(None, col, path)
         | SqlExpr.JsonExtractExpr(None, _, _) -> expr
+        | SqlExpr.JsonRootExtract(Some _, col) -> SqlExpr.JsonRootExtract(None, col)
+        | SqlExpr.JsonRootExtract(None, _) -> expr
         | SqlExpr.JsonSetExpr(target, assignments) ->
             SqlExpr.JsonSetExpr(
                 stripSourceAlias target,
@@ -275,15 +279,17 @@ module internal QueryableHelperPreprocess =
         | SqlExpr.Unary(op, inner) -> SqlExpr.Unary(op, stripSourceAlias inner)
         | SqlExpr.Binary(l, op, r) -> SqlExpr.Binary(stripSourceAlias l, op, stripSourceAlias r)
         | SqlExpr.Between(e, lower, upper) -> SqlExpr.Between(stripSourceAlias e, stripSourceAlias lower, stripSourceAlias upper)
-        | SqlExpr.InList(e, values) -> SqlExpr.InList(stripSourceAlias e, values |> List.map stripSourceAlias)
+        | SqlExpr.InList(e, head, tail) -> SqlExpr.InList(stripSourceAlias e, stripSourceAlias head, tail |> List.map stripSourceAlias)
         | SqlExpr.InSubquery(e, subquery) -> SqlExpr.InSubquery(stripSourceAlias e, stripSourceAliasInSelect subquery)
         | SqlExpr.Cast(inner, ty) -> SqlExpr.Cast(stripSourceAlias inner, ty)
-        | SqlExpr.Coalesce exprs -> SqlExpr.Coalesce(exprs |> List.map stripSourceAlias)
+        | SqlExpr.Coalesce(head, tail) -> SqlExpr.Coalesce(stripSourceAlias head, tail |> List.map stripSourceAlias)
         | SqlExpr.Exists subquery -> SqlExpr.Exists(stripSourceAliasInSelect subquery)
         | SqlExpr.ScalarSubquery subquery -> SqlExpr.ScalarSubquery(stripSourceAliasInSelect subquery)
-        | SqlExpr.CaseExpr(branches, elseExpr) ->
+        | SqlExpr.CaseExpr(firstBranch, restBranches, elseExpr) ->
             SqlExpr.CaseExpr(
-                branches |> List.map (fun (w, t) -> stripSourceAlias w, stripSourceAlias t),
+                let mapBranch (w, t) = stripSourceAlias w, stripSourceAlias t
+                mapBranch firstBranch,
+                restBranches |> List.map mapBranch,
                 elseExpr |> Option.map stripSourceAlias)
         | SqlExpr.UpdateFragment(path, value) -> SqlExpr.UpdateFragment(stripSourceAlias path, stripSourceAlias value)
 
@@ -294,11 +300,11 @@ module internal QueryableHelperPreprocess =
         | FromJsonEach(valueExpr, alias) -> FromJsonEach(stripSourceAlias valueExpr, alias)
 
     and internal stripSourceAliasInJoin (join: JoinShape) : JoinShape =
-        {
-            join with
-                Source = stripSourceAliasInTableSource join.Source
-                On = join.On |> Option.map stripSourceAlias
-        }
+        match join with
+        | CrossJoin source ->
+            CrossJoin(stripSourceAliasInTableSource source)
+        | ConditionedJoin(kind, source, onExpr) ->
+            ConditionedJoin(kind, stripSourceAliasInTableSource source, stripSourceAlias onExpr)
 
     and internal stripSourceAliasInProjection (projection: Projection) : Projection =
         { projection with Expr = stripSourceAlias projection.Expr }
@@ -311,7 +317,7 @@ module internal QueryableHelperPreprocess =
             core with
                 Source = core.Source |> Option.map stripSourceAliasInTableSource
                 Joins = core.Joins |> List.map stripSourceAliasInJoin
-                Projections = core.Projections |> List.map stripSourceAliasInProjection
+                Projections = core.Projections |> ProjectionSetOps.map stripSourceAliasInProjection
                 Where = core.Where |> Option.map stripSourceAlias
                 GroupBy = core.GroupBy |> List.map stripSourceAlias
                 Having = core.Having |> Option.map stripSourceAlias

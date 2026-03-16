@@ -138,7 +138,7 @@ module internal QueryableHelperState =
                 | 1 -> translateExprDu sourceCtx tableName args.[0] vars
                 | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" method.Name other))
             [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-             { Alias = Some "Value"; Expr = SqlExpr.Coalesce([SqlExpr.FunctionCall(fnName, [innerExpr]); SqlExpr.Literal(SqlLiteral.Integer 0L)]) }]
+             { Alias = Some "Value"; Expr = SqlExpr.Coalesce(SqlExpr.FunctionCall(fnName, [innerExpr]), [SqlExpr.Literal(SqlLiteral.Integer 0L)]) }]
         ))
 
     let internal isDecimalOrNullableDecimal (t: Type) =

@@ -59,8 +59,8 @@ let rec private canonicalizePredicate (model: IndexModel) (tableName: string) (e
         Unary(Not, canonicalizePredicate model tableName e)
     | Between(e, lo, hi) ->
         Between(canonicalizeExpr model tableName e, lo, hi)
-    | InList(e, list) ->
-        InList(canonicalizeExpr model tableName e, list)
+    | InList(e, head, tail) ->
+        InList(canonicalizeExpr model tableName e, head, tail)
     | _ -> expr
 
 /// Canonicalize ORDER BY expressions for index alignment.
@@ -119,15 +119,15 @@ let rec private expressionMatchesIndexWithAlias (model: IndexModel) (tableName: 
 let private reshapeJoinsForIndex (model: IndexModel) (core: SelectCore) : SelectCore =
     // Only consider pure INNER JOIN chains with 2+ joins
     if core.Joins.Length < 2 then core
-    elif core.Joins |> List.exists (fun j -> j.Kind <> Inner) then core
+    elif core.Joins |> List.exists (function | ConditionedJoin(Inner, _, _) -> false | _ -> true) then core
     else
         // Check if any join has ON clause referencing an indexed expression
         // and reorder to put indexed-probe joins earlier.
         // Use a simple stable sort: joins whose ON clause references
         // an indexed expression on the join source table sort before others.
         let scoreJoin (j: JoinShape) : int =
-            match j.Source, j.On with
-            | BaseTable(tName, tAlias), Some onExpr ->
+            match j with
+            | ConditionedJoin(_, BaseTable(tName, tAlias), onExpr) ->
                 // Check if any sub-expression in ON matches an index on the join's table,
                 // accounting for alias-to-table name resolution.
                 if expressionMatchesIndexWithAlias model tName tAlias onExpr then 0 else 1
@@ -173,19 +173,19 @@ let private shapeInCore (model: IndexModel) (core: SelectCore) : SelectCore =
                 else
                     let newJoins =
                         shaped.Joins |> List.map (fun j ->
-                            match j.On with
-                            | Some onExpr ->
+                            match j with
+                            | ConditionedJoin(kind, source, onExpr) ->
                                 // For JOIN ON, we canonicalize against the join source's table
                                 let joinTableName =
-                                    match resolveTableName j.Source with
+                                    match resolveTableName source with
                                     | Some n -> n
                                     | None -> tName // Fallback to FROM table
                                 let canonical = canonicalizePredicate model joinTableName onExpr
                                 // Also canonicalize against the FROM table
                                 let canonical2 = canonicalizePredicate model tName canonical
                                 if canonical2 = onExpr then j
-                                else { j with On = Some canonical2 }
-                            | None -> j)
+                                else ConditionedJoin(kind, source, canonical2)
+                            | CrossJoin _ -> j)
                     if newJoins = shaped.Joins then shaped
                     else { shaped with Joins = newJoins }
 
@@ -218,10 +218,15 @@ let rec shapeIndexSelect (model: IndexModel) (sel: SqlSelect) : SqlSelect =
             let coreWithRecursedJoins =
                 { coreWithRecursedSource with
                     Joins = coreWithRecursedSource.Joins |> List.map (fun j ->
-                        match j.Source with
-                        | DerivedTable(jSel, jAlias) ->
-                            { j with Source = DerivedTable(shapeIndexSelect model jSel, jAlias) }
-                        | _ -> j)
+                        match j with
+                        | CrossJoin(DerivedTable(jSel, jAlias)) ->
+                            CrossJoin(DerivedTable(shapeIndexSelect model jSel, jAlias))
+                        | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
+                            ConditionedJoin(kind, DerivedTable(shapeIndexSelect model jSel, jAlias), onExpr)
+                        | CrossJoin _ ->
+                            j
+                        | ConditionedJoin _ ->
+                            j)
                 }
 
             // Apply shaping at this level

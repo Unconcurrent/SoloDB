@@ -130,12 +130,13 @@ module internal QueryableLayerBuild =
                     joins <-
                         currentCtx.Joins
                         |> Seq.map (fun j ->
-                            { Kind = parseJoinKind j.JoinKind
-                              Source = BaseTable(j.TargetTable, Some j.TargetAlias)
-                              On = Some(SqlExpr.Binary(
-                                SqlExpr.Column(Some j.TargetAlias, "Id"),
-                                BinaryOperator.Eq,
-                                SqlExpr.JsonExtractExpr(j.OnSourceAlias, "Value", JsonPath [j.OnPropertyName]))) })
+                            ConditionedJoin(
+                                parseJoinKind j.JoinKind,
+                                BaseTable(j.TargetTable, Some j.TargetAlias),
+                                SqlExpr.Binary(
+                                    SqlExpr.Column(Some j.TargetAlias, "Id"),
+                                    BinaryOperator.Eq,
+                                    SqlExpr.JsonExtractExpr(j.OnSourceAlias, "Value", JsonPath(j.OnPropertyName, [])))))
                         |> Seq.toList
 
                     // Rewrite Value projection for materialization (jsonb_set).
@@ -185,4 +186,3 @@ module internal QueryableLayerBuild =
                 buildFunc {| Vars = vars; Inner = innerSel; TableName = tn |}
 
         buildLayer (layerCount - 1)
-

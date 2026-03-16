@@ -108,10 +108,15 @@ let rec pushdownSelect (sel: SqlSelect) : SqlSelect =
             let outerWithRecursedJoins =
                 { outerWithRecursedSource with
                     Joins = outerWithRecursedSource.Joins |> List.map (fun j ->
-                        match j.Source with
-                        | DerivedTable(jSel, jAlias) ->
-                            { j with Source = DerivedTable(pushdownSelect jSel, jAlias) }
-                        | _ -> j
+                        match j with
+                        | CrossJoin(DerivedTable(jSel, jAlias)) ->
+                            CrossJoin(DerivedTable(pushdownSelect jSel, jAlias))
+                        | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
+                            ConditionedJoin(kind, DerivedTable(pushdownSelect jSel, jAlias), onExpr)
+                        | CrossJoin _ ->
+                            j
+                        | ConditionedJoin _ ->
+                            j
                     )
                 }
 

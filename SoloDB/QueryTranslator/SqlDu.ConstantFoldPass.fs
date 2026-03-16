@@ -46,7 +46,7 @@ let rec private foldExpr (expr: SqlExpr) : SqlExpr =
 /// Fold constants in a SelectCore.
 and private foldCore (core: SelectCore) : SelectCore =
     { core with
-        Projections = core.Projections |> List.map (fun p -> { p with Expr = foldExpr p.Expr })
+        Projections = core.Projections |> ProjectionSetOps.map (fun p -> { p with Expr = foldExpr p.Expr })
         Where = core.Where |> Option.map foldExpr
         Having = core.Having |> Option.map foldExpr
         GroupBy = core.GroupBy |> List.map foldExpr
@@ -66,10 +66,11 @@ and private foldTableSource (src: TableSource) : TableSource =
 
 /// Fold constants in a JoinShape.
 and private foldJoin (join: JoinShape) : JoinShape =
-    { join with
-        Source = foldTableSource join.Source
-        On = join.On |> Option.map foldExpr
-    }
+    match join with
+    | CrossJoin source ->
+        CrossJoin(foldTableSource source)
+    | ConditionedJoin(kind, source, onExpr) ->
+        ConditionedJoin(kind, foldTableSource source, foldExpr onExpr)
 
 /// Fold constants in a SqlSelect.
 and private foldSelect (sel: SqlSelect) : SqlSelect =

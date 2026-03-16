@@ -18,7 +18,17 @@ namespace SqlDu.Engine.C1.Spec
 // until the full engine move in Batch 4.
 // ======================================================================
 
-type JsonPath = JsonPath of string list
+type JsonPath = JsonPath of head: string * tail: string list
+
+[<RequireQualifiedAccess>]
+module JsonPathOps =
+    let ofList (segments: string list) : JsonPath =
+        match segments with
+        | head :: tail -> JsonPath(head, tail)
+        | [] -> invalidArg "segments" "JsonPath must be non-empty."
+
+    let toList (JsonPath(head, tail): JsonPath) : string list =
+        head :: tail
 
 type SortDirection =
     | Asc
@@ -27,7 +37,6 @@ type SortDirection =
 type JoinKind =
     | Inner
     | Left
-    | Cross
 
 type AggregateKind =
     | Count

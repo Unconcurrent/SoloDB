@@ -30,8 +30,8 @@ let rec isRelationMaterializationExpr (expr: SqlExpr) : bool =
     | JsonSetExpr(_, assignments) ->
         assignments |> List.exists (fun (_, v) ->
             match v with
-            | CaseExpr(branches, _) ->
-                branches |> List.exists (fun (_, result) ->
+            | CaseExpr(firstBranch, restBranches, _) ->
+                (firstBranch :: restBranches) |> List.exists (fun (_, result) ->
                     match result with
                     | JsonArrayExpr _ -> true
                     | _ -> false)
@@ -58,14 +58,14 @@ let isCoalesceInitializationExpr (expr: SqlExpr) : bool =
 
 /// Check if a SelectCore contains a LEFT JOIN with materialization in projections.
 let coreHasRelationMaterialization (core: SelectCore) : bool =
-    let hasLeftJoin = core.Joins |> List.exists (fun j -> j.Kind = Left)
+    let hasLeftJoin = core.Joins |> List.exists (function | ConditionedJoin(Left, _, _) -> true | _ -> false)
     if not hasLeftJoin then false
     else
-        core.Projections |> List.exists (fun p -> isRelationMaterializationExpr p.Expr)
+        core.Projections |> ProjectionSetOps.toList |> List.exists (fun p -> isRelationMaterializationExpr p.Expr)
 
 /// Check if a SelectCore contains group aggregation materialization.
 let coreHasGroupMaterialization (core: SelectCore) : bool =
-    core.Projections |> List.exists (fun p -> isGroupMaterializationExpr p.Expr)
+    core.Projections |> ProjectionSetOps.toList |> List.exists (fun p -> isGroupMaterializationExpr p.Expr)
 
 /// Determine if a JsonSetExpr in a core is a transport-only wrapper
 /// that can be safely flattened. In practice, all live corpus JsonSetExpr

@@ -38,7 +38,7 @@ and private flattenCore (outer: SelectCore) (innerCore: SelectCore) (derivedAlia
     // Rewrite outer projections using inner expressions
     let rewrittenProjections =
         outer.Projections
-        |> List.map (fun p ->
+        |> ProjectionSetOps.map (fun p ->
             { p with Expr = rewriteExpr aliasMap derivedAlias p.Expr })
 
     // Merge: take inner's source, joins, where, order, limit, offset
@@ -103,10 +103,15 @@ and flattenSelect (sel: SqlSelect) : SqlSelect =
             let outerWithFlattenedJoins =
                 { outerWithFlattenedSource with
                     Joins = outerWithFlattenedSource.Joins |> List.map (fun j ->
-                        match j.Source with
-                        | DerivedTable(jSel, jAlias) ->
-                            { j with Source = DerivedTable(flattenSelect jSel, jAlias) }
-                        | _ -> j
+                        match j with
+                        | CrossJoin(DerivedTable(jSel, jAlias)) ->
+                            CrossJoin(DerivedTable(flattenSelect jSel, jAlias))
+                        | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
+                            ConditionedJoin(kind, DerivedTable(flattenSelect jSel, jAlias), onExpr)
+                        | CrossJoin _ ->
+                            j
+                        | ConditionedJoin _ ->
+                            j
                     )
                 }
 

@@ -40,11 +40,12 @@ module internal QueryableHelperBase =
             SqlExpr.Column(None, "Value")
         elif x = typeof<obj> || typeof<JsonValue>.IsAssignableFrom x then
             SqlExpr.CaseExpr(
-                [(SqlExpr.Binary(
+                (SqlExpr.Binary(
                     SqlExpr.FunctionCall("typeof", [SqlExpr.Column(None, "Value")]),
                     BinaryOperator.Eq,
                     SqlExpr.Literal(SqlLiteral.String "blob")),
-                  SqlExpr.FunctionCall("json_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")]))],
+                  SqlExpr.FunctionCall("json_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])),
+                [],
                 Some(SqlExpr.Column(None, "Value")))
         else
             SqlExpr.FunctionCall("json_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
@@ -65,7 +66,7 @@ module internal QueryableHelperBase =
             ParamCounter = ref 0
             DuHandlerResult = ref ValueNone
         }
-        let pipelineResult =
+        let firstRound =
             PassRunner.runPipeline [
                 ConstantFoldPass.constantFold
                 FlattenPass.subqueryFlatten
@@ -74,13 +75,22 @@ module internal QueryableHelperBase =
                 IndexPlanShapingPass.indexPlanShaping indexModel
                 JsonbRewritePolicyPass.jsonbRewritePolicy indexModel
             ] (SelectStmt sel)
+        let pipelineResult =
+            PassRunner.runPipelineToFixedPoint [
+                ConstantFoldPass.constantFold
+                FlattenPass.subqueryFlatten
+                PushdownPass.predicatePushdown
+                ProjectionPass.projectionPushdown
+                IndexPlanShapingPass.indexPlanShaping indexModel
+                JsonbRewritePolicyPass.jsonbRewritePolicy indexModel
+            ] firstRound
         match pipelineResult.Output with
         | SelectStmt outSel -> SqlDuMinimalEmit.emitSelect qb outSel
         | _ -> failwith "internal invariant violation: expected SelectStmt from optimizer pipeline"
 
     /// Helper to build a simple SelectCore with default empty fields.
     let internal mkCore projections source =
-        { Distinct = false; Projections = projections; Source = source
+        { Distinct = false; Projections = ProjectionSetOps.ofList projections; Source = source
           Joins = []; Where = None; GroupBy = []; Having = None
           OrderBy = []; Limit = None; Offset = None }
 
@@ -100,7 +110,9 @@ module internal QueryableHelperBase =
             | _ -> ()
 
         let addCoreJoinTables (core: SelectCore) =
-            core.Joins |> List.iter (fun join -> addJoinSource join.Source)
+            core.Joins |> List.iter (function
+                | CrossJoin source -> addJoinSource source
+                | ConditionedJoin(_, source, _) -> addJoinSource source)
 
         match select.Body with
         | SingleSelect core ->
@@ -317,4 +329,3 @@ module internal QueryableHelperBase =
             wrapBody lambda.Body lambda.Parameters :> Expression
         | _ ->
             Expression.Not expr :> Expression
-

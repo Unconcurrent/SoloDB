@@ -30,20 +30,17 @@ and private emitTableSource (ctx: EmitContext) (source: TableSource) : Emitted =
 
 /// Emit a JoinShape to SQL.
 and private emitJoin (ctx: EmitContext) (join: JoinShape) : Emitted =
-    let kindStr =
-        match join.Kind with
-        | Inner -> "INNER JOIN"
-        | Left -> "LEFT JOIN"
-        | Cross -> "CROSS JOIN"
-    let sourceEmitted = emitTableSource ctx join.Source
-    match join.On with
-    | Some onExpr ->
+    match join with
+    | CrossJoin source ->
+        let sourceEmitted = emitTableSource ctx source
+        { Sql = sprintf "CROSS JOIN %s" sourceEmitted.Sql
+          Parameters = Emitted.copyParameters sourceEmitted.Parameters }
+    | ConditionedJoin(kind, source, onExpr) ->
+        let kindStr = match kind with Inner -> "INNER JOIN" | Left -> "LEFT JOIN"
+        let sourceEmitted = emitTableSource ctx source
         let onEmitted = emitE ctx onExpr
         { Sql = sprintf "%s %s ON %s" kindStr sourceEmitted.Sql onEmitted.Sql
           Parameters = Emitted.concatParameterSets [ sourceEmitted.Parameters; onEmitted.Parameters ] }
-    | None ->
-        { Sql = sprintf "%s %s" kindStr sourceEmitted.Sql
-          Parameters = Emitted.copyParameters sourceEmitted.Parameters }
 
 /// Emit a Projection to SQL.
 and private emitProjection (ctx: EmitContext) (proj: Projection) : Emitted =
@@ -60,8 +57,14 @@ and private emitSelectCore (ctx: EmitContext) (core: SelectCore) : Emitted =
 
     let distinctStr = if core.Distinct then "SELECT DISTINCT" else "SELECT"
 
-    let projParts = core.Projections |> List.map (emitProjection ctx)
-    let projSql = projParts |> List.map (fun e -> e.Sql) |> String.concat ", "
+    let projParts =
+        core.Projections
+        |> ProjectionSetOps.toList
+        |> List.map (emitProjection ctx)
+    let projSql =
+        match core.Projections with
+        | AllColumns -> "*"
+        | Explicit _ -> projParts |> List.map (fun e -> e.Sql) |> String.concat ", "
     let projParams = Emitted.collectParameters projParts
     allParams.AddRange(projParams)
 

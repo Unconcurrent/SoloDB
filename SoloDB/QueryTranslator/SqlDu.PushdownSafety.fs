@@ -61,6 +61,7 @@ let hasCorrelatedRef (expr: SqlExpr) : bool =
 /// Maps alias (or raw column name if unaliased) to the projection expression.
 let buildInnerColumnSet (innerCore: SelectCore) : Set<string> =
     innerCore.Projections
+    |> ProjectionSetOps.toList
     |> List.choose (fun p ->
         match p.Alias with
         | Some alias -> Some alias
@@ -99,6 +100,7 @@ let isInnerPushdownSafe (innerSel: SqlSelect) : bool =
             | _ -> false
         let conservativeProjectionOk =
             innerCore.Projections
+            |> ProjectionSetOps.toList
             |> List.forall (fun p ->
                 match p.Expr with
                 | Column(Some _, _)
@@ -109,7 +111,7 @@ let isInnerPushdownSafe (innerSel: SqlSelect) : bool =
         // P-S2: No GROUP BY
         && innerCore.GroupBy.IsEmpty
         // P-S3: No window functions in projections
-        && not (innerCore.Projections |> List.exists (fun p -> hasWindowFunction p.Expr))
+        && not (innerCore.Projections |> ProjectionSetOps.toList |> List.exists (fun p -> hasWindowFunction p.Expr))
         // P-S4: No LIMIT/OFFSET
         && innerCore.Limit.IsNone
         && innerCore.Offset.IsNone

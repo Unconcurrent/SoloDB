@@ -30,11 +30,11 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
         try
             try
                 let result = f ()
-                SQLiteTools.markCurrentHandlerFaultsAsSwallowed conn
-                SQLiteTools.clearNonSwallowedHandlerFaultsDeeperThanCurrent conn
+                SQLiteToolsHandlerFaultState.markCurrentHandlerFaultsAsSwallowed conn
+                SQLiteToolsHandlerFaultState.clearNonSwallowedHandlerFaultsDeeperThanCurrent conn
                 result
             with _ ->
-                SQLiteTools.captureCurrentHandlerFaultDepth conn
+                SQLiteToolsHandlerFaultState.captureCurrentHandlerFaultDepth conn
                 reraise()
         finally
             Connections.ExitEventHandlerScope(conn)

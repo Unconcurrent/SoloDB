@@ -94,7 +94,7 @@ module internal QueryTranslatorVisitCore =
         elif qb.UpdateMode then
             SqlExpr.Literal(SqlLiteral.String "$")
         elif qb.JsonExtractSelfValue && ((not << isPrimitiveSQLiteType) m.Type || (not << String.IsNullOrWhiteSpace) qb.TableNameDot) then
-            SqlExpr.JsonExtractExpr(alias, "Value", JsonPath [])
+            SqlExpr.JsonRootExtract(alias, "Value")
         else
             SqlExpr.Column(alias, "Value")
 
@@ -127,7 +127,7 @@ module internal QueryTranslatorVisitCore =
                 if qb.UpdateMode then
                     let pathStr = (String.concat "." parts).Replace(".[", "[") |> escapeSQLiteString
                     SqlExpr.Literal(SqlLiteral.String $"$.{pathStr}")
-                else SqlExpr.JsonExtractExpr(alias, "Value", JsonPath parts)
+                else SqlExpr.JsonExtractExpr(alias, "Value", JsonPathOps.ofList parts)
         else
             match m.OriginalExpression with
             | None ->
@@ -156,7 +156,7 @@ module internal QueryTranslatorVisitCore =
                     |> normalizeKnownJsonForJsonEachValueDu (SqlExpr.Column(Some "json_each", "Value"))
                 compareKnownJsonDu qb (SqlExpr.Column(Some "json_each", "Value")) value.Type normalizedKnownJson
         SqlExpr.Exists({ Ctes = []; Body = SelectBody.SingleSelect {
-            Distinct = false; Projections = [{ Expr = SqlExpr.Literal(SqlLiteral.Integer 1L); Alias = None }]
+            Distinct = false; Projections = Explicit({ Expr = SqlExpr.Literal(SqlLiteral.Integer 1L); Alias = None }, [])
             Source = Some(TableSource.FromJsonEach(arrayExpr, None)); Joins = []
             Where = Some whereExpr; GroupBy = []; Having = None; OrderBy = []; Limit = None; Offset = None } })
 
@@ -172,7 +172,7 @@ module internal QueryTranslatorVisitCore =
         let predicateExpr = visitDu expr innerQb
         let whereExpr = if isAll then SqlExpr.Unary(UnaryOperator.Not, predicateExpr) else predicateExpr
         let existsExpr = SqlExpr.Exists({ Ctes = []; Body = SelectBody.SingleSelect {
-            Distinct = false; Projections = [{ Expr = SqlExpr.Literal(SqlLiteral.Integer 1L); Alias = None }]
+            Distinct = false; Projections = Explicit({ Expr = SqlExpr.Literal(SqlLiteral.Integer 1L); Alias = None }, [])
             Source = Some(TableSource.FromJsonEach(arrayExpr, None)); Joins = []
             Where = Some whereExpr; GroupBy = []; Having = None; OrderBy = []; Limit = None; Offset = None } })
         if isAll then SqlExpr.Unary(UnaryOperator.Not, existsExpr) else existsExpr
@@ -257,7 +257,7 @@ module internal QueryTranslatorVisitCore =
             | _ -> raise (NotSupportedException("Error: Invoke expression is not reducible.\nReason: The invoked expression cannot be inlined or treated as a constant for SQL translation.\nFix: Inline the lambda or move the invocation after AsEnumerable()."))
         | ExpressionType.Conditional ->
             let c = exp :?> ConditionalExpression
-            SqlExpr.CaseExpr([(visitDu c.Test qb, visitDu c.IfTrue qb)], Some(visitDu c.IfFalse qb))
+            SqlExpr.CaseExpr((visitDu c.Test qb, visitDu c.IfTrue qb), [], Some(visitDu c.IfFalse qb))
         | ExpressionType.TypeIs ->
             let typeIsExp = exp :?> TypeBinaryExpression
             if not (mustIncludeTypeInformationInSerializationFn typeIsExp.Expression.Type) then

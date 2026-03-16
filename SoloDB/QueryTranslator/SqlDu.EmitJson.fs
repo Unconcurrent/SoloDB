@@ -13,12 +13,12 @@ let quoteIdentifier (ctx: EmitContext) (name: string) : string =
 
 /// Emit a JSON path expression: jsonb_extract(source, '$.path').
 /// The caller decides which function name to use.
-let emitJsonExtract (ctx: EmitContext) (funcName: string) (sourceAlias: string option) (column: string) (JsonPath segments: JsonPath) : Emitted =
+let emitJsonExtract (ctx: EmitContext) (funcName: string) (sourceAlias: string option) (column: string) (jsonPath: JsonPath) : Emitted =
     let src =
         match sourceAlias with
         | Some alias -> sprintf "%s.%s" (quoteIdentifier ctx alias) (quoteIdentifier ctx column)
         | None -> quoteIdentifier ctx column
-    let path = ctx.FormatJsonPath(segments)
+    let path = ctx.FormatJsonPath(JsonPathOps.toList jsonPath)
     { Sql = sprintf "%s(%s, %s)" funcName src path
       Parameters = Emitted.emptyParameters () }
 
@@ -27,8 +27,8 @@ let emitJsonExtract (ctx: EmitContext) (funcName: string) (sourceAlias: string o
 /// are emitted by the caller-provided emitExprFn to avoid circular dependencies.
 let emitJsonSet (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emitted) (target: SqlExpr) (assignments: (JsonPath * SqlExpr) list) : Emitted =
     let mutable result = emitExprFn ctx target
-    for (JsonPath segments, valueExpr) in assignments do
-        let path = ctx.FormatJsonPath(segments)
+    for (jsonPath, valueExpr) in assignments do
+        let path = ctx.FormatJsonPath(JsonPathOps.toList jsonPath)
         let valueEmitted = emitExprFn ctx valueExpr
         result <-
             { Sql = sprintf "jsonb_set(%s, %s, %s)" result.Sql path valueEmitted.Sql

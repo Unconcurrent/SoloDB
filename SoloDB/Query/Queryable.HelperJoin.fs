@@ -370,8 +370,8 @@ Fix: Project outer and inner members into an anonymous object or move the projec
             // In this case NULL is an invalid operation, therefore to emulate the .NET behavior
             // of throwing an exception we return the Id = NULL, and Value = {exception message}
             // And downstream the pipeline it will be checked and throwed.
-            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.Null))], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
-             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.String errorMsg))], Some(SqlExpr.Column(None, "Value"))) }]
+            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.Null)), [], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
+             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.String errorMsg)), [], Some(SqlExpr.Column(None, "Value"))) }]
         ))
 
     /// <summary>

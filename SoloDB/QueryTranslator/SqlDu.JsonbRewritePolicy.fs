@@ -109,12 +109,12 @@ let private rewriteInCore (model: IndexModel) (core: SelectCore) : SelectCore =
             shaped <-
                 let newJoins =
                     shaped.Joins |> List.map (fun j ->
-                        match j.On with
-                        | Some onExpr ->
+                        match j with
+                        | ConditionedJoin(kind, source, onExpr) ->
                             let rewritten = rewritePredicate model onExpr
                             if rewritten = onExpr then j
-                            else { j with On = Some rewritten }
-                        | None -> j)
+                            else ConditionedJoin(kind, source, rewritten)
+                        | CrossJoin _ -> j)
                 if newJoins = shaped.Joins then shaped
                 else { shaped with Joins = newJoins }
 
@@ -133,7 +133,7 @@ let private rewriteInCore (model: IndexModel) (core: SelectCore) : SelectCore =
             // Rewrite projections, excluding protected materialization patterns
             shaped <-
                 let newProjs =
-                    shaped.Projections |> List.map (fun p ->
+                    shaped.Projections |> ProjectionSetOps.toList |> List.map (fun p ->
                         // Skip materialization expressions
                         if isRelationMaterializationExpr p.Expr then p
                         elif isGroupMaterializationExpr p.Expr then p
@@ -146,8 +146,8 @@ let private rewriteInCore (model: IndexModel) (core: SelectCore) : SelectCore =
                                 let rewritten = rewriteExpr model p.Expr
                                 if rewritten = p.Expr then p
                                 else { p with Expr = rewritten })
-                if newProjs = shaped.Projections then shaped
-                else { shaped with Projections = newProjs }
+                if newProjs = (shaped.Projections |> ProjectionSetOps.toList) then shaped
+                else { shaped with Projections = ProjectionSetOps.ofList newProjs }
 
             shaped
 
@@ -167,10 +167,15 @@ let rec rewriteSelectWithModel (model: IndexModel) (sel: SqlSelect) : SqlSelect 
             let coreWithRecursedJoins =
                 { coreWithRecursedSource with
                     Joins = coreWithRecursedSource.Joins |> List.map (fun j ->
-                        match j.Source with
-                        | DerivedTable(jSel, jAlias) ->
-                            { j with Source = DerivedTable(rewriteSelectWithModel model jSel, jAlias) }
-                        | _ -> j)
+                        match j with
+                        | CrossJoin(DerivedTable(jSel, jAlias)) ->
+                            CrossJoin(DerivedTable(rewriteSelectWithModel model jSel, jAlias))
+                        | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
+                            ConditionedJoin(kind, DerivedTable(rewriteSelectWithModel model jSel, jAlias), onExpr)
+                        | CrossJoin _ ->
+                            j
+                        | ConditionedJoin _ ->
+                            j)
                 }
 
             // Apply rewrite at this level

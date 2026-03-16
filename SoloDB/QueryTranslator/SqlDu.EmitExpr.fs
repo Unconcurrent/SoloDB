@@ -98,6 +98,15 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
     | JsonExtractExpr(sourceAlias, column, jsonPath) ->
         EmitJson.emitJsonExtract ctx "jsonb_extract" sourceAlias column jsonPath
 
+    // Case 4b: Root JSON extraction — jsonb_extract(source, '$')
+    | JsonRootExtract(sourceAlias, column) ->
+        let src =
+            match sourceAlias with
+            | Some alias -> sprintf "%s.%s" (EmitJson.quoteIdentifier ctx alias) (EmitJson.quoteIdentifier ctx column)
+            | None -> EmitJson.quoteIdentifier ctx column
+        { Sql = sprintf "jsonb_extract(%s, '$')" src
+          Parameters = Emitted.emptyParameters () }
+
     // Case 5: JSON set expression — jsonb_set(target, path, value)
     | JsonSetExpr(target, assignments) ->
         EmitJson.emitJsonSet ctx emitE target assignments
@@ -185,9 +194,9 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
           Parameters = Emitted.concatParameterSets [ exprEmitted.Parameters; lowerEmitted.Parameters; upperEmitted.Parameters ] }
 
     // Case 14: IN list
-    | InList(expr, values) ->
+    | InList(expr, head, tail) ->
         let exprEmitted = emitE ctx expr
-        let valuesEmitted = values |> List.map (emitE ctx)
+        let valuesEmitted = (head :: tail) |> List.map (emitE ctx)
         let valuesSql = valuesEmitted |> List.map (fun e -> e.Sql) |> String.concat ", "
         let parms = Emitted.collectParameters valuesEmitted
         { Sql = sprintf "%s IN (%s)" exprEmitted.Sql valuesSql
@@ -207,8 +216,8 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
           Parameters = Emitted.copyParameters exprEmitted.Parameters }
 
     // Case 17: COALESCE
-    | Coalesce exprs ->
-        let partsEmitted = exprs |> List.map (emitE ctx)
+    | Coalesce(head, tail) ->
+        let partsEmitted = (head :: tail) |> List.map (emitE ctx)
         let sql = partsEmitted |> List.map (fun e -> e.Sql) |> String.concat ", "
         let parms = Emitted.collectParameters partsEmitted
         { Sql = sprintf "COALESCE(%s)" sql; Parameters = parms }
@@ -226,9 +235,9 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
           Parameters = Emitted.copyParameters subEmitted.Parameters }
 
     // Case 20: CASE expression
-    | CaseExpr(branches, elseExpr) ->
+    | CaseExpr(firstBranch, restBranches, elseExpr) ->
         let branchParts =
-            branches
+            (firstBranch :: restBranches)
             |> List.map (fun (cond, result) ->
                 let condEmitted = emitE ctx cond
                 let resultEmitted = emitE ctx result

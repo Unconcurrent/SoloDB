@@ -11,4 +11,5 @@ let hasMustNotBoundary (core: SelectCore) : bool =
 
 let hasAggregateOrWindowProjections (core: SelectCore) : bool =
     core.Projections
+    |> ProjectionSetOps.toList
     |> List.exists (fun p -> hasAggregateCall p.Expr || hasWindowFunction p.Expr)

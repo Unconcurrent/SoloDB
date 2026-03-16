@@ -9,6 +9,7 @@ type AliasRewritePolicy = {
 
 let buildProjectionAliasMap (innerCore: SelectCore) : Map<string, SqlExpr> =
     innerCore.Projections
+    |> ProjectionSetOps.toList
     |> List.choose (fun p ->
         match p.Alias with
         | Some alias -> Some(alias, p.Expr)
@@ -21,12 +22,12 @@ let buildProjectionAliasMap (innerCore: SelectCore) : Map<string, SqlExpr> =
 let private matchesDerivedAlias (policy: AliasRewritePolicy) (derivedAlias: string) (src: string) : bool =
     src = derivedAlias || (policy.MatchEmptyDerivedAlias && derivedAlias = "" && src = "")
 
-let private appendJsonPath (JsonPath left) (JsonPath right) : JsonPath =
-    JsonPath(left @ right)
+let private appendJsonPath (left: JsonPath) (right: JsonPath) : JsonPath =
+    JsonPathOps.ofList (JsonPathOps.toList left @ JsonPathOps.toList right)
 
-let private jsonPathAsLiteral (JsonPath segments) : SqlExpr =
+let private jsonPathAsLiteral (path: JsonPath) : SqlExpr =
     let escaped =
-        segments
+        JsonPathOps.toList path
         |> List.map (fun s -> s.Replace("\000", ""))
         |> String.concat "."
     Literal(SqlLiteral.String($"$.{escaped}"))
@@ -37,6 +38,8 @@ let rec private rewriteJsonExtractAliasTarget (path: JsonPath) (innerExpr: SqlEx
         JsonExtractExpr(innerSrc, innerCol, path)
     | JsonExtractExpr(innerSrc, innerCol, innerPath) ->
         JsonExtractExpr(innerSrc, innerCol, appendJsonPath innerPath path)
+    | JsonRootExtract(innerSrc, innerCol) ->
+        JsonExtractExpr(innerSrc, innerCol, path)
     | Cast(inner, sqlType) ->
         Cast(rewriteJsonExtractAliasTarget path inner, sqlType)
     | FunctionCall(name, args) ->
@@ -76,6 +79,10 @@ let rewriteDerivedAliasExpr (policy: AliasRewritePolicy) (aliasMap: Map<string, 
                 match Map.tryFind col aliasMap with
                 | Some innerExpr -> rewriteJsonExtractAliasTarget path innerExpr
                 | None -> node
+            | JsonRootExtract(Some src, col) when matchesDerivedAlias policy derivedAlias src ->
+                match Map.tryFind col aliasMap with
+                | Some innerExpr -> innerExpr
+                | None -> node
             | InSubquery(valueExpr, sel) ->
                 InSubquery(valueExpr, policy.OnSubquerySelect sel)
             | Exists(sel) ->
@@ -86,6 +93,7 @@ let rewriteDerivedAliasExpr (policy: AliasRewritePolicy) (aliasMap: Map<string, 
             | Literal _
             | Parameter _
             | JsonExtractExpr _
+            | JsonRootExtract _
             | JsonSetExpr _
             | JsonArrayExpr _
             | JsonObjectExpr _

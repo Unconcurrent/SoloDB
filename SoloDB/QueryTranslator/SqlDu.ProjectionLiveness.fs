@@ -56,6 +56,7 @@ let collectReferencedColumns (derivedAlias: string) (expr: SqlExpr) : Set<string
 let computeLiveColumns (outer: SelectCore) (derivedAlias: string) : Set<string> =
     let fromProjections =
         outer.Projections
+        |> ProjectionSetOps.toList
         |> List.map (fun p -> collectReferencedColumns derivedAlias p.Expr)
         |> Set.unionMany
 
@@ -81,7 +82,9 @@ let computeLiveColumns (outer: SelectCore) (derivedAlias: string) : Set<string> 
 
     let fromJoinOn =
         outer.Joins
-        |> List.choose (fun j -> j.On)
+        |> List.choose (function
+            | ConditionedJoin(_, _, onExpr) -> Some onExpr
+            | CrossJoin _ -> None)
         |> List.map (collectReferencedColumns derivedAlias)
         |> Set.unionMany
 
@@ -100,7 +103,7 @@ let projectionAlias (p: Projection) : string option =
 /// Check if the inner query uses implicit projections (SELECT *)
 /// that we cannot safely narrow. PROJ-3.
 let hasStarProjection (innerCore: SelectCore) : bool =
-    innerCore.Projections.IsEmpty
+    innerCore.Projections |> ProjectionSetOps.isAllColumns
 
 /// Collect GROUP BY key column names from the inner query.
 /// These must be preserved per PROJ-4.
@@ -138,6 +141,7 @@ let computeDeadProjections
         // Collect all inner projection aliases
         let allAliases =
             innerCore.Projections
+            |> ProjectionSetOps.toList
             |> List.choose projectionAlias
             |> Set.ofList
 
@@ -155,7 +159,7 @@ let isProjectionPushdownAllowed (innerSel: SqlSelect) : bool =
     match innerSel.Body with
     | SingleSelect innerCore ->
         not (hasStarProjection innerCore)
-        && not innerCore.Projections.IsEmpty
+        && not (innerCore.Projections |> ProjectionSetOps.isAllColumns)
         && innerCore.GroupBy.IsEmpty
         && innerCore.Having.IsNone
         && not innerCore.Distinct

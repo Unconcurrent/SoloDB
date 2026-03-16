@@ -21,17 +21,17 @@ open SqlDu.Engine.C1.Spec
 /// Returns Some(merged) if mergeable, None otherwise.
 let mergeNestedExtract (expr: SqlExpr) : SqlExpr option =
     match expr with
-    | JsonExtractExpr(None, "Value", JsonPath outerSegs) ->
+    | JsonExtractExpr(None, "Value", _) ->
         // jsonb_extract(Value, '$.outerSegs') where Value is itself a column
         // This is already flat — no nesting to merge.
         None
-    | FunctionCall("jsonb_extract", [JsonExtractExpr(alias, col, JsonPath innerSegs); Literal(String pathStr)]) ->
+    | FunctionCall("jsonb_extract", [JsonExtractExpr(alias, col, innerPath); Literal(String pathStr)]) ->
         // FunctionCall("jsonb_extract", [inner_extract, path_literal])
         // Merge: jsonb_extract(jsonb_extract(alias.col, '$.inner'), '$.outer')
         // -> jsonb_extract(alias.col, '$.inner.outer')
         if pathStr.StartsWith("$.") then
             let outerSegs = pathStr.Substring(2).Split('.') |> Array.toList
-            Some(JsonExtractExpr(alias, col, JsonPath (innerSegs @ outerSegs)))
+            Some(JsonExtractExpr(alias, col, JsonPathOps.ofList (JsonPathOps.toList innerPath @ outerSegs)))
         else
             None
     | _ -> None

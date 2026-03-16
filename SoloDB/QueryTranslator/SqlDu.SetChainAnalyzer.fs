@@ -19,7 +19,9 @@ open SqlDu.Engine.C1.Spec
 // ══════════════════════════════════════════════════════════════
 
 /// Check if two JSON paths conflict (one is a prefix of the other, or identical).
-let pathsConflict (JsonPath segsA: JsonPath) (JsonPath segsB: JsonPath) : bool =
+let pathsConflict (pathA: JsonPath) (pathB: JsonPath) : bool =
+    let segsA = JsonPathOps.toList pathA
+    let segsB = JsonPathOps.toList pathB
     // Identical paths conflict
     if segsA = segsB then true
     else
@@ -62,7 +64,7 @@ let flattenSetChain (expr: SqlExpr) : SqlExpr option =
         match e with
         | FunctionCall("jsonb_set", [inner; Literal(String pathStr); value]) when pathStr.StartsWith("$.") ->
             let segs = pathStr.Substring(2).Split('.') |> Array.toList
-            let path = JsonPath segs
+            let path = JsonPathOps.ofList segs
             collect inner ((path, value) :: acc)
         | JsonSetExpr(target, existingAssigns) ->
             // Already a JsonSetExpr — extend with accumulated assignments

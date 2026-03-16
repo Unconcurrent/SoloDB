@@ -103,7 +103,7 @@ module internal QueryableBuildQueryPartA =
                         let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
                         addSelector statements (DuSelector (fun _tableName _vars ->
                             [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-                             { Alias = Some "Value"; Expr = SqlExpr.Coalesce([SqlExpr.FunctionCall("SUM", [extractVal]); SqlExpr.Literal(SqlLiteral.Integer 0L)]) }]
+                             { Alias = Some "Value"; Expr = SqlExpr.Coalesce(SqlExpr.FunctionCall("SUM", [extractVal]), [SqlExpr.Literal(SqlLiteral.Integer 0L)]) }]
                         ))
                     else
                         // SUM() return NULL if all elements are NULL, TOTAL() return 0.0.
@@ -121,8 +121,8 @@ module internal QueryableBuildQueryPartA =
                         ))
                         // Edge case 14: Aggregate NULL handling — error message for empty sequences
                         addSelector statements (DuSelector (fun _tableName _vars ->
-                            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.Null))], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
-                             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements"))], Some(SqlExpr.Column(None, "Value"))) }]
+                            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.Null)), [], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
+                             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements")), [], Some(SqlExpr.Column(None, "Value"))) }]
                         ))
                     else
                         raiseIfNullAggregateTranslator sourceCtx "AVG" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
@@ -136,8 +136,8 @@ module internal QueryableBuildQueryPartA =
                              { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("MIN", [extractVal]) }]
                         ))
                         addSelector statements (DuSelector (fun _tableName _vars ->
-                            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.Null))], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
-                             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements"))], Some(SqlExpr.Column(None, "Value"))) }]
+                            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.Null)), [], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
+                             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements")), [], Some(SqlExpr.Column(None, "Value"))) }]
                         ))
                     else
                         raiseIfNullAggregateTranslator sourceCtx "MIN" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
@@ -151,8 +151,8 @@ module internal QueryableBuildQueryPartA =
                              { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("MAX", [extractVal]) }]
                         ))
                         addSelector statements (DuSelector (fun _tableName _vars ->
-                            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.Null))], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
-                             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr([(isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements"))], Some(SqlExpr.Column(None, "Value"))) }]
+                            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.Null)), [], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
+                             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements")), [], Some(SqlExpr.Column(None, "Value"))) }]
                         ))
                     else
                         raiseIfNullAggregateTranslator sourceCtx "MAX" statements m.OriginalMethod m.Expressions "Sequence contains no elements"

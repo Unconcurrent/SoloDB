@@ -154,7 +154,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
             let ic = isIgnoreCase (evaluateExpr<StringComparison> comparisonExpr)
             let a = emitStringOperandDu qb ic arg1
             let b = emitStringOperandDu qb ic arg2
-            SqlExpr.CaseExpr([(SqlExpr.Binary(a, BinaryOperator.Lt, b), SqlExpr.Literal(SqlLiteral.Integer -1L)); (SqlExpr.Binary(a, BinaryOperator.Gt, b), SqlExpr.Literal(SqlLiteral.Integer 1L))], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))
+            SqlExpr.CaseExpr((SqlExpr.Binary(a, BinaryOperator.Lt, b), SqlExpr.Literal(SqlLiteral.Integer -1L)), [(SqlExpr.Binary(a, BinaryOperator.Gt, b), SqlExpr.Literal(SqlLiteral.Integer 1L))], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))
         | OfShape2 null OfString "IndexOf" null OfStringComparison (arg, v, comparisonExpr) ->
             let ic = isIgnoreCase (evaluateExpr<StringComparison> comparisonExpr)
             SqlExpr.Binary(SqlExpr.FunctionCall("INSTR", [emitStringOperandDu qb ic arg; emitStringOperandDu qb ic v]), BinaryOperator.Sub, SqlExpr.Literal(SqlLiteral.Integer 1L))

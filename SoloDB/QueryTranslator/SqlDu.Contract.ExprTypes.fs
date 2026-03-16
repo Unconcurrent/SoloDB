@@ -8,6 +8,7 @@ type SqlExpr =
     | Literal of SqlLiteral
     | Parameter of name: string
     | JsonExtractExpr of sourceAlias: string option * column: string * path: JsonPath
+    | JsonRootExtract of sourceAlias: string option * column: string
     | JsonSetExpr of target: SqlExpr * assignments: (JsonPath * SqlExpr) list
     | JsonArrayExpr of elements: SqlExpr list
     | JsonObjectExpr of properties: (string * SqlExpr) list
@@ -17,13 +18,13 @@ type SqlExpr =
     | Unary of UnaryOperator * SqlExpr
     | Binary of SqlExpr * BinaryOperator * SqlExpr
     | Between of SqlExpr * lower: SqlExpr * upper: SqlExpr
-    | InList of SqlExpr * SqlExpr list
+    | InList of SqlExpr * head: SqlExpr * tail: SqlExpr list
     | InSubquery of SqlExpr * SqlSelect
     | Cast of SqlExpr * sqlType: string
-    | Coalesce of SqlExpr list
+    | Coalesce of head: SqlExpr * tail: SqlExpr list
     | Exists of SqlSelect
     | ScalarSubquery of SqlSelect
-    | CaseExpr of branches: (SqlExpr * SqlExpr) list * elseExpr: SqlExpr option
+    | CaseExpr of firstBranch: (SqlExpr * SqlExpr) * restBranches: (SqlExpr * SqlExpr) list * elseExpr: SqlExpr option
     | UpdateFragment of path: SqlExpr * value: SqlExpr
 and WindowSpec = {
     Kind: WindowFunctionKind
@@ -39,19 +40,20 @@ and Projection = {
     Alias: string option
     Expr: SqlExpr
 }
-and JoinShape = {
-    Kind: JoinKind
-    Source: TableSource
-    On: SqlExpr option
-}
+and JoinShape =
+    | CrossJoin of source: TableSource
+    | ConditionedJoin of kind: JoinKind * source: TableSource * onExpr: SqlExpr
 and OrderBy = {
     Expr: SqlExpr
     Direction: SortDirection
 }
+and ProjectionSet =
+    | AllColumns
+    | Explicit of head: Projection * tail: Projection list
 and SelectCore = {
     Source: TableSource option
     Joins: JoinShape list
-    Projections: Projection list
+    Projections: ProjectionSet
     Where: SqlExpr option
     GroupBy: SqlExpr list
     Having: SqlExpr option
@@ -71,6 +73,28 @@ and SqlSelect = {
     Ctes: CteBinding list
     Body: SelectBody
 }
+
+module internal ProjectionSetOps =
+    let toList =
+        function
+        | AllColumns -> []
+        | Explicit(head, tail) -> head :: tail
+
+    let ofList =
+        function
+        | [] -> AllColumns
+        | head :: tail -> Explicit(head, tail)
+
+    let isAllColumns =
+        function
+        | AllColumns -> true
+        | Explicit _ -> false
+
+    let map f projections =
+        match projections with
+        | AllColumns -> AllColumns
+        | Explicit(head, tail) -> Explicit(f head, tail |> List.map f)
+
 type SqlExpr with
     static member fold (folder: 'State -> SqlExpr -> 'State) (state: 'State) (expr: SqlExpr) : 'State =
         let rec loop (acc: 'State) (node: SqlExpr) : 'State =
@@ -80,6 +104,7 @@ type SqlExpr with
             | Literal _ -> acc
             | Parameter _ -> acc
             | JsonExtractExpr _ -> acc
+            | JsonRootExtract _ -> acc
             | JsonSetExpr(target, assignments) ->
                 let acc = loop acc target
                 assignments |> List.fold (fun s (_, value) -> loop s value) acc
@@ -110,22 +135,24 @@ type SqlExpr with
                 let acc = loop acc valueExpr
                 let acc = loop acc lower
                 loop acc upper
-            | InList(valueExpr, values) ->
+            | InList(valueExpr, head, tail) ->
                 let acc = loop acc valueExpr
-                values |> List.fold loop acc
+                let acc = loop acc head
+                tail |> List.fold loop acc
             | InSubquery(valueExpr, _) ->
                 loop acc valueExpr
             | Cast(inner, _) ->
                 loop acc inner
-            | Coalesce(expressions) ->
-                expressions |> List.fold loop acc
+            | Coalesce(head, tail) ->
+                let acc = loop acc head
+                tail |> List.fold loop acc
             | Exists _ ->
                 acc
             | ScalarSubquery _ ->
                 acc
-            | CaseExpr(branches, elseExpr) ->
+            | CaseExpr(firstBranch, restBranches, elseExpr) ->
                 let acc =
-                    branches
+                    (firstBranch :: restBranches)
                     |> List.fold (fun s (condExpr, resultExpr) ->
                         let s = loop s condExpr
                         loop s resultExpr) acc
@@ -144,6 +171,7 @@ type SqlExpr with
                 | Literal _ -> node
                 | Parameter _ -> node
                 | JsonExtractExpr _ -> node
+                | JsonRootExtract _ -> node
                 | JsonSetExpr(target, assignments) ->
                     JsonSetExpr(
                         loop target,
@@ -173,21 +201,23 @@ type SqlExpr with
                     Binary(loop left, op, loop right)
                 | Between(valueExpr, lower, upper) ->
                     Between(loop valueExpr, loop lower, loop upper)
-                | InList(valueExpr, values) ->
-                    InList(loop valueExpr, values |> List.map loop)
+                | InList(valueExpr, head, tail) ->
+                    InList(loop valueExpr, loop head, tail |> List.map loop)
                 | InSubquery(valueExpr, query) ->
                     InSubquery(loop valueExpr, query)
                 | Cast(inner, sqlType) ->
                     Cast(loop inner, sqlType)
-                | Coalesce(expressions) ->
-                    Coalesce(expressions |> List.map loop)
+                | Coalesce(head, tail) ->
+                    Coalesce(loop head, tail |> List.map loop)
                 | Exists query ->
                     Exists query
                 | ScalarSubquery query ->
                     ScalarSubquery query
-                | CaseExpr(branches, elseExpr) ->
+                | CaseExpr(firstBranch, restBranches, elseExpr) ->
                     CaseExpr(
-                        branches |> List.map (fun (condExpr, resultExpr) -> loop condExpr, loop resultExpr),
+                        let mapBranch (condExpr, resultExpr) = loop condExpr, loop resultExpr
+                        mapBranch firstBranch,
+                        restBranches |> List.map mapBranch,
                         elseExpr |> Option.map loop)
                 | UpdateFragment(pathExpr, valueExpr) ->
                     UpdateFragment(loop pathExpr, loop valueExpr)
@@ -202,6 +232,7 @@ type SqlExpr with
                 | Literal _ -> false
                 | Parameter _ -> false
                 | JsonExtractExpr _ -> false
+                | JsonRootExtract _ -> false
                 | JsonSetExpr(target, assignments) ->
                     loop target || (assignments |> List.exists (fun (_, value) -> loop value))
                 | JsonArrayExpr(elements) ->
@@ -223,20 +254,20 @@ type SqlExpr with
                     loop left || loop right
                 | Between(valueExpr, lower, upper) ->
                     loop valueExpr || loop lower || loop upper
-                | InList(valueExpr, values) ->
-                    loop valueExpr || (values |> List.exists loop)
+                | InList(valueExpr, head, tail) ->
+                    loop valueExpr || loop head || (tail |> List.exists loop)
                 | InSubquery(valueExpr, _) ->
                     loop valueExpr
                 | Cast(inner, _) ->
                     loop inner
-                | Coalesce(expressions) ->
-                    expressions |> List.exists loop
+                | Coalesce(head, tail) ->
+                    loop head || (tail |> List.exists loop)
                 | Exists _ ->
                     false
                 | ScalarSubquery _ ->
                     false
-                | CaseExpr(branches, elseExpr) ->
-                    (branches |> List.exists (fun (condExpr, resultExpr) -> loop condExpr || loop resultExpr))
+                | CaseExpr(firstBranch, restBranches, elseExpr) ->
+                    ((firstBranch :: restBranches) |> List.exists (fun (condExpr, resultExpr) -> loop condExpr || loop resultExpr))
                     || (elseExpr |> Option.map loop |> Option.defaultValue false)
                 | UpdateFragment(pathExpr, valueExpr) ->
                     loop pathExpr || loop valueExpr
@@ -249,6 +280,7 @@ type SqlExpr with
                 | Literal _ -> node, false
                 | Parameter _ -> node, false
                 | JsonExtractExpr _ -> node, false
+                | JsonRootExtract _ -> node, false
                 | JsonSetExpr(target, assignments) ->
                     let newTargetOpt = loop target
                     let newTarget = newTargetOpt |> Option.defaultValue target
@@ -344,45 +376,58 @@ type SqlExpr with
                         valueOpt |> Option.defaultValue valueExpr,
                         lowerOpt |> Option.defaultValue lower,
                         upperOpt |> Option.defaultValue upper), (valueOpt.IsSome || lowerOpt.IsSome || upperOpt.IsSome)
-                | InList(valueExpr, values) ->
+                | InList(valueExpr, head, tail) ->
                     let valueOpt = loop valueExpr
-                    let mutable changed = valueOpt.IsSome
-                    let newValues =
-                        values |> List.map (fun value ->
+                    let headOpt = loop head
+                    let mutable changed = valueOpt.IsSome || headOpt.IsSome
+                    let newTail =
+                        tail |> List.map (fun value ->
                             let rewritten = loop value
                             if rewritten.IsSome then changed <- true
                             rewritten |> Option.defaultValue value)
-                    InList(valueOpt |> Option.defaultValue valueExpr, newValues), changed
+                    InList(
+                        valueOpt |> Option.defaultValue valueExpr,
+                        headOpt |> Option.defaultValue head,
+                        newTail), changed
                 | InSubquery(valueExpr, query) ->
                     let valueOpt = loop valueExpr
                     InSubquery(valueOpt |> Option.defaultValue valueExpr, query), valueOpt.IsSome
                 | Cast(inner, sqlType) ->
                     let innerOpt = loop inner
                     Cast(innerOpt |> Option.defaultValue inner, sqlType), innerOpt.IsSome
-                | Coalesce(expressions) ->
-                    let mutable changed = false
-                    let newExpressions =
-                        expressions |> List.map (fun value ->
+                | Coalesce(head, tail) ->
+                    let headOpt = loop head
+                    let mutable changed = headOpt.IsSome
+                    let newTail =
+                        tail |> List.map (fun value ->
                             let rewritten = loop value
                             if rewritten.IsSome then changed <- true
                             rewritten |> Option.defaultValue value)
-                    Coalesce(newExpressions), changed
+                    Coalesce(headOpt |> Option.defaultValue head, newTail), changed
                 | Exists query ->
                     Exists query, false
                 | ScalarSubquery query ->
                     ScalarSubquery query, false
-                | CaseExpr(branches, elseExpr) ->
-                    let mutable changed = false
-                    let newBranches =
-                        branches |> List.map (fun (condExpr, resultExpr) ->
+                | CaseExpr(firstBranch, restBranches, elseExpr) ->
+                    let rewriteBranch (condExpr, resultExpr) =
                             let condOpt = loop condExpr
                             let resultOpt = loop resultExpr
-                            if condOpt.IsSome || resultOpt.IsSome then changed <- true
-                            (condOpt |> Option.defaultValue condExpr), (resultOpt |> Option.defaultValue resultExpr))
+                            let changed = condOpt.IsSome || resultOpt.IsSome
+                            (condOpt |> Option.defaultValue condExpr), (resultOpt |> Option.defaultValue resultExpr), changed
+                    let firstCond, firstResult, firstChanged = rewriteBranch firstBranch
+                    let mutable changed = firstChanged
+                    let newRest =
+                        restBranches |> List.map (fun branch ->
+                            let condExpr, resultExpr, branchChanged = rewriteBranch branch
+                            if branchChanged then changed <- true
+                            (condExpr, resultExpr))
                     let newElseOpt =
                         elseExpr |> Option.bind loop
                     if newElseOpt.IsSome then changed <- true
-                    CaseExpr(newBranches, match newElseOpt, elseExpr with | Some e, _ -> Some e | None, original -> original), changed
+                    CaseExpr(
+                        (firstCond, firstResult),
+                        newRest,
+                        match newElseOpt, elseExpr with | Some e, _ -> Some e | None, original -> original), changed
                 | UpdateFragment(pathExpr, valueExpr) ->
                     let pathOpt = loop pathExpr
                     let valueOpt = loop valueExpr

@@ -16,10 +16,10 @@ module internal SqlDuMinimalEmit =
         let isTopLevel = qb.StringBuilder.Length = 0
 
         // Special case: top-level root extraction for readable JSON output.
-        // When the emitter is called at SB position 0 with a root-path JsonExtractExpr,
+        // When the emitter is called at SB position 0 with a JsonRootExtract,
         // use json_extract(json(source), '$') instead of the canonical jsonb_extract.
         match expr with
-        | SqlExpr.JsonExtractExpr(alias, col, JsonPath []) when isTopLevel ->
+        | SqlExpr.JsonRootExtract(alias, col) when isTopLevel ->
             let prefix =
                 match alias with
                 | Some a -> a + "."

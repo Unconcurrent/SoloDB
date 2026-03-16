@@ -12,10 +12,6 @@ open SQLiteToolsMapper
 
 module SQLiteTools =
     open SQLiteToolsHandlerFaultState
-
-    let internal markCurrentHandlerFaultsAsSwallowed = SQLiteToolsHandlerFaultState.markCurrentHandlerFaultsAsSwallowed
-    let internal clearNonSwallowedHandlerFaultsDeeperThanCurrent = SQLiteToolsHandlerFaultState.clearNonSwallowedHandlerFaultsDeeperThanCurrent
-    let internal captureCurrentHandlerFaultDepth = SQLiteToolsHandlerFaultState.captureCurrentHandlerFaultDepth
     /// <summary>
     /// A sealed wrapper around SqliteConnection that adds command caching capabilities.
     /// </summary>
