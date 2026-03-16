@@ -29,7 +29,7 @@ let emitWindowCall (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emi
         |> List.map (fun (expr, dir) ->
             let e = emitExprFn ctx expr
             let dirStr = match dir with Asc -> "ASC" | Desc -> "DESC"
-            { Sql = sprintf "%s %s" e.Sql dirStr; Parameters = Emitted.copyParameters e.Parameters })
+            { Sql = sprintf "%s %s" e.Sql dirStr; Parameters = e.Parameters })
     let orderSql =
         match orderParts with
         | [] -> ""

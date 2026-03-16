@@ -17,16 +17,16 @@ and private emitTableSource (ctx: EmitContext) (source: TableSource) : Emitted =
     | DerivedTable(query, alias) ->
         let queryEmitted = emitSelect ctx query
         { Sql = sprintf "(%s) %s" queryEmitted.Sql (EmitJson.quoteIdentifier ctx alias)
-          Parameters = Emitted.copyParameters queryEmitted.Parameters }
+          Parameters = queryEmitted.Parameters }
     | FromJsonEach(valueExpr, alias) ->
         let exprEmitted = emitE ctx valueExpr
         match alias with
         | Some a ->
             { Sql = sprintf "json_each(%s) AS %s" exprEmitted.Sql (EmitJson.quoteIdentifier ctx a)
-              Parameters = Emitted.copyParameters exprEmitted.Parameters }
+              Parameters = exprEmitted.Parameters }
         | None ->
             { Sql = sprintf "json_each(%s)" exprEmitted.Sql
-              Parameters = Emitted.copyParameters exprEmitted.Parameters }
+              Parameters = exprEmitted.Parameters }
 
 /// Emit a JoinShape to SQL.
 and private emitJoin (ctx: EmitContext) (join: JoinShape) : Emitted =
@@ -34,7 +34,7 @@ and private emitJoin (ctx: EmitContext) (join: JoinShape) : Emitted =
     | CrossJoin source ->
         let sourceEmitted = emitTableSource ctx source
         { Sql = sprintf "CROSS JOIN %s" sourceEmitted.Sql
-          Parameters = Emitted.copyParameters sourceEmitted.Parameters }
+          Parameters = sourceEmitted.Parameters }
     | ConditionedJoin(kind, source, onExpr) ->
         let kindStr = match kind with Inner -> "INNER JOIN" | Left -> "LEFT JOIN"
         let sourceEmitted = emitTableSource ctx source
@@ -48,7 +48,7 @@ and private emitProjection (ctx: EmitContext) (proj: Projection) : Emitted =
     match proj.Alias with
     | Some alias ->
         { Sql = sprintf "%s AS %s" exprEmitted.Sql (EmitJson.quoteIdentifier ctx alias)
-          Parameters = Emitted.copyParameters exprEmitted.Parameters }
+          Parameters = exprEmitted.Parameters }
     | None -> exprEmitted
 
 /// Emit a single SelectCore to SQL.
@@ -114,7 +114,7 @@ and private emitSelectCore (ctx: EmitContext) (core: SelectCore) : Emitted =
                 let exprEmitted = emitE ctx ob.Expr
                 let dirStr = match ob.Direction with Asc -> "ASC" | Desc -> "DESC"
                 { Sql = sprintf "%s %s" exprEmitted.Sql dirStr
-                  Parameters = Emitted.copyParameters exprEmitted.Parameters })
+                  Parameters = exprEmitted.Parameters })
         let orderSql = orderParts |> List.map (fun e -> e.Sql) |> String.concat ", "
         let orderParams = Emitted.collectParameters orderParts
         sql <- sprintf "%s ORDER BY %s" sql orderSql
@@ -140,7 +140,7 @@ and private emitSelectCore (ctx: EmitContext) (core: SelectCore) : Emitted =
 and private emitCteBinding (ctx: EmitContext) (cte: CteBinding) : Emitted =
     let queryEmitted = emitSelect ctx cte.Query
     { Sql = sprintf "%s AS (%s)" (EmitJson.quoteIdentifier ctx cte.Name) queryEmitted.Sql
-      Parameters = Emitted.copyParameters queryEmitted.Parameters }
+      Parameters = queryEmitted.Parameters }
 
 /// Emit a full SqlSelect (CTEs + body).
 and emitSelect (ctx: EmitContext) (select: SqlSelect) : Emitted =

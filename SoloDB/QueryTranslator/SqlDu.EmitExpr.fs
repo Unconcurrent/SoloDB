@@ -144,7 +144,7 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
                   Parameters = Emitted.concatParameterSets [ argEmitted.Parameters; sepEmitted.Parameters ] }
             | None ->
                 { Sql = sprintf "%s(%s%s)" funcName distinctStr argEmitted.Sql
-                  Parameters = Emitted.copyParameters argEmitted.Parameters }
+                  Parameters = argEmitted.Parameters }
         | _, None, _, _ ->
             raise (System.NotSupportedException($"Aggregate '{funcName}' requires an argument."))
 
@@ -158,16 +158,16 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
         match op with
         | Not ->
             { Sql = sprintf "NOT (%s)" operandEmitted.Sql
-              Parameters = Emitted.copyParameters operandEmitted.Parameters }
+              Parameters = operandEmitted.Parameters }
         | Neg ->
             { Sql = sprintf "-%s" operandEmitted.Sql
-              Parameters = Emitted.copyParameters operandEmitted.Parameters }
+              Parameters = operandEmitted.Parameters }
         | IsNull ->
             { Sql = sprintf "%s IS NULL" operandEmitted.Sql
-              Parameters = Emitted.copyParameters operandEmitted.Parameters }
+              Parameters = operandEmitted.Parameters }
         | IsNotNull ->
             { Sql = sprintf "%s IS NOT NULL" operandEmitted.Sql
-              Parameters = Emitted.copyParameters operandEmitted.Parameters }
+              Parameters = operandEmitted.Parameters }
 
     // Case 12: Binary operator — handles precedence via parenthesization
     | Binary(left, op, right) ->
@@ -213,7 +213,7 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
     | Cast(expr, sqlType) ->
         let exprEmitted = emitE ctx expr
         { Sql = sprintf "CAST(%s AS %s)" exprEmitted.Sql sqlType
-          Parameters = Emitted.copyParameters exprEmitted.Parameters }
+          Parameters = exprEmitted.Parameters }
 
     // Case 17: COALESCE
     | Coalesce(head, tail) ->
@@ -226,13 +226,13 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
     | Exists subSelect ->
         let subEmitted = emitSubSelect ctx subSelect
         { Sql = sprintf "EXISTS (%s)" subEmitted.Sql
-          Parameters = Emitted.copyParameters subEmitted.Parameters }
+          Parameters = subEmitted.Parameters }
 
     // Case 19: Scalar subquery
     | ScalarSubquery subSelect ->
         let subEmitted = emitSubSelect ctx subSelect
         { Sql = sprintf "(%s)" subEmitted.Sql
-          Parameters = Emitted.copyParameters subEmitted.Parameters }
+          Parameters = subEmitted.Parameters }
 
     // Case 20: CASE expression
     | CaseExpr(firstBranch, restBranches, elseExpr) ->

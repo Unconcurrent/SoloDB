@@ -11,11 +11,6 @@ type Emitted = {
 module Emitted =
     let emptyParameters () = ResizeArray<string * obj>()
 
-    let copyParameters (ps: ResizeArray<string * obj>) =
-        let copy = ResizeArray<string * obj>(ps.Count)
-        copy.AddRange(ps)
-        copy
-
     let concatParameterSets (parts: seq<ResizeArray<string * obj>>) =
         let parts = parts |> Seq.toArray
         let total = parts |> Array.sumBy (fun ps -> ps.Count)
@@ -36,14 +31,14 @@ module Emitted =
         { Sql = a.Sql + sep + b.Sql
           Parameters = concatParameterSets [ a.Parameters; b.Parameters ] }
 
-    /// Wrap emission SQL in parentheses, preserving parameters.
+    /// Wrap emission SQL in parentheses, sharing parameters (immutable after construction).
     let parens (e: Emitted) =
-        { Sql = "(" + e.Sql + ")"; Parameters = copyParameters e.Parameters }
+        { Sql = "(" + e.Sql + ")"; Parameters = e.Parameters }
 
-    /// Prefix SQL text, preserving parameters.
+    /// Prefix SQL text, sharing parameters (immutable after construction).
     let prefix (p: string) (e: Emitted) =
-        { Sql = p + e.Sql; Parameters = copyParameters e.Parameters }
+        { Sql = p + e.Sql; Parameters = e.Parameters }
 
-    /// Suffix SQL text, preserving parameters.
+    /// Suffix SQL text, sharing parameters (immutable after construction).
     let suffix (s: string) (e: Emitted) =
-        { Sql = e.Sql + s; Parameters = copyParameters e.Parameters }
+        { Sql = e.Sql + s; Parameters = e.Parameters }
