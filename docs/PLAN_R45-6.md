@@ -84,7 +84,7 @@ Batch 1 (Sequential — single developer):
 | E16 | `E16_DBRefMany_WhereSelect_FailClosed` | CP-02 reject | `.Tags.Where(t => ...).Select(t => t.Label)` → NotSupportedException |
 | E17 | `E17_DBRefMany_OrderBySelect_FailClosed` | CP-03 reject | `.Tags.OrderBy(t => ...).Select(t => t.Label)` → NotSupportedException |
 | E18 | `E18_DBRefMany_NestedSelectProjection_FailClosed` | CX-02 reject | `.Tags.Select(t => t.SubItems.Select(...))` → NotSupportedException |
-| E19 | `E19_DBRefMany_MixedScalarCollectionProjection_FailClosed` | E-12 reject | `.Select(o => new { o.Name, Items = o.Tags.Select(...) })` → NotSupportedException |
+| E19 | `E19_DBRefMany_AggregateInsideCollectionProjection_FailClosed` | CX reject (deterministic NotSupportedException) | `.Select(o => new { o.Id, TotalScore = o.Tags.Select(t => t.Score).Sum() })` → NotSupportedException |
 
 ### Implementation Detail
 
