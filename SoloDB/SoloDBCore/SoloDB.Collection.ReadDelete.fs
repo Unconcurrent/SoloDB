@@ -131,13 +131,22 @@ type internal CollectionReadDeleteOps<'T>() =
                     HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (json.Id.Value, box entity) |] hydMap
                 Some entity
         else
+            // R45-11 S-1: DU-built SELECT for custom-id no-relations fallback.
+            let vars = Dictionary<string, obj>()
+            vars.["_cid0"] <- box id
+            let whereExpr =
+                SqlExpr.Binary(
+                    SqlExpr.FunctionCall("jsonb_extract",
+                        [SqlExpr.Column(Some "o", "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + idProp.Name))]),
+                    BinaryOperator.Eq,
+                    SqlExpr.Parameter "_cid0")
+            let sql, _ =
+                HydrationSqlBuilder.buildManyOnlyHydratedSql connection name typeof<'T> whereExpr vars true
             QueryCommandInstrumentation.Increment()
-            match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
+            match connection.QueryFirstOrDefault<DbObjectRow>(sql, vars) with
             | json when Object.ReferenceEquals(json, null) -> None
             | json ->
                 let entity = fromSQLite<'T> json
-                if hasRelations then
-                    hydrateRelations connection json.Id.Value (box entity)
                 Some entity
 
     static member DeleteByCustomId<'IdType when 'IdType : equality>
@@ -160,7 +169,19 @@ type internal CollectionReadDeleteOps<'T>() =
             let requiresRelationHandling = requiresRelationDeleteHandling conn
             if requiresRelationHandling then
                 let tx = ensureRelationTx conn
-                let oldRow = conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables)
+                // R45-11 S-2: DU-built SELECT for DeleteByCustomId old-state read.
+                let vars = Dictionary<string, obj>()
+                vars.["_cid0"] <- box id
+                let whereExpr =
+                    SqlExpr.Binary(
+                        SqlExpr.FunctionCall("jsonb_extract",
+                            [SqlExpr.Column(Some "o", "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + idProp.Name))]),
+                        BinaryOperator.Eq,
+                        SqlExpr.Parameter "_cid0")
+                let sql, _ =
+                    HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> whereExpr vars true
+                QueryCommandInstrumentation.Increment()
+                let oldRow = conn.QueryFirstOrDefault<DbObjectRow>(sql, vars)
                 if isNull oldRow then
                     0
                 else

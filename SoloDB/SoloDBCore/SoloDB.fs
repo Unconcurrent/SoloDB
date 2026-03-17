@@ -277,10 +277,21 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
             else
                 match CustomTypeId<'T>.Value with
                 | Some customId ->
+                    // R45-11 S-3: DU-built SELECT for upsert existence check.
                     let idValue = customId.GetId(item |> box)
                     let idProp = customId.Property
-                    let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = idValue))
-                    match conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
+                    let vars = System.Collections.Generic.Dictionary<string, obj>()
+                    vars.["_cid0"] <- idValue
+                    let whereExpr =
+                        SqlDu.Engine.C1.Spec.SqlExpr.Binary(
+                            SqlDu.Engine.C1.Spec.SqlExpr.FunctionCall("jsonb_extract",
+                                [SqlDu.Engine.C1.Spec.SqlExpr.Column(Some "o", "Value"); SqlDu.Engine.C1.Spec.SqlExpr.Literal(SqlDu.Engine.C1.Spec.SqlLiteral.String ("$." + idProp.Name))]),
+                            SqlDu.Engine.C1.Spec.BinaryOperator.Eq,
+                            SqlDu.Engine.C1.Spec.SqlExpr.Parameter "_cid0")
+                    let sql, _ =
+                        HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> whereExpr vars true
+                    QueryCommandInstrumentation.Increment()
+                    match conn.QueryFirstOrDefault<DbObjectRow>(sql, vars) with
                     | row when Object.ReferenceEquals(row, null) -> ValueNone
                     | row -> ValueSome row
                 | None -> ValueNone
