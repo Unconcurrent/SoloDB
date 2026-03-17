@@ -74,7 +74,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                     if ownerEntities.Length > 0 then
                         if ctx.HasSingleRelations then
                             Relations.withRelationSqliteWrap "query-batch-load" "ExecuteEnumerable.batchLoadDBRefProperties" (fun () ->
-                                Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ownerEntities
+                                Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ownerEntities source.InTransaction
                             )
 
                         if ctx.HasManyRelations then
@@ -116,7 +116,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                 | ValueSome ctx when (ctx.HasSingleRelations || ctx.HasManyRelations) && not (isNull (box entity)) && row.Id.HasValue && ctx.OwnerType.IsAssignableFrom(typeof<'TResult>) ->
                     if ctx.HasSingleRelations then
                         Relations.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefProperties" (fun () ->
-                            Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths [| (row.Id.Value, box entity) |]
+                            Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths [| (row.Id.Value, box entity) |] source.InTransaction
                         )
                     if ctx.HasManyRelations then
                         Relations.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefManyProperties" (fun () ->

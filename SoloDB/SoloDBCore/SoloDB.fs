@@ -362,7 +362,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
             (fun () -> connection.Get())
             (fun conn entityId entity ->
                 let excludedPaths, includedPaths = Collection<'T>.mkRelationPathSets()
-                Relations.batchLoadDBRefProperties conn name typeof<'T> excludedPaths includedPaths [| (entityId, entity) |]
+                Relations.batchLoadDBRefProperties conn name typeof<'T> excludedPaths includedPaths [| (entityId, entity) |] this.InTransaction
                 Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths [| (entityId, entity) |] this.InTransaction
                 Relations.captureRelationVersionForEntities conn name [| (entityId, entity) |])
 
@@ -400,7 +400,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     member this.TryGetById<'IdType when 'IdType : equality>(id: 'IdType) : 'T option =
         let hydrateRelations (conn: SqliteConnection) (entityId: int64) (entity: obj) =
             let excludedPaths, includedPaths = Collection<'T>.mkRelationPathSets()
-            Relations.batchLoadDBRefProperties conn name typeof<'T> excludedPaths includedPaths [| (entityId, entity) |]
+            Relations.batchLoadDBRefProperties conn name typeof<'T> excludedPaths includedPaths [| (entityId, entity) |] this.InTransaction
             Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths [| (entityId, entity) |] this.InTransaction
             Relations.captureRelationVersionForEntities conn name [| (entityId, entity) |]
 

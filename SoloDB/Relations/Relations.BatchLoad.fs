@@ -15,13 +15,18 @@ open RelationsTypes
 open RelationsSchema
 open RelationsEntity
 
-let batchLoadDBRefProperties
+let private maxRecursiveDepth = 5
+
+let rec batchLoadDBRefProperties
     (connection: SqliteConnection)
     (ownerTable: string)
     (ownerType: Type)
     (excludedPaths: HashSet<string>)
     (includedPaths: HashSet<string>)
     (ownerEntities: (int64 * obj) array)
+    (inTransaction: bool)
+    (depth: int)
+    (visited: HashSet<int64 * string>)
     =
     if ownerEntities.Length = 0 then ()
     else
@@ -36,6 +41,10 @@ let batchLoadDBRefProperties
         if excludedPaths.Contains(path) then false
         elif includedPaths.Count > 0 then includedPaths.Contains(path)
         else true
+
+    // Opt-in recursion gate: recurse only when Include was explicitly used (depth 0)
+    // or we're already in a recursive sub-graph (depth > 0).
+    let shouldRecurse = depth < maxRecursiveDepth && (depth > 0 || includedPaths.Count > 0)
 
     for (prop, _kind, targetType, _typedIdType, _onDelete, _onOwnerDelete, _isUnique, _orderBy) in singleSpecs do
         if not (shouldLoadPath prop.Name) then ()
@@ -91,7 +100,19 @@ let batchLoadDBRefProperties
                     propSetter.Invoke(ownerObj, loadedRef)
                 | _ -> ()
 
-let batchLoadDBRefManyProperties
+            // Recursive multi-hop loading for Include targets
+            if shouldRecurse then
+                let subExcl = HashSet<string>()
+                let subIncl = HashSet<string>()
+                for kv in loadedTargets do
+                    let key = (kv.Key, targetType.FullName)
+                    if not (visited.Contains(key)) then
+                        visited.Add(key) |> ignore
+                        batchLoadDBRefProperties connection targetTable targetType subExcl subIncl [|(kv.Key, kv.Value)|] inTransaction (depth + 1) visited
+                        batchLoadDBRefManyProperties connection targetTable targetType subExcl subIncl [|(kv.Key, kv.Value)|] inTransaction (depth + 1) visited
+                        visited.Remove(key) |> ignore
+
+and batchLoadDBRefManyProperties
     (connection: SqliteConnection)
     (ownerTable: string)
     (ownerType: Type)
@@ -99,6 +120,8 @@ let batchLoadDBRefManyProperties
     (includedPaths: HashSet<string>)
     (ownerEntities: (int64 * obj) array)
     (inTransaction: bool)
+    (depth: int)
+    (visited: HashSet<int64 * string>)
     =
     if ownerEntities.Length = 0 then ()
     else
@@ -113,6 +136,8 @@ let batchLoadDBRefManyProperties
         if excludedPaths.Contains(path) then false
         elif includedPaths.Count > 0 then includedPaths.Contains(path)
         else true
+
+    let shouldRecurse = depth < maxRecursiveDepth && (depth > 0 || includedPaths.Count > 0)
 
     for descriptor in manyDescriptors do
         if not (shouldLoadPath descriptor.Property.Name) then ()
@@ -180,3 +205,20 @@ let batchLoadDBRefManyProperties
                 | true, items -> internal'.SetLoadedBoxed (items |> Seq.map snd) (items |> Seq.map fst)
                 | _ -> internal'.SetLoadedBoxed Seq.empty Seq.empty
             | _ -> ()
+
+        // Recursive multi-hop loading for Include targets
+        if shouldRecurse then
+            let subExcl = HashSet<string>()
+            let subIncl = HashSet<string>()
+            let allTargets =
+                grouped.Values
+                |> Seq.collect id
+                |> Seq.distinctBy fst
+                |> Seq.toArray
+            for (targetId, targetObj) in allTargets do
+                let key = (targetId, descriptor.TargetType.FullName)
+                if not (visited.Contains(key)) then
+                    visited.Add(key) |> ignore
+                    batchLoadDBRefProperties connection descriptor.TargetTable descriptor.TargetType subExcl subIncl [|(targetId, targetObj)|] inTransaction (depth + 1) visited
+                    batchLoadDBRefManyProperties connection descriptor.TargetTable descriptor.TargetType subExcl subIncl [|(targetId, targetObj)|] inTransaction (depth + 1) visited
+                    visited.Remove(key) |> ignore
