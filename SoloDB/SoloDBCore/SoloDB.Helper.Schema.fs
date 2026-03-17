@@ -7,8 +7,34 @@ open System
 open System.Reflection
 open Utils
 open SQLiteTools
+open SoloDatabase
+open SqlDu.Engine.C1.Spec
 
 module internal HelperSchema =
+    /// Emit a SqlExpr to SQL string.
+    /// For index DDL, we need the DU expression emitted without table aliases.
+    /// Use the standalone C2 emitter (same as HydrationSqlBuilder.emitExprToSql).
+    let private emitExprToSqlLocal (expr: SqlExpr) : string =
+        let ctx = EmitContext()
+        ctx.InlineLiterals <- true
+        let emitted = EmitExpr.emitExprWith EmitSelect.emitSelect ctx expr
+        emitted.Sql
+
+    /// Strip source aliases from SqlExpr (inline — Preprocess not yet compiled).
+    let rec private stripAlias (expr: SqlExpr) : SqlExpr =
+        match expr with
+        | SqlExpr.Column(Some _, col) -> SqlExpr.Column(None, col)
+        | SqlExpr.Column(None, _) -> expr
+        | SqlExpr.Literal _ | SqlExpr.Parameter _ -> expr
+        | SqlExpr.JsonExtractExpr(Some _, col, path) -> SqlExpr.JsonExtractExpr(None, col, path)
+        | SqlExpr.JsonExtractExpr(None, _, _) -> expr
+        | SqlExpr.JsonRootExtract(Some _, col) -> SqlExpr.JsonRootExtract(None, col)
+        | SqlExpr.JsonRootExtract(None, _) -> expr
+        | SqlExpr.FunctionCall(name, args) -> SqlExpr.FunctionCall(name, args |> List.map stripAlias)
+        | SqlExpr.Unary(op, inner) -> SqlExpr.Unary(op, stripAlias inner)
+        | SqlExpr.Binary(l, op, r) -> SqlExpr.Binary(stripAlias l, op, stripAlias r)
+        | SqlExpr.Cast(inner, ty) -> SqlExpr.Cast(stripAlias inner, ty)
+        | _ -> expr
     let private tryGetIndexedAttribute (p: PropertyInfo) =
         p.GetCustomAttributes(true)
         |> Array.tryPick (function
@@ -74,11 +100,15 @@ module internal HelperSchema =
         if containsRelationSubExpression expression.Body then
             raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
 
-        let whereSQL, variables = QueryTranslator.translate name expression
-        let whereSQL = whereSQL.Replace($"\"{name}\".", "") // Table-qualified references are not allowed in index expressions.
+        // R45-12 Slice B: use translateWhereExpr → DU → strip aliases → emit.
+        // No .Replace/.Substring string surgery.
+        let duExpr, variables = QueryTranslator.translateWhereExpr name expression
         if variables.Count > 0 then raise (ArgumentException "Cannot have variables in index.")
-        // Safety net: also reject any SQL that contains subqueries (in case new translator paths are added).
-        if whereSQL.Contains "SELECT" then
+        // Strip table-qualification at DU level (not string Replace).
+        let stripped = stripAlias duExpr
+        // Safety net: reject subqueries.
+        let emitted = emitExprToSqlLocal stripped
+        if emitted.Contains "SELECT" then
             raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
         let expressionBody = expression.Body
 
@@ -89,10 +119,18 @@ module internal HelperSchema =
         let whereSQL =
             match expressionBody with
             | :? NewExpression as ne when isTuple ne.Type ->
-                whereSQL.Substring("jsonb_array".Length)
+                // Tuple: DU is FunctionCall("jsonb_array", [arg1; arg2; ...]).
+                // Unwrap to (arg1, arg2, ...) at DU level.
+                match stripped with
+                | SqlDu.Engine.C1.Spec.SqlExpr.FunctionCall("jsonb_array", args) ->
+                    let argsSql = args |> List.map emitExprToSqlLocal |> String.concat ", "
+                    $"({argsSql})"
+                | _ ->
+                    // Fallback: emit as-is with parens (stripped already has no jsonb_array wrapper in some cases).
+                    $"({emitted})"
             | :? MethodCallExpression
             | :? MemberExpression ->
-                $"({whereSQL})"
+                $"({emitted})"
             | other -> raise (ArgumentException (sprintf "Cannot index an expression with type: %s" (other.GetType().FullName)))
 
         let expressionStr = whereSQL.ToCharArray() |> Seq.filter (fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""
@@ -131,19 +169,25 @@ module internal HelperSchema =
         if containsRelationSubExpression expression.Body then
             raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
 
-        let whereSQL, variables = QueryTranslator.translate name expression
-        let whereSQL = whereSQL.Replace($"\"{name}\".", "")
+        // R45-12 Slice B: DU-level index expression emission (no string surgery).
+        let duExpr, variables = QueryTranslator.translateWhereExpr name expression
         if variables.Count > 0 then raise (ArgumentException "Cannot have variables in index.")
-        if whereSQL.Contains "SELECT" then
+        let stripped = stripAlias duExpr
+        let emitted = emitExprToSqlLocal stripped
+        if emitted.Contains "SELECT" then
             raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
 
         let whereSQL =
             match expression.Body with
             | :? NewExpression as ne when isTuple ne.Type ->
-                whereSQL.Substring("jsonb_array".Length)
+                match stripped with
+                | SqlDu.Engine.C1.Spec.SqlExpr.FunctionCall("jsonb_array", args) ->
+                    let argsSql = args |> List.map emitExprToSqlLocal |> String.concat ", "
+                    $"({argsSql})"
+                | _ -> $"({emitted})"
             | :? MethodCallExpression
             | :? MemberExpression ->
-                $"({whereSQL})"
+                $"({emitted})"
             | other -> raise (ArgumentException (sprintf "Cannot index an expression with type: %s" (other.GetType().FullName)))
 
         let expressionStr = whereSQL.ToCharArray() |> Seq.filter (fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""

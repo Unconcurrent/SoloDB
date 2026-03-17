@@ -383,6 +383,9 @@ module internal HydrationSqlBuilder =
 
         sb.ToString(), manyHydrated
 
+    /// Strip source aliases from a SqlExpr (re-exported from Preprocess for use by SoloDBCore callers).
+    let stripSourceAlias = QueryableHelperPreprocess.stripSourceAlias
+
     /// Emit a SqlExpr to a SQL string using the standalone EmitContext.
     /// Used for emitting DU-built expressions as SQL fragments for template composition.
     let emitExprToSql (expr: SqlExpr) : string =
