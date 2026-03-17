@@ -173,7 +173,13 @@ module internal QueryableTranslationCore =
                     let defaultLinkTable = "SoloDBRelLink_" + name
                     let useSharedMany =
                         match relationKind with
-                        | RelationKind.Many -> tableExists connection canonicalLinkTable
+                        | RelationKind.Many ->
+                            // Only share if canonical table exists AND the current per-property
+                            // link table does NOT exist (meaning bootstrap chose shared).
+                            // This aligns with R43-3b: if bootstrap created a per-property table,
+                            // use it; if bootstrap used the shared canonical table, share.
+                            tableExists connection canonicalLinkTable
+                            && not (tableExists connection defaultLinkTable)
                         | RelationKind.Single -> false
                     let ownerUsesSource =
                         if useSharedMany then
