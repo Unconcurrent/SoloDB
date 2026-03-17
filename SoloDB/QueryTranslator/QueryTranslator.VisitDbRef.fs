@@ -370,6 +370,89 @@ module internal QueryTranslatorVisitDbRef =
                     false
             | ValueNone -> false
 
+        // Case 5: Select(proj) over DBRefMany — correlated subquery with jsonb_group_array (CP-01).
+        | :? MethodCallExpression as mce when mce.Method.Name = "Select" ->
+            let sourceExpr, projExpr =
+                if not (isNull mce.Object) then
+                    mce.Object, (if mce.Arguments.Count >= 1 then ValueSome mce.Arguments.[0] else ValueNone)
+                elif mce.Arguments.Count >= 2 then
+                    mce.Arguments.[0], ValueSome mce.Arguments.[1]
+                else
+                    null, ValueNone
+
+            if isNull sourceExpr then false
+            else
+                let unwrappedSource = unwrapConvert sourceExpr
+                if isDBRefManyType unwrappedSource.Type then
+                    // Direct DBRefMany source — CP-01 admitted
+                    match tryGetDBRefManyOwnerRef qb sourceExpr with
+                    | ValueSome ownerRef ->
+                        match projExpr with
+                        | ValueSome projectionExprRaw ->
+                            match tryExtractLambdaExpression projectionExprRaw with
+                            | ValueSome projLambda ->
+                                if countDbRefManyDepth projLambda.Body > 0 then
+                                    raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
+
+                                let propName = ownerRef.PropertyExpr.Member.Name
+                                let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
+                                let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
+                                let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
+                                let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
+                                let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
+                                let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
+                                let aliasId = System.Threading.Interlocked.Increment(&subqueryAliasCounter)
+                                let tgtAlias = sprintf "_tgt%d" aliasId
+                                let lnkAlias = sprintf "_lnk%d" aliasId
+
+                                // Translate projection body in subquery context
+                                let subQb = qb.ForSubquery(tgtAlias, projLambda)
+                                let projectedDu = visitDu projLambda.Body subQb
+
+                                // Build: ScalarSubquery(SELECT jsonb_group_array(projectedExpr)
+                                //   FROM link AS _lnk INNER JOIN target AS _tgt ON _tgt.Id = _lnk.targetCol
+                                //   WHERE _lnk.ownerCol = outerAlias.Id)
+                                let joinOn =
+                                    SqlExpr.Binary(
+                                        SqlExpr.Column(Some tgtAlias, "Id"),
+                                        BinaryOperator.Eq,
+                                        SqlExpr.Column(Some lnkAlias, targetColumn))
+                                let ownerWhere =
+                                    SqlExpr.Binary(
+                                        SqlExpr.Column(Some lnkAlias, ownerColumn),
+                                        BinaryOperator.Eq,
+                                        SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
+                                let groupArrayExpr = SqlExpr.FunctionCall("json_group_array", [projectedDu])
+                                let core =
+                                    { mkSubCore
+                                        [{ Alias = None; Expr = groupArrayExpr }]
+                                        (Some(BaseTable(linkTable, Some lnkAlias)))
+                                        (Some ownerWhere) with
+                                        Joins = [ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), joinOn)] }
+                                let subSelect = { Ctes = []; Body = SingleSelect core }
+                                qb.DuHandlerResult.Value <- ValueSome(SqlExpr.ScalarSubquery subSelect)
+                                true
+                            | ValueNone ->
+                                raise (NotSupportedException(
+                                    "Error: Cannot extract projection lambda for relation-backed DBRefMany.Select.\nReason: The projection is not a simple lambda expression.\nFix: Use a simple lambda (e.g., x => x.Name) or move the operation after AsEnumerable()."))
+                        | ValueNone -> false
+                    | ValueNone -> false
+                // Explicit CP-02/CP-03 reject: chained Where/OrderBy/etc on DBRefMany before Select
+                elif unwrappedSource :? MethodCallExpression then
+                    let innerMce = unwrappedSource :?> MethodCallExpression
+                    let innerSource =
+                        if not (isNull innerMce.Object) then innerMce.Object
+                        elif innerMce.Arguments.Count > 0 then innerMce.Arguments.[0]
+                        else null
+                    if not (isNull innerSource) && isDBRefManyType (unwrapConvert innerSource).Type then
+                        raise (NotSupportedException(
+                            "Error: Chained collection operations on DBRefMany are not supported in this cycle.\n" +
+                            "Reason: Only direct .Select(projection) over DBRefMany is admitted; " +
+                            ".Where().Select(), .OrderBy().Select(), and other chained forms are deferred.\n" +
+                            "Fix: Use .Select() directly on the DBRefMany property, or move the query after AsEnumerable()."))
+                    else false
+                else false
+
         | _ -> false
 
     do preExpressionHandler.Add(Func<QueryBuilder, Expression, bool>(handleDBRefExpression))
