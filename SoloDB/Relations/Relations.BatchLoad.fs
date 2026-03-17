@@ -50,9 +50,8 @@ let rec batchLoadDBRefProperties
             includedPaths |> Seq.exists (fun i -> i = fp || i.StartsWith(fp + ".") || fp.StartsWith(i + "."))
         else true
 
-    // Opt-in recursion gate: recurse only when Include was explicitly used (depth 0)
-    // or we're already in a recursive sub-graph (depth > 0).
-    let shouldRecurse = depth < maxRecursiveDepth && (depth > 0 || includedPaths.Count > 0)
+    // Default load-all: recurse until depth cap. Exclude paths suppress specific sub-graphs.
+    let shouldRecurse = depth < maxRecursiveDepth
 
     for (prop, _kind, targetType, _typedIdType, _onDelete, _onOwnerDelete, _isUnique, _orderBy) in singleSpecs do
         if not (shouldLoadPath prop.Name) then ()
@@ -150,7 +149,8 @@ and batchLoadDBRefManyProperties
             includedPaths |> Seq.exists (fun i -> i = fp || i.StartsWith(fp + ".") || fp.StartsWith(i + "."))
         else true
 
-    let shouldRecurse = depth < maxRecursiveDepth && (depth > 0 || includedPaths.Count > 0)
+    // Default load-all: recurse until depth cap. Exclude paths suppress specific sub-graphs.
+    let shouldRecurse = depth < maxRecursiveDepth
 
     for descriptor in manyDescriptors do
         if not (shouldLoadPath descriptor.Property.Name) then ()
