@@ -269,7 +269,6 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
             if HasTypeId<'T>.Value then
                 let id = HasTypeId<'T>.Read item
                 if id > 0L then
-                    QueryCommandInstrumentation.Increment()
                     match conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {| id = id |}) with
                     | row when Object.ReferenceEquals(row, null) -> ValueNone
                     | row -> ValueSome row
