@@ -57,11 +57,12 @@ module internal QueryableBuildQueryMain =
                 let excludePath = if chainPath = "" then hop else chainPath + "." + hop
                 registerExcludePath sourceCtx excludePath
                 // ThenExclude does NOT advance chainPath — it stays at the parent level
-            | Method m when m.Value = SupportedLinqMethods.Exclude ->
+            | Method m when m.Value = SupportedLinqMethods.Exclude && m.Expressions.Length > 0 ->
                 let path = extractRelationPathOrThrow "Exclude" m.Expressions
                 chainPath <- ""
                 registerExcludePath sourceCtx path
-            | Method m when m.Value = SupportedLinqMethods.ExcludeAll ->
+            | Method m when m.Value = SupportedLinqMethods.Exclude && m.Expressions.Length = 0 ->
+                // Parameterless Exclude() — whitelist mode
                 sourceCtx.WhitelistMode <- true
             | _ -> ()
 
@@ -150,7 +151,6 @@ module internal QueryableBuildQueryMain =
                 | SupportedLinqMethods.Include
                 | SupportedLinqMethods.ThenInclude
                 | SupportedLinqMethods.ThenExclude
-                | SupportedLinqMethods.ExcludeAll
                 | SupportedLinqMethods.Aggregate ->
                     QueryableBuildQueryPartC.apply<'T>
                         sourceCtx

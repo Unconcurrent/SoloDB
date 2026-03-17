@@ -249,10 +249,13 @@ module internal QueryableBuildQueryPartC =
                             )
 
                 | SupportedLinqMethods.Exclude ->
-                    // Extract property path from the selector lambda and add to ExcludedPaths.
-                    // SupportedLinqMethods.Exclude does not produce SQL — it only suppresses materialization for the specified path.
-                    let path = extractRelationPathOrThrow "Exclude" m.Expressions
-                    registerExcludePath sourceCtx path
+                    if m.Expressions.Length > 0 then
+                        // Selector-based Exclude: extract property path and register as exclusion.
+                        let path = extractRelationPathOrThrow "Exclude" m.Expressions
+                        registerExcludePath sourceCtx path
+                    else
+                        // Parameterless Exclude(): whitelist mode — set up-front in Main.fs.
+                        sourceCtx.WhitelistMode <- true
                 | SupportedLinqMethods.Include ->
                     // Extract property path from the selector lambda and add to IncludedPaths.
                     // SupportedLinqMethods.Include does not produce SQL — it only controls relation hydration whitelist.
@@ -270,10 +273,6 @@ module internal QueryableBuildQueryPartC =
                     // No-op here — the up-front pass already handles the correct dotted path.
                     ()
 
-                | SupportedLinqMethods.ExcludeAll ->
-                    // Parameterless Exclude() — whitelist mode set up-front in Main.fs.
-                    // No-op here.
-                    ()
 
                 | SupportedLinqMethods.Aggregate ->
                     raise (NotSupportedException("Aggregate is not supported."))
