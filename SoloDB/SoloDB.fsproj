@@ -145,6 +145,7 @@
 		    <Compile Include="Query/Queryable.HelperState.fs" />
 		    <Compile Include="Query/Queryable.HelperJoin.fs" />
 		    <Compile Include="Query/Queryable.Preprocess.fs" />
+		    <Compile Include="Query/Queryable.HydrationSql.fs" />
 		    <Compile Include="Query/Queryable.BuildLayers.fs" />
 		    <Compile Include="Query/Queryable.BuildQuery.PartA.fs" />
 		    <Compile Include="Query/Queryable.BuildQuery.PartB.fs" />

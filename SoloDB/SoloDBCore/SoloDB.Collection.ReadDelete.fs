@@ -8,6 +8,8 @@ open SoloDatabase.Types
 open JsonFunctions
 open Utils
 open SQLiteTools
+open SoloDatabase
+open SqlDu.Engine.C1.Spec
 
 [<AutoOpen>]
 module internal CollectionReadDeletePrivate =
@@ -28,13 +30,37 @@ type internal CollectionReadDeleteOps<'T>() =
         (hydrateRelations: SqliteConnection -> int64 -> obj -> unit) =
 
         use connection = getConnection()
-        match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
-        | json when Object.ReferenceEquals(json, null) -> None
-        | json ->
-            let entity = fromSQLite<'T> json
-            if hasRelations then
-                hydrateRelations connection id (box entity)
-            Some entity
+        if hasRelations && HydrationSqlBuilder.hasRelationProperties typeof<'T> then
+            // R45-10: Single-SQL hydration for non-queryable path.
+            let vars = Dictionary<string, obj>()
+            vars.["id"] <- box id
+            let whereExpr =
+                SqlExpr.Binary(
+                    SqlExpr.Column(Some "o", "Id"),
+                    BinaryOperator.Eq,
+                    SqlExpr.Parameter "id")
+            let sql, singleHydrated, manyHydrated =
+                HydrationSqlBuilder.buildHydratedGetByIdSql connection name typeof<'T> whereExpr vars true
+            QueryCommandInstrumentation.Increment()
+            match connection.QueryFirstOrDefault<DbObjectRow>(sql, vars) with
+            | json when Object.ReferenceEquals(json, null) -> None
+            | json ->
+                let entity = fromSQLite<'T> json
+                // Populate DBRefMany trackers from HydrationJSON.
+                if manyHydrated && not (isNull json.HydrationJSON) then
+                    let hydMap = Dictionary<int64, string>()
+                    hydMap.[json.Id.Value] <- json.HydrationJSON
+                    HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (json.Id.Value, box entity) |] hydMap
+                Some entity
+        else
+            QueryCommandInstrumentation.Increment()
+            match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
+            | json when Object.ReferenceEquals(json, null) -> None
+            | json ->
+                let entity = fromSQLite<'T> json
+                if hasRelations then
+                    hydrateRelations connection id (box entity)
+                Some entity
 
     static member RequireByIdInt64(id: int64, name: string, value: 'T option) =
         match value with
@@ -80,13 +106,70 @@ type internal CollectionReadDeleteOps<'T>() =
         let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
 
         use connection = getConnection()
-        match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
-        | json when Object.ReferenceEquals(json, null) -> None
-        | json ->
-            let entity = fromSQLite<'T> json
-            if hasRelations then
-                hydrateRelations connection json.Id.Value (box entity)
-            Some entity
+        if hasRelations && HydrationSqlBuilder.hasRelationProperties typeof<'T> then
+            // R45-10: Single-SQL hydration for custom-id non-queryable path.
+            // The filter is already translated to raw SQL. Build hydrated projections
+            // via DU builder (with table alias "o"), emit without WHERE, then splice raw filter.
+            let ctx = QueryContext.SingleSource(name)
+            HydrationSqlBuilder.preloadQueryContextMetadata ctx connection
+            let shape : HydrationSqlBuilder.RelationShapeInfo = HydrationSqlBuilder.getRelationShape typeof<'T>
+            let mutable aliasCounter = 0
+            let tblAlias = "o"
+            let valueExpr =
+                if shape.HasSingle then
+                    let hydrated = HydrationSqlBuilder.buildHydrationValueExpr ctx typeof<'T> name (SqlExpr.Column(Some tblAlias, "Value")) 0 "" &aliasCounter
+                    if aliasCounter > 0 then
+                        SqlExpr.FunctionCall("json_extract", [hydrated; SqlExpr.Literal(SqlLiteral.String "$")])
+                    else
+                        SqlExpr.FunctionCall("json_quote", [SqlExpr.Column(Some tblAlias, "Value")])
+                else
+                    SqlExpr.FunctionCall("json_quote", [SqlExpr.Column(Some tblAlias, "Value")])
+            let manyOpt =
+                if shape.HasMany then HydrationSqlBuilder.buildManyHydrationProjection ctx typeof<'T> name (SqlExpr.Column(Some tblAlias, "Id")) &aliasCounter
+                else None
+            let manyHydrated = shape.HasMany && manyOpt.IsSome
+            let sb = System.Text.StringBuilder(256)
+            let emitVars = Dictionary<string, obj>(variables)
+            let projections =
+                [{ Alias = None; Expr = SqlExpr.Column(Some tblAlias, "Id") }
+                 { Alias = Some "ValueJSON"; Expr = valueExpr }]
+                @ (match manyOpt with Some e -> [{ Alias = Some "HydrationJSON"; Expr = e }] | None -> [])
+            let core =
+                { QueryableHelperBase.mkCore projections (Some (BaseTable(name, Some tblAlias)))
+                  with
+                    Where = None
+                    Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
+            let select = QueryableHelperBase.wrapCore core
+            let modelTableNames = QueryableHelperBase.collectIndexModelTableNames name select
+            let indexModel = SoloDatabase.IndexModel.loadModelForTables connection modelTableNames
+            QueryableHelperBase.emitSelectToSb sb emitVars indexModel select
+            // Splice raw WHERE filter before LIMIT.
+            let emittedSql = sb.ToString()
+            let sql =
+                let limitIdx = emittedSql.LastIndexOf("LIMIT")
+                if limitIdx > 0 then
+                    emittedSql.Insert(limitIdx, $"WHERE {filter} ")
+                else
+                    emittedSql + $" WHERE {filter}"
+            QueryCommandInstrumentation.Increment()
+            match connection.QueryFirstOrDefault<DbObjectRow>(sql, variables) with
+            | json when Object.ReferenceEquals(json, null) -> None
+            | json ->
+                let entity = fromSQLite<'T> json
+                if manyHydrated && not (isNull json.HydrationJSON) then
+                    let hydMap = Dictionary<int64, string>()
+                    hydMap.[json.Id.Value] <- json.HydrationJSON
+                    HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (json.Id.Value, box entity) |] hydMap
+                Some entity
+        else
+            QueryCommandInstrumentation.Increment()
+            match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables) with
+            | json when Object.ReferenceEquals(json, null) -> None
+            | json ->
+                let entity = fromSQLite<'T> json
+                if hasRelations then
+                    hydrateRelations connection json.Id.Value (box entity)
+                Some entity
 
     static member DeleteByCustomId<'IdType when 'IdType : equality>
         (id: 'IdType)
