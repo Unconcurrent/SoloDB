@@ -48,12 +48,10 @@ module QueryTranslator =
 
     /// <returns>A tuple containing the generated SQL string and a dictionary of parameters.</returns>
     let translate (tableName: string) (expression: Expression) =
-        ensureDbRefHandlersInitialized()
+        // Thin wrapper over translateWhereExpr: get DU, emit via MinimalEmit (product path).
+        let duExpr, variables = translateWhereExpr tableName expression
         let sb = StringBuilder()
-        let variables = Dictionary<string, obj>()
         let builder = QueryBuilder.New sb variables false tableName expression -1 ValueNone
-        let duExpr = visitDu expression builder
-        sb.Length <- 0
         SqlDuMinimalEmit.emitExpr builder duExpr
         sb.ToString(), variables
 
