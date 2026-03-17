@@ -103,8 +103,6 @@ type internal CollectionReadDeleteOps<'T>() =
             | Some c -> c.Property
             | None -> raise (InvalidOperationException("This collection has no custom [Id] property. Use the Int64 Id overload."))
 
-        let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
-
         use connection = getConnection()
         if hasRelations && HydrationSqlBuilder.hasRelationProperties typeof<'T> then
             // R45-10: Single-SQL hydration for custom-id non-queryable path.
@@ -163,7 +161,9 @@ type internal CollectionReadDeleteOps<'T>() =
             | Some c -> c.Property
             | None -> raise (InvalidOperationException("This collection has no custom [Id] property. Use the Int64 Id overload."))
 
-        let filter, variables = QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
+        // R45-12 W-8: translateWhereExpr canonical predicate path for DeleteByCustomId.
+        let filterExpr, variables = QueryTranslator.translateWhereExpr name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
+        let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
 
         withTransaction (fun conn ->
             let requiresRelationHandling = requiresRelationDeleteHandling conn
@@ -189,7 +189,7 @@ type internal CollectionReadDeleteOps<'T>() =
                     syncDeleteOwner tx oldRow.Id.Value (box owner)
                     conn.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {| id = oldRow.Id.Value |})
             else
-                conn.Execute ($"DELETE FROM \"{name}\" WHERE {filter}", variables)
+                conn.Execute ($"DELETE FROM \"{name}\" WHERE {filterSql}", variables)
         )
 
     static member TryGetByIdWithFallback<'IdType when 'IdType : equality>

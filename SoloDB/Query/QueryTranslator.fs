@@ -35,16 +35,25 @@ module QueryTranslator =
     /// </summary>
     /// <param name="tableName">The name of the table to query.</param>
     /// <param name="expression">The LINQ expression to translate.</param>
-    /// <returns>A tuple containing the generated SQL string and a dictionary of parameters.</returns>
-    let translate (tableName: string) (expression: Expression) =
+    /// Canonical predicate path: translates a filter expression to SqlExpr DU + variables.
+    /// Used by write-path call sites that compose UPDATE/DELETE templates with DU-emitted WHERE.
+    /// This is the canonical predicate producer; `translate` is a thin wrapper over this.
+    let translateWhereExpr (tableName: string) (expression: Expression) : SqlExpr * Dictionary<string, obj> =
         ensureDbRefHandlersInitialized()
         let sb = StringBuilder()
         let variables = Dictionary<string, obj>()
         let builder = QueryBuilder.New sb variables false tableName expression -1 ValueNone
         let duExpr = visitDu expression builder
-        sb.Length <- 0
-        SqlDuMinimalEmit.emitExpr builder duExpr
-        sb.ToString(), variables
+        duExpr, variables
+
+    /// <returns>A tuple containing the generated SQL string and a dictionary of parameters.</returns>
+    let translate (tableName: string) (expression: Expression) =
+        // Thin wrapper over translateWhereExpr: get DU, emit to string.
+        let duExpr, variables = translateWhereExpr tableName expression
+        let ctx = EmitContext()
+        ctx.InlineLiterals <- true
+        let emitted = EmitExpr.emitExprWith EmitSelect.emitSelect ctx duExpr
+        emitted.Sql, variables
 
     /// Returns a SqlExpr DU node for an expression without emitting to any StringBuilder.
     /// Used by the Queryable DU construction path to build SqlSelect trees.

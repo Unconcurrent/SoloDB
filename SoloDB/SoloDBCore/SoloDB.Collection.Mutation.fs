@@ -25,22 +25,24 @@ type internal CollectionMutationOps<'T>() =
 
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
 
-        let filter, variables =
+        // R45-12: translateWhereExpr returns SqlExpr DU + variables (canonical predicate path).
+        let filterExpr, variables =
             if HasTypeId<'T>.Value then
                 let id = HasTypeId<'T>.Read item
-                QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<int64>("Id") = id))
+                QueryTranslator.translateWhereExpr name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<int64>("Id") = id))
             else
                 match CustomTypeId<'T>.Value with
                 | Some customId ->
                     let id = customId.GetId (item |> box)
                     let idProp = CustomTypeId<'T>.Value.Value.Property
-                    QueryTranslator.translate name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = id))
+                    QueryTranslator.translateWhereExpr name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = id))
                 | None ->
                     let typeName = typeof<'T>.Name
                     let message =
                         sprintf "Error: Item type %s has no int64 Id or custom Id.\nReason: Updates require a stable identifier.\nFix: Add an int64 Id property or configure a custom Id strategy."
                             typeName
                     raise (InvalidOperationException(message))
+        let filter = HydrationSqlBuilder.emitExprToSql filterExpr
 
         if hasRelations then
             withTransaction (fun conn ->
@@ -130,8 +132,10 @@ type internal CollectionMutationOps<'T>() =
                     let sql = $"DELETE FROM \"{name}\" WHERE Id IN ({idList})"
                     conn.Execute(sql, deleteVars)
             else
-                let filterSql, variables = QueryTranslator.translate name filter
-                conn.Execute ($"DELETE FROM \"{name}\" WHERE " + filterSql, variables)
+                // R45-12 W-3: translateWhereExpr + emitted WHERE for DeleteMany.
+                let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
+                let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
+                conn.Execute ($"DELETE FROM \"{name}\" WHERE {filterSql}", variables)
         )
 
     static member DeleteOne
@@ -160,7 +164,9 @@ type internal CollectionMutationOps<'T>() =
                     Relations.syncDeleteOwner tx deletePlan
                     conn.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {| id = oldRow.Id.Value |})
             else
-                let filterSql, variables = QueryTranslator.translate name filter
+                // R45-12 W-4: translateWhereExpr + emitted WHERE for DeleteOne no-rel.
+                let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
+                let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
                 conn.Execute ($"DELETE FROM \"{name}\" WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filterSql}) LIMIT 1)", variables)
         )
 
@@ -177,14 +183,15 @@ type internal CollectionMutationOps<'T>() =
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
 
-        let filterSql, variables = QueryTranslator.translate name filter
+        // R45-12 W-5/W-6: translateWhereExpr canonical predicate path for ReplaceMany.
+        let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
+        let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
 
         if hasRelations then
             withTransaction (fun conn ->
                 let tx = ensureRelationTx conn
 
                 // R45-10 Slice B: mutation-prep old-state read with DBRefMany-only hydration.
-                // DU-built hydration projection + raw filter composed via SQL template.
                 let sql, manyHydrated =
                     HydrationSqlBuilder.buildManyOnlyHydratedSqlWithRawWhere conn name typeof<'T> filterSql false
                 QueryCommandInstrumentation.Increment()
@@ -203,12 +210,12 @@ type internal CollectionMutationOps<'T>() =
                         HydrationManyPopulator.populateFromHydrationJson typeof<'T> ownerPairs hydMap
                     Relations.syncReplaceMany tx (ownerIds :> seq<_>) (oldOwners :> seq<_>) (box item)
                     setSerializedItem variables item
-                    conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filterSql, variables)
+                    conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {filterSql}", variables)
             )
         else
             withTransaction (fun conn ->
                 setSerializedItem variables item
-                conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filterSql, variables))
+                conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {filterSql}", variables))
 
     static member ReplaceOne
         (item: 'T)
@@ -223,13 +230,14 @@ type internal CollectionMutationOps<'T>() =
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
 
-        let filterSql, variables = QueryTranslator.translate name filter
+        // R45-12 W-7: translateWhereExpr canonical predicate path for ReplaceOne.
+        let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
+        let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
 
         if hasRelations then
             withTransaction (fun conn ->
                 let tx = ensureRelationTx conn
 
-                // R45-10 Slice B: mutation-prep old-state read with DBRefMany-only hydration.
                 let sql, manyHydrated =
                     HydrationSqlBuilder.buildManyOnlyHydratedSqlWithRawWhere conn name typeof<'T> $"({filterSql})" true
                 QueryCommandInstrumentation.Increment()
