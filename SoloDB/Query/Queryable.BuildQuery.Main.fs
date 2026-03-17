@@ -61,6 +61,8 @@ module internal QueryableBuildQueryMain =
                 let path = extractRelationPathOrThrow "Exclude" m.Expressions
                 chainPath <- ""
                 registerExcludePath sourceCtx path
+            | Method m when m.Value = SupportedLinqMethods.ExcludeAll ->
+                sourceCtx.WhitelistMode <- true
             | _ -> ()
 
         validateIncludeExcludeConflicts sourceCtx
@@ -148,6 +150,7 @@ module internal QueryableBuildQueryMain =
                 | SupportedLinqMethods.Include
                 | SupportedLinqMethods.ThenInclude
                 | SupportedLinqMethods.ThenExclude
+                | SupportedLinqMethods.ExcludeAll
                 | SupportedLinqMethods.Aggregate ->
                     QueryableBuildQueryPartC.apply<'T>
                         sourceCtx

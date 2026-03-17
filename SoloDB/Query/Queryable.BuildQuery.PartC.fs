@@ -270,6 +270,11 @@ module internal QueryableBuildQueryPartC =
                     // No-op here — the up-front pass already handles the correct dotted path.
                     ()
 
+                | SupportedLinqMethods.ExcludeAll ->
+                    // Parameterless Exclude() — whitelist mode set up-front in Main.fs.
+                    // No-op here.
+                    ()
+
                 | SupportedLinqMethods.Aggregate ->
                     raise (NotSupportedException("Aggregate is not supported."))
 

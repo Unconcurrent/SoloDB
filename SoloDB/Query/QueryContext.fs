@@ -86,6 +86,8 @@ type internal QueryContext = {
     ExcludedPaths: HashSet<string>
     /// Property paths included via Include() whitelist for hydration.
     IncludedPaths: HashSet<string>
+    /// When true, only explicitly Included paths load (activated by parameterless Exclude()).
+    mutable WhitelistMode: bool
     /// Relation paths currently materialized into the payload Value column.
     MaterializedPaths: HashSet<string>
     /// Relation target table mapping keyed by "OwnerCollection|PropertyName"
@@ -107,6 +109,7 @@ type internal QueryContext = {
           AliasCounter = 0
           ExcludedPaths = HashSet()
           IncludedPaths = HashSet()
+          WhitelistMode = false
           MaterializedPaths = HashSet(System.StringComparer.Ordinal)
           RelationTargets = Dictionary(System.StringComparer.Ordinal)
           RelationLinks = Dictionary(System.StringComparer.Ordinal)
@@ -126,6 +129,7 @@ type internal QueryContext = {
           AliasCounter = 0
           ExcludedPaths = HashSet()
           IncludedPaths = HashSet()
+          WhitelistMode = false
           MaterializedPaths = HashSet(System.StringComparer.Ordinal)
           RelationTargets = Dictionary(System.StringComparer.Ordinal)
           RelationLinks = Dictionary(System.StringComparer.Ordinal)

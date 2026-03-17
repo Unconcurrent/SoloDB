@@ -23,6 +23,7 @@ let rec batchLoadDBRefProperties
     (ownerType: Type)
     (excludedPaths: HashSet<string>)
     (includedPaths: HashSet<string>)
+    (whitelistMode: bool)
     (ownerEntities: (int64 * obj) array)
     (inTransaction: bool)
     (depth: int)
@@ -45,9 +46,10 @@ let rec batchLoadDBRefProperties
         let fp = fullPath propName
         // Check exact or prefix-based exclusion
         if excludedPaths |> Seq.exists (fun e -> e = fp || fp.StartsWith(e + ".")) then false
-        // Check exact or prefix-based inclusion
-        elif includedPaths.Count > 0 then
+        // Whitelist mode: only admitted paths load
+        elif whitelistMode then
             includedPaths |> Seq.exists (fun i -> i = fp || i.StartsWith(fp + ".") || fp.StartsWith(i + "."))
+        // Default load-all: everything loads
         else true
 
     // Default load-all: recurse until depth cap. Exclude paths suppress specific sub-graphs.
@@ -114,8 +116,8 @@ let rec batchLoadDBRefProperties
                     let key = (kv.Key, targetType.FullName)
                     if not (visited.Contains(key)) then
                         visited.Add(key) |> ignore
-                        batchLoadDBRefProperties connection targetTable targetType excludedPaths includedPaths [|(kv.Key, kv.Value)|] inTransaction (depth + 1) visited childPrefix
-                        batchLoadDBRefManyProperties connection targetTable targetType excludedPaths includedPaths [|(kv.Key, kv.Value)|] inTransaction (depth + 1) visited childPrefix
+                        batchLoadDBRefProperties connection targetTable targetType excludedPaths includedPaths whitelistMode [|(kv.Key, kv.Value)|] inTransaction (depth + 1) visited childPrefix
+                        batchLoadDBRefManyProperties connection targetTable targetType excludedPaths includedPaths whitelistMode [|(kv.Key, kv.Value)|] inTransaction (depth + 1) visited childPrefix
                         visited.Remove(key) |> ignore
 
 and batchLoadDBRefManyProperties
@@ -124,6 +126,7 @@ and batchLoadDBRefManyProperties
     (ownerType: Type)
     (excludedPaths: HashSet<string>)
     (includedPaths: HashSet<string>)
+    (whitelistMode: bool)
     (ownerEntities: (int64 * obj) array)
     (inTransaction: bool)
     (depth: int)
@@ -145,7 +148,7 @@ and batchLoadDBRefManyProperties
     let shouldLoadPath (propName: string) =
         let fp = fullPath propName
         if excludedPaths |> Seq.exists (fun e -> e = fp || fp.StartsWith(e + ".")) then false
-        elif includedPaths.Count > 0 then
+        elif whitelistMode then
             includedPaths |> Seq.exists (fun i -> i = fp || i.StartsWith(fp + ".") || fp.StartsWith(i + "."))
         else true
 
@@ -231,6 +234,6 @@ and batchLoadDBRefManyProperties
                 let key = (targetId, descriptor.TargetType.FullName)
                 if not (visited.Contains(key)) then
                     visited.Add(key) |> ignore
-                    batchLoadDBRefProperties connection descriptor.TargetTable descriptor.TargetType excludedPaths includedPaths [|(targetId, targetObj)|] inTransaction (depth + 1) visited childPrefix
-                    batchLoadDBRefManyProperties connection descriptor.TargetTable descriptor.TargetType excludedPaths includedPaths [|(targetId, targetObj)|] inTransaction (depth + 1) visited childPrefix
+                    batchLoadDBRefProperties connection descriptor.TargetTable descriptor.TargetType excludedPaths includedPaths whitelistMode [|(targetId, targetObj)|] inTransaction (depth + 1) visited childPrefix
+                    batchLoadDBRefManyProperties connection descriptor.TargetTable descriptor.TargetType excludedPaths includedPaths whitelistMode [|(targetId, targetObj)|] inTransaction (depth + 1) visited childPrefix
                     visited.Remove(key) |> ignore

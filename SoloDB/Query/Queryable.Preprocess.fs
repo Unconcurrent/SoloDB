@@ -135,7 +135,7 @@ module internal QueryableHelperPreprocess =
 
     let internal shouldLoadRelationPath (sourceCtx: QueryContext) (path: string) =
         if sourceCtx.ExcludedPaths.Contains(path) then false
-        elif sourceCtx.IncludedPaths.Count > 0 then sourceCtx.IncludedPaths.Contains(path)
+        elif sourceCtx.WhitelistMode then sourceCtx.IncludedPaths.Contains(path)
         else true
 
     let internal cloneQueryContext (sourceCtx: QueryContext) =
@@ -154,6 +154,7 @@ module internal QueryableHelperPreprocess =
             AliasCounter = 0
             ExcludedPaths = HashSet(sourceCtx.ExcludedPaths, System.StringComparer.Ordinal)
             IncludedPaths = HashSet(sourceCtx.IncludedPaths, System.StringComparer.Ordinal)
+            WhitelistMode = sourceCtx.WhitelistMode
             MaterializedPaths = HashSet(sourceCtx.MaterializedPaths, System.StringComparer.Ordinal)
             RelationTargets = Dictionary(sourceCtx.RelationTargets, System.StringComparer.Ordinal)
             RelationLinks = Dictionary(sourceCtx.RelationLinks, System.StringComparer.Ordinal)

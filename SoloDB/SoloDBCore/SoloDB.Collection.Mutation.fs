@@ -50,7 +50,7 @@ type internal CollectionMutationOps<'T>() =
 
                 let oldOwner = fromSQLite<'T> oldRow
                 let excludedPaths, includedPaths = mkRelationPathSets()
-                Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths [| (oldRow.Id.Value, box oldOwner) |] true
+                Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths false [| (oldRow.Id.Value, box oldOwner) |] true
                 let writePlan = Relations.prepareUpdate tx oldRow.Id.Value (box oldOwner) (box item)
 
                 setSerializedItem variables item
@@ -165,7 +165,7 @@ type internal CollectionMutationOps<'T>() =
                     let ownerIds = oldRows |> Array.map (fun row -> row.Id.Value)
                     let excludedPaths, includedPaths = mkRelationPathSets()
                     let ownerPairs = Array.zip ownerIds oldOwners
-                    Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths ownerPairs true
+                    Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths false ownerPairs true
                     Relations.syncReplaceMany tx (ownerIds :> seq<_>) (oldOwners :> seq<_>) (box item)
                     setSerializedItem variables item
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filterSql, variables)
@@ -200,7 +200,7 @@ type internal CollectionMutationOps<'T>() =
                 else
                     let oldOwner = fromSQLite<'T> oldRow
                     let excludedPaths, includedPaths = mkRelationPathSets()
-                    Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths [| (oldRow.Id.Value, box oldOwner) |] true
+                    Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths false [| (oldRow.Id.Value, box oldOwner) |] true
                     Relations.syncReplaceOne tx oldRow.Id.Value (box oldOwner) (box item)
                     setSerializedItem variables item
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id = @id", {| item = variables.["item"]; id = oldRow.Id.Value |})

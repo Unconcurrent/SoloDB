@@ -84,6 +84,7 @@ module internal QueryableTranslationCore =
             | SupportedLinqMethods.ThenInclude
             | SupportedLinqMethods.Exclude
             | SupportedLinqMethods.ThenExclude
+            | SupportedLinqMethods.ExcludeAll
                 -> false
         | _other -> false
 
@@ -147,6 +148,7 @@ module internal QueryableTranslationCore =
         OwnerType: Type
         ExcludedPaths: HashSet<string>
         IncludedPaths: HashSet<string>
+        WhitelistMode: bool
         HasSingleRelations: bool
         HasManyRelations: bool
     }
@@ -278,6 +280,7 @@ module internal QueryableTranslationCore =
                     OwnerType = typeof<'T>
                     ExcludedPaths = new HashSet<string>(ctx.ExcludedPaths, StringComparer.Ordinal)
                     IncludedPaths = new HashSet<string>(ctx.IncludedPaths, StringComparer.Ordinal)
+                    WhitelistMode = ctx.WhitelistMode
                     HasSingleRelations = hasSingleRelations
                     HasManyRelations = hasManyRelations
                 }

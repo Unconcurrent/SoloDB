@@ -1663,3 +1663,14 @@ type RelationQueryExt =
                 .MakeGenericMethod(typeof<'T>, typeof<'TRelation>)
         let callExpr = Expression.Call(method, query.Expression, selector)
         query.Provider.CreateQuery<'T>(callExpr)
+
+    /// <summary>Parameterless Exclude: switches to whitelist mode where no relations load unless explicitly Included.</summary>
+    [<Extension>]
+    static member ExcludeAll<'T>(query: IQueryable<'T>) : IQueryable<'T> =
+        if isNull query then raise (ArgumentNullException(nameof(query)))
+        let method =
+            typeof<RelationQueryExt>
+                .GetMethod("ExcludeAll", Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
+                .MakeGenericMethod(typeof<'T>)
+        let callExpr = Expression.Call(method, query.Expression)
+        query.Provider.CreateQuery<'T>(callExpr)
