@@ -39,6 +39,65 @@ module internal QueryableTranslation =
 /// </summary>
 /// <param name="source">The source collection.</param>
 /// <param name="data">Additional data, such as cache clearing functions.</param>
+/// Populates DBRefMany trackers from HydrationJSON data.
+/// HydrationJSON shape: {"PropName": [{"Id": n, "Value": {...}}, ...], ...}
+module internal HydrationManyPopulator =
+    open SoloDatabase.JsonSerializator
+    open SoloDatabase.RelationsTypes
+
+    let populateFromHydrationJson (ownerType: Type) (ownerEntities: (int64 * obj) array) (hydrationMap: Dictionary<int64, string>) =
+        let manyProps =
+            ownerType.GetProperties(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Instance)
+            |> Array.filter (fun p -> DBRefTypeHelpers.isDBRefManyType p.PropertyType)
+
+        if manyProps.Length = 0 then ()
+        else
+
+        for (ownerId, ownerObj) in ownerEntities do
+            match hydrationMap.TryGetValue(ownerId) with
+            | false, _ -> ()
+            | true, hydrationJsonStr ->
+                let hydrationObj = JsonValue.Parse hydrationJsonStr
+                match hydrationObj with
+                | JsonValue.Object dict ->
+                    for prop in manyProps do
+                        let targetType = (Utils.GenericTypeArgCache.Get prop.PropertyType).[0]
+                        match dict.TryGetValue(prop.Name) with
+                        | false, _ -> ()
+                        | true, jsonArray ->
+                            let items = ResizeArray<int64 * obj>()
+                            match jsonArray with
+                            | JsonValue.List arr ->
+                                for elem in arr do
+                                    match elem with
+                                    | JsonValue.Object elemDict ->
+                                        match elemDict.TryGetValue("Id"), elemDict.TryGetValue("Value") with
+                                        | (true, idJson), (true, valueJson) ->
+                                            let id = int64 (idJson.ToObject<decimal>())
+                                            let targetObj = valueJson.ToObject(targetType)
+                                            let idWriter = RelationsAccessorCache.compiledInt64IdWriter targetType
+                                            idWriter.Invoke(targetObj, id)
+                                            items.Add(id, targetObj)
+                                        | _ -> ()
+                                    | _ -> ()
+                            | _ -> ()
+
+                            // Populate the DBRefMany tracker via SetLoadedBoxed.
+                            let trackerGetter = RelationsAccessorCache.compiledPropGetter prop
+                            let trackerSetter = RelationsAccessorCache.compiledPropSetter prop
+                            let trackerCtor = RelationsAccessorCache.compiledDefaultCtor prop.PropertyType
+                            let tracker = trackerGetter.Invoke(ownerObj)
+                            match tracker with
+                            | :? IDBRefManyInternal as internal' ->
+                                internal'.SetLoadedBoxed (items |> Seq.map snd) (items |> Seq.map fst)
+                            | null ->
+                                let instance = trackerCtor.Invoke()
+                                trackerSetter.Invoke(ownerObj, instance)
+                                let internal' = instance :?> IDBRefManyInternal
+                                internal'.SetLoadedBoxed (items |> Seq.map snd) (items |> Seq.map fst)
+                            | _ -> ()
+                | _ -> ()
+
 /// Instrumentation counter for one-statement proof.
 /// Tracks the number of SQL commands executed during queryable execution.
 /// Reset before each query via ResetQueryCommandCounter(); read via QueryCommandCounter.
@@ -62,16 +121,20 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
             use connection = source.GetInternalConnection()
             match batchCtx with
             | ValueSome ctx when ctx.HasSingleRelations || ctx.HasManyRelations ->
-                // Buffer all results, then batch-load relation properties.
+                // Buffer all results, then batch-load or hydrate relation properties.
                 let buffer = ResizeArray<int64 * 'Elem>()
+                // When ManyRelationsHydrated, rows include HydrationJSON column.
+                // Map: ownerId → HydrationJSON string for post-deserialization tracker population.
+                let hydrationMap =
+                    if ctx.ManyRelationsHydrated then Dictionary<int64, string>() else null
                 QueryCommandInstrumentation.Increment()
                 for row in connection.Query<Types.DbObjectRow>(query, par) do
                     let entity = JsonFunctions.fromSQLite<'Elem> row
                     buffer.Add(row.Id.Value, entity)
+                    if not (isNull hydrationMap) && not (isNull row.HydrationJSON) then
+                        hydrationMap.[row.Id.Value] <- row.HydrationJSON
 
                 if buffer.Count > 0 then
-                    // Select projections can change result element type (for example to string),
-                    // so batch loading must run only for actual owner entity objects.
                     let ownerEntities =
                         buffer
                         |> Seq.choose (fun (id, e) ->
@@ -89,17 +152,21 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                                 Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
                             )
 
-                        if ctx.HasManyRelations then
+                        // Skip batchLoadDBRefManyProperties when many relations are hydrated
+                        // inline via HydrationJSON column with json_group_array subqueries.
+                        if ctx.HasManyRelations && not ctx.ManyRelationsHydrated then
                             Relations.withRelationSqliteWrap "query-batch-load" "ExecuteEnumerable.batchLoadDBRefManyProperties" (fun () ->
                                 Relations.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
                             )
 
-                        // Version capture requires per-entity metadata queries.
-                        // When all relations are hydrated inline (no batch-load ran at all),
-                        // defer version capture to Update-time to preserve one-statement guarantee.
+                        // Populate DBRefMany trackers from HydrationJSON.
+                        if ctx.ManyRelationsHydrated && not (isNull hydrationMap) then
+                            HydrationManyPopulator.populateFromHydrationJson ctx.OwnerType ownerEntities hydrationMap
+
+                        // Version capture: defer when all relations are hydrated inline.
                         let batchLoadRan =
                             (ctx.HasSingleRelations && not ctx.SingleRelationsHydrated)
-                            || ctx.HasManyRelations
+                            || (ctx.HasManyRelations && not ctx.ManyRelationsHydrated)
                         if batchLoadRan then
                             Relations.captureRelationVersionForEntities connection ctx.OwnerTable ownerEntities
 
@@ -134,19 +201,22 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
             let inline batchLoadSingle (connection: SqliteConnection) (row: Types.DbObjectRow) (entity: 'TResult) =
                 match batchCtx with
                 | ValueSome ctx when (ctx.HasSingleRelations || ctx.HasManyRelations) && not (isNull (box entity)) && row.Id.HasValue && ctx.OwnerType.IsAssignableFrom(typeof<'TResult>) ->
-                    // Skip batchLoadDBRefProperties when single relations are hydrated
-                    // inline via correlated subqueries in the SQL projection.
                     if ctx.HasSingleRelations && not ctx.SingleRelationsHydrated then
                         Relations.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefProperties" (fun () ->
                             Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
                         )
-                    if ctx.HasManyRelations then
+                    if ctx.HasManyRelations && not ctx.ManyRelationsHydrated then
                         Relations.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefManyProperties" (fun () ->
                             Relations.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
                         )
+                    // Populate DBRefMany from HydrationJSON for scalar path.
+                    if ctx.ManyRelationsHydrated && not (isNull row.HydrationJSON) then
+                        let hydMap = Dictionary<int64, string>()
+                        hydMap.[row.Id.Value] <- row.HydrationJSON
+                        HydrationManyPopulator.populateFromHydrationJson ctx.OwnerType [| (row.Id.Value, box entity) |] hydMap
                     let batchLoadRan =
                         (ctx.HasSingleRelations && not ctx.SingleRelationsHydrated)
-                        || ctx.HasManyRelations
+                        || (ctx.HasManyRelations && not ctx.ManyRelationsHydrated)
                     if batchLoadRan then
                         Relations.captureRelationVersionForEntities connection ctx.OwnerTable [| (row.Id.Value, box entity) |]
                 | _ -> ()

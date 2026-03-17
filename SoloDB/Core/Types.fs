@@ -13,6 +13,10 @@ type DbObjectRow = {
     /// If the Id is NULL then the ValueJSON is a error message encoded in a JSON string.
     Id: Nullable<int64>
     ValueJSON: string
+    /// JSON object containing hydrated DBRefMany collection data.
+    /// Null when no DBRefMany hydration is active (non-queryable paths, types without DBRefMany).
+    /// Shape: {"PropName": [{"Id": n, "Value": {...}}, ...], ...}
+    HydrationJSON: string
 }
 
 [<CLIMutable>]

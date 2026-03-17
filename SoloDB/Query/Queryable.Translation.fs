@@ -153,6 +153,9 @@ module internal QueryableTranslationCore =
         /// When true, all DBRef single-relation properties are hydrated inline in the SQL
         /// via correlated subqueries. The provider must skip batchLoadDBRefProperties.
         SingleRelationsHydrated: bool
+        /// When true, all DBRefMany collection properties are hydrated inline in the SQL
+        /// via a HydrationJSON column. The provider must skip batchLoadDBRefManyProperties.
+        ManyRelationsHydrated: bool
     }
 
     let internal preloadQueryContextMetadata (ctx: QueryContext) (connection: SqliteConnection) =
@@ -307,6 +310,104 @@ module internal QueryableTranslationCore =
         else
             SqlExpr.FunctionCall("jsonb_set", args |> Seq.toList)
 
+    /// Build a HydrationJSON projection expression for DBRefMany properties.
+    /// Returns Some(json_object('Prop1', COALESCE(subquery, jsonb('[]')), ...)) if any many-relations
+    /// should be loaded, or None if all are excluded.
+    /// Each subquery: SELECT json_group_array(json_object('Id', t.Id, 'Value', json_quote(t.Value)))
+    ///   FROM "LinkTable" lnk INNER JOIN "Target" t ON t.Id = lnk.TargetColumn
+    ///   WHERE lnk.OwnerColumn = o.Id
+    let private buildManyHydrationProjection
+        (ctx: QueryContext)
+        (ownerType: Type)
+        (ownerTable: string)
+        (ownerIdExpr: SqlExpr)
+        (aliasCounter: byref<int>)
+        : SqlExpr option =
+
+        let manyProps =
+            ownerType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+            |> Array.filter (fun p -> DBRefTypeHelpers.isDBRefManyType p.PropertyType)
+
+        if manyProps.Length = 0 then None
+        else
+
+        let args = ResizeArray<SqlExpr>()
+
+        for prop in manyProps do
+            if QueryableHelperPreprocess.shouldLoadRelationPath ctx prop.Name then
+                let targetType = (GenericTypeArgCache.Get prop.PropertyType).[0]
+
+                // Resolve link table and target table from relation metadata.
+                let linkTable =
+                    match ctx.TryResolveRelationLink(ownerTable, prop.Name) with
+                    | Some t -> t
+                    | None ->
+                        raise (NotSupportedException(
+                            $"Error: Missing relation link metadata for '{ownerType.Name}.{prop.Name}'.\nReason: Cannot hydrate DBRefMany without link table mapping.\nFix: Ensure collection is properly initialized before querying."))
+
+                let targetTable =
+                    match ctx.TryResolveRelationTarget(ownerTable, prop.Name) with
+                    | Some t -> t
+                    | None ->
+                        raise (NotSupportedException(
+                            $"Error: Missing relation target metadata for '{ownerType.Name}.{prop.Name}'.\nReason: Cannot hydrate DBRefMany without target table mapping.\nFix: Ensure collection is properly initialized before querying."))
+
+                let ownerUsesSource =
+                    match ctx.TryResolveRelationOwnerUsesSource(ownerTable, prop.Name) with
+                    | Some v -> v
+                    | None -> true
+
+                let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
+                let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
+
+                aliasCounter <- aliasCounter + 1
+                let lnkAlias = sprintf "_hlnk%d" aliasCounter
+                aliasCounter <- aliasCounter + 1
+                let tAlias = sprintf "_ht%d" aliasCounter
+
+                // Subquery: SELECT json_group_array(json_object('Id', t.Id, 'Value', json_quote(t.Value)))
+                //   FROM "LinkTable" AS _hlnk INNER JOIN "Target" AS _ht ON _ht.Id = _hlnk.TargetColumn
+                //   WHERE _hlnk.OwnerColumn = o.Id
+                let subqueryProjection =
+                    SqlExpr.FunctionCall("json_group_array",
+                        [SqlExpr.FunctionCall("json_object",
+                            [SqlExpr.Literal(SqlLiteral.String "Id"); SqlExpr.Column(Some tAlias, "Id")
+                             SqlExpr.Literal(SqlLiteral.String "Value"); SqlExpr.FunctionCall("json_quote", [SqlExpr.Column(Some tAlias, "Value")])])])
+
+                let joinOn =
+                    SqlExpr.Binary(
+                        SqlExpr.Column(Some tAlias, "Id"),
+                        BinaryOperator.Eq,
+                        SqlExpr.Column(Some lnkAlias, targetColumn))
+
+                let subqueryWhere =
+                    SqlExpr.Binary(
+                        SqlExpr.Column(Some lnkAlias, ownerColumn),
+                        BinaryOperator.Eq,
+                        ownerIdExpr)
+
+                let subqueryCore =
+                    { mkCore
+                        [{ Alias = None; Expr = subqueryProjection }]
+                        (Some (BaseTable(linkTable, Some lnkAlias)))
+                      with
+                        Joins = [ConditionedJoin(JoinKind.Inner, BaseTable(targetTable, Some tAlias), joinOn)]
+                        Where = Some subqueryWhere }
+                let subquerySelect = { Ctes = []; Body = SingleSelect subqueryCore }
+
+                // COALESCE(subquery, jsonb('[]')) — empty array when no linked targets.
+                let coalesceExpr =
+                    SqlExpr.Coalesce(
+                        SqlExpr.ScalarSubquery subquerySelect,
+                        [SqlExpr.FunctionCall("jsonb", [SqlExpr.Literal(SqlLiteral.String "[]")])])
+
+                // Add property name + value to json_object args.
+                args.Add(SqlExpr.Literal(SqlLiteral.String prop.Name))
+                args.Add(coalesceExpr)
+
+        if args.Count = 0 then None
+        else Some (SqlExpr.FunctionCall("json_object", args |> Seq.toList))
+
     /// <summary>
     /// Initiates the translation of a LINQ expression tree to an SQL query string and a dictionary of parameters.
     /// </summary>
@@ -381,14 +482,35 @@ module internal QueryableTranslationCore =
             else
                 extractValueAsJsonDu valueDecodedType
 
-        // Build the outer wrapper: SELECT Id/(-1), valueDecoded as ValueJSON FROM (inner)
-        let outerProjections =
+        // Build HydrationJSON projection for DBRefMany properties.
+        // json_object('Prop', COALESCE(json_group_array(...), jsonb('[]')), ...)
+        let mutable manyAliasCounter = hydrationAliasCounter
+        let manyRelationsHydrated =
+            hasManyRelations && not (QueryTranslator.isPrimitiveSQLiteType valueDecodedType)
+        let manyHydrationProjection =
+            if manyRelationsHydrated then
+                let ownerIdExpr = SqlExpr.Column(Some "o", "Id")
+                buildManyHydrationProjection ctx typeof<'T> (source.Name)
+                    ownerIdExpr &manyAliasCounter
+            else
+                None
+
+        // Build the outer wrapper: SELECT Id/(-1), valueDecoded as ValueJSON [, HydrationJSON] FROM (inner)
+        let baseProjections =
             if doesNotReturnIdFn expression then
                 [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
                  { Alias = Some "ValueJSON"; Expr = effectiveValueDecodedExpr }]
             else
                 [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
                  { Alias = Some "ValueJSON"; Expr = effectiveValueDecodedExpr }]
+
+        let outerProjections =
+            match manyHydrationProjection with
+            | Some hydExpr ->
+                baseProjections @ [{ Alias = Some "HydrationJSON"; Expr = hydExpr }]
+            | None ->
+                baseProjections
+
         let outerCore = mkCore outerProjections (Some (DerivedTable(innerSelect, "o")))
         let outerSelect = wrapCore outerCore
 
@@ -402,6 +524,7 @@ module internal QueryableTranslationCore =
         emitSelectToSb sb variables indexModel outerSelect
 
         let actuallyHydrated = singleRelationsHydrated && hydrationAliasCounter > 0
+        let actuallyManyHydrated = manyRelationsHydrated && manyHydrationProjection.IsSome
 
         let batchLoadContext =
             if hasSingleRelations || hasManyRelations then
@@ -414,6 +537,7 @@ module internal QueryableTranslationCore =
                     HasSingleRelations = hasSingleRelations
                     HasManyRelations = hasManyRelations
                     SingleRelationsHydrated = actuallyHydrated
+                    ManyRelationsHydrated = actuallyManyHydrated
                 }
             else
                 ValueNone
