@@ -42,8 +42,8 @@ let rec private resolveTransitive (visited: Set<int * string * string>) (expr: S
                 match currentCore.Source with
                 | Some(DerivedTable(innerSel, derivedAlias)) when derivedAlias = src ->
                     resolveIntoDerivedTable visited col innerSel deeperCores
-                | Some(BaseTable(tableName, Some tableAlias)) when tableAlias = src ->
-                    BaseColumn(tableName, col)
+                | Some(BaseTable(_, Some tableAlias)) when tableAlias = src ->
+                    BaseColumn(tableAlias, col)
                 | Some(BaseTable(tableName, None)) when tableName = src ->
                     BaseColumn(tableName, col)
                 | _ ->
@@ -52,14 +52,14 @@ let rec private resolveTransitive (visited: Set<int * string * string>) (expr: S
                             match j with
                             | ConditionedJoin(_, DerivedTable(jSel, jAlias), _) when jAlias = src ->
                                 Some(resolveIntoDerivedTable visited col jSel deeperCores)
-                            | ConditionedJoin(_, BaseTable(tbl, Some tAlias), _) when tAlias = src ->
-                                Some(BaseColumn(tbl, col))
+                            | ConditionedJoin(_, BaseTable(_, Some tAlias), _) when tAlias = src ->
+                                Some(BaseColumn(tAlias, col))
                             | ConditionedJoin(_, BaseTable(tbl, None), _) when tbl = src ->
                                 Some(BaseColumn(tbl, col))
                             | CrossJoin(DerivedTable(jSel, jAlias)) when jAlias = src ->
                                 Some(resolveIntoDerivedTable visited col jSel deeperCores)
-                            | CrossJoin(BaseTable(tbl, Some tAlias)) when tAlias = src ->
-                                Some(BaseColumn(tbl, col))
+                            | CrossJoin(BaseTable(_, Some tAlias)) when tAlias = src ->
+                                Some(BaseColumn(tAlias, col))
                             | CrossJoin(BaseTable(tbl, None)) when tbl = src ->
                                 Some(BaseColumn(tbl, col))
                             | _ -> None)
@@ -97,7 +97,9 @@ and private resolveFromSource (visited: Set<int * string * string>) (core: Selec
     match core.Source with
     | Some(DerivedTable(innerSel, _)) ->
         resolveIntoDerivedTable visited col innerSel deeperCores
-    | Some(BaseTable(tableName, _)) when core.Joins.IsEmpty ->
+    | Some(BaseTable(_, Some alias)) when core.Joins.IsEmpty ->
+        BaseColumn(alias, col)
+    | Some(BaseTable(tableName, None)) when core.Joins.IsEmpty ->
         BaseColumn(tableName, col)
     | _ ->
         Opaque
