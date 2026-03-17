@@ -72,7 +72,9 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         |> Seq.toArray
 
                     if ownerEntities.Length > 0 then
-                        if ctx.HasSingleRelations then
+                        // Skip batchLoadDBRefProperties when single relations are hydrated
+                        // inline via correlated subqueries in the SQL projection.
+                        if ctx.HasSingleRelations && not ctx.SingleRelationsHydrated then
                             Relations.withRelationSqliteWrap "query-batch-load" "ExecuteEnumerable.batchLoadDBRefProperties" (fun () ->
                                 Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
                             )
@@ -114,7 +116,9 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
             let inline batchLoadSingle (connection: SqliteConnection) (row: Types.DbObjectRow) (entity: 'TResult) =
                 match batchCtx with
                 | ValueSome ctx when (ctx.HasSingleRelations || ctx.HasManyRelations) && not (isNull (box entity)) && row.Id.HasValue && ctx.OwnerType.IsAssignableFrom(typeof<'TResult>) ->
-                    if ctx.HasSingleRelations then
+                    // Skip batchLoadDBRefProperties when single relations are hydrated
+                    // inline via correlated subqueries in the SQL projection.
+                    if ctx.HasSingleRelations && not ctx.SingleRelationsHydrated then
                         Relations.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefProperties" (fun () ->
                             Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
                         )

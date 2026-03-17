@@ -150,6 +150,9 @@ module internal QueryableTranslationCore =
         WhitelistMode: bool
         HasSingleRelations: bool
         HasManyRelations: bool
+        /// When true, all DBRef single-relation properties are hydrated inline in the SQL
+        /// via correlated subqueries. The provider must skip batchLoadDBRefProperties.
+        SingleRelationsHydrated: bool
     }
 
     let internal preloadQueryContextMetadata (ctx: QueryContext) (connection: SqliteConnection) =
@@ -202,6 +205,108 @@ module internal QueryableTranslationCore =
                 if not (isNull typeKey || isNull collectionName) then
                     ctx.RegisterTypeCollection(typeKey, collectionName)
 
+    /// Maximum nesting depth for hydration correlated subqueries (matches batch load maxRecursiveDepth).
+    let private maxHydrationDepth = 5
+
+    /// Build a hydrated Value expression by embedding correlated subqueries for DBRef properties.
+    /// Each DBRef property that should be loaded gets a ScalarSubquery that returns
+    /// jsonb_array(target.Id, target.Value) correlated on the FK in the owner's Value JSON.
+    /// Multi-hop: recursive — the target's Value is itself hydrated for its own DBRef properties.
+    /// Edge case SA-05: stops recursion at maxHydrationDepth.
+    let rec private buildHydrationValueExpr
+        (ctx: QueryContext)
+        (ownerType: Type)
+        (ownerTable: string)
+        (ownerValueExpr: SqlExpr)
+        (depth: int)
+        (prefix: string)
+        (aliasCounter: byref<int>)
+        : SqlExpr =
+
+        // Edge case SA-05: depth cap — stop nesting, leave FK ids as-is.
+        if depth >= maxHydrationDepth then ownerValueExpr
+        else
+
+        let singleProps =
+            ownerType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+            |> Array.filter (fun p -> DBRefTypeHelpers.isDBRefType p.PropertyType)
+
+        if singleProps.Length = 0 then ownerValueExpr
+        else
+
+        // Collect jsonb_set arguments: (base, path1, value1, path2, value2, ...)
+        let args = ResizeArray<SqlExpr>()
+        args.Add(ownerValueExpr)
+
+        for prop in singleProps do
+            let path = if prefix = "" then prop.Name else prefix + "." + prop.Name
+
+            // Edge case SA-03: excluded path — no subquery emitted.
+            if QueryableHelperPreprocess.shouldLoadRelationPath ctx path then
+                let targetType = (GenericTypeArgCache.Get prop.PropertyType).[0]
+
+                // Resolve target table from relation metadata.
+                // Edge case: missing metadata → deterministic reject (per AGORA contract).
+                let targetTable =
+                    match ctx.TryResolveRelationTarget(ownerTable, prop.Name) with
+                    | Some t -> t
+                    | None ->
+                        raise (NotSupportedException(
+                            $"Error: Missing relation metadata for '{ownerType.Name}.{prop.Name}'.\nReason: Cannot hydrate DBRef without relation target mapping.\nFix: Ensure collection is properly initialized before querying."))
+
+                aliasCounter <- aliasCounter + 1
+                let tAlias = sprintf "_ht%d" aliasCounter
+
+                // FK extraction from owner: jsonb_extract(ownerValue, '$.PropName')
+                let fkExpr =
+                    SqlExpr.FunctionCall("jsonb_extract",
+                        [ownerValueExpr; SqlExpr.Literal(SqlLiteral.String ("$." + prop.Name))])
+
+                // Recursive multi-hop: hydrate target type's DBRef properties within the subquery.
+                let targetValueExpr =
+                    buildHydrationValueExpr ctx targetType targetTable
+                        (SqlExpr.Column(Some tAlias, "Value"))
+                        (depth + 1) path &aliasCounter
+
+                // Subquery projection: jsonb_array(t.Id, <hydrated_target_value>)
+                // Deserializer recognizes [id, entityJson] as DBRef.Loaded(id, entity).
+                let subqueryProjection =
+                    SqlExpr.FunctionCall("jsonb_array",
+                        [SqlExpr.Column(Some tAlias, "Id"); targetValueExpr])
+
+                // Correlated WHERE: t.Id = jsonb_extract(owner.Value, '$.PropName')
+                let subqueryWhere =
+                    SqlExpr.Binary(
+                        SqlExpr.Column(Some tAlias, "Id"),
+                        BinaryOperator.Eq,
+                        fkExpr)
+
+                let subqueryCore =
+                    { mkCore
+                        [{ Alias = None; Expr = subqueryProjection }]
+                        (Some (BaseTable(targetTable, Some tAlias)))
+                      with Where = Some subqueryWhere }
+                let subquerySelect = { Ctes = []; Body = SingleSelect subqueryCore }
+
+                // COALESCE(subquery, raw_fk) — preserves raw FK when target missing/null.
+                // When FK is null (DBRef.None): subquery returns NULL, COALESCE returns NULL → deserialized as None.
+                // When FK is valid: subquery returns [id, entity] → deserialized as Loaded.
+                // When FK is dangling: subquery returns NULL, COALESCE returns raw int → deserialized as Unloaded.
+                let coalesceExpr =
+                    SqlExpr.Coalesce(
+                        SqlExpr.ScalarSubquery subquerySelect,
+                        [fkExpr])
+
+                // Add path/value pair to jsonb_set.
+                args.Add(SqlExpr.Literal(SqlLiteral.String ("$." + prop.Name)))
+                args.Add(coalesceExpr)
+
+        // Edge case: all props excluded → no jsonb_set needed.
+        if args.Count <= 1 then
+            ownerValueExpr
+        else
+            SqlExpr.FunctionCall("jsonb_set", args |> Seq.toList)
+
     /// <summary>
     /// Initiates the translation of a LINQ expression tree to an SQL query string and a dictionary of parameters.
     /// </summary>
@@ -247,15 +352,41 @@ module internal QueryableTranslationCore =
         // Build the inner query as a SqlSelect DU.
         let innerSelect = translateQuery<'T> ctx variables expression
 
+        let shape = getRelationShape typeof<'T>
+        let hasSingleRelations = hasRelations && shape.HasSingle
+        let hasManyRelations = hasRelations && shape.HasMany
+
+        // Build hydrated value expression for DBRef single-relation properties.
+        // Correlated subqueries embed target entity data directly in the Value column,
+        // eliminating N+1 batch-load queries for DBRef relations on the queryable path.
+        let mutable hydrationAliasCounter = 0
+        let singleRelationsHydrated =
+            hasSingleRelations && not (QueryTranslator.isPrimitiveSQLiteType valueDecodedType)
+
+        let effectiveValueDecodedExpr =
+            if singleRelationsHydrated then
+                let ownerValueExpr = SqlExpr.Column(Some "o", "Value")
+                let hydratedValue =
+                    buildHydrationValueExpr ctx typeof<'T> (source.Name)
+                        ownerValueExpr 0 "" &hydrationAliasCounter
+                if hydrationAliasCounter = 0 then
+                    // No hydration happened (all excluded or no matching props).
+                    extractValueAsJsonDu valueDecodedType
+                else
+                    // Wrap hydrated value with json_extract for ValueJSON output.
+                    SqlExpr.FunctionCall("json_extract",
+                        [hydratedValue; SqlExpr.Literal(SqlLiteral.String "$")])
+            else
+                extractValueAsJsonDu valueDecodedType
+
         // Build the outer wrapper: SELECT Id/(-1), valueDecoded as ValueJSON FROM (inner)
-        let valueDecodedExpr = extractValueAsJsonDu valueDecodedType
         let outerProjections =
             if doesNotReturnIdFn expression then
                 [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-                 { Alias = Some "ValueJSON"; Expr = valueDecodedExpr }]
+                 { Alias = Some "ValueJSON"; Expr = effectiveValueDecodedExpr }]
             else
                 [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
-                 { Alias = Some "ValueJSON"; Expr = valueDecodedExpr }]
+                 { Alias = Some "ValueJSON"; Expr = effectiveValueDecodedExpr }]
         let outerCore = mkCore outerProjections (Some (DerivedTable(innerSelect, "o")))
         let outerSelect = wrapCore outerCore
 
@@ -268,9 +399,7 @@ module internal QueryableTranslationCore =
             sb.Append "EXPLAIN QUERY PLAN " |> ignore
         emitSelectToSb sb variables indexModel outerSelect
 
-        let shape = getRelationShape typeof<'T>
-        let hasSingleRelations = hasRelations && shape.HasSingle
-        let hasManyRelations = hasRelations && shape.HasMany
+        let actuallyHydrated = singleRelationsHydrated && hydrationAliasCounter > 0
 
         let batchLoadContext =
             if hasSingleRelations || hasManyRelations then
@@ -282,6 +411,7 @@ module internal QueryableTranslationCore =
                     WhitelistMode = ctx.WhitelistMode
                     HasSingleRelations = hasSingleRelations
                     HasManyRelations = hasManyRelations
+                    SingleRelationsHydrated = actuallyHydrated
                 }
             else
                 ValueNone

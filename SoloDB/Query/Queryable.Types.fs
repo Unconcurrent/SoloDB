@@ -161,6 +161,13 @@ type internal LoweredKeySelector = {
     Fingerprint: string
 }
 
+/// Describes a relation property hydrated via correlated subquery in the SQL projection.
+/// Used to track which properties were embedded in the single SQL statement.
+[<RequireQualifiedAccess>]
+type internal HydrationProjection =
+    /// DBRef single-relation: target entity embedded as [Id, Value] array via scalar subquery.
+    | ScalarRelProjection of propertyName: string * targetType: Type
+
 /// <summary>
 /// A private, mutable builder used to construct an SQL query from a LINQ expression tree.
 /// </summary>
