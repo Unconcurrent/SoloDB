@@ -1659,12 +1659,18 @@ type RelationQueryExt =
         // Produce a MethodCallExpression so the query pipeline can detect Exclude and populate ExcludedPaths.
         let method =
             typeof<RelationQueryExt>
-                .GetMethod("Exclude", Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
-                .MakeGenericMethod(typeof<'T>, typeof<'TRelation>)
+                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
+                |> Array.find (fun m -> m.Name = "Exclude" && m.GetGenericArguments().Length = 2)
+            |> fun m -> m.MakeGenericMethod(typeof<'T>, typeof<'TRelation>)
         let callExpr = Expression.Call(method, query.Expression, selector)
         query.Provider.CreateQuery<'T>(callExpr)
 
     /// <summary>Parameterless Exclude: switches to whitelist mode where no relations load unless explicitly Included.</summary>
+    [<Extension>]
+    static member Exclude<'T>(query: IQueryable<'T>) : IQueryable<'T> =
+        RelationQueryExt.ExcludeAll<'T>(query)
+
+    /// <summary>Internal: ExcludeAll emits the pipeline-distinguishable MethodCallExpression for parameterless Exclude.</summary>
     [<Extension>]
     static member ExcludeAll<'T>(query: IQueryable<'T>) : IQueryable<'T> =
         if isNull query then raise (ArgumentNullException(nameof(query)))
