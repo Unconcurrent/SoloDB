@@ -260,6 +260,7 @@ module internal QueryableHelperBase =
         | "OfType" -> Some SupportedLinqMethods.OfType
         | "Aggregate" -> Some SupportedLinqMethods.Aggregate
         | "Include" -> Some SupportedLinqMethods.Include
+        | "ThenInclude" -> Some SupportedLinqMethods.ThenInclude
         | "Exclude" -> Some SupportedLinqMethods.Exclude
         | _ -> None
 
