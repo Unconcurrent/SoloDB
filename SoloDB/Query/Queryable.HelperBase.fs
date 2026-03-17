@@ -262,6 +262,7 @@ module internal QueryableHelperBase =
         | "Include" -> Some SupportedLinqMethods.Include
         | "ThenInclude" -> Some SupportedLinqMethods.ThenInclude
         | "Exclude" -> Some SupportedLinqMethods.Exclude
+        | "ThenExclude" -> Some SupportedLinqMethods.ThenExclude
         | _ -> None
 
     /// <summary>

@@ -265,6 +265,11 @@ module internal QueryableBuildQueryPartC =
                     let path = extractRelationPathOrThrow "ThenInclude" m.Expressions
                     registerIncludePath sourceCtx path
 
+                | SupportedLinqMethods.ThenExclude ->
+                    // ThenExclude paths are registered up-front in Main.fs with full dotted path composition.
+                    // No-op here — the up-front pass already handles the correct dotted path.
+                    ()
+
                 | SupportedLinqMethods.Aggregate ->
                     raise (NotSupportedException("Aggregate is not supported."))
 

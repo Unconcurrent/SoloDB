@@ -70,6 +70,7 @@ type internal SupportedLinqMethods =
 | Include
 | ThenInclude
 | Exclude
+| ThenExclude
 
 // Translation validation helpers.
 /// <summary>A marker interface for the SoloDB query provider.</summary>

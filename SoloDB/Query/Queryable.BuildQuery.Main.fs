@@ -38,16 +38,29 @@ module internal QueryableBuildQueryMain =
         let mutable isPostScalarProjection = false
         let preprocessed = preprocessQuery e |> Seq.toArray
 
-        // Register SupportedLinqMethods.Include/SupportedLinqMethods.Exclude paths up-front so behavior is deterministic regardless method-call order.
-        // If a predicate accesses an excluded path via .Value, translator must fail loudly in both orders.
-        for q in preprocessed do
+        // Register Include/Exclude/ThenInclude/ThenExclude paths up-front so behavior is deterministic regardless method-call order.
+        // Process in reverse (expression-tree order: root → Include → ThenInclude → ThenExclude)
+        // to accumulate dotted chain paths for ThenInclude/ThenExclude.
+        let mutable chainPath = ""
+        for q in preprocessed |> Array.rev do
             match q with
-            | Method m when m.Value = SupportedLinqMethods.Exclude || m.Value = SupportedLinqMethods.Include || m.Value = SupportedLinqMethods.ThenInclude ->
-                let path =
-                    if m.Value = SupportedLinqMethods.Exclude then extractRelationPathOrThrow "Exclude" m.Expressions
-                    else extractRelationPathOrThrow "Include" m.Expressions
-                if m.Value = SupportedLinqMethods.Exclude then registerExcludePath sourceCtx path
-                else registerIncludePath sourceCtx path
+            | Method m when m.Value = SupportedLinqMethods.Include ->
+                let path = extractRelationPathOrThrow "Include" m.Expressions
+                chainPath <- path
+                registerIncludePath sourceCtx path
+            | Method m when m.Value = SupportedLinqMethods.ThenInclude ->
+                let hop = extractRelationPathOrThrow "ThenInclude" m.Expressions
+                chainPath <- if chainPath = "" then hop else chainPath + "." + hop
+                registerIncludePath sourceCtx chainPath
+            | Method m when m.Value = SupportedLinqMethods.ThenExclude ->
+                let hop = extractRelationPathOrThrow "ThenExclude" m.Expressions
+                let excludePath = if chainPath = "" then hop else chainPath + "." + hop
+                registerExcludePath sourceCtx excludePath
+                // ThenExclude does NOT advance chainPath — it stays at the parent level
+            | Method m when m.Value = SupportedLinqMethods.Exclude ->
+                let path = extractRelationPathOrThrow "Exclude" m.Expressions
+                chainPath <- ""
+                registerExcludePath sourceCtx path
             | _ -> ()
 
         validateIncludeExcludeConflicts sourceCtx
@@ -134,6 +147,7 @@ module internal QueryableBuildQueryMain =
                 | SupportedLinqMethods.Exclude
                 | SupportedLinqMethods.Include
                 | SupportedLinqMethods.ThenInclude
+                | SupportedLinqMethods.ThenExclude
                 | SupportedLinqMethods.Aggregate ->
                     QueryableBuildQueryPartC.apply<'T>
                         sourceCtx

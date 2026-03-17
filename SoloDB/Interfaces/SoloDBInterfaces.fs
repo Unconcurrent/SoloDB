@@ -1505,6 +1505,140 @@ type RelationQueryExt =
         let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
         IncludableQueryable<'T, 'TNext>(resultQuery, chainPath) :> IIncludableQueryable<'T, 'TNext>
 
+    /// <summary>ThenExclude for DBRef&lt;TPrev&gt; hop: excludes child relation under included parent. Returns carrier for continued chaining.</summary>
+    [<Extension>]
+    static member ThenExclude<'T, 'TPrev, 'TNext>(query: IIncludableQueryable<'T, DBRef<'TPrev>>, selector: Expression<Func<'TPrev, 'TNext>>) : IIncludableQueryable<'T, DBRef<'TPrev>> =
+        if isNull query then raise (ArgumentNullException(nameof(query)))
+        if isNull selector then raise (ArgumentNullException(nameof(selector)))
+        let nextType = typeof<'TNext>
+        let isRelation =
+            nextType.IsGenericType
+            && (nextType.GetGenericTypeDefinition() = typedefof<DBRef<_>>
+                || nextType.GetGenericTypeDefinition() = typedefof<DBRef<_,_>>
+                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
+                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
+        if not isRelation then
+            raise (NotSupportedException(
+                $"Error: ThenExclude selector must target a relation property (DBRef<T> or DBRefMany<T>).\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenExclude(x => x.RelationProperty) where the property is DBRef<T> or DBRefMany<T>."))
+        let parentPath =
+            match query with
+            | :? IncludableQueryable<'T, DBRef<'TPrev>> as iq -> iq.ChainPath
+            | _ -> ""
+        let propName =
+            match selector.Body with
+            | :? MemberExpression as me -> me.Member.Name
+            | _ -> raise (NotSupportedException("ThenExclude selector must be a direct member access."))
+        let chainPath = if parentPath = "" then propName else parentPath + "." + propName
+        let method =
+            typeof<RelationQueryExt>
+                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
+                |> Array.find (fun m -> m.Name = "ThenExclude" && m.GetParameters().[0].ParameterType.GenericTypeArguments.[1].GetGenericTypeDefinition() = typedefof<DBRef<_>> && m.GetGenericArguments().Length = 3)
+        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TPrev>, typeof<'TNext>)
+        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
+        IncludableQueryable<'T, DBRef<'TPrev>>(resultQuery, parentPath) :> IIncludableQueryable<'T, DBRef<'TPrev>>
+
+    /// <summary>ThenExclude for DBRefMany&lt;TElem&gt; hop: excludes child relation under included parent. Returns carrier for continued chaining.</summary>
+    [<Extension>]
+    static member ThenExclude<'T, 'TElem, 'TNext>(query: IIncludableQueryable<'T, DBRefMany<'TElem>>, selector: Expression<Func<'TElem, 'TNext>>) : IIncludableQueryable<'T, DBRefMany<'TElem>> =
+        if isNull query then raise (ArgumentNullException(nameof(query)))
+        if isNull selector then raise (ArgumentNullException(nameof(selector)))
+        let nextType = typeof<'TNext>
+        let isRelation =
+            nextType.IsGenericType
+            && (nextType.GetGenericTypeDefinition() = typedefof<DBRef<_>>
+                || nextType.GetGenericTypeDefinition() = typedefof<DBRef<_,_>>
+                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
+                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
+        if not isRelation then
+            raise (NotSupportedException(
+                $"Error: ThenExclude selector must target a relation property (DBRef<T> or DBRefMany<T>).\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenExclude(x => x.RelationProperty) where the property is DBRef<T> or DBRefMany<T>."))
+        let parentPath =
+            match query with
+            | :? IncludableQueryable<'T, DBRefMany<'TElem>> as iq -> iq.ChainPath
+            | _ -> ""
+        let propName =
+            match selector.Body with
+            | :? MemberExpression as me -> me.Member.Name
+            | _ -> raise (NotSupportedException("ThenExclude selector must be a direct member access."))
+        let chainPath = if parentPath = "" then propName else parentPath + "." + propName
+        let method =
+            typeof<RelationQueryExt>
+                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
+                |> Array.find (fun m -> m.Name = "ThenExclude" && m.GetParameters().[0].ParameterType.GenericTypeArguments.[1].GetGenericTypeDefinition() = typedefof<DBRefMany<_>> && m.GetGenericArguments().Length = 3)
+        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TElem>, typeof<'TNext>)
+        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
+        IncludableQueryable<'T, DBRefMany<'TElem>>(resultQuery, parentPath) :> IIncludableQueryable<'T, DBRefMany<'TElem>>
+
+    /// <summary>ThenExclude for typed-id DBRef&lt;TTarget,TId&gt; hop.</summary>
+    [<Extension>]
+    static member ThenExclude<'T, 'TPrev, 'TId, 'TNext when 'TId : equality>(query: IIncludableQueryable<'T, DBRef<'TPrev, 'TId>>, selector: Expression<Func<'TPrev, 'TNext>>) : IIncludableQueryable<'T, DBRef<'TPrev, 'TId>> =
+        if isNull query then raise (ArgumentNullException(nameof(query)))
+        if isNull selector then raise (ArgumentNullException(nameof(selector)))
+        let nextType = typeof<'TNext>
+        let isRelation =
+            nextType.IsGenericType
+            && (nextType.GetGenericTypeDefinition() = typedefof<DBRef<_>>
+                || nextType.GetGenericTypeDefinition() = typedefof<DBRef<_,_>>
+                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
+                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
+        if not isRelation then
+            raise (NotSupportedException(
+                $"Error: ThenExclude selector must target a relation property (DBRef<T> or DBRefMany<T>).\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenExclude(x => x.RelationProperty) where the property is DBRef<T> or DBRefMany<T>."))
+        let parentPath =
+            match query with
+            | :? IncludableQueryable<'T, DBRef<'TPrev, 'TId>> as iq -> iq.ChainPath
+            | _ -> ""
+        let propName =
+            match selector.Body with
+            | :? MemberExpression as me -> me.Member.Name
+            | _ -> raise (NotSupportedException("ThenExclude selector must be a direct member access."))
+        let chainPath = if parentPath = "" then propName else parentPath + "." + propName
+        let method =
+            typeof<RelationQueryExt>
+                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
+                |> Array.find (fun m -> m.Name = "ThenExclude" && m.GetParameters().Length = 2 && m.GetGenericArguments().Length = 4
+                                        && m.GetParameters().[0].ParameterType.GenericTypeArguments.[1].GetGenericTypeDefinition() = typedefof<DBRef<_,_>>)
+        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TPrev>, typeof<'TId>, typeof<'TNext>)
+        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
+        IncludableQueryable<'T, DBRef<'TPrev, 'TId>>(resultQuery, parentPath) :> IIncludableQueryable<'T, DBRef<'TPrev, 'TId>>
+
+    /// <summary>ThenExclude for typed-id DBRefMany&lt;TTarget,TId&gt; hop.</summary>
+    [<Extension>]
+    static member ThenExclude<'T, 'TElem, 'TId, 'TNext when 'TId : equality>(query: IIncludableQueryable<'T, DBRefMany<'TElem, 'TId>>, selector: Expression<Func<'TElem, 'TNext>>) : IIncludableQueryable<'T, DBRefMany<'TElem, 'TId>> =
+        if isNull query then raise (ArgumentNullException(nameof(query)))
+        if isNull selector then raise (ArgumentNullException(nameof(selector)))
+        let nextType = typeof<'TNext>
+        let isRelation =
+            nextType.IsGenericType
+            && (nextType.GetGenericTypeDefinition() = typedefof<DBRef<_>>
+                || nextType.GetGenericTypeDefinition() = typedefof<DBRef<_,_>>
+                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
+                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
+        if not isRelation then
+            raise (NotSupportedException(
+                $"Error: ThenExclude selector must target a relation property (DBRef<T> or DBRefMany<T>).\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenExclude(x => x.RelationProperty) where the property is DBRef<T> or DBRefMany<T>."))
+        let parentPath =
+            match query with
+            | :? IncludableQueryable<'T, DBRefMany<'TElem, 'TId>> as iq -> iq.ChainPath
+            | _ -> ""
+        let propName =
+            match selector.Body with
+            | :? MemberExpression as me -> me.Member.Name
+            | _ -> raise (NotSupportedException("ThenExclude selector must be a direct member access."))
+        let chainPath = if parentPath = "" then propName else parentPath + "." + propName
+        let method =
+            typeof<RelationQueryExt>
+                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
+                |> Array.find (fun m -> m.Name = "ThenExclude" && m.GetParameters().Length = 2 && m.GetGenericArguments().Length = 4
+                                        && m.GetParameters().[0].ParameterType.GenericTypeArguments.[1].GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
+        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TElem>, typeof<'TId>, typeof<'TNext>)
+        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
+        IncludableQueryable<'T, DBRefMany<'TElem, 'TId>>(resultQuery, parentPath) :> IIncludableQueryable<'T, DBRefMany<'TElem, 'TId>>
+
     [<Extension>]
     static member Exclude<'T, 'TRelation>(query: IQueryable<'T>, selector: Expression<Func<'T, 'TRelation>>) : IQueryable<'T> =
         if isNull query then raise (ArgumentNullException(nameof(query)))
