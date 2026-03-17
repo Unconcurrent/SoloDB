@@ -42,7 +42,7 @@ type internal CollectionMutationOps<'T>() =
                         sprintf "Error: Item type %s has no int64 Id or custom Id.\nReason: Updates require a stable identifier.\nFix: Add an int64 Id property or configure a custom Id strategy."
                             typeName
                     raise (InvalidOperationException(message))
-        let filter = HydrationSqlBuilder.emitExprToSql filterExpr
+        let whereSql = HydrationSqlBuilder.emitExprToSql filterExpr
 
         if hasRelations then
             withTransaction (fun conn ->
@@ -82,7 +82,7 @@ type internal CollectionMutationOps<'T>() =
                 let writePlan = Relations.prepareUpdate tx oldRow.Id.Value (box oldOwner) (box item)
 
                 setSerializedItem variables item
-                let count = conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
+                let count = conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {whereSql}", variables)
                 if count <= 0 then
                     raise (KeyNotFoundException "Could not Update any entities with specified Id.")
 
@@ -91,7 +91,7 @@ type internal CollectionMutationOps<'T>() =
         else
             withTransaction (fun conn ->
                 setSerializedItem variables item
-                let count = conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filter, variables)
+                let count = conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {whereSql}", variables)
                 if count <= 0 then
                     raise (KeyNotFoundException "Could not Update any entities with specified Id."))
 
