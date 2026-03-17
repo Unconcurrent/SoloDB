@@ -18,21 +18,37 @@ open SoloDatabase.AliasRewrite
 // After flattening, those references must resolve to the inner's actual expressions.
 // ══════════════════════════════════════════════════════════════
 
+/// Strip embedded quotes from a source alias to normalize quoting.
+/// The LINQ translator generates Column(Some "\"Order\"", ...) with embedded quotes
+/// but BaseTable("Order", None) without. After flatten merge, expressions must use
+/// the same naming as the merged source.
+let private stripQuotes (s: string) : string =
+    if s.Length >= 2 && s.[0] = '"' && s.[s.Length - 1] = '"' then s.[1..s.Length - 2]
+    else s
+
+/// Normalize source alias quoting in an expression to match BaseTable naming.
+let internal normalizeExprQuoting (expr: SqlExpr) : SqlExpr =
+    SqlExpr.map (fun node ->
+        match node with
+        | Column(Some src, col) ->
+            let norm = stripQuotes src
+            if norm <> src then Column(Some norm, col) else node
+        | JsonExtractExpr(Some src, col, path) ->
+            let norm = stripQuotes src
+            if norm <> src then JsonExtractExpr(Some norm, col, path) else node
+        | JsonRootExtract(Some src, col) ->
+            let norm = stripQuotes src
+            if norm <> src then JsonRootExtract(Some norm, col) else node
+        | _ -> node) expr
+
 /// Build a mapping from inner projection aliases to their expressions.
-/// For DerivedTable inner sources, uses provenance-backed transitive resolution
-/// to resolve aliases through nested levels. For BaseTable sources, uses the
-/// raw inner expressions directly (single-level is already correct).
+/// Uses raw inner projection expressions with quote normalization only.
+/// Provenance resolution is NOT applied here — it prematurely binds to base-table
+/// qualifiers which causes drift when the DerivedTable boundary survives this iteration.
+/// The rewriteExpr substitution handles composition correctly using raw inner expressions.
 let private buildAliasMap (innerCore: SelectCore) : Map<string, SqlExpr> =
-    let baseMap = buildProjectionAliasMap innerCore
-    match innerCore.Source with
-    | Some(DerivedTable _) ->
-        // Enrich with provenance for DerivedTable inner sources only
-        let prov = Provenance.buildForCore innerCore
-        baseMap |> Map.map (fun alias expr ->
-            match Provenance.tryResolveColumn prov "" alias with
-            | Some(Provenance.BaseColumn(table, col)) -> Column(Some table, col)
-            | _ -> expr)
-    | _ -> baseMap
+    buildProjectionAliasMap innerCore
+    |> Map.map (fun _ expr -> normalizeExprQuoting expr)
 
 /// Rewrite an expression, substituting alias references with inner expressions.
 let rec private rewriteExpr (aliasMap: Map<string, SqlExpr>) (derivedAlias: string) (expr: SqlExpr) : SqlExpr =
