@@ -108,51 +108,20 @@ type internal CollectionReadDeleteOps<'T>() =
         use connection = getConnection()
         if hasRelations && HydrationSqlBuilder.hasRelationProperties typeof<'T> then
             // R45-10: Single-SQL hydration for custom-id non-queryable path.
-            // The filter is already translated to raw SQL. Build hydrated projections
-            // via DU builder (with table alias "o"), emit without WHERE, then splice raw filter.
-            let ctx = QueryContext.SingleSource(name)
-            HydrationSqlBuilder.preloadQueryContextMetadata ctx connection
-            let shape : HydrationSqlBuilder.RelationShapeInfo = HydrationSqlBuilder.getRelationShape typeof<'T>
-            let mutable aliasCounter = 0
-            let tblAlias = "o"
-            let valueExpr =
-                if shape.HasSingle then
-                    let hydrated = HydrationSqlBuilder.buildHydrationValueExpr ctx typeof<'T> name (SqlExpr.Column(Some tblAlias, "Value")) 0 "" &aliasCounter
-                    if aliasCounter > 0 then
-                        SqlExpr.FunctionCall("json_extract", [hydrated; SqlExpr.Literal(SqlLiteral.String "$")])
-                    else
-                        SqlExpr.FunctionCall("json_quote", [SqlExpr.Column(Some tblAlias, "Value")])
-                else
-                    SqlExpr.FunctionCall("json_quote", [SqlExpr.Column(Some tblAlias, "Value")])
-            let manyOpt =
-                if shape.HasMany then HydrationSqlBuilder.buildManyHydrationProjection ctx typeof<'T> name (SqlExpr.Column(Some tblAlias, "Id")) &aliasCounter
-                else None
-            let manyHydrated = shape.HasMany && manyOpt.IsSome
-            let sb = System.Text.StringBuilder(256)
-            let emitVars = Dictionary<string, obj>(variables)
-            let projections =
-                [{ Alias = None; Expr = SqlExpr.Column(Some tblAlias, "Id") }
-                 { Alias = Some "ValueJSON"; Expr = valueExpr }]
-                @ (match manyOpt with Some e -> [{ Alias = Some "HydrationJSON"; Expr = e }] | None -> [])
-            let core =
-                { QueryableHelperBase.mkCore projections (Some (BaseTable(name, Some tblAlias)))
-                  with
-                    Where = None
-                    Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
-            let select = QueryableHelperBase.wrapCore core
-            let modelTableNames = QueryableHelperBase.collectIndexModelTableNames name select
-            let indexModel = SoloDatabase.IndexModel.loadModelForTables connection modelTableNames
-            QueryableHelperBase.emitSelectToSb sb emitVars indexModel select
-            // Splice raw WHERE filter before LIMIT.
-            let emittedSql = sb.ToString()
-            let sql =
-                let limitIdx = emittedSql.LastIndexOf("LIMIT")
-                if limitIdx > 0 then
-                    emittedSql.Insert(limitIdx, $"WHERE {filter} ")
-                else
-                    emittedSql + $" WHERE {filter}"
+            // Build WHERE as SqlExpr DU (not raw string splice) to keep query in the DU tree.
+            // Custom-id filter is: jsonb_extract(Value, '$.PropName') = @param
+            let vars = Dictionary<string, obj>()
+            vars.["_cid0"] <- box id
+            let whereExpr =
+                SqlExpr.Binary(
+                    SqlExpr.FunctionCall("jsonb_extract",
+                        [SqlExpr.Column(Some "o", "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + idProp.Name))]),
+                    BinaryOperator.Eq,
+                    SqlExpr.Parameter "_cid0")
+            let sql, _singleHydrated, manyHydrated =
+                HydrationSqlBuilder.buildHydratedGetByIdSql connection name typeof<'T> whereExpr vars true
             QueryCommandInstrumentation.Increment()
-            match connection.QueryFirstOrDefault<DbObjectRow>(sql, variables) with
+            match connection.QueryFirstOrDefault<DbObjectRow>(sql, vars) with
             | json when Object.ReferenceEquals(json, null) -> None
             | json ->
                 let entity = fromSQLite<'T> json
