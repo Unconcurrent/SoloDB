@@ -8,4 +8,5 @@ open System.Runtime.CompilerServices
 [<assembly: InternalsVisibleTo("BenchMaster")>]
 [<assembly: InternalsVisibleTo("SqlDu.Engine.C1.Spec")>]
 [<assembly: InternalsVisibleTo("SqlDu.C1.Corpus")>]
+[<assembly: InternalsVisibleTo("SingleSqlHydration.SliceA.Tests")>]
 do ()

@@ -39,6 +39,15 @@ module internal QueryableTranslation =
 /// </summary>
 /// <param name="source">The source collection.</param>
 /// <param name="data">Additional data, such as cache clearing functions.</param>
+/// Instrumentation counter for one-statement proof.
+/// Tracks the number of SQL commands executed during queryable execution.
+/// Reset before each query via ResetQueryCommandCounter(); read via QueryCommandCounter.
+module internal QueryCommandInstrumentation =
+    let mutable private counter = 0
+    let Increment() = System.Threading.Interlocked.Increment(&counter) |> ignore
+    let Reset() = counter <- 0
+    let Count() = counter
+
 type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, data: obj) =
     static let enumerableDispatchCache = System.Collections.Concurrent.ConcurrentDictionary<Type, MethodInfo>()
 
@@ -55,6 +64,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
             | ValueSome ctx when ctx.HasSingleRelations || ctx.HasManyRelations ->
                 // Buffer all results, then batch-load relation properties.
                 let buffer = ResizeArray<int64 * 'Elem>()
+                QueryCommandInstrumentation.Increment()
                 for row in connection.Query<Types.DbObjectRow>(query, par) do
                     let entity = JsonFunctions.fromSQLite<'Elem> row
                     buffer.Add(row.Id.Value, entity)
@@ -84,11 +94,19 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                                 Relations.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
                             )
 
-                        Relations.captureRelationVersionForEntities connection ctx.OwnerTable ownerEntities
+                        // Version capture requires per-entity metadata queries.
+                        // When all relations are hydrated inline (no batch-load ran at all),
+                        // defer version capture to Update-time to preserve one-statement guarantee.
+                        let batchLoadRan =
+                            (ctx.HasSingleRelations && not ctx.SingleRelationsHydrated)
+                            || ctx.HasManyRelations
+                        if batchLoadRan then
+                            Relations.captureRelationVersionForEntities connection ctx.OwnerTable ownerEntities
 
                 for (_id, entity) in buffer do
                     yield entity
             | _ ->
+                QueryCommandInstrumentation.Increment()
                 for row in connection.Query<Types.DbObjectRow>(query, par) do
                     yield JsonFunctions.fromSQLite<'Elem> row
         }
@@ -126,7 +144,11 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         Relations.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefManyProperties" (fun () ->
                             Relations.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
                         )
-                    Relations.captureRelationVersionForEntities connection ctx.OwnerTable [| (row.Id.Value, box entity) |]
+                    let batchLoadRan =
+                        (ctx.HasSingleRelations && not ctx.SingleRelationsHydrated)
+                        || ctx.HasManyRelations
+                    if batchLoadRan then
+                        Relations.captureRelationVersionForEntities connection ctx.OwnerTable [| (row.Id.Value, box entity) |]
                 | _ -> ()
                 entity
 
@@ -183,6 +205,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         | None -> Unchecked.defaultof<'TResult>
 
                     // Add Single, First, and the OrDefault Variant here.
+                    QueryCommandInstrumentation.Increment()
                     let query = connection.Query<Types.DbObjectRow>(query, variables)
 
                     match methodName with
