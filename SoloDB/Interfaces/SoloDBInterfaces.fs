@@ -1325,10 +1325,41 @@ type UntypedCollectionExt =
     static member InsertObj(collection: ISoloDBCollection<JsonSerializator.JsonValue>, o: obj) =
         o |> JsonSerializator.JsonValue.SerializeWithType |> collection.Insert
 
+/// <summary>
+/// Represents an IQueryable that carries include-chain type context for ThenInclude dispatch.
+/// TProperty is the type of the last included relation (DBRef&lt;T&gt; or DBRefMany&lt;T&gt;).
+/// </summary>
+[<AllowNullLiteral>]
+type IIncludableQueryable<'T, 'TProperty> =
+    inherit IQueryable<'T>
+
+/// <summary>
+/// Internal wrapper that carries the dotted include-chain path alongside the inner IQueryable.
+/// </summary>
+type IncludableQueryable<'T, 'TProperty> internal (inner: IQueryable<'T>, chainPath: string) =
+    let elementType = typeof<'T>
+    let expression = inner.Expression
+    let provider = inner.Provider
+
+    /// The accumulated dotted path for this include chain (e.g., "Customer.Address").
+    member _.ChainPath = chainPath
+    /// The wrapped IQueryable.
+    member _.Inner = inner
+
+    interface IIncludableQueryable<'T, 'TProperty>
+    interface IQueryable<'T> with
+        member _.ElementType = elementType
+        member _.Expression = expression
+        member _.Provider = provider
+    interface System.Collections.IEnumerable with
+        member _.GetEnumerator() = (inner :> System.Collections.IEnumerable).GetEnumerator()
+    interface IEnumerable<'T> with
+        member _.GetEnumerator() = inner.GetEnumerator()
+
 [<Extension>]
 type RelationQueryExt =
     [<Extension>]
-    static member Include<'T, 'TRelation>(query: IQueryable<'T>, selector: Expression<Func<'T, 'TRelation>>) : IQueryable<'T> =
+    static member Include<'T, 'TRelation>(query: IQueryable<'T>, selector: Expression<Func<'T, 'TRelation>>) : IIncludableQueryable<'T, 'TRelation> =
         if isNull query then raise (ArgumentNullException(nameof(query)))
         if isNull selector then raise (ArgumentNullException(nameof(selector)))
         // Produce a MethodCallExpression so the query pipeline can detect Include and populate IncludedPaths.
@@ -1337,7 +1368,61 @@ type RelationQueryExt =
                 .GetMethod("Include", Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
                 .MakeGenericMethod(typeof<'T>, typeof<'TRelation>)
         let callExpr = Expression.Call(method, query.Expression, selector)
-        query.Provider.CreateQuery<'T>(callExpr)
+        let resultQuery = query.Provider.CreateQuery<'T>(callExpr)
+        // Extract property name from selector for chain path
+        let propName =
+            match selector.Body with
+            | :? MemberExpression as me -> me.Member.Name
+            | _ -> ""
+        IncludableQueryable<'T, 'TRelation>(resultQuery, propName) :> IIncludableQueryable<'T, 'TRelation>
+
+    /// <summary>ThenInclude for DBRef&lt;TPrev&gt; hop: selector takes TPrev.</summary>
+    [<Extension>]
+    static member ThenInclude<'T, 'TPrev, 'TNext>(query: IIncludableQueryable<'T, DBRef<'TPrev>>, selector: Expression<Func<'TPrev, 'TNext>>) : IIncludableQueryable<'T, 'TNext> =
+        if isNull query then raise (ArgumentNullException(nameof(query)))
+        if isNull selector then raise (ArgumentNullException(nameof(selector)))
+        let parentPath =
+            match query with
+            | :? IncludableQueryable<'T, DBRef<'TPrev>> as iq -> iq.ChainPath
+            | _ -> ""
+        let propName =
+            match selector.Body with
+            | :? MemberExpression as me -> me.Member.Name
+            | _ -> raise (NotSupportedException("ThenInclude selector must be a direct member access."))
+        let chainPath = if parentPath = "" then propName else parentPath + "." + propName
+        // Produce a ThenInclude MethodCallExpression for the query pipeline
+        let method =
+            typeof<RelationQueryExt>
+                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
+                |> Array.find (fun m -> m.Name = "ThenInclude" && m.GetParameters().[0].ParameterType.GenericTypeArguments.[1].GetGenericTypeDefinition() = typedefof<DBRef<_>>)
+        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TPrev>, typeof<'TNext>)
+        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
+        IncludableQueryable<'T, 'TNext>(resultQuery, chainPath) :> IIncludableQueryable<'T, 'TNext>
+
+    /// <summary>ThenInclude for DBRefMany&lt;TElem&gt; hop: selector takes TElem (element type).</summary>
+    [<Extension>]
+    static member ThenInclude<'T, 'TElem, 'TNext>(query: IIncludableQueryable<'T, DBRefMany<'TElem>>, selector: Expression<Func<'TElem, 'TNext>>) : IIncludableQueryable<'T, 'TNext> =
+        if isNull query then raise (ArgumentNullException(nameof(query)))
+        if isNull selector then raise (ArgumentNullException(nameof(selector)))
+        let parentPath =
+            match query with
+            | :? IncludableQueryable<'T, DBRefMany<'TElem>> as iq -> iq.ChainPath
+            | _ -> ""
+        let propName =
+            match selector.Body with
+            | :? MemberExpression as me -> me.Member.Name
+            | _ -> raise (NotSupportedException("ThenInclude selector must be a direct member access."))
+        let chainPath = if parentPath = "" then propName else parentPath + "." + propName
+        // Produce a ThenInclude MethodCallExpression for the query pipeline
+        let method =
+            typeof<RelationQueryExt>
+                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
+                |> Array.find (fun m -> m.Name = "ThenInclude" && m.GetParameters().[0].ParameterType.GenericTypeArguments.[1].GetGenericTypeDefinition() = typedefof<DBRefMany<_>>)
+        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TElem>, typeof<'TNext>)
+        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
+        IncludableQueryable<'T, 'TNext>(resultQuery, chainPath) :> IIncludableQueryable<'T, 'TNext>
 
     [<Extension>]
     static member Exclude<'T, 'TRelation>(query: IQueryable<'T>, selector: Expression<Func<'T, 'TRelation>>) : IQueryable<'T> =

@@ -81,6 +81,7 @@ module internal QueryableTranslationCore =
             | SupportedLinqMethods.Cast
             | SupportedLinqMethods.OfType
             | SupportedLinqMethods.Include
+            | SupportedLinqMethods.ThenInclude
             | SupportedLinqMethods.Exclude
                 -> false
         | _other -> false

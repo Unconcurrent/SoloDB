@@ -259,6 +259,12 @@ module internal QueryableBuildQueryPartC =
                     let path = extractRelationPathOrThrow "Include" m.Expressions
                     registerIncludePath sourceCtx path
 
+                | SupportedLinqMethods.ThenInclude ->
+                    // ThenInclude appends to the chain path from the carrier.
+                    // The dotted path is composed in the extension method and registered here.
+                    let path = extractRelationPathOrThrow "ThenInclude" m.Expressions
+                    registerIncludePath sourceCtx path
+
                 | SupportedLinqMethods.Aggregate ->
                     raise (NotSupportedException("Aggregate is not supported."))
 

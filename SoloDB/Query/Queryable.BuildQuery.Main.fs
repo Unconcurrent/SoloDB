@@ -42,7 +42,7 @@ module internal QueryableBuildQueryMain =
         // If a predicate accesses an excluded path via .Value, translator must fail loudly in both orders.
         for q in preprocessed do
             match q with
-            | Method m when m.Value = SupportedLinqMethods.Exclude || m.Value = SupportedLinqMethods.Include ->
+            | Method m when m.Value = SupportedLinqMethods.Exclude || m.Value = SupportedLinqMethods.Include || m.Value = SupportedLinqMethods.ThenInclude ->
                 let path =
                     if m.Value = SupportedLinqMethods.Exclude then extractRelationPathOrThrow "Exclude" m.Expressions
                     else extractRelationPathOrThrow "Include" m.Expressions
@@ -133,6 +133,7 @@ module internal QueryableBuildQueryMain =
                 | SupportedLinqMethods.OfType
                 | SupportedLinqMethods.Exclude
                 | SupportedLinqMethods.Include
+                | SupportedLinqMethods.ThenInclude
                 | SupportedLinqMethods.Aggregate ->
                     QueryableBuildQueryPartC.apply<'T>
                         sourceCtx

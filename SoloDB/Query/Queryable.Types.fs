@@ -68,6 +68,7 @@ type internal SupportedLinqMethods =
 | OfType
 | Aggregate
 | Include
+| ThenInclude
 | Exclude
 
 // Translation validation helpers.
