@@ -2,6 +2,7 @@ namespace SoloDatabase
 
 open System
 open System.Collections.Generic
+open System.Linq.Expressions
 open System.Reflection
 open System.Text
 open Microsoft.Data.Sqlite
@@ -381,3 +382,47 @@ module internal HydrationSqlBuilder =
         emitSelectToSb sb initialVars indexModel select
 
         sb.ToString(), manyHydrated
+
+    /// Emit a SqlExpr to a SQL string using the standalone EmitContext.
+    /// Used for emitting DU-built expressions as SQL fragments for template composition.
+    let emitExprToSql (expr: SqlExpr) : string =
+        let ctx = EmitContext()
+        ctx.InlineLiterals <- true
+        let emitted = EmitExpr.emitExprWith EmitSelect.emitSelect ctx expr
+        emitted.Sql
+
+    /// Build a mutation-prep SELECT SQL with DBRefMany-only HydrationJSON.
+    /// Uses table alias "o". The raw WHERE filter SQL is composed via SQL template
+    /// (standard composition, not post-emission string surgery).
+    /// Returns (sqlString, hasManyHydration).
+    let buildManyOnlyHydratedSqlWithRawWhere
+        (connection: SqliteConnection)
+        (tableName: string)
+        (ownerType: Type)
+        (rawFilterSql: string)
+        (addLimit: bool)
+        : string * bool =
+
+        let ctx = QueryContext.SingleSource(tableName)
+        preloadQueryContextMetadata ctx connection
+
+        let shape : RelationShapeInfo = getRelationShape ownerType
+        let limitClause = if addLimit then " LIMIT 1" else ""
+        let qTable = "\"" + tableName + "\""
+
+        if not shape.HasMany then
+            $"SELECT Id, json_quote(Value) as ValueJSON FROM {qTable} WHERE {rawFilterSql}{limitClause}", false
+        else
+
+        let mutable aliasCounter = 0
+        // Use table-name-qualified Id for correlated subquery correlation.
+        // No table alias: the raw filter SQL references columns by table name (e.g., "Article"."Value").
+        let ownerIdExpr = SqlExpr.Column(Some qTable, "Id")
+        match buildManyHydrationProjection ctx ownerType tableName ownerIdExpr &aliasCounter with
+        | None ->
+            $"SELECT Id, json_quote(Value) as ValueJSON FROM {qTable} WHERE {rawFilterSql}{limitClause}", false
+        | Some hydExpr ->
+            // Emit the HydrationJSON expression to a SQL fragment via standalone emitter.
+            let hydSql = emitExprToSql hydExpr
+            // Compose full SQL via template — standard composition, no surgery.
+            $"SELECT {qTable}.Id, json_quote({qTable}.Value) AS \"ValueJSON\", {hydSql} AS \"HydrationJSON\" FROM {qTable} WHERE {rawFilterSql}{limitClause}", true

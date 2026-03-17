@@ -9,6 +9,8 @@ open SoloDatabase.Types
 open JsonFunctions
 open Utils
 open SQLiteTools
+open SoloDatabase
+open SqlDu.Engine.C1.Spec
 
 type internal CollectionMutationOps<'T>() =
 
@@ -44,13 +46,37 @@ type internal CollectionMutationOps<'T>() =
             withTransaction (fun conn ->
                 let tx = ensureRelationTx conn
 
-                let oldRow = conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filter} LIMIT 1", variables)
+                // R45-10 Slice B: mutation-prep old-state read with DBRefMany-only hydration.
+                // Build DU-based WHERE from entity Id (no raw SQL string surgery).
+                let manyVars = Dictionary<string, obj>()
+                let whereExpr =
+                    if HasTypeId<'T>.Value then
+                        let id = HasTypeId<'T>.Read item
+                        manyVars.["_mid0"] <- box id
+                        SqlExpr.Binary(SqlExpr.Column(Some "o", "Id"), BinaryOperator.Eq, SqlExpr.Parameter "_mid0")
+                    else
+                        match CustomTypeId<'T>.Value with
+                        | Some customId ->
+                            let id = customId.GetId(item |> box)
+                            manyVars.["_mid0"] <- id
+                            SqlExpr.Binary(
+                                SqlExpr.FunctionCall("jsonb_extract",
+                                    [SqlExpr.Column(Some "o", "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + customId.Property.Name))]),
+                                BinaryOperator.Eq,
+                                SqlExpr.Parameter "_mid0")
+                        | None -> raise (InvalidOperationException("Update requires int64 Id or custom Id."))
+                let sql, manyHydrated =
+                    HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> whereExpr manyVars true
+                QueryCommandInstrumentation.Increment()
+                let oldRow = conn.QueryFirstOrDefault<DbObjectRow>(sql, manyVars)
                 if isNull oldRow then
                     raise (KeyNotFoundException "Could not Update any entities with specified Id.")
 
                 let oldOwner = fromSQLite<'T> oldRow
-                let excludedPaths, includedPaths = mkRelationPathSets()
-                Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths false [| (oldRow.Id.Value, box oldOwner) |] true
+                if manyHydrated && not (isNull oldRow.HydrationJSON) then
+                    let hydMap = Dictionary<int64, string>()
+                    hydMap.[oldRow.Id.Value] <- oldRow.HydrationJSON
+                    HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (oldRow.Id.Value, box oldOwner) |] hydMap
                 let writePlan = Relations.prepareUpdate tx oldRow.Id.Value (box oldOwner) (box item)
 
                 setSerializedItem variables item
@@ -157,15 +183,24 @@ type internal CollectionMutationOps<'T>() =
             withTransaction (fun conn ->
                 let tx = ensureRelationTx conn
 
-                let oldRows = conn.Query<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE {filterSql}", variables) |> Seq.toArray
+                // R45-10 Slice B: mutation-prep old-state read with DBRefMany-only hydration.
+                // DU-built hydration projection + raw filter composed via SQL template.
+                let sql, manyHydrated =
+                    HydrationSqlBuilder.buildManyOnlyHydratedSqlWithRawWhere conn name typeof<'T> filterSql false
+                QueryCommandInstrumentation.Increment()
+                let oldRows = conn.Query<DbObjectRow>(sql, variables) |> Seq.toArray
                 if oldRows.Length = 0 then
                     0
                 else
                     let oldOwners = oldRows |> Array.map (fun row -> fromSQLite<'T> row |> box)
                     let ownerIds = oldRows |> Array.map (fun row -> row.Id.Value)
-                    let excludedPaths, includedPaths = mkRelationPathSets()
                     let ownerPairs = Array.zip ownerIds oldOwners
-                    Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths false ownerPairs true
+                    if manyHydrated then
+                        let hydMap = Dictionary<int64, string>()
+                        for row in oldRows do
+                            if not (isNull row.HydrationJSON) then
+                                hydMap.[row.Id.Value] <- row.HydrationJSON
+                        HydrationManyPopulator.populateFromHydrationJson typeof<'T> ownerPairs hydMap
                     Relations.syncReplaceMany tx (ownerIds :> seq<_>) (oldOwners :> seq<_>) (box item)
                     setSerializedItem variables item
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE " + filterSql, variables)
@@ -194,13 +229,19 @@ type internal CollectionMutationOps<'T>() =
             withTransaction (fun conn ->
                 let tx = ensureRelationTx conn
 
-                let oldRow = conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE ({filterSql}) LIMIT 1", variables)
+                // R45-10 Slice B: mutation-prep old-state read with DBRefMany-only hydration.
+                let sql, manyHydrated =
+                    HydrationSqlBuilder.buildManyOnlyHydratedSqlWithRawWhere conn name typeof<'T> $"({filterSql})" true
+                QueryCommandInstrumentation.Increment()
+                let oldRow = conn.QueryFirstOrDefault<DbObjectRow>(sql, variables)
                 if isNull oldRow then
                     0
                 else
                     let oldOwner = fromSQLite<'T> oldRow
-                    let excludedPaths, includedPaths = mkRelationPathSets()
-                    Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths false [| (oldRow.Id.Value, box oldOwner) |] true
+                    if manyHydrated && not (isNull oldRow.HydrationJSON) then
+                        let hydMap = Dictionary<int64, string>()
+                        hydMap.[oldRow.Id.Value] <- oldRow.HydrationJSON
+                        HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (oldRow.Id.Value, box oldOwner) |] hydMap
                     Relations.syncReplaceOne tx oldRow.Id.Value (box oldOwner) (box item)
                     setSerializedItem variables item
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id = @id", {| item = variables.["item"]; id = oldRow.Id.Value |})
