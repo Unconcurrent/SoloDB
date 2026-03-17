@@ -209,11 +209,7 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
                     false
 
             if probeOk then
-                if not pooledConn.IsEventDispatchStateClean then
-                    pooledConn.ResetEventDispatchState()
-
                 pooledConn.ResetEventDispatchState()
-
                 pool.Push pooledConn
 
         /// <summary>
