@@ -139,7 +139,7 @@ let batchLoadDBRefProperties
     (inTransaction: bool)
     =
     withRelationSqliteWrap "batch-load" "batchLoadDBRefProperties" (fun () ->
-        RelationsBatchLoad.batchLoadDBRefProperties connection ownerTable ownerType excludedPaths includedPaths ownerEntities inTransaction 0 (HashSet())
+        RelationsBatchLoad.batchLoadDBRefProperties connection ownerTable ownerType excludedPaths includedPaths ownerEntities inTransaction 0 (HashSet()) ""
     )
 
 let batchLoadDBRefManyProperties
@@ -152,7 +152,7 @@ let batchLoadDBRefManyProperties
     (inTransaction: bool)
     =
     withRelationSqliteWrap "batch-load" "batchLoadDBRefManyProperties" (fun () ->
-        RelationsBatchLoad.batchLoadDBRefManyProperties connection ownerTable ownerType excludedPaths includedPaths ownerEntities inTransaction 0 (HashSet())
+        RelationsBatchLoad.batchLoadDBRefManyProperties connection ownerTable ownerType excludedPaths includedPaths ownerEntities inTransaction 0 (HashSet()) ""
     )
 
 /// Capture the RelationVersion baseline for loaded entities.

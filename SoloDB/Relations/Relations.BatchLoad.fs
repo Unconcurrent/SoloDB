@@ -27,6 +27,7 @@ let rec batchLoadDBRefProperties
     (inTransaction: bool)
     (depth: int)
     (visited: HashSet<int64 * string>)
+    (currentPrefix: string)
     =
     if ownerEntities.Length = 0 then ()
     else
@@ -37,9 +38,16 @@ let rec batchLoadDBRefProperties
     else
 
     let ownerTable = formatName ownerTable
-    let shouldLoadPath (path: string) =
-        if excludedPaths.Contains(path) then false
-        elif includedPaths.Count > 0 then includedPaths.Contains(path)
+    let fullPath (propName: string) =
+        if currentPrefix = "" then propName else currentPrefix + "." + propName
+
+    let shouldLoadPath (propName: string) =
+        let fp = fullPath propName
+        // Check exact or prefix-based exclusion
+        if excludedPaths |> Seq.exists (fun e -> e = fp || fp.StartsWith(e + ".")) then false
+        // Check exact or prefix-based inclusion
+        elif includedPaths.Count > 0 then
+            includedPaths |> Seq.exists (fun i -> i = fp || i.StartsWith(fp + ".") || fp.StartsWith(i + "."))
         else true
 
     // Opt-in recursion gate: recurse only when Include was explicitly used (depth 0)
@@ -102,14 +110,13 @@ let rec batchLoadDBRefProperties
 
             // Recursive multi-hop loading for Include targets
             if shouldRecurse then
-                let subExcl = HashSet<string>()
-                let subIncl = HashSet<string>()
+                let childPrefix = fullPath prop.Name
                 for kv in loadedTargets do
                     let key = (kv.Key, targetType.FullName)
                     if not (visited.Contains(key)) then
                         visited.Add(key) |> ignore
-                        batchLoadDBRefProperties connection targetTable targetType subExcl subIncl [|(kv.Key, kv.Value)|] inTransaction (depth + 1) visited
-                        batchLoadDBRefManyProperties connection targetTable targetType subExcl subIncl [|(kv.Key, kv.Value)|] inTransaction (depth + 1) visited
+                        batchLoadDBRefProperties connection targetTable targetType excludedPaths includedPaths [|(kv.Key, kv.Value)|] inTransaction (depth + 1) visited childPrefix
+                        batchLoadDBRefManyProperties connection targetTable targetType excludedPaths includedPaths [|(kv.Key, kv.Value)|] inTransaction (depth + 1) visited childPrefix
                         visited.Remove(key) |> ignore
 
 and batchLoadDBRefManyProperties
@@ -122,6 +129,7 @@ and batchLoadDBRefManyProperties
     (inTransaction: bool)
     (depth: int)
     (visited: HashSet<int64 * string>)
+    (currentPrefix: string)
     =
     if ownerEntities.Length = 0 then ()
     else
@@ -132,9 +140,14 @@ and batchLoadDBRefManyProperties
     if manyDescriptors.Length = 0 then ()
     else
 
-    let shouldLoadPath (path: string) =
-        if excludedPaths.Contains(path) then false
-        elif includedPaths.Count > 0 then includedPaths.Contains(path)
+    let fullPath (propName: string) =
+        if currentPrefix = "" then propName else currentPrefix + "." + propName
+
+    let shouldLoadPath (propName: string) =
+        let fp = fullPath propName
+        if excludedPaths |> Seq.exists (fun e -> e = fp || fp.StartsWith(e + ".")) then false
+        elif includedPaths.Count > 0 then
+            includedPaths |> Seq.exists (fun i -> i = fp || i.StartsWith(fp + ".") || fp.StartsWith(i + "."))
         else true
 
     let shouldRecurse = depth < maxRecursiveDepth && (depth > 0 || includedPaths.Count > 0)
@@ -208,8 +221,7 @@ and batchLoadDBRefManyProperties
 
         // Recursive multi-hop loading for Include targets
         if shouldRecurse then
-            let subExcl = HashSet<string>()
-            let subIncl = HashSet<string>()
+            let childPrefix = fullPath descriptor.Property.Name
             let allTargets =
                 grouped.Values
                 |> Seq.collect id
@@ -219,6 +231,6 @@ and batchLoadDBRefManyProperties
                 let key = (targetId, descriptor.TargetType.FullName)
                 if not (visited.Contains(key)) then
                     visited.Add(key) |> ignore
-                    batchLoadDBRefProperties connection descriptor.TargetTable descriptor.TargetType subExcl subIncl [|(targetId, targetObj)|] inTransaction (depth + 1) visited
-                    batchLoadDBRefManyProperties connection descriptor.TargetTable descriptor.TargetType subExcl subIncl [|(targetId, targetObj)|] inTransaction (depth + 1) visited
+                    batchLoadDBRefProperties connection descriptor.TargetTable descriptor.TargetType excludedPaths includedPaths [|(targetId, targetObj)|] inTransaction (depth + 1) visited childPrefix
+                    batchLoadDBRefManyProperties connection descriptor.TargetTable descriptor.TargetType excludedPaths includedPaths [|(targetId, targetObj)|] inTransaction (depth + 1) visited childPrefix
                     visited.Remove(key) |> ignore

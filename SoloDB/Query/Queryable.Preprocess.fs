@@ -122,10 +122,16 @@ module internal QueryableHelperPreprocess =
             sourceCtx.IncludedPaths.Add(path) |> ignore
 
     let internal validateIncludeExcludeConflicts (ctx: QueryContext) =
-        for path in ctx.IncludedPaths do
-            if ctx.ExcludedPaths.Contains(path) then
+        for includedPath in ctx.IncludedPaths do
+            // C-01: exact-match conflict
+            if ctx.ExcludedPaths.Contains(includedPath) then
                 raise (InvalidOperationException(
-                    $"Error: Path '{path}' is both included and excluded.\nReason: Include/Exclude conflict on same relation path.\nFix: Keep only one directive for this path."))
+                    $"Error: Path '{includedPath}' is both included and excluded.\nReason: Include/Exclude conflict on same relation path.\nFix: Keep only one directive for this path."))
+            // C-03: parent excluded, child included
+            for excludedPath in ctx.ExcludedPaths do
+                if includedPath.StartsWith(excludedPath + ".") then
+                    raise (InvalidOperationException(
+                        $"Error: Path '{includedPath}' is included but parent '{excludedPath}' is excluded.\nReason: Cannot include a child path under an excluded parent.\nFix: Remove the Exclude on '{excludedPath}' or remove the Include on '{includedPath}'."))
 
     let internal shouldLoadRelationPath (sourceCtx: QueryContext) (path: string) =
         if sourceCtx.ExcludedPaths.Contains(path) then false
