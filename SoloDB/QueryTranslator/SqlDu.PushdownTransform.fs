@@ -46,7 +46,61 @@ let private rewriteExpr (aliasMap: Map<string, SqlExpr>) (derivedAlias: string) 
 let private pushdownInCore (outer: SelectCore) : SelectCore =
     match outer.Source with
     | Some(DerivedTable(innerSel, alias)) when outer.Where.IsSome ->
-        // Check if inner is structurally safe for pushdown
+        match innerSel.Body with
+        | UnionAllSelect(head, tail) ->
+            // UNION ALL predicate distribution: push conjuncts into every arm
+            // when ALL arms are structurally safe and conjunct refs exist in ALL arms.
+            let allArms = head :: tail
+            let allArmsSafe =
+                allArms |> List.forall (fun arm ->
+                    arm.GroupBy.IsEmpty
+                    && arm.Having.IsNone
+                    && arm.Limit.IsNone
+                    && arm.Offset.IsNone
+                    && not arm.Distinct
+                    && not (arm.Projections |> ProjectionSetOps.toList |> List.exists (fun p -> ExpressionPredicates.hasWindowFunction p.Expr))
+                    && not (arm.Projections |> ProjectionSetOps.toList |> List.exists (fun p -> ExpressionPredicates.hasAggregateCall p.Expr)))
+            if not allArmsSafe then outer
+            else
+                // Column set = intersection of all arms' projections
+                let armColumnSets = allArms |> List.map buildInnerColumnSet
+                let commonColumns = armColumnSets |> List.reduce Set.intersect
+
+                let conjuncts = splitConjuncts outer.Where.Value
+
+                let pushable, stays =
+                    conjuncts
+                    |> List.partition (fun c ->
+                        predicateRefsAvailable c commonColumns alias
+                        && not (hasCorrelatedRef c)
+                        && not (PushdownSafety.hasAggregateCall c))
+
+                if pushable.IsEmpty then outer
+                else
+                    // Distribute pushable conjuncts to every arm
+                    let distributeToArm (arm: SelectCore) =
+                        let armAliasMap = buildAliasMap arm
+                        let rewrittenPushable =
+                            pushable |> List.map (rewriteExpr armAliasMap alias)
+                        let newWhere =
+                            match arm.Where with
+                            | Some existing ->
+                                match joinConjuncts rewrittenPushable with
+                                | Some p -> Some(Binary(existing, And, p))
+                                | None -> Some existing
+                            | None -> joinConjuncts rewrittenPushable
+                        { arm with Where = newWhere }
+
+                    let newHead = distributeToArm head
+                    let newTail = tail |> List.map distributeToArm
+                    let newInnerSel = { innerSel with Body = UnionAllSelect(newHead, newTail) }
+                    let newOuterWhere = joinConjuncts stays
+
+                    { outer with
+                        Source = Some(DerivedTable(newInnerSel, alias))
+                        Where = newOuterWhere }
+        | _ ->
+        // SingleSelect path: check if inner is structurally safe for pushdown
         if not (isInnerPushdownSafe innerSel) then outer
         else
             match innerSel.Body with
@@ -92,7 +146,7 @@ let private pushdownInCore (outer: SelectCore) : SelectCore =
                     { outer with
                         Source = Some(DerivedTable(newInnerSel, alias))
                         Where = newOuterWhere }
-            | _ -> outer // UnionAll — P-S8 blocks
+            | _ -> outer // Unreachable: UnionAll handled above
     | _ -> outer // No DerivedTable source or no WHERE — nothing to push
 
 /// Recursively apply pushdown to a SqlSelect at every nesting level.
