@@ -24,6 +24,18 @@ module internal QueryTranslatorVisitDbRef =
     let private nestedDbRefManyNotSupportedMessage =
         "Error: Deeply nested DBRefMany query is not supported.\nReason: Only one level of DBRefMany nesting is allowed in relation predicates.\nFix: Rewrite to at most one nested DBRefMany level, or move deeper traversal after AsEnumerable()."
 
+    [<Literal>]
+    let private filteredWhereOnlyAnyCountLongCountMessage =
+        "Error: DBRefMany.Where() is not supported with this terminal operator in this cycle.\nReason: Only .Where().Any(), .Where().Count(), and .Where().LongCount() are admitted in L1.\nFix: Use one of the admitted operators, or move the query after AsEnumerable()."
+
+    [<Literal>]
+    let private filteredWhereRelationNavigationMessage =
+        "Error: DBRefMany.Where() predicate cannot navigate DBRef or DBRefMany relations.\nReason: L1 admits only scalar predicates over the target entity.\nFix: Filter on scalar target properties only, or move the relation navigation after AsEnumerable()."
+
+    [<Literal>]
+    let private filteredWhereOuterCaptureMessage =
+        "Error: DBRefMany.Where() predicate cannot capture the outer owner entity.\nReason: L1 binds the inner predicate only to the relation target alias.\nFix: Rewrite the predicate to depend only on the relation target, or move it after AsEnumerable()."
+
     // Unique alias counter for nested EXISTS subqueries (prevents alias collision).
     let mutable private subqueryAliasCounter = 0L
 
@@ -68,6 +80,99 @@ module internal QueryTranslatorVisitDbRef =
                 nae.Expressions |> Seq.map visitExpr |> Seq.fold max 0
             | _ -> 0
         visitExpr expr
+
+    let private containsRelationNavigation (expr: Expression) =
+        let rec visitExpr (e: Expression) =
+            match unwrapConvert e with
+            | null -> false
+            | :? MemberExpression as me ->
+                let inner = unwrapConvert me.Expression
+                let directDbRefNav =
+                    not (isNull inner)
+                    && isDBRefType inner.Type
+                let directDbRefManyNav =
+                    not (isNull inner)
+                    && isDBRefManyType inner.Type
+                directDbRefNav
+                || directDbRefManyNav
+                || visitExpr me.Expression
+            | :? MethodCallExpression as mc ->
+                let objectNav =
+                    not (isNull mc.Object)
+                    && (isDBRefType (unwrapConvert mc.Object).Type || isDBRefManyType (unwrapConvert mc.Object).Type)
+                let argNav =
+                    mc.Arguments
+                    |> Seq.exists (fun a ->
+                        let ua = unwrapConvert a
+                        isDBRefType ua.Type || isDBRefManyType ua.Type || visitExpr a)
+                objectNav || argNav || visitExpr mc.Object
+            | :? BinaryExpression as be ->
+                visitExpr be.Left || visitExpr be.Right
+            | :? UnaryExpression as ue ->
+                visitExpr ue.Operand
+            | :? ConditionalExpression as ce ->
+                visitExpr ce.Test || visitExpr ce.IfTrue || visitExpr ce.IfFalse
+            | :? InvocationExpression as ie ->
+                visitExpr ie.Expression || (ie.Arguments |> Seq.exists visitExpr)
+            | :? NewExpression as ne ->
+                ne.Arguments |> Seq.exists visitExpr
+            | :? NewArrayExpression as nae ->
+                nae.Expressions |> Seq.exists visitExpr
+            | :? MemberInitExpression as mie ->
+                visitExpr mie.NewExpression
+                || (mie.Bindings |> Seq.exists (function
+                    | :? MemberAssignment as ma -> visitExpr ma.Expression
+                    | _ -> false))
+            | :? ListInitExpression as lie ->
+                visitExpr lie.NewExpression
+                || (lie.Initializers |> Seq.exists (fun init -> init.Arguments |> Seq.exists visitExpr))
+            | :? LambdaExpression as le ->
+                visitExpr le.Body
+            | _ -> false
+        visitExpr expr
+
+    let private containsOuterCapture (lambda: LambdaExpression) =
+        let root =
+            if lambda.Parameters.Count = 1 then ValueSome lambda.Parameters.[0]
+            else ValueNone
+
+        let rec visitExpr (e: Expression) =
+            match unwrapConvert e with
+            | null -> false
+            | :? ParameterExpression as pe ->
+                match root with
+                | ValueSome rp -> not (Object.ReferenceEquals(pe, rp))
+                | ValueNone -> true
+            | :? MemberExpression as me ->
+                visitExpr me.Expression
+            | :? MethodCallExpression as mc ->
+                (not (isNull mc.Object) && visitExpr mc.Object)
+                || (mc.Arguments |> Seq.exists visitExpr)
+            | :? BinaryExpression as be ->
+                visitExpr be.Left || visitExpr be.Right
+            | :? UnaryExpression as ue ->
+                visitExpr ue.Operand
+            | :? ConditionalExpression as ce ->
+                visitExpr ce.Test || visitExpr ce.IfTrue || visitExpr ce.IfFalse
+            | :? InvocationExpression as ie ->
+                visitExpr ie.Expression || (ie.Arguments |> Seq.exists visitExpr)
+            | :? NewExpression as ne ->
+                ne.Arguments |> Seq.exists visitExpr
+            | :? NewArrayExpression as nae ->
+                nae.Expressions |> Seq.exists visitExpr
+            | :? MemberInitExpression as mie ->
+                visitExpr mie.NewExpression
+                || (mie.Bindings |> Seq.exists (function
+                    | :? MemberAssignment as ma -> visitExpr ma.Expression
+                    | _ -> false))
+            | :? ListInitExpression as lie ->
+                visitExpr lie.NewExpression
+                || (lie.Initializers |> Seq.exists (fun init -> init.Arguments |> Seq.exists visitExpr))
+            | :? LambdaExpression as innerLambda ->
+                // Nested lambdas are out of scope for this cycle.
+                not (Object.ReferenceEquals(innerLambda, lambda)) || visitExpr innerLambda.Body
+            | _ -> false
+        visitExpr lambda.Body
 
     /// preExpressionHandler for DBRef member access translation.
     let private handleDBRefExpression (qb: QueryBuilder) (exp: Expression) : bool =
@@ -306,6 +411,124 @@ module internal QueryTranslatorVisitDbRef =
             raise (NotSupportedException(
                 sprintf "Error: Cannot extract predicate lambda for relation-backed DBRefMany.%s.\nReason: The predicate is not a simple lambda expression.\nFix: Use a simple lambda (e.g., x => ...) or move the operation after AsEnumerable()." methodName))
 
+    let private buildFilteredPredicateDus (qb: QueryBuilder) (tgtAlias: string) (predicateExprs: Expression list) =
+        predicateExprs
+        |> List.map (fun predExpr ->
+            match tryExtractLambdaExpression predExpr with
+            | ValueSome predLambda ->
+                if countDbRefManyDepth predLambda.Body > 0 then
+                    raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
+                if containsRelationNavigation predLambda.Body then
+                    raise (NotSupportedException(filteredWhereRelationNavigationMessage))
+                if containsOuterCapture predLambda then
+                    raise (NotSupportedException(filteredWhereOuterCaptureMessage))
+                let subQb = qb.ForSubquery(tgtAlias, predLambda)
+                visitDu predLambda.Body subQb
+            | ValueNone ->
+                raise (NotSupportedException(
+                    "Error: Cannot extract predicate lambda for DBRefMany.Where.\nReason: The predicate is not a simple lambda expression.\nFix: Use a simple lambda or move the operation after AsEnumerable().")))
+
+    /// L1: Peel .Where(pred) calls from a DBRefMany source expression.
+    /// Returns (innerDBRefManyExpr, predicateExprs) where predicateExprs is a list of
+    /// Where predicates in application order (chained .Where().Where() produces multiple).
+    /// Returns ValueNone if the expression is not a .Where() on a DBRefMany source.
+    let rec private tryPeelWhereFromDBRefMany (expr: Expression) : (Expression * Expression list) voption =
+        match expr with
+        | :? MethodCallExpression as mce when mce.Method.Name = "Where" ->
+            let sourceExpr, predExpr =
+                if not (isNull mce.Object) then
+                    mce.Object, (if mce.Arguments.Count >= 1 then ValueSome mce.Arguments.[0] else ValueNone)
+                elif mce.Arguments.Count >= 2 then
+                    mce.Arguments.[0], ValueSome mce.Arguments.[1]
+                else
+                    null, ValueNone
+            if isNull sourceExpr then ValueNone
+            else
+                let unwrappedSource = unwrapConvert sourceExpr
+                if isDBRefManyType unwrappedSource.Type then
+                    // Direct DBRefMany.Where(pred) — single predicate.
+                    match predExpr with
+                    | ValueSome pred -> ValueSome (sourceExpr, [pred])
+                    | ValueNone -> ValueNone
+                else
+                    // Chained: source.Where(pred) where source is itself a .Where() call.
+                    match tryPeelWhereFromDBRefMany sourceExpr with
+                    | ValueSome (innerSource, preds) ->
+                        match predExpr with
+                        | ValueSome pred -> ValueSome (innerSource, preds @ [pred])
+                        | ValueNone -> ValueSome (innerSource, preds)
+                    | ValueNone -> ValueNone
+        | _ -> ValueNone
+
+    /// L1: Build a filtered COUNT subquery for DBRefMany.Where(pred).Count().
+    /// Emits: ScalarSubquery(SELECT COUNT(*) FROM link JOIN target WHERE ownerLink AND pred1 AND pred2 ...)
+    let private buildFilteredCountSubquery (qb: QueryBuilder) (ownerRef: DBRefManyOwnerRef) (predicateExprs: Expression list) : SqlExpr =
+        let propName = ownerRef.PropertyExpr.Member.Name
+        let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
+        let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
+        let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
+        let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
+        let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
+        let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
+        let aliasId = System.Threading.Interlocked.Increment(&subqueryAliasCounter)
+        let tgtAlias = sprintf "_tgt%d" aliasId
+        let lnkAlias = sprintf "_lnk%d" aliasId
+
+        let predicateDus = buildFilteredPredicateDus qb tgtAlias predicateExprs
+
+        let joinOn =
+            SqlExpr.Binary(
+                SqlExpr.Column(Some tgtAlias, "Id"),
+                BinaryOperator.Eq,
+                SqlExpr.Column(Some lnkAlias, targetColumn))
+        let ownerWhere =
+            SqlExpr.Binary(
+                SqlExpr.Column(Some lnkAlias, ownerColumn),
+                BinaryOperator.Eq,
+                SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
+        let fullWhere =
+            predicateDus |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) ownerWhere
+        let countProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
+        let core =
+            { mkSubCore countProj (Some(BaseTable(linkTable, Some lnkAlias))) (Some fullWhere) with
+                Joins = [ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), joinOn)] }
+        let subSelect = { Ctes = []; Body = SingleSelect core }
+        SqlExpr.ScalarSubquery subSelect
+
+    let private buildFilteredExistsSubquery (qb: QueryBuilder) (ownerRef: DBRefManyOwnerRef) (predicateExprs: Expression list) : SqlExpr =
+        let propName = ownerRef.PropertyExpr.Member.Name
+        let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
+        let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
+        let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
+        let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
+        let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
+        let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
+        let aliasId = System.Threading.Interlocked.Increment(&subqueryAliasCounter)
+        let tgtAlias = sprintf "_tgt%d" aliasId
+        let lnkAlias = sprintf "_lnk%d" aliasId
+        let predicateDus = buildFilteredPredicateDus qb tgtAlias predicateExprs
+
+        let joinOn =
+            SqlExpr.Binary(
+                SqlExpr.Column(Some tgtAlias, "Id"),
+                BinaryOperator.Eq,
+                SqlExpr.Column(Some lnkAlias, targetColumn))
+        let ownerWhere =
+            SqlExpr.Binary(
+                SqlExpr.Column(Some lnkAlias, ownerColumn),
+                BinaryOperator.Eq,
+                SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
+        let fullWhere =
+            predicateDus |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) ownerWhere
+        let core =
+            { mkSubCore
+                [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                (Some(BaseTable(linkTable, Some lnkAlias)))
+                (Some fullWhere) with
+                Joins = [ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), joinOn)] }
+        let subSelect = { Ctes = []; Body = SingleSelect core }
+        SqlExpr.Exists subSelect
+
     /// preExpressionHandler for DBRefMany.Count, Any(), Any(pred) as correlated subqueries.
     let private handleDBRefManyExpression (qb: QueryBuilder) (exp: Expression) : bool =
         match exp with
@@ -325,7 +548,27 @@ module internal QueryTranslatorVisitDbRef =
                 | ValueNone -> false
             else false
 
+        // L1: .Where(pred).Count() / .LongCount() method forms only.
+        | :? MethodCallExpression as mce when mce.Method.Name = "Count" || mce.Method.Name = "LongCount" ->
+            let sourceArg, predArg = extractSourceAndPredicate mce
+            match sourceArg with
+            | ValueSome sourceExpr ->
+                match tryPeelWhereFromDBRefMany sourceExpr with
+                | ValueSome (dbRefManySource, predicateExprs) ->
+                    match predArg with
+                    | ValueSome _ ->
+                        raise (NotSupportedException(filteredWhereOnlyAnyCountLongCountMessage))
+                    | ValueNone ->
+                        match tryGetDBRefManyOwnerRef qb dbRefManySource with
+                        | ValueSome ownerRef ->
+                            qb.DuHandlerResult.Value <- ValueSome(buildFilteredCountSubquery qb ownerRef predicateExprs)
+                            true
+                        | ValueNone -> false
+                | ValueNone -> false
+            | ValueNone -> false
+
         // Case 2/3: Any() / Any(pred) over DBRefMany in either extension-call or instance-call form.
+        // L1: also handles .Where(pred).Any() → normalized to .Any(pred) with AND composition.
         | :? MethodCallExpression as mce when mce.Method.Name = "Any" ->
             let sourceArg, predArg = extractSourceAndPredicate mce
 
@@ -347,7 +590,19 @@ module internal QueryTranslatorVisitDbRef =
                         qb.DuHandlerResult.Value <- ValueSome(buildQuantifierWithPredicate qb ownerRef predicateExpr false)
                         true
                 | ValueNone ->
-                    false
+                    // L1: .Where(pred).Any() or .Where(pred).Any(pred2) — peel Where, compose predicates.
+                    match tryPeelWhereFromDBRefMany sourceExpr with
+                    | ValueSome (dbRefManySource, wherePredicates) ->
+                        match tryGetDBRefManyOwnerRef qb dbRefManySource with
+                        | ValueSome ownerRef ->
+                            match predArg with
+                            | ValueSome _ ->
+                                raise (NotSupportedException(filteredWhereOnlyAnyCountLongCountMessage))
+                            | ValueNone ->
+                                qb.DuHandlerResult.Value <- ValueSome(buildFilteredExistsSubquery qb ownerRef wherePredicates)
+                                true
+                        | ValueNone -> false
+                    | ValueNone -> false
             | ValueNone -> false
 
         // Case 4: All(pred) over DBRefMany — relation-aware NOT EXISTS with negated predicate.
@@ -367,7 +622,10 @@ module internal QueryTranslatorVisitDbRef =
                         qb.DuHandlerResult.Value <- ValueSome(SqlExpr.Literal(SqlLiteral.Integer 1L))
                         true
                 | ValueNone ->
-                    false
+                    match tryPeelWhereFromDBRefMany sourceExpr with
+                    | ValueSome _ ->
+                        raise (NotSupportedException(filteredWhereOnlyAnyCountLongCountMessage))
+                    | ValueNone -> false
             | ValueNone -> false
 
         // Case 5: Select(proj) over DBRefMany — correlated subquery with jsonb_group_array (CP-01).
@@ -437,21 +695,58 @@ module internal QueryTranslatorVisitDbRef =
                                     "Error: Cannot extract projection lambda for relation-backed DBRefMany.Select.\nReason: The projection is not a simple lambda expression.\nFix: Use a simple lambda (e.g., x => x.Name) or move the operation after AsEnumerable()."))
                         | ValueNone -> false
                     | ValueNone -> false
-                // Explicit CP-02/CP-03 reject: chained Where/OrderBy/etc on DBRefMany before Select
+                // L1 reject: .Where(pred).Select(proj) on DBRefMany — deferred to L2+.
                 elif unwrappedSource :? MethodCallExpression then
                     let innerMce = unwrappedSource :?> MethodCallExpression
                     let innerSource =
                         if not (isNull innerMce.Object) then innerMce.Object
                         elif innerMce.Arguments.Count > 0 then innerMce.Arguments.[0]
                         else null
-                    if not (isNull innerSource) && isDBRefManyType (unwrapConvert innerSource).Type then
-                        raise (NotSupportedException(
-                            "Error: Chained collection operations on DBRefMany are not supported in this cycle.\n" +
-                            "Reason: Only direct .Select(projection) over DBRefMany is admitted; " +
-                            ".Where().Select(), .OrderBy().Select(), and other chained forms are deferred.\n" +
-                            "Fix: Use .Select() directly on the DBRefMany property, or move the query after AsEnumerable()."))
+                    if not (isNull innerSource) then
+                        let deepSource = unwrapConvert innerSource
+                        if isDBRefManyType deepSource.Type then
+                            raise (NotSupportedException(
+                                "Error: DBRefMany.Where().Select() is not supported in this cycle.\n" +
+                                "Reason: Only .Where().Any(), .Where().Count(), and .Where().LongCount() are admitted.\n" +
+                                "Fix: Use .Where().Any() or .Where().Count() for filtering, or move the query after AsEnumerable()."))
+                        else
+                            // Check if the source is a chained Where on DBRefMany.
+                            match tryPeelWhereFromDBRefMany unwrappedSource with
+                            | ValueSome _ ->
+                                raise (NotSupportedException(
+                                    "Error: DBRefMany.Where().Select() is not supported in this cycle.\n" +
+                                    "Reason: Only .Where().Any(), .Where().Count(), and .Where().LongCount() are admitted.\n" +
+                                    "Fix: Use .Where().Any() or .Where().Count() for filtering, or move the query after AsEnumerable()."))
+                            | ValueNone -> false
                     else false
                 else false
+
+        // L1 reject: bare DBRefMany.Where(pred) materialization.
+        | :? MethodCallExpression as mce when mce.Method.Name = "Where" ->
+            match tryPeelWhereFromDBRefMany exp with
+            | ValueSome _ ->
+                raise (NotSupportedException(filteredWhereOnlyAnyCountLongCountMessage))
+            | ValueNone -> false
+
+        // L1 reject: ordering/paging/set operators after DBRefMany.Where(pred).
+        | :? MethodCallExpression as mce
+            when mce.Method.Name = "OrderBy"
+              || mce.Method.Name = "OrderByDescending"
+              || mce.Method.Name = "ThenBy"
+              || mce.Method.Name = "ThenByDescending"
+              || mce.Method.Name = "Take"
+              || mce.Method.Name = "Skip"
+              || mce.Method.Name = "SelectMany" ->
+            let sourceExpr =
+                if not (isNull mce.Object) then mce.Object
+                elif mce.Arguments.Count > 0 then mce.Arguments.[0]
+                else null
+            if isNull sourceExpr then false
+            else
+                match tryPeelWhereFromDBRefMany sourceExpr with
+                | ValueSome _ ->
+                    raise (NotSupportedException(filteredWhereOnlyAnyCountLongCountMessage))
+                | ValueNone -> false
 
         | _ -> false
 
