@@ -22,16 +22,22 @@ open DBRefTypeHelpers
 module internal QueryTranslatorVisitDbRef =
     [<Literal>]
     let private nestedDbRefManyNotSupportedMessage =
-        "Error: Nested DBRefMany query is not supported.\nReason: Relation-backed DBRefMany predicates cannot contain inner DBRefMany traversals.\nFix: Rewrite the predicate to a single DBRefMany level, or move nested traversal after AsEnumerable()."
+        "Error: Deeply nested DBRefMany query is not supported.\nReason: Only one level of DBRefMany nesting is allowed in relation predicates.\nFix: Rewrite to at most one nested DBRefMany level, or move deeper traversal after AsEnumerable()."
 
-    let private predicateContainsDbRefManyTraversal (expr: Expression) =
-        let rec visitExpr (e: Expression) =
+    // Unique alias counter for nested EXISTS subqueries (prevents alias collision).
+    let mutable private subqueryAliasCounter = 0L
+
+    /// Count the maximum DBRefMany nesting depth in an expression tree.
+    /// depth 0 = no nested DBRefMany, depth 1 = one nested level (admitted), depth 2+ = rejected.
+    let private countDbRefManyDepth (expr: Expression) : int =
+        let rec visitExpr (e: Expression) : int =
             let e = unwrapConvert e
             match e with
-            | null -> false
+            | null -> 0
             | :? MemberExpression as me ->
-                isDBRefManyType me.Type
-                || (not (isNull me.Expression) && visitExpr me.Expression)
+                // Member access (e.g., c.Children) is just property access — not a nesting level.
+                // Only MethodCallExpression (e.g., .Any(), .Count) counts as a nesting level.
+                if not (isNull me.Expression) then visitExpr me.Expression else 0
             | :? MethodCallExpression as mc ->
                 let sourceIsDbRefMany =
                     if not (isNull mc.Object) then
@@ -40,24 +46,27 @@ module internal QueryTranslatorVisitDbRef =
                         isDBRefManyType (unwrapConvert mc.Arguments.[0]).Type
                     else
                         false
-                sourceIsDbRefMany
-                || (not (isNull mc.Object) && visitExpr mc.Object)
-                || (mc.Arguments |> Seq.exists visitExpr)
+                let childMax =
+                    let objDepth = if not (isNull mc.Object) then visitExpr mc.Object else 0
+                    let argDepth = mc.Arguments |> Seq.map visitExpr |> Seq.fold max 0
+                    max objDepth argDepth
+                // Additive: each DBRefMany method call adds 1 to the nesting depth
+                if sourceIsDbRefMany then 1 + childMax else childMax
             | :? BinaryExpression as be ->
-                visitExpr be.Left || visitExpr be.Right
+                max (visitExpr be.Left) (visitExpr be.Right)
             | :? UnaryExpression as ue ->
                 visitExpr ue.Operand
             | :? ConditionalExpression as ce ->
-                visitExpr ce.Test || visitExpr ce.IfTrue || visitExpr ce.IfFalse
+                max (max (visitExpr ce.Test) (visitExpr ce.IfTrue)) (visitExpr ce.IfFalse)
             | :? InvocationExpression as ie ->
-                visitExpr ie.Expression || (ie.Arguments |> Seq.exists visitExpr)
+                max (visitExpr ie.Expression) (ie.Arguments |> Seq.map visitExpr |> Seq.fold max 0)
             | :? LambdaExpression as le ->
                 visitExpr le.Body
             | :? NewExpression as ne ->
-                ne.Arguments |> Seq.exists visitExpr
+                ne.Arguments |> Seq.map visitExpr |> Seq.fold max 0
             | :? NewArrayExpression as nae ->
-                nae.Expressions |> Seq.exists visitExpr
-            | _ -> false
+                nae.Expressions |> Seq.map visitExpr |> Seq.fold max 0
+            | _ -> 0
         visitExpr expr
 
     /// preExpressionHandler for DBRef member access translation.
@@ -248,7 +257,7 @@ module internal QueryTranslatorVisitDbRef =
         let methodName = if isAll then "All" else "Any"
         match tryExtractLambdaExpression predicateExpr with
         | ValueSome predExpr ->
-            if predicateContainsDbRefManyTraversal predExpr.Body then
+            if countDbRefManyDepth predExpr.Body > 1 then
                 raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
 
             let propName = ownerRef.PropertyExpr.Member.Name
@@ -258,8 +267,9 @@ module internal QueryTranslatorVisitDbRef =
             let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
             let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
             let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
-            let tgtAlias = "_tgt"
-            let lnkAlias = "_lnk"
+            let aliasId = System.Threading.Interlocked.Increment(&subqueryAliasCounter)
+            let tgtAlias = sprintf "_tgt%d" aliasId
+            let lnkAlias = sprintf "_lnk%d" aliasId
 
             // Visit the predicate body to get a DU expression.
             let subQb = qb.ForSubquery(tgtAlias, predExpr)
