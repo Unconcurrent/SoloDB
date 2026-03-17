@@ -70,15 +70,15 @@ All correlated-subquery predicates use indexed columns:
 
 ### Slice A — DBRef Single-Relation Hydration
 
+**Mechanism:** jsonb_set Value-enrichment — correlated ScalarSubquery results are embedded directly into the owner's Value column via `jsonb_set(Value, '$.Prop', COALESCE(subquery, rawFK))` in the outer SELECT projection. The existing JSON deserializer recognizes `[id, entityJson]` array format as `DBRef.Loaded(id, entity)`. No new columns or row-type changes required. This supersedes the original separate-column parse seam described below; the enrichment approach was selected because it requires zero Provider materialization changes and reuses the existing `buildMaterializedValueExpr` pattern.
+
 **Changes**:
 
 | File | Change |
 |------|--------|
-| `QueryContext.fs` | Add `HydrationPlan: HydrationProjection list` (typed DU per Syme) |
 | `Queryable.Types.fs` | Add `HydrationProjection` DU: `ScalarRelProjection` / `CollectionRelProjection` |
-| `Queryable.Translation.fs` | Build hydration plan from relation specs + Include/Exclude paths |
-| `Queryable.BuildQuery.Main.fs` | Emit additional ScalarSubquery projection columns for DBRef relations |
-| `Queryable.Provider.fs` | Parse hydration columns from result row instead of calling BatchLoad for queryable path |
+| `Queryable.Translation.fs` | Add `buildHydrationValueExpr` recursive function + `SingleRelationsHydrated` flag on `BatchLoadContext`; inject correlated subqueries into outer SELECT Value projection via `startTranslationCore` |
+| `Queryable.Provider.fs` | Skip `batchLoadDBRefProperties` when `SingleRelationsHydrated = true` (both enumerable and scalar paths) |
 
 **Test rows** (SA-01..SA-05):
 

@@ -167,6 +167,8 @@ type internal LoweredKeySelector = {
 type internal HydrationProjection =
     /// DBRef single-relation: target entity embedded as [Id, Value] array via scalar subquery.
     | ScalarRelProjection of propertyName: string * targetType: Type
+    /// DBRefMany collection-relation: targets embedded as json_group_array via scalar subquery (Slice B).
+    | CollectionRelProjection of propertyName: string * targetType: Type
 
 /// <summary>
 /// A private, mutable builder used to construct an SQL query from a LINQ expression tree.

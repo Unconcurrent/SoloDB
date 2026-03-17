@@ -316,12 +316,6 @@ module internal QueryableTranslationCore =
     let internal startTranslationCore (metadataConnection: SqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
         let variables = Dictionary<string, obj>(16)
 
-        let valueDecodedType =
-            if typedefof<IQueryable>.IsAssignableFrom expression.Type then
-                GenericTypeArgCache.Get expression.Type |> Array.head
-            else
-                expression.Type
-
         let struct (isExplainQueryPlan, expression) =
             match expression with
             | :? MethodCallExpression as expression when isAggregateExplainQuery expression ->
@@ -329,6 +323,14 @@ module internal QueryableTranslationCore =
             | :? MethodCallExpression as expression when isGetGeneratedSQLQuery expression ->
                 struct (false, expression.Arguments.[0])
             | _ -> struct (false, expression)
+
+        // Compute valueDecodedType AFTER unwrapping GetSQL/ExplainQueryPlan so the
+        // hydration path sees the real element type, not the Aggregate wrapper type.
+        let valueDecodedType =
+            if typedefof<IQueryable>.IsAssignableFrom expression.Type then
+                GenericTypeArgCache.Get expression.Type |> Array.head
+            else
+                expression.Type
 
         let ctx = QueryContext.SingleSource(source.Name)
         let hasRelations = hasRelationProperties typeof<'T>
