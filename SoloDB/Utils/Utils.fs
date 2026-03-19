@@ -9,4 +9,6 @@ open System.Runtime.CompilerServices
 [<assembly: InternalsVisibleTo("SqlDu.Engine.C1.Spec")>]
 [<assembly: InternalsVisibleTo("SqlDu.C1.Corpus")>]
 [<assembly: InternalsVisibleTo("SingleSqlHydration.SliceA.Tests")>]
+[<assembly: InternalsVisibleTo("VL1.SilentWrongResult.Sherlock.Tests")>]
+[<assembly: InternalsVisibleTo("BankingApp.Tests")>]
 do ()

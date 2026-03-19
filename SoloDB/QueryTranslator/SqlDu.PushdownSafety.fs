@@ -2,6 +2,7 @@ module SoloDatabase.PushdownSafety
 
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.ExpressionPredicates
+open SoloDatabase.Provenance
 
 // ══════════════════════════════════════════════════════════════
 // Pushdown-Safety Predicate
@@ -94,20 +95,16 @@ let predicateRefsAvailable (predicate: SqlExpr) (innerColumns: Set<string>) (der
 let isInnerPushdownSafe (innerSel: SqlSelect) : bool =
     match innerSel.Body with
     | SingleSelect innerCore ->
-        let conservativeSourceOk =
+        // R42E: provenance-backed source and projection check.
+        // Accepts BaseTable OR DerivedTable when all projections resolve to
+        // base columns or simple derived column references (not aggregates,
+        // not window functions, not opaque expressions).
+        let provenanceSafeSourceAndProjections =
             match innerCore.Source with
-            | Some(BaseTable _) -> true
+            | Some(BaseTable _) | Some(DerivedTable _) ->
+                Provenance.allProjectionsResolved innerCore
             | _ -> false
-        let conservativeProjectionOk =
-            innerCore.Projections
-            |> ProjectionSetOps.toList
-            |> List.forall (fun p ->
-                match p.Expr with
-                | Column(Some _, _)
-                | JsonExtractExpr(Some _, _, _) -> true
-                | _ -> false)
-        conservativeSourceOk
-        && conservativeProjectionOk
+        provenanceSafeSourceAndProjections
         // P-S2: No GROUP BY
         && innerCore.GroupBy.IsEmpty
         // P-S3: No window functions in projections

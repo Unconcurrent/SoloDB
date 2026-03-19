@@ -124,48 +124,183 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                             wrapCore core
                         )
                     | None ->
-                        // Edge case 15: SelectMany with json_each — JOIN json_each on inner source
-                        addComplexFinal statements (fun ctx ->
+                        // L6: Check for DBRefMany SelectMany — JOIN-based flattening.
+                        let tryMatchDBRefManySelectMany () =
                             match m.Expressions.Length with
-                            | 1 ->
-                                let generics = GenericMethodArgCache.Get m.OriginalMethod
-                                if generics.[1] (*output*) = typeof<byte> then
-                                    raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit the SQLite context with .AsEnumerable().")
-                                // Use a stable inner source alias based on the inner select structure
+                            | 1 | 2 ->
+                                match m.Expressions.[0] with
+                                | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
+                                    let lambda = ue.Operand :?> LambdaExpression
+                                    match lambda.Body with
+                                    | :? MemberExpression as me when DBRefTypeHelpers.isDBRefManyType me.Type ->
+                                        // L6 lock: direct owner-parameter member access only.
+                                        // Reject member chains (o.Ref.Value.Tags) and non-parameter bases.
+                                        match me.Expression with
+                                        | :? ParameterExpression as pe when
+                                            lambda.Parameters.Count = 1 &&
+                                            System.Object.ReferenceEquals(pe, lambda.Parameters.[0]) ->
+                                            Some (lambda, me, m.Expressions.Length)
+                                        | _ -> None
+                                    | _ -> None
+                                | _ -> None
+                            | _ -> None
+
+                        match tryMatchDBRefManySelectMany () with
+                        | Some (_selectorLambda, memberExpr, argCount) ->
+                            // L6: DBRefMany SelectMany — JOIN owner → link → target.
+                            let propName = memberExpr.Member.Name
+                            let targetType = memberExpr.Type.GetGenericArguments().[0]
+                            addComplexFinal statements (fun ctx ->
                                 let innerSourceName = Utils.getVarName (hash ctx.Inner.Body % 10000 |> abs)
-                                // Build the json_each join source expression
-                                let jsonEachExpr =
-                                    match m.Expressions.[0] with
+                                let lnkAlias = "_lnk"
+                                let tgtAlias = "_tgt"
+
+                                // Resolve link table and target table from relation metadata.
+                                let linkTable =
+                                    match sourceCtx.TryResolveRelationLink(tableName, propName) with
+                                    | Some mapped when not (System.String.IsNullOrWhiteSpace mapped) -> formatName mapped
+                                    | _ ->
+                                        raise (InvalidOperationException(
+                                            sprintf "Error: relation metadata missing for '%s.%s'.\nReason: link table cannot be resolved.\nFix: repair relation metadata." tableName propName))
+                                let ownerUsesSource =
+                                    match sourceCtx.TryResolveRelationOwnerUsesSource(tableName, propName) with
+                                    | Some v -> v
+                                    | None ->
+                                        raise (InvalidOperationException(
+                                            sprintf "Error: relation metadata missing for '%s.%s'.\nReason: owner-source direction cannot be resolved." tableName propName))
+                                let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
+                                let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
+                                let targetTable =
+                                    let defaultTable = formatName targetType.Name
+                                    match sourceCtx.TryResolveRelationTarget(tableName, propName) with
+                                    | Some mapped when not (System.String.IsNullOrWhiteSpace mapped) -> formatName mapped
+                                    | _ -> sourceCtx.ResolveCollectionForType(Utils.typeIdentityKey targetType, defaultTable)
+
+                                // JOIN: owner → link (on owner.Id = link.ownerCol) → target (on target.Id = link.targetCol)
+                                let linkJoinOn =
+                                    SqlExpr.Binary(
+                                        SqlExpr.Column(Some innerSourceName, "Id"),
+                                        BinaryOperator.Eq,
+                                        SqlExpr.Column(Some lnkAlias, ownerColumn))
+                                let targetJoinOn =
+                                    SqlExpr.Binary(
+                                        SqlExpr.Column(Some tgtAlias, "Id"),
+                                        BinaryOperator.Eq,
+                                        SqlExpr.Column(Some lnkAlias, targetColumn))
+
+                                // Wrap owner query to project only Id (strip Value to prevent ambiguity with target).
+                                let ownerAlias = "_ow"
+                                let ownerIdCore =
+                                    mkCore
+                                        [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some ownerAlias, "Id") }]
+                                        (Some (DerivedTable(ctx.Inner, ownerAlias)))
+                                let ownerIdSel = wrapCore ownerIdCore
+                                let ownerIdName = Utils.getVarName (hash ownerIdSel.Body % 10000 |> abs)
+
+                                // Re-bind link JOIN to use the Id-only owner source.
+                                let linkJoinOnIdOnly =
+                                    SqlExpr.Binary(
+                                        SqlExpr.Column(Some ownerIdName, "Id"),
+                                        BinaryOperator.Eq,
+                                        SqlExpr.Column(Some lnkAlias, ownerColumn))
+
+                                if argCount = 1 then
+                                    // Case A: bare SelectMany — return target entities.
+                                    let core =
+                                        { mkCore
+                                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some tgtAlias, "Id") }
+                                             { Alias = Some "Value"; Expr = SqlExpr.Column(Some tgtAlias, "Value") }]
+                                            (Some (DerivedTable(ownerIdSel, ownerIdName)))
+                                          with
+                                              Joins =
+                                                  [ConditionedJoin(Inner, BaseTable(linkTable, Some lnkAlias), linkJoinOnIdOnly)
+                                                   ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), targetJoinOn)] }
+                                    wrapCore core
+                                else
+                                    // Case C: SelectMany with result selector (2 args).
+                                    let resultSelectorExpr = m.Expressions.[1]
+                                    match resultSelectorExpr with
                                     | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
-                                        let lambda = ue.Operand :?> LambdaExpression
-                                        match lambda.Body with
-                                        | :? MemberExpression as me ->
-                                            SqlExpr.FunctionCall("jsonb_extract", [
-                                                SqlExpr.Column(Some innerSourceName, "Value")
-                                                SqlExpr.Literal(SqlLiteral.String ("$." + me.Member.Name))
-                                            ])
-                                        | :? ParameterExpression ->
-                                            SqlExpr.Column(Some innerSourceName, "Value")
-                                        | _ ->
+                                        let resultLambda = ue.Operand :?> LambdaExpression
+                                        if resultLambda.Parameters.Count <> 2 then
                                             raise (NotSupportedException(
-                                                "Error: Unsupported SelectMany selector structure.
-Reason: The selector cannot be translated to SQL.
-Fix: Simplify the selector or move SelectMany after AsEnumerable()."))
+                                                "Error: SelectMany result selector must have exactly 2 parameters (owner, target).\nFix: Use (o, t) => new { ... } pattern."))
+                                        let outerParam = resultLambda.Parameters.[0]
+                                        let innerParam = resultLambda.Parameters.[1]
+                                        let innerCtx = QueryContext.SingleSource(targetTable)
+                                        let resultExpr =
+                                            translateJoinResultSelectorExpression
+                                                sourceCtx
+                                                innerCtx
+                                                ctx.Vars
+                                                innerSourceName
+                                                tgtAlias
+                                                outerParam
+                                                innerParam
+                                                resultLambda.Body
+                                        // Case C needs owner Value for result selector — use full owner DerivedTable.
+                                        let core =
+                                            { mkCore
+                                                [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some innerSourceName, "Id") }
+                                                 { Alias = Some "Value"; Expr = resultExpr }]
+                                                (Some (DerivedTable(ctx.Inner, innerSourceName)))
+                                              with
+                                                  Joins =
+                                                      [ConditionedJoin(Inner, BaseTable(linkTable, Some lnkAlias), linkJoinOn)
+                                                       ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), targetJoinOn)] }
+                                        wrapCore core
                                     | _ ->
                                         raise (NotSupportedException(
-                                            "Error: Invalid SelectMany structure.
+                                            "Error: Invalid SelectMany result selector.\nFix: Use a lambda expression."))
+                            )
+                        | None ->
+                            // Fallback: json_each SelectMany.
+                            addComplexFinal statements (fun ctx ->
+                                match m.Expressions.Length with
+                                | 1 ->
+                                    let generics = GenericMethodArgCache.Get m.OriginalMethod
+                                    if generics.[1] (*output*) = typeof<byte> then
+                                        raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit the SQLite context with .AsEnumerable().")
+                                    // Use a stable inner source alias based on the inner select structure
+                                    let innerSourceName = Utils.getVarName (hash ctx.Inner.Body % 10000 |> abs)
+                                    // Build the json_each join source expression
+                                    let jsonEachExpr =
+                                        match m.Expressions.[0] with
+                                        | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
+                                            let lambda = ue.Operand :?> LambdaExpression
+                                            match lambda.Body with
+                                            | :? MemberExpression as me ->
+                                                // L6 guard: reject DBRefMany-typed members — they must go through
+                                                // the link-table JOIN path, not json_each on embedded JSON.
+                                                if DBRefTypeHelpers.isDBRefManyType me.Type || DBRefTypeHelpers.isDBRefType me.Type then
+                                                    raise (NotSupportedException(
+                                                        "Error: SelectMany on a relation-backed property requires direct owner-parameter access.\nReason: Non-direct member access (projected alias, computed selector) is not supported.\nFix: Use .SelectMany(o => o.RelationProperty) directly on the owner collection."))
+                                                SqlExpr.FunctionCall("jsonb_extract", [
+                                                    SqlExpr.Column(Some innerSourceName, "Value")
+                                                    SqlExpr.Literal(SqlLiteral.String ("$." + me.Member.Name))
+                                                ])
+                                            | :? ParameterExpression ->
+                                                SqlExpr.Column(Some innerSourceName, "Value")
+                                            | _ ->
+                                                raise (NotSupportedException(
+                                                    "Error: Unsupported SelectMany selector structure.
+Reason: The selector cannot be translated to SQL.
+Fix: Simplify the selector or move SelectMany after AsEnumerable()."))
+                                        | _ ->
+                                            raise (NotSupportedException(
+                                                "Error: Invalid SelectMany structure.
 Reason: The SelectMany arguments are not a supported query pattern.
 Fix: Rewrite the query or move SelectMany after AsEnumerable()."))
-                                // SELECT innerSource.Id AS Id, json_each.Value as Value FROM (inner) AS innerSource JOIN json_each(expr)
-                                let core =
-                                    { mkCore
-                                        [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some innerSourceName, "Id") }
-                                         { Alias = Some "Value"; Expr = SqlExpr.Column(Some "json_each", "Value") }]
-                                        (Some (DerivedTable(ctx.Inner, innerSourceName)))
-                                      with Joins = [CrossJoin(FromJsonEach(jsonEachExpr, None))] }
-                                wrapCore core
-                            | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
-                        )
+                                    // SELECT innerSource.Id AS Id, json_each.Value as Value FROM (inner) AS innerSource JOIN json_each(expr)
+                                    let core =
+                                        { mkCore
+                                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some innerSourceName, "Id") }
+                                             { Alias = Some "Value"; Expr = SqlExpr.Column(Some "json_each", "Value") }]
+                                            (Some (DerivedTable(ctx.Inner, innerSourceName)))
+                                          with Joins = [CrossJoin(FromJsonEach(jsonEachExpr, None))] }
+                                    wrapCore core
+                                | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
+                            )
 
                 | SupportedLinqMethods.Join ->
                     match m.Expressions.Length with

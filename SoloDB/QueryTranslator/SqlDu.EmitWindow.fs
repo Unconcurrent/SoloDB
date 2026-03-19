@@ -38,8 +38,18 @@ let emitWindowCall (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emi
             sprintf "ORDER BY %s" sql
     let orderParams = Emitted.collectParameters orderParts
 
+    // For aggregate window functions (SUM, etc.), emit ROWS UNBOUNDED PRECEDING
+    // to ensure positional (not peer-group) semantics with duplicate order keys.
+    let frameSql =
+        match spec.Kind with
+        | NamedWindowFunction name when
+            (name = "SUM" || name = "COUNT" || name = "MIN" || name = "MAX" || name = "AVG")
+            && not (List.isEmpty spec.OrderBy) ->
+            "ROWS UNBOUNDED PRECEDING"
+        | _ -> ""
+
     let overParts =
-        [ partitionSql; orderSql ]
+        [ partitionSql; orderSql; frameSql ]
         |> List.filter (fun s -> s <> "")
         |> String.concat " "
 

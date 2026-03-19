@@ -42,11 +42,6 @@ let private isSimpleProjectionExpr (expr: SqlExpr) : bool =
 let private hasSimpleOuterProjections (outer: SelectCore) : bool =
     outer.Projections |> ProjectionSetOps.toList |> List.forall (fun p -> isSimpleProjectionExpr p.Expr)
 
-let private hasBaseTableInnerSource (innerCore: SelectCore) : bool =
-    match innerCore.Source with
-    | Some(BaseTable _) -> true
-    | _ -> false
-
 /// Determine if a DerivedTable's inner SelectCore can be safely flattened
 /// into the given outer SelectCore.
 let isFlattenSafe (outer: SelectCore) (innerCore: SelectCore) : bool =
