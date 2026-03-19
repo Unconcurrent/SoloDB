@@ -445,14 +445,23 @@ module internal QueryTranslatorVisitDbRef =
             if isNull sourceExpr then ValueNone
             else
                 let unwrappedSource = unwrapConvert sourceExpr
-                // L10: Also accept OfType(DBRefMany) as a valid source for Where peeling.
-                let isValidSource =
-                    isDBRefManyType unwrappedSource.Type ||
-                    (match unwrappedSource with
-                     | :? MethodCallExpression as mc when mc.Method.Name = "OfType" ->
-                         let innerSrc = if not (isNull mc.Object) then mc.Object elif mc.Arguments.Count > 0 then mc.Arguments.[0] else null
-                         not (isNull innerSrc) && isDBRefManyType (unwrapConvert innerSrc).Type
-                     | _ -> false)
+                // L10/composition: Accept DBRefMany, OfType(DBRefMany), or OrderBy(DBRefMany) as valid source.
+                // This allows Where at any position relative to OrderBy in the LINQ chain.
+                let rec isValidDBRefManyChainSource (e: Expression) =
+                    let e = unwrapConvert e
+                    if isDBRefManyType e.Type then true
+                    else
+                        match e with
+                        | :? MethodCallExpression as mc
+                            when mc.Method.Name = "OfType"
+                              || mc.Method.Name = "OrderBy"
+                              || mc.Method.Name = "OrderByDescending"
+                              || mc.Method.Name = "ThenBy"
+                              || mc.Method.Name = "ThenByDescending" ->
+                            let innerSrc = if not (isNull mc.Object) then mc.Object elif mc.Arguments.Count > 0 then mc.Arguments.[0] else null
+                            not (isNull innerSrc) && isValidDBRefManyChainSource innerSrc
+                        | _ -> false
+                let isValidSource = isValidDBRefManyChainSource unwrappedSource
                 if isValidSource then
                     // Direct DBRefMany.Where(pred) or OfType(DBRefMany).Where(pred) — single predicate.
                     match predExpr with
@@ -586,74 +595,6 @@ module internal QueryTranslatorVisitDbRef =
             | None -> None
         limit, offset
 
-    /// L9: Build correlated subquery parts from a Select-on-DBRefMany expression.
-    /// Handles Select(DBRefMany, proj) and Select(Where(DBRefMany, pred), proj).
-    /// Returns the subquery core for use in set operations.
-    let private tryBuildProjectedSetOperand (qb: QueryBuilder) (selectExpr: Expression) : (SqlExpr * SelectCore * string) voption =
-        match selectExpr with
-        | :? MethodCallExpression as selectMce when selectMce.Method.Name = "Select" ->
-            let selectSource, projArg =
-                if not (isNull selectMce.Object) then
-                    selectMce.Object, (if selectMce.Arguments.Count >= 1 then Some selectMce.Arguments.[0] else None)
-                elif selectMce.Arguments.Count >= 2 then
-                    selectMce.Arguments.[0], Some selectMce.Arguments.[1]
-                else null, None
-            if isNull selectSource || projArg.IsNone then ValueNone
-            else
-                let unwrappedSrc = unwrapConvert selectSource
-                // Peel Where from inside Select.
-                let innerSrc, wherePreds =
-                    if isDBRefManyType unwrappedSrc.Type then unwrappedSrc, []
-                    else
-                        match tryPeelWhereFromDBRefMany unwrappedSrc with
-                        | ValueSome (s, p) -> s, p
-                        | ValueNone -> unwrappedSrc, []
-                match tryGetDBRefManyOwnerRef qb innerSrc with
-                | ValueSome ownerRef ->
-                    match projArg.Value |> tryExtractLambdaExpression with
-                    | ValueSome projLambda ->
-                        let propName = ownerRef.PropertyExpr.Member.Name
-                        let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
-                        let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
-                        let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
-                        let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
-                        let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
-                        let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
-                        let aliasId = System.Threading.Interlocked.Increment(&subqueryAliasCounter)
-                        let tgtAlias = sprintf "_tgt%d" aliasId
-                        let lnkAlias = sprintf "_lnk%d" aliasId
-
-                        let wherePredDus =
-                            if wherePreds.IsEmpty then []
-                            else buildFilteredPredicateDus qb tgtAlias wherePreds
-
-                        let subQb = qb.ForSubquery(tgtAlias, projLambda)
-                        let projectedDu = visitDu projLambda.Body subQb
-
-                        let joinOn =
-                            SqlExpr.Binary(
-                                SqlExpr.Column(Some tgtAlias, "Id"),
-                                BinaryOperator.Eq,
-                                SqlExpr.Column(Some lnkAlias, targetColumn))
-                        let ownerWhere =
-                            SqlExpr.Binary(
-                                SqlExpr.Column(Some lnkAlias, ownerColumn),
-                                BinaryOperator.Eq,
-                                SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
-                        let fullWhere =
-                            wherePredDus |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) ownerWhere
-
-                        let core =
-                            { mkSubCore
-                                [{ Alias = Some "v"; Expr = projectedDu }]
-                                (Some(BaseTable(linkTable, Some lnkAlias)))
-                                (Some fullWhere) with
-                                Joins = [ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), joinOn)] }
-                        ValueSome (projectedDu, core, tgtAlias)
-                    | ValueNone -> ValueNone
-                | ValueNone -> ValueNone
-        | _ -> ValueNone
-
     /// L10: Peel .OfType<T>() from a source expression.
     /// Returns (innerExpr, typeName) if the source is OfType on a DBRefMany chain.
     let private tryPeelOfTypeFromSource (expr: Expression) : (Expression * string) voption =
@@ -694,6 +635,78 @@ module internal QueryTranslatorVisitDbRef =
                 SqlExpr.Literal(SqlLiteral.String "$.$type")]),
             BinaryOperator.Eq,
             SqlExpr.Literal(SqlLiteral.String typeName))
+
+    /// L9: Build correlated subquery parts from a Select-on-DBRefMany expression.
+    /// Handles Select(DBRefMany, proj) and Select(Where(DBRefMany, pred), proj).
+    /// Returns the subquery core for use in set operations.
+    let private tryBuildProjectedSetOperand (qb: QueryBuilder) (selectExpr: Expression) : (SqlExpr * SelectCore * string) voption =
+        match selectExpr with
+        | :? MethodCallExpression as selectMce when selectMce.Method.Name = "Select" ->
+            let selectSource, projArg =
+                if not (isNull selectMce.Object) then
+                    selectMce.Object, (if selectMce.Arguments.Count >= 1 then Some selectMce.Arguments.[0] else None)
+                elif selectMce.Arguments.Count >= 2 then
+                    selectMce.Arguments.[0], Some selectMce.Arguments.[1]
+                else null, None
+            if isNull selectSource || projArg.IsNone then ValueNone
+            else
+                let unwrappedSrc = unwrapConvert selectSource
+                // Peel Where from inside Select.
+                let innerSrc, wherePreds =
+                    if isDBRefManyType unwrappedSrc.Type then unwrappedSrc, []
+                    else
+                        match tryPeelWhereFromDBRefMany unwrappedSrc with
+                        | ValueSome (s, p) -> s, p
+                        | ValueNone -> unwrappedSrc, []
+                match tryGetDBRefManyOwnerRefWithOfType qb innerSrc with
+                | ValueSome (ownerRef, ofTypeName) ->
+                    match projArg.Value |> tryExtractLambdaExpression with
+                    | ValueSome projLambda ->
+                        let propName = ownerRef.PropertyExpr.Member.Name
+                        let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
+                        let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
+                        let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
+                        let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
+                        let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
+                        let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
+                        let aliasId = System.Threading.Interlocked.Increment(&subqueryAliasCounter)
+                        let tgtAlias = sprintf "_tgt%d" aliasId
+                        let lnkAlias = sprintf "_lnk%d" aliasId
+
+                        let wherePredDus =
+                            let basePreds =
+                                if wherePreds.IsEmpty then []
+                                else buildFilteredPredicateDus qb tgtAlias wherePreds
+                            match ofTypeName with
+                            | Some tn -> basePreds @ [buildOfTypePredicate tgtAlias tn]
+                            | None -> basePreds
+
+                        let subQb = qb.ForSubquery(tgtAlias, projLambda)
+                        let projectedDu = visitDu projLambda.Body subQb
+
+                        let joinOn =
+                            SqlExpr.Binary(
+                                SqlExpr.Column(Some tgtAlias, "Id"),
+                                BinaryOperator.Eq,
+                                SqlExpr.Column(Some lnkAlias, targetColumn))
+                        let ownerWhere =
+                            SqlExpr.Binary(
+                                SqlExpr.Column(Some lnkAlias, ownerColumn),
+                                BinaryOperator.Eq,
+                                SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
+                        let fullWhere =
+                            wherePredDus |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) ownerWhere
+
+                        let core =
+                            { mkSubCore
+                                [{ Alias = Some "v"; Expr = projectedDu }]
+                                (Some(BaseTable(linkTable, Some lnkAlias)))
+                                (Some fullWhere) with
+                                Joins = [ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), joinOn)] }
+                        ValueSome (projectedDu, core, tgtAlias)
+                    | ValueNone -> ValueNone
+                | ValueNone -> ValueNone
+        | _ -> ValueNone
 
     /// L12: Build a TakeWhile/SkipWhile windowed DerivedTable from a DBRefMany source.
     /// Returns the inner SELECT with _cf window column and the appropriate outer WHERE filter.
@@ -1239,55 +1252,100 @@ module internal QueryTranslatorVisitDbRef =
                     match tryPeelOrderByFromSource sourceAfterTakeSkip with
                     | ValueSome (inner, keys) -> inner, keys
                     | ValueNone -> sourceAfterTakeSkip, []
-                match tryPeelWhereFromDBRefMany sourceAfterOrder with
-                | ValueSome (dbRefManySource, predicateExprs) ->
-                    match predArg with
-                    | ValueSome _ ->
-                        raise (NotSupportedException(filteredWhereUnsupportedTerminalMessage))
-                    | ValueNone ->
-                        // L10: Get owner ref with OfType support.
-                        match tryGetDBRefManyOwnerRefWithOfType qb dbRefManySource with
-                        | ValueSome (ownerRef, _ofTypeNameCount) ->
-                            let countExpr = buildFilteredCountSubquery qb ownerRef predicateExprs sortKeys _ofTypeNameCount
-                            // L4: If Take/Skip present, wrap COUNT in derived table:
-                            // SELECT COUNT(*) FROM (SELECT 1 FROM ... WHERE ... [ORDER BY] LIMIT n OFFSET m)
+                match predArg with
+                | ValueNone ->
+                    match tryBuildProjectedSetOperand qb sourceAfterOrder with
+                    | ValueSome (_projectedDu, innerCore, _) ->
+                        let boundedCore =
                             if limitExprC.IsSome || offsetExprC.IsSome then
-                                match countExpr with
-                                | SqlExpr.ScalarSubquery subSel ->
-                                    match subSel.Body with
-                                    | SingleSelect core ->
-                                        let limitDu, offsetDu = buildLimitOffset qb limitExprC offsetExprC
-                                        // Replace COUNT projection with SELECT 1, add LIMIT/OFFSET
-                                        let innerCore =
-                                            { core with
-                                                Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
-                                                Limit = limitDu
-                                                Offset = offsetDu }
-                                        let innerSelect = { Ctes = []; Body = SingleSelect innerCore }
-                                        let aliasId = System.Threading.Interlocked.Increment(&subqueryAliasCounter)
-                                        let dtAlias = sprintf "_pg%d" aliasId
-                                        let outerCountProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
-                                        let outerCore = mkSubCore outerCountProj (Some(DerivedTable(innerSelect, dtAlias))) None
-                                        let outerSelect = { Ctes = []; Body = SingleSelect outerCore }
-                                        qb.DuHandlerResult.Value <- ValueSome(SqlExpr.ScalarSubquery outerSelect)
-                                        true
+                                let limitDu, offsetDu = buildLimitOffset qb limitExprC offsetExprC
+                                { innerCore with Limit = limitDu; Offset = offsetDu }
+                            else innerCore
+                        let innerSelect = { Ctes = []; Body = SingleSelect boundedCore }
+                        let dtAlias = sprintf "_pc%d" (System.Threading.Interlocked.Increment(&subqueryAliasCounter))
+                        let countProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
+                        let outerCore = mkSubCore countProj (Some(DerivedTable(innerSelect, dtAlias))) None
+                        let outerSelect = { Ctes = []; Body = SingleSelect outerCore }
+                        qb.DuHandlerResult.Value <- ValueSome(SqlExpr.ScalarSubquery outerSelect)
+                        true
+                    | ValueNone ->
+                        match tryPeelWhereFromDBRefMany sourceAfterOrder with
+                        | ValueSome (dbRefManySource, predicateExprs) ->
+                            // L10: Get owner ref with OfType support.
+                            match tryGetDBRefManyOwnerRefWithOfType qb dbRefManySource with
+                            | ValueSome (ownerRef, _ofTypeNameCount) ->
+                                let countExpr = buildFilteredCountSubquery qb ownerRef predicateExprs sortKeys _ofTypeNameCount
+                                // L4: If Take/Skip present, wrap COUNT in derived table:
+                                // SELECT COUNT(*) FROM (SELECT 1 FROM ... WHERE ... [ORDER BY] LIMIT n OFFSET m)
+                                if limitExprC.IsSome || offsetExprC.IsSome then
+                                    match countExpr with
+                                    | SqlExpr.ScalarSubquery subSel ->
+                                        match subSel.Body with
+                                        | SingleSelect core ->
+                                            let limitDu, offsetDu = buildLimitOffset qb limitExprC offsetExprC
+                                            // Replace COUNT projection with SELECT 1, add LIMIT/OFFSET
+                                            let innerCore =
+                                                { core with
+                                                    Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                                                    Limit = limitDu
+                                                    Offset = offsetDu }
+                                            let innerSelect = { Ctes = []; Body = SingleSelect innerCore }
+                                            let aliasId = System.Threading.Interlocked.Increment(&subqueryAliasCounter)
+                                            let dtAlias = sprintf "_pg%d" aliasId
+                                            let outerCountProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
+                                            let outerCore = mkSubCore outerCountProj (Some(DerivedTable(innerSelect, dtAlias))) None
+                                            let outerSelect = { Ctes = []; Body = SingleSelect outerCore }
+                                            qb.DuHandlerResult.Value <- ValueSome(SqlExpr.ScalarSubquery outerSelect)
+                                            true
+                                        | _ ->
+                                            qb.DuHandlerResult.Value <- ValueSome countExpr
+                                            true
                                     | _ ->
                                         qb.DuHandlerResult.Value <- ValueSome countExpr
                                         true
-                                | _ ->
+                                else
                                     qb.DuHandlerResult.Value <- ValueSome countExpr
                                     true
-                            else
-                                qb.DuHandlerResult.Value <- ValueSome countExpr
-                                true
-                        | ValueNone -> false
-                // L10: If Where peeling found nothing, try OfType(DBRefMany) directly.
-                | ValueNone ->
-                    match tryGetDBRefManyOwnerRefWithOfType qb sourceAfterOrder with
-                    | ValueSome (ownerRef, ofTypeNameDirect) ->
-                        let countExpr = buildFilteredCountSubquery qb ownerRef [] [] ofTypeNameDirect
-                        qb.DuHandlerResult.Value <- ValueSome countExpr
-                        true
+                            | ValueNone -> false
+                        // L10: If Where peeling found nothing, try OfType(DBRefMany) directly.
+                        | ValueNone ->
+                            match tryGetDBRefManyOwnerRefWithOfType qb sourceAfterOrder with
+                            | ValueSome (ownerRef, ofTypeNameDirect) ->
+                                let countExpr = buildFilteredCountSubquery qb ownerRef [] sortKeys ofTypeNameDirect
+                                // L4: If Take/Skip present, wrap COUNT in bounded rowset.
+                                if limitExprC.IsSome || offsetExprC.IsSome then
+                                    match countExpr with
+                                    | SqlExpr.ScalarSubquery subSel ->
+                                        match subSel.Body with
+                                        | SingleSelect core ->
+                                            let limitDu, offsetDu = buildLimitOffset qb limitExprC offsetExprC
+                                            let innerCore =
+                                                { core with
+                                                    Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                                                    Limit = limitDu
+                                                    Offset = offsetDu }
+                                            let innerSelect = { Ctes = []; Body = SingleSelect innerCore }
+                                            let aliasId = System.Threading.Interlocked.Increment(&subqueryAliasCounter)
+                                            let dtAlias = sprintf "_pg%d" aliasId
+                                            let outerCountProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
+                                            let outerCore = mkSubCore outerCountProj (Some(DerivedTable(innerSelect, dtAlias))) None
+                                            let outerSelect = { Ctes = []; Body = SingleSelect outerCore }
+                                            qb.DuHandlerResult.Value <- ValueSome(SqlExpr.ScalarSubquery outerSelect)
+                                            true
+                                        | _ ->
+                                            qb.DuHandlerResult.Value <- ValueSome countExpr
+                                            true
+                                    | _ ->
+                                        qb.DuHandlerResult.Value <- ValueSome countExpr
+                                        true
+                                else
+                                    qb.DuHandlerResult.Value <- ValueSome countExpr
+                                    true
+                            | ValueNone -> false
+                | ValueSome _ ->
+                    match tryPeelWhereFromDBRefMany sourceAfterOrder with
+                    | ValueSome _ ->
+                        raise (NotSupportedException(filteredWhereUnsupportedTerminalMessage))
                     | ValueNone -> false
             | ValueNone -> false
 
@@ -1476,44 +1534,88 @@ module internal QueryTranslatorVisitDbRef =
                         match tryPeelOrderByFromSource sourceAfterTakeSkip with
                         | ValueSome (inner, keys) -> inner, keys
                         | ValueNone -> sourceAfterTakeSkip, []
-                    // Peel Where (may or may not be present after peeling Take/Skip + OrderBy).
-                    let innerSource, wherePredicates =
-                        match tryPeelWhereFromDBRefMany sourceAfterOrder with
-                        | ValueSome (dbRefSrc, preds) -> dbRefSrc, preds
-                        | ValueNone -> sourceAfterOrder, []
-                    // L10: Get owner ref with OfType support.
-                    match tryGetDBRefManyOwnerRefWithOfType qb innerSource with
-                    | ValueSome (ownerRef, ofTypeNameAny) ->
-                        match predArg with
-                        | ValueSome _ when not wherePredicates.IsEmpty ->
-                            raise (NotSupportedException(filteredWhereUnsupportedTerminalMessage))
-                        | ValueSome predicateExpr when wherePredicates.IsEmpty && sortKeys.IsEmpty && not (limitExprA.IsSome || offsetExprA.IsSome) && ofTypeNameAny.IsNone ->
-                            // Bare Any(pred) after peeling — shouldn't normally reach here (direct case above), but handle gracefully.
-                            qb.DuHandlerResult.Value <- ValueSome(buildQuantifierWithPredicate qb ownerRef predicateExpr false)
+                    match predArg with
+                    | ValueNone ->
+                        match tryBuildProjectedSetOperand qb sourceAfterOrder with
+                        | ValueSome (_projectedDu, innerCore, _) ->
+                            let boundedCore =
+                                if limitExprA.IsSome || offsetExprA.IsSome then
+                                    let limitDu, offsetDu = buildLimitOffset qb limitExprA offsetExprA
+                                    { innerCore with Limit = limitDu; Offset = offsetDu }
+                                else innerCore
+                            let subSelect = { Ctes = []; Body = SingleSelect boundedCore }
+                            qb.DuHandlerResult.Value <- ValueSome(SqlExpr.Exists subSelect)
                             true
-                        | _ ->
-                            let existsExpr = buildFilteredExistsSubquery qb ownerRef wherePredicates sortKeys ofTypeNameAny
-                            // L4: If Take/Skip present, add LIMIT/OFFSET to the EXISTS subquery.
-                            if limitExprA.IsSome || offsetExprA.IsSome then
-                                match existsExpr with
-                                | SqlExpr.Exists subSel ->
-                                    match subSel.Body with
-                                    | SingleSelect core ->
-                                        let limitDu, offsetDu = buildLimitOffset qb limitExprA offsetExprA
-                                        let boundedCore = { core with Limit = limitDu; Offset = offsetDu }
-                                        let boundedSelect = { Ctes = []; Body = SingleSelect boundedCore }
-                                        qb.DuHandlerResult.Value <- ValueSome(SqlExpr.Exists boundedSelect)
-                                        true
+                        | ValueNone ->
+                            // Peel Where (may or may not be present after peeling Take/Skip + OrderBy).
+                            let innerSource, wherePredicates =
+                                match tryPeelWhereFromDBRefMany sourceAfterOrder with
+                                | ValueSome (dbRefSrc, preds) -> dbRefSrc, preds
+                                | ValueNone -> sourceAfterOrder, []
+                            // L10: Get owner ref with OfType support.
+                            match tryGetDBRefManyOwnerRefWithOfType qb innerSource with
+                            | ValueSome (ownerRef, ofTypeNameAny) ->
+                                let existsExpr = buildFilteredExistsSubquery qb ownerRef wherePredicates sortKeys ofTypeNameAny
+                                // L4: If Take/Skip present, add LIMIT/OFFSET to the EXISTS subquery.
+                                if limitExprA.IsSome || offsetExprA.IsSome then
+                                    match existsExpr with
+                                    | SqlExpr.Exists subSel ->
+                                        match subSel.Body with
+                                        | SingleSelect core ->
+                                            let limitDu, offsetDu = buildLimitOffset qb limitExprA offsetExprA
+                                            let boundedCore = { core with Limit = limitDu; Offset = offsetDu }
+                                            let boundedSelect = { Ctes = []; Body = SingleSelect boundedCore }
+                                            qb.DuHandlerResult.Value <- ValueSome(SqlExpr.Exists boundedSelect)
+                                            true
+                                        | _ ->
+                                            qb.DuHandlerResult.Value <- ValueSome existsExpr
+                                            true
                                     | _ ->
                                         qb.DuHandlerResult.Value <- ValueSome existsExpr
                                         true
-                                | _ ->
+                                else
                                     qb.DuHandlerResult.Value <- ValueSome existsExpr
                                     true
-                            else
-                                qb.DuHandlerResult.Value <- ValueSome existsExpr
+                            | ValueNone -> false
+                    | ValueSome predicateExpr ->
+                        // Peel Where (may or may not be present after peeling Take/Skip + OrderBy).
+                        let innerSource, wherePredicates =
+                            match tryPeelWhereFromDBRefMany sourceAfterOrder with
+                            | ValueSome (dbRefSrc, preds) -> dbRefSrc, preds
+                            | ValueNone -> sourceAfterOrder, []
+                        // L10: Get owner ref with OfType support.
+                        match tryGetDBRefManyOwnerRefWithOfType qb innerSource with
+                        | ValueSome (ownerRef, ofTypeNameAny) ->
+                            match predArg with
+                            | ValueSome _ when not wherePredicates.IsEmpty ->
+                                raise (NotSupportedException(filteredWhereUnsupportedTerminalMessage))
+                            | ValueSome predicateExpr when wherePredicates.IsEmpty && sortKeys.IsEmpty && not (limitExprA.IsSome || offsetExprA.IsSome) && ofTypeNameAny.IsNone ->
+                                // Bare Any(pred) after peeling — shouldn't normally reach here (direct case above), but handle gracefully.
+                                qb.DuHandlerResult.Value <- ValueSome(buildQuantifierWithPredicate qb ownerRef predicateExpr false)
                                 true
-                    | ValueNone -> false
+                            | _ ->
+                                let existsExpr = buildFilteredExistsSubquery qb ownerRef wherePredicates sortKeys ofTypeNameAny
+                                // L4: If Take/Skip present, add LIMIT/OFFSET to the EXISTS subquery.
+                                if limitExprA.IsSome || offsetExprA.IsSome then
+                                    match existsExpr with
+                                    | SqlExpr.Exists subSel ->
+                                        match subSel.Body with
+                                        | SingleSelect core ->
+                                            let limitDu, offsetDu = buildLimitOffset qb limitExprA offsetExprA
+                                            let boundedCore = { core with Limit = limitDu; Offset = offsetDu }
+                                            let boundedSelect = { Ctes = []; Body = SingleSelect boundedCore }
+                                            qb.DuHandlerResult.Value <- ValueSome(SqlExpr.Exists boundedSelect)
+                                            true
+                                        | _ ->
+                                            qb.DuHandlerResult.Value <- ValueSome existsExpr
+                                            true
+                                    | _ ->
+                                        qb.DuHandlerResult.Value <- ValueSome existsExpr
+                                        true
+                                else
+                                    qb.DuHandlerResult.Value <- ValueSome existsExpr
+                                    true
+                        | ValueNone -> false
             | ValueNone -> false
 
         // Case 4: All(pred) over DBRefMany — relation-aware NOT EXISTS with negated predicate.
@@ -1730,6 +1832,43 @@ module internal QueryTranslatorVisitDbRef =
                     match tryPeelOrderByFromSource sourceAfterTakeSkip with
                     | ValueSome (inner, keys) -> inner, keys
                     | ValueNone -> sourceAfterTakeSkip, []
+                match sourceAfterOrder with
+                | :? MethodCallExpression as distinctMce when distinctMce.Method.Name = "Distinct" && selectorArg.IsNone ->
+                    let distinctSource =
+                        if not (isNull distinctMce.Object) then distinctMce.Object
+                        elif distinctMce.Arguments.Count > 0 then distinctMce.Arguments.[0]
+                        else null
+                    if isNull distinctSource then false
+                    else
+                        match tryBuildProjectedSetOperand qb distinctSource with
+                        | ValueSome (_projectedDu, innerCore, _) ->
+                            let aggKind =
+                                match mce.Method.Name with
+                                | "Sum" -> AggregateKind.Sum
+                                | "Min" -> AggregateKind.Min
+                                | "Max" -> AggregateKind.Max
+                                | "Average" -> AggregateKind.Avg
+                                | other -> failwithf "Unexpected aggregate method: %s" other
+                            let limitDu, offsetDu = buildLimitOffset qb limitExprAgg offsetExprAgg
+                            let distinctCore =
+                                { innerCore with
+                                    Distinct = true
+                                    Limit = if limitExprAgg.IsSome || offsetExprAgg.IsSome then limitDu else innerCore.Limit
+                                    Offset = if limitExprAgg.IsSome || offsetExprAgg.IsSome then offsetDu else innerCore.Offset }
+                            let distinctSelect = { Ctes = []; Body = SingleSelect distinctCore }
+                            let dtAlias = sprintf "_da%d" (System.Threading.Interlocked.Increment(&subqueryAliasCounter))
+                            let outerAggExpr = SqlExpr.AggregateCall(aggKind, Some(SqlExpr.Column(Some dtAlias, "v")), false, None)
+                            let outerCore = mkSubCore [{ Alias = None; Expr = outerAggExpr }] (Some(DerivedTable(distinctSelect, dtAlias))) None
+                            let outerSelect = { Ctes = []; Body = SingleSelect outerCore }
+                            let scalarExpr = SqlExpr.ScalarSubquery outerSelect
+                            let finalExpr =
+                                if mce.Method.Name = "Sum" then
+                                    SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
+                                else scalarExpr
+                            qb.DuHandlerResult.Value <- ValueSome finalExpr
+                            true
+                        | ValueNone -> false
+                | _ ->
                 let innerSourceAgg, wherePredicatesAgg =
                     if isDBRefManyType (unwrapConvert sourceAfterOrder).Type then
                         sourceAfterOrder, []
@@ -1737,8 +1876,8 @@ module internal QueryTranslatorVisitDbRef =
                         match tryPeelWhereFromDBRefMany sourceAfterOrder with
                         | ValueSome (dbRefSrc, preds) -> dbRefSrc, preds
                         | ValueNone -> sourceAfterOrder, []
-                match tryGetDBRefManyOwnerRef qb innerSourceAgg with
-                | ValueSome ownerRef ->
+                match tryGetDBRefManyOwnerRefWithOfType qb innerSourceAgg with
+                | ValueSome (ownerRef, ofTypeNameAgg) ->
                     match selectorArg with
                     | ValueSome selectorExprRaw ->
                         match tryExtractLambdaExpression selectorExprRaw with
@@ -1762,8 +1901,12 @@ module internal QueryTranslatorVisitDbRef =
                             let lnkAlias = sprintf "_lnk%d" aliasId
 
                             let wherePredDus =
-                                if wherePredicatesAgg.IsEmpty then []
-                                else buildFilteredPredicateDus qb tgtAlias wherePredicatesAgg
+                                let basePreds =
+                                    if wherePredicatesAgg.IsEmpty then []
+                                    else buildFilteredPredicateDus qb tgtAlias wherePredicatesAgg
+                                match ofTypeNameAgg with
+                                | Some tn -> basePreds @ [buildOfTypePredicate tgtAlias tn]
+                                | None -> basePreds
                             let sortKeyDus = if sortKeys.IsEmpty then [] else buildSortKeyDus qb tgtAlias sortKeys
 
                             // Visit selector body.
@@ -2196,7 +2339,24 @@ module internal QueryTranslatorVisitDbRef =
                         qb.DuHandlerResult.Value <- ValueSome(SqlExpr.Exists subSelect)
                         true
                     | ValueNone -> false
-                | ValueNone -> false
+                | ValueNone ->
+                    match valueArg with
+                    | ValueSome containsValueExpr ->
+                        match tryBuildProjectedSetOperand qb sourceExpr with
+                        | ValueSome (projectedDu, innerCore, _) ->
+                            let containsValueDu = visitDu containsValueExpr qb
+                            let matchExpr = nullSafeEq projectedDu containsValueDu
+                            let coreWithMatch =
+                                { innerCore with
+                                    Where =
+                                        match innerCore.Where with
+                                        | Some w -> Some(SqlExpr.Binary(w, BinaryOperator.And, matchExpr))
+                                        | None -> Some matchExpr }
+                            let subSelect = { Ctes = []; Body = SingleSelect coreWithMatch }
+                            qb.DuHandlerResult.Value <- ValueSome(SqlExpr.Exists subSelect)
+                            true
+                        | ValueNone -> false
+                    | ValueNone -> false
             | ValueNone -> false
 
         // L11: ToList/ToArray inside expression trees — identity passthrough.

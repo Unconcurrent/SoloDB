@@ -78,40 +78,67 @@ module JsonFunctions =
         element.ToJsonString()
 
     /// Internal serialization helper. Not part of the public API.
-    let toSQLJson (item: obj) = 
+    let toSQLJson (item: obj) =
         match box item with
+        | null -> null, false
+
+        // Strings and chars
         | :? string as s -> s :> obj, false
         | :? char as c -> string c :> obj, false
 
+        // Boolean — SQLite stores as integer 0/1
+        | :? bool as b -> (if b then 1L :> obj else 0L :> obj), false
+
+        // Type → full name string
         | :? Type as t -> t.FullName :> obj, false
 
+        // Signed integers — all pass through directly to SQLite INTEGER
         | :? int8 as x -> x :> obj, false
         | :? int16 as x -> x :> obj, false
         | :? int32 as x -> x :> obj, false
         | :? int64 as x -> x :> obj, false
         | :? nativeint as x -> x :> obj, false
 
+        // Unsigned integers — pass through directly
         | :? uint8 as x -> x :> obj, false
         | :? uint16 as x -> x :> obj, false
         | :? uint32 as x -> x :> obj, false
         | :? uint64 as x -> x :> obj, false
         | :? unativeint as x -> x :> obj, false
 
+        // Floating point — pass through directly to SQLite REAL
         | :? float32 as x -> x :> obj, false
         | :? float as x -> x :> obj, false
-        | :? decimal as x -> (float x) :> obj, false  // Convert decimal to double for SQLite REAL comparison
+        | :? decimal as x -> (float x) :> obj, false  // decimal → double for SQLite REAL comparison
 
+        // Date/time types — must match JsonSerializator storage format (all stored as numeric values).
+        | :? DateOnly as x -> x.DayNumber :> obj, false
+        | :? DateTime as x -> x.ToBinary() :> obj, false
+        | :? DateTimeOffset as x -> x.ToUnixTimeMilliseconds() :> obj, false
+        | :? TimeOnly as x -> (int64 (x.ToTimeSpan().TotalMilliseconds)) :> obj, false
+        | :? TimeSpan as x -> (int64 x.TotalMilliseconds) :> obj, false
+
+        // Guid — string representation
+        | :? System.Guid as x -> x.ToString("D") :> obj, false
+
+        // Enums — serialize as underlying integer value (matches SoloDB JSON storage)
+        | _ when item.GetType().IsEnum -> System.Convert.ToInt64(item) :> obj, false
+
+        // Fallback: complex objects — serialize via JSON round-trip.
+        // This path handles arrays, lists, custom objects, and any other structured types.
         | _other ->
-
         let element = JsonValue.Serialize item
         match element with
-        | Boolean b -> b :> obj, false
+        | Boolean b -> (if b then 1L :> obj else 0L :> obj), false
         | Null -> null, false
-        | Number _
-        | String _
-            -> element.ToObject(), false
-        | other -> 
-            // Cannot remove the Id value from here, maybe it is needed. 
+        | Number n ->
+            // Explicit numeric extraction — avoid lossy ToObject() round-trip.
+            if System.Decimal.IsInteger n then
+                if n >= decimal System.Int64.MinValue && n <= decimal System.Int64.MaxValue then int64 n :> obj, false
+                else float n :> obj, false
+            else float n :> obj, false
+        | String s -> s.ToString() :> obj, false
+        | other ->
             other.ToJsonString(), true
 
     
