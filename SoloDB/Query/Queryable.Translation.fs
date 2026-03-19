@@ -87,34 +87,6 @@ module internal QueryableTranslationCore =
                 -> false
         | _other -> false
 
-    /// <summary>
-    /// Checks if an Aggregate expression is a special call to ExplainQueryPlan.
-    /// </summary>
-    /// <param name="expression">The expression to check.</param>
-    /// <returns>True if it's an ExplainQueryPlan call, otherwise false.</returns>
-    let internal isAggregateExplainQuery (expression: Expression) =
-        match expression with
-        | :? MethodCallExpression as expression ->
-            expression.Arguments.Count > 2 
-            && expression.Arguments.[1] :? ConstantExpression 
-            && Object.ReferenceEquals((expression.Arguments.[1] :?> ConstantExpression).Value, (QueryPlan.ExplainQueryPlanReference :> obj)) 
-            && expression.Arguments.[2].NodeType = ExpressionType.Quote
-        | _ -> false
-
-    /// <summary>
-    /// Checks if an Aggregate expression is a special call to GetSQL.
-    /// </summary>
-    /// <param name="expression">The expression to check.</param>
-    /// <returns>True if it's a GetSQL call, otherwise false.</returns>
-    let internal isGetGeneratedSQLQuery (expression: Expression) =
-        match expression with
-        | :? MethodCallExpression as expression ->
-            expression.Arguments.Count > 2 
-            && expression.Arguments.[1] :? ConstantExpression 
-            && Object.ReferenceEquals((expression.Arguments.[1] :?> ConstantExpression).Value, (QueryPlan.GetGeneratedSQLReference :> obj)) 
-            && expression.Arguments.[2].NodeType = ExpressionType.Quote
-        | _ -> false
-
     let internal tableExists = HydrationSqlBuilder.tableExists
 
     type internal RelationShapeInfo = HydrationSqlBuilder.RelationShapeInfo
@@ -154,16 +126,6 @@ module internal QueryableTranslationCore =
     let internal startTranslationCore (metadataConnection: SqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
         let variables = Dictionary<string, obj>(16)
 
-        let struct (isExplainQueryPlan, expression) =
-            match expression with
-            | :? MethodCallExpression as expression when isAggregateExplainQuery expression ->
-                struct (true, expression.Arguments.[0])
-            | :? MethodCallExpression as expression when isGetGeneratedSQLQuery expression ->
-                struct (false, expression.Arguments.[0])
-            | _ -> struct (false, expression)
-
-        // Compute valueDecodedType AFTER unwrapping GetSQL/ExplainQueryPlan so the
-        // hydration path sees the real element type, not the Aggregate wrapper type.
         let valueDecodedType =
             if typedefof<IQueryable>.IsAssignableFrom expression.Type then
                 GenericTypeArgCache.Get expression.Type |> Array.head
@@ -255,9 +217,6 @@ module internal QueryableTranslationCore =
         let sb = StringBuilder(256)
         let modelTableNames = collectIndexModelTableNames source.Name outerSelect
         let indexModel = SoloDatabase.IndexModel.loadModelForTables metadataConnection modelTableNames
-        // Edge case 18: ExplainQueryPlan prefix
-        if isExplainQueryPlan then
-            sb.Append "EXPLAIN QUERY PLAN " |> ignore
         emitSelectToSb sb variables indexModel outerSelect
 
         let actuallyHydrated = singleRelationsHydrated && hydrationAliasCounter > 0

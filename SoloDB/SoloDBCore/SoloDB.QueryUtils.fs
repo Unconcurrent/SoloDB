@@ -1,10 +1,10 @@
 namespace SoloDatabase
 
 open System.Linq
-open Utils
 
 /// <summary>
 /// Module containing query utility functions extracted from SoloDB static members.
+/// Uses direct provider type check instead of Aggregate sentinel hack.
 /// </summary>
 module internal QueryUtils =
 
@@ -20,9 +20,8 @@ module internal QueryUtils =
             match p.AdditionalData with
             | :? SoloDBToCollectionData as data -> data.ClearCacheFunction()
             | _ -> ()
-        | _ -> ()
-        // This is a hack, I do not think that it is possible to add new IQueryable methods directly.
-        query.Aggregate(QueryPlan.ExplainQueryPlanReference, (fun _a _b -> ""))
+            p.GetExplainQueryPlan(query.Expression)
+        | _ -> "Query provider is not a SoloDB provider — cannot explain query plan."
 
     /// <summary>
     /// Translates the provided LINQ query into its corresponding SQL statement.
@@ -30,4 +29,7 @@ module internal QueryUtils =
     /// <param name="query">The LINQ query to translate.</param>
     /// <returns>The generated SQL string.</returns>
     let getSQL (query: IQueryable<'T>) =
-        query.Aggregate(QueryPlan.GetGeneratedSQLReference, (fun _a _b -> ""))
+        match query.Provider with
+        | :? ISoloDBCollectionQueryProvider as p ->
+            p.TranslateToSQL(query.Expression)
+        | _ -> "Query provider is not a SoloDB provider — cannot translate to SQL."

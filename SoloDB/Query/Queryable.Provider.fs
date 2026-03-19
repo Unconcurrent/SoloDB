@@ -28,6 +28,10 @@ type internal ISoloDBCollectionQueryProvider =
     abstract member Source: obj
     /// <summary>Gets additional data passed from the parent database instance.</summary>
     abstract member AdditionalData: obj
+    /// <summary>Translates a LINQ expression to its SQL string without executing the query.</summary>
+    abstract member TranslateToSQL: expression: Expression -> string
+    /// <summary>Translates and executes EXPLAIN QUERY PLAN for a LINQ expression.</summary>
+    abstract member GetExplainQueryPlan: expression: Expression -> string
 
 module internal QueryableTranslation =
     let startFilterTranslationWithConnection (metadataConnection: SqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
@@ -113,6 +117,15 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
     interface ISoloDBCollectionQueryProvider with
         override this.Source = source
         override this.AdditionalData = data
+        override this.TranslateToSQL(expression: Expression) =
+            let query, _, _ = QueryableTranslationCore.startTranslation source expression
+            query
+        override this.GetExplainQueryPlan(expression: Expression) =
+            let query, variables, _ = QueryableTranslationCore.startTranslation source expression
+            let explainQuery = "EXPLAIN QUERY PLAN " + query
+            use connection = source.GetInternalConnection()
+            let result = connection.Query<{|detail: string|}>(explainQuery, variables) |> Seq.toList
+            result |> List.map(_.detail) |> String.concat ";\n"
 
     interface SoloDBQueryProvider
     member internal this.ExecuteEnumetable<'Elem> (query: string) (par: obj) (batchCtxObj: obj) : IEnumerable<'Elem> =
@@ -236,14 +249,6 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                                 .MakeGenericMethod(et)
                         ))
                     m.Invoke(this, [|query; variables; box batchCtx|]) :?> 'TResult
-                    // When is explain query plan.
-                | t when t = typeof<string> && QueryableTranslationCore.isAggregateExplainQuery expression ->
-                    use connection = source.GetInternalConnection()
-                    let result = connection.Query<{|detail: string|}>(query, variables) |> Seq.toList
-                    let plan = result |> List.map(_.detail) |> String.concat ";\n"
-                    plan :> obj :?> 'TResult
-                | t when t = typeof<string> && QueryableTranslationCore.isGetGeneratedSQLQuery expression ->
-                    query :> obj :?> 'TResult
                 | _other ->
                     use connection = source.GetInternalConnection()
                     let methodName =

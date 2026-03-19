@@ -28,10 +28,6 @@ module Utils =
         ExceptionDispatchInfo.Capture(e).Throw()
         Unchecked.defaultof<'a>
 
-    type internal QueryPlan =
-        static member val ExplainQueryPlanReference = sprintf "This is a string reference that will be used to determine in which special mode Aggregate() method will be used...%i" 435
-        static member val GetGeneratedSQLReference = sprintf "This is a string reference that will be used to determine in which special mode Aggregate() method will be used...%i" 436
-
     let internal isTuple (t: Type) =
         not t.IsArray &&
         (typeof<Tuple>.IsAssignableFrom t || typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "Tuple`" || t.Name.StartsWith "ValueTuple`")
