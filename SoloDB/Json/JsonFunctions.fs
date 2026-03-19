@@ -99,6 +99,7 @@ module JsonFunctions =
 
         | :? float32 as x -> x :> obj, false
         | :? float as x -> x :> obj, false
+        | :? decimal as x -> (float x) :> obj, false  // Convert decimal to double for SQLite REAL comparison
 
         | _other ->
 
