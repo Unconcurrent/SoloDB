@@ -1048,12 +1048,16 @@ module internal QueryTranslatorVisitDbRef =
                         else null
                     if not (isNull distinctSource) then
                         match tryBuildProjectedSetOperand qb distinctSource with
-                        | ValueSome (projectedDu, innerCore, _tgtAlias) ->
-                            // Emit COUNT(DISTINCT proj) over the inner core.
-                            let countDistinctProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, Some projectedDu, true, None) }]
-                            let core = { innerCore with Projections = ProjectionSetOps.ofList countDistinctProj }
-                            let subSelect = { Ctes = []; Body = SingleSelect core }
-                            qb.DuHandlerResult.Value <- ValueSome(SqlExpr.ScalarSubquery subSelect)
+                        | ValueSome (_projectedDu, innerCore, _tgtAlias) ->
+                            // Two-layer: inner SELECT DISTINCT proj, outer COUNT(*).
+                            // Using COUNT(DISTINCT proj) would drop NULLs — LINQ counts null as distinct.
+                            let distinctCore = { innerCore with Distinct = true }
+                            let distinctSelect = { Ctes = []; Body = SingleSelect distinctCore }
+                            let dtAlias = sprintf "_dc%d" (System.Threading.Interlocked.Increment(&subqueryAliasCounter))
+                            let countProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
+                            let outerCore = mkSubCore countProj (Some(DerivedTable(distinctSelect, dtAlias))) None
+                            let outerSelect = { Ctes = []; Body = SingleSelect outerCore }
+                            qb.DuHandlerResult.Value <- ValueSome(SqlExpr.ScalarSubquery outerSelect)
                             true
                         | ValueNone -> false
                     else false
