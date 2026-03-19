@@ -178,9 +178,16 @@ module JsonFunctions =
             row.ValueJSON :> obj :?> 'R
         else
 
+        if not (isNull row.ValueJSON) && row.ValueJSON.StartsWith("__solodb_error__:", StringComparison.Ordinal) then
+            raise (InvalidOperationException(row.ValueJSON.Substring("__solodb_error__:".Length)))
+        else
+
         match typeof<'R> with
+        | OfType float when isNull row.ValueJSON -> (genericReinterpret Double.NaN)
+        | OfType float32 when isNull row.ValueJSON -> (genericReinterpret Single.NaN)
         | OfType float when row.ValueJSON <> null -> (genericReinterpret << float) row.ValueJSON
         | OfType float32 when row.ValueJSON <> null -> (genericReinterpret << float32) row.ValueJSON
+        | _ when isNull row.ValueJSON -> Unchecked.defaultof<'R>
         | OfType decimal -> (genericReinterpret << decimal) row.ValueJSON
 
         | OfType int8 -> (genericReinterpret << int8) row.ValueJSON
@@ -202,6 +209,10 @@ module JsonFunctions =
             JsonValue.Null :> obj :?> 'R
         | Null when typeof<'R>.IsValueType && typeof<float> <> typeof<'R> && typeof<float32> <> typeof<'R> -> 
             Unchecked.defaultof<'R>
+        | String s when s.StartsWith("__solodb_error__:", StringComparison.Ordinal) ->
+            raise (InvalidOperationException(s.Substring("__solodb_error__:".Length)))
+        | String s when typeof<'R> <> typeof<string> && s.StartsWith("Sequence contains", StringComparison.Ordinal) ->
+            raise (InvalidOperationException(s))
         | json when typeof<JsonValue> = typeof<'R> ->
             let id = row.Id.Value
             if json.JsonType = JsonValueType.Object && not (json.Contains "Id") && id >= 0 then
@@ -213,6 +224,6 @@ module JsonFunctions =
         let mutable obj = fromJson<'R> json
             
         // An Id of -1 mean that it is an inserted object inside the IQueryable.
-        if row.Id.Value <> -1 && HasTypeId<'R>.Value then
+        if not (isNull (obj :> obj)) && row.Id.Value <> -1 && HasTypeId<'R>.Value then
             HasTypeId<'R>.Write obj row.Id.Value
         obj

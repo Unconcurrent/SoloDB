@@ -31,6 +31,14 @@ module internal DBRefManyDescriptor =
         | Select of projection: Expression
         | Contains of value: Expression
         | Exists  // bare Any() without predicate
+        // L4a element-access terminals.
+        | First of predicate: Expression option
+        | FirstOrDefault of predicate: Expression option
+        | Last of predicate: Expression option
+        | LastOrDefault of predicate: Expression option
+        // Single/SingleOrDefault: emits json_group_array LIMIT 2, materializer enforces cardinality.
+        | Single of predicate: Expression option
+        | SingleOrDefault of predicate: Expression option
 
     /// Set operation shape.
     [<RequireQualifiedAccess>]

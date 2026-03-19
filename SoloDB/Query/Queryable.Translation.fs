@@ -64,6 +64,8 @@ module internal QueryableTranslationCore =
             | SupportedLinqMethods.OrderByDescending
             | SupportedLinqMethods.Take
             | SupportedLinqMethods.Skip
+            | SupportedLinqMethods.TakeWhile
+            | SupportedLinqMethods.SkipWhile
             | SupportedLinqMethods.First
             | SupportedLinqMethods.FirstOrDefault
             | SupportedLinqMethods.DefaultIfEmpty
@@ -207,13 +209,12 @@ module internal QueryableTranslationCore =
         // Inline DBRefMany hydration is only admitted for identity owner rowsets.
         // Ordered/filtered owner queries stay on the batch-load path to preserve the
         // non-cartesian root SQL contract required by relation tests.
-        let inlineManyRelationsHydrated =
+        let mutable manyAliasCounter = hydrationAliasCounter
+        let manyRelationsHydrated =
             hasManyRelations
             && not (QueryTranslator.isPrimitiveSQLiteType valueDecodedType)
             && valueDecodedType = typeof<'T>
             && isIdentityOwnerRowsetExpr expression
-        let mutable manyAliasCounter = hydrationAliasCounter
-        let manyRelationsHydrated = inlineManyRelationsHydrated
         let manyHydrationProjection =
             if manyRelationsHydrated then
                 let ownerIdExpr = SqlExpr.Column(Some "o", "Id")

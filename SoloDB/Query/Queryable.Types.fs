@@ -46,6 +46,8 @@ type internal SupportedLinqMethods =
 | OrderByDescending
 | Take
 | Skip
+| TakeWhile
+| SkipWhile
 | First
 | FirstOrDefault
 | DefaultIfEmpty

@@ -111,6 +111,13 @@ module internal DBRefManyExtractor =
                 | "Select" ->
                     // Select as terminal: materializes DBRefMany to json_group_array.
                     getArg mce |> Option.map Terminal.Select
+                // L4a element-access terminals.
+                | "First" -> Some (Terminal.First(getArg mce))
+                | "FirstOrDefault" -> Some (Terminal.FirstOrDefault(getArg mce))
+                | "Last" -> Some (Terminal.Last(getArg mce))
+                | "LastOrDefault" -> Some (Terminal.LastOrDefault(getArg mce))
+                | "Single" -> Some (Terminal.Single(getArg mce))
+                | "SingleOrDefault" -> Some (Terminal.SingleOrDefault(getArg mce))
                 | _ -> None
 
             match terminalOpt with

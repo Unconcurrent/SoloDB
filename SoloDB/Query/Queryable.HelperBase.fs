@@ -238,6 +238,8 @@ module internal QueryableHelperBase =
         | "OrderByDescending" -> Some SupportedLinqMethods.OrderByDescending
         | "Take" -> Some SupportedLinqMethods.Take
         | "Skip" -> Some SupportedLinqMethods.Skip
+        | "TakeWhile" -> Some SupportedLinqMethods.TakeWhile
+        | "SkipWhile" -> Some SupportedLinqMethods.SkipWhile
         | "First" -> Some SupportedLinqMethods.First
         | "FirstOrDefault" -> Some SupportedLinqMethods.FirstOrDefault
         | "DefaultIfEmpty" -> Some SupportedLinqMethods.DefaultIfEmpty

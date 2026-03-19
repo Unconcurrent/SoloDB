@@ -68,7 +68,12 @@ module internal QueryableBuildQueryMain =
 
         validateIncludeExcludeConflicts sourceCtx
 
-        for q in preprocessed |> Array.rev do
+        let reversed = preprocessed |> Array.rev
+        let mutable pendingGroupByExprs : Expression array option = None
+        let mutable pendingGroupByHavingPreds : Expression list = []
+        let mutable idx = 0
+        while idx < reversed.Length do
+            let q = reversed.[idx]
             match q with
             | RootQuery rq -> tableName <- rq.SourceTableName
             | Method m ->
@@ -89,75 +94,115 @@ module internal QueryableBuildQueryMain =
                    && m.Value <> SupportedLinqMethods.ThenBy && m.Value <> SupportedLinqMethods.ThenByDescending then
                     pendingDistinctByScalarReuse <- None
 
-                match m.Value with
-                | SupportedLinqMethods.Where
-                | SupportedLinqMethods.Select
-                | SupportedLinqMethods.Order
-                | SupportedLinqMethods.OrderDescending
-                | SupportedLinqMethods.OrderBy
-                | SupportedLinqMethods.OrderByDescending
-                | SupportedLinqMethods.ThenBy
-                | SupportedLinqMethods.ThenByDescending
-                | SupportedLinqMethods.Skip
-                | SupportedLinqMethods.Take
-                | SupportedLinqMethods.Sum
-                | SupportedLinqMethods.Average
-                | SupportedLinqMethods.Min
-                | SupportedLinqMethods.Max
-                | SupportedLinqMethods.MinBy
-                | SupportedLinqMethods.MaxBy
-                | SupportedLinqMethods.Distinct
-                | SupportedLinqMethods.DistinctBy
-                | SupportedLinqMethods.GroupBy ->
-                    QueryableBuildQueryPartA.apply<'T>
-                        sourceCtx
-                        tableName
-                        statements
-                        &pendingDistinctByScalarReuse
-                        &isPostScalarProjection
-                        simpleCurrent
-                        installTerminalOrdering
-                        m
-                | SupportedLinqMethods.Count
-                | SupportedLinqMethods.CountBy
-                | SupportedLinqMethods.LongCount
-                | SupportedLinqMethods.SelectMany
-                | SupportedLinqMethods.Join
-                | SupportedLinqMethods.Single
-                | SupportedLinqMethods.SingleOrDefault
-                | SupportedLinqMethods.First
-                | SupportedLinqMethods.FirstOrDefault
-                | SupportedLinqMethods.DefaultIfEmpty
-                | SupportedLinqMethods.Last
-                | SupportedLinqMethods.LastOrDefault ->
-                    QueryableBuildQueryPartB.apply<'T>
-                        sourceCtx
-                        tableName
-                        statements
-                        (fun innerCtx vars expression -> translateQuery<'T> innerCtx vars expression)
-                        m
-                | SupportedLinqMethods.All
-                | SupportedLinqMethods.Any
-                | SupportedLinqMethods.Contains
-                | SupportedLinqMethods.Append
-                | SupportedLinqMethods.Concat
-                | SupportedLinqMethods.Except
-                | SupportedLinqMethods.Intersect
-                | SupportedLinqMethods.ExceptBy
-                | SupportedLinqMethods.IntersectBy
-                | SupportedLinqMethods.Cast
-                | SupportedLinqMethods.OfType
-                | SupportedLinqMethods.Exclude
-                | SupportedLinqMethods.Include
-                | SupportedLinqMethods.ThenInclude
-                | SupportedLinqMethods.ThenExclude
-                | SupportedLinqMethods.Aggregate ->
-                    QueryableBuildQueryPartC.apply<'T>
-                        sourceCtx
-                        tableName
-                        statements
-                        (fun innerCtx vars expression -> translateQuery<'T> innerCtx vars expression)
-                        m
+                // GroupBy look-ahead state machine.
+                let mutable pendingGroupByHandled = false
+                if pendingGroupByExprs.IsSome then
+                    match m.Value with
+                    | SupportedLinqMethods.Where ->
+                        pendingGroupByHavingPreds <- m.Expressions.[0] :: pendingGroupByHavingPreds
+                        pendingGroupByHandled <- true
+                    | SupportedLinqMethods.Select ->
+                        let groupByExprs = pendingGroupByExprs.Value
+                        let havingPreds = pendingGroupByHavingPreds |> List.rev
+                        pendingGroupByExprs <- None
+                        pendingGroupByHavingPreds <- []
+                        QueryableBuildQueryPartA.applyGroupBySelect<'T>
+                            sourceCtx tableName statements groupByExprs havingPreds m.Expressions
+                        pendingGroupByHandled <- true
+                    | _ ->
+                        let groupByExprs = pendingGroupByExprs.Value
+                        pendingGroupByExprs <- None
+                        let havingPreds = pendingGroupByHavingPreds |> List.rev
+                        pendingGroupByHavingPreds <- []
+                        QueryableBuildQueryPartA.flushGroupByAsJsonGroupArray<'T>
+                            sourceCtx tableName statements groupByExprs havingPreds
+
+                if not pendingGroupByHandled then
+                    match m.Value with
+                    | SupportedLinqMethods.Where
+                    | SupportedLinqMethods.Select
+                    | SupportedLinqMethods.Order
+                    | SupportedLinqMethods.OrderDescending
+                    | SupportedLinqMethods.OrderBy
+                    | SupportedLinqMethods.OrderByDescending
+                    | SupportedLinqMethods.ThenBy
+                    | SupportedLinqMethods.ThenByDescending
+                    | SupportedLinqMethods.Skip
+                    | SupportedLinqMethods.Take
+                    | SupportedLinqMethods.Sum
+                    | SupportedLinqMethods.Average
+                    | SupportedLinqMethods.Min
+                    | SupportedLinqMethods.Max
+                    | SupportedLinqMethods.MinBy
+                    | SupportedLinqMethods.MaxBy
+                    | SupportedLinqMethods.Distinct
+                    | SupportedLinqMethods.DistinctBy
+                    | SupportedLinqMethods.TakeWhile
+                    | SupportedLinqMethods.SkipWhile ->
+                        QueryableBuildQueryPartA.apply<'T>
+                            sourceCtx
+                            tableName
+                            statements
+                            &pendingDistinctByScalarReuse
+                            &isPostScalarProjection
+                            simpleCurrent
+                            installTerminalOrdering
+                            m
+                    | SupportedLinqMethods.GroupBy ->
+                        QueryableBuildQueryPartA.applyGroupByKeyOnly<'T>
+                            sourceCtx tableName statements m.Expressions
+                        pendingGroupByExprs <- Some m.Expressions
+                    | SupportedLinqMethods.Count
+                    | SupportedLinqMethods.CountBy
+                    | SupportedLinqMethods.LongCount
+                    | SupportedLinqMethods.SelectMany
+                    | SupportedLinqMethods.Join
+                    | SupportedLinqMethods.Single
+                    | SupportedLinqMethods.SingleOrDefault
+                    | SupportedLinqMethods.First
+                    | SupportedLinqMethods.FirstOrDefault
+                    | SupportedLinqMethods.DefaultIfEmpty
+                    | SupportedLinqMethods.Last
+                    | SupportedLinqMethods.LastOrDefault ->
+                        QueryableBuildQueryPartB.apply<'T>
+                            sourceCtx
+                            tableName
+                            statements
+                            (fun innerCtx vars expression -> translateQuery<'T> innerCtx vars expression)
+                            m
+                    | SupportedLinqMethods.All
+                    | SupportedLinqMethods.Any
+                    | SupportedLinqMethods.Contains
+                    | SupportedLinqMethods.Append
+                    | SupportedLinqMethods.Concat
+                    | SupportedLinqMethods.Except
+                    | SupportedLinqMethods.Intersect
+                    | SupportedLinqMethods.ExceptBy
+                    | SupportedLinqMethods.IntersectBy
+                    | SupportedLinqMethods.Cast
+                    | SupportedLinqMethods.OfType
+                    | SupportedLinqMethods.Exclude
+                    | SupportedLinqMethods.Include
+                    | SupportedLinqMethods.ThenInclude
+                    | SupportedLinqMethods.ThenExclude
+                    | SupportedLinqMethods.Aggregate ->
+                        QueryableBuildQueryPartC.apply<'T>
+                            sourceCtx
+                            tableName
+                            statements
+                            (fun innerCtx vars expression -> translateQuery<'T> innerCtx vars expression)
+                            m
+
+            idx <- idx + 1
+
+        // Flush any trailing pending GroupBy.
+        if pendingGroupByExprs.IsSome then
+            let groupByExprs = pendingGroupByExprs.Value
+            let havingPreds = pendingGroupByHavingPreds |> List.rev
+            pendingGroupByExprs <- None
+            pendingGroupByHavingPreds <- []
+            QueryableBuildQueryPartA.flushGroupByAsJsonGroupArray<'T>
+                sourceCtx tableName statements groupByExprs havingPreds
 
         match statements.[0] with
         | Simple s ->
