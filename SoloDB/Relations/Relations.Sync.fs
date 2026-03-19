@@ -157,6 +157,20 @@ let batchLoadDBRefManyProperties
         RelationsBatchLoad.batchLoadDBRefManyProperties connection ownerTable ownerType excludedPaths includedPaths whitelistMode ownerEntities inTransaction 0 (HashSet()) ""
     )
 
+let recurseLoadedRelationTargets
+    (connection: SqliteConnection)
+    (ownerTable: string)
+    (ownerType: Type)
+    (excludedPaths: HashSet<string>)
+    (includedPaths: HashSet<string>)
+    (whitelistMode: bool)
+    (ownerEntities: (int64 * obj) array)
+    (inTransaction: bool)
+    =
+    withRelationSqliteWrap "batch-load" "recurseLoadedRelationTargets" (fun () ->
+        RelationsBatchLoad.recurseLoadedRelationTargets connection ownerTable ownerType excludedPaths includedPaths whitelistMode ownerEntities inTransaction
+    )
+
 /// Capture the RelationVersion baseline for loaded entities.
 /// Called after batch-loading relations so the version is recorded at load time.
 let captureRelationVersionForEntities

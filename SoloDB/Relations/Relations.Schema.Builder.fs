@@ -96,6 +96,30 @@ let internal sqliteTableExistsByName (connection: SqliteConnection) (tableName: 
         "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @name) THEN 1 ELSE 0 END",
         {| name = tableName |}) = 1L
 
+type internal MissingReadMetadataState =
+    | AbsentNoEvidence
+    | PoisonedWithEvidence
+
+let internal classifyMissingReadMetadata
+    (connection: SqliteConnection)
+    (ownerTable: string)
+    (propertyName: string)
+    (kind: RelationKind)
+    (targetType: Type) =
+    let ownerTable = formatName ownerTable
+    match kind with
+    | Single ->
+        AbsentNoEvidence
+    | Many ->
+        let targetTable = formatName targetType.Name
+        let defaultLinkTable = linkTableFromRelationName (relationName ownerTable propertyName)
+        let canonicalLinkTable = linkTableFromRelationName (canonicalManyRelationName ownerTable targetTable)
+        let hasEvidence =
+            [| defaultLinkTable; canonicalLinkTable |]
+            |> Array.distinct
+            |> Array.exists (sqliteTableExistsByName connection)
+        if hasEvidence then PoisonedWithEvidence else AbsentNoEvidence
+
 let internal resolveTargetCollectionName (connection: SqliteConnection) (ownerTable: string) (propertyName: string) (targetType: Type) =
     let ownerTable = formatName ownerTable
     let defaultTable = formatName targetType.Name

@@ -192,6 +192,11 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
             else
                 let genericArgs = mce.Method.GetGenericArguments()
                 if genericArgs.Length = 1 then
+                    let sourceElemType =
+                        if not sourceExpr.Type.IsGenericType then null
+                        else sourceExpr.Type.GetGenericArguments() |> Array.tryHead |> Option.defaultValue null
+                    if not (isNull sourceElemType) then
+                        DBRefManyHelpers.ensureOfTypeSupported sourceElemType
                     match Utils.typeToName genericArgs.[0] with
                     | Some typeName -> ValueSome (sourceExpr, typeName)
                     | None -> ValueNone

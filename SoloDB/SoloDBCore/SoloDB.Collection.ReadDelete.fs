@@ -31,27 +31,32 @@ type internal CollectionReadDeleteOps<'T>() =
 
         use connection = getConnection()
         if hasRelations && HydrationSqlBuilder.hasRelationProperties typeof<'T> then
-            // R45-10: Single-SQL hydration for non-queryable path.
-            let vars = Dictionary<string, obj>()
-            vars.["id"] <- box id
-            let whereExpr =
-                SqlExpr.Binary(
-                    SqlExpr.Column(Some "o", "Id"),
-                    BinaryOperator.Eq,
-                    SqlExpr.Parameter "id")
-            let sql, singleHydrated, manyHydrated =
-                HydrationSqlBuilder.buildHydratedGetByIdSql connection name typeof<'T> whereExpr vars true
-            QueryCommandInstrumentation.Increment()
-            match connection.QueryFirstOrDefault<DbObjectRow>(sql, vars) with
-            | json when Object.ReferenceEquals(json, null) -> None
-            | json ->
-                let entity = fromSQLite<'T> json
-                // Populate DBRefMany trackers from HydrationJSON.
-                if manyHydrated && not (isNull json.HydrationJSON) then
-                    let hydMap = Dictionary<int64, string>()
-                    hydMap.[json.Id.Value] <- json.HydrationJSON
-                    HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (json.Id.Value, box entity) |] hydMap
-                Some entity
+            Relations.withRelationSqliteWrap "read" "TryGetById.hydrated" (fun () ->
+                // R45-10: Single-SQL hydration for non-queryable path.
+                let vars = Dictionary<string, obj>()
+                vars.["id"] <- box id
+                let whereExpr =
+                    SqlExpr.Binary(
+                        SqlExpr.Column(Some "o", "Id"),
+                        BinaryOperator.Eq,
+                        SqlExpr.Parameter "id")
+                let sql, singleHydrated, manyHydrated =
+                    HydrationSqlBuilder.buildHydratedGetByIdSql connection name typeof<'T> whereExpr vars true
+                QueryCommandInstrumentation.Increment()
+                match connection.QueryFirstOrDefault<DbObjectRow>(sql, vars) with
+                | json when Object.ReferenceEquals(json, null) -> None
+                | json ->
+                    let entity = fromSQLite<'T> json
+                    // Populate DBRefMany trackers from HydrationJSON.
+                    if manyHydrated && not (isNull json.HydrationJSON) then
+                        let hydMap = Dictionary<int64, string>()
+                        hydMap.[json.Id.Value] <- json.HydrationJSON
+                        HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (json.Id.Value, box entity) |] hydMap
+                    if singleHydrated || manyHydrated then
+                        let excludedPaths, includedPaths = HashSet<string>(), HashSet<string>()
+                        Relations.recurseLoadedRelationTargets connection name typeof<'T> excludedPaths includedPaths false [| (json.Id.Value, box entity) |] false
+                    Relations.captureRelationVersionForEntities connection name [| (json.Id.Value, box entity) |]
+                    Some entity)
         else
             QueryCommandInstrumentation.Increment()
             match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
@@ -105,29 +110,34 @@ type internal CollectionReadDeleteOps<'T>() =
 
         use connection = getConnection()
         if hasRelations && HydrationSqlBuilder.hasRelationProperties typeof<'T> then
-            // R45-10: Single-SQL hydration for custom-id non-queryable path.
-            // Build WHERE as SqlExpr DU (not raw string splice) to keep query in the DU tree.
-            // Custom-id filter is: jsonb_extract(Value, '$.PropName') = @param
-            let vars = Dictionary<string, obj>()
-            vars.["_cid0"] <- box id
-            let whereExpr =
-                SqlExpr.Binary(
-                    SqlExpr.FunctionCall("jsonb_extract",
-                        [SqlExpr.Column(Some "o", "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + idProp.Name))]),
-                    BinaryOperator.Eq,
-                    SqlExpr.Parameter "_cid0")
-            let sql, _singleHydrated, manyHydrated =
-                HydrationSqlBuilder.buildHydratedGetByIdSql connection name typeof<'T> whereExpr vars true
-            QueryCommandInstrumentation.Increment()
-            match connection.QueryFirstOrDefault<DbObjectRow>(sql, vars) with
-            | json when Object.ReferenceEquals(json, null) -> None
-            | json ->
-                let entity = fromSQLite<'T> json
-                if manyHydrated && not (isNull json.HydrationJSON) then
-                    let hydMap = Dictionary<int64, string>()
-                    hydMap.[json.Id.Value] <- json.HydrationJSON
-                    HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (json.Id.Value, box entity) |] hydMap
-                Some entity
+            Relations.withRelationSqliteWrap "read" "TryGetByCustomId.hydrated" (fun () ->
+                // R45-10: Single-SQL hydration for custom-id non-queryable path.
+                // Build WHERE as SqlExpr DU (not raw string splice) to keep query in the DU tree.
+                // Custom-id filter is: jsonb_extract(Value, '$.PropName') = @param
+                let vars = Dictionary<string, obj>()
+                vars.["_cid0"] <- box id
+                let whereExpr =
+                    SqlExpr.Binary(
+                        SqlExpr.FunctionCall("jsonb_extract",
+                            [SqlExpr.Column(Some "o", "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + idProp.Name))]),
+                        BinaryOperator.Eq,
+                        SqlExpr.Parameter "_cid0")
+                let sql, singleHydrated, manyHydrated =
+                    HydrationSqlBuilder.buildHydratedGetByIdSql connection name typeof<'T> whereExpr vars true
+                QueryCommandInstrumentation.Increment()
+                match connection.QueryFirstOrDefault<DbObjectRow>(sql, vars) with
+                | json when Object.ReferenceEquals(json, null) -> None
+                | json ->
+                    let entity = fromSQLite<'T> json
+                    if manyHydrated && not (isNull json.HydrationJSON) then
+                        let hydMap = Dictionary<int64, string>()
+                        hydMap.[json.Id.Value] <- json.HydrationJSON
+                        HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (json.Id.Value, box entity) |] hydMap
+                    if singleHydrated || manyHydrated then
+                        let excludedPaths, includedPaths = HashSet<string>(), HashSet<string>()
+                        Relations.recurseLoadedRelationTargets connection name typeof<'T> excludedPaths includedPaths false [| (json.Id.Value, box entity) |] false
+                    Relations.captureRelationVersionForEntities connection name [| (json.Id.Value, box entity) |]
+                    Some entity)
         else
             // R45-11 S-1: DU-built SELECT for custom-id no-relations fallback.
             let vars = Dictionary<string, obj>()

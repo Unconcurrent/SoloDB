@@ -176,11 +176,12 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         if ctx.ManyRelationsHydrated && not (isNull hydrationMap) then
                             HydrationManyPopulator.populateFromHydrationJson ctx.OwnerType ownerEntities hydrationMap
 
-                        // Version capture: defer when all relations are hydrated inline.
-                        let batchLoadRan =
-                            (ctx.HasSingleRelations && not ctx.SingleRelationsHydrated)
-                            || (ctx.HasManyRelations && not ctx.ManyRelationsHydrated)
-                        if batchLoadRan then
+                        // Inline hydration loads hop-1 relations, but nested traversal still
+                        // belongs to the recursive batch-loader.
+                        if ctx.SingleRelationsHydrated || ctx.ManyRelationsHydrated then
+                            Relations.recurseLoadedRelationTargets connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
+
+                        if ctx.HasSingleRelations || ctx.HasManyRelations then
                             Relations.captureRelationVersionForEntities connection ctx.OwnerTable ownerEntities
 
                 for (_id, entity) in buffer do
@@ -227,10 +228,9 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         let hydMap = Dictionary<int64, string>()
                         hydMap.[row.Id.Value] <- row.HydrationJSON
                         HydrationManyPopulator.populateFromHydrationJson ctx.OwnerType [| (row.Id.Value, box entity) |] hydMap
-                    let batchLoadRan =
-                        (ctx.HasSingleRelations && not ctx.SingleRelationsHydrated)
-                        || (ctx.HasManyRelations && not ctx.ManyRelationsHydrated)
-                    if batchLoadRan then
+                    if ctx.SingleRelationsHydrated || ctx.ManyRelationsHydrated then
+                        Relations.recurseLoadedRelationTargets connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
+                    if ctx.HasSingleRelations || ctx.HasManyRelations then
                         Relations.captureRelationVersionForEntities connection ctx.OwnerTable [| (row.Id.Value, box entity) |]
                 | _ -> ()
                 entity

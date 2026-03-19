@@ -87,6 +87,29 @@ module internal QueryableTranslationCore =
                 -> false
         | _other -> false
 
+    let rec private isIdentityOwnerRowsetExpr (expression: Expression) =
+        let rec stripConvert (expr: Expression) =
+            match expr with
+            | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert || ue.NodeType = ExpressionType.ConvertChecked ->
+                stripConvert ue.Operand
+            | _ -> expr
+        let expression = stripConvert expression
+        match expression with
+        | :? ConstantExpression -> true
+        | :? MethodCallExpression as mce ->
+            let source =
+                if not (isNull mce.Object) then mce.Object
+                elif mce.Arguments.Count > 0 then mce.Arguments.[0]
+                else null
+            match parseSupportedMethod mce.Method.Name with
+            | Some SupportedLinqMethods.Include
+            | Some SupportedLinqMethods.ThenInclude
+            | Some SupportedLinqMethods.Exclude
+            | Some SupportedLinqMethods.ThenExclude ->
+                not (isNull source) && isIdentityOwnerRowsetExpr source
+            | _ -> false
+        | _ -> false
+
     let internal tableExists = HydrationSqlBuilder.tableExists
 
     type internal RelationShapeInfo = HydrationSqlBuilder.RelationShapeInfo
@@ -169,7 +192,7 @@ module internal QueryableTranslationCore =
             if singleRelationsHydrated then
                 let ownerValueExpr = SqlExpr.Column(Some "o", "Value")
                 let hydratedValue =
-                    HydrationSqlBuilder.buildHydrationValueExpr ctx typeof<'T> (source.Name)
+                    HydrationSqlBuilder.buildHydrationValueExpr metadataConnection ctx typeof<'T> (source.Name)
                         ownerValueExpr 0 "" &hydrationAliasCounter
                 if hydrationAliasCounter = 0 then
                     // No hydration happened (all excluded or no matching props).
@@ -181,15 +204,20 @@ module internal QueryableTranslationCore =
             else
                 extractValueAsJsonDu valueDecodedType
 
-        // Build HydrationJSON projection for DBRefMany properties.
-        // json_object('Prop', COALESCE(json_group_array(...), jsonb('[]')), ...)
+        // Inline DBRefMany hydration is only admitted for identity owner rowsets.
+        // Ordered/filtered owner queries stay on the batch-load path to preserve the
+        // non-cartesian root SQL contract required by relation tests.
+        let inlineManyRelationsHydrated =
+            hasManyRelations
+            && not (QueryTranslator.isPrimitiveSQLiteType valueDecodedType)
+            && valueDecodedType = typeof<'T>
+            && isIdentityOwnerRowsetExpr expression
         let mutable manyAliasCounter = hydrationAliasCounter
-        let manyRelationsHydrated =
-            hasManyRelations && not (QueryTranslator.isPrimitiveSQLiteType valueDecodedType)
+        let manyRelationsHydrated = inlineManyRelationsHydrated
         let manyHydrationProjection =
             if manyRelationsHydrated then
                 let ownerIdExpr = SqlExpr.Column(Some "o", "Id")
-                HydrationSqlBuilder.buildManyHydrationProjection ctx typeof<'T> (source.Name)
+                HydrationSqlBuilder.buildManyHydrationProjection metadataConnection ctx typeof<'T> (source.Name)
                     ownerIdExpr &manyAliasCounter
             else
                 None

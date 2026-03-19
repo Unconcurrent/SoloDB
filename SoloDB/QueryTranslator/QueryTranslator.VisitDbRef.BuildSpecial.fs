@@ -16,18 +16,20 @@ module internal DBRefManyBuildSpecial =
     /// Build GroupBy terminal SQL from a descriptor.
     let tryBuildGroupBy
         (qb: QueryBuilder) (desc: QueryDescriptor)
-        (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore)
+        (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore * string)
         (mkSubCore: Projection list -> TableSource option -> SqlExpr option -> SelectCore)
         (nextAlias: string -> string)
         (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef)
         (keyLambda: LambdaExpression) : SqlExpr voption =
 
-        let tgtAlias, _, baseCore =
+        let tgtAlias, _, baseCore, targetTable =
             buildCorrelatedCore qb { desc with Limit = None; Offset = None; SortKeys = [] } ownerRef
                 [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
-        let subQbKey = qb.ForSubquery(tgtAlias, keyLambda)
+        let subQbKey = qb.ForSubquery(tgtAlias, keyLambda, subqueryRootTable = targetTable)
         let groupKeyDu = visitDu keyLambda.Body subQbKey
+        let keyJoins = DBRefManyHelpers.joinEdgesToClauses subQbKey.SourceContext.Joins
 
+        let baseCore = { baseCore with Joins = baseCore.Joins @ keyJoins }
         match desc.Terminal with
         | Terminal.Count | Terminal.LongCount ->
             let gbCore = { baseCore with GroupBy = [groupKeyDu] }
@@ -65,7 +67,7 @@ module internal DBRefManyBuildSpecial =
     /// Build TakeWhile/SkipWhile terminal SQL from a descriptor.
     let tryBuildTakeWhile
         (qb: QueryBuilder) (desc: QueryDescriptor)
-        (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore)
+        (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore * string)
         (mkSubCore: Projection list -> TableSource option -> SqlExpr option -> SelectCore)
         (nextAlias: string -> string)
         (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef)
@@ -75,9 +77,11 @@ module internal DBRefManyBuildSpecial =
             raise (NotSupportedException(
                 "Error: TakeWhile/SkipWhile requires an explicit OrderBy.\nFix: Add .OrderBy(key) before .TakeWhile(pred)."))
 
-        let tgtAlias, _, baseCore = buildCorrelatedCore qb desc ownerRef []
-        let twSubQb = qb.ForSubquery(tgtAlias, twPredLambda)
+        let tgtAlias, _, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
+        let twSubQb = qb.ForSubquery(tgtAlias, twPredLambda, subqueryRootTable = targetTable)
         let twPredDu = visitDu twPredLambda.Body twSubQb
+        let twJoins = DBRefManyHelpers.joinEdgesToClauses twSubQb.SourceContext.Joins
+        let baseCore = { baseCore with Joins = baseCore.Joins @ twJoins }
         let caseExpr = SqlExpr.CaseExpr(
             (SqlExpr.Unary(UnaryOperator.Not, twPredDu), SqlExpr.Literal(SqlLiteral.Integer 1L)),
             [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))
@@ -107,10 +111,11 @@ module internal DBRefManyBuildSpecial =
         | Terminal.Select _ ->
             match desc.SelectProjection with
             | Some projLambda ->
-                let subQb2 = qb.ForSubquery(tgtAlias, projLambda)
+                let subQb2 = qb.ForSubquery(tgtAlias, projLambda, subqueryRootTable = targetTable)
                 let projDu = visitDu projLambda.Body subQb2
+                let projJoins = DBRefManyHelpers.joinEdgesToClauses subQb2.SourceContext.Joins
                 let innerProjs2 = [{ Alias = Some "v"; Expr = projDu }; { Alias = Some "_cf"; Expr = cfExpr }]
-                let innerCore2 = { baseCore with Projections = ProjectionSetOps.ofList innerProjs2 }
+                let innerCore2 = { baseCore with Projections = ProjectionSetOps.ofList innerProjs2; Joins = baseCore.Joins @ projJoins }
                 let innerSel2 = { Ctes = []; Body = SingleSelect innerCore2 }
                 let twAlias2 = nextAlias "_tw"
                 let cfFilter2 =

@@ -8,6 +8,7 @@ open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.QueryTranslatorVisitCore
 open SoloDatabase.QueryTranslatorVisitPost
+open SoloDatabase.QueryTranslatorVisitDbRefPeelers3
 open SoloDatabase.DBRefManyDescriptor
 open DBRefTypeHelpers
 open Utils
@@ -53,13 +54,13 @@ module internal DBRefManyBuilder =
           OrderBy = []; Limit = None; Offset = None }
 
     /// Build the correlated subquery core from a descriptor.
-    /// Returns (tgtAlias, lnkAlias, core with JOIN + WHERE + ORDER BY + LIMIT/OFFSET).
+    /// Returns (tgtAlias, lnkAlias, core, targetTable) with JOIN + WHERE + ORDER BY + LIMIT/OFFSET.
     let internal buildCorrelatedCore
         (qb: QueryBuilder)
         (desc: QueryDescriptor)
         (ownerRef: DBRefManyOwnerRef)
         (projections: Projection list)
-        : string * string * SelectCore =
+        : string * string * SelectCore * string =
 
         let propName = ownerRef.PropertyExpr.Member.Name
         let ctx = qb.SourceContext
@@ -69,17 +70,26 @@ module internal DBRefManyBuilder =
         let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
         let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
         let targetTable = resolveTargetTable ctx ownerRef.OwnerCollection propName targetType
+        if desc.OfTypeName.IsSome then
+            DBRefManyHelpers.ensureOfTypeSupported targetType
         let tgtAlias = nextAlias "_tgt"
         let lnkAlias = nextAlias "_lnk"
+
+        // Collect inner DBRef JOINs from isolated ForSubquery contexts.
+        let innerJoinEdges = ResizeArray<JoinEdge>()
 
         let wherePredDus =
             desc.WherePredicates
             |> List.collect (fun predExpr ->
                 match tryExtractLambdaExpression predExpr with
                 | ValueSome predLambda ->
-                    let subQb = qb.ForSubquery(tgtAlias, predLambda)
-                    [visitDu predLambda.Body subQb]
-                | ValueNone -> [])
+                    let subQb = qb.ForSubquery(tgtAlias, predLambda, subqueryRootTable = targetTable)
+                    let result = [visitDu predLambda.Body subQb]
+                    innerJoinEdges.AddRange(subQb.SourceContext.Joins)
+                    result
+                | ValueNone ->
+                    raise (NotSupportedException(
+                        "Error: Cannot translate relation-backed DBRefMany.Any predicate.\nReason: The predicate is not a translatable lambda expression (e.g., Func<> delegate instead of Expression<Func<>>).\nFix: Pass the predicate as an inline lambda, not a delegate variable.")))
 
         let ofTypePred =
             match desc.OfTypeName with
@@ -99,8 +109,10 @@ module internal DBRefManyBuilder =
             |> List.map (fun (keyExpr, dir) ->
                 match tryExtractLambdaExpression keyExpr with
                 | ValueSome keyLambda ->
-                    let subQb = qb.ForSubquery(tgtAlias, keyLambda)
-                    { Expr = visitDu keyLambda.Body subQb; Direction = dir }
+                    let subQb = qb.ForSubquery(tgtAlias, keyLambda, subqueryRootTable = targetTable)
+                    let result = { Expr = visitDu keyLambda.Body subQb; Direction = dir }
+                    innerJoinEdges.AddRange(subQb.SourceContext.Joins)
+                    result
                 | ValueNone ->
                     raise (NotSupportedException("Cannot extract key selector for OrderBy.")))
 
@@ -135,14 +147,98 @@ module internal DBRefManyBuilder =
         let fullWhere =
             allPreds |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) ownerWhere
 
-        let core =
+        // Edge case: DBRef.Value navigation inside predicates/sort keys adds JOINs to isolated ForSubquery contexts.
+        // These JOINs must be emitted inside the correlated subquery, not leaked to the outer scope.
+        let dbRefJoins = DBRefManyHelpers.joinEdgesToClauses innerJoinEdges
+
+        let innerCore =
             { mkSubCore projections (Some(BaseTable(linkTable, Some lnkAlias))) (Some fullWhere) with
-                Joins = [ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), joinOn)]
+                Joins = [ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), joinOn)] @ dbRefJoins
                 OrderBy = sortKeyDus
                 Limit = limitDu
                 Offset = offsetDu }
 
-        tgtAlias, lnkAlias, core
+        // PostBound wrapping: when Take/Skip precedes Where/OrderBy in the LINQ pipeline,
+        // the descriptor has PostBound operators that must be applied AFTER bounding.
+        // Wrap the inner core in a DerivedTable and apply PostBound on the outer layer.
+        let hasPostBound =
+            desc.PostBoundWherePredicates.Length > 0 ||
+            desc.PostBoundSortKeys.Length > 0 ||
+            desc.PostBoundLimit.IsSome ||
+            desc.PostBoundOffset.IsSome
+
+        if hasPostBound then
+            // PostBound wrapping: inner core bounded by Take/Skip, outer applies post-bound operators.
+            // Inner core projects pass-through columns for the DerivedTable.
+            let passThrough = { innerCore with Projections = AllColumns }
+            let innerSel = { Ctes = []; Body = SingleSelect passThrough }
+            let pbAlias = nextAlias "_pb"
+
+            // Translate PostBound WHERE predicates against the _pb alias.
+            let pbJoinEdges = ResizeArray<JoinEdge>()
+            let pbWhereDus =
+                desc.PostBoundWherePredicates
+                |> List.collect (fun predExpr ->
+                    match tryExtractLambdaExpression predExpr with
+                    | ValueSome predLambda ->
+                        let subQb = qb.ForSubquery(pbAlias, predLambda, subqueryRootTable = targetTable)
+                        let result = [visitDu predLambda.Body subQb]
+                        pbJoinEdges.AddRange(subQb.SourceContext.Joins)
+                        result
+                    | ValueNone ->
+                        raise (NotSupportedException(
+                            "Error: Cannot translate relation-backed DBRefMany predicate.\nReason: The predicate is not a translatable lambda expression.\nFix: Pass the predicate as an inline lambda, not a delegate variable.")))
+
+            // Translate PostBound sort keys.
+            let pbSortKeyDus =
+                desc.PostBoundSortKeys
+                |> List.map (fun (keyExpr, dir) ->
+                    match tryExtractLambdaExpression keyExpr with
+                    | ValueSome keyLambda ->
+                        let subQb = qb.ForSubquery(pbAlias, keyLambda, subqueryRootTable = targetTable)
+                        let result = { Expr = visitDu keyLambda.Body subQb; Direction = dir }
+                        pbJoinEdges.AddRange(subQb.SourceContext.Joins)
+                        result
+                    | ValueNone ->
+                        raise (NotSupportedException("Cannot extract key selector for PostBound OrderBy.")))
+
+            let pbLimitDu =
+                match desc.PostBoundLimit with
+                | Some e ->
+                    match e with
+                    | :? ConstantExpression as ce -> Some(SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value))))
+                    | _ -> Some(visitDu e qb)
+                | None ->
+                    // SQLite requires LIMIT before OFFSET. When only OFFSET is present, use LIMIT -1 (unlimited).
+                    match desc.PostBoundOffset with
+                    | Some _ -> Some(SqlExpr.Literal(SqlLiteral.Integer -1L))
+                    | None -> None
+            let pbOffsetDu =
+                match desc.PostBoundOffset with
+                | Some e ->
+                    match e with
+                    | :? ConstantExpression as ce -> Some(SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value))))
+                    | _ -> Some(visitDu e qb)
+                | None -> None
+
+            let pbWhere =
+                match pbWhereDus with
+                | [] -> None
+                | preds -> Some(preds |> List.reduce (fun a b -> SqlExpr.Binary(a, BinaryOperator.And, b)))
+
+            let pbDbRefJoins = DBRefManyHelpers.joinEdgesToClauses pbJoinEdges
+
+            let outerCore =
+                { mkSubCore projections (Some(DerivedTable(innerSel, pbAlias))) pbWhere with
+                    Joins = pbDbRefJoins
+                    OrderBy = pbSortKeyDus
+                    Limit = pbLimitDu
+                    Offset = pbOffsetDu }
+
+            // Return _pb as the effective target alias for terminal builders.
+            pbAlias, lnkAlias, outerCore, targetTable
+        else
+            tgtAlias, lnkAlias, innerCore, targetTable
 
 
     let private countDbRefManyDepth (expr: Expression) : int =
@@ -151,9 +247,8 @@ module internal DBRefManyBuilder =
             match e with
             | null -> 0
             | :? MemberExpression as me ->
-                let inner = unwrapConvert me.Expression
-                let depth = if not (isNull inner) && isDBRefManyType inner.Type then 1 else 0
-                depth + visitExpr me.Expression
+                let selfDepth = if isDBRefManyType me.Type then 1 else 0
+                selfDepth + visitExpr me.Expression
             | :? MethodCallExpression as mc ->
                 let objectDepth = if isNull mc.Object then 0 else visitExpr mc.Object
                 let argsDepth = mc.Arguments |> Seq.map visitExpr |> Seq.fold max 0
@@ -169,45 +264,48 @@ module internal DBRefManyBuilder =
     /// Build EXISTS subquery (for Any terminal).
     let private buildExists (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) : SqlExpr =
         let oneProj = [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
-        let _, _, core = buildCorrelatedCore qb desc ownerRef oneProj
+        let _, _, core, _ = buildCorrelatedCore qb desc ownerRef oneProj
         SqlExpr.Exists { Ctes = []; Body = SingleSelect core }
 
     /// Build NOT EXISTS subquery (for All terminal).
     let private buildNotExists (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) (allPredExpr: Expression) : SqlExpr =
         let oneProj = [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
-        let tgtAlias, _, core = buildCorrelatedCore qb desc ownerRef oneProj
+        let tgtAlias, _, core, targetTable = buildCorrelatedCore qb desc ownerRef oneProj
         match tryExtractLambdaExpression allPredExpr with
         | ValueSome allPredLambda ->
-            let subQb = qb.ForSubquery(tgtAlias, allPredLambda)
+            let subQb = qb.ForSubquery(tgtAlias, allPredLambda, subqueryRootTable = targetTable)
             let allPredDu = visitDu allPredLambda.Body subQb
+            let allPredJoins = DBRefManyHelpers.joinEdgesToClauses subQb.SourceContext.Joins
             let negatedPred = SqlExpr.Unary(UnaryOperator.Not, allPredDu)
             let extendedWhere =
                 match core.Where with
                 | Some w -> Some(SqlExpr.Binary(w, BinaryOperator.And, negatedPred))
                 | None -> Some negatedPred
-            let coreWithNot = { core with Where = extendedWhere }
+            let coreWithNot = { core with Where = extendedWhere; Joins = core.Joins @ allPredJoins }
 
-            if desc.Limit.IsSome || desc.Offset.IsSome then
+            if core.Limit.IsSome || core.Offset.IsSome then
                 let boundedCore = { core with Where = core.Where; Projections = AllColumns }
                 let boundedSel = { Ctes = []; Body = SingleSelect boundedCore }
                 let bndAlias = nextAlias "_bnd"
-                let bndQb = qb.ForSubquery(bndAlias, allPredLambda)
+                let bndQb = qb.ForSubquery(bndAlias, allPredLambda, subqueryRootTable = targetTable)
                 let bndPredDu = visitDu allPredLambda.Body bndQb
+                let bndJoins = DBRefManyHelpers.joinEdgesToClauses bndQb.SourceContext.Joins
                 let outerWhere = SqlExpr.Unary(UnaryOperator.Not, bndPredDu)
-                let outerCore = mkSubCore oneProj (Some(DerivedTable(boundedSel, bndAlias))) (Some outerWhere)
+                let outerCore = { mkSubCore oneProj (Some(DerivedTable(boundedSel, bndAlias))) (Some outerWhere) with Joins = bndJoins }
                 let outerSel = { Ctes = []; Body = SingleSelect outerCore }
                 SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists outerSel)
             else
                 SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists { Ctes = []; Body = SingleSelect coreWithNot })
         | ValueNone ->
-            raise (NotSupportedException("Cannot extract predicate for All."))
+            raise (NotSupportedException(
+                "Error: Cannot translate relation-backed DBRefMany.All predicate.\nReason: The predicate is not a translatable lambda expression (e.g., Func<> delegate instead of Expression<Func<>>).\nFix: Pass the predicate as an inline lambda, not a delegate variable."))
 
     /// Build scalar COUNT subquery.
     let private buildCount (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) : SqlExpr =
         let countProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
-        let _, _, core = buildCorrelatedCore qb desc ownerRef countProj
+        let _, _, core, _ = buildCorrelatedCore qb desc ownerRef countProj
 
-        if desc.Limit.IsSome || desc.Offset.IsSome then
+        if core.Limit.IsSome || core.Offset.IsSome then
             let innerCore = { core with Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] }
             let innerSel = { Ctes = []; Body = SingleSelect innerCore }
             let dtAlias = nextAlias "_pg"
@@ -221,13 +319,14 @@ module internal DBRefManyBuilder =
     let private buildAggregate (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) (selectorExpr: Expression) (aggKind: AggregateKind) : SqlExpr =
         match tryExtractLambdaExpression selectorExpr with
         | ValueSome selectorLambda ->
-            let tgtAlias, _, baseCore = buildCorrelatedCore qb desc ownerRef []
-            let subQb = qb.ForSubquery(tgtAlias, selectorLambda)
+            let tgtAlias, _, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
+            let subQb = qb.ForSubquery(tgtAlias, selectorLambda, subqueryRootTable = targetTable)
             let selectorDu = visitDu selectorLambda.Body subQb
+            let selectorJoins = DBRefManyHelpers.joinEdgesToClauses subQb.SourceContext.Joins
             let aggExpr = SqlExpr.AggregateCall(aggKind, Some selectorDu, false, None)
 
-            if desc.Limit.IsSome || desc.Offset.IsSome then
-                let innerCore = { baseCore with Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = selectorDu }] }
+            if baseCore.Limit.IsSome || baseCore.Offset.IsSome then
+                let innerCore = { baseCore with Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = selectorDu }]; Joins = baseCore.Joins @ selectorJoins }
                 let innerSel = { Ctes = []; Body = SingleSelect innerCore }
                 let pgAlias = nextAlias "_pg"
                 let outerAgg = SqlExpr.AggregateCall(aggKind, Some(SqlExpr.Column(Some pgAlias, "v")), false, None)
@@ -237,12 +336,53 @@ module internal DBRefManyBuilder =
                 else scalarExpr
             else
                 let aggProj = [{ Alias = None; Expr = aggExpr }]
-                let core = { baseCore with Projections = ProjectionSetOps.ofList aggProj }
+                let core = { baseCore with Projections = ProjectionSetOps.ofList aggProj; Joins = baseCore.Joins @ selectorJoins }
                 let scalarExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
                 if aggKind = AggregateKind.Sum then SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
                 else scalarExpr
         | ValueNone ->
             raise (NotSupportedException("Cannot extract selector for aggregate."))
+
+    /// Build the projected scalar rowset that Select/Distinct/Take/Skip/OfType compose over.
+    let private buildProjectedRowset (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) : SqlSelect =
+        match desc.SelectProjection with
+        | Some projLambda ->
+            let tgtAlias, _, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
+            let subQb = qb.ForSubquery(tgtAlias, projLambda, subqueryRootTable = targetTable)
+            let projectedDu = visitDu projLambda.Body subQb
+            let projJoins = DBRefManyHelpers.joinEdgesToClauses subQb.SourceContext.Joins
+            let projectedCore =
+                { baseCore with
+                    Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = projectedDu }]
+                    Distinct = false
+                    Joins = baseCore.Joins @ projJoins }
+            if desc.Distinct && (baseCore.Limit.IsSome || baseCore.Offset.IsSome) then
+                let innerSel = { Ctes = []; Body = SingleSelect projectedCore }
+                let dtAlias = nextAlias "_pd"
+                let outerCore =
+                    { mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Column(Some dtAlias, "v") }] (Some(DerivedTable(innerSel, dtAlias))) None with
+                        Distinct = true }
+                { Ctes = []; Body = SingleSelect outerCore }
+            else
+                let finalCore = { projectedCore with Distinct = desc.Distinct }
+                { Ctes = []; Body = SingleSelect finalCore }
+        | None ->
+            raise (NotSupportedException("Projected scalar terminal requires Select projection."))
+
+    let private buildProjectedAggregate (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) (aggKind: AggregateKind) : SqlExpr =
+        if desc.TakeWhileInfo.IsSome then
+            raise (NotSupportedException("Projected scalar aggregate after TakeWhile/SkipWhile is not supported."))
+
+        let projectedSel = buildProjectedRowset qb desc ownerRef
+        let projectedAlias = nextAlias "_pa"
+        let projectedValue = SqlExpr.Column(Some projectedAlias, "v")
+        let aggExpr = SqlExpr.AggregateCall(aggKind, Some projectedValue, false, None)
+        let aggCore = mkSubCore [{ Alias = None; Expr = aggExpr }] (Some(DerivedTable(projectedSel, projectedAlias))) None
+        let scalarExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect aggCore }
+        if aggKind = AggregateKind.Sum then
+            SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
+        else
+            scalarExpr
 
     /// Build Select projection (json_group_array).
     let private buildSelect (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) : SqlExpr =
@@ -251,11 +391,15 @@ module internal DBRefManyBuilder =
             if countDbRefManyDepth projLambda.Body > 0 then
                 raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
 
-            let tgtAlias, _, baseCore = buildCorrelatedCore qb desc ownerRef []
-            let subQb = qb.ForSubquery(tgtAlias, projLambda)
+            let tgtAlias, _, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
+            let subQb = qb.ForSubquery(tgtAlias, projLambda, subqueryRootTable = targetTable)
             let projectedDu = visitDu projLambda.Body subQb
+            // Edge case: DBRef.Value navigation inside Select projection (e.g., tag.TagType.Value.Code)
+            // generates JOINs in the isolated ForSubquery context — capture and include in core.
+            let projJoins = DBRefManyHelpers.joinEdgesToClauses subQb.SourceContext.Joins
+            let baseCore = { baseCore with Joins = baseCore.Joins @ projJoins }
 
-            let hasTakeSkipOrOrder = desc.SortKeys.Length > 0 || desc.Limit.IsSome || desc.Offset.IsSome
+            let hasTakeSkipOrOrder = baseCore.OrderBy.Length > 0 || baseCore.Limit.IsSome || baseCore.Offset.IsSome
             let hasTakeWhile = desc.TakeWhileInfo.IsSome
 
             if desc.Distinct && not hasTakeSkipOrOrder && not hasTakeWhile then
@@ -271,7 +415,7 @@ module internal DBRefManyBuilder =
                 let innerProjs =
                     match desc.TakeWhileInfo with
                     | Some (twPredLambda, _) ->
-                        let twSubQb = qb.ForSubquery(tgtAlias, twPredLambda)
+                        let twSubQb = qb.ForSubquery(tgtAlias, twPredLambda, subqueryRootTable = targetTable)
                         let twPredDu = visitDu twPredLambda.Body twSubQb
                         let caseExpr = SqlExpr.CaseExpr(
                             (SqlExpr.Unary(UnaryOperator.Not, twPredDu), SqlExpr.Literal(SqlLiteral.Integer 1L)),
@@ -306,26 +450,35 @@ module internal DBRefManyBuilder =
 
     /// Build Contains (entity Id-based membership or projected scalar).
     let private buildContains (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) (valueExpr: Expression) : SqlExpr =
+        if desc.SelectProjection.IsSome then
+            let projectedSel = buildProjectedRowset qb desc ownerRef
+            let projectedAlias = nextAlias "_pc"
+            let valueDu = visitDu valueExpr qb
+            let containsWhere = nullSafeEq (SqlExpr.Column(Some projectedAlias, "v")) valueDu
+            let oneProj = [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+            let containsCore = mkSubCore oneProj (Some(DerivedTable(projectedSel, projectedAlias))) (Some containsWhere)
+            SqlExpr.Exists { Ctes = []; Body = SingleSelect containsCore }
+        else
         // Entity Contains: EXISTS(SELECT 1 FROM link WHERE ownerId AND targetId = entity.Id)
-        let propName = ownerRef.PropertyExpr.Member.Name
-        let ctx = qb.SourceContext
-        let linkTable = dbRefManyLinkTable ctx ownerRef.OwnerCollection propName
-        let ownerUsesSource = dbRefManyOwnerUsesSource ctx ownerRef.OwnerCollection propName
-        let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
-        let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
+            let propName = ownerRef.PropertyExpr.Member.Name
+            let ctx = qb.SourceContext
+            let linkTable = dbRefManyLinkTable ctx ownerRef.OwnerCollection propName
+            let ownerUsesSource = dbRefManyOwnerUsesSource ctx ownerRef.OwnerCollection propName
+            let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
+            let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
 
-        let idProp = valueExpr.Type.GetProperty("Id")
-        if isNull idProp then
-            raise (NotSupportedException("Contains requires an entity with an Id property."))
-        let idAccess = Expression.MakeMemberAccess(valueExpr, idProp)
-        let entityIdDu = visitDu idAccess qb
+            let idProp = valueExpr.Type.GetProperty("Id")
+            if isNull idProp then
+                raise (NotSupportedException("Contains requires an entity with an Id property."))
+            let idAccess = Expression.MakeMemberAccess(valueExpr, idProp)
+            let entityIdDu = visitDu idAccess qb
 
-        let ownerWhere = SqlExpr.Binary(SqlExpr.Column(None, ownerColumn), BinaryOperator.Eq, SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
-        let targetWhere = SqlExpr.Binary(SqlExpr.Column(None, targetColumn), BinaryOperator.Eq, entityIdDu)
-        let fullWhere = SqlExpr.Binary(ownerWhere, BinaryOperator.And, targetWhere)
-        let oneProj = [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
-        let core = mkSubCore oneProj (Some(BaseTable(linkTable, None))) (Some fullWhere)
-        SqlExpr.Exists { Ctes = []; Body = SingleSelect core }
+            let ownerWhere = SqlExpr.Binary(SqlExpr.Column(None, ownerColumn), BinaryOperator.Eq, SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
+            let targetWhere = SqlExpr.Binary(SqlExpr.Column(None, targetColumn), BinaryOperator.Eq, entityIdDu)
+            let fullWhere = SqlExpr.Binary(ownerWhere, BinaryOperator.And, targetWhere)
+            let oneProj = [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+            let core = mkSubCore oneProj (Some(BaseTable(linkTable, None))) (Some fullWhere)
+            SqlExpr.Exists { Ctes = []; Body = SingleSelect core }
 
 
     /// Build SQL from a QueryDescriptor with a pre-resolved owner ref.
@@ -352,14 +505,8 @@ module internal DBRefManyBuilder =
         // Distinct.Count — null-safe two-layer: inner SELECT DISTINCT, outer COUNT(*).
         if desc.Distinct && (match desc.Terminal with Terminal.Count | Terminal.LongCount -> true | _ -> false) then
             match desc.SelectProjection with
-            | Some projLambda ->
-                let tgtAlias, _, baseCore = buildCorrelatedCore qb desc ownerRef []
-                let subQb = qb.ForSubquery(tgtAlias, projLambda)
-                let projDu = visitDu projLambda.Body subQb
-                let distinctCore = { baseCore with
-                                        Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = projDu }]
-                                        Distinct = true; Limit = None; Offset = None }
-                let distinctSel = { Ctes = []; Body = SingleSelect distinctCore }
+            | Some _ ->
+                let distinctSel = buildProjectedRowset qb desc ownerRef
                 let dtAlias = nextAlias "_dc"
                 let countProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
                 let outerCore = mkSubCore countProj (Some(DerivedTable(distinctSel, dtAlias))) None
@@ -371,20 +518,37 @@ module internal DBRefManyBuilder =
         let result =
             match desc.Terminal with
             | Terminal.Exists ->
-                buildExists qb desc ownerRef
+                if desc.SelectProjection.IsSome && desc.TakeWhileInfo.IsNone then
+                    SqlExpr.Exists (buildProjectedRowset qb desc ownerRef)
+                else
+                    buildExists qb desc ownerRef
             | Terminal.Any(Some pred) ->
                 let descWithPred = { desc with WherePredicates = desc.WherePredicates @ [pred] }
                 buildExists qb descWithPred ownerRef
             | Terminal.Any None ->
-                buildExists qb desc ownerRef
+                if desc.SelectProjection.IsSome && desc.TakeWhileInfo.IsNone then
+                    SqlExpr.Exists (buildProjectedRowset qb desc ownerRef)
+                else
+                    buildExists qb desc ownerRef
             | Terminal.All pred ->
                 buildNotExists qb desc ownerRef pred
             | Terminal.Count | Terminal.LongCount ->
-                buildCount qb desc ownerRef
+                if desc.SelectProjection.IsSome && desc.TakeWhileInfo.IsNone then
+                    let projectedSel = buildProjectedRowset qb desc ownerRef
+                    let projectedAlias = nextAlias "_pc"
+                    let countProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
+                    let countCore = mkSubCore countProj (Some(DerivedTable(projectedSel, projectedAlias))) None
+                    SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect countCore }
+                else
+                    buildCount qb desc ownerRef
             | Terminal.Sum sel -> buildAggregate qb desc ownerRef sel AggregateKind.Sum
+            | Terminal.SumProjected -> buildProjectedAggregate qb desc ownerRef AggregateKind.Sum
             | Terminal.Min sel -> buildAggregate qb desc ownerRef sel AggregateKind.Min
+            | Terminal.MinProjected -> buildProjectedAggregate qb desc ownerRef AggregateKind.Min
             | Terminal.Max sel -> buildAggregate qb desc ownerRef sel AggregateKind.Max
+            | Terminal.MaxProjected -> buildProjectedAggregate qb desc ownerRef AggregateKind.Max
             | Terminal.Average sel -> buildAggregate qb desc ownerRef sel AggregateKind.Avg
+            | Terminal.AverageProjected -> buildProjectedAggregate qb desc ownerRef AggregateKind.Avg
             | Terminal.Select _ ->
                 buildSelect qb desc ownerRef
             | Terminal.Contains value ->

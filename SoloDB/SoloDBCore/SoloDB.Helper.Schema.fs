@@ -30,11 +30,42 @@ module internal HelperSchema =
         | SqlExpr.JsonExtractExpr(None, _, _) -> expr
         | SqlExpr.JsonRootExtract(Some _, col) -> SqlExpr.JsonRootExtract(None, col)
         | SqlExpr.JsonRootExtract(None, _) -> expr
+        | SqlExpr.JsonSetExpr(target, assignments) ->
+            SqlExpr.JsonSetExpr(
+                stripAlias target,
+                assignments |> List.map (fun (path, value) -> path, stripAlias value))
+        | SqlExpr.JsonArrayExpr elements ->
+            SqlExpr.JsonArrayExpr(elements |> List.map stripAlias)
+        | SqlExpr.JsonObjectExpr properties ->
+            SqlExpr.JsonObjectExpr(properties |> List.map (fun (name, value) -> name, stripAlias value))
         | SqlExpr.FunctionCall(name, args) -> SqlExpr.FunctionCall(name, args |> List.map stripAlias)
+        | SqlExpr.AggregateCall(kind, argument, distinct, separator) ->
+            SqlExpr.AggregateCall(kind, argument |> Option.map stripAlias, distinct, separator |> Option.map stripAlias)
+        | SqlExpr.WindowCall spec ->
+            SqlExpr.WindowCall {
+                spec with
+                    Arguments = spec.Arguments |> List.map stripAlias
+                    PartitionBy = spec.PartitionBy |> List.map stripAlias
+                    OrderBy = spec.OrderBy |> List.map (fun (e, d) -> stripAlias e, d)
+            }
         | SqlExpr.Unary(op, inner) -> SqlExpr.Unary(op, stripAlias inner)
         | SqlExpr.Binary(l, op, r) -> SqlExpr.Binary(stripAlias l, op, stripAlias r)
+        | SqlExpr.Between(e, lower, upper) -> SqlExpr.Between(stripAlias e, stripAlias lower, stripAlias upper)
+        | SqlExpr.InList(e, head, tail) -> SqlExpr.InList(stripAlias e, stripAlias head, tail |> List.map stripAlias)
+        | SqlExpr.InSubquery _ -> expr
         | SqlExpr.Cast(inner, ty) -> SqlExpr.Cast(stripAlias inner, ty)
-        | _ -> expr
+        | SqlExpr.Coalesce(head, tail) -> SqlExpr.Coalesce(stripAlias head, tail |> List.map stripAlias)
+        | SqlExpr.Exists _ | SqlExpr.ScalarSubquery _ -> expr
+        | SqlExpr.CaseExpr(firstBranch, restBranches, elseExpr) ->
+            let mapBranch (w, t) = stripAlias w, stripAlias t
+            SqlExpr.CaseExpr(mapBranch firstBranch, restBranches |> List.map mapBranch, elseExpr |> Option.map stripAlias)
+        | SqlExpr.UpdateFragment(path, value) -> SqlExpr.UpdateFragment(stripAlias path, stripAlias value)
+
+    let private tryGetTupleExprArgs (expr: SqlExpr) : SqlExpr list option =
+        match expr with
+        | SqlExpr.FunctionCall("jsonb_array", args) -> Some args
+        | SqlExpr.JsonArrayExpr args -> Some args
+        | _ -> None
     let private tryGetIndexedAttribute (p: PropertyInfo) =
         p.GetCustomAttributes(true)
         |> Array.tryPick (function
@@ -119,14 +150,13 @@ module internal HelperSchema =
         let whereSQL =
             match expressionBody with
             | :? NewExpression as ne when isTuple ne.Type ->
-                // Tuple: DU is FunctionCall("jsonb_array", [arg1; arg2; ...]).
-                // Unwrap to (arg1, arg2, ...) at DU level.
-                match stripped with
-                | SqlDu.Engine.C1.Spec.SqlExpr.FunctionCall("jsonb_array", args) ->
+                // Tuple translation may arrive as jsonb_array(...) or JsonArrayExpr.
+                // Unwrap to (arg1, arg2, ...) at DU level so CREATE INDEX sees plain expressions.
+                match tryGetTupleExprArgs stripped with
+                | Some args ->
                     let argsSql = args |> List.map emitExprToSqlLocal |> String.concat ", "
                     $"({argsSql})"
                 | _ ->
-                    // Fallback: emit as-is with parens (stripped already has no jsonb_array wrapper in some cases).
                     $"({emitted})"
             | :? MethodCallExpression
             | :? MemberExpression ->
@@ -180,8 +210,8 @@ module internal HelperSchema =
         let whereSQL =
             match expression.Body with
             | :? NewExpression as ne when isTuple ne.Type ->
-                match stripped with
-                | SqlDu.Engine.C1.Spec.SqlExpr.FunctionCall("jsonb_array", args) ->
+                match tryGetTupleExprArgs stripped with
+                | Some args ->
                     let argsSql = args |> List.map emitExprToSqlLocal |> String.concat ", "
                     $"({argsSql})"
                 | _ -> $"({emitted})"

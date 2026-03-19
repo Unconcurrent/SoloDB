@@ -151,7 +151,7 @@ module internal QueryableHelperPreprocess =
                     SourceAliasCounter = sourceCtx.RootGraph.SourceAliasCounter
                 }
             Joins = ResizeArray()
-            AliasCounter = 0
+            AliasCounter = ref 0
             ExcludedPaths = HashSet(sourceCtx.ExcludedPaths, System.StringComparer.Ordinal)
             IncludedPaths = HashSet(sourceCtx.IncludedPaths, System.StringComparer.Ordinal)
             WhitelistMode = sourceCtx.WhitelistMode

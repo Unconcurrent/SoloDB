@@ -209,7 +209,12 @@ module internal QueryTranslatorVisitCore =
         | ExpressionType.GreaterThan | ExpressionType.GreaterThanOrEqual
         | ExpressionType.Add | ExpressionType.Subtract | ExpressionType.Multiply | ExpressionType.Divide | ExpressionType.Modulo ->
             visitBinaryDu (exp :?> BinaryExpression) qb
-        | ExpressionType.Not -> SqlExpr.Unary(UnaryOperator.Not, visitDu (exp :?> UnaryExpression).Operand qb)
+        | ExpressionType.Not ->
+            // SARGABLE form: NOT(expr) → (expr = 0) for boolean operands.
+            // LINQ only generates NOT on boolean expressions, so this is safe.
+            // Enables index utilization on boolean fields.
+            let operand = visitDu (exp :?> UnaryExpression).Operand qb
+            SqlExpr.Binary(operand, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
         | ExpressionType.Negate | ExpressionType.NegateChecked -> SqlExpr.Unary(UnaryOperator.Neg, visitDu (exp :?> UnaryExpression).Operand qb)
         | ExpressionType.Lambda -> visitDu (exp :?> LambdaExpression).Body qb
         | ExpressionType.Call -> visitMethodCallDu (exp :?> MethodCallExpression) qb

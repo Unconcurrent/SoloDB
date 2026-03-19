@@ -134,13 +134,15 @@ module internal QueryTranslatorBaseTypes =
 
         /// Create a scoped sub-builder for correlated subquery predicate translation.
         /// Shares StringBuilder + Variables (parameters go to the same query), but uses a different table name and lambda parameters.
-        member internal this.ForSubquery(tableName: string, lambdaExpr: LambdaExpression) =
+        /// SourceContext is cloned with isolated Joins to prevent DBRef JOIN leakage from inner scope to outer query.
+        member internal this.ForSubquery(tableName: string, lambdaExpr: LambdaExpression, ?subqueryRootTable: string) =
             { this with
                 TableNameDot = if String.IsNullOrEmpty tableName then String.Empty else "\"" + tableName + "\"."
                 Parameters = lambdaExpr.Parameters
                 JsonExtractSelfValue = true
                 UpdateMode = false
-                IdParameterIndex = -1 }
+                IdParameterIndex = -1
+                SourceContext = this.SourceContext.CloneForSubquery(?rootTable = subqueryRootTable) }
 
         // Whitelisted internal accessors for cross-file visitor split boundary.
         /// Allocate a DU parameter: stores value in Variables dict, returns SqlExpr.Parameter or FunctionCall("jsonb", [Parameter]).

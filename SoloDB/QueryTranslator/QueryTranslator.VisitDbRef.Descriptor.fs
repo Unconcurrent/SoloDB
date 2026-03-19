@@ -21,9 +21,13 @@ module internal DBRefManyDescriptor =
         | Count
         | LongCount
         | Sum of selector: Expression
+        | SumProjected
         | Min of selector: Expression
+        | MinProjected
         | Max of selector: Expression
+        | MaxProjected
         | Average of selector: Expression
+        | AverageProjected
         | Select of projection: Expression
         | Contains of value: Expression
         | Exists  // bare Any() without predicate
@@ -42,14 +46,23 @@ module internal DBRefManyDescriptor =
         Source: Expression
         /// OfType<T> type name, if present.
         OfTypeName: string option
-        /// Where predicates (accumulated, any order).
+        /// Where predicates applied BEFORE Take/Skip (inner scope).
         WherePredicates: Expression list
-        /// OrderBy/ThenBy sort keys with directions.
+        /// OrderBy/ThenBy sort keys applied BEFORE Take/Skip (inner scope).
         SortKeys: (Expression * SortDirection) list
-        /// Take limit expression.
+        /// Take limit expression (innermost bounding).
         Limit: Expression option
-        /// Skip offset expression.
+        /// Skip offset expression (innermost bounding).
         Offset: Expression option
+        /// Where predicates applied AFTER Take/Skip (outer scope, post-bound).
+        /// When non-empty, the builder wraps the core in a DerivedTable and applies these on the outer layer.
+        PostBoundWherePredicates: Expression list
+        /// OrderBy sort keys applied AFTER Take/Skip (outer scope, post-bound).
+        PostBoundSortKeys: (Expression * SortDirection) list
+        /// Outer Take after inner bounding (e.g., Skip(1).Take(3)).
+        PostBoundLimit: Expression option
+        /// Outer Skip after inner bounding (e.g., Take(3).Skip(1)).
+        PostBoundOffset: Expression option
         /// TakeWhile/SkipWhile predicate and direction.
         TakeWhileInfo: (LambdaExpression * bool) option  // (pred, isTakeWhile)
         /// GroupBy key selector.

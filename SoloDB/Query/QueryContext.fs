@@ -80,8 +80,8 @@ type internal QueryContext = {
     RootGraph: QueryRootGraph
     /// Accumulated join edges (populated during expression translation)
     Joins: ResizeArray<JoinEdge>
-    /// Monotonic alias counter (shared across entire query to prevent collisions)
-    mutable AliasCounter: int
+    /// Monotonic alias counter (shared by reference across cloned contexts to prevent collisions)
+    AliasCounter: int ref
     /// Property paths excluded via Exclude() — skip JOIN/load for these
     ExcludedPaths: HashSet<string>
     /// Property paths included via Include() whitelist for hydration.
@@ -106,7 +106,7 @@ type internal QueryContext = {
           LayerPosition = BaseLayer
           RootGraph = QueryRootGraph.Single(tableName)
           Joins = ResizeArray()
-          AliasCounter = 0
+          AliasCounter = ref 0
           ExcludedPaths = HashSet()
           IncludedPaths = HashSet()
           WhitelistMode = false
@@ -126,7 +126,7 @@ type internal QueryContext = {
           LayerPosition = BaseLayer
           RootGraph = graph
           Joins = ResizeArray()
-          AliasCounter = 0
+          AliasCounter = ref 0
           ExcludedPaths = HashSet()
           IncludedPaths = HashSet()
           WhitelistMode = false
@@ -137,9 +137,10 @@ type internal QueryContext = {
           TypeCollections = Dictionary(System.StringComparer.Ordinal) }
 
     /// Generate a unique alias (_ref0, _ref1, ...).
+    /// AliasCounter is a ref cell — shared across cloned contexts to prevent collisions.
     member this.NextAlias() =
-        let n = this.AliasCounter
-        this.AliasCounter <- n + 1
+        let n = this.AliasCounter.Value
+        this.AliasCounter.Value <- n + 1
         sprintf "_ref%d" n
 
     /// Find existing join for a property path, or None (deduplication).
@@ -148,6 +149,13 @@ type internal QueryContext = {
 
     member this.TryFindJoinByAlias(alias: string) =
         this.Joins |> Seq.tryFind (fun j -> j.TargetAlias = alias)
+
+    /// Create a subquery-scoped clone with isolated Joins but shared metadata dictionaries.
+    /// Used by ForSubquery to prevent DBRef JOIN leakage from inner correlated subqueries to the outer scope.
+    member this.CloneForSubquery(?rootTable: string) =
+        { this with
+            Joins = ResizeArray()
+            RootTable = defaultArg rootTable this.RootTable }
 
     /// Resolve or create an additional query root for multi-source planning.
     member this.ResolveRoot(sourceKey: string, tableName: string) =

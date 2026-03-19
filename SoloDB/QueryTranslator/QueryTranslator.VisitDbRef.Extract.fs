@@ -12,6 +12,21 @@ open SoloDatabase.QueryTranslatorVisitPost
 /// collecting ALL operators into a QueryDescriptor regardless of order.
 module internal DBRefManyExtractor =
 
+    let private isDecimalLikeType (t: Type) =
+        let t =
+            match Nullable.GetUnderlyingType t with
+            | null -> t
+            | underlying -> underlying
+        t = typeof<decimal>
+
+    let private mkIdentityLambdaForDbRefMany (expr: Expression) =
+        let targetType =
+            match expr.Type.GetGenericArguments() |> Array.tryHead with
+            | Some t -> t
+            | None -> raise (InvalidOperationException("Could not resolve DBRefMany target type for identity materialization."))
+        let p = Expression.Parameter(targetType)
+        Expression.Lambda(p, [| p |])
+
     /// Extract the source expression from a MethodCallExpression.
     let private getSource (mce: MethodCallExpression) =
         if not (isNull mce.Object) then mce.Object
@@ -42,6 +57,7 @@ module internal DBRefManyExtractor =
         // First, identify the terminal and peel it.
         // Pre-peel Distinct, ToList, ToArray from the outermost expression.
         let mutable outerDistinct = false
+        let mutable outerMaterialize = false
         let rec preProcess (e: Expression) =
             match e with
             | :? MethodCallExpression as mc when mc.Method.Name = "Distinct" ->
@@ -49,6 +65,7 @@ module internal DBRefManyExtractor =
                 let src = getSource mc
                 if isNull src then e else preProcess src
             | :? MethodCallExpression as mc when mc.Method.Name = "ToList" || mc.Method.Name = "ToArray" ->
+                outerMaterialize <- true
                 let src = getSource mc
                 if isNull src then e else preProcess src
             | _ -> e
@@ -74,10 +91,22 @@ module internal DBRefManyExtractor =
                 | "Count" | "LongCount" ->
                     let t = if mce.Method.Name = "Count" then Terminal.Count else Terminal.LongCount
                     Some t
-                | "Sum" -> getArg mce |> Option.map Terminal.Sum
-                | "Min" -> getArg mce |> Option.map Terminal.Min
-                | "Max" -> getArg mce |> Option.map Terminal.Max
-                | "Average" -> getArg mce |> Option.map Terminal.Average
+                | "Sum" ->
+                    match getArg mce with
+                    | Some sel -> Some (Terminal.Sum sel)
+                    | None -> Some Terminal.SumProjected
+                | "Min" ->
+                    match getArg mce with
+                    | Some sel -> Some (Terminal.Min sel)
+                    | None -> Some Terminal.MinProjected
+                | "Max" ->
+                    match getArg mce with
+                    | Some sel -> Some (Terminal.Max sel)
+                    | None -> Some Terminal.MaxProjected
+                | "Average" ->
+                    match getArg mce with
+                    | Some sel -> Some (Terminal.Average sel)
+                    | None -> Some Terminal.AverageProjected
                 | "Contains" -> getArg mce |> Option.map Terminal.Contains
                 | "Select" ->
                     // Select as terminal: materializes DBRefMany to json_group_array.
@@ -93,8 +122,18 @@ module internal DBRefManyExtractor =
             else
 
             // Walk the source chain inward, collecting operators.
+            // seenBoundary: once Take/Skip is encountered, all subsequent operators are inner (pre-bound).
+            // Operators encountered BEFORE Take/Skip (outermost-first) are post-bound (outer scope).
+            let mutable seenBoundary = false
             let mutable wheres = ResizeArray<Expression>()
             let mutable sortKeys = ResizeArray<Expression * SortDirection>()
+            let mutable postBoundWheres = ResizeArray<Expression>()
+            let mutable postBoundSortKeys = ResizeArray<Expression * SortDirection>()
+            let mutable postBoundLimit: Expression option = None
+            let mutable postBoundOffset: Expression option = None
+            // Track whether we've seen an OrderBy during outermost-first walk.
+            // Once seen, any inner OrderBy/ThenBy belongs to a replaced sort scope and must be skipped.
+            let mutable seenOrderBy = false
             let mutable limit: Expression option = None
             let mutable offset: Expression option = None
             let mutable takeWhileInfo: (LambdaExpression * bool) option = None
@@ -115,33 +154,67 @@ module internal DBRefManyExtractor =
                     match mc.Method.Name with
                     | "Where" ->
                         match arg with
-                        | Some pred -> wheres.Add(pred)
+                        | Some pred ->
+                            if seenBoundary then wheres.Add(pred)
+                            else postBoundWheres.Add(pred)
                         | None -> ()
                         walkChain src
 
                     | "OrderBy" | "OrderByDescending" ->
-                        let dir = if mc.Method.Name = "OrderBy" then SortDirection.Asc else SortDirection.Desc
-                        match arg with
-                        | Some key ->
-                            // OrderBy is the primary sort key. Since we walk outermost-first,
-                            // ThenBy keys are already in the list. Insert OrderBy at position 0.
-                            sortKeys.Insert(0, (key, dir))
-                        | None -> ()
+                        if seenOrderBy then
+                            // Inner/replaced OrderBy — skip (LINQ: second OrderBy replaces first).
+                            ()
+                        else
+                            seenOrderBy <- true
+                            let dir = if mc.Method.Name = "OrderBy" then SortDirection.Asc else SortDirection.Desc
+                            match arg with
+                            | Some key ->
+                                if seenBoundary then sortKeys.Insert(0, (key, dir))
+                                else postBoundSortKeys.Insert(0, (key, dir))
+                            | None -> ()
                         walkChain src
 
                     | "ThenBy" | "ThenByDescending" ->
-                        let dir = if mc.Method.Name = "ThenBy" then SortDirection.Asc else SortDirection.Desc
-                        match arg with
-                        | Some key -> sortKeys.Add(key, dir)
-                        | None -> ()
+                        if seenOrderBy then
+                            // ThenBy from an inner/replaced sort scope — skip.
+                            ()
+                        else
+                            let dir = if mc.Method.Name = "ThenBy" then SortDirection.Asc else SortDirection.Desc
+                            match arg with
+                            | Some key ->
+                                if seenBoundary then sortKeys.Add(key, dir)
+                                else postBoundSortKeys.Add(key, dir)
+                            | None -> ()
                         walkChain src
 
                     | "Take" ->
+                        if seenBoundary then
+                            raise (NotSupportedException(
+                                "Error: Multiple Take/Skip boundaries in DBRefMany query are not supported.\nReason: The descriptor model admits only one semantic pagination boundary.\nFix: Keep at most one Take or Skip in the DBRefMany chain, or move additional pagination after AsEnumerable()."))
+                        // Flush all previously collected operators to postBound.
+                        // This ensures that operators OUTER to this Take are applied AFTER bounding.
+                        seenBoundary <- true
+                        postBoundWheres.AddRange(wheres); wheres.Clear()
+                        postBoundSortKeys.AddRange(sortKeys); sortKeys.Clear()
+                        if limit.IsSome then postBoundLimit <- limit
+                        if offset.IsSome then postBoundOffset <- offset
                         limit <- arg
+                        offset <- None
                         walkChain src
 
                     | "Skip" ->
+                        if seenBoundary
+                           && not (limit.IsSome && offset.IsNone && postBoundLimit.IsNone && postBoundOffset.IsNone) then
+                            raise (NotSupportedException(
+                                "Error: Multiple Take/Skip boundaries in DBRefMany query are not supported.\nReason: The descriptor model admits only one semantic pagination boundary.\nFix: Keep at most one Take or Skip in the DBRefMany chain, or move additional pagination after AsEnumerable()."))
+                        // Flush all previously collected operators to postBound.
+                        seenBoundary <- true
+                        postBoundWheres.AddRange(wheres); wheres.Clear()
+                        postBoundSortKeys.AddRange(sortKeys); sortKeys.Clear()
+                        if limit.IsSome then postBoundLimit <- limit
+                        if offset.IsSome then postBoundOffset <- offset
                         offset <- arg
+                        limit <- None
                         walkChain src
 
                     | "TakeWhile" | "SkipWhile" ->
@@ -179,6 +252,11 @@ module internal DBRefManyExtractor =
                     | "OfType" ->
                         let genericArgs = mc.Method.GetGenericArguments()
                         if genericArgs.Length = 1 then
+                            let sourceElemType =
+                                if isNull src || not src.Type.IsGenericType then null
+                                else src.Type.GetGenericArguments() |> Array.tryHead |> Option.defaultValue null
+                            if not (isNull sourceElemType) then
+                                DBRefManyHelpers.ensureOfTypeSupported sourceElemType
                             match Utils.typeToName genericArgs.[0] with
                             | Some tn -> ofTypeName <- Some tn
                             | None -> ()
@@ -221,6 +299,12 @@ module internal DBRefManyExtractor =
 
             let innerSource = walkChain source
 
+            // If no Take/Skip boundary was encountered, all operators are in one scope.
+            // Merge postBound buffers back to inner fields.
+            if not seenBoundary then
+                wheres.AddRange(postBoundWheres); postBoundWheres.Clear()
+                sortKeys.AddRange(postBoundSortKeys); postBoundSortKeys.Clear()
+
             // Handle GroupBy terminal: extract the HAVING predicate from Any/All.
             let finalTerminal, finalGroupByHaving =
                 match groupByKey with
@@ -240,6 +324,21 @@ module internal DBRefManyExtractor =
                     | ValueNone -> selectProj
                 | _ -> selectProj
 
+            match finalTerminal with
+            | Terminal.Average selectorExpr ->
+                match tryExtractLambdaExpression selectorExpr with
+                | ValueSome selectorLambda when isDecimalLikeType selectorLambda.Body.Type ->
+                    raise (NotSupportedException(
+                        "Error: Decimal Average over DBRefMany is not supported.\nReason: SQLite AVG is not exact for decimal semantics on this route.\nFix: Use Sum/Count in-memory after AsEnumerable(), or project to a supported numeric type."))
+                | _ -> ()
+            | Terminal.AverageProjected ->
+                match finalSelectProj with
+                | Some proj when isDecimalLikeType proj.Body.Type ->
+                    raise (NotSupportedException(
+                        "Error: Decimal Average over DBRefMany is not supported.\nReason: SQLite AVG is not exact for decimal semantics on this route.\nFix: Use Sum/Count in-memory after AsEnumerable(), or project to a supported numeric type."))
+                | _ -> ()
+            | _ -> ()
+
             ValueSome {
                 Source = innerSource
                 OfTypeName = ofTypeName
@@ -247,6 +346,10 @@ module internal DBRefManyExtractor =
                 SortKeys = sortKeys |> Seq.toList
                 Limit = limit
                 Offset = offset
+                PostBoundWherePredicates = postBoundWheres |> Seq.toList
+                PostBoundSortKeys = postBoundSortKeys |> Seq.toList
+                PostBoundLimit = postBoundLimit
+                PostBoundOffset = postBoundOffset
                 TakeWhileInfo = takeWhileInfo
                 GroupByKey = groupByKey
                 Distinct = distinct || outerDistinct
@@ -263,9 +366,29 @@ module internal DBRefManyExtractor =
                 ValueSome {
                     Source = inner
                     OfTypeName = None; WherePredicates = []; SortKeys = []
-                    Limit = None; Offset = None; TakeWhileInfo = None
+                    Limit = None; Offset = None
+                    PostBoundWherePredicates = []; PostBoundSortKeys = []
+                    PostBoundLimit = None; PostBoundOffset = None
+                    TakeWhileInfo = None
                     GroupByKey = None; Distinct = false; SelectProjection = None
                     SetOp = None; Terminal = Terminal.Count
+                    GroupByHavingPredicate = None
+                }
+            else ValueNone
+
+        | :? MemberExpression as me when outerMaterialize ->
+            let memberExpr = unwrapConvert (me :> Expression)
+            if isDBRefManyType memberExpr.Type then
+                let identity = mkIdentityLambdaForDbRefMany memberExpr
+                ValueSome {
+                    Source = memberExpr
+                    OfTypeName = None; WherePredicates = []; SortKeys = []
+                    Limit = None; Offset = None
+                    PostBoundWherePredicates = []; PostBoundSortKeys = []
+                    PostBoundLimit = None; PostBoundOffset = None
+                    TakeWhileInfo = None
+                    GroupByKey = None; Distinct = false; SelectProjection = Some identity
+                    SetOp = None; Terminal = Terminal.Select(identity :> Expression)
                     GroupByHavingPredicate = None
                 }
             else ValueNone

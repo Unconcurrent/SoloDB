@@ -28,4 +28,5 @@ let globalRefCount = RelationsSync.globalRefCount
 
 let batchLoadDBRefProperties = RelationsSync.batchLoadDBRefProperties
 let batchLoadDBRefManyProperties = RelationsSync.batchLoadDBRefManyProperties
+let recurseLoadedRelationTargets = RelationsSync.recurseLoadedRelationTargets
 let captureRelationVersionForEntities = RelationsSync.captureRelationVersionForEntities

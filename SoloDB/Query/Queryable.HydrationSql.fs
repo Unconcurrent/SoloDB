@@ -10,6 +10,7 @@ open SQLiteTools
 open Utils
 open SoloDatabase
 open SoloDatabase.RelationsTypes
+open SoloDatabase.RelationsSchema
 open SqlDu.Engine.C1.Spec
 
 /// Shared hydration SQL builders for both queryable (R45-9) and non-queryable (R45-10) paths.
@@ -19,7 +20,7 @@ module internal HydrationSqlBuilder =
     open QueryableHelperBase
 
     /// Maximum nesting depth for hydration correlated subqueries (matches batch load maxRecursiveDepth).
-    let maxHydrationDepth = 5
+    let maxHydrationDepth = 10
 
     [<Struct>]
     type internal RelationShapeInfo = {
@@ -98,6 +99,7 @@ module internal HydrationSqlBuilder =
     /// Multi-hop: recursive — the target's Value is itself hydrated for its own DBRef properties.
     /// Edge case SA-05: stops recursion at maxHydrationDepth.
     let rec buildHydrationValueExpr
+        (connection: SqliteConnection)
         (ctx: QueryContext)
         (ownerType: Type)
         (ownerTable: string)
@@ -125,50 +127,48 @@ module internal HydrationSqlBuilder =
 
             if shouldLoadRelationPath ctx path then
                 let targetType = (GenericTypeArgCache.Get prop.PropertyType).[0]
+                match ctx.TryResolveRelationTarget(ownerTable, prop.Name) with
+                | None ->
+                    // Read-path hydration must not explode when downstream metadata
+                    // is absent; the deserialized DBRef id remains usable.
+                    ()
+                | Some targetTable ->
+                    aliasCounter <- aliasCounter + 1
+                    let tAlias = sprintf "_ht%d" aliasCounter
 
-                let targetTable =
-                    match ctx.TryResolveRelationTarget(ownerTable, prop.Name) with
-                    | Some t -> t
-                    | None ->
-                        raise (NotSupportedException(
-                            $"Error: Missing relation metadata for '{ownerType.Name}.{prop.Name}'.\nReason: Cannot hydrate DBRef without relation target mapping.\nFix: Ensure collection is properly initialized before querying."))
+                    let fkExpr =
+                        SqlExpr.FunctionCall("jsonb_extract",
+                            [ownerValueExpr; SqlExpr.Literal(SqlLiteral.String ("$." + prop.Name))])
 
-                aliasCounter <- aliasCounter + 1
-                let tAlias = sprintf "_ht%d" aliasCounter
+                    let targetValueExpr =
+                        buildHydrationValueExpr connection ctx targetType targetTable
+                            (SqlExpr.Column(Some tAlias, "Value"))
+                            (depth + 1) path &aliasCounter
 
-                let fkExpr =
-                    SqlExpr.FunctionCall("jsonb_extract",
-                        [ownerValueExpr; SqlExpr.Literal(SqlLiteral.String ("$." + prop.Name))])
+                    let subqueryProjection =
+                        SqlExpr.FunctionCall("jsonb_array",
+                            [SqlExpr.Column(Some tAlias, "Id"); targetValueExpr])
 
-                let targetValueExpr =
-                    buildHydrationValueExpr ctx targetType targetTable
-                        (SqlExpr.Column(Some tAlias, "Value"))
-                        (depth + 1) path &aliasCounter
+                    let subqueryWhere =
+                        SqlExpr.Binary(
+                            SqlExpr.Column(Some tAlias, "Id"),
+                            BinaryOperator.Eq,
+                            fkExpr)
 
-                let subqueryProjection =
-                    SqlExpr.FunctionCall("jsonb_array",
-                        [SqlExpr.Column(Some tAlias, "Id"); targetValueExpr])
+                    let subqueryCore =
+                        { mkCore
+                            [{ Alias = None; Expr = subqueryProjection }]
+                            (Some (BaseTable(targetTable, Some tAlias)))
+                          with Where = Some subqueryWhere }
+                    let subquerySelect = { Ctes = []; Body = SingleSelect subqueryCore }
 
-                let subqueryWhere =
-                    SqlExpr.Binary(
-                        SqlExpr.Column(Some tAlias, "Id"),
-                        BinaryOperator.Eq,
-                        fkExpr)
+                    let coalesceExpr =
+                        SqlExpr.Coalesce(
+                            SqlExpr.ScalarSubquery subquerySelect,
+                            [fkExpr])
 
-                let subqueryCore =
-                    { mkCore
-                        [{ Alias = None; Expr = subqueryProjection }]
-                        (Some (BaseTable(targetTable, Some tAlias)))
-                      with Where = Some subqueryWhere }
-                let subquerySelect = { Ctes = []; Body = SingleSelect subqueryCore }
-
-                let coalesceExpr =
-                    SqlExpr.Coalesce(
-                        SqlExpr.ScalarSubquery subquerySelect,
-                        [fkExpr])
-
-                args.Add(SqlExpr.Literal(SqlLiteral.String ("$." + prop.Name)))
-                args.Add(coalesceExpr)
+                    args.Add(SqlExpr.Literal(SqlLiteral.String ("$." + prop.Name)))
+                    args.Add(coalesceExpr)
 
         if args.Count <= 1 then
             ownerValueExpr
@@ -177,6 +177,7 @@ module internal HydrationSqlBuilder =
 
     /// Build a HydrationJSON projection expression for DBRefMany properties.
     let buildManyHydrationProjection
+        (connection: SqliteConnection)
         (ctx: QueryContext)
         (ownerType: Type)
         (ownerTable: string)
@@ -196,68 +197,64 @@ module internal HydrationSqlBuilder =
         for prop in manyProps do
             if shouldLoadRelationPath ctx prop.Name then
                 let targetType = (GenericTypeArgCache.Get prop.PropertyType).[0]
+                let linkTableOpt = ctx.TryResolveRelationLink(ownerTable, prop.Name)
+                let targetTableOpt = ctx.TryResolveRelationTarget(ownerTable, prop.Name)
+                match linkTableOpt, targetTableOpt with
+                | Some linkTable, Some targetTable ->
+                    let ownerUsesSource =
+                        match ctx.TryResolveRelationOwnerUsesSource(ownerTable, prop.Name) with
+                        | Some v -> v
+                        | None -> true
 
-                let linkTable =
-                    match ctx.TryResolveRelationLink(ownerTable, prop.Name) with
-                    | Some t -> t
-                    | None ->
-                        raise (NotSupportedException(
-                            $"Error: Missing relation link metadata for '{ownerType.Name}.{prop.Name}'.\nReason: Cannot hydrate DBRefMany without link table mapping.\nFix: Ensure collection is properly initialized before querying."))
+                    let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
+                    let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
 
-                let targetTable =
-                    match ctx.TryResolveRelationTarget(ownerTable, prop.Name) with
-                    | Some t -> t
-                    | None ->
-                        raise (NotSupportedException(
-                            $"Error: Missing relation target metadata for '{ownerType.Name}.{prop.Name}'.\nReason: Cannot hydrate DBRefMany without target table mapping.\nFix: Ensure collection is properly initialized before querying."))
+                    aliasCounter <- aliasCounter + 1
+                    let lnkAlias = sprintf "_hlnk%d" aliasCounter
+                    aliasCounter <- aliasCounter + 1
+                    let tAlias = sprintf "_ht%d" aliasCounter
 
-                let ownerUsesSource =
-                    match ctx.TryResolveRelationOwnerUsesSource(ownerTable, prop.Name) with
-                    | Some v -> v
-                    | None -> true
+                    let subqueryProjection =
+                        SqlExpr.FunctionCall("json_group_array",
+                            [SqlExpr.FunctionCall("json_object",
+                                [SqlExpr.Literal(SqlLiteral.String "Id"); SqlExpr.Column(Some tAlias, "Id")
+                                 SqlExpr.Literal(SqlLiteral.String "Value"); SqlExpr.FunctionCall("json_quote", [SqlExpr.Column(Some tAlias, "Value")])])])
 
-                let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
-                let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
+                    let joinOn =
+                        SqlExpr.Binary(
+                            SqlExpr.Column(Some tAlias, "Id"),
+                            BinaryOperator.Eq,
+                            SqlExpr.Column(Some lnkAlias, targetColumn))
 
-                aliasCounter <- aliasCounter + 1
-                let lnkAlias = sprintf "_hlnk%d" aliasCounter
-                aliasCounter <- aliasCounter + 1
-                let tAlias = sprintf "_ht%d" aliasCounter
+                    let subqueryWhere =
+                        SqlExpr.Binary(
+                            SqlExpr.Column(Some lnkAlias, ownerColumn),
+                            BinaryOperator.Eq,
+                            ownerIdExpr)
 
-                let subqueryProjection =
-                    SqlExpr.FunctionCall("json_group_array",
-                        [SqlExpr.FunctionCall("json_object",
-                            [SqlExpr.Literal(SqlLiteral.String "Id"); SqlExpr.Column(Some tAlias, "Id")
-                             SqlExpr.Literal(SqlLiteral.String "Value"); SqlExpr.FunctionCall("json_quote", [SqlExpr.Column(Some tAlias, "Value")])])])
+                    let subqueryCore =
+                        { mkCore
+                            [{ Alias = None; Expr = subqueryProjection }]
+                            (Some (BaseTable(linkTable, Some lnkAlias)))
+                          with
+                            Joins = [ConditionedJoin(JoinKind.Inner, BaseTable(targetTable, Some tAlias), joinOn)]
+                            Where = Some subqueryWhere }
+                    let subquerySelect = { Ctes = []; Body = SingleSelect subqueryCore }
 
-                let joinOn =
-                    SqlExpr.Binary(
-                        SqlExpr.Column(Some tAlias, "Id"),
-                        BinaryOperator.Eq,
-                        SqlExpr.Column(Some lnkAlias, targetColumn))
+                    let coalesceExpr =
+                        SqlExpr.Coalesce(
+                            SqlExpr.ScalarSubquery subquerySelect,
+                            [SqlExpr.FunctionCall("jsonb", [SqlExpr.Literal(SqlLiteral.String "[]")])])
 
-                let subqueryWhere =
-                    SqlExpr.Binary(
-                        SqlExpr.Column(Some lnkAlias, ownerColumn),
-                        BinaryOperator.Eq,
-                        ownerIdExpr)
-
-                let subqueryCore =
-                    { mkCore
-                        [{ Alias = None; Expr = subqueryProjection }]
-                        (Some (BaseTable(linkTable, Some lnkAlias)))
-                      with
-                        Joins = [ConditionedJoin(JoinKind.Inner, BaseTable(targetTable, Some tAlias), joinOn)]
-                        Where = Some subqueryWhere }
-                let subquerySelect = { Ctes = []; Body = SingleSelect subqueryCore }
-
-                let coalesceExpr =
-                    SqlExpr.Coalesce(
-                        SqlExpr.ScalarSubquery subquerySelect,
-                        [SqlExpr.FunctionCall("jsonb", [SqlExpr.Literal(SqlLiteral.String "[]")])])
-
-                args.Add(SqlExpr.Literal(SqlLiteral.String prop.Name))
-                args.Add(coalesceExpr)
+                    args.Add(SqlExpr.Literal(SqlLiteral.String prop.Name))
+                    args.Add(coalesceExpr)
+                | _ ->
+                    match classifyMissingReadMetadata connection ownerTable prop.Name RelationKind.Many targetType with
+                    | MissingReadMetadataState.AbsentNoEvidence ->
+                        ()
+                    | MissingReadMetadataState.PoisonedWithEvidence ->
+                        raise (InvalidOperationException(
+                            $"Error: relation metadata missing for '{ownerTable}.{prop.Name}'.\nReason: prior relation evidence exists and read-time auto-heal is not safe.\nFix: rebuild/repair relation metadata and link-table state before retrying."))
 
         if args.Count = 0 then None
         else Some (SqlExpr.FunctionCall("json_object", args |> Seq.toList))
@@ -288,7 +285,7 @@ module internal HydrationSqlBuilder =
         let valueExpr =
             if hasSingle then
                 let hydrated =
-                    buildHydrationValueExpr ctx ownerType tableName
+                    buildHydrationValueExpr connection ctx ownerType tableName
                         (SqlExpr.Column(Some tblAlias, "Value")) 0 "" &aliasCounter
                 if aliasCounter > 0 then
                     SqlExpr.FunctionCall("json_extract",
@@ -301,7 +298,7 @@ module internal HydrationSqlBuilder =
         // Build HydrationJSON (DBRefMany json_group_array).
         let manyHydrationOpt =
             if hasMany then
-                buildManyHydrationProjection ctx ownerType tableName
+                buildManyHydrationProjection connection ctx ownerType tableName
                     (SqlExpr.Column(Some tblAlias, "Id")) &aliasCounter
             else
                 None
@@ -355,7 +352,7 @@ module internal HydrationSqlBuilder =
 
         let manyHydrationOpt =
             if hasMany then
-                buildManyHydrationProjection ctx ownerType tableName
+                buildManyHydrationProjection connection ctx ownerType tableName
                     (SqlExpr.Column(Some tblAlias, "Id")) &aliasCounter
             else
                 None
@@ -421,7 +418,7 @@ module internal HydrationSqlBuilder =
         // Use table-name-qualified Id for correlated subquery correlation.
         // No table alias: the raw filter SQL references columns by table name (e.g., "Article"."Value").
         let ownerIdExpr = SqlExpr.Column(Some qTable, "Id")
-        match buildManyHydrationProjection ctx ownerType tableName ownerIdExpr &aliasCounter with
+        match buildManyHydrationProjection connection ctx ownerType tableName ownerIdExpr &aliasCounter with
         | None ->
             $"SELECT Id, json_quote(Value) as ValueJSON FROM {qTable} WHERE {rawFilterSql}{limitClause}", false
         | Some hydExpr ->

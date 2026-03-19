@@ -12,6 +12,21 @@ open SoloDatabase.QueryTranslatorVisitPost
 /// Used by both the unified Builder and the legacy handler.
 module internal DBRefManyHelpers =
 
+    let joinEdgesToClauses (edges: ResizeArray<JoinEdge>) : JoinShape list =
+        [ for j in edges ->
+            ConditionedJoin(
+                Left,
+                BaseTable(j.TargetTable, Some j.TargetAlias),
+                SqlExpr.Binary(
+                    SqlExpr.Column(Some j.TargetAlias, "Id"),
+                    BinaryOperator.Eq,
+                    SqlExpr.JsonExtractExpr(j.OnSourceAlias, "Value", JsonPath(j.OnPropertyName, [])))) ]
+
+    let ensureOfTypeSupported (targetType: Type) =
+        if not (JsonFunctions.mustIncludeTypeInformationInSerializationFn targetType) then
+            raise (NotSupportedException(
+                "Error: OfType requires type discriminator information.\nReason: The DBRefMany target type does not store $type metadata.\nFix: Add the Polymorphic attribute to the base type and reinsert all elements."))
+
     /// Translate an IGrouping predicate body (g => g.Count() > N) to a HAVING DU expression.
     /// Recognizes g.Count(), g.Sum(sel), g.Min(sel), g.Max(sel), g.Average(sel), g.Key,
     /// and binary comparisons/logic.

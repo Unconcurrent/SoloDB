@@ -15,7 +15,7 @@ open RelationsTypes
 open RelationsSchema
 open RelationsEntity
 
-let private maxRecursiveDepth = 5
+let private maxRecursiveDepth = 10
 
 let rec batchLoadDBRefProperties
     (connection: SqliteConnection)
@@ -237,3 +237,86 @@ and batchLoadDBRefManyProperties
                     batchLoadDBRefProperties connection descriptor.TargetTable descriptor.TargetType excludedPaths includedPaths whitelistMode [|(targetId, targetObj)|] inTransaction (depth + 1) visited childPrefix
                     batchLoadDBRefManyProperties connection descriptor.TargetTable descriptor.TargetType excludedPaths includedPaths whitelistMode [|(targetId, targetObj)|] inTransaction (depth + 1) visited childPrefix
                     visited.Remove(key) |> ignore
+
+let internal recurseLoadedRelationTargets
+    (connection: SqliteConnection)
+    (ownerTable: string)
+    (ownerType: Type)
+    (excludedPaths: HashSet<string>)
+    (includedPaths: HashSet<string>)
+    (whitelistMode: bool)
+    (ownerEntities: (int64 * obj) array)
+    (inTransaction: bool)
+    =
+    let rec loop
+        (ownerTable: string)
+        (ownerType: Type)
+        (ownerEntities: (int64 * obj) array)
+        (depth: int)
+        (visited: HashSet<int64 * string>)
+        (currentPrefix: string)
+        =
+        if ownerEntities.Length = 0 || depth >= maxRecursiveDepth then ()
+        else
+        let ownerTable = formatName ownerTable
+        let tx: RelationTxContext = { Connection = connection; OwnerTable = ownerTable; OwnerType = ownerType; InTransaction = inTransaction }
+        let descriptors = buildRelationDescriptors tx ownerType
+
+        let fullPath (propName: string) =
+            if currentPrefix = "" then propName else currentPrefix + "." + propName
+
+        let shouldLoadPath (propName: string) =
+            let fp = fullPath propName
+            if excludedPaths |> Seq.exists (fun e -> e = fp || fp.StartsWith(e + ".")) then false
+            elif whitelistMode then
+                includedPaths |> Seq.exists (fun i -> i = fp || i.StartsWith(fp + ".") || fp.StartsWith(i + "."))
+            else true
+
+        let recurseTargets (targetTable: string) (targetType: Type) (childPrefix: string) (targets: (int64 * obj) seq) =
+            targets
+            |> Seq.filter (fun (targetId, targetObj) -> targetId > 0L && not (isNull targetObj))
+            |> Seq.distinctBy fst
+            |> Seq.iter (fun (targetId, targetObj) ->
+                let key = (targetId, targetType.FullName)
+                if not (visited.Contains key) then
+                    visited.Add(key) |> ignore
+                    batchLoadDBRefProperties connection targetTable targetType excludedPaths includedPaths whitelistMode [| (targetId, targetObj) |] inTransaction (depth + 1) visited childPrefix
+                    batchLoadDBRefManyProperties connection targetTable targetType excludedPaths includedPaths whitelistMode [| (targetId, targetObj) |] inTransaction (depth + 1) visited childPrefix
+                    visited.Remove(key) |> ignore)
+
+        for descriptor in descriptors do
+            if shouldLoadPath descriptor.Property.Name then
+                let propGetter = RelationsAccessorCache.compiledPropGetter descriptor.Property
+                let childPrefix = fullPath descriptor.Property.Name
+                match descriptor.Kind with
+                | Single ->
+                    let hasValueGetter = RelationsAccessorCache.compiledGetter descriptor.Property.PropertyType "HasValue"
+                    let isLoadedGetter = RelationsAccessorCache.compiledGetter descriptor.Property.PropertyType "IsLoaded"
+                    let valueGetter = RelationsAccessorCache.compiledGetter descriptor.Property.PropertyType "Value"
+                    let idReader = RelationsAccessorCache.compiledDbRefIdReader descriptor.Property.PropertyType
+                    ownerEntities
+                    |> Seq.choose (fun (_ownerId, ownerObj) ->
+                        let dbRefObj = propGetter.Invoke(ownerObj)
+                        let hasValue = hasValueGetter.Invoke(dbRefObj) :?> bool
+                        let isLoaded = isLoadedGetter.Invoke(dbRefObj) :?> bool
+                        if not hasValue || not isLoaded then None
+                        else
+                            let targetId = idReader.Invoke(dbRefObj)
+                            let targetObj = valueGetter.Invoke(dbRefObj)
+                            Some(targetId, targetObj))
+                    |> recurseTargets descriptor.TargetTable descriptor.TargetType childPrefix
+                | Many ->
+                    let idReader = RelationsAccessorCache.compiledInt64IdReader descriptor.TargetType
+                    ownerEntities
+                    |> Seq.collect (fun (_ownerId, ownerObj) ->
+                        let tracker = propGetter.Invoke(ownerObj)
+                        match tracker with
+                        | :? IDBRefManyInternal as internal' when internal'.IsLoaded ->
+                            internal'.GetCurrentItemsBoxed()
+                            |> Seq.choose (fun targetObj ->
+                                if isNull targetObj then None
+                                else Some(idReader.Invoke(targetObj), targetObj))
+                        | _ -> Seq.empty)
+                    |> recurseTargets descriptor.TargetTable descriptor.TargetType childPrefix
+
+    loop ownerTable ownerType ownerEntities 0 (HashSet()) ""
