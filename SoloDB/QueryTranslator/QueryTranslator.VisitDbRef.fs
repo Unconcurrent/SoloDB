@@ -1039,6 +1039,25 @@ module internal QueryTranslatorVisitDbRef =
             let sourceArg, predArg = extractSourceAndPredicate mce
             match sourceArg with
             | ValueSome sourceExpr ->
+                // L7a: Check for Distinct.Count() — emit COUNT(DISTINCT proj).
+                match sourceExpr with
+                | :? MethodCallExpression as distinctMce when distinctMce.Method.Name = "Distinct" ->
+                    let distinctSource =
+                        if not (isNull distinctMce.Object) then distinctMce.Object
+                        elif distinctMce.Arguments.Count > 0 then distinctMce.Arguments.[0]
+                        else null
+                    if not (isNull distinctSource) then
+                        match tryBuildProjectedSetOperand qb distinctSource with
+                        | ValueSome (projectedDu, innerCore, _tgtAlias) ->
+                            // Emit COUNT(DISTINCT proj) over the inner core.
+                            let countDistinctProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, Some projectedDu, true, None) }]
+                            let core = { innerCore with Projections = ProjectionSetOps.ofList countDistinctProj }
+                            let subSelect = { Ctes = []; Body = SingleSelect core }
+                            qb.DuHandlerResult.Value <- ValueSome(SqlExpr.ScalarSubquery subSelect)
+                            true
+                        | ValueNone -> false
+                    else false
+                | _ ->
                 // L8: Check for GroupBy.Count() first.
                 match tryPeelGroupByFromSource sourceExpr with
                 | ValueSome (groupByInner, keyLambda) ->
