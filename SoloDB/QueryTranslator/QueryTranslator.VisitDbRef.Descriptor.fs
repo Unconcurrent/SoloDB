@@ -96,4 +96,9 @@ module internal DBRefManyDescriptor =
         Terminal: Terminal
         /// GroupBy HAVING predicate (for GroupBy.Any/All terminals).
         GroupByHavingPredicate: Expression option
+        /// DefaultIfEmpty on base entity rowset (before Select projection).
+        /// None = not applied. Some None = DefaultIfEmpty(). Some(Some expr) = DefaultIfEmpty(value).
+        DefaultIfEmpty: Expression option option
+        /// DefaultIfEmpty on projected rowset (after Select projection).
+        PostSelectDefaultIfEmpty: Expression option option
     }

@@ -2694,11 +2694,56 @@ and private JsonSerializerImpl<'A> =
             (fun (v: 'A) -> v :> obj :?> JsonValue)
             :> obj :?> ('A -> JsonValue)
 
+        // KeyValuePair<TKey, TValue> → {"Key": k, "Value": v} — explicit for contract stability
+        | t when t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<KeyValuePair<_,_>> ->
+            let args = GenericTypeArgCache.Get t
+            let keyType, valueType = args.[0], args.[1]
+            let keyProp = t.GetProperty("Key")
+            let valueProp = t.GetProperty("Value")
+            let keySerializeMeth =
+                typedefof<JsonSerializerImpl<_>>
+                    .MakeGenericType(keyType)
+                    .GetMethod(nameof JsonSerializerImpl<_>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+            let valueSerializeMeth =
+                typedefof<JsonSerializerImpl<_>>
+                    .MakeGenericType(valueType)
+                    .GetMethod(nameof JsonSerializerImpl<_>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+
+            let param = Expression.Parameter(t)
+            let outDict = Expression.Variable(typeof<IDictionary<string, JsonValue>>)
+            let newDefaultDictDelegate = Func<IDictionary<string, JsonValue>>(fun () -> JsonHelper.newDefaultDict())
+            let newDictMethInstance = Expression.Constant(newDefaultDictDelegate)
+            let newDictMeth = typeof<Func<IDictionary<string, JsonValue>>>.GetMethod "Invoke"
+            let dictAddMeth = typeof<IDictionary<string, JsonValue>>.GetMethod("Add")
+            let createJsonMeth = typeof<JsonImpl>.GetMethod((nameof JsonImpl.CreateJsonObj), BindingFlags.NonPublic ||| BindingFlags.Static)
+            let returnLabel = Expression.Label(typeof<JsonValue>, "Return")
+
+            let lambda = Expression.Lambda<Func<'A, JsonValue>>(
+                Expression.Block(
+                    [|outDict|],
+                    [|
+                        Expression.Assign(outDict, Expression.Call(newDictMethInstance, newDictMeth)) :> Expression
+                        Expression.Call(outDict, dictAddMeth, [|
+                            Expression.Constant("Key", typeof<string>) :> Expression
+                            Expression.Call(keySerializeMeth, [|Expression.Property(param, keyProp) :> Expression|]) :> Expression
+                        |]) :> Expression
+                        Expression.Call(outDict, dictAddMeth, [|
+                            Expression.Constant("Value", typeof<string>) :> Expression
+                            Expression.Call(valueSerializeMeth, [|Expression.Property(param, valueProp) :> Expression|]) :> Expression
+                        |]) :> Expression
+                        Expression.Label(returnLabel, Expression.Call(createJsonMeth, [|outDict :> Expression|]))
+                    |]
+                ),
+                [|param|]
+            )
+            let fn = lambda.Compile(false)
+            fn.Invoke
+
         | t when t.Name = "FSharpOption`1" ->
             failwithf "FSharp option is not supported yet, use Nullable<>"
 
         | t when t.Name = "Nullable`1" ->
-            
+
             let underlyingType = (GenericTypeArgCache.Get t).[0]
             let serializerType = typedefof<JsonSerializerImpl<_>>.MakeGenericType(underlyingType)
             let serializeMethod = serializerType.GetMethod(nameof JsonSerializerImpl<_>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)

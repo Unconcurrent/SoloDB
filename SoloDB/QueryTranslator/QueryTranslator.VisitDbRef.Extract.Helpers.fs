@@ -77,7 +77,9 @@ module internal DBRefManyExtractorHelpers =
         selectProjection
         setOp
         terminal
-        groupByHaving =
+        groupByHaving
+        defaultIfEmpty
+        postSelectDefaultIfEmpty =
         {
             Source = innerSource
             OfTypeName = ofTypeName
@@ -96,6 +98,8 @@ module internal DBRefManyExtractorHelpers =
             SetOp = setOp
             Terminal = terminal
             GroupByHavingPredicate = groupByHaving
+            DefaultIfEmpty = defaultIfEmpty
+            PostSelectDefaultIfEmpty = postSelectDefaultIfEmpty
         }
 
     let tryBuildCountPropertyDescriptor (unwrapConvert: Expression -> Expression) (isDBRefManyType: Type -> bool) (me: MemberExpression) : QueryDescriptor voption =
@@ -119,6 +123,8 @@ module internal DBRefManyExtractorHelpers =
                     None
                     None
                     Terminal.Count
+                    None
+                    None
                     None)
         else
             ValueNone
@@ -144,6 +150,8 @@ module internal DBRefManyExtractorHelpers =
                     (Some identity)
                     None
                     (Terminal.Select(identity :> Expression))
+                    None
+                    None
                     None)
         else
             ValueNone

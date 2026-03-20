@@ -67,7 +67,7 @@ module internal DBRefManyExtractor =
                 | "MinBy" -> getArg mce |> Option.map Terminal.MinBy
                 | "MaxBy" -> getArg mce |> Option.map Terminal.MaxBy
                 | "DistinctBy" -> getArg mce |> Option.map Terminal.DistinctBy
-                | "Order" | "OrderDescending" | "UnionBy" | "IntersectBy" | "ExceptBy" ->
+                | "Order" | "OrderDescending" | "UnionBy" | "IntersectBy" | "ExceptBy" | "DefaultIfEmpty" ->
                     let identityLambda = mkIdentityLambdaForDbRefMany mce
                     Some (Terminal.Select(identityLambda :> Expression))
                 | "CountBy" -> getArg mce |> Option.map Terminal.CountBy
@@ -78,7 +78,7 @@ module internal DBRefManyExtractor =
             | Some terminal ->
             let source =
                 match mce.Method.Name with
-                | "DistinctBy" | "Order" | "OrderDescending" | "UnionBy" | "IntersectBy" | "ExceptBy" ->
+                | "DistinctBy" | "Order" | "OrderDescending" | "UnionBy" | "IntersectBy" | "ExceptBy" | "DefaultIfEmpty" ->
                     mce :> Expression  // Include the operator in the chain
                 | _ -> source
 
@@ -101,6 +101,8 @@ module internal DBRefManyExtractor =
             let mutable setOp: SetOperation option = None
             let mutable ofTypeName: string option = None
             let mutable groupByHaving: Expression option = None
+            let mutable defaultIfEmpty: Expression option option = None
+            let mutable postSelectDefaultIfEmpty: Expression option option = None
 
             let rec walkChain (e: Expression) : Expression =
                 let e = unwrapConvert e
@@ -299,6 +301,16 @@ module internal DBRefManyExtractor =
                         // Identity passthrough (L11).
                         walkChain src
 
+                    | "DefaultIfEmpty" ->
+                        // R61: DefaultIfEmpty pipeline modifier.
+                        // walkChain walks outer-to-inner: if selectProj is not yet set,
+                        // DefaultIfEmpty is OUTER (post-Select); if set, INNER (pre-Select).
+                        if selectProj.IsNone then
+                            postSelectDefaultIfEmpty <- Some arg
+                        else
+                            defaultIfEmpty <- Some arg
+                        walkChain src
+
                     | _ ->
                         // Unknown operator — stop walking, return current expression as source.
                         e
@@ -313,6 +325,11 @@ module internal DBRefManyExtractor =
             if not seenBoundary then
                 wheres.AddRange(postBoundWheres); postBoundWheres.Clear()
                 sortKeys.AddRange(postBoundSortKeys); postBoundSortKeys.Clear()
+
+            // R61: If no Select in chain, DefaultIfEmpty captured as postSelect is actually pre-Select.
+            if selectProj.IsNone && postSelectDefaultIfEmpty.IsSome && defaultIfEmpty.IsNone then
+                defaultIfEmpty <- postSelectDefaultIfEmpty
+                postSelectDefaultIfEmpty <- None
 
             match countPredicate with
             | Some pred when seenBoundary -> postBoundWheres.Add(pred)
@@ -376,7 +393,9 @@ module internal DBRefManyExtractor =
                     finalSelectProj
                     setOp
                     finalTerminal
-                    finalGroupByHaving)
+                    finalGroupByHaving
+                    defaultIfEmpty
+                    postSelectDefaultIfEmpty)
 
         // Non-MethodCall expressions (MemberExpression for .Count property, etc.)
         | :? MemberExpression as me when me.Member.Name = "Count" && not (isNull me.Expression) ->

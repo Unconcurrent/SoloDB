@@ -182,83 +182,184 @@ module internal DBRefManyBuilder =
             desc.PostBoundLimit.IsSome ||
             desc.PostBoundOffset.IsSome
 
-        if hasPostBound then
-            // PostBound wrapping: inner core bounded by Take/Skip, outer applies post-bound operators.
-            // Inner core projects pass-through columns for the DerivedTable.
-            let passThrough = { innerCore with Projections = AllColumns }
-            let innerSel = { Ctes = []; Body = SingleSelect passThrough }
-            let pbAlias = nextAlias "_pb"
+        let effectiveAlias, effectiveLnk, effectiveCore, effectiveTarget =
+            if hasPostBound then
+                // PostBound wrapping: inner core bounded by Take/Skip, outer applies post-bound operators.
+                // Inner core projects pass-through columns for the DerivedTable.
+                let passThrough = { innerCore with Projections = AllColumns }
+                let innerSel = { Ctes = []; Body = SingleSelect passThrough }
+                let pbAlias = nextAlias "_pb"
 
-            // Translate PostBound WHERE predicates against the _pb alias.
-            let pbJoinEdges = ResizeArray<JoinEdge>()
-            let pbWhereDus =
-                desc.PostBoundWherePredicates
-                |> List.collect (fun predExpr ->
-                    match tryExtractLambdaExpression predExpr with
-                    | ValueSome predLambda ->
-                        let subQb = qb.ForSubquery(pbAlias, predLambda, subqueryRootTable = targetTable)
-                        let result = [visitDu predLambda.Body subQb]
-                        pbJoinEdges.AddRange(subQb.SourceContext.Joins)
-                        result
-                    | ValueNone ->
-                        raise (NotSupportedException(
-                            "Error: Cannot translate relation-backed DBRefMany predicate.\nReason: The predicate is not a translatable lambda expression.\nFix: Pass the predicate as an inline lambda, not a delegate variable.")))
+                // Translate PostBound WHERE predicates against the _pb alias.
+                let pbJoinEdges = ResizeArray<JoinEdge>()
+                let pbWhereDus =
+                    desc.PostBoundWherePredicates
+                    |> List.collect (fun predExpr ->
+                        match tryExtractLambdaExpression predExpr with
+                        | ValueSome predLambda ->
+                            let subQb = qb.ForSubquery(pbAlias, predLambda, subqueryRootTable = targetTable)
+                            let result = [visitDu predLambda.Body subQb]
+                            pbJoinEdges.AddRange(subQb.SourceContext.Joins)
+                            result
+                        | ValueNone ->
+                            raise (NotSupportedException(
+                                "Error: Cannot translate relation-backed DBRefMany predicate.\nReason: The predicate is not a translatable lambda expression.\nFix: Pass the predicate as an inline lambda, not a delegate variable.")))
 
-            // Translate PostBound sort keys.
-            let pbSortKeyDus =
-                desc.PostBoundSortKeys
-                |> List.map (fun (keyExpr, dir) ->
-                    match tryExtractLambdaExpression keyExpr with
-                    | ValueSome keyLambda ->
-                        let subQb = qb.ForSubquery(pbAlias, keyLambda, subqueryRootTable = targetTable)
-                        let result = { Expr = visitDu keyLambda.Body subQb; Direction = dir }
-                        pbJoinEdges.AddRange(subQb.SourceContext.Joins)
-                        result
-                    | ValueNone ->
-                        raise (NotSupportedException("Cannot extract key selector for PostBound OrderBy.")))
+                // Translate PostBound sort keys.
+                let pbSortKeyDus =
+                    desc.PostBoundSortKeys
+                    |> List.map (fun (keyExpr, dir) ->
+                        match tryExtractLambdaExpression keyExpr with
+                        | ValueSome keyLambda ->
+                            let subQb = qb.ForSubquery(pbAlias, keyLambda, subqueryRootTable = targetTable)
+                            let result = { Expr = visitDu keyLambda.Body subQb; Direction = dir }
+                            pbJoinEdges.AddRange(subQb.SourceContext.Joins)
+                            result
+                        | ValueNone ->
+                            raise (NotSupportedException("Cannot extract key selector for PostBound OrderBy.")))
 
-            let pbLimitDu =
-                match desc.PostBoundLimit with
-                | Some e ->
-                    match e with
-                    | :? ConstantExpression as ce -> Some(SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value))))
-                    | _ -> Some(visitDu e qb)
-                | None ->
-                    // SQLite requires LIMIT before OFFSET. When only OFFSET is present, use LIMIT -1 (unlimited).
+                let pbLimitDu =
+                    match desc.PostBoundLimit with
+                    | Some e ->
+                        match e with
+                        | :? ConstantExpression as ce -> Some(SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value))))
+                        | _ -> Some(visitDu e qb)
+                    | None ->
+                        // SQLite requires LIMIT before OFFSET. When only OFFSET is present, use LIMIT -1 (unlimited).
+                        match desc.PostBoundOffset with
+                        | Some _ -> Some(SqlExpr.Literal(SqlLiteral.Integer -1L))
+                        | None -> None
+                let pbOffsetDu =
                     match desc.PostBoundOffset with
-                    | Some _ -> Some(SqlExpr.Literal(SqlLiteral.Integer -1L))
+                    | Some e ->
+                        match e with
+                        | :? ConstantExpression as ce -> Some(SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value))))
+                        | _ -> Some(visitDu e qb)
                     | None -> None
-            let pbOffsetDu =
-                match desc.PostBoundOffset with
-                | Some e ->
-                    match e with
-                    | :? ConstantExpression as ce -> Some(SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value))))
-                    | _ -> Some(visitDu e qb)
-                | None -> None
 
-            let pbWhere =
-                match pbWhereDus with
-                | [] -> None
-                | preds -> Some(preds |> List.reduce (fun a b -> SqlExpr.Binary(a, BinaryOperator.And, b)))
+                let pbWhere =
+                    match pbWhereDus with
+                    | [] -> None
+                    | preds -> Some(preds |> List.reduce (fun a b -> SqlExpr.Binary(a, BinaryOperator.And, b)))
 
-            let pbDbRefJoins = DBRefManyHelpers.joinEdgesToClauses pbJoinEdges
+                let pbDbRefJoins = DBRefManyHelpers.joinEdgesToClauses pbJoinEdges
 
-            let outerCore =
-                { mkSubCore projections (Some(DerivedTable(innerSel, pbAlias))) pbWhere with
-                    Joins = pbDbRefJoins
-                    OrderBy = pbSortKeyDus
-                    Limit = pbLimitDu
-                    Offset = pbOffsetDu }
+                let outerCore =
+                    { mkSubCore projections (Some(DerivedTable(innerSel, pbAlias))) pbWhere with
+                        Joins = pbDbRefJoins
+                        OrderBy = pbSortKeyDus
+                        Limit = pbLimitDu
+                        Offset = pbOffsetDu }
 
-            // Return _pb as the effective target alias for terminal builders.
-            pbAlias, lnkAlias, outerCore, targetTable
-        else
-            tgtAlias, lnkAlias, innerCore, targetTable
+                // Return _pb as the effective target alias for terminal builders.
+                pbAlias, lnkAlias, outerCore, targetTable
+            else
+                tgtAlias, lnkAlias, innerCore, targetTable
+
+        // R61: Pre-Select DefaultIfEmpty — inject UNION ALL synthetic default row.
+        match desc.DefaultIfEmpty with
+        | Some defaultValueExprOpt ->
+            // Compute default value SQL expression.
+            let defaultValueDu =
+                match defaultValueExprOpt with
+                | Some valueExpr ->
+                    let v = evaluateExpr<obj> valueExpr
+                    let jsonObj = JsonSerializator.JsonValue.Serialize v
+                    let jsonText = jsonObj.ToJsonString()
+                    SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.FunctionCall("jsonb", [SqlExpr.Literal(SqlLiteral.String jsonText)]); SqlExpr.Literal(SqlLiteral.String "$")])
+                | None ->
+                    SqlExpr.Literal(SqlLiteral.Null)
+
+            // Build NOT EXISTS guard using the full inner core (for emptiness check).
+            let existsCore = { effectiveCore with Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] }
+            let existsSel = { Ctes = []; Body = SingleSelect existsCore }
+
+            // Flatten the effective core into a DerivedTable with Id+Value columns,
+            // so both sides of UNION ALL have matching column shapes.
+            let flatAlias = nextAlias "_dif"
+            let flatProjs =
+                [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some flatAlias, "Id") }
+                 { Alias = Some "Value"; Expr = SqlExpr.Column(Some flatAlias, "Value") }]
+            let flatSel = { Ctes = []; Body = SingleSelect { effectiveCore with Projections = AllColumns } }
+            let mainCore = mkSubCore flatProjs (Some(DerivedTable(flatSel, flatAlias))) None
+
+            let defaultProjs =
+                [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                 { Alias = Some "Value"; Expr = defaultValueDu }]
+            let defaultCore =
+                { mkSubCore defaultProjs None (Some(SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists existsSel))) with
+                    Joins = []; OrderBy = []; Limit = None; Offset = None }
+
+            let unionSel = { Ctes = []; Body = UnionAllSelect(mainCore, [defaultCore]) }
+            let dtAlias = nextAlias "_die"
+            let wrappedCore = mkSubCore projections (Some(DerivedTable(unionSel, dtAlias))) None
+            dtAlias, effectiveLnk, wrappedCore, effectiveTarget
+        | None -> effectiveAlias, effectiveLnk, effectiveCore, effectiveTarget
+
+    /// Compute default value SQL expression for DefaultIfEmpty.
+    /// For value with explicit expression: evaluate + serialize.
+    /// For no-arg: value types → default(T), reference types → NULL.
+    let private computeDefaultValueDu (defaultValueExprOpt: Expression option) (projectedType: Type option) : SqlExpr =
+        match defaultValueExprOpt with
+        | Some valueExpr ->
+            let v = evaluateExpr<obj> valueExpr
+            let jsonObj = JsonSerializator.JsonValue.Serialize v
+            let jsonText = jsonObj.ToJsonString()
+            SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.FunctionCall("jsonb", [SqlExpr.Literal(SqlLiteral.String jsonText)]); SqlExpr.Literal(SqlLiteral.String "$")])
+        | None ->
+            match projectedType with
+            | Some t when t.IsValueType ->
+                let defaultValue = Activator.CreateInstance(t)
+                let jsonObj = JsonSerializator.JsonValue.Serialize defaultValue
+                let jsonText = jsonObj.ToJsonString()
+                SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.FunctionCall("jsonb", [SqlExpr.Literal(SqlLiteral.String jsonText)]); SqlExpr.Literal(SqlLiteral.String "$")])
+            | _ ->
+                SqlExpr.Literal(SqlLiteral.Null)
+
+    /// Compute default value for json_array wrapping (post-Select Select terminal).
+    let private computeDefaultValueForJsonArray (defaultValueExprOpt: Expression option) (projectedType: Type option) : SqlExpr =
+        match defaultValueExprOpt with
+        | Some valueExpr ->
+            let v = evaluateExpr<obj> valueExpr
+            let jsonObj = JsonSerializator.JsonValue.Serialize v
+            let jsonText = jsonObj.ToJsonString()
+            SqlExpr.FunctionCall("json", [SqlExpr.Literal(SqlLiteral.String jsonText)])
+        | None ->
+            match projectedType with
+            | Some t when t.IsValueType ->
+                let defaultValue = Activator.CreateInstance(t)
+                let jsonObj = JsonSerializator.JsonValue.Serialize defaultValue
+                let jsonText = jsonObj.ToJsonString()
+                SqlExpr.FunctionCall("json", [SqlExpr.Literal(SqlLiteral.String jsonText)])
+            | _ ->
+                SqlExpr.Literal(SqlLiteral.Null)
+
     let tryBuild (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) : SqlExpr voption =
         let countDbRefManyDepth =
             DBRefManyBuilderTerminals.countDbRefManyDepth unwrapConvert isDBRefManyType
-        let buildProjectedRowset qb desc ownerRef =
+        let buildProjectedRowsetRaw qb desc ownerRef =
             DBRefManyBuilderTerminals.buildProjectedRowset buildCorrelatedCore nextAlias visitDu joinEdgesToClauses qb desc ownerRef
+        let projectedType = desc.SelectProjection |> Option.map (fun l -> l.Body.Type)
+        let buildProjectedRowset qb desc ownerRef =
+            let baseSel = buildProjectedRowsetRaw qb desc ownerRef
+            // R61: Post-Select DefaultIfEmpty — wrap projected rowset with UNION ALL default.
+            match desc.PostSelectDefaultIfEmpty with
+            | Some defaultValueExprOpt ->
+                let defaultValueDu = computeDefaultValueDu defaultValueExprOpt projectedType
+                // Extract the main core from baseSel, build UNION ALL with default row.
+                // Projected rowset uses alias "v" for the single projected column.
+                match baseSel.Body with
+                | SingleSelect mainCore ->
+                    let existsCore = { mainCore with Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] }
+                    let existsSel = { Ctes = []; Body = SingleSelect existsCore }
+                    let defaultProjs =
+                        [{ Alias = Some "v"; Expr = defaultValueDu }]
+                    let defaultCore =
+                        { mkSubCore defaultProjs None (Some(SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists existsSel))) with
+                            Joins = []; OrderBy = []; Limit = None; Offset = None }
+                    { baseSel with Body = UnionAllSelect(mainCore, [defaultCore]) }
+                | UnionAllSelect _ -> baseSel // Already union — skip
+            | None -> baseSel
         let buildProjectedAggregate qb desc ownerRef aggKind =
             if desc.TakeWhileInfo.IsSome then
                 raise (NotSupportedException("Projected scalar aggregate after TakeWhile/SkipWhile is not supported."))
@@ -370,7 +471,18 @@ module internal DBRefManyBuilder =
             | Terminal.MaxProjected -> buildProjectedAggregate qb desc ownerRef AggregateKind.Max
             | Terminal.Average sel -> buildAggregate qb desc ownerRef sel AggregateKind.Avg
             | Terminal.AverageProjected -> buildProjectedAggregate qb desc ownerRef AggregateKind.Avg
-            | Terminal.Select _ -> buildSelect qb desc ownerRef
+            | Terminal.Select _ ->
+                let selectResult = buildSelect qb desc ownerRef
+                // R61: Post-Select DefaultIfEmpty wrapping for Select terminal (json_group_array).
+                match desc.PostSelectDefaultIfEmpty with
+                | Some defaultValueExprOpt ->
+                    let defaultValueDu = computeDefaultValueForJsonArray defaultValueExprOpt projectedType
+                    // CASE WHEN json_array_length(result) = 0 THEN json_array(default) ELSE result END
+                    SqlExpr.CaseExpr(
+                        (SqlExpr.Binary(SqlExpr.FunctionCall("json_array_length", [selectResult]), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)),
+                         SqlExpr.FunctionCall("json_array", [defaultValueDu])),
+                        [], Some selectResult)
+                | None -> selectResult
             | Terminal.Contains value -> buildContains qb desc ownerRef value
             | Terminal.First pred ->
                 match desc.SelectProjection with
@@ -378,7 +490,26 @@ module internal DBRefManyBuilder =
                 | None -> buildEntityElement qb desc ownerRef pred false
             | Terminal.FirstOrDefault pred ->
                 match desc.SelectProjection with
-                | Some _ -> buildProjectedElement qb desc ownerRef pred false
+                | Some _ ->
+                    let elemResult = buildProjectedElement qb desc ownerRef pred false
+                    // R61: Post-Select DefaultIfEmpty wrapping for FirstOrDefault.
+                    // Use CASE WHEN NOT EXISTS (not COALESCE) to avoid conflating
+                    // empty-relation with legitimate NULL first values.
+                    match desc.PostSelectDefaultIfEmpty with
+                    | Some defaultValueExprOpt ->
+                        let defaultValueDu = computeDefaultValueDu defaultValueExprOpt projectedType
+                        // Build NOT EXISTS check using the projected rowset.
+                        let projRowset = buildProjectedRowset qb desc ownerRef
+                        let existsCore =
+                            match projRowset.Body with
+                            | SingleSelect c -> { c with Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] }
+                            | UnionAllSelect(h, _) -> { h with Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] }
+                        let existsSel = { Ctes = []; Body = SingleSelect existsCore }
+                        // CASE WHEN NOT EXISTS(projected) THEN default ELSE elemResult END
+                        SqlExpr.CaseExpr(
+                            (SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists existsSel), defaultValueDu),
+                            [], Some elemResult)
+                    | None -> elemResult
                 | None -> buildEntityElement qb desc ownerRef pred false
             | Terminal.Last pred ->
                 match desc.SelectProjection with
