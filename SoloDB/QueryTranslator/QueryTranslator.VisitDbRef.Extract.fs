@@ -104,6 +104,21 @@ module internal DBRefManyExtractor =
             let mutable groupByHaving: Expression option = None
             let mutable defaultIfEmpty: Expression option option = None
             let mutable postSelectDefaultIfEmpty: Expression option option = None
+            let source =
+                match terminal, source with
+                | (Terminal.Count | Terminal.LongCount), (:? MethodCallExpression as srcMc) when srcMc.Method.Name = "CountBy" ->
+                    match getArg srcMc, getSource srcMc with
+                    | Some keyExpr, src when not (isNull src) ->
+                        match tryExtractLambdaExpression keyExpr with
+                        | ValueSome keyLambda ->
+                            groupByKey <- Some keyLambda
+                            src
+                        | ValueNone ->
+                            source
+                    | _ ->
+                        source
+                | _ ->
+                    source
 
             let rec walkChain (e: Expression) : Expression =
                 let e = unwrapConvert e
