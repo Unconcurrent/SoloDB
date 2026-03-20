@@ -356,21 +356,6 @@ module internal DBRefManyExtractor =
                     | ValueNone -> selectProj
                 | _ -> selectProj
 
-            match finalTerminal with
-            | Terminal.Average selectorExpr ->
-                match tryExtractLambdaExpression selectorExpr with
-                | ValueSome selectorLambda when isDecimalLikeType selectorLambda.Body.Type ->
-                    raise (NotSupportedException(
-                        "Error: Decimal Average over DBRefMany is not supported.\nReason: SQLite AVG is not exact for decimal semantics on this route.\nFix: Use Sum/Count in-memory after AsEnumerable(), or project to a supported numeric type."))
-                | _ -> ()
-            | Terminal.AverageProjected ->
-                match finalSelectProj with
-                | Some proj when isDecimalLikeType proj.Body.Type ->
-                    raise (NotSupportedException(
-                        "Error: Decimal Average over DBRefMany is not supported.\nReason: SQLite AVG is not exact for decimal semantics on this route.\nFix: Use Sum/Count in-memory after AsEnumerable(), or project to a supported numeric type."))
-                | _ -> ()
-            | _ -> ()
-
             // Inject Count(pred) predicate as a WHERE clause so the correlated COUNT is owner-scoped.
             match countPredicate with
             | Some pred -> wheres.Add(pred)

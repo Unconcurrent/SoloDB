@@ -8,13 +8,6 @@ open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.QueryTranslatorBaseHelpers
 
 module internal DBRefManyExtractorHelpers =
-    let isDecimalLikeType (t: Type) =
-        let t =
-            match Nullable.GetUnderlyingType t with
-            | null -> t
-            | underlying -> underlying
-        t = typeof<decimal>
-
     let mkIdentityLambdaForDbRefMany (expr: Expression) =
         let targetType =
             match expr.Type.GetGenericArguments() |> Array.tryHead with
