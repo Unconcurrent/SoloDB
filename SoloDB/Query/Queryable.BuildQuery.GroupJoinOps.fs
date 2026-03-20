@@ -69,36 +69,91 @@ module internal QueryableBuildQueryPartBGroupJoin =
                 let innerSelect = translateQueryFn innerCtx ctx.Vars capturedInnerExpr
                 let innerSource = DerivedTable(innerSelect, innerAlias)
 
-                // Create a separate context for aggregate lambda translation that resolves against
-                // the DerivedTable alias, not the root table. This ensures DBRef JOINs reference
-                // the correct alias (e.g., "gj" instead of "StressAgent").
-                let innerAggCtx =
-                    { innerCtx with
-                        RootTable = innerAlias
-                        Joins = ResizeArray() }
-
-                let outerKeyExpr =
-                    translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars (Some outerKeySelector.Parameters.[0]) outerKeySelector.Body
-                // Translate inner key against the inner alias (the DerivedTable exposes Id + Value columns).
-                let innerKeyExpr =
-                    translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body
-                let quotedInnerRoot = "\"" + innerRootTable + "\""
-
-                let rewriteDiscoveredJoins (targetAlias: string) (joins: ResizeArray<JoinEdge>) =
+                let materializeDiscoveredJoins
+                    (joins: ResizeArray<JoinEdge>)
+                    (materializedRootAlias: string option)
+                    (materializedRootPaths: Collections.Generic.HashSet<string> option) =
                     joins
                     |> Seq.map (fun j ->
-                        let rewrittenSource =
-                            match j.OnSourceAlias with
-                            | Some src when src = quotedInnerRoot || src = innerRootTable -> Some targetAlias
-                            | other -> other
+                        let onExpr =
+                            match materializedRootAlias, materializedRootPaths, j.OnSourceAlias with
+                            | Some rootAlias, Some paths, Some sourceAlias
+                                when sourceAlias = rootAlias && paths.Contains(j.PropertyPath) ->
+                                SqlExpr.FunctionCall(
+                                    "jsonb_extract",
+                                    [ SqlExpr.Column(j.OnSourceAlias, "Value")
+                                      SqlExpr.Literal(SqlLiteral.String($"$.{j.OnPropertyName}[0]")) ])
+                            | _ ->
+                                SqlExpr.JsonExtractExpr(j.OnSourceAlias, "Value", JsonPath(j.OnPropertyName, []))
                         ConditionedJoin(
                             parseJoinKind j.JoinKind,
                             BaseTable(j.TargetTable, Some j.TargetAlias),
                             SqlExpr.Binary(
                                 SqlExpr.Column(Some j.TargetAlias, "Id"),
                                 BinaryOperator.Eq,
-                                SqlExpr.JsonExtractExpr(rewrittenSource, "Value", JsonPath(j.OnPropertyName, [])))))
+                                onExpr)))
                     |> Seq.toList
+
+                let outerCtx =
+                    { sourceCtx with
+                        Joins = ResizeArray() }
+
+                let innerAggCtx =
+                    { innerCtx with
+                        Joins = ResizeArray() }
+                let innerKeyCtx =
+                    { innerCtx with
+                        Joins = ResizeArray() }
+
+                let rec stripConvert (expr: Expression) =
+                    match expr with
+                    | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> stripConvert ue.Operand
+                    | _ -> expr
+
+                let tryTranslateDbRefValueIdKey (parameter: ParameterExpression) (tableAlias: string) (expr: Expression) =
+                    match stripConvert expr with
+                    | :? MemberExpression as idMe when idMe.Member.Name = "Id" ->
+                        match stripConvert idMe.Expression with
+                        | :? MemberExpression as valueMe when valueMe.Member.Name = "Value" ->
+                            match stripConvert valueMe.Expression with
+                            | :? MemberExpression as relMe when Object.ReferenceEquals(stripConvert relMe.Expression, parameter) ->
+                                Some (
+                                    SqlExpr.FunctionCall(
+                                        "jsonb_extract",
+                                        [ SqlExpr.Column(Some tableAlias, "Value")
+                                          SqlExpr.Literal(SqlLiteral.String($"$.{relMe.Member.Name}")) ]))
+                            | _ -> None
+                        | _ -> None
+                    | _ -> None
+
+                let outerKeyExpr =
+                    match tryTranslateDbRefValueIdKey outerKeySelector.Parameters.[0] outerAlias outerKeySelector.Body with
+                    | Some translated -> translated
+                    | None -> translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars (Some outerKeySelector.Parameters.[0]) outerKeySelector.Body
+
+                let innerJoinKeyExpr =
+                    let innerKeyDirectCtx =
+                        { innerCtx with
+                            Joins = ResizeArray() }
+                    let directExpr =
+                        match tryTranslateDbRefValueIdKey innerKeySelector.Parameters.[0] innerAlias innerKeySelector.Body with
+                        | Some translated -> translated
+                        | None -> translateJoinSingleSourceExpression innerKeyDirectCtx innerAlias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body
+                    if innerKeyDirectCtx.Joins.Count = 0 then
+                        directExpr
+                    else
+                        let innerKeySourceAlias = sprintf "gjk%d" (Interlocked.Increment(innerCtx.AliasCounter) - 1)
+                        let correlatedExpr =
+                            match tryTranslateDbRefValueIdKey innerKeySelector.Parameters.[0] innerKeySourceAlias innerKeySelector.Body with
+                            | Some translated -> translated
+                            | None -> translateJoinSingleSourceExpression innerKeyCtx innerKeySourceAlias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body
+                        let keyCore =
+                            { mkCore [{ Alias = None; Expr = correlatedExpr }] (Some (DerivedTable(innerSelect, innerKeySourceAlias)))
+                                with
+                                    Joins = materializeDiscoveredJoins innerKeyCtx.Joins None None
+                                    Where = Some (SqlExpr.Binary(SqlExpr.Column(Some innerKeySourceAlias, "Id"), BinaryOperator.Eq, SqlExpr.Column(Some innerAlias, "Id")))
+                                    Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
+                        SqlExpr.ScalarSubquery (wrapCore keyCore)
 
                 let replaceExpression (target: Expression) (replacement: Expression) (expr: Expression) =
                     let visitor =
@@ -108,6 +163,9 @@ module internal QueryableBuildQueryPartBGroupJoin =
                                 elif Object.ReferenceEquals(node, target) then replacement
                                 else base.Visit(node) }
                     visitor.Visit(expr)
+
+                let translateOuterExpr (expr: Expression) =
+                    translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars (Some outerParam) expr
 
                 let tryMatchGroupFirstLikeCall (expr: Expression) =
                     match expr with
@@ -128,18 +186,19 @@ module internal QueryableBuildQueryPartBGroupJoin =
                     let scalarAlias = sprintf "gjf%d" (Interlocked.Increment(innerCtx.AliasCounter) - 1)
                     let freshInnerCtx =
                         { innerCtx with
-                            RootTable = scalarAlias
                             Joins = ResizeArray() }
                     let innerParam = innerKeySelector.Parameters.[0]
                     let rewrittenProjection = replaceExpression (groupCall :> Expression) (innerParam :> Expression) projectionBody
                     let freshInnerKeyExpr =
-                        translateJoinSingleSourceExpression freshInnerCtx scalarAlias ctx.Vars (Some innerParam) innerKeySelector.Body
+                        match tryTranslateDbRefValueIdKey innerParam scalarAlias innerKeySelector.Body with
+                        | Some translated -> translated
+                        | None -> translateJoinSingleSourceExpression freshInnerCtx scalarAlias ctx.Vars (Some innerParam) innerKeySelector.Body
                     let projectedExpr =
                         translateJoinSingleSourceExpression freshInnerCtx scalarAlias ctx.Vars (Some innerParam) rewrittenProjection
                     let scalarCore =
                         { mkCore [{ Alias = None; Expr = projectedExpr }] (Some (DerivedTable(innerSelect, scalarAlias)))
                             with
-                                Joins = rewriteDiscoveredJoins scalarAlias freshInnerCtx.Joins
+                                Joins = materializeDiscoveredJoins freshInnerCtx.Joins None None
                                 Where = Some (SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, freshInnerKeyExpr))
                                 Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
                     SqlExpr.ScalarSubquery (wrapCore scalarCore)
@@ -167,13 +226,13 @@ module internal QueryableBuildQueryPartBGroupJoin =
                     match expr with
                     // outer.Prop — direct outer member access
                     | :? MemberExpression as me when not (isNull me.Expression) && me.Expression :? ParameterExpression && (me.Expression :?> ParameterExpression) = outerParam ->
-                        translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars (Some outerParam) expr
+                        translateOuterExpr expr
                     // group.First().Prop / group.FirstOrDefault().Prop
                     | :? MemberExpression as me when not (isNull me.Expression) ->
                         match tryMatchGroupFirstLikeCall me.Expression with
                         | Some groupCall -> buildGroupFirstLikeSubquery groupCall expr
                         | None ->
-                            translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars (Some outerParam) expr
+                            translateOuterExpr expr
                     // group.First() / group.FirstOrDefault()
                     | :? MethodCallExpression as mc ->
                         match tryMatchGroupFirstLikeCall mc with
@@ -213,10 +272,10 @@ module internal QueryableBuildQueryPartBGroupJoin =
                                 SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.Not, predDu), SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None),
                                 BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
                         | _ ->
-                            translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars (Some outerParam) expr
+                            translateOuterExpr expr
                     // Constant / no-group expression
                     | :? ConstantExpression ->
-                        translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars None expr
+                        translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars None expr
                     // Conditional (ternary)
                     | :? ConditionalExpression as ce ->
                         SqlExpr.CaseExpr((translateGroupJoinArg ce.Test, translateGroupJoinArg ce.IfTrue), [], Some(translateGroupJoinArg ce.IfFalse))
@@ -244,7 +303,7 @@ module internal QueryableBuildQueryPartBGroupJoin =
                             SqlExpr.Binary(translateGroupJoinArg be.Left, op, translateGroupJoinArg be.Right)
                     // Fallback — try outer translation
                     | _ ->
-                        translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars (Some outerParam) expr
+                        translateOuterExpr expr
 
                 // Build the result projection from the selector body.
                 // Use json_object (not jsonb_object) so downstream jsonb_extract returns typed SQL values.
@@ -275,16 +334,20 @@ module internal QueryableBuildQueryPartBGroupJoin =
                             "Fix: Use new { ... } in the result selector."))
 
                 // Collect DBRef JOINs discovered during inner aggregate translation.
-                // Rewrite OnSourceAlias: root table references → DerivedTable alias.
+                // Outer DBRef joins must precede the GroupJoin itself because outerKeyExpr and
+                // outer projections may depend on them. Inner aggregate joins come after.
+                let outerDiscoveredJoins =
+                    materializeDiscoveredJoins outerCtx.Joins (Some ("\"" + outerAlias + "\"")) (Some sourceCtx.MaterializedPaths)
                 let discoveredJoins =
-                    rewriteDiscoveredJoins innerAlias innerAggCtx.Joins
+                    materializeDiscoveredJoins innerAggCtx.Joins None None
 
                 // LEFT JOIN inner subquery + discovered DBRef JOINs + GROUP BY outer.Id, outer.Value
                 let allJoins =
-                    [ConditionedJoin(
+                    outerDiscoveredJoins
+                    @ [ConditionedJoin(
                         JoinKind.Left,
                         innerSource,
-                        SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr))]
+                        SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerJoinKeyExpr))]
                     @ discoveredJoins
                 let core =
                     { mkCore
