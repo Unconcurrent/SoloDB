@@ -408,6 +408,50 @@ module internal DBRefManyBuilder =
         let buildUnionByEntityRowset =
             DBRefManyBuilderSetOps.buildUnionByEntityRowset buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias (DBRefManyBuilderElements.buildEntityValueExpr desc.CastTypeName)
 
+        let buildSetOpProjectedRowset (rowsetSel: SqlSelect) : SqlSelect =
+            match desc.SelectProjection with
+            | None -> rowsetSel
+            | Some projLambda ->
+                let rowAlias = nextAlias "_sv"
+                let valueCore =
+                    { Distinct = false
+                      Projections =
+                        ProjectionSetOps.ofList [
+                            { Alias = Some "Value"; Expr = SqlExpr.Column(Some rowAlias, "v") }
+                            { Alias = Some "__ord"; Expr = SqlExpr.Column(Some rowAlias, "__ord") }
+                        ]
+                      Source = Some(DerivedTable(rowsetSel, rowAlias))
+                      Joins = []
+                      Where = None
+                      GroupBy = []
+                      Having = None
+                      OrderBy = []
+                      Limit = None
+                      Offset = None }
+                let valueSel = { Ctes = []; Body = SingleSelect valueCore }
+                let projAlias = nextAlias "_sq"
+                let projQb =
+                    { qb.ForSubquery(projAlias, projLambda) with
+                        JsonExtractSelfValue = false }
+                let projectedDu = visitDu projLambda.Body projQb
+                let projJoins = joinEdgesToClauses projQb.SourceContext.Joins
+                let projectedCore =
+                    { Distinct = false
+                      Projections =
+                        ProjectionSetOps.ofList [
+                            { Alias = Some "v"; Expr = projectedDu }
+                            { Alias = Some "__ord"; Expr = SqlExpr.Column(Some projAlias, "__ord") }
+                        ]
+                      Source = Some(DerivedTable(valueSel, projAlias))
+                      Joins = projJoins
+                      Where = None
+                      GroupBy = []
+                      Having = None
+                      OrderBy = [{ Expr = SqlExpr.Column(Some projAlias, "__ord"); Direction = SortDirection.Asc }]
+                      Limit = None
+                      Offset = None }
+                { Ctes = []; Body = SingleSelect projectedCore }
+
         let buildSetOpFilteredRowset (rowsetSel: SqlSelect) (predExprOpt: Expression option) : SqlSelect =
             match predExprOpt with
             | None -> rowsetSel
@@ -535,6 +579,7 @@ module internal DBRefManyBuilder =
             SqlExpr.Exists filteredSel
 
         let buildSetOpTerminalFromRowset (rowsetSel: SqlSelect) : SqlExpr voption =
+            let rowsetSel = buildSetOpProjectedRowset rowsetSel
             match desc.Terminal with
             | Terminal.Select _
             | Terminal.DistinctBy _ ->
