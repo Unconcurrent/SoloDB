@@ -65,6 +65,7 @@ module internal QueryableHelperBase =
             SourceContext = QueryContext.SingleSource("")
             ParamCounter = ref 0
             DuHandlerResult = ref ValueNone
+            OuterParameterAliases = Dictionary<ParameterExpression, string>()
         }
         let firstRound =
             PassRunner.runPipeline [

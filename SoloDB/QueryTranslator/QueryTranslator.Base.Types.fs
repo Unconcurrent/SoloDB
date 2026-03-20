@@ -125,6 +125,9 @@ module internal QueryTranslatorBaseTypes =
             ParamCounter: int ref
             /// <summary>DU result from pre-expression/unknown handler — replaces __raw__ StringBuilder capture.</summary>
             DuHandlerResult: SqlExpr voption ref
+            /// <summary>Maps outer-scope ParameterExpressions to their SQL alias (quoted, e.g. '"RecursiveNode"').
+            /// Used by visitParameterDu and related Id fast paths to resolve outer-captured variables correctly across ForSubquery boundaries.</summary>
+            OuterParameterAliases: Dictionary<ParameterExpression, string>
         }
         /// <summary>
         /// Returns the generated SQL query string.
@@ -136,12 +139,19 @@ module internal QueryTranslatorBaseTypes =
         /// Shares StringBuilder + Variables (parameters go to the same query), but uses a different table name and lambda parameters.
         /// SourceContext is cloned with isolated Joins to prevent DBRef JOIN leakage from inner scope to outer query.
         member internal this.ForSubquery(tableName: string, lambdaExpr: LambdaExpression, ?subqueryRootTable: string) =
+            // R63: Record current scope's parameters with their alias before creating child scope.
+            let outerAliases = Dictionary<ParameterExpression, string>(this.OuterParameterAliases)
+            let currentAlias = this.TableNameDot.TrimEnd([|'.'|])
+            if not (String.IsNullOrEmpty currentAlias) then
+                for p in this.Parameters do
+                    outerAliases.[p] <- currentAlias
             { this with
                 TableNameDot = if String.IsNullOrEmpty tableName then String.Empty else "\"" + tableName + "\"."
                 Parameters = lambdaExpr.Parameters
                 JsonExtractSelfValue = true
                 UpdateMode = false
                 IdParameterIndex = -1
+                OuterParameterAliases = outerAliases
                 SourceContext = this.SourceContext.CloneForSubquery(?rootTable = subqueryRootTable) }
 
         // Whitelisted internal accessors for cross-file visitor split boundary.
@@ -201,4 +211,5 @@ module internal QueryTranslatorBaseTypes =
                 SourceContext = sourceCtx
                 ParamCounter = ref 0
                 DuHandlerResult = ref ValueNone
+                OuterParameterAliases = Dictionary<ParameterExpression, string>()
             }

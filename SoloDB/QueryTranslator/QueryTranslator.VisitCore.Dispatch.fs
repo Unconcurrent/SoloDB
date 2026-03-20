@@ -70,10 +70,30 @@ module internal QueryTranslatorVisitCore =
             SqlExpr.FunctionCall("jsonb_extract", [visitDu array qb; SqlExpr.Literal(SqlLiteral.String(sprintf "$[%O]" ce.Value))])
         | _ -> raise (NotSupportedException("The index of the array must always be a constant value."))
 
+    /// R63: Resolve the correct SQL alias for a ParameterExpression.
+    /// If the parameter belongs to the current scope, use qb.TableNameDot.
+    /// If it's an outer-captured parameter, look up OuterParameterAliases.
+    and private resolveAliasForParameter (paramExpr: ParameterExpression) (qb: QueryBuilder) : string option =
+        if qb.Parameters |> Seq.exists (fun p -> obj.ReferenceEquals(p, paramExpr)) then
+            // Current scope parameter
+            if String.IsNullOrEmpty qb.TableNameDot then None
+            else Some(qb.TableNameDot.TrimEnd([|'.'|]))
+        else
+            // Outer scope parameter — check dictionary
+            match qb.OuterParameterAliases.TryGetValue(paramExpr) with
+            | true, outerAlias -> Some outerAlias
+            | false, _ ->
+                // Fallback: use current scope (pre-existing behavior for edge cases)
+                if String.IsNullOrEmpty qb.TableNameDot then None
+                else Some(qb.TableNameDot.TrimEnd([|'.'|]))
+
     and private visitPropertyDu (o: Expression) (property: obj) (m: Expression) (qb: QueryBuilder) : SqlExpr =
         match property with
         | :? string as property ->
-            let alias = if String.IsNullOrEmpty qb.TableNameDot then None else Some(qb.TableNameDot.TrimEnd([|'.'|]))
+            let alias =
+                match o with
+                | :? ParameterExpression as pe -> resolveAliasForParameter pe qb
+                | _ -> if String.IsNullOrEmpty qb.TableNameDot then None else Some(qb.TableNameDot.TrimEnd([|'.'|]))
             if property = "Id" && o.NodeType = ExpressionType.Parameter && (m.Type = typeof<int64> || m.Type = typeof<int32>) then
                 SqlExpr.Column(alias, "Id")
             else
@@ -86,7 +106,7 @@ module internal QueryTranslatorVisitCore =
         SqlExpr.JsonObjectExpr([for struct(name, expr) in members -> (name, expr)])
 
     and private visitParameterDu (m: ParameterExpression) (qb: QueryBuilder) : SqlExpr =
-        let alias = if String.IsNullOrEmpty qb.TableNameDot then None else Some(qb.TableNameDot.TrimEnd([|'.'|]))
+        let alias = resolveAliasForParameter m qb
         if m.Type = typeof<int64>
             && ((qb.Parameters.IndexOf m = 0 && qb.Parameters.Count = 2)
                 || qb.IdParameterIndex = qb.Parameters.IndexOf m) then
@@ -99,7 +119,10 @@ module internal QueryTranslatorVisitCore =
             SqlExpr.Column(alias, "Value")
 
     and private visitMemberAccessDu (m: MemberAccess) (qb: QueryBuilder) : SqlExpr =
-        let alias = if String.IsNullOrEmpty qb.TableNameDot then None else Some(qb.TableNameDot.TrimEnd([|'.'|]))
+        let alias =
+            match m.Expression with
+            | :? ParameterExpression as pe -> resolveAliasForParameter pe qb
+            | _ -> if String.IsNullOrEmpty qb.TableNameDot then None else Some(qb.TableNameDot.TrimEnd([|'.'|]))
         if m.MemberName = "Length" && m.InputType.GetInterface(typeof<IEnumerable>.FullName) <> null then
             if m.InputType = typeof<string> then SqlExpr.FunctionCall("length", [visitDu m.Expression qb])
             elif m.InputType = typeof<byte array> then SqlExpr.FunctionCall("length", [SqlExpr.FunctionCall("base64", [visitDu m.Expression qb])])
