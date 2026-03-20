@@ -94,7 +94,7 @@ module internal QueryableBuildQueryPartAGroupBy =
         | _ -> false
 
     let private tryTranslateProjectedAggregate
-        (sourceCtx: QueryContext) (ctxTableName: string) (groupParam: ParameterExpression) (vars: Dictionary<string, obj>)
+        (sourceCtx: QueryContext) (ctxTableName: string) (groupRowTableName: string) (groupParam: ParameterExpression) (vars: Dictionary<string, obj>)
         (source: Expression) (aggKind: AggregateKind) (coalesceZero: bool) : SqlExpr option =
         let isDistinct, innerSource =
             match source with
@@ -113,7 +113,7 @@ module internal QueryableBuildQueryPartAGroupBy =
         if not (isGroupSource innerSource3 groupParam) then None
         else
         let translateInner (lambda: LambdaExpression) =
-            translateExprDu sourceCtx ctxTableName (lambda :> Expression) vars
+            translateExprDu sourceCtx groupRowTableName (lambda :> Expression) vars
         let argExpr =
             match projLambda, whereLambda with
             | Some proj, Some where -> SqlExpr.CaseExpr((translateInner where, translateInner proj), [], None)
@@ -130,7 +130,7 @@ module internal QueryableBuildQueryPartAGroupBy =
         else Some aggExpr
 
     let rec private tryTranslateGroupArg
-        (sourceCtx: QueryContext) (ctxTableName: string) (groupParam: ParameterExpression) (vars: Dictionary<string, obj>)
+        (sourceCtx: QueryContext) (ctxTableName: string) (groupRowTableName: string) (groupParam: ParameterExpression) (vars: Dictionary<string, obj>)
         (expr: Expression) : SqlExpr option =
         match expr with
         | :? MemberExpression as me when not (isNull me.Expression) && me.Expression :? ParameterExpression && obj.ReferenceEquals(me.Expression, groupParam) && me.Member.Name = "Key" ->
@@ -149,27 +149,27 @@ module internal QueryableBuildQueryPartAGroupBy =
                 Some (SqlExpr.AggregateCall(AggregateKind.Count, None, false, None))
             | "Count" when mc.Arguments.Count = 2 && isGroupSource mc.Arguments.[0] groupParam ->
                 let pred = extractLambdaFromExpr mc.Arguments.[1]
-                let predDu = translateExprDu sourceCtx ctxTableName (pred :> Expression) vars
+                let predDu = translateExprDu sourceCtx groupRowTableName (pred :> Expression) vars
                 Some (SqlExpr.AggregateCall(AggregateKind.Sum, Some (SqlExpr.CaseExpr(
                     (predDu, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None))
             | "Sum" when mc.Arguments.Count = 2 && isGroupSource mc.Arguments.[0] groupParam ->
                 let sel = extractLambdaFromExpr mc.Arguments.[1]
-                let selDu = translateExprDu sourceCtx ctxTableName (sel :> Expression) vars
+                let selDu = translateExprDu sourceCtx groupRowTableName (sel :> Expression) vars
                 Some (SqlExpr.Coalesce(SqlExpr.AggregateCall(AggregateKind.Sum, Some selDu, false, None), [SqlExpr.Literal(SqlLiteral.Integer 0L)]))
             | "Min" when mc.Arguments.Count = 2 && isGroupSource mc.Arguments.[0] groupParam ->
                 let sel = extractLambdaFromExpr mc.Arguments.[1]
-                Some (SqlExpr.AggregateCall(AggregateKind.Min, Some (translateExprDu sourceCtx ctxTableName (sel :> Expression) vars), false, None))
+                Some (SqlExpr.AggregateCall(AggregateKind.Min, Some (translateExprDu sourceCtx groupRowTableName (sel :> Expression) vars), false, None))
             | "Max" when mc.Arguments.Count = 2 && isGroupSource mc.Arguments.[0] groupParam ->
                 let sel = extractLambdaFromExpr mc.Arguments.[1]
-                Some (SqlExpr.AggregateCall(AggregateKind.Max, Some (translateExprDu sourceCtx ctxTableName (sel :> Expression) vars), false, None))
+                Some (SqlExpr.AggregateCall(AggregateKind.Max, Some (translateExprDu sourceCtx groupRowTableName (sel :> Expression) vars), false, None))
             | "Average" when mc.Arguments.Count = 2 && isGroupSource mc.Arguments.[0] groupParam ->
                 let sel = extractLambdaFromExpr mc.Arguments.[1]
-                Some (SqlExpr.AggregateCall(AggregateKind.Avg, Some (translateExprDu sourceCtx ctxTableName (sel :> Expression) vars), false, None))
-            | "Sum" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupParam vars mc.Arguments.[0] AggregateKind.Sum true
-            | "Count" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupParam vars mc.Arguments.[0] AggregateKind.Count false
-            | "Min" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupParam vars mc.Arguments.[0] AggregateKind.Min false
-            | "Max" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupParam vars mc.Arguments.[0] AggregateKind.Max false
-            | "Average" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupParam vars mc.Arguments.[0] AggregateKind.Avg false
+                Some (SqlExpr.AggregateCall(AggregateKind.Avg, Some (translateExprDu sourceCtx groupRowTableName (sel :> Expression) vars), false, None))
+            | "Sum" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupRowTableName groupParam vars mc.Arguments.[0] AggregateKind.Sum true
+            | "Count" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupRowTableName groupParam vars mc.Arguments.[0] AggregateKind.Count false
+            | "Min" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupRowTableName groupParam vars mc.Arguments.[0] AggregateKind.Min false
+            | "Max" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupRowTableName groupParam vars mc.Arguments.[0] AggregateKind.Max false
+            | "Average" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupRowTableName groupParam vars mc.Arguments.[0] AggregateKind.Avg false
             | "Any" when mc.Arguments.Count = 1 && isGroupSource mc.Arguments.[0] groupParam ->
                 Some (SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, None, false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L)))
             | "Items" when mc.Arguments.Count = 1 && isGroupSource mc.Arguments.[0] groupParam ->
@@ -182,8 +182,8 @@ module internal QueryableBuildQueryPartAGroupBy =
                 ]))
             | _ -> None
         | :? BinaryExpression as be when referencesParam groupParam be ->
-            let left = tryTranslateGroupArg sourceCtx ctxTableName groupParam vars be.Left
-            let right = tryTranslateGroupArg sourceCtx ctxTableName groupParam vars be.Right
+            let left = tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars be.Left
+            let right = tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars be.Right
             match left, right with
             | Some l, Some r ->
                 let op =
@@ -205,13 +205,13 @@ module internal QueryableBuildQueryPartAGroupBy =
                 Some (SqlExpr.Binary(l, op, r))
             | _ -> None
         | :? ConditionalExpression as ce when referencesParam groupParam ce ->
-            match tryTranslateGroupArg sourceCtx ctxTableName groupParam vars ce.Test,
-                  tryTranslateGroupArg sourceCtx ctxTableName groupParam vars ce.IfTrue,
-                  tryTranslateGroupArg sourceCtx ctxTableName groupParam vars ce.IfFalse with
+            match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars ce.Test,
+                  tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars ce.IfTrue,
+                  tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars ce.IfFalse with
             | Some t, Some tr, Some fa -> Some (SqlExpr.CaseExpr((t, tr), [], Some fa))
             | _ -> None
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Not && referencesParam groupParam ue ->
-            match tryTranslateGroupArg sourceCtx ctxTableName groupParam vars ue.Operand with
+            match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars ue.Operand with
             | Some inner -> Some (SqlExpr.Unary(UnaryOperator.Not, inner))
             | None -> None
         | :? ConstantExpression as ce ->
@@ -233,7 +233,7 @@ module internal QueryableBuildQueryPartAGroupBy =
                     havingPreds
                     |> List.map (fun pred ->
                         let lambda = extractLambdaFromExpr pred
-                        match tryTranslateGroupArg sourceCtx ctx.TableName lambda.Parameters.[0] ctx.Vars lambda.Body with
+                        match tryTranslateGroupArg sourceCtx ctx.TableName "o" lambda.Parameters.[0] ctx.Vars lambda.Body with
                         | Some sqlExpr -> sqlExpr
                         | None ->
                             raise (NotSupportedException(
@@ -247,7 +247,7 @@ module internal QueryableBuildQueryPartAGroupBy =
                     [for i = 0 to newExpr.Arguments.Count - 1 do
                         let memberName = newExpr.Members.[i].Name
                         let arg = newExpr.Arguments.[i]
-                        match tryTranslateGroupArg sourceCtx ctx.TableName groupParam ctx.Vars arg with
+                        match tryTranslateGroupArg sourceCtx ctx.TableName "o" groupParam ctx.Vars arg with
                         | Some sqlExpr -> yield (memberName, sqlExpr)
                         | None ->
                             raise (NotSupportedException(
@@ -255,7 +255,7 @@ module internal QueryableBuildQueryPartAGroupBy =
                                 "Reason: The expression contains an unsupported aggregate pattern.\n" +
                                 "Fix: Simplify the aggregate or call AsEnumerable() before the Select."))]
                 | _ ->
-                    match tryTranslateGroupArg sourceCtx ctx.TableName groupParam ctx.Vars body with
+                    match tryTranslateGroupArg sourceCtx ctx.TableName "o" groupParam ctx.Vars body with
                     | Some sqlExpr -> ["Value", sqlExpr]
                     | None ->
                         raise (NotSupportedException(
