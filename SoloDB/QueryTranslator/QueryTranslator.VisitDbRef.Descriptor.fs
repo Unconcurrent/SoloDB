@@ -39,6 +39,8 @@ module internal DBRefManyDescriptor =
         // Single/SingleOrDefault: emits json_group_array LIMIT 2, materializer enforces cardinality.
         | Single of predicate: Expression option
         | SingleOrDefault of predicate: Expression option
+        | ElementAt of index: Expression
+        | ElementAtOrDefault of index: Expression
 
     /// Set operation shape.
     [<RequireQualifiedAccess>]

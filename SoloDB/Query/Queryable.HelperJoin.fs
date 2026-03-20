@@ -190,12 +190,15 @@ Fix: Rewrite the query to use direct lambda arguments or move it after AsEnumera
                         [| for i in 0 .. n.Arguments.Count - 1 -> $"Item{i + 1}" |]
                     else
                         n.Members |> Seq.map (fun m -> m.Name) |> Seq.toArray
-                SqlExpr.JsonObjectExpr(
+                // Use json_object (not jsonb_object via JsonObjectExpr) so downstream jsonb_extract returns typed SQL values.
+                let pairs =
                     [ for i in 0 .. n.Arguments.Count - 1 ->
                         memberNames.[i],
-                        translateJoinResultSelectorExpression outerCtx innerCtx vars outerAlias innerAlias outerParam innerParam n.Arguments.[i] ])
+                        translateJoinResultSelectorExpression outerCtx innerCtx vars outerAlias innerAlias outerParam innerParam n.Arguments.[i] ]
+                let args = pairs |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
+                SqlExpr.FunctionCall("json_object", args)
             | :? MemberInitExpression as mi ->
-                SqlExpr.JsonObjectExpr(
+                let pairs =
                     [ for binding in mi.Bindings do
                         match binding with
                         | :? MemberAssignment as ma ->
@@ -205,7 +208,9 @@ Fix: Rewrite the query to use direct lambda arguments or move it after AsEnumera
                             raise (NotSupportedException(
                                 "Error: Join result selector is not supported.
 Reason: Only direct member assignments are supported for mixed-source object initialization.
-Fix: Use an anonymous object, tuple, or move the projection after AsEnumerable().")) ])
+Fix: Use an anonymous object, tuple, or move the projection after AsEnumerable().")) ]
+                let args = pairs |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
+                SqlExpr.FunctionCall("json_object", args)
             | _ ->
                 raise (NotSupportedException(
                     "Error: Join result selector is not supported.

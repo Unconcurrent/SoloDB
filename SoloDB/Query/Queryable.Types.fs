@@ -59,6 +59,7 @@ type internal SupportedLinqMethods =
 | Any
 | Contains
 | Join
+| GroupJoin
 | Append
 | Concat
 | GroupBy

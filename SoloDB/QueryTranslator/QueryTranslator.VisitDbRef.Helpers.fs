@@ -61,6 +61,18 @@ module internal DBRefManyHelpers =
                     if Object.ReferenceEquals(pe, groupParam) then groupKeyDu
                     else visitDu e qb
                 else visitDu e qb
+            | :? NewExpression as ne when not (isNull ne.Members) ->
+                SqlExpr.JsonObjectExpr(
+                    [ for i in 0 .. ne.Arguments.Count - 1 ->
+                        ne.Members.[i].Name, visit ne.Arguments.[i] ])
+            | :? MemberInitExpression as mi ->
+                SqlExpr.JsonObjectExpr(
+                    [ for binding in mi.Bindings do
+                        match binding with
+                        | :? MemberAssignment as ma ->
+                            yield ma.Member.Name, visit ma.Expression
+                        | _ ->
+                            raise (NotSupportedException("GroupBy projection supports only member assignments.")) ])
             | :? MethodCallExpression as mc ->
                 let isGroupMethod =
                     let source =

@@ -118,6 +118,8 @@ module internal DBRefManyExtractor =
                 | "LastOrDefault" -> Some (Terminal.LastOrDefault(getArg mce))
                 | "Single" -> Some (Terminal.Single(getArg mce))
                 | "SingleOrDefault" -> Some (Terminal.SingleOrDefault(getArg mce))
+                | "ElementAt" -> getArg mce |> Option.map Terminal.ElementAt
+                | "ElementAtOrDefault" -> getArg mce |> Option.map Terminal.ElementAtOrDefault
                 | _ -> None
 
             match terminalOpt with

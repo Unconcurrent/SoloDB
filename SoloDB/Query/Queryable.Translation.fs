@@ -55,6 +55,7 @@ module internal QueryableTranslationCore =
             | SupportedLinqMethods.Where
             | SupportedLinqMethods.Select
             | SupportedLinqMethods.Join
+            | SupportedLinqMethods.GroupJoin
             | SupportedLinqMethods.SelectMany
             | SupportedLinqMethods.ThenBy
             | SupportedLinqMethods.ThenByDescending

@@ -251,6 +251,7 @@ module internal QueryableHelperBase =
         | "Any" -> Some SupportedLinqMethods.Any
         | "Contains" -> Some SupportedLinqMethods.Contains
         | "Join" -> Some SupportedLinqMethods.Join
+        | "GroupJoin" -> Some SupportedLinqMethods.GroupJoin
         | "Append" -> Some SupportedLinqMethods.Append
         | "Concat" -> Some SupportedLinqMethods.Concat
         | "GroupBy" -> Some SupportedLinqMethods.GroupBy

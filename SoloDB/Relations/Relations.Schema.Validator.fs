@@ -36,9 +36,9 @@ let private validateRelationTargetType (ownerType: Type) (prop: PropertyInfo) (t
     if targetType.IsInterface then
         raise (InvalidOperationException(
             $"Error: Invalid relation target on {ownerType.FullName}.{prop.Name}.\nReason: Target type '{targetType.FullName}' is an interface.\nFix: Use a concrete class with a writable int64 Id property."))
-    elif targetType.IsAbstract then
+    elif targetType.IsAbstract && not (JsonFunctions.mustIncludeTypeInformationInSerializationFn targetType) then
         raise (InvalidOperationException(
-            $"Error: Invalid relation target on {ownerType.FullName}.{prop.Name}.\nReason: Target type '{targetType.FullName}' is abstract.\nFix: Use a concrete class with a writable int64 Id property."))
+            $"Error: Invalid relation target on {ownerType.FullName}.{prop.Name}.\nReason: Target type '{targetType.FullName}' is abstract without [Polymorphic] attribute.\nFix: Add [Polymorphic] to the abstract base class, or use a concrete class with a writable int64 Id property."))
     else
         getWritableInt64IdPropertyOrThrow targetType |> ignore
 

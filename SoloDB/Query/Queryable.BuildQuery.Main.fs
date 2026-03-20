@@ -157,6 +157,7 @@ module internal QueryableBuildQueryMain =
                     | SupportedLinqMethods.LongCount
                     | SupportedLinqMethods.SelectMany
                     | SupportedLinqMethods.Join
+                    | SupportedLinqMethods.GroupJoin
                     | SupportedLinqMethods.Single
                     | SupportedLinqMethods.SingleOrDefault
                     | SupportedLinqMethods.First

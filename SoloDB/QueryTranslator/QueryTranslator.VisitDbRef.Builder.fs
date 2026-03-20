@@ -384,6 +384,32 @@ module internal DBRefManyBuilder =
         else
             scalarExpr
 
+    let private buildProjectedPredicateExists (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) (predicateExpr: Expression) : SqlExpr =
+        match tryExtractLambdaExpression predicateExpr with
+        | ValueSome predLambda ->
+            let projectedSel = buildProjectedRowset qb desc ownerRef
+            let projectedAlias = nextAlias "_pp"
+            let valueCore =
+                mkSubCore
+                    [{ Alias = Some "Value"; Expr = SqlExpr.Column(Some projectedAlias, "v") }]
+                    (Some(DerivedTable(projectedSel, projectedAlias)))
+                    None
+            let valueSel = { Ctes = []; Body = SingleSelect valueCore }
+            let predicateAlias = nextAlias "_pv"
+            let predQb =
+                { qb.ForSubquery(predicateAlias, predLambda) with
+                    JsonExtractSelfValue = false }
+            let predDu = visitDu predLambda.Body predQb
+            let predJoins = DBRefManyHelpers.joinEdgesToClauses predQb.SourceContext.Joins
+            let oneProj = [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+            let existsCore =
+                { mkSubCore oneProj (Some(DerivedTable(valueSel, predicateAlias))) (Some predDu) with
+                    Joins = predJoins }
+            SqlExpr.Exists { Ctes = []; Body = SingleSelect existsCore }
+        | ValueNone ->
+            raise (NotSupportedException(
+                "Error: Cannot translate relation-backed DBRefMany.Any predicate.\nReason: The predicate is not a translatable lambda expression (e.g., Func<> delegate instead of Expression<Func<>>).\nFix: Pass the predicate as an inline lambda, not a delegate variable."))
+
     let private appendTerminalPredicate (desc: QueryDescriptor) (predicateOpt: Expression option) =
         match predicateOpt with
         | Some pred -> { desc with WherePredicates = desc.WherePredicates @ [pred] }
@@ -520,6 +546,67 @@ module internal DBRefManyBuilder =
                 Some manyElementsExpr)
         let outerCore = mkSubCore [{ Alias = None; Expr = valueExpr }] (Some(DerivedTable(rowsetSel, rowAlias))) None
         SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
+
+    let private buildIndexedLike
+        (qb: QueryBuilder)
+        (rowsetSel: SqlSelect)
+        (indexExpr: Expression)
+        (orDefault: bool)
+        : SqlExpr =
+        let idx =
+            match indexExpr with
+            | :? ConstantExpression as ce -> SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value)))
+            | _ -> visitDu indexExpr qb
+        let indexedAlias = nextAlias "_ei"
+        let indexedCore =
+            { mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Column(Some indexedAlias, "v") }] (Some(DerivedTable(rowsetSel, indexedAlias))) None with
+                Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L))
+                Offset = Some idx }
+        let indexedSel = { Ctes = []; Body = SingleSelect indexedCore }
+        let rowAlias = nextAlias "_eo"
+        let countExpr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None)
+        let firstValueExpr = SqlExpr.FunctionCall("MIN", [SqlExpr.Column(Some rowAlias, "v")])
+        let noElementsExpr =
+            SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String "__solodb_error__:Index was out of range. Must be non-negative and less than the size of the collection.")])
+        let valueExpr =
+            SqlExpr.CaseExpr(
+                (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)),
+                 if orDefault then SqlExpr.Literal(SqlLiteral.Null) else noElementsExpr),
+                [],
+                Some firstValueExpr)
+        let outerCore = mkSubCore [{ Alias = None; Expr = valueExpr }] (Some(DerivedTable(indexedSel, rowAlias))) None
+        SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
+
+    let private buildEntityElementAt
+        (qb: QueryBuilder)
+        (desc: QueryDescriptor)
+        (ownerRef: DBRefManyOwnerRef)
+        (indexExpr: Expression)
+        (orDefault: bool)
+        : SqlExpr =
+        let tgtAlias, lnkAlias, baseCore, _ = buildCorrelatedCore qb desc ownerRef []
+        let effectiveOrder =
+            match baseCore.OrderBy with
+            | _ :: _ -> baseCore.OrderBy
+            | [] -> [{ Expr = SqlExpr.Column(Some lnkAlias, "rowid"); Direction = SortDirection.Asc }]
+        let rowCore =
+            { baseCore with
+                Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = buildEntityValueExpr tgtAlias }]
+                OrderBy = effectiveOrder
+                Limit = None
+                Offset = baseCore.Offset }
+        let rowSel = { Ctes = []; Body = SingleSelect rowCore }
+        buildIndexedLike qb rowSel indexExpr orDefault
+
+    let private buildProjectedElementAt
+        (qb: QueryBuilder)
+        (desc: QueryDescriptor)
+        (ownerRef: DBRefManyOwnerRef)
+        (indexExpr: Expression)
+        (orDefault: bool)
+        : SqlExpr =
+        let projectedSel = buildProjectedRowset qb desc ownerRef
+        buildIndexedLike qb projectedSel indexExpr orDefault
 
     /// Build Select projection (json_group_array).
     let private buildSelect (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) : SqlExpr =
@@ -660,8 +747,11 @@ module internal DBRefManyBuilder =
                 else
                     buildExists qb desc ownerRef
             | Terminal.Any(Some pred) ->
-                let descWithPred = { desc with WherePredicates = desc.WherePredicates @ [pred] }
-                buildExists qb descWithPred ownerRef
+                if desc.SelectProjection.IsSome && desc.TakeWhileInfo.IsNone then
+                    buildProjectedPredicateExists qb desc ownerRef pred
+                else
+                    let descWithPred = { desc with WherePredicates = desc.WherePredicates @ [pred] }
+                    buildExists qb descWithPred ownerRef
             | Terminal.Any None ->
                 if desc.SelectProjection.IsSome && desc.TakeWhileInfo.IsNone then
                     SqlExpr.Exists (buildProjectedRowset qb desc ownerRef)
@@ -710,5 +800,13 @@ module internal DBRefManyBuilder =
                 buildSingleLike qb desc ownerRef pred false
             | Terminal.SingleOrDefault pred ->
                 buildSingleLike qb desc ownerRef pred true
+            | Terminal.ElementAt indexExpr ->
+                match desc.SelectProjection with
+                | Some _ -> buildProjectedElementAt qb desc ownerRef indexExpr false
+                | None -> buildEntityElementAt qb desc ownerRef indexExpr false
+            | Terminal.ElementAtOrDefault indexExpr ->
+                match desc.SelectProjection with
+                | Some _ -> buildProjectedElementAt qb desc ownerRef indexExpr true
+                | None -> buildEntityElementAt qb desc ownerRef indexExpr true
 
         ValueSome result
