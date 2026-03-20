@@ -120,11 +120,33 @@ module internal DBRefManyExtractor =
                 | "SingleOrDefault" -> Some (Terminal.SingleOrDefault(getArg mce))
                 | "ElementAt" -> getArg mce |> Option.map Terminal.ElementAt
                 | "ElementAtOrDefault" -> getArg mce |> Option.map Terminal.ElementAtOrDefault
+                // R55: MinBy/MaxBy — return the element with min/max key.
+                | "MinBy" -> getArg mce |> Option.map Terminal.MinBy
+                | "MaxBy" -> getArg mce |> Option.map Terminal.MaxBy
+                | "DistinctBy" -> getArg mce |> Option.map Terminal.DistinctBy
+                // R55: Intermediate operators as outermost — use identity Select as terminal.
+                // The source is set to mce itself (not mce's source) so walkChain processes the operator.
+                | "Order" | "OrderDescending" | "UnionBy" | "IntersectBy" | "ExceptBy" ->
+                    let identityLambda = mkIdentityLambdaForDbRefMany mce
+                    Some (Terminal.Select(identityLambda :> Expression))
+                | "CountBy" ->
+                    raise (NotSupportedException(
+                        "Error: CountBy is not supported in DBRefMany queries.\n" +
+                        "Reason: CountBy requires GroupBy + KeyValuePair projection which is not available in correlated subqueries.\n" +
+                        "Fix: Call AsEnumerable() before CountBy, or use GroupBy(key).Select(g => new { g.Key, Count = g.Count() })."))
                 | _ -> None
 
             match terminalOpt with
             | None -> ValueNone
             | Some terminal ->
+
+            // For R55 intermediate-as-terminal operators, the source must include the operator itself
+            // so walkChain processes it. For normal terminals, source = getSource(mce) which skips the terminal.
+            let source =
+                match mce.Method.Name with
+                | "DistinctBy" | "Order" | "OrderDescending" | "UnionBy" | "IntersectBy" | "ExceptBy" ->
+                    mce :> Expression  // Include the operator in the chain
+                | _ -> source
 
             // Check if the source chain involves DBRefMany.
             if not (isDBRefManyChain source) then ValueNone
@@ -292,6 +314,59 @@ module internal DBRefManyExtractor =
                     | "Concat" ->
                         match arg with
                         | Some rightSrc -> setOp <- Some (SetOperation.Concat rightSrc)
+                        | None -> ()
+                        walkChain src
+
+                    // Newer .NET LINQ operators — R55 DBRefMany parity.
+                    | "DistinctBy" ->
+                        // Terminal.DistinctBy already carries the key selector.
+                        // Do not set groupByKey here, or the descriptor is misrouted into the GroupBy builder.
+                        walkChain src
+
+                    | "Order" ->
+                        // Parameterless Order — sort by identity (IComparable).
+                        if not seenOrderBy then
+                            seenOrderBy <- true
+                            let key =
+                                match src with
+                                | :? MethodCallExpression as srcMc when srcMc.Method.Name = "Select" ->
+                                    match getArg srcMc with
+                                    | Some selectorExpr -> selectorExpr
+                                    | None -> mkIdentityLambdaForDbRefMany src :> Expression
+                                | _ -> mkIdentityLambdaForDbRefMany src :> Expression
+                            if seenBoundary then sortKeys.Insert(0, (key, SortDirection.Asc))
+                            else postBoundSortKeys.Insert(0, (key, SortDirection.Asc))
+                        walkChain src
+
+                    | "OrderDescending" ->
+                        if not seenOrderBy then
+                            seenOrderBy <- true
+                            let key =
+                                match src with
+                                | :? MethodCallExpression as srcMc when srcMc.Method.Name = "Select" ->
+                                    match getArg srcMc with
+                                    | Some selectorExpr -> selectorExpr
+                                    | None -> mkIdentityLambdaForDbRefMany src :> Expression
+                                | _ -> mkIdentityLambdaForDbRefMany src :> Expression
+                            if seenBoundary then sortKeys.Insert(0, (key, SortDirection.Desc))
+                            else postBoundSortKeys.Insert(0, (key, SortDirection.Desc))
+                        walkChain src
+
+                    | "IntersectBy" ->
+                        match arg with
+                        | Some rightSrc -> setOp <- Some (SetOperation.Intersect rightSrc)
+                        | None -> ()
+                        walkChain src
+
+                    | "ExceptBy" ->
+                        match arg with
+                        | Some rightSrc -> setOp <- Some (SetOperation.Except rightSrc)
+                        | None -> ()
+                        walkChain src
+
+                    | "UnionBy" ->
+                        match arg with
+                        | Some rightSrc -> setOp <- Some (SetOperation.Union rightSrc)
                         | None -> ()
                         walkChain src
 

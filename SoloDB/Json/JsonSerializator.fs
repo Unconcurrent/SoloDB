@@ -1877,6 +1877,25 @@ and private JsonDeserializerImpl<'A> =
                                         .GetMethod(nameof JsonImpl.LinkedListDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
                                         .MakeGenericMethod(elemType)
                         Expression.Call(method, [|jsonParam :> Expression|])
+                    elif t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<IOrderedEnumerable<_>> then
+                        let method = typeof<JsonImpl>
+                                        .GetMethod(nameof JsonImpl.IEnumerableDeserialize, BindingFlags.NonPublic ||| BindingFlags.Static)
+                                        .MakeGenericMethod(elemType)
+                        let sourceExpr = Expression.Call(method, [|jsonParam :> Expression|]) :> Expression
+                        let p = Expression.Parameter(elemType, "x")
+                        let keySelector =
+                            Expression.Lambda(
+                                typedefof<Func<_,_>>.MakeGenericType(elemType, typeof<int>),
+                                Expression.Constant(0),
+                                p)
+                        let orderByMethod =
+                            typeof<Enumerable>.GetMethods(BindingFlags.Public ||| BindingFlags.Static)
+                            |> Array.find (fun m ->
+                                m.Name = "OrderBy"
+                                && m.IsGenericMethodDefinition
+                                && m.GetParameters().Length = 2)
+                            |> fun m -> m.MakeGenericMethod([| elemType; typeof<int> |])
+                        Expression.Call(orderByMethod, [| sourceExpr; keySelector :> Expression |])
                     elif typeof<IList>.IsAssignableFrom(t) && t.IsGenericType && (GenericTypeArgCache.Get t).Length = 1 then
                         // For IList types that need an instance (like List<T>)
                         if t.GetConstructor([||]) <> null then

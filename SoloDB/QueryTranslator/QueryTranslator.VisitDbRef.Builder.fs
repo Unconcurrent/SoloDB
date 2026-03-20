@@ -608,6 +608,53 @@ module internal DBRefManyBuilder =
         let projectedSel = buildProjectedRowset qb desc ownerRef
         buildIndexedLike qb projectedSel indexExpr orDefault
 
+    let private buildDistinctByEntitySequence
+        (qb: QueryBuilder)
+        (desc: QueryDescriptor)
+        (ownerRef: DBRefManyOwnerRef)
+        (keyExpr: Expression)
+        : SqlExpr =
+        match tryExtractLambdaExpression keyExpr with
+        | ValueSome keyLambda ->
+            let tgtAlias, lnkAlias, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
+            let subQb = qb.ForSubquery(tgtAlias, keyLambda, subqueryRootTable = targetTable)
+            let keyDu = visitDu keyLambda.Body subQb
+            let keyJoins = DBRefManyHelpers.joinEdgesToClauses subQb.SourceContext.Joins
+            let effectiveOrder =
+                if baseCore.OrderBy.Length > 0 then
+                    baseCore.OrderBy
+                else
+                    [{ Expr = SqlExpr.Column(Some lnkAlias, "rowid"); Direction = SortDirection.Asc }]
+            let rankExpr =
+                SqlExpr.WindowCall({
+                    Kind = WindowFunctionKind.RowNumber
+                    Arguments = []
+                    PartitionBy = [keyDu]
+                    OrderBy = effectiveOrder |> List.map (fun ob -> (ob.Expr, ob.Direction))
+                })
+            let innerCore =
+                { baseCore with
+                    Projections =
+                        ProjectionSetOps.ofList [
+                            { Alias = Some "v"; Expr = buildEntityValueExpr tgtAlias }
+                            { Alias = Some "__rk"; Expr = rankExpr }
+                        ]
+                    Joins = baseCore.Joins @ keyJoins }
+            let innerSel = { Ctes = []; Body = SingleSelect innerCore }
+            let rankAlias = nextAlias "_db"
+            let filteredCore =
+                mkSubCore
+                    [{ Alias = Some "v"; Expr = SqlExpr.Column(Some rankAlias, "v") }]
+                    (Some(DerivedTable(innerSel, rankAlias)))
+                    (Some(SqlExpr.Binary(SqlExpr.Column(Some rankAlias, "__rk"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L))))
+            let filteredSel = { Ctes = []; Body = SingleSelect filteredCore }
+            let outAlias = nextAlias "_dba"
+            let outerGA = SqlExpr.FunctionCall("json_group_array", [SqlExpr.FunctionCall("json", [SqlExpr.Column(Some outAlias, "v")])])
+            let outerCore = mkSubCore [{ Alias = None; Expr = outerGA }] (Some(DerivedTable(filteredSel, outAlias))) None
+            SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
+        | ValueNone ->
+            raise (NotSupportedException("Cannot extract key selector for DistinctBy."))
+
     /// Build Select projection (json_group_array).
     let private buildSelect (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) : SqlExpr =
         match desc.SelectProjection with
@@ -709,6 +756,12 @@ module internal DBRefManyBuilder =
     /// Returns Some(SqlExpr) if handled, None otherwise.
     let tryBuild (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) : SqlExpr voption =
 
+        // TakeWhile/SkipWhile — delegated to BuildSpecial.
+        match desc.TakeWhileInfo with
+        | Some (twPredLambda, isTakeWhile) ->
+            DBRefManyBuildSpecial.tryBuildTakeWhile qb desc buildCorrelatedCore mkSubCore nextAlias ownerRef twPredLambda isTakeWhile
+        | None ->
+
         // GroupBy terminals — delegated to BuildSpecial.
         match desc.GroupByKey with
         | Some keyLambda ->
@@ -718,12 +771,6 @@ module internal DBRefManyBuilder =
         // Set operations — defer to existing handler (requires expression reconstruction).
         match desc.SetOp with
         | Some _ -> ValueNone
-        | None ->
-
-        // TakeWhile/SkipWhile — delegated to BuildSpecial.
-        match desc.TakeWhileInfo with
-        | Some (twPredLambda, isTakeWhile) ->
-            DBRefManyBuildSpecial.tryBuildTakeWhile qb desc buildCorrelatedCore mkSubCore nextAlias ownerRef twPredLambda isTakeWhile
         | None ->
 
         // Distinct.Count — null-safe two-layer: inner SELECT DISTINCT, outer COUNT(*).
@@ -808,5 +855,14 @@ module internal DBRefManyBuilder =
                 match desc.SelectProjection with
                 | Some _ -> buildProjectedElementAt qb desc ownerRef indexExpr true
                 | None -> buildEntityElementAt qb desc ownerRef indexExpr true
+            // R55: MinBy/MaxBy — ORDER BY key ASC/DESC + First element.
+            | Terminal.MinBy keySel ->
+                let desc = { desc with SortKeys = [(keySel, SortDirection.Asc)] }
+                buildEntityElement qb desc ownerRef None false
+            | Terminal.MaxBy keySel ->
+                let desc = { desc with SortKeys = [(keySel, SortDirection.Desc)] }
+                buildEntityElement qb desc ownerRef None false
+            | Terminal.DistinctBy keySel ->
+                buildDistinctByEntitySequence qb desc ownerRef keySel
 
         ValueSome result

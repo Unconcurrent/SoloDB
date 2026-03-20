@@ -187,7 +187,43 @@ module internal DBRefManyBuildSpecial =
                 let countCore = mkSubCore countProj (Some(DerivedTable(outerSel, dtAlias))) None
                 ValueSome(SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect countCore })
         | Terminal.Exists | Terminal.Any _ ->
-            ValueSome(SqlExpr.Exists outerSel)
+            // When GroupBy is present with TakeWhile, apply GROUP BY + HAVING on the bounded set.
+            match desc.GroupByKey with
+            | Some keyLambda when desc.GroupByHavingPredicate.IsSome ->
+                // Rebuild the TakeWhile-bounded set with the group key projected.
+                let subQbKey = qb.ForSubquery(tgtAlias, keyLambda, subqueryRootTable = targetTable)
+                let groupKeyDu = visitDu keyLambda.Body subQbKey
+                let keyJoins = DBRefManyHelpers.joinEdgesToClauses subQbKey.SourceContext.Joins
+                let innerWithKey =
+                    { baseCore with
+                        Projections = ProjectionSetOps.ofList [
+                            { Alias = Some "v"; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }
+                            { Alias = Some "_cf"; Expr = cfExpr }
+                            { Alias = Some "_gk"; Expr = groupKeyDu }
+                        ]
+                        Joins = baseCore.Joins @ keyJoins }
+                let innerSelWithKey = { Ctes = []; Body = SingleSelect innerWithKey }
+                let twAlias2 = nextAlias "_twg"
+                let cfFilter2 =
+                    if isTakeWhile then SqlExpr.Binary(SqlExpr.Column(Some twAlias2, "_cf"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
+                    else SqlExpr.Binary(SqlExpr.Column(Some twAlias2, "_cf"), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
+                // Outer: GROUP BY _gk HAVING predicate
+                let havingDu =
+                    match desc.GroupByHavingPredicate with
+                    | Some havingPredExpr ->
+                        match tryExtractLambdaExpression havingPredExpr with
+                        | ValueSome havingLambda ->
+                            let groupParam = havingLambda.Parameters.[0]
+                            Some (DBRefManyHelpers.translateGroupingPredicate qb tgtAlias (SqlExpr.Column(Some twAlias2, "_gk")) groupParam havingLambda.Body)
+                        | ValueNone -> None
+                    | None -> None
+                let gbCore =
+                    { mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Column(Some twAlias2, "v") }] (Some(DerivedTable(innerSelWithKey, twAlias2))) (Some cfFilter2)
+                      with GroupBy = [SqlExpr.Column(Some twAlias2, "_gk")]
+                           Having = havingDu }
+                ValueSome(SqlExpr.Exists { Ctes = []; Body = SingleSelect gbCore })
+            | _ ->
+                ValueSome(SqlExpr.Exists outerSel)
         | Terminal.Select _ ->
             match buildTakeWhileProjectedRowset qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc isTakeWhile with
             | ValueSome middleSel ->

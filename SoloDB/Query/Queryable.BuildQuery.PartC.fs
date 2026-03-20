@@ -191,6 +191,44 @@ module internal QueryableBuildQueryPartC =
                         wrapCore core
                     )
 
+                | SupportedLinqMethods.UnionBy ->
+                    // UnionBy(other, keySelector): UNION ALL + deduplicate by key (first occurrence wins).
+                    // Emits: SELECT Id, Value FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY key ORDER BY Id) AS _rn
+                    //         FROM (left UNION ALL right)) WHERE _rn = 1
+                    if m.Expressions.Length <> 2 then raise (NotSupportedException(sprintf "Invalid number of arguments, expected 2, in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
+                    let keySelE = m.Expressions.[1]
+                    addUnionAll statements (fun _tableName vars ->
+                        let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
+                        let rhsSelect = translateQueryFn sourceCtx vars rhs
+                        let valueExpr = extractValueAsJsonDu rhs.Type
+                        mkCore
+                            [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
+                             { Alias = Some "Value"; Expr = valueExpr }]
+                            (Some (DerivedTable(rhsSelect, "o")))
+                    )
+                    // After UNION ALL, apply DistinctBy-style deduplication via ROW_NUMBER window.
+                    addLoweredKeySelector statements (lowerKeySelectorLambda sourceCtx tableName keySelE DistinctByKey)
+                    addComplexFinal statements (fun ctx ->
+                        let innerProjs =
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }
+                             { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") }
+                             { Alias = Some "__solodb_rn"; Expr = SqlExpr.WindowCall({
+                                Kind = WindowFunctionKind.RowNumber
+                                Arguments = []
+                                PartitionBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
+                                OrderBy = [(SqlExpr.Column(Some "o", "Id"), SortDirection.Asc)]
+                             }) }]
+                        let innerCore = mkCore innerProjs (Some (DerivedTable(ctx.Inner, "o")))
+                        let innerSel = wrapCore innerCore
+                        let outerProjs =
+                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }
+                             { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") }]
+                        let outerCore =
+                            { mkCore outerProjs (Some (DerivedTable(innerSel, "o")))
+                              with Where = Some (SqlExpr.Binary(SqlExpr.Column(Some "o", "__solodb_rn"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L))) }
+                        wrapCore outerCore
+                    )
+
                 // --- Type filtering / casting over polymorphic payloads ---
                 | SupportedLinqMethods.Cast ->
                     // Cast<TTarget>() with polymorphic guard & diagnostic messages.

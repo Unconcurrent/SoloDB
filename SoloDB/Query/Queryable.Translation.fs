@@ -81,6 +81,7 @@ module internal QueryableTranslationCore =
             | SupportedLinqMethods.ExceptBy
             | SupportedLinqMethods.Intersect
             | SupportedLinqMethods.IntersectBy
+            | SupportedLinqMethods.UnionBy
             | SupportedLinqMethods.Cast
             | SupportedLinqMethods.OfType
             | SupportedLinqMethods.Include

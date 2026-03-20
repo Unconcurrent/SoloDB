@@ -67,6 +67,7 @@ type internal SupportedLinqMethods =
 | ExceptBy
 | Intersect
 | IntersectBy
+| UnionBy
 | Cast
 | OfType
 | Aggregate

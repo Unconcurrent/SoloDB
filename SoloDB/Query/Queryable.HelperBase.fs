@@ -259,6 +259,7 @@ module internal QueryableHelperBase =
         | "ExceptBy" -> Some SupportedLinqMethods.ExceptBy
         | "Intersect" -> Some SupportedLinqMethods.Intersect
         | "IntersectBy" -> Some SupportedLinqMethods.IntersectBy
+        | "UnionBy" -> Some SupportedLinqMethods.UnionBy
         | "Cast" -> Some SupportedLinqMethods.Cast
         | "OfType" -> Some SupportedLinqMethods.OfType
         | "Aggregate" -> Some SupportedLinqMethods.Aggregate

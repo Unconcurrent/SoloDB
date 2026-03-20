@@ -180,6 +180,7 @@ module internal QueryableBuildQueryMain =
                     | SupportedLinqMethods.Intersect
                     | SupportedLinqMethods.ExceptBy
                     | SupportedLinqMethods.IntersectBy
+                    | SupportedLinqMethods.UnionBy
                     | SupportedLinqMethods.Cast
                     | SupportedLinqMethods.OfType
                     | SupportedLinqMethods.Exclude
