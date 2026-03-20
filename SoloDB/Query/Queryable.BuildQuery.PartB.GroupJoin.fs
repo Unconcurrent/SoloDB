@@ -68,11 +68,19 @@ module internal QueryableBuildQueryPartBGroupJoin =
                 let innerSelect = translateQueryFn innerCtx ctx.Vars capturedInnerExpr
                 let innerSource = DerivedTable(innerSelect, innerAlias)
 
+                // Create a separate context for aggregate lambda translation that resolves against
+                // the DerivedTable alias, not the root table. This ensures DBRef JOINs reference
+                // the correct alias (e.g., "gj" instead of "StressAgent").
+                let innerAggCtx =
+                    { innerCtx with
+                        RootTable = innerAlias
+                        Joins = ResizeArray() }
+
                 let outerKeyExpr =
                     translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars (Some outerKeySelector.Parameters.[0]) outerKeySelector.Body
                 // Translate inner key against the inner alias (the DerivedTable exposes Id + Value columns).
                 let innerKeyExpr =
-                    translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body
+                    translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body
 
                 // Translate the result selector body. Outer references → outer table.
                 // Group references → SQL aggregates over the inner table.
@@ -87,7 +95,7 @@ module internal QueryableBuildQueryPartBGroupJoin =
                     // group.Count(predicate) — with predicate
                     | :? MethodCallExpression as mc when mc.Method.Name = "Count" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                         let pred = unwrapLambdaExpressionOrThrow "GroupJoin Count predicate" mc.Arguments.[1]
-                        let predDu = translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
+                        let predDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
                         SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((predDu, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None)
                     // group.LongCount() — parameterless
                     | :? MethodCallExpression as mc when mc.Method.Name = "LongCount" && mc.Arguments.Count = 1 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
@@ -95,32 +103,32 @@ module internal QueryableBuildQueryPartBGroupJoin =
                     // group.Sum(selector)
                     | :? MethodCallExpression as mc when mc.Method.Name = "Sum" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                         let sel = unwrapLambdaExpressionOrThrow "GroupJoin Sum selector" mc.Arguments.[1]
-                        let selDu = translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body
+                        let selDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body
                         SqlExpr.Coalesce(SqlExpr.AggregateCall(AggregateKind.Sum, Some selDu, false, None), [SqlExpr.Literal(SqlLiteral.Integer 0L)])
                     // group.Min(selector)
                     | :? MethodCallExpression as mc when mc.Method.Name = "Min" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                         let sel = unwrapLambdaExpressionOrThrow "GroupJoin Min selector" mc.Arguments.[1]
-                        SqlExpr.AggregateCall(AggregateKind.Min, Some(translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None)
+                        SqlExpr.AggregateCall(AggregateKind.Min, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None)
                     // group.Max(selector)
                     | :? MethodCallExpression as mc when mc.Method.Name = "Max" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                         let sel = unwrapLambdaExpressionOrThrow "GroupJoin Max selector" mc.Arguments.[1]
-                        SqlExpr.AggregateCall(AggregateKind.Max, Some(translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None)
+                        SqlExpr.AggregateCall(AggregateKind.Max, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None)
                     // group.Average(selector)
                     | :? MethodCallExpression as mc when mc.Method.Name = "Average" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                         let sel = unwrapLambdaExpressionOrThrow "GroupJoin Average selector" mc.Arguments.[1]
-                        SqlExpr.AggregateCall(AggregateKind.Avg, Some(translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None)
+                        SqlExpr.AggregateCall(AggregateKind.Avg, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None)
                     // group.Any() — parameterless
                     | :? MethodCallExpression as mc when mc.Method.Name = "Any" && mc.Arguments.Count = 1 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                         SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
                     // group.Any(predicate) — with predicate
                     | :? MethodCallExpression as mc when mc.Method.Name = "Any" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                         let pred = unwrapLambdaExpressionOrThrow "GroupJoin Any predicate" mc.Arguments.[1]
-                        let predDu = translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
+                        let predDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
                         SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((predDu, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
                     // group.All(predicate)
                     | :? MethodCallExpression as mc when mc.Method.Name = "All" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                         let pred = unwrapLambdaExpressionOrThrow "GroupJoin All predicate" mc.Arguments.[1]
-                        let predDu = translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
+                        let predDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
                         SqlExpr.Binary(
                             SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.Not, predDu), SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None),
                             BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
@@ -185,7 +193,7 @@ module internal QueryableBuildQueryPartBGroupJoin =
                 // Rewrite OnSourceAlias: root table references → DerivedTable alias.
                 let quotedInnerRoot = "\"" + innerRootTable + "\""
                 let discoveredJoins =
-                    innerCtx.Joins
+                    innerAggCtx.Joins
                     |> Seq.map (fun j ->
                         let rewrittenSource =
                             match j.OnSourceAlias with
