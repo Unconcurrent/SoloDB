@@ -76,6 +76,7 @@ module internal DBRefManyExtractor =
             let source = getSource mce
             if isNull source then ValueNone
             else
+            let mutable countPredicate: Expression option = None
 
             // Determine terminal type.
             let terminalOpt =
@@ -90,6 +91,9 @@ module internal DBRefManyExtractor =
                     | None -> Some Terminal.Exists // All() without pred = trivially true
                 | "Count" | "LongCount" ->
                     let t = if mce.Method.Name = "Count" then Terminal.Count else Terminal.LongCount
+                    // When Count has a predicate, capture it — it will be injected as WHERE
+                    // on the correlated subquery so COUNT applies only to matching rows.
+                    countPredicate <- getArg mce
                     Some t
                 | "Sum" ->
                     match getArg mce with
@@ -353,21 +357,19 @@ module internal DBRefManyExtractor =
                         walkChain src
 
                     | "IntersectBy" ->
-                        match arg with
-                        | Some rightSrc -> setOp <- Some (SetOperation.Intersect rightSrc)
-                        | None -> ()
+                        // IntersectBy(source, rightKeys, keySelector) — 3 args
+                        if mc.Arguments.Count >= 3 then
+                            setOp <- Some (SetOperation.IntersectBy(mc.Arguments.[1], mc.Arguments.[2]))
                         walkChain src
 
                     | "ExceptBy" ->
-                        match arg with
-                        | Some rightSrc -> setOp <- Some (SetOperation.Except rightSrc)
-                        | None -> ()
+                        if mc.Arguments.Count >= 3 then
+                            setOp <- Some (SetOperation.ExceptBy(mc.Arguments.[1], mc.Arguments.[2]))
                         walkChain src
 
                     | "UnionBy" ->
-                        match arg with
-                        | Some rightSrc -> setOp <- Some (SetOperation.Union rightSrc)
-                        | None -> ()
+                        if mc.Arguments.Count >= 3 then
+                            setOp <- Some (SetOperation.UnionBy(mc.Arguments.[1], mc.Arguments.[2]))
                         walkChain src
 
                     | "ToList" | "ToArray" ->
@@ -388,6 +390,11 @@ module internal DBRefManyExtractor =
             if not seenBoundary then
                 wheres.AddRange(postBoundWheres); postBoundWheres.Clear()
                 sortKeys.AddRange(postBoundSortKeys); postBoundSortKeys.Clear()
+
+            match countPredicate with
+            | Some pred when seenBoundary -> postBoundWheres.Add(pred)
+            | Some pred -> wheres.Add(pred)
+            | None -> ()
 
             // Handle GroupBy terminal: extract the HAVING predicate from Any/All.
             let finalTerminal, finalGroupByHaving =
@@ -422,6 +429,11 @@ module internal DBRefManyExtractor =
                         "Error: Decimal Average over DBRefMany is not supported.\nReason: SQLite AVG is not exact for decimal semantics on this route.\nFix: Use Sum/Count in-memory after AsEnumerable(), or project to a supported numeric type."))
                 | _ -> ()
             | _ -> ()
+
+            // Inject Count(pred) predicate as a WHERE clause so the correlated COUNT is owner-scoped.
+            match countPredicate with
+            | Some pred -> wheres.Add(pred)
+            | None -> ()
 
             ValueSome {
                 Source = innerSource

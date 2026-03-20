@@ -1,6 +1,7 @@
 namespace SoloDatabase
 
 open System
+open System.Collections
 open System.Linq.Expressions
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.QueryTranslatorBaseTypes
@@ -512,7 +513,7 @@ module internal DBRefManyBuilder =
         let rowsetSel =
             match desc.SelectProjection with
             | Some projLambda ->
-                let tgtAlias, _, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
+                let tgtAlias, lnkAlias, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
                 let subQb = qb.ForSubquery(tgtAlias, projLambda, subqueryRootTable = targetTable)
                 let projectedDu = visitDu projLambda.Body subQb
                 let projJoins = DBRefManyHelpers.joinEdgesToClauses subQb.SourceContext.Joins
@@ -655,6 +656,225 @@ module internal DBRefManyBuilder =
         | ValueNone ->
             raise (NotSupportedException("Cannot extract key selector for DistinctBy."))
 
+    let private evaluateConstantEnumerable (expr: Expression) : obj list =
+        if not (isFullyConstant expr) then
+            raise (NotSupportedException(
+                "Error: DBRefMany By-set operator requires a constant second sequence.\n" +
+                "Reason: The second sequence cannot be translated on the correlated SQL route.\n" +
+                "Fix: Use a constant array/list, or move the operator after AsEnumerable()."))
+        match evaluateExpr<IEnumerable> expr with
+        | null -> []
+        | values -> [ for value in values -> value ]
+
+    let private compileObjectSelector (selectorExpr: Expression) : (obj -> obj) =
+        match tryExtractLambdaExpression selectorExpr with
+        | ValueSome selectorLambda ->
+            let argObj = Expression.Parameter(typeof<obj>, "o")
+            let inlinedBody =
+                inlineLambdaInvocation selectorLambda [| Expression.Convert(argObj, selectorLambda.Parameters.[0].Type) :> Expression |]
+            let boxedBody =
+                if inlinedBody.Type = typeof<obj> then inlinedBody
+                else Expression.Convert(inlinedBody, typeof<obj>) :> Expression
+            Expression.Lambda<Func<obj, obj>>(boxedBody, argObj).Compile(true).Invoke
+        | ValueNone ->
+            raise (NotSupportedException("Cannot extract key selector for DBRefMany By-set operator."))
+
+    let private buildNullSafeMembershipPredicate
+        (qb: QueryBuilder)
+        (leftExpr: SqlExpr)
+        (values: obj list)
+        (negate: bool)
+        : SqlExpr option =
+        let terms =
+            values
+            |> List.map (fun value ->
+                let rightExpr =
+                    match value with
+                    | null -> SqlExpr.Literal(SqlLiteral.Null)
+                    | _ -> qb.AllocateParamExpr(value)
+                nullSafeEq leftExpr rightExpr)
+
+        match terms with
+        | [] -> None
+        | head :: tail ->
+            let disjunction = tail |> List.fold (fun acc term -> SqlExpr.Binary(acc, BinaryOperator.Or, term)) head
+            Some(if negate then SqlExpr.Unary(UnaryOperator.Not, disjunction) else disjunction)
+
+    let private buildEntitySequenceAggregate (rowsetSel: SqlSelect) : SqlExpr =
+        let outAlias = nextAlias "_set"
+        let outerGA = SqlExpr.FunctionCall("json_group_array", [SqlExpr.FunctionCall("json", [SqlExpr.Column(Some outAlias, "v")])])
+        let outerCore = mkSubCore [{ Alias = None; Expr = outerGA }] (Some(DerivedTable(rowsetSel, outAlias))) None
+        SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
+
+    let private buildByFilterEntitySequence
+        (qb: QueryBuilder)
+        (desc: QueryDescriptor)
+        (ownerRef: DBRefManyOwnerRef)
+        (keyExpr: Expression)
+        (rightKeysExpr: Expression)
+        (negate: bool)
+        : SqlExpr =
+        match tryExtractLambdaExpression keyExpr with
+        | ValueSome keyLambda ->
+            let rightKeys = evaluateConstantEnumerable rightKeysExpr
+            match rightKeys with
+            | [] when negate ->
+                buildDistinctByEntitySequence qb desc ownerRef keyExpr
+            | [] ->
+                let emptyCore =
+                    mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Literal(SqlLiteral.Null) }] None (Some(SqlExpr.Literal(SqlLiteral.Boolean false)))
+                buildEntitySequenceAggregate { Ctes = []; Body = SingleSelect emptyCore }
+            | _ ->
+                let tgtAlias, lnkAlias, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
+                let subQb = qb.ForSubquery(tgtAlias, keyLambda, subqueryRootTable = targetTable)
+                let keyDu = visitDu keyLambda.Body subQb
+                let keyJoins = DBRefManyHelpers.joinEdgesToClauses subQb.SourceContext.Joins
+                let membershipPred =
+                    buildNullSafeMembershipPredicate qb keyDu rightKeys negate
+                    |> Option.defaultValue (SqlExpr.Literal(SqlLiteral.Boolean negate))
+                let whereExpr =
+                    match baseCore.Where with
+                    | Some w -> SqlExpr.Binary(w, BinaryOperator.And, membershipPred)
+                    | None -> membershipPred
+                let effectiveOrder =
+                    if baseCore.OrderBy.Length > 0 then
+                        baseCore.OrderBy
+                    else
+                        [{ Expr = SqlExpr.Column(Some lnkAlias, "rowid"); Direction = SortDirection.Asc }]
+                let rankExpr =
+                    SqlExpr.WindowCall({
+                        Kind = WindowFunctionKind.RowNumber
+                        Arguments = []
+                        PartitionBy = [keyDu]
+                        OrderBy = effectiveOrder |> List.map (fun ob -> (ob.Expr, ob.Direction))
+                    })
+                let core =
+                    { baseCore with
+                        Projections =
+                            ProjectionSetOps.ofList [
+                                { Alias = Some "v"; Expr = buildEntityValueExpr tgtAlias }
+                                { Alias = Some "__rk"; Expr = rankExpr }
+                            ]
+                        Joins = baseCore.Joins @ keyJoins
+                        Where = Some whereExpr }
+                let innerSel = { Ctes = []; Body = SingleSelect core }
+                let rankAlias = nextAlias "_bf"
+                let filteredCore =
+                    mkSubCore
+                        [{ Alias = Some "v"; Expr = SqlExpr.Column(Some rankAlias, "v") }]
+                        (Some(DerivedTable(innerSel, rankAlias)))
+                        (Some(SqlExpr.Binary(SqlExpr.Column(Some rankAlias, "__rk"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L))))
+                buildEntitySequenceAggregate { Ctes = []; Body = SingleSelect filteredCore }
+        | ValueNone ->
+            raise (NotSupportedException("Cannot extract key selector for DBRefMany By-set operator."))
+
+    let private buildUnionByEntitySequence
+        (qb: QueryBuilder)
+        (desc: QueryDescriptor)
+        (ownerRef: DBRefManyOwnerRef)
+        (rightSourceExpr: Expression)
+        (keyExpr: Expression)
+        : SqlExpr =
+        match tryExtractLambdaExpression keyExpr with
+        | ValueSome keyLambda ->
+            let rightItems = evaluateConstantEnumerable rightSourceExpr
+            let projectKey = compileObjectSelector keyExpr
+
+            let tgtAlias, lnkAlias, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
+            let keyQb = qb.ForSubquery(tgtAlias, keyLambda, subqueryRootTable = targetTable)
+            let keyDu = visitDu keyLambda.Body keyQb
+            let keyJoins = DBRefManyHelpers.joinEdgesToClauses keyQb.SourceContext.Joins
+            let effectiveOrder =
+                if baseCore.OrderBy.Length > 0 then
+                    baseCore.OrderBy
+                else
+                    [{ Expr = SqlExpr.Column(Some lnkAlias, "rowid"); Direction = SortDirection.Asc }]
+            let leftOrdExpr =
+                SqlExpr.WindowCall({
+                    Kind = WindowFunctionKind.RowNumber
+                    Arguments = []
+                    PartitionBy = []
+                    OrderBy = effectiveOrder |> List.map (fun ob -> (ob.Expr, ob.Direction))
+                })
+            let leftCoreInner =
+                { baseCore with
+                    Projections =
+                        ProjectionSetOps.ofList [
+                            { Alias = Some "v"; Expr = buildEntityValueExpr tgtAlias }
+                            { Alias = Some "k"; Expr = keyDu }
+                            { Alias = Some "__ord"; Expr = leftOrdExpr }
+                        ]
+                    Joins = baseCore.Joins @ keyJoins }
+            let leftSel = { Ctes = []; Body = SingleSelect leftCoreInner }
+            let leftAlias = nextAlias "_ubl"
+            let leftCore =
+                mkSubCore
+                    [
+                        { Alias = Some "v"; Expr = SqlExpr.Column(Some leftAlias, "v") }
+                        { Alias = Some "k"; Expr = SqlExpr.Column(Some leftAlias, "k") }
+                        { Alias = Some "__src"; Expr = SqlExpr.Literal(SqlLiteral.Integer 0L) }
+                        { Alias = Some "__ord"; Expr = SqlExpr.Column(Some leftAlias, "__ord") }
+                    ]
+                    (Some(DerivedTable(leftSel, leftAlias)))
+                    None
+
+            let rightCores =
+                rightItems
+                |> List.mapi (fun i item ->
+                    let keyValue = projectKey item
+                    mkSubCore
+                        [
+                            { Alias = Some "v"; Expr = qb.AllocateParamExpr(item) }
+                            { Alias = Some "k"; Expr = match keyValue with null -> SqlExpr.Literal(SqlLiteral.Null) | _ -> qb.AllocateParamExpr(keyValue) }
+                            { Alias = Some "__src"; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }
+                            { Alias = Some "__ord"; Expr = SqlExpr.Literal(SqlLiteral.Integer(int64 (i + 1))) }
+                        ]
+                        None
+                        None)
+
+            let unionSel =
+                match rightCores with
+                | [] -> { Ctes = []; Body = SingleSelect leftCore }
+                | head :: tail -> { Ctes = []; Body = UnionAllSelect(leftCore, head :: tail) }
+
+            let unionAlias = nextAlias "_ubu"
+            let rankExpr =
+                SqlExpr.WindowCall({
+                    Kind = WindowFunctionKind.RowNumber
+                    Arguments = []
+                    PartitionBy = [SqlExpr.Column(Some unionAlias, "k")]
+                    OrderBy =
+                        [
+                            SqlExpr.Column(Some unionAlias, "__src"), SortDirection.Asc
+                            SqlExpr.Column(Some unionAlias, "__ord"), SortDirection.Asc
+                        ]
+                })
+            let rankedCore =
+                mkSubCore
+                    [
+                        { Alias = Some "v"; Expr = SqlExpr.Column(Some unionAlias, "v") }
+                        { Alias = Some "__src"; Expr = SqlExpr.Column(Some unionAlias, "__src") }
+                        { Alias = Some "__ord"; Expr = SqlExpr.Column(Some unionAlias, "__ord") }
+                        { Alias = Some "__rk"; Expr = rankExpr }
+                    ]
+                    (Some(DerivedTable(unionSel, unionAlias)))
+                    None
+            let rankedSel = { Ctes = []; Body = SingleSelect rankedCore }
+            let rankAlias = nextAlias "_ubr"
+            let filteredCore =
+                { mkSubCore
+                    [{ Alias = Some "v"; Expr = SqlExpr.Column(Some rankAlias, "v") }]
+                    (Some(DerivedTable(rankedSel, rankAlias)))
+                    (Some(SqlExpr.Binary(SqlExpr.Column(Some rankAlias, "__rk"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L)))) with
+                        OrderBy =
+                            [
+                                { Expr = SqlExpr.Column(Some rankAlias, "__src"); Direction = SortDirection.Asc }
+                                { Expr = SqlExpr.Column(Some rankAlias, "__ord"); Direction = SortDirection.Asc }
+                            ] }
+            buildEntitySequenceAggregate { Ctes = []; Body = SingleSelect filteredCore }
+        | ValueNone ->
+            raise (NotSupportedException("Cannot extract key selector for DBRefMany UnionBy."))
+
     /// Build Select projection (json_group_array).
     let private buildSelect (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) : SqlExpr =
         match desc.SelectProjection with
@@ -768,9 +988,16 @@ module internal DBRefManyBuilder =
             DBRefManyBuildSpecial.tryBuildGroupBy qb desc buildCorrelatedCore mkSubCore nextAlias ownerRef keyLambda
         | None ->
 
-        // Set operations — defer to existing handler (requires expression reconstruction).
+        // Set operations.
         match desc.SetOp with
-        | Some _ -> ValueNone
+        | Some (SetOperation.IntersectBy(rightKeys, keySel)) ->
+            ValueSome(buildByFilterEntitySequence qb desc ownerRef keySel rightKeys false)
+        | Some (SetOperation.ExceptBy(rightKeys, keySel)) ->
+            ValueSome(buildByFilterEntitySequence qb desc ownerRef keySel rightKeys true)
+        | Some (SetOperation.UnionBy(rightSource, keySel)) ->
+            ValueSome(buildUnionByEntitySequence qb desc ownerRef rightSource keySel)
+        | Some _ ->
+            ValueNone
         | None ->
 
         // Distinct.Count — null-safe two-layer: inner SELECT DISTINCT, outer COUNT(*).

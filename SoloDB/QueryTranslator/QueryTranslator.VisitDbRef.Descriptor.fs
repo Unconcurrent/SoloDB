@@ -53,6 +53,10 @@ module internal DBRefManyDescriptor =
         | Except of rightSource: Expression
         | Union of rightSource: Expression
         | Concat of rightSource: Expression
+        // R56: By-key set operations — carry both the right source and the key selector.
+        | IntersectBy of rightKeys: Expression * keySelector: Expression
+        | ExceptBy of rightKeys: Expression * keySelector: Expression
+        | UnionBy of rightKeys: Expression * keySelector: Expression
 
     /// The full query descriptor for a DBRefMany operator chain.
     type QueryDescriptor = {
