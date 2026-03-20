@@ -133,7 +133,7 @@ module internal DBRefManyBuilderTerminals =
             let projJoins = joinEdgesToClauses subQb.SourceContext.Joins
             let projectedCore =
                 { baseCore with
-                    Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = projectedDu }]
+                    Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = DBRefManyBuilderElements.wrapProjectedCastExpr desc.CastTypeName tgtAlias projectedDu }]
                     Distinct = false
                     Joins = baseCore.Joins @ projJoins }
             if desc.Distinct && (baseCore.Limit.IsSome || baseCore.Offset.IsSome) then
@@ -239,7 +239,7 @@ module internal DBRefManyBuilderTerminals =
                 raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
             let tgtAlias, _, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
             let subQb = qb.ForSubquery(tgtAlias, projLambda, subqueryRootTable = targetTable)
-            let projectedDu = visitDu projLambda.Body subQb
+            let projectedDu = visitDu projLambda.Body subQb |> DBRefManyBuilderElements.wrapProjectedCastExpr desc.CastTypeName tgtAlias
             let projJoins = joinEdgesToClauses subQb.SourceContext.Joins
             let baseCore = { baseCore with Joins = baseCore.Joins @ projJoins }
             let hasTakeSkipOrOrder = baseCore.OrderBy.Length > 0 || baseCore.Limit.IsSome || baseCore.Offset.IsSome

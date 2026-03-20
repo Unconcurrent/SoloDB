@@ -8,12 +8,55 @@ open SoloDatabase.QueryTranslatorBaseTypes
 open SqlDu.Engine.C1.Spec
 
 module internal DBRefManyBuilderElements =
-    let buildEntityValueExpr (tgtAlias: string) =
-        SqlExpr.FunctionCall("jsonb_set", [
-            SqlExpr.Column(Some tgtAlias, "Value")
-            SqlExpr.Literal(SqlLiteral.String "$.Id")
-            SqlExpr.Column(Some tgtAlias, "Id")
-        ])
+    let private castMissingTypeMessage =
+        "The type of item is not stored in the database, if you want to include it, then add the Polymorphic attribute to the type and reinsert all elements."
+
+    let private castMismatchMessage =
+        "Unable to cast object to the specified type, because the types are different."
+
+    let private castJsonErrorExpr (message: string) =
+        SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String message)])
+
+    let private castScalarErrorExpr (message: string) =
+        SqlExpr.Literal(SqlLiteral.String($"__solodb_error__:{message}"))
+
+    let wrapProjectedCastExpr (castTypeNameOpt: string option) (tgtAlias: string) (projectedExpr: SqlExpr) =
+        match castTypeNameOpt with
+        | None -> projectedExpr
+        | Some typeName ->
+            let typeExtract =
+                SqlExpr.FunctionCall("jsonb_extract", [
+                    SqlExpr.Column(Some tgtAlias, "Value")
+                    SqlExpr.Literal(SqlLiteral.String "$.$type")
+                ])
+            let typeIsNull = SqlExpr.Unary(UnaryOperator.IsNull, typeExtract)
+            let typeMismatch = SqlExpr.Binary(typeExtract, BinaryOperator.Ne, SqlExpr.Literal(SqlLiteral.String typeName))
+            SqlExpr.CaseExpr(
+                (typeIsNull, castScalarErrorExpr castMissingTypeMessage),
+                [(typeMismatch, castScalarErrorExpr castMismatchMessage)],
+                Some projectedExpr)
+
+    let buildEntityValueExpr (castTypeNameOpt: string option) (tgtAlias: string) =
+        let normalEntityExpr =
+            SqlExpr.FunctionCall("jsonb_set", [
+                SqlExpr.Column(Some tgtAlias, "Value")
+                SqlExpr.Literal(SqlLiteral.String "$.Id")
+                SqlExpr.Column(Some tgtAlias, "Id")
+            ])
+        match castTypeNameOpt with
+        | None -> normalEntityExpr
+        | Some typeName ->
+            let typeExtract =
+                SqlExpr.FunctionCall("jsonb_extract", [
+                    SqlExpr.Column(Some tgtAlias, "Value")
+                    SqlExpr.Literal(SqlLiteral.String "$.$type")
+                ])
+            let typeIsNull = SqlExpr.Unary(UnaryOperator.IsNull, typeExtract)
+            let typeMismatch = SqlExpr.Binary(typeExtract, BinaryOperator.Ne, SqlExpr.Literal(SqlLiteral.String typeName))
+            SqlExpr.CaseExpr(
+                (typeIsNull, castJsonErrorExpr castMissingTypeMessage),
+                [(typeMismatch, castJsonErrorExpr castMismatchMessage)],
+                Some normalEntityExpr)
 
     let buildOrderedElementSubquery
         (baseCore: SelectCore)
@@ -83,14 +126,14 @@ module internal DBRefManyBuilderElements =
                 let projJoins = joinEdgesToClauses subQb.SourceContext.Joins
                 let core =
                     { baseCore with
-                        Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = projectedDu }]
+                        Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = wrapProjectedCastExpr desc.CastTypeName tgtAlias projectedDu }]
                         Joins = baseCore.Joins @ projJoins }
                 { Ctes = []; Body = SingleSelect core }
             | None ->
                 let tgtAlias, _, baseCore, _ = buildCorrelatedCore qb desc ownerRef []
                 let core =
                     { baseCore with
-                        Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = buildEntityValueExpr tgtAlias }] }
+                        Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = buildEntityValueExpr desc.CastTypeName tgtAlias }] }
                 { Ctes = []; Body = SingleSelect core }
 
         let rowAlias = nextAlias "_sg"
@@ -191,7 +234,7 @@ module internal DBRefManyBuilderElements =
             | _ :: _ -> baseCore.OrderBy
             | [] when pickLast -> [{ Expr = SqlExpr.Column(Some lnkAlias, "rowid"); Direction = SortDirection.Desc }]
             | [] -> []
-        let elementSel = buildOrderedElementSubquery baseCore (buildEntityValueExpr tgtAlias) effectiveOrder (pickLast && baseCore.OrderBy.Length > 0)
+        let elementSel = buildOrderedElementSubquery baseCore (buildEntityValueExpr desc.CastTypeName tgtAlias) effectiveOrder (pickLast && baseCore.OrderBy.Length > 0)
         SqlExpr.ScalarSubquery elementSel
 
     let buildProjectedElement
@@ -213,7 +256,7 @@ module internal DBRefManyBuilderElements =
         | Some projLambda ->
             let tgtAlias, lnkAlias, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
             let subQb = qb.ForSubquery(tgtAlias, projLambda, subqueryRootTable = targetTable)
-            let projectedDu = visitDu projLambda.Body subQb
+            let projectedDu = visitDu projLambda.Body subQb |> wrapProjectedCastExpr desc.CastTypeName tgtAlias
             let projJoins = joinEdgesToClauses subQb.SourceContext.Joins
             let baseCore = { baseCore with Joins = baseCore.Joins @ projJoins }
             let effectiveOrder =
@@ -243,7 +286,7 @@ module internal DBRefManyBuilderElements =
             | [] -> [{ Expr = SqlExpr.Column(Some lnkAlias, "rowid"); Direction = SortDirection.Asc }]
         let rowCore =
             { baseCore with
-                Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = buildEntityValueExpr tgtAlias }]
+                Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = buildEntityValueExpr desc.CastTypeName tgtAlias }]
                 OrderBy = effectiveOrder
                 Limit = None
                 Offset = baseCore.Offset }

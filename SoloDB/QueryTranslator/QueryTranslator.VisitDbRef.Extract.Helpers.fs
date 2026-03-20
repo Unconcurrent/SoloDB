@@ -56,6 +56,7 @@ module internal DBRefManyExtractorHelpers =
     let buildDescriptor
         innerSource
         ofTypeName
+        castTypeName
         wheres
         sortKeys
         limit
@@ -76,6 +77,7 @@ module internal DBRefManyExtractorHelpers =
         {
             Source = innerSource
             OfTypeName = ofTypeName
+            CastTypeName = castTypeName
             WherePredicates = wheres |> Seq.toList
             SortKeys = sortKeys |> Seq.toList
             Limit = limit
@@ -101,6 +103,7 @@ module internal DBRefManyExtractorHelpers =
             ValueSome(
                 buildDescriptor
                     inner
+                    None
                     None
                     []
                     []
@@ -128,6 +131,7 @@ module internal DBRefManyExtractorHelpers =
             ValueSome(
                 buildDescriptor
                     memberExpr
+                    None
                     None
                     []
                     []

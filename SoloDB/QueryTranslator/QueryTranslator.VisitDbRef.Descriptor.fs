@@ -66,6 +66,8 @@ module internal DBRefManyDescriptor =
         Source: Expression
         /// OfType<T> type name, if present.
         OfTypeName: string option
+        /// Cast<T> type name, if present. Preserves rows and encodes mismatches as errors.
+        CastTypeName: string option
         /// Where predicates applied BEFORE Take/Skip (inner scope).
         WherePredicates: Expression list
         /// OrderBy/ThenBy sort keys applied BEFORE Take/Skip (inner scope).

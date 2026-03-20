@@ -85,7 +85,7 @@ module internal DBRefManyBuilder =
         let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
         let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
         let targetTable = resolveTargetTable ctx ownerRef.OwnerCollection propName targetType
-        if desc.OfTypeName.IsSome then
+        if desc.OfTypeName.IsSome || desc.CastTypeName.IsSome then
             DBRefManyHelpers.ensureOfTypeSupported targetType
         let tgtAlias = nextAlias "_tgt"
         let lnkAlias = nextAlias "_lnk"
@@ -401,11 +401,11 @@ module internal DBRefManyBuilder =
         let buildProjectedElementAt qb desc ownerRef indexExpr orDefault =
             DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb (buildProjectedRowset qb desc ownerRef) indexExpr orDefault
         let buildDistinctByEntityRowset =
-            DBRefManyBuilderSetOps.buildDistinctByEntityRowset buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias DBRefManyBuilderElements.buildEntityValueExpr
+            DBRefManyBuilderSetOps.buildDistinctByEntityRowset buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias (DBRefManyBuilderElements.buildEntityValueExpr desc.CastTypeName)
         let buildByFilterEntityRowset =
-            DBRefManyBuilderSetOps.buildByFilterEntityRowset buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias nullSafeEq DBRefManyBuilderElements.buildEntityValueExpr isFullyConstant (fun expr -> evaluateExpr<IEnumerable> expr)
+            DBRefManyBuilderSetOps.buildByFilterEntityRowset buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias nullSafeEq (DBRefManyBuilderElements.buildEntityValueExpr desc.CastTypeName) isFullyConstant (fun expr -> evaluateExpr<IEnumerable> expr)
         let buildUnionByEntityRowset =
-            DBRefManyBuilderSetOps.buildUnionByEntityRowset buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias DBRefManyBuilderElements.buildEntityValueExpr
+            DBRefManyBuilderSetOps.buildUnionByEntityRowset buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias (DBRefManyBuilderElements.buildEntityValueExpr desc.CastTypeName)
 
         let buildSetOpFilteredRowset (rowsetSel: SqlSelect) (predExprOpt: Expression option) : SqlSelect =
             match predExprOpt with

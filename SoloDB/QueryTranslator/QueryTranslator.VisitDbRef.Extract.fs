@@ -67,7 +67,7 @@ module internal DBRefManyExtractor =
                 | "MinBy" -> getArg mce |> Option.map Terminal.MinBy
                 | "MaxBy" -> getArg mce |> Option.map Terminal.MaxBy
                 | "DistinctBy" -> getArg mce |> Option.map Terminal.DistinctBy
-                | "Order" | "OrderDescending" | "UnionBy" | "IntersectBy" | "ExceptBy" | "DefaultIfEmpty" ->
+                | "Order" | "OrderDescending" | "UnionBy" | "IntersectBy" | "ExceptBy" | "DefaultIfEmpty" | "Cast" ->
                     let identityLambda = mkIdentityLambdaForDbRefMany mce
                     Some (Terminal.Select(identityLambda :> Expression))
                 | "CountBy" -> getArg mce |> Option.map Terminal.CountBy
@@ -78,7 +78,7 @@ module internal DBRefManyExtractor =
             | Some terminal ->
             let source =
                 match mce.Method.Name with
-                | "DistinctBy" | "Order" | "OrderDescending" | "UnionBy" | "IntersectBy" | "ExceptBy" | "DefaultIfEmpty" ->
+                | "DistinctBy" | "Order" | "OrderDescending" | "UnionBy" | "IntersectBy" | "ExceptBy" | "DefaultIfEmpty" | "Cast" ->
                     mce :> Expression  // Include the operator in the chain
                 | _ -> source
 
@@ -100,6 +100,7 @@ module internal DBRefManyExtractor =
             let mutable selectProj: LambdaExpression option = None
             let mutable setOp: SetOperation option = None
             let mutable ofTypeName: string option = None
+            let mutable castTypeName: string option = None
             let mutable groupByHaving: Expression option = None
             let mutable defaultIfEmpty: Expression option option = None
             let mutable postSelectDefaultIfEmpty: Expression option option = None
@@ -220,6 +221,20 @@ module internal DBRefManyExtractor =
                             match Utils.typeToName genericArgs.[0] with
                             | Some tn -> ofTypeName <- Some tn
                             | None -> ()
+                        walkChain src
+
+                    | "Cast" ->
+                        let genericArgs = mc.Method.GetGenericArguments()
+                        if genericArgs.Length = 1 then
+                            let sourceElemType =
+                                if isNull src || not src.Type.IsGenericType then null
+                                else src.Type.GetGenericArguments() |> Array.tryHead |> Option.defaultValue null
+                            if not (isNull sourceElemType) && sourceElemType <> genericArgs.[0] then
+                                DBRefManyHelpers.ensureOfTypeSupported sourceElemType
+                            match Utils.typeToName genericArgs.[0] with
+                            | Some tn when sourceElemType <> genericArgs.[0] -> castTypeName <- Some tn
+                            | None -> ()
+                            | _ -> ()
                         walkChain src
 
                     | "Intersect" ->
@@ -365,6 +380,7 @@ module internal DBRefManyExtractor =
                 buildDescriptor
                     innerSource
                     ofTypeName
+                    castTypeName
                     wheres
                     sortKeys
                     limit

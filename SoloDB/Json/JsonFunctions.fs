@@ -173,13 +173,13 @@ module JsonFunctions =
             let exc = toJson<string> row.ValueJSON
             raise (exn exc)
             
+        if not (isNull row.ValueJSON) && row.ValueJSON.StartsWith("__solodb_error__:", StringComparison.Ordinal) then
+            raise (InvalidOperationException(row.ValueJSON.Substring("__solodb_error__:".Length)))
+        else
+
         // Checking if the SQLite returned a raw string.
         if typeof<'R> = typeof<string> then
             row.ValueJSON :> obj :?> 'R
-        else
-
-        if not (isNull row.ValueJSON) && row.ValueJSON.StartsWith("__solodb_error__:", StringComparison.Ordinal) then
-            raise (InvalidOperationException(row.ValueJSON.Substring("__solodb_error__:".Length)))
         else
 
         match typeof<'R> with
