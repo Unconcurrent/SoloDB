@@ -416,7 +416,11 @@ module internal DBRefManyBuilder =
                     let rowAlias = nextAlias "_sr"
                     let valueCore =
                         { Distinct = false
-                          Projections = ProjectionSetOps.ofList [{ Alias = Some "Value"; Expr = SqlExpr.Column(Some rowAlias, "v") }]
+                          Projections =
+                            ProjectionSetOps.ofList [
+                                { Alias = Some "Value"; Expr = SqlExpr.Column(Some rowAlias, "v") }
+                                { Alias = Some "__ord"; Expr = SqlExpr.Column(Some rowAlias, "__ord") }
+                            ]
                           Source = Some(DerivedTable(rowsetSel, rowAlias))
                           Joins = []
                           Where = None
@@ -434,13 +438,17 @@ module internal DBRefManyBuilder =
                     let predJoins = joinEdgesToClauses predQb.SourceContext.Joins
                     let filteredCore =
                         { Distinct = false
-                          Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = SqlExpr.Column(Some predAlias, "Value") }]
+                          Projections =
+                            ProjectionSetOps.ofList [
+                                { Alias = Some "v"; Expr = SqlExpr.Column(Some predAlias, "Value") }
+                                { Alias = Some "__ord"; Expr = SqlExpr.Column(Some predAlias, "__ord") }
+                            ]
                           Source = Some(DerivedTable(valueSel, predAlias))
                           Joins = predJoins
                           Where = Some predDu
                           GroupBy = []
                           Having = None
-                          OrderBy = []
+                          OrderBy = [{ Expr = SqlExpr.Column(Some predAlias, "__ord"); Direction = SortDirection.Asc }]
                           Limit = None
                           Offset = None }
                     { Ctes = []; Body = SingleSelect filteredCore }
@@ -459,10 +467,52 @@ module internal DBRefManyBuilder =
                   Where = None
                   GroupBy = []
                   Having = None
-                  OrderBy = []
+                  OrderBy = [{ Expr = SqlExpr.Column(Some rowAlias, "__ord"); Direction = SortDirection.Asc }]
                   Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L))
                   Offset = None }
             SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect firstCore }
+
+        let buildElementAtFromRowset (rowsetSel: SqlSelect) (indexExpr: Expression) (orDefault: bool) : SqlExpr =
+            let idx =
+                match indexExpr with
+                | :? ConstantExpression as ce -> SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value)))
+                | _ -> visitDu indexExpr qb
+            let rowAlias = nextAlias "_si"
+            let indexedCore =
+                { Distinct = false
+                  Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = SqlExpr.Column(Some rowAlias, "v") }]
+                  Source = Some(DerivedTable(rowsetSel, rowAlias))
+                  Joins = []
+                  Where = None
+                  GroupBy = []
+                  Having = None
+                  OrderBy = [{ Expr = SqlExpr.Column(Some rowAlias, "__ord"); Direction = SortDirection.Asc }]
+                  Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L))
+                  Offset = Some idx }
+            let indexedSel = { Ctes = []; Body = SingleSelect indexedCore }
+            let outerAlias = nextAlias "_so"
+            let countExpr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None)
+            let firstValueExpr = SqlExpr.FunctionCall("MIN", [SqlExpr.Column(Some outerAlias, "v")])
+            let noElementsExpr =
+                SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String "__solodb_error__:Index was out of range. Must be non-negative and less than the size of the collection.")])
+            let valueExpr =
+                SqlExpr.CaseExpr(
+                    (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)),
+                     if orDefault then SqlExpr.Literal(SqlLiteral.Null) else noElementsExpr),
+                    [],
+                    Some firstValueExpr)
+            let outerCore =
+                { Distinct = false
+                  Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = valueExpr }]
+                  Source = Some(DerivedTable(indexedSel, outerAlias))
+                  Joins = []
+                  Where = None
+                  GroupBy = []
+                  Having = None
+                  OrderBy = []
+                  Limit = None
+                  Offset = None }
+            SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
 
         let buildCountFromRowset (rowsetSel: SqlSelect) : SqlExpr =
             let rowAlias = nextAlias "_sc"
@@ -482,6 +532,21 @@ module internal DBRefManyBuilder =
         let buildExistsFromRowset (rowsetSel: SqlSelect) (predExprOpt: Expression option) : SqlExpr =
             let filteredSel = buildSetOpFilteredRowset rowsetSel predExprOpt
             SqlExpr.Exists filteredSel
+
+        let buildSetOpTerminalFromRowset (rowsetSel: SqlSelect) : SqlExpr voption =
+            match desc.Terminal with
+            | Terminal.Select _
+            | Terminal.DistinctBy _ ->
+                ValueSome(DBRefManyBuilderSetOps.buildEntitySequenceAggregate nextAlias rowsetSel)
+            | Terminal.Exists -> ValueSome(buildExistsFromRowset rowsetSel None)
+            | Terminal.Any pred -> ValueSome(buildExistsFromRowset rowsetSel pred)
+            | Terminal.Count
+            | Terminal.LongCount -> ValueSome(buildCountFromRowset rowsetSel)
+            | Terminal.First pred
+            | Terminal.FirstOrDefault pred -> ValueSome(buildFirstLikeFromRowset rowsetSel pred)
+            | Terminal.ElementAt indexExpr -> ValueSome(buildElementAtFromRowset rowsetSel indexExpr false)
+            | Terminal.ElementAtOrDefault indexExpr -> ValueSome(buildElementAtFromRowset rowsetSel indexExpr true)
+            | _ -> ValueNone
 
         // TakeWhile/SkipWhile — delegated to BuildSpecial.
         match desc.TakeWhileInfo with
@@ -503,42 +568,14 @@ module internal DBRefManyBuilder =
 
         // Set operations.
         match desc.SetOp with
+        | Some (SetOperation.DistinctBy(keySel)) ->
+            buildSetOpTerminalFromRowset (buildDistinctByEntityRowset qb desc ownerRef keySel)
         | Some (SetOperation.IntersectBy(rightKeys, keySel)) ->
-            let rowsetSel = buildByFilterEntityRowset qb desc ownerRef keySel rightKeys false
-            match desc.Terminal with
-            | Terminal.Select _ -> ValueSome(DBRefManyBuilderSetOps.buildEntitySequenceAggregate nextAlias rowsetSel)
-            | Terminal.Exists -> ValueSome(buildExistsFromRowset rowsetSel None)
-            | Terminal.Any pred -> ValueSome(buildExistsFromRowset rowsetSel pred)
-            | Terminal.Count | Terminal.LongCount -> ValueSome(buildCountFromRowset rowsetSel)
-            | Terminal.First pred
-            | Terminal.FirstOrDefault pred -> ValueSome(buildFirstLikeFromRowset rowsetSel pred)
-            | Terminal.ElementAt indexExpr -> ValueSome(DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb rowsetSel indexExpr false)
-            | Terminal.ElementAtOrDefault indexExpr -> ValueSome(DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb rowsetSel indexExpr true)
-            | _ -> ValueNone
+            buildSetOpTerminalFromRowset (buildByFilterEntityRowset qb desc ownerRef keySel rightKeys false)
         | Some (SetOperation.ExceptBy(rightKeys, keySel)) ->
-            let rowsetSel = buildByFilterEntityRowset qb desc ownerRef keySel rightKeys true
-            match desc.Terminal with
-            | Terminal.Select _ -> ValueSome(DBRefManyBuilderSetOps.buildEntitySequenceAggregate nextAlias rowsetSel)
-            | Terminal.Exists -> ValueSome(buildExistsFromRowset rowsetSel None)
-            | Terminal.Any pred -> ValueSome(buildExistsFromRowset rowsetSel pred)
-            | Terminal.Count | Terminal.LongCount -> ValueSome(buildCountFromRowset rowsetSel)
-            | Terminal.First pred
-            | Terminal.FirstOrDefault pred -> ValueSome(buildFirstLikeFromRowset rowsetSel pred)
-            | Terminal.ElementAt indexExpr -> ValueSome(DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb rowsetSel indexExpr false)
-            | Terminal.ElementAtOrDefault indexExpr -> ValueSome(DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb rowsetSel indexExpr true)
-            | _ -> ValueNone
+            buildSetOpTerminalFromRowset (buildByFilterEntityRowset qb desc ownerRef keySel rightKeys true)
         | Some (SetOperation.UnionBy(rightSource, keySel)) ->
-            let rowsetSel = buildUnionByEntityRowset qb desc ownerRef rightSource keySel
-            match desc.Terminal with
-            | Terminal.Select _ -> ValueSome(DBRefManyBuilderSetOps.buildEntitySequenceAggregate nextAlias rowsetSel)
-            | Terminal.Exists -> ValueSome(buildExistsFromRowset rowsetSel None)
-            | Terminal.Any pred -> ValueSome(buildExistsFromRowset rowsetSel pred)
-            | Terminal.Count | Terminal.LongCount -> ValueSome(buildCountFromRowset rowsetSel)
-            | Terminal.First pred
-            | Terminal.FirstOrDefault pred -> ValueSome(buildFirstLikeFromRowset rowsetSel pred)
-            | Terminal.ElementAt indexExpr -> ValueSome(DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb rowsetSel indexExpr false)
-            | Terminal.ElementAtOrDefault indexExpr -> ValueSome(DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb rowsetSel indexExpr true)
-            | _ -> ValueNone
+            buildSetOpTerminalFromRowset (buildUnionByEntityRowset qb desc ownerRef rightSource keySel)
         | Some _ ->
             ValueNone
         | None ->

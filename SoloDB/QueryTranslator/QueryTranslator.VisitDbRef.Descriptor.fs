@@ -50,6 +50,7 @@ module internal DBRefManyDescriptor =
     /// Set operation shape.
     [<RequireQualifiedAccess>]
     type SetOperation =
+        | DistinctBy of keySelector: Expression
         | Intersect of rightSource: Expression
         | Except of rightSource: Expression
         | Union of rightSource: Expression

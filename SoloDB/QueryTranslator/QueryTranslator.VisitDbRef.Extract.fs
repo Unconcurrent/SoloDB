@@ -248,8 +248,9 @@ module internal DBRefManyExtractor =
 
                     // Newer .NET LINQ operators — R55 DBRefMany parity.
                     | "DistinctBy" ->
-                        // Terminal.DistinctBy already carries the key selector.
-                        // Do not set groupByKey here, or the descriptor is misrouted into the GroupBy builder.
+                        match arg with
+                        | Some keySel -> setOp <- Some (SetOperation.DistinctBy keySel)
+                        | None -> ()
                         walkChain src
 
                     | "Order" ->

@@ -107,19 +107,29 @@ module internal DBRefManyBuilderSetOps =
                         ProjectionSetOps.ofList [
                             { Alias = Some "v"; Expr = buildEntityValueExpr tgtAlias }
                             { Alias = Some "__rk"; Expr = rankExpr }
+                            { Alias = Some "__ord"; Expr = SqlExpr.WindowCall({
+                                Kind = WindowFunctionKind.RowNumber
+                                Arguments = []
+                                PartitionBy = []
+                                OrderBy = effectiveOrder |> List.map (fun ob -> (ob.Expr, ob.Direction))
+                            }) }
                         ]
                     Joins = baseCore.Joins @ keyJoins }
             let innerSel = { Ctes = []; Body = SingleSelect innerCore }
             let rankAlias = nextAlias "_db"
             let filteredCore =
                 { Distinct = false
-                  Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = SqlExpr.Column(Some rankAlias, "v") }]
+                  Projections =
+                    ProjectionSetOps.ofList [
+                        { Alias = Some "v"; Expr = SqlExpr.Column(Some rankAlias, "v") }
+                        { Alias = Some "__ord"; Expr = SqlExpr.Column(Some rankAlias, "__ord") }
+                    ]
                   Source = Some(DerivedTable(innerSel, rankAlias))
                   Joins = []
                   Where = Some(SqlExpr.Binary(SqlExpr.Column(Some rankAlias, "__rk"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L)))
                   GroupBy = []
                   Having = None
-                  OrderBy = []
+                  OrderBy = [{ Expr = SqlExpr.Column(Some rankAlias, "__ord"); Direction = SortDirection.Asc }]
                   Limit = None
                   Offset = None }
             { Ctes = []; Body = SingleSelect filteredCore }
@@ -152,7 +162,11 @@ module internal DBRefManyBuilderSetOps =
             | [] ->
                 let emptyCore =
                     { Distinct = false
-                      Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = SqlExpr.Literal(SqlLiteral.Null) }]
+                      Projections =
+                        ProjectionSetOps.ofList [
+                            { Alias = Some "v"; Expr = SqlExpr.Literal(SqlLiteral.Null) }
+                            { Alias = Some "__ord"; Expr = SqlExpr.Literal(SqlLiteral.Integer 0L) }
+                        ]
                       Source = None
                       Joins = []
                       Where = Some(SqlExpr.Literal(SqlLiteral.Boolean false))
@@ -192,6 +206,12 @@ module internal DBRefManyBuilderSetOps =
                             ProjectionSetOps.ofList [
                                 { Alias = Some "v"; Expr = buildEntityValueExpr tgtAlias }
                                 { Alias = Some "__rk"; Expr = rankExpr }
+                                { Alias = Some "__ord"; Expr = SqlExpr.WindowCall({
+                                    Kind = WindowFunctionKind.RowNumber
+                                    Arguments = []
+                                    PartitionBy = []
+                                    OrderBy = effectiveOrder |> List.map (fun ob -> (ob.Expr, ob.Direction))
+                                }) }
                             ]
                         Joins = baseCore.Joins @ keyJoins
                         Where = Some whereExpr }
@@ -199,13 +219,17 @@ module internal DBRefManyBuilderSetOps =
                 let rankAlias = nextAlias "_bf"
                 let filteredCore =
                     { Distinct = false
-                      Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = SqlExpr.Column(Some rankAlias, "v") }]
+                      Projections =
+                        ProjectionSetOps.ofList [
+                            { Alias = Some "v"; Expr = SqlExpr.Column(Some rankAlias, "v") }
+                            { Alias = Some "__ord"; Expr = SqlExpr.Column(Some rankAlias, "__ord") }
+                        ]
                       Source = Some(DerivedTable(innerSel, rankAlias))
                       Joins = []
                       Where = Some(SqlExpr.Binary(SqlExpr.Column(Some rankAlias, "__rk"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L)))
                       GroupBy = []
                       Having = None
-                      OrderBy = []
+                      OrderBy = [{ Expr = SqlExpr.Column(Some rankAlias, "__ord"); Direction = SortDirection.Asc }]
                       Limit = None
                       Offset = None }
                 { Ctes = []; Body = SingleSelect filteredCore }
@@ -332,17 +356,27 @@ module internal DBRefManyBuilderSetOps =
             let rankAlias = nextAlias "_ubr"
             let filteredCore =
                 { Distinct = false
-                  Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = SqlExpr.Column(Some rankAlias, "v") }]
+                  Projections =
+                    ProjectionSetOps.ofList [
+                        { Alias = Some "v"; Expr = SqlExpr.Column(Some rankAlias, "v") }
+                        { Alias = Some "__ord"; Expr = SqlExpr.WindowCall({
+                            Kind = WindowFunctionKind.RowNumber
+                            Arguments = []
+                            PartitionBy = []
+                            OrderBy =
+                                [
+                                    SqlExpr.Column(Some rankAlias, "__src"), SortDirection.Asc
+                                    SqlExpr.Column(Some rankAlias, "__ord"), SortDirection.Asc
+                                ]
+                        }) }
+                    ]
                   Source = Some(DerivedTable(rankedSel, rankAlias))
                   Joins = []
                   Where = Some(SqlExpr.Binary(SqlExpr.Column(Some rankAlias, "__rk"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L)))
                   GroupBy = []
                   Having = None
-                  OrderBy =
-                    [
-                        { Expr = SqlExpr.Column(Some rankAlias, "__src"); Direction = SortDirection.Asc }
-                        { Expr = SqlExpr.Column(Some rankAlias, "__ord"); Direction = SortDirection.Asc }
-                    ]
+                  OrderBy = [{ Expr = SqlExpr.Column(Some rankAlias, "__src"); Direction = SortDirection.Asc }
+                             { Expr = SqlExpr.Column(Some rankAlias, "__ord"); Direction = SortDirection.Asc }]
                   Limit = None
                   Offset = None }
             { Ctes = []; Body = SingleSelect filteredCore }
