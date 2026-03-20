@@ -17,6 +17,12 @@ open RelationsEntity
 
 let private maxRecursiveDepth = Utils.maxRelationDepth
 
+let private groupRecursiveTargets (targets: seq<int64 * obj>) =
+    targets
+    |> Seq.filter (fun (targetId, targetObj) -> targetId > 0L && not (isNull targetObj))
+    |> Seq.groupBy fst
+    |> Seq.map (fun (targetId, instances) -> targetId, instances |> Seq.toArray)
+
 let rec batchLoadDBRefProperties
     (connection: SqliteConnection)
     (ownerTable: string)
@@ -225,17 +231,20 @@ and batchLoadDBRefManyProperties
         // Recursive multi-hop loading for Include targets
         if shouldRecurse then
             let childPrefix = fullPath descriptor.Property.Name
-            let allTargets =
+            let targetGroups =
                 grouped.Values
                 |> Seq.collect id
-                |> Seq.distinctBy fst
+                |> groupRecursiveTargets
                 |> Seq.toArray
-            for (targetId, targetObj) in allTargets do
+            for (targetId, targetInstances) in targetGroups do
                 let key = (targetId, descriptor.TargetType.FullName)
                 if not (visited.Contains(key)) then
                     visited.Add(key) |> ignore
-                    batchLoadDBRefProperties connection descriptor.TargetTable descriptor.TargetType excludedPaths includedPaths whitelistMode [|(targetId, targetObj)|] inTransaction (depth + 1) visited childPrefix
-                    batchLoadDBRefManyProperties connection descriptor.TargetTable descriptor.TargetType excludedPaths includedPaths whitelistMode [|(targetId, targetObj)|] inTransaction (depth + 1) visited childPrefix
+                    let targetEntities =
+                        targetInstances
+                        |> Array.map (fun (_, targetObj) -> targetId, targetObj)
+                    batchLoadDBRefProperties connection descriptor.TargetTable descriptor.TargetType excludedPaths includedPaths whitelistMode targetEntities inTransaction (depth + 1) visited childPrefix
+                    batchLoadDBRefManyProperties connection descriptor.TargetTable descriptor.TargetType excludedPaths includedPaths whitelistMode targetEntities inTransaction (depth + 1) visited childPrefix
                     visited.Remove(key) |> ignore
 
 let internal recurseLoadedRelationTargets
@@ -274,14 +283,16 @@ let internal recurseLoadedRelationTargets
 
         let recurseTargets (targetTable: string) (targetType: Type) (childPrefix: string) (targets: (int64 * obj) seq) =
             targets
-            |> Seq.filter (fun (targetId, targetObj) -> targetId > 0L && not (isNull targetObj))
-            |> Seq.distinctBy fst
-            |> Seq.iter (fun (targetId, targetObj) ->
+            |> groupRecursiveTargets
+            |> Seq.iter (fun (targetId, targetInstances) ->
                 let key = (targetId, targetType.FullName)
                 if not (visited.Contains key) then
                     visited.Add(key) |> ignore
-                    batchLoadDBRefProperties connection targetTable targetType excludedPaths includedPaths whitelistMode [| (targetId, targetObj) |] inTransaction (depth + 1) visited childPrefix
-                    batchLoadDBRefManyProperties connection targetTable targetType excludedPaths includedPaths whitelistMode [| (targetId, targetObj) |] inTransaction (depth + 1) visited childPrefix
+                    let targetEntities =
+                        targetInstances
+                        |> Array.map (fun (_, targetObj) -> targetId, targetObj)
+                    batchLoadDBRefProperties connection targetTable targetType excludedPaths includedPaths whitelistMode targetEntities inTransaction (depth + 1) visited childPrefix
+                    batchLoadDBRefManyProperties connection targetTable targetType excludedPaths includedPaths whitelistMode targetEntities inTransaction (depth + 1) visited childPrefix
                     visited.Remove(key) |> ignore)
 
         for descriptor in descriptors do
