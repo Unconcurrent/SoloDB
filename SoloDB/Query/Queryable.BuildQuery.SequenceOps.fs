@@ -388,4 +388,4 @@ module internal QueryableBuildQueryPartA =
                     )
                 | _ -> ()
 
-    // GroupBy fusion functions moved to Queryable.BuildQuery.PartA.GroupByFusion.fs (R58 decomposition).
+    // GroupBy fusion functions moved to Queryable.BuildQuery.GroupByOps.fs.
