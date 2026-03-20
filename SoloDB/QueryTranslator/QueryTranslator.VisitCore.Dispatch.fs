@@ -209,6 +209,9 @@ module internal QueryTranslatorVisitCore =
         | ExpressionType.GreaterThan | ExpressionType.GreaterThanOrEqual
         | ExpressionType.Add | ExpressionType.Subtract | ExpressionType.Multiply | ExpressionType.Divide | ExpressionType.Modulo ->
             visitBinaryDu (exp :?> BinaryExpression) qb
+        | ExpressionType.Coalesce ->
+            let b = exp :?> BinaryExpression
+            SqlExpr.Coalesce(visitDu b.Left qb, [visitDu b.Right qb])
         | ExpressionType.Not ->
             // SARGABLE form: NOT(expr) → (expr = 0) for boolean operands.
             // LINQ only generates NOT on boolean expressions, so this is safe.

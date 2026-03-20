@@ -453,6 +453,18 @@ Fix: Use another SoloDB IQueryable rooted in a collection or move the join after
                                 // group.Any() — parameterless
                                 | :? MethodCallExpression as mc when mc.Method.Name = "Any" && mc.Arguments.Count = 1 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                                     SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
+                                // group.Any(predicate) — with predicate
+                                | :? MethodCallExpression as mc when mc.Method.Name = "Any" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
+                                    let pred = unwrapLambdaExpressionOrThrow "GroupJoin Any predicate" mc.Arguments.[1]
+                                    let predDu = translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
+                                    SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((predDu, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
+                                // group.All(predicate)
+                                | :? MethodCallExpression as mc when mc.Method.Name = "All" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
+                                    let pred = unwrapLambdaExpressionOrThrow "GroupJoin All predicate" mc.Arguments.[1]
+                                    let predDu = translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
+                                    SqlExpr.Binary(
+                                        SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.Not, predDu), SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None),
+                                        BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
                                 // Constant / no-group expression
                                 | :? ConstantExpression ->
                                     translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars None expr
@@ -510,18 +522,39 @@ Fix: Use another SoloDB IQueryable rooted in a collection or move the join after
                                         "Reason: Scalar result selectors are not supported for GroupJoin.\n" +
                                         "Fix: Use new { ... } in the result selector."))
 
-                            // LEFT JOIN inner subquery + GROUP BY outer.Id, outer.Value
+                            // Collect DBRef JOINs discovered during inner aggregate translation.
+                            // Rewrite OnSourceAlias: root table references → DerivedTable alias.
+                            let quotedInnerRoot = "\"" + innerRootTable + "\""
+                            let discoveredJoins =
+                                innerCtx.Joins
+                                |> Seq.map (fun j ->
+                                    let rewrittenSource =
+                                        match j.OnSourceAlias with
+                                        | Some src when src = quotedInnerRoot || src = innerRootTable -> Some innerAlias
+                                        | other -> other
+                                    ConditionedJoin(
+                                        parseJoinKind j.JoinKind,
+                                        BaseTable(j.TargetTable, Some j.TargetAlias),
+                                        SqlExpr.Binary(
+                                            SqlExpr.Column(Some j.TargetAlias, "Id"),
+                                            BinaryOperator.Eq,
+                                            SqlExpr.JsonExtractExpr(rewrittenSource, "Value", JsonPath(j.OnPropertyName, [])))))
+                                |> Seq.toList
+
+                            // LEFT JOIN inner subquery + discovered DBRef JOINs + GROUP BY outer.Id, outer.Value
+                            let allJoins =
+                                [ConditionedJoin(
+                                    JoinKind.Left,
+                                    innerSource,
+                                    SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr))]
+                                @ discoveredJoins
                             let core =
                                 { mkCore
                                     [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some outerAlias, "Id") }
                                      { Alias = Some "Value"; Expr = resultExpr }]
                                     (Some (DerivedTable(ctx.Inner, outerAlias)))
                                   with
-                                      Joins =
-                                          [ConditionedJoin(
-                                              JoinKind.Left,
-                                              innerSource,
-                                              SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr))]
+                                      Joins = allJoins
                                       GroupBy = [SqlExpr.Column(Some outerAlias, "Id"); SqlExpr.Column(Some outerAlias, "Value")] }
                             wrapCore core
                         )

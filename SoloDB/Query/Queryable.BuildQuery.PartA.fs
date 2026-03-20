@@ -176,6 +176,34 @@ module internal QueryableBuildQueryPartA =
                         raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                 
                 | SupportedLinqMethods.Distinct ->
+                    let mutable carriedOrders : PreprocessedOrder array = Array.empty
+                    let mutable latestSelectorInfo : (string * bool) option = None
+                    for i = statements.Count - 1 downto 0 do
+                        if latestSelectorInfo.IsNone then
+                            match statements.[i] with
+                            | Simple s ->
+                                match s.Selector with
+                                | Some (Expression selector) ->
+                                    let selectorType =
+                                        match unwrapQuotedLambda selector with
+                                        | :? LambdaExpression as le -> le.Body.Type
+                                        | other -> other.Type
+                                    latestSelectorInfo <-
+                                        Some (expressionFingerprint selector, QueryTranslator.isPrimitiveSQLiteType selectorType)
+                                | _ -> ()
+                            | _ -> ()
+                        if carriedOrders.Length = 0 then
+                            match statements.[i] with
+                            | Simple s when s.Orders.Count > 0 ->
+                                carriedOrders <-
+                                    s.Orders
+                                    |> Seq.map (fun o ->
+                                        { OrderingRule = o.OrderingRule
+                                          Descending = o.Descending
+                                          RawExpr = o.RawExpr })
+                                    |> Seq.toArray
+                                s.Orders.Clear()
+                            | _ -> ()
                     addComplexFinal statements (fun ctx ->
                         // SELECT -1 AS Id, Value FROM (inner) o GROUP BY {identity expr}
                         let groupByExpr = translateExprDu sourceCtx ctx.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) ctx.Vars
@@ -187,6 +215,21 @@ module internal QueryableBuildQueryPartA =
                               with GroupBy = [groupByExpr] }
                         wrapCore core
                     )
+                    if carriedOrders.Length > 0 then
+                        let orderedLayer = emptySQLStatement ()
+                        for order in carriedOrders do
+                            let rawExpr =
+                                match latestSelectorInfo with
+                                | Some (selectorFingerprint, true) when expressionFingerprint order.OrderingRule = selectorFingerprint ->
+                                    Some (SqlExpr.Column(None, "Value"))
+                                | _ ->
+                                    order.RawExpr
+                            orderedLayer.Orders.Add({
+                                OrderingRule = order.OrderingRule
+                                Descending = order.Descending
+                                RawExpr = rawExpr
+                            })
+                        statements.Add(Simple orderedLayer)
 
                 | SupportedLinqMethods.DistinctBy ->
                     // Edge case 7: SupportedLinqMethods.DistinctBy with ROW_NUMBER OVER — window function + derived table
