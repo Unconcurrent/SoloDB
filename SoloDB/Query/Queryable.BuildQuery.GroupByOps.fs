@@ -174,7 +174,7 @@ module internal QueryableBuildQueryPartAGroupBy =
             | "Any" when mc.Arguments.Count = 1 && isGroupSource mc.Arguments.[0] groupParam ->
                 Some (SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, None, false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L)))
             | "Items" when mc.Arguments.Count = 1 && isGroupSource mc.Arguments.[0] groupParam ->
-                Some (SqlExpr.FunctionCall("json_group_array", [
+                Some (SqlExpr.FunctionCall("jsonb_group_array", [
                     SqlExpr.FunctionCall("jsonb_set", [
                         SqlExpr.Column(Some "o", "Value")
                         SqlExpr.Literal(SqlLiteral.String "$.Id")

@@ -133,7 +133,7 @@ module internal DBRefManyBuildSpecial =
             match projectedGroupRowset () with
             | Some gbSel ->
                 let gbAlias = nextAlias "_gbs"
-                let outerGA = SqlExpr.FunctionCall("json_group_array", [SqlExpr.FunctionCall("json", [SqlExpr.Column(Some gbAlias, "v")])])
+                let outerGA = SqlExpr.FunctionCall("jsonb_group_array", [SqlExpr.FunctionCall("jsonb", [SqlExpr.Column(Some gbAlias, "v")])])
                 let outerCore = mkSubCore [{ Alias = None; Expr = outerGA }] (Some(DerivedTable(gbSel, gbAlias))) None
                 ValueSome(SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore })
             | None ->
@@ -187,7 +187,7 @@ module internal DBRefManyBuildSpecial =
             SqlExpr.Literal(SqlLiteral.String "Value")
             SqlExpr.Column(Some gbAlias, "_gc")
         ])
-        let outerGA = SqlExpr.FunctionCall("json_group_array", [SqlExpr.FunctionCall("json", [kvpObj])])
+        let outerGA = SqlExpr.FunctionCall("jsonb_group_array", [SqlExpr.FunctionCall("jsonb", [kvpObj])])
         let outerCore = mkSubCore [{ Alias = None; Expr = outerGA }] (Some(DerivedTable(innerSel, gbAlias))) None
         ValueSome(SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore })
 
@@ -287,7 +287,7 @@ module internal DBRefManyBuildSpecial =
             match buildTakeWhileProjectedRowset qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc isTakeWhile with
             | ValueSome middleSel ->
                 let midAlias = nextAlias "_twm"
-                let outerGA = SqlExpr.FunctionCall("json_group_array", [SqlExpr.Column(Some midAlias, "v")])
+                let outerGA = SqlExpr.FunctionCall("jsonb_group_array", [SqlExpr.Column(Some midAlias, "v")])
                 let outerCore2 = mkSubCore [{ Alias = None; Expr = outerGA }] (Some(DerivedTable(middleSel, midAlias))) None
                 ValueSome(SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore2 })
             | ValueNone ->

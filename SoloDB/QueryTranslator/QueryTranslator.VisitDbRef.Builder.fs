@@ -639,7 +639,7 @@ module internal DBRefManyBuilder =
                     // CASE WHEN json_array_length(result) = 0 THEN json_array(default) ELSE result END
                     SqlExpr.CaseExpr(
                         (SqlExpr.Binary(SqlExpr.FunctionCall("json_array_length", [selectResult]), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)),
-                         SqlExpr.FunctionCall("json_array", [defaultValueDu])),
+                         SqlExpr.FunctionCall("jsonb_array", [defaultValueDu])),
                         [], Some selectResult)
                 | None -> selectResult
             | Terminal.Contains value -> buildContains qb desc ownerRef value

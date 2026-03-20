@@ -57,7 +57,7 @@ module internal DBRefManyBuilderSetOps =
 
     let buildEntitySequenceAggregate (nextAlias: string -> string) (rowsetSel: SqlSelect) : SqlExpr =
         let outAlias = nextAlias "_set"
-        let outerGA = SqlExpr.FunctionCall("json_group_array", [SqlExpr.FunctionCall("json", [SqlExpr.Column(Some outAlias, "v")])])
+        let outerGA = SqlExpr.FunctionCall("jsonb_group_array", [SqlExpr.FunctionCall("jsonb", [SqlExpr.Column(Some outAlias, "v")])])
         let outerCore =
             { Distinct = false
               Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = outerGA }]

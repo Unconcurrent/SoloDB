@@ -249,7 +249,7 @@ module internal DBRefManyBuilderTerminals =
                 let core = { baseCore with Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = distinctAgg }]; Limit = None; Offset = None }
                 SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
             elif not hasTakeSkipOrOrder && not hasTakeWhile then
-                let groupArray = SqlExpr.FunctionCall("json_group_array", [projectedDu])
+                let groupArray = SqlExpr.FunctionCall("jsonb_group_array", [projectedDu])
                 let core = { baseCore with Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = groupArray }]; Limit = None; Offset = None }
                 SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
             else
@@ -285,7 +285,7 @@ module internal DBRefManyBuilderTerminals =
                           Offset = None }
                     let middleSel = { Ctes = []; Body = SingleSelect middleCore }
                     let midAlias = nextAlias "_tw"
-                    let outerGA = SqlExpr.FunctionCall("json_group_array", [SqlExpr.Column(Some midAlias, "v")])
+                    let outerGA = SqlExpr.FunctionCall("jsonb_group_array", [SqlExpr.Column(Some midAlias, "v")])
                     let outerCore =
                         { Distinct = false
                           Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = outerGA }]
@@ -299,7 +299,7 @@ module internal DBRefManyBuilderTerminals =
                           Offset = None }
                     SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
                 | None ->
-                    let outerGA = SqlExpr.FunctionCall("json_group_array", [SqlExpr.Column(Some ordAlias, "v")])
+                    let outerGA = SqlExpr.FunctionCall("jsonb_group_array", [SqlExpr.Column(Some ordAlias, "v")])
                     let outerCore =
                         { Distinct = false
                           Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = outerGA }]

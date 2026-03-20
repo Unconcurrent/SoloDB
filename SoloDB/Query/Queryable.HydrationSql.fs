@@ -150,7 +150,7 @@ module internal HydrationSqlBuilder =
                     let tAlias = sprintf "_ht%d" aliasCounter
 
                     let subqueryProjection =
-                        SqlExpr.FunctionCall("json_group_array",
+                        SqlExpr.FunctionCall("jsonb_group_array",
                             [SqlExpr.FunctionCall("json_object",
                                 [SqlExpr.Literal(SqlLiteral.String "Id"); SqlExpr.Column(Some tAlias, "Id")
                                  SqlExpr.Literal(SqlLiteral.String "Value"); SqlExpr.FunctionCall("json_quote", [SqlExpr.Column(Some tAlias, "Value")])])])
