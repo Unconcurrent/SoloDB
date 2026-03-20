@@ -53,7 +53,6 @@
     <Compile Include="SQLiteTools/SQLiteTools.Extensions.fs" />
     <Compile Include="SQLiteTools/SQLiteTools.CachingDbConnection.fs" />
     <Compile Include="RawSqliteFunctions/RawSqliteFunctions.Types.fs" />
-    <Compile Include="RawSqliteFunctions/RawSqliteFunctions.fs" />
     <Compile Include="RawSqliteFunctions/RawSqliteFunctions.Extensions.fs" />
     <Compile Include="Connections/Connections.TransactionHelpers.fs" />
     <Compile Include="Connections/Connections.fs" />

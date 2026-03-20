@@ -400,12 +400,88 @@ module internal DBRefManyBuilder =
         let buildEntityElementAt = DBRefManyBuilderElements.buildEntityElementAt buildCorrelatedCore nextAlias visitDu
         let buildProjectedElementAt qb desc ownerRef indexExpr orDefault =
             DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb (buildProjectedRowset qb desc ownerRef) indexExpr orDefault
-        let buildDistinctByEntitySequence =
-            DBRefManyBuilderSetOps.buildDistinctByEntitySequence buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias DBRefManyBuilderElements.buildEntityValueExpr
-        let buildByFilterEntitySequence =
-            DBRefManyBuilderSetOps.buildByFilterEntitySequence buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias nullSafeEq DBRefManyBuilderElements.buildEntityValueExpr isFullyConstant (fun expr -> evaluateExpr<IEnumerable> expr)
-        let buildUnionByEntitySequence =
-            DBRefManyBuilderSetOps.buildUnionByEntitySequence buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias DBRefManyBuilderElements.buildEntityValueExpr
+        let buildDistinctByEntityRowset =
+            DBRefManyBuilderSetOps.buildDistinctByEntityRowset buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias DBRefManyBuilderElements.buildEntityValueExpr
+        let buildByFilterEntityRowset =
+            DBRefManyBuilderSetOps.buildByFilterEntityRowset buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias nullSafeEq DBRefManyBuilderElements.buildEntityValueExpr isFullyConstant (fun expr -> evaluateExpr<IEnumerable> expr)
+        let buildUnionByEntityRowset =
+            DBRefManyBuilderSetOps.buildUnionByEntityRowset buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias DBRefManyBuilderElements.buildEntityValueExpr
+
+        let buildSetOpFilteredRowset (rowsetSel: SqlSelect) (predExprOpt: Expression option) : SqlSelect =
+            match predExprOpt with
+            | None -> rowsetSel
+            | Some predExpr ->
+                match tryExtractLambdaExpression predExpr with
+                | ValueSome predLambda ->
+                    let rowAlias = nextAlias "_sr"
+                    let valueCore =
+                        { Distinct = false
+                          Projections = ProjectionSetOps.ofList [{ Alias = Some "Value"; Expr = SqlExpr.Column(Some rowAlias, "v") }]
+                          Source = Some(DerivedTable(rowsetSel, rowAlias))
+                          Joins = []
+                          Where = None
+                          GroupBy = []
+                          Having = None
+                          OrderBy = []
+                          Limit = None
+                          Offset = None }
+                    let valueSel = { Ctes = []; Body = SingleSelect valueCore }
+                    let predAlias = nextAlias "_sp"
+                    let predQb =
+                        { qb.ForSubquery(predAlias, predLambda) with
+                            JsonExtractSelfValue = false }
+                    let predDu = visitDu predLambda.Body predQb
+                    let predJoins = joinEdgesToClauses predQb.SourceContext.Joins
+                    let filteredCore =
+                        { Distinct = false
+                          Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = SqlExpr.Column(Some predAlias, "Value") }]
+                          Source = Some(DerivedTable(valueSel, predAlias))
+                          Joins = predJoins
+                          Where = Some predDu
+                          GroupBy = []
+                          Having = None
+                          OrderBy = []
+                          Limit = None
+                          Offset = None }
+                    { Ctes = []; Body = SingleSelect filteredCore }
+                | ValueNone ->
+                    raise (NotSupportedException(
+                        "Error: Cannot translate relation-backed DBRefMany.First/FirstOrDefault predicate after set operation.\nReason: The predicate is not a translatable lambda expression.\nFix: Pass the predicate as an inline lambda, not a delegate variable."))
+
+        let buildFirstLikeFromRowset (rowsetSel: SqlSelect) (predExprOpt: Expression option) : SqlExpr =
+            let filteredSel = buildSetOpFilteredRowset rowsetSel predExprOpt
+            let rowAlias = nextAlias "_sf"
+            let firstCore =
+                { Distinct = false
+                  Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Column(Some rowAlias, "v") }]
+                  Source = Some(DerivedTable(filteredSel, rowAlias))
+                  Joins = []
+                  Where = None
+                  GroupBy = []
+                  Having = None
+                  OrderBy = []
+                  Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L))
+                  Offset = None }
+            SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect firstCore }
+
+        let buildCountFromRowset (rowsetSel: SqlSelect) : SqlExpr =
+            let rowAlias = nextAlias "_sc"
+            let countCore =
+                { Distinct = false
+                  Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
+                  Source = Some(DerivedTable(rowsetSel, rowAlias))
+                  Joins = []
+                  Where = None
+                  GroupBy = []
+                  Having = None
+                  OrderBy = []
+                  Limit = None
+                  Offset = None }
+            SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect countCore }
+
+        let buildExistsFromRowset (rowsetSel: SqlSelect) (predExprOpt: Expression option) : SqlExpr =
+            let filteredSel = buildSetOpFilteredRowset rowsetSel predExprOpt
+            SqlExpr.Exists filteredSel
 
         // TakeWhile/SkipWhile — delegated to BuildSpecial.
         match desc.TakeWhileInfo with
@@ -428,11 +504,41 @@ module internal DBRefManyBuilder =
         // Set operations.
         match desc.SetOp with
         | Some (SetOperation.IntersectBy(rightKeys, keySel)) ->
-            ValueSome(buildByFilterEntitySequence qb desc ownerRef keySel rightKeys false)
+            let rowsetSel = buildByFilterEntityRowset qb desc ownerRef keySel rightKeys false
+            match desc.Terminal with
+            | Terminal.Select _ -> ValueSome(DBRefManyBuilderSetOps.buildEntitySequenceAggregate nextAlias rowsetSel)
+            | Terminal.Exists -> ValueSome(buildExistsFromRowset rowsetSel None)
+            | Terminal.Any pred -> ValueSome(buildExistsFromRowset rowsetSel pred)
+            | Terminal.Count | Terminal.LongCount -> ValueSome(buildCountFromRowset rowsetSel)
+            | Terminal.First pred
+            | Terminal.FirstOrDefault pred -> ValueSome(buildFirstLikeFromRowset rowsetSel pred)
+            | Terminal.ElementAt indexExpr -> ValueSome(DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb rowsetSel indexExpr false)
+            | Terminal.ElementAtOrDefault indexExpr -> ValueSome(DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb rowsetSel indexExpr true)
+            | _ -> ValueNone
         | Some (SetOperation.ExceptBy(rightKeys, keySel)) ->
-            ValueSome(buildByFilterEntitySequence qb desc ownerRef keySel rightKeys true)
+            let rowsetSel = buildByFilterEntityRowset qb desc ownerRef keySel rightKeys true
+            match desc.Terminal with
+            | Terminal.Select _ -> ValueSome(DBRefManyBuilderSetOps.buildEntitySequenceAggregate nextAlias rowsetSel)
+            | Terminal.Exists -> ValueSome(buildExistsFromRowset rowsetSel None)
+            | Terminal.Any pred -> ValueSome(buildExistsFromRowset rowsetSel pred)
+            | Terminal.Count | Terminal.LongCount -> ValueSome(buildCountFromRowset rowsetSel)
+            | Terminal.First pred
+            | Terminal.FirstOrDefault pred -> ValueSome(buildFirstLikeFromRowset rowsetSel pred)
+            | Terminal.ElementAt indexExpr -> ValueSome(DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb rowsetSel indexExpr false)
+            | Terminal.ElementAtOrDefault indexExpr -> ValueSome(DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb rowsetSel indexExpr true)
+            | _ -> ValueNone
         | Some (SetOperation.UnionBy(rightSource, keySel)) ->
-            ValueSome(buildUnionByEntitySequence qb desc ownerRef rightSource keySel)
+            let rowsetSel = buildUnionByEntityRowset qb desc ownerRef rightSource keySel
+            match desc.Terminal with
+            | Terminal.Select _ -> ValueSome(DBRefManyBuilderSetOps.buildEntitySequenceAggregate nextAlias rowsetSel)
+            | Terminal.Exists -> ValueSome(buildExistsFromRowset rowsetSel None)
+            | Terminal.Any pred -> ValueSome(buildExistsFromRowset rowsetSel pred)
+            | Terminal.Count | Terminal.LongCount -> ValueSome(buildCountFromRowset rowsetSel)
+            | Terminal.First pred
+            | Terminal.FirstOrDefault pred -> ValueSome(buildFirstLikeFromRowset rowsetSel pred)
+            | Terminal.ElementAt indexExpr -> ValueSome(DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb rowsetSel indexExpr false)
+            | Terminal.ElementAtOrDefault indexExpr -> ValueSome(DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb rowsetSel indexExpr true)
+            | _ -> ValueNone
         | Some _ ->
             ValueNone
         | None ->
@@ -552,7 +658,7 @@ module internal DBRefManyBuilder =
             | Terminal.MaxBy keySel ->
                 let desc = { desc with SortKeys = [(keySel, SortDirection.Desc)] }
                 buildEntityElement qb desc ownerRef None false
-            | Terminal.DistinctBy keySel -> buildDistinctByEntitySequence qb desc ownerRef keySel
+            | Terminal.DistinctBy keySel -> DBRefManyBuilderSetOps.buildEntitySequenceAggregate nextAlias (buildDistinctByEntityRowset qb desc ownerRef keySel)
             | Terminal.CountBy _ -> failwith "CountBy is handled above; this branch is unreachable."
 
         ValueSome result

@@ -71,7 +71,7 @@ module internal DBRefManyBuilderSetOps =
               Offset = None }
         SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
 
-    let buildDistinctByEntitySequence
+    let buildDistinctByEntityRowset
         (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore * string)
         (tryExtractLambdaExpression: Expression -> ValueOption<LambdaExpression>)
         (visitDu: Expression -> QueryBuilder -> SqlExpr)
@@ -82,7 +82,7 @@ module internal DBRefManyBuilderSetOps =
         (desc: QueryDescriptor)
         (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef)
         (keyExpr: Expression)
-        : SqlExpr =
+        : SqlSelect =
         match tryExtractLambdaExpression keyExpr with
         | ValueSome keyLambda ->
             let tgtAlias, lnkAlias, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
@@ -122,12 +122,11 @@ module internal DBRefManyBuilderSetOps =
                   OrderBy = []
                   Limit = None
                   Offset = None }
-            let filteredSel = { Ctes = []; Body = SingleSelect filteredCore }
-            buildEntitySequenceAggregate nextAlias filteredSel
+            { Ctes = []; Body = SingleSelect filteredCore }
         | ValueNone ->
             raise (NotSupportedException("Cannot extract key selector for DistinctBy."))
 
-    let buildByFilterEntitySequence
+    let buildByFilterEntityRowset
         (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore * string)
         (tryExtractLambdaExpression: Expression -> ValueOption<LambdaExpression>)
         (visitDu: Expression -> QueryBuilder -> SqlExpr)
@@ -143,13 +142,13 @@ module internal DBRefManyBuilderSetOps =
         (keyExpr: Expression)
         (rightKeysExpr: Expression)
         (negate: bool)
-        : SqlExpr =
+        : SqlSelect =
         match tryExtractLambdaExpression keyExpr with
         | ValueSome keyLambda ->
             let rightKeys = evaluateConstantEnumerable isFullyConstant evaluateExpr rightKeysExpr
             match rightKeys with
             | [] when negate ->
-                buildDistinctByEntitySequence buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias buildEntityValueExpr qb desc ownerRef keyExpr
+                buildDistinctByEntityRowset buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias buildEntityValueExpr qb desc ownerRef keyExpr
             | [] ->
                 let emptyCore =
                     { Distinct = false
@@ -162,7 +161,7 @@ module internal DBRefManyBuilderSetOps =
                       OrderBy = []
                       Limit = None
                       Offset = None }
-                buildEntitySequenceAggregate nextAlias { Ctes = []; Body = SingleSelect emptyCore }
+                { Ctes = []; Body = SingleSelect emptyCore }
             | _ ->
                 let tgtAlias, lnkAlias, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
                 let subQb = qb.ForSubquery(tgtAlias, keyLambda, subqueryRootTable = targetTable)
@@ -209,11 +208,11 @@ module internal DBRefManyBuilderSetOps =
                       OrderBy = []
                       Limit = None
                       Offset = None }
-                buildEntitySequenceAggregate nextAlias { Ctes = []; Body = SingleSelect filteredCore }
+                { Ctes = []; Body = SingleSelect filteredCore }
         | ValueNone ->
             raise (NotSupportedException("Cannot extract key selector for DBRefMany By-set operator."))
 
-    let buildUnionByEntitySequence
+    let buildUnionByEntityRowset
         (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore * string)
         (tryExtractLambdaExpression: Expression -> ValueOption<LambdaExpression>)
         (visitDu: Expression -> QueryBuilder -> SqlExpr)
@@ -225,7 +224,7 @@ module internal DBRefManyBuilderSetOps =
         (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef)
         (rightSourceExpr: Expression)
         (keyExpr: Expression)
-        : SqlExpr =
+        : SqlSelect =
         match tryExtractLambdaExpression keyExpr with
         | ValueSome keyLambda ->
             let rightItems = evaluateConstantEnumerable isFullyConstant (evaluateExpr<IEnumerable>) rightSourceExpr
@@ -346,6 +345,6 @@ module internal DBRefManyBuilderSetOps =
                     ]
                   Limit = None
                   Offset = None }
-            buildEntitySequenceAggregate nextAlias { Ctes = []; Body = SingleSelect filteredCore }
+            { Ctes = []; Body = SingleSelect filteredCore }
         | ValueNone ->
             raise (NotSupportedException("Cannot extract key selector for DBRefMany UnionBy."))
