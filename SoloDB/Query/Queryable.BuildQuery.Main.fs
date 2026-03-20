@@ -28,7 +28,11 @@ module internal QueryableBuildQueryMain =
     open QueryableBuildQueryPartA
     open QueryableBuildQueryPartB
     open QueryableBuildQueryPartC
-    let rec internal buildQuery<'T> (sourceCtx: QueryContext) (statements: SQLSubquery ResizeArray) (e: Expression) =
+    let rec internal buildQuery<'T> (translationStepCounter: int ref) (sourceCtx: QueryContext) (statements: SQLSubquery ResizeArray) (e: Expression) =
+        let next = translationStepCounter.Value + 1
+        translationStepCounter.Value <- next
+        if next > maxTranslationSteps then
+            raise (NotSupportedException translationStepLimitMessage)
         statements.Add (emptySQLStatement () |> Simple)
 
         let mutable tableName = ""
@@ -169,7 +173,7 @@ module internal QueryableBuildQueryMain =
                             sourceCtx
                             tableName
                             statements
-                            (fun innerCtx vars expression -> translateQuery<'T> innerCtx vars expression)
+                            (fun innerCtx vars expression -> translateQuery<'T> translationStepCounter innerCtx vars expression)
                             m
                     | SupportedLinqMethods.All
                     | SupportedLinqMethods.Any
@@ -192,7 +196,7 @@ module internal QueryableBuildQueryMain =
                             sourceCtx
                             tableName
                             statements
-                            (fun innerCtx vars expression -> translateQuery<'T> innerCtx vars expression)
+                            (fun innerCtx vars expression -> translateQuery<'T> translationStepCounter innerCtx vars expression)
                             m
 
             idx <- idx + 1
@@ -212,8 +216,8 @@ module internal QueryableBuildQueryMain =
         | ComplexDu _ ->
             ()
 
-    and internal translateQuery<'T> (sourceCtx: QueryContext) (vars: Dictionary<string, obj>) (expression: Expression) : SqlSelect =
+    and internal translateQuery<'T> (translationStepCounter: int ref) (sourceCtx: QueryContext) (vars: Dictionary<string, obj>) (expression: Expression) : SqlSelect =
         let statements = ResizeArray<SQLSubquery>()
-        buildQuery<'T> sourceCtx statements expression
+        buildQuery<'T> translationStepCounter sourceCtx statements expression
         buildLayersDu<'T> sourceCtx vars statements
     

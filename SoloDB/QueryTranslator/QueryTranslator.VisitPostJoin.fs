@@ -77,6 +77,7 @@ module internal QueryTranslatorVisitPostJoin =
 
     /// Ensure a LEFT JOIN exists for a DBRef<T>.Value access. Returns the alias.
     and internal ensureDBRefJoin (qb: QueryBuilder) (valueMemberExpr: MemberExpression) : string =
+        qb.StepTranslation()
         let dbrefExpr = unwrapConvert valueMemberExpr.Expression
         let targetType = valueMemberExpr.Type
         let ctx = qb.SourceContext

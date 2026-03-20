@@ -11,6 +11,12 @@ open Utils
 open SqlDu.Engine.C1.Spec
 
 module internal QueryTranslatorBaseTypes =
+    let internal maxTranslationSteps = 10000
+    let internal translationStepLimitMessage =
+        "Error: Query too complex for SQL translation.\n" +
+        "Reason: Expression translation exceeded the internal step limit and may be non-terminating on this composition.\n" +
+        "Fix: Simplify the LINQ chain, split it into smaller queries, or call .AsEnumerable() before the unsupported composition."
+
     /// <summary>
     /// Represents a member access expression in a more abstract way.
     /// This private type simplifies handling different forms of member access.
@@ -128,6 +134,8 @@ module internal QueryTranslatorBaseTypes =
             /// <summary>Maps outer-scope ParameterExpressions to their SQL alias (quoted, e.g. '"RecursiveNode"').
             /// Used by visitParameterDu and related Id fast paths to resolve outer-captured variables correctly across ForSubquery boundaries.</summary>
             OuterParameterAliases: Dictionary<ParameterExpression, string>
+            /// <summary>Shared translation step counter for hard fail-closed non-termination protection.</summary>
+            TranslationStepCounter: int ref
         }
         /// <summary>
         /// Returns the generated SQL query string.
@@ -153,6 +161,12 @@ module internal QueryTranslatorBaseTypes =
                 IdParameterIndex = -1
                 OuterParameterAliases = outerAliases
                 SourceContext = this.SourceContext.CloneForSubquery(?rootTable = subqueryRootTable) }
+
+        member internal this.StepTranslation() =
+            let next = this.TranslationStepCounter.Value + 1
+            this.TranslationStepCounter.Value <- next
+            if next > maxTranslationSteps then
+                raise (NotSupportedException translationStepLimitMessage)
 
         // Whitelisted internal accessors for cross-file visitor split boundary.
         /// Allocate a DU parameter: stores value in Variables dict, returns SqlExpr.Parameter or FunctionCall("jsonb", [Parameter]).
@@ -212,4 +226,5 @@ module internal QueryTranslatorBaseTypes =
                 ParamCounter = ref 0
                 DuHandlerResult = ref ValueNone
                 OuterParameterAliases = Dictionary<ParameterExpression, string>()
+                TranslationStepCounter = ref 0
             }

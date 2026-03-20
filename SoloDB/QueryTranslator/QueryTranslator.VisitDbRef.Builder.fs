@@ -334,6 +334,7 @@ module internal DBRefManyBuilder =
                 SqlExpr.Literal(SqlLiteral.Null)
 
     let tryBuild (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) : SqlExpr voption =
+        qb.StepTranslation()
         // Depth guard — check all predicate/projection expressions for nested DBRefMany depth.
         let peelerDepth = QueryTranslatorVisitDbRefPeelers.countDbRefManyDepth
         let maxExprDepth =

@@ -66,6 +66,7 @@ module internal QueryableHelperBase =
             ParamCounter = ref 0
             DuHandlerResult = ref ValueNone
             OuterParameterAliases = Dictionary<ParameterExpression, string>()
+            TranslationStepCounter = ref 0
         }
         let firstRound =
             PassRunner.runPipeline [

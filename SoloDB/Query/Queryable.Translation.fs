@@ -179,7 +179,7 @@ module internal QueryableTranslationCore =
         preloadQueryContextMetadata ctx metadataConnection
 
         // Build the inner query as a SqlSelect DU.
-        let innerSelect = translateQuery<'T> ctx variables expression
+        let innerSelect = translateQuery<'T> (ref 0) ctx variables expression
 
         let shape = getRelationShape typeof<'T>
         let hasSingleRelations = hasRelations && shape.HasSingle

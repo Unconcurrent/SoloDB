@@ -210,6 +210,7 @@ module internal QueryTranslatorVisitCore =
     /// ALL expression families return proper SqlExpr DU nodes.
     /// Pre-expression handlers return DU via qb.DuHandlerResult.
     and internal visitDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
+        qb.StepTranslation()
         // Pre-expression handlers (DBRef etc.) — return DU directly via DuHandlerResult
         qb.DuHandlerResult.Value <- ValueNone
         if runHandler preExpressionHandler qb exp then
