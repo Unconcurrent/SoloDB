@@ -202,7 +202,6 @@ module internal QueryableBuildQueryPartA =
                                           Descending = o.Descending
                                           RawExpr = o.RawExpr })
                                     |> Seq.toArray
-                                s.Orders.Clear()
                             | _ -> ()
                     addComplexFinal statements (fun ctx ->
                         // SELECT -1 AS Id, Value FROM (inner) o GROUP BY {identity expr}
@@ -286,9 +285,9 @@ module internal QueryableBuildQueryPartA =
                             | _ -> ()
                     if foundOrders.Length = 0 then
                         raise (InvalidOperationException(
-                            $"Error: {opName} requires explicit ordering.\n" +
-                            "Reason: Window-based conditional filtering needs a deterministic row order.\n" +
-                            $"Fix: Add .OrderBy() or .OrderByDescending() before .{opName}()."))
+                            "Error: TakeWhile/SkipWhile requires explicit ordering.\n" +
+                            "Reason: TakeWhile/SkipWhile needs a deterministic row order.\n" +
+                            "Fix: Add .OrderBy() before .TakeWhile(), or set OrderBy on the [SoloRef] attribute."))
                     let capturedOrders = foundOrders
                     let predExpr = m.Expressions.[0]
                     addComplexFinal statements (fun ctx ->

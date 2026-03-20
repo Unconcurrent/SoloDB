@@ -13,6 +13,7 @@ open SoloDatabase.QueryTranslatorVisitDbRefPeelers3
 open SoloDatabase.DBRefManyDescriptor
 open DBRefTypeHelpers
 open Utils
+open SoloDatabase.Attributes
 
 /// Builds SQL DU trees from a unified DBRefManyQueryDescriptor.
 /// Replaces the order-dependent per-handler peeling in VisitDbRef.
@@ -38,6 +39,25 @@ module internal DBRefManyBuilder =
         match ctx.TryResolveRelationTarget(ownerCollection, propName) with
         | Some mapped when not (String.IsNullOrWhiteSpace mapped) -> formatName mapped
         | _ -> ctx.ResolveCollectionForType(typeIdentityKey targetType, defaultTable)
+
+    let private tryGetRelationOrderByForTakeWhile
+        (ownerRef: DBRefManyOwnerRef)
+        (tgtAlias: string)
+        (lnkAlias: string)
+        : OrderBy list voption =
+        let relationOrder =
+            match ownerRef.PropertyExpr.Member with
+            | :? Reflection.PropertyInfo as prop ->
+                match prop.GetCustomAttributes(typeof<SoloRefAttribute>, true) |> Seq.tryHead with
+                | Some attrObj -> (attrObj :?> SoloRefAttribute).OrderBy
+                | None -> DBRefOrder.Undefined
+            | _ -> DBRefOrder.Undefined
+
+        match relationOrder with
+        | DBRefOrder.TargetId ->
+            ValueSome [{ Expr = SqlExpr.Column(Some tgtAlias, "Id"); Direction = SortDirection.Asc }]
+        | _ ->
+            ValueNone
 
     let mutable private aliasCounter = 0L
     let internal nextAlias prefix =
@@ -111,7 +131,6 @@ module internal DBRefManyBuilder =
                     result
                 | ValueNone ->
                     raise (NotSupportedException("Cannot extract key selector for OrderBy.")))
-
         let limitDu =
             match desc.Limit with
             | Some e ->
@@ -274,7 +293,7 @@ module internal DBRefManyBuilder =
         // TakeWhile/SkipWhile — delegated to BuildSpecial.
         match desc.TakeWhileInfo with
         | Some (twPredLambda, isTakeWhile) ->
-            DBRefManyBuildSpecial.tryBuildTakeWhile qb desc buildCorrelatedCore mkSubCore nextAlias ownerRef twPredLambda isTakeWhile
+            DBRefManyBuildSpecial.tryBuildTakeWhile qb desc buildCorrelatedCore mkSubCore nextAlias tryGetRelationOrderByForTakeWhile ownerRef twPredLambda isTakeWhile
         | None ->
 
         // GroupBy terminals — delegated to BuildSpecial.

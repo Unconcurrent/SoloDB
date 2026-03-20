@@ -146,19 +146,27 @@ module internal DBRefManyBuildSpecial =
         (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore * string)
         (mkSubCore: Projection list -> TableSource option -> SqlExpr option -> SelectCore)
         (nextAlias: string -> string)
+        (tryGetRelationOrderByForTakeWhile: DBRefManyDescriptor.DBRefManyOwnerRef -> string -> string -> OrderBy list voption)
         (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef)
         (twPredLambda: LambdaExpression) (isTakeWhile: bool) : SqlExpr voption =
 
-        if desc.SortKeys.IsEmpty then
-            raise (NotSupportedException(
-                "Error: TakeWhile/SkipWhile requires an explicit OrderBy.\nFix: Add .OrderBy(key) before .TakeWhile(pred)."))
-
-        let tgtAlias, _, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
+        let tgtAlias, lnkAlias, baseCore0, targetTable = buildCorrelatedCore qb desc ownerRef []
+        let effectiveOrderBy =
+            match baseCore0.OrderBy with
+            | [] ->
+                match tryGetRelationOrderByForTakeWhile ownerRef tgtAlias lnkAlias with
+                | ValueSome orderBy -> orderBy
+                | ValueNone ->
+                    raise (InvalidOperationException(
+                        "Error: TakeWhile/SkipWhile requires explicit ordering.\n" +
+                        "Reason: TakeWhile/SkipWhile needs a deterministic row order.\n" +
+                        "Fix: Add .OrderBy() before .TakeWhile(), or set OrderBy on the [SoloRef] attribute."))
+            | orderBy -> orderBy
         let twSubQb = qb.ForSubquery(tgtAlias, twPredLambda, subqueryRootTable = targetTable)
         let twPredDu = visitDu twPredLambda.Body twSubQb
         let twJoins = DBRefManyHelpers.joinEdgesToClauses twSubQb.SourceContext.Joins
-        let baseCore = { baseCore with Joins = baseCore.Joins @ twJoins }
-        let sortKeyDuPairs = baseCore.OrderBy |> List.map (fun ob -> (ob.Expr, ob.Direction))
+        let baseCore = { baseCore0 with Joins = baseCore0.Joins @ twJoins; OrderBy = effectiveOrderBy }
+        let sortKeyDuPairs = effectiveOrderBy |> List.map (fun ob -> (ob.Expr, ob.Direction))
         let windowSpec = { Kind = NamedWindowFunction "SUM"; Arguments = [SqlExpr.Unary(UnaryOperator.Not, twPredDu)]; PartitionBy = []; OrderBy = sortKeyDuPairs }
         let cfExpr = SqlExpr.WindowCall windowSpec
 

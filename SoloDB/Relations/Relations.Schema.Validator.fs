@@ -3,6 +3,7 @@ module internal SoloDatabase.RelationsSchemaValidator
 open System
 open System.Reflection
 open System.Collections.Generic
+open Microsoft.FSharp.Reflection
 open Microsoft.Data.Sqlite
 open SoloDatabase
 open SoloDatabase.Attributes
@@ -32,8 +33,49 @@ let rec private containsNestedRelationRefType (t: Type) =
     else
         false
 
+let private isFSharpUnionType (t: Type) =
+    not (isNull t) && FSharpType.IsUnion(t, true)
+
+let private containsUnionHostedRelationRefType (rootType: Type) =
+    let visited = HashSet<Type>()
+
+    let rec scan (t: Type) =
+        if isNull t then false
+        elif DBRefTypeHelpers.isOptionWrappedRelationRefType t || DBRefTypeHelpers.isAnyRelationRefType t then true
+        elif t = typeof<string> || t.IsPrimitive || t.IsEnum
+             || t = typeof<decimal> || t = typeof<Guid>
+             || t = typeof<DateTime> || t = typeof<DateTimeOffset>
+             || t = typeof<DateOnly> || t = typeof<TimeOnly>
+             || t = typeof<TimeSpan> then false
+        elif not (visited.Add t) then false
+        elif t.IsArray then
+            scan (t.GetElementType())
+        elif isFSharpUnionType t then
+            FSharpType.GetUnionCases(t, true)
+            |> Array.exists (fun unionCase ->
+                unionCase.GetFields()
+                |> Array.exists (fun field -> scan field.PropertyType))
+        elif FSharpType.IsRecord(t, true) then
+            FSharpType.GetRecordFields(t, true)
+            |> Array.exists (fun field -> scan field.PropertyType)
+        elif t.IsGenericType && (t.GetGenericArguments() |> Array.exists scan) then
+            true
+        elif t.IsClass then
+            t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+            |> Array.exists (fun prop ->
+                prop.CanRead
+                && prop.GetIndexParameters().Length = 0
+                && scan prop.PropertyType)
+        else
+            false
+
+    isFSharpUnionType rootType && scan rootType
+
 let private validateRelationTargetType (ownerType: Type) (prop: PropertyInfo) (targetType: Type) =
-    if targetType.IsInterface then
+    if isFSharpUnionType targetType then
+        raise (InvalidOperationException(
+            $"Error: Invalid relation target on {ownerType.FullName}.{prop.Name}.\nReason: Target type '{targetType.FullName}' is an F# discriminated union. DBRef/DBRefMany targets require stable property paths for relation tracking, but DU cases serialize as tagged JSON values.\nFix: Use a record or class type instead."))
+    elif targetType.IsInterface then
         raise (InvalidOperationException(
             $"Error: Invalid relation target on {ownerType.FullName}.{prop.Name}.\nReason: Target type '{targetType.FullName}' is an interface.\nFix: Use a concrete class with a writable int64 Id property."))
     elif targetType.IsAbstract && not (JsonFunctions.mustIncludeTypeInformationInSerializationFn targetType) then
@@ -43,6 +85,10 @@ let private validateRelationTargetType (ownerType: Type) (prop: PropertyInfo) (t
         getWritableInt64IdPropertyOrThrow targetType |> ignore
 
 let private buildRelationSpecs (ownerType: Type) =
+    if containsUnionHostedRelationRefType ownerType then
+        raise (InvalidOperationException(
+            $"Error: Invalid relation declaration on '{ownerType.FullName}'.\nReason: DBRef/DBRefMany properties inside F# discriminated unions are not supported. DU cases serialize as tagged JSON values without stable property paths for relation tracking.\nFix: Use a record or class type to hold relation properties."))
+
     ownerType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
     |> Array.choose (fun prop ->
         if not prop.CanRead then
