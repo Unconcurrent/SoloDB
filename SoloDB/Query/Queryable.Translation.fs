@@ -69,6 +69,8 @@ module internal QueryableTranslationCore =
             | SupportedLinqMethods.SkipWhile
             | SupportedLinqMethods.First
             | SupportedLinqMethods.FirstOrDefault
+            | SupportedLinqMethods.ElementAt
+            | SupportedLinqMethods.ElementAtOrDefault
             | SupportedLinqMethods.DefaultIfEmpty
             | SupportedLinqMethods.Last
             | SupportedLinqMethods.LastOrDefault

@@ -244,6 +244,8 @@ module internal QueryableHelperBase =
         | "SkipWhile" -> Some SupportedLinqMethods.SkipWhile
         | "First" -> Some SupportedLinqMethods.First
         | "FirstOrDefault" -> Some SupportedLinqMethods.FirstOrDefault
+        | "ElementAt" -> Some SupportedLinqMethods.ElementAt
+        | "ElementAtOrDefault" -> Some SupportedLinqMethods.ElementAtOrDefault
         | "DefaultIfEmpty" -> Some SupportedLinqMethods.DefaultIfEmpty
         | "Last" -> Some SupportedLinqMethods.Last
         | "LastOrDefault" -> Some SupportedLinqMethods.LastOrDefault

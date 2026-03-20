@@ -50,6 +50,8 @@ type internal SupportedLinqMethods =
 | SkipWhile
 | First
 | FirstOrDefault
+| ElementAt
+| ElementAtOrDefault
 | DefaultIfEmpty
 | Last
 | LastOrDefault

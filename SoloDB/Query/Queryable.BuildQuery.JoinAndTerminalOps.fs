@@ -125,7 +125,8 @@ Fix: Use another SoloDB IQueryable rooted in a collection or move the join after
                         sourceCtx tableName statements translateQueryFn m.Expressions
 
                 | SupportedLinqMethods.Single | SupportedLinqMethods.SingleOrDefault
-                | SupportedLinqMethods.First | SupportedLinqMethods.FirstOrDefault ->
+                | SupportedLinqMethods.First | SupportedLinqMethods.FirstOrDefault
+                | SupportedLinqMethods.ElementAt | SupportedLinqMethods.ElementAtOrDefault ->
                     match m.Value, m.Expressions with
                     | (SupportedLinqMethods.Single | SupportedLinqMethods.First), [||] -> ()
                     | (SupportedLinqMethods.Single | SupportedLinqMethods.First), [| predicate |] when isExpressionLikeArgument predicate ->
@@ -137,15 +138,23 @@ Fix: Use another SoloDB IQueryable rooted in a collection or move the join after
                     | (SupportedLinqMethods.SingleOrDefault | SupportedLinqMethods.FirstOrDefault), [| predicate; _defaultValue |]
                         when isExpressionLikeArgument predicate ->
                         addFilter statements predicate
+                    | (SupportedLinqMethods.ElementAt | SupportedLinqMethods.ElementAtOrDefault), [| index |] ->
+                        statements.Add(Simple { emptySQLStatement () with Skip = Some index; Take = Some (ExpressionHelper.constant 1) })
                     | _ ->
                         raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
 
                     let limit =
                         match m.Value with
                         | SupportedLinqMethods.Single | SupportedLinqMethods.SingleOrDefault -> 2
+                        | SupportedLinqMethods.ElementAt | SupportedLinqMethods.ElementAtOrDefault -> 1
                         | _ -> 1
 
-                    addTake statements (ExpressionHelper.constant limit)
+                    match m.Value with
+                    | SupportedLinqMethods.ElementAt
+                    | SupportedLinqMethods.ElementAtOrDefault ->
+                        ()
+                    | _ ->
+                        addTake statements (ExpressionHelper.constant limit)
 
                 | SupportedLinqMethods.DefaultIfEmpty ->
                     // Edge case 11: SupportedLinqMethods.DefaultIfEmpty with UNION ALL — synthetic row when result set empty
