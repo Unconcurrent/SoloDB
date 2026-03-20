@@ -30,6 +30,10 @@ module internal QueryTranslatorVisitCore =
     // visitLambda, newObject, containsImpl, emitStringOperand).
     // All callers now use visitDu + SqlDuMinimalEmit.emitExpr.
 
+    let private isByRefLikeType (t: Type) =
+        t.CustomAttributes
+        |> Seq.exists (fun attr -> attr.AttributeType.FullName = "System.Runtime.CompilerServices.IsByRefLikeAttribute")
+
     let rec private emitStringOperandDu (qb: QueryBuilder) (ignoreCase: bool) (expr: Expression) : SqlExpr =
         if ignoreCase then SqlExpr.FunctionCall("TO_LOWER", [visitDu expr qb])
         else visitDu expr qb
@@ -169,8 +173,18 @@ module internal QueryTranslatorVisitCore =
                         sprintf "Error: Member access '%O' is not supported.\nReason: The member cannot be translated to SQL in this context.\nFix: Simplify the expression or move it after AsEnumerable()." originalExpr.Member.Name))
 
     and private containsImplDu (qb: QueryBuilder) (array: Expression) (value: Expression) : SqlExpr =
+        let rec normalizeContainsSource (expr: Expression) =
+            match unwrapConvert expr with
+            | :? MethodCallExpression as mc when isByRefLikeType mc.Type && mc.Type.Name = "ReadOnlySpan`1" && mc.Arguments.Count >= 1 ->
+                match mc.Method.Name with
+                | "AsSpan"
+                | "op_Implicit" -> normalizeContainsSource mc.Arguments.[0]
+                | _ -> expr
+            | :? NewExpression as ne when isByRefLikeType ne.Type && ne.Type.Name = "ReadOnlySpan`1" && ne.Arguments.Count >= 1 ->
+                normalizeContainsSource ne.Arguments.[0]
+            | other -> other
         let arrayQb = if qb.TableNameDot = "" then {qb with TableNameDot = "o."} else qb
-        let arrayExpr = visitDu array arrayQb
+        let arrayExpr = visitDu (normalizeContainsSource array) arrayQb
         let whereExpr =
             if isPrimitiveSQLiteType value.Type then
                 SqlExpr.Binary(SqlExpr.Column(Some "json_each", "Value"), BinaryOperator.Eq, visitDu value qb)
@@ -225,6 +239,7 @@ module internal QueryTranslatorVisitCore =
         // Fully-constant early-out (same guard as legacy visit)
         if exp.NodeType <> ExpressionType.Lambda
             && exp.NodeType <> ExpressionType.Quote
+            && not (isByRefLikeType exp.Type)
             && isFullyConstant exp
             && (match exp with :? ConstantExpression as ce when ce.Value = null -> false | _ -> true) then
             qb.AllocateParamExpr(evaluateExpr<obj> exp)
