@@ -5,71 +5,13 @@ open System.Linq.Expressions
 open SqlDu.Engine.C1.Spec
 open DBRefTypeHelpers
 open SoloDatabase.DBRefManyDescriptor
+open SoloDatabase.DBRefManyExtractorHelpers
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorVisitPost
 
-/// Unified extraction: walks a DBRefMany expression tree from terminal inward,
-/// collecting ALL operators into a QueryDescriptor regardless of order.
 module internal DBRefManyExtractor =
-
-    let private isDecimalLikeType (t: Type) =
-        let t =
-            match Nullable.GetUnderlyingType t with
-            | null -> t
-            | underlying -> underlying
-        t = typeof<decimal>
-
-    let private mkIdentityLambdaForDbRefMany (expr: Expression) =
-        let targetType =
-            match expr.Type.GetGenericArguments() |> Array.tryHead with
-            | Some t -> t
-            | None -> raise (InvalidOperationException("Could not resolve DBRefMany target type for identity materialization."))
-        let p = Expression.Parameter(targetType)
-        Expression.Lambda(p, [| p |])
-
-    /// Extract the source expression from a MethodCallExpression.
-    let private getSource (mce: MethodCallExpression) =
-        if not (isNull mce.Object) then mce.Object
-        elif mce.Arguments.Count > 0 then mce.Arguments.[0]
-        else null
-
-    /// Extract the first argument (predicate/selector/value) from a MethodCallExpression.
-    let private getArg (mce: MethodCallExpression) =
-        if not (isNull mce.Object) then
-            if mce.Arguments.Count >= 1 then Some mce.Arguments.[0] else None
-        elif mce.Arguments.Count >= 2 then Some mce.Arguments.[1]
-        else None
-
-    /// Check if an expression is a DBRefMany type or wraps one via OfType/OrderBy/Where etc.
-    let rec private isDBRefManyChain (expr: Expression) : bool =
-        let e = unwrapConvert expr
-        if isDBRefManyType e.Type then true
-        else
-            match e with
-            | :? MethodCallExpression as mc ->
-                let src = getSource mc
-                not (isNull src) && isDBRefManyChain src
-            | _ -> false
-
-    /// Try to extract a terminal + operator chain from an expression.
-    /// Returns None if the expression is not a DBRefMany chain.
     let tryExtract (expr: Expression) : QueryDescriptor voption =
-        // First, identify the terminal and peel it.
-        // Pre-peel Distinct, ToList, ToArray from the outermost expression.
-        let mutable outerDistinct = false
-        let mutable outerMaterialize = false
-        let rec preProcess (e: Expression) =
-            match e with
-            | :? MethodCallExpression as mc when mc.Method.Name = "Distinct" ->
-                outerDistinct <- true
-                let src = getSource mc
-                if isNull src then e else preProcess src
-            | :? MethodCallExpression as mc when mc.Method.Name = "ToList" || mc.Method.Name = "ToArray" ->
-                outerMaterialize <- true
-                let src = getSource mc
-                if isNull src then e else preProcess src
-            | _ -> e
-        let expr = preProcess expr
+        let expr, outerDistinct, outerMaterialize = preprocessRoot expr
 
         match expr with
         | :? MethodCallExpression as mce ->
@@ -78,7 +20,6 @@ module internal DBRefManyExtractor =
             else
             let mutable countPredicate: Expression option = None
 
-            // Determine terminal type.
             let terminalOpt =
                 match mce.Method.Name with
                 | "Any" ->
@@ -113,9 +54,7 @@ module internal DBRefManyExtractor =
                     | None -> Some Terminal.AverageProjected
                 | "Contains" -> getArg mce |> Option.map Terminal.Contains
                 | "Select" ->
-                    // Select as terminal: materializes DBRefMany to json_group_array.
                     getArg mce |> Option.map Terminal.Select
-                // L4a element-access terminals.
                 | "First" -> Some (Terminal.First(getArg mce))
                 | "FirstOrDefault" -> Some (Terminal.FirstOrDefault(getArg mce))
                 | "Last" -> Some (Terminal.Last(getArg mce))
@@ -128,8 +67,6 @@ module internal DBRefManyExtractor =
                 | "MinBy" -> getArg mce |> Option.map Terminal.MinBy
                 | "MaxBy" -> getArg mce |> Option.map Terminal.MaxBy
                 | "DistinctBy" -> getArg mce |> Option.map Terminal.DistinctBy
-                // R55: Intermediate operators as outermost — use identity Select as terminal.
-                // The source is set to mce itself (not mce's source) so walkChain processes the operator.
                 | "Order" | "OrderDescending" | "UnionBy" | "IntersectBy" | "ExceptBy" ->
                     let identityLambda = mkIdentityLambdaForDbRefMany mce
                     Some (Terminal.Select(identityLambda :> Expression))
@@ -143,22 +80,14 @@ module internal DBRefManyExtractor =
             match terminalOpt with
             | None -> ValueNone
             | Some terminal ->
-
-            // For R55 intermediate-as-terminal operators, the source must include the operator itself
-            // so walkChain processes it. For normal terminals, source = getSource(mce) which skips the terminal.
             let source =
                 match mce.Method.Name with
                 | "DistinctBy" | "Order" | "OrderDescending" | "UnionBy" | "IntersectBy" | "ExceptBy" ->
                     mce :> Expression  // Include the operator in the chain
                 | _ -> source
 
-            // Check if the source chain involves DBRefMany.
-            if not (isDBRefManyChain source) then ValueNone
+            if not (isDBRefManyChain unwrapConvert isDBRefManyType source) then ValueNone
             else
-
-            // Walk the source chain inward, collecting operators.
-            // seenBoundary: once Take/Skip is encountered, all subsequent operators are inner (pre-bound).
-            // Operators encountered BEFORE Take/Skip (outermost-first) are post-bound (outer scope).
             let mutable seenBoundary = false
             let mutable wheres = ResizeArray<Expression>()
             let mutable sortKeys = ResizeArray<Expression * SortDirection>()
@@ -166,8 +95,6 @@ module internal DBRefManyExtractor =
             let mutable postBoundSortKeys = ResizeArray<Expression * SortDirection>()
             let mutable postBoundLimit: Expression option = None
             let mutable postBoundOffset: Expression option = None
-            // Track whether we've seen an OrderBy during outermost-first walk.
-            // Once seen, any inner OrderBy/ThenBy belongs to a replaced sort scope and must be skipped.
             let mutable seenOrderBy = false
             let mutable limit: Expression option = None
             let mutable offset: Expression option = None
@@ -435,58 +362,32 @@ module internal DBRefManyExtractor =
             | Some pred -> wheres.Add(pred)
             | None -> ()
 
-            ValueSome {
-                Source = innerSource
-                OfTypeName = ofTypeName
-                WherePredicates = wheres |> Seq.toList
-                SortKeys = sortKeys |> Seq.toList
-                Limit = limit
-                Offset = offset
-                PostBoundWherePredicates = postBoundWheres |> Seq.toList
-                PostBoundSortKeys = postBoundSortKeys |> Seq.toList
-                PostBoundLimit = postBoundLimit
-                PostBoundOffset = postBoundOffset
-                TakeWhileInfo = takeWhileInfo
-                GroupByKey = groupByKey
-                Distinct = distinct || outerDistinct
-                SelectProjection = finalSelectProj
-                SetOp = setOp
-                Terminal = finalTerminal
-                GroupByHavingPredicate = finalGroupByHaving
-            }
+            ValueSome(
+                buildDescriptor
+                    innerSource
+                    ofTypeName
+                    wheres
+                    sortKeys
+                    limit
+                    offset
+                    postBoundWheres
+                    postBoundSortKeys
+                    postBoundLimit
+                    postBoundOffset
+                    takeWhileInfo
+                    groupByKey
+                    (distinct || outerDistinct)
+                    finalSelectProj
+                    setOp
+                    finalTerminal
+                    finalGroupByHaving)
 
         // Non-MethodCall expressions (MemberExpression for .Count property, etc.)
         | :? MemberExpression as me when me.Member.Name = "Count" && not (isNull me.Expression) ->
-            let inner = unwrapConvert me.Expression
-            if isDBRefManyType inner.Type then
-                ValueSome {
-                    Source = inner
-                    OfTypeName = None; WherePredicates = []; SortKeys = []
-                    Limit = None; Offset = None
-                    PostBoundWherePredicates = []; PostBoundSortKeys = []
-                    PostBoundLimit = None; PostBoundOffset = None
-                    TakeWhileInfo = None
-                    GroupByKey = None; Distinct = false; SelectProjection = None
-                    SetOp = None; Terminal = Terminal.Count
-                    GroupByHavingPredicate = None
-                }
-            else ValueNone
+            tryBuildCountPropertyDescriptor unwrapConvert isDBRefManyType me
 
         | :? MemberExpression as me when outerMaterialize ->
             let memberExpr = unwrapConvert (me :> Expression)
-            if isDBRefManyType memberExpr.Type then
-                let identity = mkIdentityLambdaForDbRefMany memberExpr
-                ValueSome {
-                    Source = memberExpr
-                    OfTypeName = None; WherePredicates = []; SortKeys = []
-                    Limit = None; Offset = None
-                    PostBoundWherePredicates = []; PostBoundSortKeys = []
-                    PostBoundLimit = None; PostBoundOffset = None
-                    TakeWhileInfo = None
-                    GroupByKey = None; Distinct = false; SelectProjection = Some identity
-                    SetOp = None; Terminal = Terminal.Select(identity :> Expression)
-                    GroupByHavingPredicate = None
-                }
-            else ValueNone
+            tryBuildMaterializeDescriptor isDBRefManyType memberExpr
 
         | _ -> ValueNone

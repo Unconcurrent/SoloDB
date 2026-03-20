@@ -379,45 +379,10 @@ module internal SQLiteToolsMapper =
                     try fn.Invoke(reader, startIndex, columns)
                     with _ex -> reraise()
 
-    /// <summary>
-    /// Returns a proper default value for type 'T. For tuple types, constructs a tuple with
-    /// all-default elements instead of returning null (which Unchecked.defaultof produces for reference tuples).
-    /// </summary>
-    let internal defaultOf<'T> () : 'T =
-        let t = typeof<'T>
-        if isTuple t then
-            let elementTypes = GenericTypeArgCache.Get t
-            let defaults = elementTypes |> Array.map (fun et ->
-                if et.IsValueType then Activator.CreateInstance(et)
-                else null)
-            FSharpValue.MakeTuple(defaults, t) :?> 'T
-        else
-            Unchecked.defaultof<'T>
+    let internal defaultOf<'T> () : 'T = SQLiteToolsMapperQuery.defaultOf<'T> ()
 
-    /// <summary>
-    /// Executes a command and maps the resulting data reader to a sequence of objects of type 'T.
-    /// </summary>
-    let internal queryCommand<'T> (command: IDbCommand) (nullableCachedDict: Dictionary<string, int>) = seq {
-        use reader = command.ExecuteReader()
-        let dict =
-            if isNull nullableCachedDict then
-                Dictionary<string, int>(reader.FieldCount)
-            else
-                nullableCachedDict
+    let internal queryCommand<'T> (command: IDbCommand) (nullableCachedDict: Dictionary<string, int>) =
+        SQLiteToolsMapperQuery.queryCommandWith<'T> TypeMapper<'T>.Map command nullableCachedDict
 
-        if dict.Count = 0 then
-            for i in 0..(reader.FieldCount - 1) do
-                dict.[reader.GetName(i)] <- i
-
-
-        while reader.Read() do
-            yield TypeMapper<'T>.Map reader 0 dict
-    }
-
-    /// <summary>
-    /// A helper function that creates a command and queries the database.
-    /// </summary>
-    let internal queryInner<'T> this (sql: string) (parameters: obj) = seq {
-        use command = createCommand this sql parameters
-        yield! queryCommand<'T> command null
-    }
+    let internal queryInner<'T> this (sql: string) (parameters: obj) =
+        SQLiteToolsMapperQuery.queryInnerWith<'T> TypeMapper<'T>.Map this sql parameters

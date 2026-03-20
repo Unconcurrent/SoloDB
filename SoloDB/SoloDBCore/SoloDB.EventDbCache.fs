@@ -1,60 +1,96 @@
 namespace SoloDatabase
 
 open System
+open System.Collections.Concurrent
+open System.Collections.Generic
+open Microsoft.Data.Sqlite
+open FileStorage
+open Connections
 
-/// Non-recursive cache storage helper for EventDbCache.
-/// Keeps object/type/name slot management outside the recursive SoloDB.fs type group.
-type internal EventDbCacheStore(maxCachedCollections: int) =
-    let cachedCollections = Array.zeroCreate<obj> maxCachedCollections
-    let cachedCollectionNames = Array.zeroCreate<string> maxCachedCollections
-    let cachedCollectionTypes = Array.zeroCreate<Type> maxCachedCollections
-    let mutable cachedCount = 0
+type internal EventDbCacheStore(initialCapacity: int) =
+    let cache = ConcurrentDictionary<string, obj>(Environment.ProcessorCount, initialCapacity, StringComparer.Ordinal)
 
-    member _.TryGetCached<'U>(collectionName: string) =
-        let targetType = typeof<'U>
-        let mutable found = Unchecked.defaultof<ISoloDBCollection<'U> | null>
-        let mutable i = 0
-        while isNull found && i < cachedCount do
-            let cached = cachedCollections.[i]
-            if not (isNull cached) && cachedCollectionNames.[i] = collectionName && cachedCollectionTypes.[i] = targetType then
-                found <- cached :?> ISoloDBCollection<'U>
-            i <- i + 1
-        if isNull found then None else Some found
-
-    member _.InvalidateIfCached(collectionName: string) =
-        for i in 0 .. cachedCount - 1 do
-            let cached = cachedCollections.[i]
-            if not (isNull cached) && cachedCollectionNames.[i] = collectionName then
-                cachedCollections.[i] <- null
-                cachedCollectionNames.[i] <- null
-                cachedCollectionTypes.[i] <- null
+    member _.TryGetCached<'U>(collectionName: string) : ISoloDBCollection<'U> option =
+        match cache.TryGetValue collectionName with
+        | true, (:? ISoloDBCollection<'U> as collection) -> Some collection
+        | _ -> None
 
     member _.TryStoreCached<'U>(collectionName: string) (collection: ISoloDBCollection<'U>) =
-        let targetType = typeof<'U>
-        let mutable slot = -1
-        let mutable i = 0
-        while slot < 0 && i < cachedCount do
-            if isNull cachedCollections.[i] then
-                slot <- i
-            i <- i + 1
-
-        if slot < 0 && cachedCount < maxCachedCollections then
-            slot <- cachedCount
-            cachedCount <- cachedCount + 1
-
-        if slot >= 0 then
-            cachedCollections.[slot] <- collection :> obj
-            cachedCollectionNames.[slot] <- collectionName
-            cachedCollectionTypes.[slot] <- targetType
-            true
-        else false
+        cache.TryAdd(collectionName, box collection)
 
     member _.IsCachedName(collectionName: string) =
-        let mutable found = false
-        let mutable i = 0
-        while not found && i < cachedCount do
-            let cached = cachedCollections.[i]
-            if not (isNull cached) && cachedCollectionNames.[i] = collectionName then
-                found <- true
-            i <- i + 1
-        found
+        cache.ContainsKey collectionName
+
+type internal IEventDbCollectionFactory =
+    abstract CreateCollection<'U> : collectionName: string -> ISoloDBCollection<'U>
+
+/// <summary>
+/// Caches event-context database resources to avoid repeated allocations and redundant metadata queries.
+/// </summary>
+type internal EventDbCache(connectionString: string, directConnection: SqliteConnection, guardedConnection: Connection, parentData: SoloDBToCollectionData, knownCollectionName: string, collectionFactory: IEventDbCollectionFactory) =
+    let knownCollectionName = Helper.formatName knownCollectionName
+    let mutable knownCollectionExists = true
+    let cacheStore = EventDbCacheStore(4)
+    let mutable cachedFileSystem: IFileSystem | null = null
+
+    member private _.TryGetCached<'U>(collectionName: string) : ISoloDBCollection<'U> option =
+        cacheStore.TryGetCached<'U>(collectionName)
+
+    member private _.TryStoreCached<'U>(collectionName: string) (collection: ISoloDBCollection<'U>) =
+        cacheStore.TryStoreCached<'U>(collectionName) collection
+
+    member private _.IsCachedName(collectionName: string) =
+        cacheStore.IsCachedName(collectionName)
+
+    member private _.EnsureExists<'U>(collectionName: string) =
+        if collectionName = knownCollectionName then
+            if not knownCollectionExists then
+                if not (Helper.existsCollection collectionName directConnection) then
+                    Helper.createTableInner<'U> collectionName directConnection
+                knownCollectionExists <- true
+        else if not (Helper.existsCollection collectionName directConnection) then
+            Helper.createTableInner<'U> collectionName directConnection
+
+        Helper.registerTypeCollection<'U> collectionName directConnection
+
+        let hasRelations = RelationsSchema.getRelationSpecs typeof<'U> |> Array.isEmpty |> not
+        if hasRelations then
+            let relationTx: Relations.RelationTxContext = {
+                Connection = directConnection
+                OwnerTable = collectionName
+                OwnerType = typeof<'U>
+                InTransaction = true
+            }
+            Relations.ensureSchemaForOwnerType relationTx typeof<'U>
+
+    member this.FileSystem : IFileSystem =
+        if isNull cachedFileSystem then
+            cachedFileSystem <- (FileSystem guardedConnection :> IFileSystem)
+        cachedFileSystem
+
+    member this.GetCollection<'U>(collectionName: string) : ISoloDBCollection<'U> =
+        let collectionName = Helper.formatName collectionName
+        if collectionName.StartsWith "SoloDB" then
+            raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
+
+        match this.TryGetCached<'U>(collectionName) with
+        | Some cached -> cached
+        | None ->
+            this.EnsureExists<'U>(collectionName)
+            let collection = collectionFactory.CreateCollection<'U>(collectionName)
+            this.TryStoreCached<'U>(collectionName) collection |> ignore
+            collection
+
+    member this.CollectionExists(collectionName: string) =
+        let collectionName = Helper.formatName collectionName
+        if collectionName = knownCollectionName && knownCollectionExists then true
+        elif this.IsCachedName(collectionName) then true
+        else Helper.existsCollection collectionName directConnection
+
+    member _.DropCollectionIfExists(_collectionName: string) =
+        raise (InvalidOperationException
+            "Error: Dropping collections is not supported from event handlers.\nReason: Event handlers must not perform schema changes.\nFix: Drop collections outside event handlers.")
+
+    member _.DropCollection(_collectionName: string) =
+        raise (InvalidOperationException
+            "Error: Dropping collections is not supported from event handlers.\nReason: Event handlers must not perform schema changes.\nFix: Drop collections outside event handlers.")

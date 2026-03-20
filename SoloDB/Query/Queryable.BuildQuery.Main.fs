@@ -106,7 +106,7 @@ module internal QueryableBuildQueryMain =
                         let havingPreds = pendingGroupByHavingPreds |> List.rev
                         pendingGroupByExprs <- None
                         pendingGroupByHavingPreds <- []
-                        QueryableBuildQueryPartA.applyGroupBySelect<'T>
+                        QueryableBuildQueryPartAGroupBy.applyGroupBySelect<'T>
                             sourceCtx tableName statements groupByExprs havingPreds m.Expressions
                         pendingGroupByHandled <- true
                     | _ ->
@@ -114,7 +114,7 @@ module internal QueryableBuildQueryMain =
                         pendingGroupByExprs <- None
                         let havingPreds = pendingGroupByHavingPreds |> List.rev
                         pendingGroupByHavingPreds <- []
-                        QueryableBuildQueryPartA.flushGroupByAsJsonGroupArray<'T>
+                        QueryableBuildQueryPartAGroupBy.flushGroupByAsJsonGroupArray<'T>
                             sourceCtx tableName statements groupByExprs havingPreds
 
                 if not pendingGroupByHandled then
@@ -149,7 +149,7 @@ module internal QueryableBuildQueryMain =
                             installTerminalOrdering
                             m
                     | SupportedLinqMethods.GroupBy ->
-                        QueryableBuildQueryPartA.applyGroupByKeyOnly<'T>
+                        QueryableBuildQueryPartAGroupBy.applyGroupByKeyOnly<'T>
                             sourceCtx tableName statements m.Expressions
                         pendingGroupByExprs <- Some m.Expressions
                     | SupportedLinqMethods.Count
@@ -203,7 +203,7 @@ module internal QueryableBuildQueryMain =
             let havingPreds = pendingGroupByHavingPreds |> List.rev
             pendingGroupByExprs <- None
             pendingGroupByHavingPreds <- []
-            QueryableBuildQueryPartA.flushGroupByAsJsonGroupArray<'T>
+            QueryableBuildQueryPartAGroupBy.flushGroupByAsJsonGroupArray<'T>
                 sourceCtx tableName statements groupByExprs havingPreds
 
         match statements.[0] with
