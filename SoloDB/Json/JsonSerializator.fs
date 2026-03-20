@@ -1707,6 +1707,55 @@ and private JsonDeserializerImpl<'A> =
                     | _ -> fn.Invoke json
                 )
 
+        // KeyValuePair<TKey, TValue> deserialization from {"Key": k, "Value": v}
+        | t when t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<KeyValuePair<_,_>> ->
+            let args = GenericTypeArgCache.Get t
+            let keyType, valueType = args.[0], args.[1]
+
+            let jsonParam = Expression.Parameter(typeof<JsonValue>)
+
+            // Extract "Key" field
+            let keyJsonExpr = Expression.Call(
+                jsonParam,
+                typeof<JsonValue>.GetMethod("get_Item", [| typeof<string> |]),
+                [| Expression.Constant("Key") :> Expression |]
+            )
+            // Deserialize key
+            let keyDeserializerMethod =
+                typedefof<JsonDeserializerImpl<_>>
+                    .MakeGenericType(keyType)
+                    .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+            let keyExpr = Expression.Call(keyDeserializerMethod, keyJsonExpr)
+
+            // Extract "Value" field
+            let valueJsonExpr = Expression.Call(
+                jsonParam,
+                typeof<JsonValue>.GetMethod("get_Item", [| typeof<string> |]),
+                [| Expression.Constant("Value") :> Expression |]
+            )
+            // Deserialize value
+            let valueDeserializerMethod =
+                typedefof<JsonDeserializerImpl<_>>
+                    .MakeGenericType(valueType)
+                    .GetMethod(nameof JsonDeserializerImpl<_>.DeserializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+            let valueExpr = Expression.Call(valueDeserializerMethod, valueJsonExpr)
+
+            // Construct KeyValuePair<TKey, TValue>(key, value)
+            let kvpCtor = t.GetConstructor([| keyType; valueType |])
+            let newKvpExpr = Expression.New(kvpCtor, [| keyExpr :> Expression; valueExpr :> Expression |])
+
+            let lambda = Expression.Lambda<Func<JsonValue, 'A>>(
+                Expression.Convert(newKvpExpr, typeof<'A>),
+                [| jsonParam |]
+            )
+
+            let fn = lambda.Compile(false)
+            (fun (json: JsonValue) ->
+                match json with
+                | JsonValue.Null -> Unchecked.defaultof<'A>
+                | _ -> fn.Invoke json
+            )
+
         // IGrouping<K,E> implementation
         | t when JsonHelper.implementsGeneric typedefof<IGrouping<_,_>> t ->
             let iface = t.GetInterface("IGrouping`2") |> Option.ofObj |> Option.defaultValue t

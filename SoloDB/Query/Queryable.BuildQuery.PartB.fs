@@ -33,7 +33,6 @@ module internal QueryableBuildQueryPartB =
         (m: {| Value: SupportedLinqMethods; OriginalMethod: MethodInfo; Expressions: Expression array |}) =
         match m.Value with
                 | SupportedLinqMethods.Count
-                | SupportedLinqMethods.CountBy
                 | SupportedLinqMethods.LongCount ->
                     match m.Expressions.Length with
                     | 0 -> ()
@@ -41,7 +40,6 @@ module internal QueryableBuildQueryPartB =
                         let role =
                             match m.Value with
                             | SupportedLinqMethods.Count
-                            | SupportedLinqMethods.CountBy -> CountPredicate
                             | SupportedLinqMethods.LongCount -> LongCountPredicate
                             | _ -> CountPredicate
                         addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName m.Expressions.[0] role)

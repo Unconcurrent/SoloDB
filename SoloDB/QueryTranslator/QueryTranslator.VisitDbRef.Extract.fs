@@ -70,11 +70,7 @@ module internal DBRefManyExtractor =
                 | "Order" | "OrderDescending" | "UnionBy" | "IntersectBy" | "ExceptBy" ->
                     let identityLambda = mkIdentityLambdaForDbRefMany mce
                     Some (Terminal.Select(identityLambda :> Expression))
-                | "CountBy" ->
-                    raise (NotSupportedException(
-                        "Error: CountBy is not supported in DBRefMany queries.\n" +
-                        "Reason: CountBy requires GroupBy + KeyValuePair projection which is not available in correlated subqueries.\n" +
-                        "Fix: Call AsEnumerable() before CountBy, or use GroupBy(key).Select(g => new { g.Key, Count = g.Count() })."))
+                | "CountBy" -> getArg mce |> Option.map Terminal.CountBy
                 | _ -> None
 
             match terminalOpt with

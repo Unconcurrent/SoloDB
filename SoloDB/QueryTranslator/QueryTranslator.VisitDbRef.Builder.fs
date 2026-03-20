@@ -296,6 +296,12 @@ module internal DBRefManyBuilder =
             DBRefManyBuildSpecial.tryBuildTakeWhile qb desc buildCorrelatedCore mkSubCore nextAlias tryGetRelationOrderByForTakeWhile ownerRef twPredLambda isTakeWhile
         | None ->
 
+        // CountBy — delegated to BuildSpecial.
+        match desc.Terminal with
+        | Terminal.CountBy keySel ->
+            DBRefManyBuildSpecial.tryBuildCountBy qb desc buildCorrelatedCore mkSubCore nextAlias ownerRef keySel
+        | _ ->
+
         // GroupBy terminals — delegated to BuildSpecial.
         match desc.GroupByKey with
         | Some keyLambda ->
@@ -400,5 +406,6 @@ module internal DBRefManyBuilder =
                 let desc = { desc with SortKeys = [(keySel, SortDirection.Desc)] }
                 buildEntityElement qb desc ownerRef None false
             | Terminal.DistinctBy keySel -> buildDistinctByEntitySequence qb desc ownerRef keySel
+            | Terminal.CountBy _ -> failwith "CountBy is handled above; this branch is unreachable."
 
         ValueSome result

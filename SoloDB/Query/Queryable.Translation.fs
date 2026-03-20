@@ -38,7 +38,6 @@ module internal QueryableTranslationCore =
             match method with
             | SupportedLinqMethods.Sum
             | SupportedLinqMethods.Count
-            | SupportedLinqMethods.CountBy
             | SupportedLinqMethods.LongCount
             | SupportedLinqMethods.All
             | SupportedLinqMethods.Any
@@ -50,6 +49,7 @@ module internal QueryableTranslationCore =
             | SupportedLinqMethods.MinBy
             | SupportedLinqMethods.MaxBy
             | SupportedLinqMethods.Average
+            | SupportedLinqMethods.CountBy
             | SupportedLinqMethods.Distinct
             | SupportedLinqMethods.DistinctBy
             | SupportedLinqMethods.Where

@@ -137,6 +137,7 @@ module internal QueryableBuildQueryMain =
                     | SupportedLinqMethods.MaxBy
                     | SupportedLinqMethods.Distinct
                     | SupportedLinqMethods.DistinctBy
+                    | SupportedLinqMethods.CountBy
                     | SupportedLinqMethods.TakeWhile
                     | SupportedLinqMethods.SkipWhile ->
                         QueryableBuildQueryPartA.apply<'T>
@@ -153,7 +154,6 @@ module internal QueryableBuildQueryMain =
                             sourceCtx tableName statements m.Expressions
                         pendingGroupByExprs <- Some m.Expressions
                     | SupportedLinqMethods.Count
-                    | SupportedLinqMethods.CountBy
                     | SupportedLinqMethods.LongCount
                     | SupportedLinqMethods.SelectMany
                     | SupportedLinqMethods.Join

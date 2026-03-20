@@ -268,6 +268,62 @@ module internal QueryableBuildQueryPartA =
                         wrapCore outerCore
                     )
 
+                | SupportedLinqMethods.CountBy ->
+                    let keySelectorExpr, comparerExprOpt =
+                        match m.Expressions with
+                        | [| keySelector |] -> keySelector, None
+                        | [| keySelector; comparer |] -> keySelector, Some comparer
+                        | [||] ->
+                            raise (NotSupportedException(
+                                "Error: CountBy requires a key selector.\n" +
+                                "Reason: CountBy groups rows by a projected key before counting.\n" +
+                                "Fix: Pass a key selector lambda, for example .CountBy(x => x.Category)."))
+                        | other ->
+                            raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other.Length))
+
+                    match comparerExprOpt with
+                    | Some comparerExpr ->
+                        let keyType = (GenericMethodArgCache.Get m.OriginalMethod).[1]
+                        let comparerValue =
+                            try QueryTranslator.evaluateExpr<obj> comparerExpr
+                            with _ ->
+                                raise (NotSupportedException(
+                                    "Error: CountBy comparer overload is not supported.\n" +
+                                    "Reason: SoloDB can translate CountBy only with the default equality comparer in SQL.\n" +
+                                    "Fix: Remove the comparer or normalize the key inside the selector."))
+                        if not (isNull comparerValue) then
+                            let eqType = typedefof<EqualityComparer<_>>.MakeGenericType([| keyType |])
+                            let defaultProp = eqType.GetProperty("Default", BindingFlags.Public ||| BindingFlags.Static)
+                            let defaultComparer = if isNull defaultProp then null else defaultProp.GetValue(null)
+                            let isDefaultComparer =
+                                not (isNull defaultComparer)
+                                && eqType.IsAssignableFrom(comparerValue.GetType())
+                                && (obj.ReferenceEquals(comparerValue, defaultComparer)
+                                    || comparerValue.GetType() = defaultComparer.GetType())
+                            if not isDefaultComparer then
+                                raise (NotSupportedException(
+                                    "Error: CountBy comparer overload is not supported.\n" +
+                                    "Reason: SoloDB can translate CountBy only with the default equality comparer in SQL.\n" +
+                                    "Fix: Remove the comparer or normalize the key inside the selector."))
+                    | None -> ()
+
+                    addLoweredKeySelector statements (lowerKeySelectorLambda sourceCtx tableName keySelectorExpr GroupByKey)
+                    addComplexFinal statements (fun ctx ->
+                        let core =
+                            { mkCore
+                                [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                                 { Alias = Some "Value"; Expr =
+                                    SqlExpr.FunctionCall("json_object", [
+                                        SqlExpr.Literal(SqlLiteral.String "Key")
+                                        SqlExpr.Column(Some "o", "__solodb_group_key")
+                                        SqlExpr.Literal(SqlLiteral.String "Value")
+                                        SqlExpr.AggregateCall(AggregateKind.Count, None, false, None)
+                                    ]) }]
+                                (Some (DerivedTable(ctx.Inner, "o")))
+                              with GroupBy = [SqlExpr.Column(Some "o", "__solodb_group_key")] }
+                        wrapCore core
+                    )
+
                 | SupportedLinqMethods.GroupBy ->
                     // GroupBy is intercepted in BuildQuery.Main.fs for look-ahead fusion.
                     raise (InvalidOperationException("GroupBy should be intercepted in BuildQuery.Main.fs, not dispatched to PartA."))

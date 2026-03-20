@@ -45,6 +45,7 @@ module internal DBRefManyDescriptor =
         | DistinctBy of keySelector: Expression
         | ElementAt of index: Expression
         | ElementAtOrDefault of index: Expression
+        | CountBy of keySelector: Expression
 
     /// Set operation shape.
     [<RequireQualifiedAccess>]

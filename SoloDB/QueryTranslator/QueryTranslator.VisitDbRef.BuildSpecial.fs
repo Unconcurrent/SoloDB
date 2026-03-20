@@ -140,6 +140,57 @@ module internal DBRefManyBuildSpecial =
                 ValueNone
         | _ -> ValueNone
 
+    /// Build CountBy terminal SQL from a descriptor.
+    /// Emits: SELECT json_group_array(json_object('Key', _gk, 'Value', _gc)) FROM (
+    ///          SELECT <key_expr> AS _gk, COUNT(*) AS _gc FROM ... GROUP BY _gk
+    ///        )
+    let tryBuildCountBy
+        (qb: QueryBuilder) (desc: QueryDescriptor)
+        (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore * string)
+        (mkSubCore: Projection list -> TableSource option -> SqlExpr option -> SelectCore)
+        (nextAlias: string -> string)
+        (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef)
+        (keySelectorExpr: Expression) : SqlExpr voption =
+
+        let keyLambda =
+            match tryExtractLambdaExpression keySelectorExpr with
+            | ValueSome lambda -> lambda
+            | ValueNone ->
+                raise (NotSupportedException(
+                    "Error: Cannot translate CountBy key selector.\n" +
+                    "Reason: The key selector is not a translatable lambda expression.\n" +
+                    "Fix: Pass the key selector as an inline lambda."))
+
+        let tgtAlias, _, baseCore, targetTable =
+            buildCorrelatedCore qb { desc with Limit = None; Offset = None; SortKeys = [] } ownerRef
+                [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+        let subQbKey = qb.ForSubquery(tgtAlias, keyLambda, subqueryRootTable = targetTable)
+        let groupKeyDu = visitDu keyLambda.Body subQbKey
+        let keyJoins = DBRefManyHelpers.joinEdgesToClauses subQbKey.SourceContext.Joins
+
+        // Inner: SELECT <key> AS _gk, COUNT(*) AS _gc FROM ... GROUP BY <key>
+        let innerCore =
+            { baseCore with
+                Projections = ProjectionSetOps.ofList [
+                    { Alias = Some "_gk"; Expr = groupKeyDu }
+                    { Alias = Some "_gc"; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }
+                ]
+                Joins = baseCore.Joins @ keyJoins
+                GroupBy = [groupKeyDu] }
+        let innerSel = { Ctes = []; Body = SingleSelect innerCore }
+
+        // Outer: SELECT json_group_array(json_object('Key', _gk, 'Value', _gc))
+        let gbAlias = nextAlias "_cb"
+        let kvpObj = SqlExpr.FunctionCall("json_object", [
+            SqlExpr.Literal(SqlLiteral.String "Key")
+            SqlExpr.Column(Some gbAlias, "_gk")
+            SqlExpr.Literal(SqlLiteral.String "Value")
+            SqlExpr.Column(Some gbAlias, "_gc")
+        ])
+        let outerGA = SqlExpr.FunctionCall("json_group_array", [SqlExpr.FunctionCall("json", [kvpObj])])
+        let outerCore = mkSubCore [{ Alias = None; Expr = outerGA }] (Some(DerivedTable(innerSel, gbAlias))) None
+        ValueSome(SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore })
+
     /// Build TakeWhile/SkipWhile terminal SQL from a descriptor.
     let tryBuildTakeWhile
         (qb: QueryBuilder) (desc: QueryDescriptor)
