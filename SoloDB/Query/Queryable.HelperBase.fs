@@ -60,6 +60,7 @@ module internal QueryableHelperBase =
             UpdateMode = false
             TableNameDot = ""
             JsonExtractSelfValue = true
+            InsideJsonObjectProjection = false
             Parameters = System.Collections.ObjectModel.ReadOnlyCollection(Array.empty)
             IdParameterIndex = -1
             SourceContext = QueryContext.SingleSource("")

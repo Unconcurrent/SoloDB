@@ -202,7 +202,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
                             let struct(_, correspondingExpr) = argsList |> Seq.find(fun struct(p, _) -> p = pe)
                             struct (field.Name, correspondingExpr)
                         | other -> struct (field.Name, other) }
-                |> Seq.map(fun struct(name, expr) -> struct (name, visitDu expr qb)) |> Seq.toArray
+                |> Seq.map(fun struct(name, expr) -> struct (name, visitDu expr { qb with InsideJsonObjectProjection = true })) |> Seq.toArray
             newObjectDu members
         | OfShape0 null OfString "Trim" str -> SqlExpr.FunctionCall("TRIM", [visitDu str qb])
         | OfShape0 null OfString "TrimStart" str -> SqlExpr.FunctionCall("LTRIM", [visitDu str qb])

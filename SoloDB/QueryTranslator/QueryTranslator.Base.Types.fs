@@ -121,6 +121,8 @@ module internal QueryTranslatorBaseTypes =
             TableNameDot: string
             /// <summary>Determines if a root parameter should be wrapped in json_extract.</summary>
             JsonExtractSelfValue: bool
+            /// <summary>True when translating a value that becomes one field inside a json_object projection.</summary>
+            InsideJsonObjectProjection: bool
             /// <summary>The parameters of the root lambda expression.</summary>
             Parameters: ReadOnlyCollection<ParameterExpression>
             /// <summary>The index of the parameter representing the document ID.</summary>
@@ -215,6 +217,7 @@ module internal QueryTranslatorBaseTypes =
                 UpdateMode = updateMode
                 TableNameDot = if String.IsNullOrEmpty tableName then String.Empty else "\"" + tableName + "\"."
                 JsonExtractSelfValue = true
+                InsideJsonObjectProjection = false
                 Parameters =
                     let expression =
                         if expression.NodeType = ExpressionType.Quote

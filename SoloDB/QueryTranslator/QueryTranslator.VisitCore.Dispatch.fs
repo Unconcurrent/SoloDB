@@ -260,7 +260,8 @@ module internal QueryTranslatorVisitCore =
             let m = exp :?> NewExpression
             if isTuple m.Type then SqlExpr.JsonArrayExpr([for arg in m.Arguments -> visitDu arg qb])
             elif m.Members.Count = m.Arguments.Count then
-                newObjectDu [|for membr, expr in m.Arguments |> Seq.zip m.Members -> struct(membr.Name, visitDu expr qb)|]
+                let fieldQb = { qb with InsideJsonObjectProjection = true }
+                newObjectDu [|for membr, expr in m.Arguments |> Seq.zip m.Members -> struct(membr.Name, visitDu expr fieldQb)|]
             else raise (NotSupportedException(sprintf "Cannot construct new in SQL query %A" m.Type))
         | ExpressionType.Parameter -> visitParameterDu (exp :?> ParameterExpression) qb
         | ExpressionType.ArrayIndex ->
@@ -303,7 +304,8 @@ module internal QueryTranslatorVisitCore =
             | Some typeName -> SqlExpr.Binary(typeExpr, BinaryOperator.Eq, qb.AllocateParamExpr typeName)
         | ExpressionType.MemberInit ->
             let m = exp :?> MemberInitExpression
-            newObjectDu [|for binding in m.Bindings |> Seq.cast<MemberAssignment> -> struct(binding.Member.Name, visitDu binding.Expression qb)|]
+            let fieldQb = { qb with InsideJsonObjectProjection = true }
+            newObjectDu [|for binding in m.Bindings |> Seq.cast<MemberAssignment> -> struct(binding.Member.Name, visitDu binding.Expression fieldQb)|]
         | ExpressionType.ListInit ->
             let listExp = exp :?> ListInitExpression
             SqlExpr.FunctionCall("jsonb_array", [for item in listExp.Initializers -> visitDu (item.Arguments |> Seq.exactlyOne) qb])

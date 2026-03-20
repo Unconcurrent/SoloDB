@@ -13,9 +13,11 @@ open SoloDatabase.DBRefManyDescriptor
 /// Separated from the main builder to keep file sizes under 400 lines.
 module internal DBRefManyBuildSpecial =
 
-    let private wrapAggregateEmptySemantics (aggKind: AggregateKind) (scalarExpr: SqlExpr) : SqlExpr =
+    let private wrapAggregateEmptySemantics (aggKind: AggregateKind) (insideJsonObjectProjection: bool) (scalarExpr: SqlExpr) : SqlExpr =
         if aggKind = AggregateKind.Sum then
             SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
+        elif insideJsonObjectProjection then
+            scalarExpr
         else
             SqlExpr.CaseExpr(
                 (SqlExpr.Unary(UnaryOperator.IsNull, scalarExpr),
@@ -60,6 +62,7 @@ module internal DBRefManyBuildSpecial =
             ValueNone
 
     let private buildAggregateOverRowset
+        (insideJsonObjectProjection: bool)
         (mkSubCore: Projection list -> TableSource option -> SqlExpr option -> SelectCore)
         (nextAlias: string -> string)
         (rowsetSel: SqlSelect)
@@ -69,7 +72,7 @@ module internal DBRefManyBuildSpecial =
         let aggExpr = SqlExpr.AggregateCall(aggKind, Some(SqlExpr.Column(Some dtAlias, "v")), false, None)
         let aggCore = mkSubCore [{ Alias = None; Expr = aggExpr }] (Some(DerivedTable(rowsetSel, dtAlias))) None
         let scalarExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect aggCore }
-        wrapAggregateEmptySemantics aggKind scalarExpr
+        wrapAggregateEmptySemantics aggKind insideJsonObjectProjection scalarExpr
 
     /// Build GroupBy terminal SQL from a descriptor.
     let tryBuildGroupBy
@@ -305,18 +308,18 @@ module internal DBRefManyBuildSpecial =
                 ValueNone
         | Terminal.SumProjected ->
             match buildTakeWhileProjectedRowset qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc isTakeWhile with
-            | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset mkSubCore nextAlias rowsetSel AggregateKind.Sum)
+            | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset qb.InsideJsonObjectProjection mkSubCore nextAlias rowsetSel AggregateKind.Sum)
             | ValueNone -> ValueNone
         | Terminal.MinProjected ->
             match buildTakeWhileProjectedRowset qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc isTakeWhile with
-            | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset mkSubCore nextAlias rowsetSel AggregateKind.Min)
+            | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset qb.InsideJsonObjectProjection mkSubCore nextAlias rowsetSel AggregateKind.Min)
             | ValueNone -> ValueNone
         | Terminal.MaxProjected ->
             match buildTakeWhileProjectedRowset qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc isTakeWhile with
-            | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset mkSubCore nextAlias rowsetSel AggregateKind.Max)
+            | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset qb.InsideJsonObjectProjection mkSubCore nextAlias rowsetSel AggregateKind.Max)
             | ValueNone -> ValueNone
         | Terminal.AverageProjected ->
             match buildTakeWhileProjectedRowset qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc isTakeWhile with
-            | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset mkSubCore nextAlias rowsetSel AggregateKind.Avg)
+            | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset qb.InsideJsonObjectProjection mkSubCore nextAlias rowsetSel AggregateKind.Avg)
             | ValueNone -> ValueNone
         | _ -> ValueNone
