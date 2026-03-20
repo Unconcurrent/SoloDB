@@ -161,6 +161,9 @@ module internal QueryTranslatorVisitCore =
                     qb.AllocateParamExpr((originalExpr.Member :?> PropertyInfo).GetValue null)
                 elif isFullyConstant originalExpr then
                     qb.AllocateParamExpr(evaluateExpr originalExpr)
+                elif (not (isPrimitiveSQLiteType m.InputType)) || typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.InputType then
+                    let esc = escapeSQLiteString m.MemberName
+                    SqlExpr.FunctionCall("jsonb_extract", [visitDu originalExpr.Expression qb; SqlExpr.Literal(SqlLiteral.String $"$.{esc}")])
                 else
                     raise (NotSupportedException(
                         sprintf "Error: Member access '%O' is not supported.\nReason: The member cannot be translated to SQL in this context.\nFix: Simplify the expression or move it after AsEnumerable()." originalExpr.Member.Name))
