@@ -9,6 +9,16 @@ open SqlDu.Engine.C1.Spec
 open Utils
 
 module internal DBRefManyBuilderTerminals =
+    let private wrapAggregateEmptySemantics (aggKind: AggregateKind) (scalarExpr: SqlExpr) : SqlExpr =
+        if aggKind = AggregateKind.Sum then
+            SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
+        else
+            SqlExpr.CaseExpr(
+                (SqlExpr.Unary(UnaryOperator.IsNull, scalarExpr),
+                 SqlExpr.Literal(SqlLiteral.String "__solodb_error__:Sequence contains no elements")),
+                [],
+                Some scalarExpr)
+
     let countDbRefManyDepth (unwrapConvert: Expression -> Expression) (isDBRefManyType: Type -> bool) (expr: Expression) : int =
         let rec visitExpr (e: Expression) : int =
             let e = unwrapConvert e
@@ -108,14 +118,12 @@ module internal DBRefManyBuilderTerminals =
                 let outerAgg = SqlExpr.AggregateCall(aggKind, Some(SqlExpr.Column(Some pgAlias, "v")), false, None)
                 let outerCore = mkSubCore [{ Alias = None; Expr = outerAgg }] (Some(DerivedTable(innerSel, pgAlias))) None
                 let scalarExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
-                if aggKind = AggregateKind.Sum then SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
-                else scalarExpr
+                wrapAggregateEmptySemantics aggKind scalarExpr
             else
                 let aggProj = [{ Alias = None; Expr = aggExpr }]
                 let core = { baseCore with Projections = ProjectionSetOps.ofList aggProj; Joins = baseCore.Joins @ selectorJoins }
                 let scalarExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
-                if aggKind = AggregateKind.Sum then SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
-                else scalarExpr
+                wrapAggregateEmptySemantics aggKind scalarExpr
         | ValueNone ->
             raise (NotSupportedException("Cannot extract selector for aggregate."))
 
@@ -173,8 +181,7 @@ module internal DBRefManyBuilderTerminals =
               Limit = None
               Offset = None }
         let scalarExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect aggCore }
-        if aggKind = AggregateKind.Sum then SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
-        else scalarExpr
+        wrapAggregateEmptySemantics aggKind scalarExpr
 
     let buildProjectedPredicateExists
         (nextAlias: string -> string)

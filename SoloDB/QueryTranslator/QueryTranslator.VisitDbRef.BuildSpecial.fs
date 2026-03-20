@@ -13,6 +13,16 @@ open SoloDatabase.DBRefManyDescriptor
 /// Separated from the main builder to keep file sizes under 400 lines.
 module internal DBRefManyBuildSpecial =
 
+    let private wrapAggregateEmptySemantics (aggKind: AggregateKind) (scalarExpr: SqlExpr) : SqlExpr =
+        if aggKind = AggregateKind.Sum then
+            SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
+        else
+            SqlExpr.CaseExpr(
+                (SqlExpr.Unary(UnaryOperator.IsNull, scalarExpr),
+                 SqlExpr.Literal(SqlLiteral.String "__solodb_error__:Sequence contains no elements")),
+                [],
+                Some scalarExpr)
+
     let private buildTakeWhileProjectedRowset
         (qb: QueryBuilder)
         (baseCore: SelectCore)
@@ -59,10 +69,7 @@ module internal DBRefManyBuildSpecial =
         let aggExpr = SqlExpr.AggregateCall(aggKind, Some(SqlExpr.Column(Some dtAlias, "v")), false, None)
         let aggCore = mkSubCore [{ Alias = None; Expr = aggExpr }] (Some(DerivedTable(rowsetSel, dtAlias))) None
         let scalarExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect aggCore }
-        if aggKind = AggregateKind.Sum then
-            SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
-        else
-            scalarExpr
+        wrapAggregateEmptySemantics aggKind scalarExpr
 
     /// Build GroupBy terminal SQL from a descriptor.
     let tryBuildGroupBy
