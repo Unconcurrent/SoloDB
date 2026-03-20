@@ -20,7 +20,7 @@ open SoloDatabase.QueryTranslatorBaseTypes
 open SqlDu.Engine.C1.Spec
 
 /// GroupBy deferred emission + GroupBy+Select fusion for root-level queries.
-/// Separated from PartA to keep files under 400 lines (R58).
+/// Separated from SequenceOps to keep files under 400 lines.
 module internal QueryableBuildQueryPartAGroupBy =
     open QueryableHelperState
     open QueryableHelperJoin

@@ -1,4 +1,4 @@
 namespace SoloDatabase
 
-// Queryable decomposition facade (R38).
+// Queryable decomposition facade.
 // Implementation moved to Queryable.*.fs slices.

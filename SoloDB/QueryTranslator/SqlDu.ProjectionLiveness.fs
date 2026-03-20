@@ -4,7 +4,7 @@ open SqlDu.Engine.C1.Spec
 open SoloDatabase.ExpressionPredicates
 
 // ══════════════════════════════════════════════════════════════
-// Projection Liveness Analysis (C7a)
+// Projection Liveness Analysis
 //
 // Determines which inner projection aliases are "live" — referenced
 // by the outer query's projections, WHERE, ORDER BY, GROUP BY,

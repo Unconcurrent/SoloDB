@@ -255,7 +255,7 @@ module internal DBRefManyBuilder =
             else
                 tgtAlias, lnkAlias, innerCore, targetTable
 
-        // R61: Pre-Select DefaultIfEmpty — inject UNION ALL synthetic default row.
+        // Pre-Select DefaultIfEmpty — inject UNION ALL synthetic default row.
         match desc.DefaultIfEmpty with
         | Some defaultValueExprOpt ->
             // Compute default value SQL expression.
@@ -334,7 +334,7 @@ module internal DBRefManyBuilder =
                 SqlExpr.Literal(SqlLiteral.Null)
 
     let tryBuild (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) : SqlExpr voption =
-        // R62: Depth guard — check all predicate/projection expressions for nested DBRefMany depth.
+        // Depth guard — check all predicate/projection expressions for nested DBRefMany depth.
         let peelerDepth = QueryTranslatorVisitDbRefPeelers.countDbRefManyDepth
         let maxExprDepth =
             let predDepths = desc.WherePredicates |> List.map peelerDepth
@@ -358,7 +358,7 @@ module internal DBRefManyBuilder =
         let projectedType = desc.SelectProjection |> Option.map (fun l -> l.Body.Type)
         let buildProjectedRowset qb desc ownerRef =
             let baseSel = buildProjectedRowsetRaw qb desc ownerRef
-            // R61: Post-Select DefaultIfEmpty — wrap projected rowset with UNION ALL default.
+            // Post-Select DefaultIfEmpty — wrap projected rowset with UNION ALL default.
             match desc.PostSelectDefaultIfEmpty with
             | Some defaultValueExprOpt ->
                 let defaultValueDu = computeDefaultValueDu defaultValueExprOpt projectedType
@@ -632,7 +632,7 @@ module internal DBRefManyBuilder =
             | Terminal.AverageProjected -> buildProjectedAggregate qb desc ownerRef AggregateKind.Avg
             | Terminal.Select _ ->
                 let selectResult = buildSelect qb desc ownerRef
-                // R61: Post-Select DefaultIfEmpty wrapping for Select terminal (json_group_array).
+                // Post-Select DefaultIfEmpty wrapping for Select terminal (json_group_array).
                 match desc.PostSelectDefaultIfEmpty with
                 | Some defaultValueExprOpt ->
                     let defaultValueDu = computeDefaultValueForJsonArray defaultValueExprOpt projectedType
@@ -651,7 +651,7 @@ module internal DBRefManyBuilder =
                 match desc.SelectProjection with
                 | Some _ ->
                     let elemResult = buildProjectedElement qb desc ownerRef pred false
-                    // R61: Post-Select DefaultIfEmpty wrapping for FirstOrDefault.
+                    // Post-Select DefaultIfEmpty wrapping for FirstOrDefault.
                     // Use CASE WHEN NOT EXISTS (not COALESCE) to avoid conflating
                     // empty-relation with legitimate NULL first values.
                     match desc.PostSelectDefaultIfEmpty with
@@ -688,7 +688,7 @@ module internal DBRefManyBuilder =
                 match desc.SelectProjection with
                 | Some _ -> buildProjectedElementAt qb desc ownerRef indexExpr true
                 | None -> buildEntityElementAt qb desc ownerRef indexExpr true
-            // R55: MinBy/MaxBy — ORDER BY key ASC/DESC + First element.
+            // MinBy/MaxBy — ORDER BY key ASC/DESC + First element.
             | Terminal.MinBy keySel ->
                 let desc = { desc with SortKeys = [(keySel, SortDirection.Asc)] }
                 buildEntityElement qb desc ownerRef None false

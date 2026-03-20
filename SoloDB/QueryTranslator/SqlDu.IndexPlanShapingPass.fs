@@ -8,8 +8,8 @@ open SoloDatabase.IndexPlanShaping
 // Index plan shaping pass registration.
 //
 // The pass factory takes an IndexModel and returns a standard
-// C4 Pass via closure capture. The C4 framework sees a standard
-// SqlStatement -> SqlStatement function. Zero C4 changes.
+// Optimizer pass via closure capture. The framework sees a standard
+// SqlStatement -> SqlStatement function.
 // ══════════════════════════════════════════════════════════════
 
 /// Create an IndexPlanShaping pass that closes over the given index model.

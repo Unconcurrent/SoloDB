@@ -63,7 +63,7 @@ module internal DBRefManyExtractor =
                 | "SingleOrDefault" -> Some (Terminal.SingleOrDefault(getArg mce))
                 | "ElementAt" -> getArg mce |> Option.map Terminal.ElementAt
                 | "ElementAtOrDefault" -> getArg mce |> Option.map Terminal.ElementAtOrDefault
-                // R55: MinBy/MaxBy — return the element with min/max key.
+                // MinBy/MaxBy — return the element with min/max key.
                 | "MinBy" -> getArg mce |> Option.map Terminal.MinBy
                 | "MaxBy" -> getArg mce |> Option.map Terminal.MaxBy
                 | "DistinctBy" -> getArg mce |> Option.map Terminal.DistinctBy
@@ -318,7 +318,7 @@ module internal DBRefManyExtractor =
                         walkChain src
 
                     | "DefaultIfEmpty" ->
-                        // R61: DefaultIfEmpty pipeline modifier.
+                        // DefaultIfEmpty pipeline modifier.
                         // walkChain walks outer-to-inner: if selectProj is not yet set,
                         // DefaultIfEmpty is OUTER (post-Select); if set, INNER (pre-Select).
                         if selectProj.IsNone then
@@ -342,7 +342,7 @@ module internal DBRefManyExtractor =
                 wheres.AddRange(postBoundWheres); postBoundWheres.Clear()
                 sortKeys.AddRange(postBoundSortKeys); postBoundSortKeys.Clear()
 
-            // R61: If no Select in chain, DefaultIfEmpty captured as postSelect is actually pre-Select.
+            // If no Select in chain, DefaultIfEmpty captured as postSelect is actually pre-Select.
             if selectProj.IsNone && postSelectDefaultIfEmpty.IsSome && defaultIfEmpty.IsNone then
                 defaultIfEmpty <- postSelectDefaultIfEmpty
                 postSelectDefaultIfEmpty <- None

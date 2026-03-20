@@ -199,7 +199,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
             else
                 match CustomTypeId<'T>.Value with
                 | Some customId ->
-                    // R45-11 S-3: DU-built SELECT for upsert existence check.
+                    // DU-built SELECT for upsert existence check.
                     let idValue = customId.GetId(item |> box)
                     let idProp = customId.Property
                     let vars = System.Collections.Generic.Dictionary<string, obj>()

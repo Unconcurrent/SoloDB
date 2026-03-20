@@ -39,7 +39,7 @@ module internal DBRefManyDescriptor =
         // Single/SingleOrDefault: emits json_group_array LIMIT 2, materializer enforces cardinality.
         | Single of predicate: Expression option
         | SingleOrDefault of predicate: Expression option
-        // R55: MinBy/MaxBy — return element with min/max key. Emits ORDER BY key + LIMIT 1.
+        // MinBy/MaxBy — return element with min/max key. Emits ORDER BY key + LIMIT 1.
         | MinBy of keySelector: Expression
         | MaxBy of keySelector: Expression
         | DistinctBy of keySelector: Expression
@@ -55,7 +55,7 @@ module internal DBRefManyDescriptor =
         | Except of rightSource: Expression
         | Union of rightSource: Expression
         | Concat of rightSource: Expression
-        // R56: By-key set operations — carry both the right source and the key selector.
+        // By-key set operations — carry both the right source and the key selector.
         | IntersectBy of rightKeys: Expression * keySelector: Expression
         | ExceptBy of rightKeys: Expression * keySelector: Expression
         | UnionBy of rightKeys: Expression * keySelector: Expression

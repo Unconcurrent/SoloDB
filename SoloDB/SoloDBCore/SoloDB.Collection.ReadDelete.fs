@@ -32,7 +32,7 @@ type internal CollectionReadDeleteOps<'T>() =
         use connection = getConnection()
         if hasRelations && HydrationSqlBuilder.hasRelationProperties typeof<'T> then
             Relations.withRelationSqliteWrap "read" "TryGetById.hydrated" (fun () ->
-                // R45-10: Single-SQL hydration for non-queryable path.
+                // Single-SQL hydration for non-queryable path.
                 let vars = Dictionary<string, obj>()
                 vars.["id"] <- box id
                 let whereExpr =
@@ -111,7 +111,7 @@ type internal CollectionReadDeleteOps<'T>() =
         use connection = getConnection()
         if hasRelations && HydrationSqlBuilder.hasRelationProperties typeof<'T> then
             Relations.withRelationSqliteWrap "read" "TryGetByCustomId.hydrated" (fun () ->
-                // R45-10: Single-SQL hydration for custom-id non-queryable path.
+                // Single-SQL hydration for custom-id non-queryable path.
                 // Build WHERE as SqlExpr DU (not raw string splice) to keep query in the DU tree.
                 // Custom-id filter is: jsonb_extract(Value, '$.PropName') = @param
                 let vars = Dictionary<string, obj>()
@@ -139,7 +139,7 @@ type internal CollectionReadDeleteOps<'T>() =
                     Relations.captureRelationVersionForEntities connection name [| (json.Id.Value, box entity) |]
                     Some entity)
         else
-            // R45-11 S-1: DU-built SELECT for custom-id no-relations fallback.
+            // DU-built SELECT for custom-id no-relations fallback.
             let vars = Dictionary<string, obj>()
             vars.["_cid0"] <- box id
             let whereExpr =
@@ -171,7 +171,7 @@ type internal CollectionReadDeleteOps<'T>() =
             | Some c -> c.Property
             | None -> raise (InvalidOperationException("This collection has no custom [Id] property. Use the Int64 Id overload."))
 
-        // R45-12 W-8: translateWhereExpr canonical predicate path for DeleteByCustomId.
+        // translateWhereExpr canonical predicate path for DeleteByCustomId.
         let filterExpr, variables = QueryTranslator.translateWhereExpr name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
         let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
 
@@ -179,7 +179,7 @@ type internal CollectionReadDeleteOps<'T>() =
             let requiresRelationHandling = requiresRelationDeleteHandling conn
             if requiresRelationHandling then
                 let tx = ensureRelationTx conn
-                // R45-11 S-2: DU-built SELECT for DeleteByCustomId old-state read.
+                // DU-built SELECT for DeleteByCustomId old-state read.
                 let vars = Dictionary<string, obj>()
                 vars.["_cid0"] <- box id
                 let whereExpr =

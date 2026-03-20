@@ -13,7 +13,7 @@ open SqlDu.Engine.C1.Spec
 module internal HelperSchema =
     /// Emit a SqlExpr to SQL string.
     /// For index DDL, we need the DU expression emitted without table aliases.
-    /// Use the standalone C2 emitter (same as HydrationSqlBuilder.emitExprToSql).
+    /// Use the standalone emitter (same as HydrationSqlBuilder.emitExprToSql).
     let private emitExprToSqlLocal (expr: SqlExpr) : string =
         let ctx = EmitContext()
         ctx.InlineLiterals <- true
@@ -131,7 +131,7 @@ module internal HelperSchema =
         if containsRelationSubExpression expression.Body then
             raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
 
-        // R45-12 Slice B: use translateWhereExpr → DU → strip aliases → emit.
+        // Use translateWhereExpr → DU → strip aliases → emit.
         // No .Replace/.Substring string surgery.
         let duExpr, variables = QueryTranslator.translateWhereExpr name expression
         if variables.Count > 0 then raise (ArgumentException "Cannot have variables in index.")
@@ -199,7 +199,7 @@ module internal HelperSchema =
         if containsRelationSubExpression expression.Body then
             raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
 
-        // R45-12 Slice B: DU-level index expression emission (no string surgery).
+        // DU-level index expression emission (no string surgery).
         let duExpr, variables = QueryTranslator.translateWhereExpr name expression
         if variables.Count > 0 then raise (ArgumentException "Cannot have variables in index.")
         let stripped = stripAlias duExpr

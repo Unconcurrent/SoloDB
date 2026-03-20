@@ -5,7 +5,7 @@ open SoloDatabase.ProjectionLiveness
 open SoloDatabase.ExpressionPredicates
 
 // ══════════════════════════════════════════════════════════════
-// Projection Pushdown Transform (C7b)
+// Projection Pushdown Transform
 //
 // Narrows inner query projections to only the columns referenced
 // by the outer query. Dead projections are removed.

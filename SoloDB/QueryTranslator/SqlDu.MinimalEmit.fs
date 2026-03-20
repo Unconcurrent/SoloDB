@@ -3,7 +3,7 @@ namespace SoloDatabase
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.QueryTranslatorBaseTypes
 
-/// Thin adapter: bridges the canonical C2-style emitter (QB-free, returns Emitted records)
+/// Thin adapter: bridges the canonical emitter (QB-free, returns Emitted records)
 /// into the product's QueryBuilder (StringBuilder + parameter dictionary).
 /// No independent emission logic — all SQL generation delegates to the canonical emitter.
 module internal SqlDuMinimalEmit =

@@ -139,7 +139,7 @@ module internal QueryTranslatorBaseTypes =
         /// Shares StringBuilder + Variables (parameters go to the same query), but uses a different table name and lambda parameters.
         /// SourceContext is cloned with isolated Joins to prevent DBRef JOIN leakage from inner scope to outer query.
         member internal this.ForSubquery(tableName: string, lambdaExpr: LambdaExpression, ?subqueryRootTable: string) =
-            // R63: Record current scope's parameters with their alias before creating child scope.
+            // Record current scope's parameters with their alias before creating child scope.
             let outerAliases = Dictionary<ParameterExpression, string>(this.OuterParameterAliases)
             let currentAlias = this.TableNameDot.TrimEnd([|'.'|])
             if not (String.IsNullOrEmpty currentAlias) then

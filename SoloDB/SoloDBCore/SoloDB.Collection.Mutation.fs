@@ -25,7 +25,7 @@ type internal CollectionMutationOps<'T>() =
 
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
 
-        // R45-12: translateWhereExpr returns SqlExpr DU + variables (canonical predicate path).
+        // translateWhereExpr returns SqlExpr DU + variables (canonical predicate path).
         let filterExpr, variables =
             if HasTypeId<'T>.Value then
                 let id = HasTypeId<'T>.Read item
@@ -48,7 +48,7 @@ type internal CollectionMutationOps<'T>() =
             withTransaction (fun conn ->
                 let tx = ensureRelationTx conn
 
-                // R45-10 Slice B: mutation-prep old-state read with DBRefMany-only hydration.
+                // mutation-prep old-state read with DBRefMany-only hydration.
                 // Build DU-based WHERE from entity Id (no raw SQL string surgery).
                 let manyVars = Dictionary<string, obj>()
                 let whereExpr =
@@ -132,7 +132,7 @@ type internal CollectionMutationOps<'T>() =
                     let sql = $"DELETE FROM \"{name}\" WHERE Id IN ({idList})"
                     conn.Execute(sql, deleteVars)
             else
-                // R45-12 W-3: translateWhereExpr + emitted WHERE for DeleteMany.
+                // translateWhereExpr + emitted WHERE for DeleteMany.
                 let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
                 let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
                 conn.Execute ($"DELETE FROM \"{name}\" WHERE {filterSql}", variables)
@@ -164,7 +164,7 @@ type internal CollectionMutationOps<'T>() =
                     Relations.syncDeleteOwner tx deletePlan
                     conn.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {| id = oldRow.Id.Value |})
             else
-                // R45-12 W-4: translateWhereExpr + emitted WHERE for DeleteOne no-rel.
+                // translateWhereExpr + emitted WHERE for DeleteOne no-rel.
                 let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
                 let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
                 conn.Execute ($"DELETE FROM \"{name}\" WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filterSql}) LIMIT 1)", variables)
@@ -183,7 +183,7 @@ type internal CollectionMutationOps<'T>() =
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
 
-        // R45-12 W-5/W-6: translateWhereExpr canonical predicate path for ReplaceMany.
+        // translateWhereExpr canonical predicate path for ReplaceMany.
         let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
         let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
 
@@ -191,7 +191,7 @@ type internal CollectionMutationOps<'T>() =
             withTransaction (fun conn ->
                 let tx = ensureRelationTx conn
 
-                // R45-10 Slice B: mutation-prep old-state read with DBRefMany-only hydration.
+                // mutation-prep old-state read with DBRefMany-only hydration.
                 let sql, manyHydrated =
                     HydrationSqlBuilder.buildManyOnlyHydratedSqlWithRawWhere conn name typeof<'T> filterSql false
                 QueryCommandInstrumentation.Increment()
@@ -230,7 +230,7 @@ type internal CollectionMutationOps<'T>() =
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
 
-        // R45-12 W-7: translateWhereExpr canonical predicate path for ReplaceOne.
+        // translateWhereExpr canonical predicate path for ReplaceOne.
         let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
         let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
 

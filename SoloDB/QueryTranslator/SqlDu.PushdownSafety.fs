@@ -22,7 +22,7 @@ open SoloDatabase.Provenance
 //   P-S8: Inner body is SingleSelect (not UnionAll)
 //   P-S9: Inner has no HAVING
 //
-// Conservative cut (deferred from C6):
+// Conservative cut (deferred):
 //   - UNION ALL arm distribution
 //   - GROUP BY key-only pushdown
 //   - WHERE-to-HAVING reclassification

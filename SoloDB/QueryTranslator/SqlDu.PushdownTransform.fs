@@ -202,6 +202,6 @@ and private pushdownSelectCore (core: SelectCore) : SelectCore =
 let pushdownStatement (stmt: SqlStatement) : SqlStatement =
     match stmt with
     | SelectStmt sel -> SelectStmt(pushdownSelect sel)
-    // DML predicate optimization is out of scope for C6.
+    // DML predicate optimization is out of scope.
     // UpdateStmt, DeleteStmt, InsertStmt, DdlStmt pass through unchanged.
     | InsertStmt _ | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> stmt

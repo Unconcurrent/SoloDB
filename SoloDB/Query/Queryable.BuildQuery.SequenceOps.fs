@@ -51,7 +51,7 @@ module internal QueryableBuildQueryPartA =
                         pendingDistinctByScalarReuse <- None
                         isPostScalarProjection <- true
                     | Some lowered when lowered.RelationAccess = HasRelationAccess ->
-                        // C12 path: post-SupportedLinqMethods.DistinctBy Select on a DIFFERENT relation scalar than
+                        // Post-DistinctBy Select on a DIFFERENT relation scalar than
                         // the SupportedLinqMethods.DistinctBy key. The base layer will materialize the relation into
                         // Value via jsonb_set, so we extract from the materialized JSON payload.
                         // Edge case 20: Relation-backed SupportedLinqMethods.DistinctBy scalar slot reuse

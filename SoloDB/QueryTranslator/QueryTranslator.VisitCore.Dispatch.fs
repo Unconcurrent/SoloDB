@@ -70,7 +70,7 @@ module internal QueryTranslatorVisitCore =
             SqlExpr.FunctionCall("jsonb_extract", [visitDu array qb; SqlExpr.Literal(SqlLiteral.String(sprintf "$[%O]" ce.Value))])
         | _ -> raise (NotSupportedException("The index of the array must always be a constant value."))
 
-    /// R63: Resolve the correct SQL alias for a ParameterExpression.
+    /// Resolve the correct SQL alias for a ParameterExpression.
     /// If the parameter belongs to the current scope, use qb.TableNameDot.
     /// If it's an outer-captured parameter, look up OuterParameterAliases.
     and private resolveAliasForParameter (paramExpr: ParameterExpression) (qb: QueryBuilder) : string option =

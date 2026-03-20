@@ -22,7 +22,7 @@ module internal QueryTranslatorVisitDbRef =
             match exp with
             | :? LambdaExpression as le -> le.Body
             | _ -> exp
-        // R50: Try unified descriptor path first (handles most operator compositions).
+        // Try unified descriptor path first (handles most operator compositions).
         let unifiedResult =
             match DBRefManyExtractor.tryExtract actualExp with
             | ValueSome desc ->

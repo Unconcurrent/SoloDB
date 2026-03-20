@@ -8,7 +8,7 @@ open System.Text
 open System.Text.RegularExpressions
 
 // ══════════════════════════════════════════════════════════════
-// Index Knowledge Model (C8a)
+// Index Knowledge Model
 //
 // Read-only model of available indexes for optimizer decisions.
 // Binary presence/absence only — no cost model, no cardinality,

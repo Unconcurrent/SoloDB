@@ -114,7 +114,7 @@ let rec private expressionMatchesIndexWithAlias (model: IndexModel) (tableName: 
             | _ -> false
 
 /// Reorder INNER JOIN chain based on index knowledge.
-/// Among C7-legal orderings, prefer probing the side with a matching
+/// Among legal orderings, prefer probing the side with a matching
 /// index on its join key. Only operates on pure INNER JOIN chains.
 let private reshapeJoinsForIndex (model: IndexModel) (core: SelectCore) : SelectCore =
     // Only consider pure INNER JOIN chains with 2+ joins

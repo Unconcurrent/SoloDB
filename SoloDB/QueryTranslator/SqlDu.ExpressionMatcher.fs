@@ -4,7 +4,7 @@ open SqlDu.Engine.C1.Spec
 open SoloDatabase.IndexModel
 
 // ══════════════════════════════════════════════════════════════
-// Expression-Form Matcher (C8b)
+// Expression-Form Matcher
 //
 // Checks if a DU expression structurally matches an index entry,
 // accounting for:

@@ -28,7 +28,7 @@ let private emitBinaryOp (op: BinaryOperator) : string =
 
 /// Emit a SQL literal value.
 /// When ctx.InlineLiterals is true, Integer/Float/String are emitted inline (product behavior).
-/// When false, they are parameterized (C2 spec behavior).
+/// When false, they are parameterized (spec behavior).
 /// NULL and Boolean are always emitted inline regardless of the flag.
 let private emitLiteral (ctx: EmitContext) (lit: SqlLiteral) : Emitted =
     match lit with
