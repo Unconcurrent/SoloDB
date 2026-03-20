@@ -78,6 +78,7 @@ module internal QueryableBuildQueryPartC =
                         wrapCore (mkCore projs None)
                     )
 
+                // todo: Append works at root level but is not yet supported at DBRefMany level (see Extract.fs)
                 | SupportedLinqMethods.Append ->
                     addUnionAll statements (fun _tableName vars ->
                         let appendingObj = QueryTranslator.evaluateExpr<'T> m.Expressions.[0]
@@ -313,6 +314,9 @@ module internal QueryableBuildQueryPartC =
 
 
                 | SupportedLinqMethods.Aggregate ->
-                    raise (NotSupportedException("Aggregate is not supported."))
+                    raise (NotSupportedException(
+                        "Error: Aggregate is not supported.\n" +
+                        "Reason: LINQ Aggregate (seed/accumulator fold) has no direct SQL translation. SoloDB supports specific aggregates (Sum, Min, Max, Average, Count) natively.\n" +
+                        "Fix: Use .Sum(), .Min(), .Max(), .Average(), or .Count() instead, or call .AsEnumerable() before .Aggregate()."))
 
                 | _ -> ()

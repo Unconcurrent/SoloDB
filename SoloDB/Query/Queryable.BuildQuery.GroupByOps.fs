@@ -35,7 +35,6 @@ module internal QueryableBuildQueryPartAGroupBy =
     let internal flushGroupByAsJsonGroupArray<'T>
         (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>)
         (expressions: Expression array) (havingPreds: Expression list) =
-        ()
         addComplexFinal statements (fun ctx ->
             let havingDu =
                 if havingPreds.IsEmpty then None

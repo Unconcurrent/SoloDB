@@ -327,6 +327,38 @@ module internal DBRefManyExtractor =
                             defaultIfEmpty <- Some arg
                         walkChain src
 
+                    | "Zip" ->
+                        raise (NotSupportedException(
+                            "Error: Zip is not supported on DBRefMany.\n" +
+                            "Reason: Zip pairs two sequences positionally, which has no direct SQL translation for relation-backed collections.\n" +
+                            "Fix: Call .AsEnumerable() before .Zip(), or restructure the query."))
+                    | "Reverse" ->
+                        raise (NotSupportedException(
+                            "Error: Reverse is not supported on DBRefMany.\n" +
+                            "Reason: Reverse requires materializing the full sequence to invert ordering, which cannot be expressed as a single SQL query.\n" +
+                            "Fix: Use .OrderByDescending() for reverse ordering, or call .AsEnumerable() before .Reverse()."))
+                    | "Prepend" ->
+                        raise (NotSupportedException(
+                            "Error: Prepend is not supported on DBRefMany.\n" +
+                            "Reason: Prepend inserts an element at a specific position, which has no direct SQL translation for relation-backed collections.\n" +
+                            "Fix: Call .AsEnumerable() before .Prepend(), or use .Concat() instead."))
+                    | "SequenceEqual" ->
+                        raise (NotSupportedException(
+                            "Error: SequenceEqual is not supported on DBRefMany.\n" +
+                            "Reason: SequenceEqual compares two sequences element-by-element in order, which has no direct SQL translation.\n" +
+                            "Fix: Call .AsEnumerable() before .SequenceEqual(), or compare counts and individual elements."))
+                    | "Aggregate" ->
+                        raise (NotSupportedException(
+                            "Error: Aggregate is not supported on DBRefMany.\n" +
+                            "Reason: LINQ Aggregate (seed/accumulator fold) has no direct SQL translation. Use specific aggregates (Sum, Min, Max, Average, Count) natively.\n" +
+                            "Fix: Use .Sum(), .Min(), .Max(), .Average(), or .Count() instead, or call .AsEnumerable() before .Aggregate()."))
+                    // todo: implement Append at DBRefMany level (UNION ALL with single-element subquery, same pattern as root-level Append in SetAndTypeOps.fs)
+                    | "Append" ->
+                        raise (NotSupportedException(
+                            "Error: Append is not supported on DBRefMany.\n" +
+                            "Reason: Append adds a single element to a relation-backed collection, which is not yet implemented at the DBRefMany translation level.\n" +
+                            "Fix: Call .AsEnumerable() before .Append(), or use the mutation API to add elements to the relation."))
+
                     | _ ->
                         // Unknown operator — stop walking, return current expression as source.
                         e
