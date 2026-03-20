@@ -81,9 +81,11 @@ module internal QueryTranslatorVisitPostJoin =
         let targetType = valueMemberExpr.Type
         let ctx = qb.SourceContext
 
-        if dbRefChainDepth dbrefExpr > 10 then
+        // DBRef chain depth is counted directly (no off-by-one), so > is correct here.
+        // DBRefMany guards use >= because the outer level is excluded from the predicate body count.
+        if dbRefChainDepth dbrefExpr > maxRelationDepth then
             raise (NotSupportedException(
-                "Error: Relation chain is too deep or circular (depth > 10).\nReason: The query exceeds the supported relation traversal depth.\nFix: Reduce relation depth or split the query into multiple steps."))
+                sprintf "Error: Relation chain is too deep or circular (depth > %d).\nReason: The query exceeds the supported relation traversal depth.\nFix: Reduce relation depth or split the query into multiple steps." maxRelationDepth))
 
         let pathKey = computePathKey dbrefExpr
 

@@ -20,7 +20,7 @@ module internal HydrationSqlBuilder =
     open QueryableHelperBase
 
     /// Maximum nesting depth for hydration correlated subqueries (matches batch load maxRecursiveDepth).
-    let maxHydrationDepth = 10
+    let maxHydrationDepth = Utils.maxRelationDepth
 
     type internal RelationShapeInfo = HydrationSqlMetadata.RelationShapeInfo
     let internal getRelationShape = HydrationSqlMetadata.getRelationShape

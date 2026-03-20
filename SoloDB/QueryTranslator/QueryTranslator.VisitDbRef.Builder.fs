@@ -18,9 +18,8 @@ open SoloDatabase.Attributes
 /// Builds SQL DU trees from a unified DBRefManyQueryDescriptor.
 /// Replaces the order-dependent per-handler peeling in VisitDbRef.
 module internal DBRefManyBuilder =
-    [<Literal>]
     let private nestedDbRefManyNotSupportedMessage =
-        "Error: Deeply nested DBRefMany query is not supported.\nReason: Only one level of DBRefMany nesting is allowed in relation predicates.\nFix: Rewrite to at most one nested DBRefMany level, or move deeper traversal after AsEnumerable()."
+        QueryTranslatorVisitDbRefPeelers.nestedDbRefManyNotSupportedMessage
     type DBRefManyOwnerRef = DBRefManyDescriptor.DBRefManyOwnerRef
     let private joinEdgesToClauses = DBRefManyHelpers.joinEdgesToClauses
 
@@ -335,6 +334,23 @@ module internal DBRefManyBuilder =
                 SqlExpr.Literal(SqlLiteral.Null)
 
     let tryBuild (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) : SqlExpr voption =
+        // R62: Depth guard — check all predicate/projection expressions for nested DBRefMany depth.
+        let peelerDepth = QueryTranslatorVisitDbRefPeelers.countDbRefManyDepth
+        let maxExprDepth =
+            let predDepths = desc.WherePredicates |> List.map peelerDepth
+            let projDepth = desc.SelectProjection |> Option.map (fun l -> peelerDepth l.Body) |> Option.defaultValue 0
+            let termDepth =
+                match desc.Terminal with
+                | Terminal.Any(Some pred) | Terminal.All pred | Terminal.Contains pred
+                | Terminal.Sum pred | Terminal.Min pred | Terminal.Max pred | Terminal.Average pred
+                | Terminal.First(Some pred) | Terminal.FirstOrDefault(Some pred)
+                | Terminal.Last(Some pred) | Terminal.LastOrDefault(Some pred)
+                | Terminal.Single(Some pred) | Terminal.SingleOrDefault(Some pred) -> peelerDepth pred
+                | _ -> 0
+            (predDepths @ [projDepth; termDepth]) |> List.max
+        if maxExprDepth >= maxRelationDepth then
+            raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
+
         let countDbRefManyDepth =
             DBRefManyBuilderTerminals.countDbRefManyDepth unwrapConvert isDBRefManyType
         let buildProjectedRowsetRaw qb desc ownerRef =

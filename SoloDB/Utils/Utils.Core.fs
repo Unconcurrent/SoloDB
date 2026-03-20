@@ -16,6 +16,11 @@ open System.Runtime.CompilerServices
 #nowarn "0044"
 
 module Utils =
+    /// Maximum nesting depth for DBRef/DBRefMany relation traversal.
+    /// Shared across translator guards, batch-load, hydration, and join chains.
+    [<Literal>]
+    let internal maxRelationDepth = 10
+
     let isNull x = Object.ReferenceEquals(x, null)
 
     /// Returns a deterministic variable name based on a int.

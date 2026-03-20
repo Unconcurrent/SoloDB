@@ -21,17 +21,12 @@ open DBRefTypeHelpers
 
 /// Shared peeler functions, builder helpers, and constants for DBRefMany query translation.
 module internal QueryTranslatorVisitDbRefPeelers =
-    [<Literal>]
     let internal nestedDbRefManyNotSupportedMessage =
-        "Error: Deeply nested DBRefMany query is not supported.\nReason: Only one level of DBRefMany nesting is allowed in relation predicates.\nFix: Rewrite to at most one nested DBRefMany level, or move deeper traversal after AsEnumerable()."
+        sprintf "Error: Deeply nested DBRefMany query exceeds maximum depth (%d).\nReason: Queries with more than %d levels of nested DBRefMany relations are not supported.\nFix: Reduce nesting depth or move deeper traversal after AsEnumerable()." maxRelationDepth maxRelationDepth
 
     [<Literal>]
     let internal filteredWhereUnsupportedTerminalMessage =
         "Error: DBRefMany operator chain is not supported with this terminal operator.\nReason: Only .Any(), .Count(), .LongCount(), .Select(), .All(), and ordering operators (.OrderBy/.ThenBy) are admitted as composable prefixes.\nFix: Use one of the admitted operators, or move the query after AsEnumerable()."
-
-    [<Literal>]
-    let internal filteredWhereRelationNavigationMessage =
-        "Error: DBRefMany.Where() predicate cannot navigate DBRef or DBRefMany relations.\nReason: L1 admits only scalar predicates over the target entity.\nFix: Filter on scalar target properties only, or move the relation navigation after AsEnumerable()."
 
     [<Literal>]
     let internal filteredWhereOuterCaptureMessage =
@@ -290,70 +285,13 @@ module internal QueryTranslatorVisitDbRefPeelers =
         { Ctes = []; Body = SingleSelect(mkSubCore proj (Some(BaseTable(linkTable, None))) (Some where)) }
 
     /// Build a correlated EXISTS or NOT EXISTS subquery for a DBRefMany quantifier with a predicate.
-    /// When isAll=false: EXISTS(SELECT 1 FROM link INNER JOIN target ... WHERE owner AND predicate)
-    /// When isAll=true:  NOT EXISTS(SELECT 1 FROM link INNER JOIN target ... WHERE owner AND NOT(predicate))
-    let internal buildQuantifierWithPredicate (qb: QueryBuilder) (ownerRef: DBRefManyOwnerRef) (predicateExpr: Expression) (isAll: bool) =
-        let methodName = if isAll then "All" else "Any"
-        match tryExtractLambdaExpression predicateExpr with
-        | ValueSome predExpr ->
-            if countDbRefManyDepth predExpr.Body > 1 then
-                raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
-
-            let propName = ownerRef.PropertyExpr.Member.Name
-            let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
-            let ownerUsesSource = dbRefManyOwnerUsesSource qb.SourceContext ownerRef.OwnerCollection propName
-            let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
-            let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
-            let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
-            let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
-            let aliasId = System.Threading.Interlocked.Increment(&subqueryAliasCounter)
-            let tgtAlias = sprintf "_tgt%d" aliasId
-            let lnkAlias = sprintf "_lnk%d" aliasId
-
-            // Visit the predicate body to get a DU expression.
-            let subQb = qb.ForSubquery(tgtAlias, predExpr)
-            let predicateDu = visitDu predExpr.Body subQb
-
-            // Build: SELECT 1 FROM "linkTable" AS _lnk INNER JOIN "targetTable" AS _tgt
-            //   ON _tgt.Id = _lnk.targetColumn
-            //   WHERE _lnk.ownerColumn = ownerAlias.Id AND [NOT] predicate
-            let joinOn =
-                SqlExpr.Binary(
-                    SqlExpr.Column(Some tgtAlias, "Id"),
-                    BinaryOperator.Eq,
-                    SqlExpr.Column(Some lnkAlias, targetColumn))
-            let ownerWhere =
-                SqlExpr.Binary(
-                    SqlExpr.Column(Some lnkAlias, ownerColumn),
-                    BinaryOperator.Eq,
-                    SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
-            let fullPredicate =
-                if isAll then SqlExpr.Unary(UnaryOperator.Not, predicateDu)
-                else predicateDu
-            let fullWhere = SqlExpr.Binary(ownerWhere, BinaryOperator.And, fullPredicate)
-            let core =
-                { mkSubCore
-                    [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
-                    (Some(BaseTable(linkTable, Some lnkAlias)))
-                    (Some fullWhere) with
-                    Joins = [ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), joinOn)] }
-            let subSelect = { Ctes = []; Body = SingleSelect core }
-            let existsExpr = SqlExpr.Exists subSelect
-            if isAll then SqlExpr.Unary(UnaryOperator.Not, existsExpr)
-            else existsExpr
-        | ValueNone ->
-            raise (NotSupportedException(
-                sprintf "Error: Cannot extract predicate lambda for relation-backed DBRefMany.%s.\nReason: The predicate is not a simple lambda expression.\nFix: Use a simple lambda (e.g., x => ...) or move the operation after AsEnumerable()." methodName))
-
     let internal buildFilteredPredicateDus (qb: QueryBuilder) (tgtAlias: string) (predicateExprs: Expression list) =
         predicateExprs
         |> List.map (fun predExpr ->
             match tryExtractLambdaExpression predExpr with
             | ValueSome predLambda ->
-                if countDbRefManyDepth predLambda.Body > 0 then
+                if countDbRefManyDepth predLambda.Body >= maxRelationDepth then
                     raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
-                if containsRelationNavigation predLambda.Body then
-                    raise (NotSupportedException(filteredWhereRelationNavigationMessage))
                 if containsOuterCapture predLambda then
                     raise (NotSupportedException(filteredWhereOuterCaptureMessage))
                 let subQb = qb.ForSubquery(tgtAlias, predLambda)

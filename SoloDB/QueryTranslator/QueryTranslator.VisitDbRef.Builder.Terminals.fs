@@ -6,6 +6,7 @@ open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.QueryTranslatorVisitCore
 open SoloDatabase.QueryTranslatorBaseTypes
 open SqlDu.Engine.C1.Spec
+open Utils
 
 module internal DBRefManyBuilderTerminals =
     let countDbRefManyDepth (unwrapConvert: Expression -> Expression) (isDBRefManyType: Type -> bool) (expr: Expression) : int =
@@ -234,7 +235,7 @@ module internal DBRefManyBuilderTerminals =
         : SqlExpr =
         match desc.SelectProjection with
         | Some projLambda ->
-            if countDbRefManyDepth projLambda.Body > 0 then
+            if countDbRefManyDepth projLambda.Body >= maxRelationDepth then
                 raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
             let tgtAlias, _, baseCore, targetTable = buildCorrelatedCore qb desc ownerRef []
             let subQb = qb.ForSubquery(tgtAlias, projLambda, subqueryRootTable = targetTable)

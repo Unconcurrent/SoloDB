@@ -15,7 +15,7 @@ open RelationsTypes
 open RelationsSchema
 open RelationsEntity
 
-let private maxRecursiveDepth = 10
+let private maxRecursiveDepth = Utils.maxRelationDepth
 
 let rec batchLoadDBRefProperties
     (connection: SqliteConnection)
