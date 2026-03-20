@@ -79,25 +79,29 @@ module internal DBRefManyBuildSpecial =
         let subQbKey = qb.ForSubquery(tgtAlias, keyLambda, subqueryRootTable = targetTable)
         let groupKeyDu = visitDu keyLambda.Body subQbKey
         let keyJoins = DBRefManyHelpers.joinEdgesToClauses subQbKey.SourceContext.Joins
-
-        let baseCore = { baseCore with Joins = baseCore.Joins @ keyJoins }
+        let havingJoinEdges = ResizeArray<JoinEdge>()
         let havingOpt =
             match desc.GroupByHavingPredicate with
             | Some havingPredExpr ->
                 match tryExtractLambdaExpression havingPredExpr with
                 | ValueSome havingLambda ->
                     let groupParam = havingLambda.Parameters.[0]
-                    Some (DBRefManyHelpers.translateGroupingPredicate qb tgtAlias groupKeyDu groupParam havingLambda.Body)
+                    Some (DBRefManyHelpers.translateGroupingPredicate qb tgtAlias targetTable groupKeyDu groupParam havingLambda.Body havingJoinEdges)
                 | ValueNone -> None
             | None -> None
+        let havingJoins = DBRefManyHelpers.joinEdgesToClauses havingJoinEdges
+        let baseCore = { baseCore with Joins = baseCore.Joins @ keyJoins @ havingJoins }
         let projectedGroupRowset () =
             match desc.SelectProjection with
             | Some projLambda ->
                 let groupParam = projLambda.Parameters.[0]
-                let projDu = DBRefManyHelpers.translateGroupingPredicate qb tgtAlias groupKeyDu groupParam projLambda.Body
+                let projJoinEdges = ResizeArray<JoinEdge>()
+                let projDu = DBRefManyHelpers.translateGroupingPredicate qb tgtAlias targetTable groupKeyDu groupParam projLambda.Body projJoinEdges
+                let projJoins = DBRefManyHelpers.joinEdgesToClauses projJoinEdges
                 let gbCore =
                     { baseCore with
                         Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = projDu }]
+                        Joins = baseCore.Joins @ projJoins
                         GroupBy = [groupKeyDu]
                         Having = havingOpt }
                 Some { Ctes = []; Body = SingleSelect gbCore }
@@ -273,7 +277,7 @@ module internal DBRefManyBuildSpecial =
                         match tryExtractLambdaExpression havingPredExpr with
                         | ValueSome havingLambda ->
                             let groupParam = havingLambda.Parameters.[0]
-                            Some (DBRefManyHelpers.translateGroupingPredicate qb tgtAlias (SqlExpr.Column(Some twAlias2, "_gk")) groupParam havingLambda.Body)
+                            Some (DBRefManyHelpers.translateGroupingPredicate qb tgtAlias targetTable (SqlExpr.Column(Some twAlias2, "_gk")) groupParam havingLambda.Body (ResizeArray<JoinEdge>()))
                         | ValueNone -> None
                     | None -> None
                 let gbCore =

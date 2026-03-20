@@ -285,7 +285,7 @@ module internal QueryTranslatorVisitDbRefPeelers =
         { Ctes = []; Body = SingleSelect(mkSubCore proj (Some(BaseTable(linkTable, None))) (Some where)) }
 
     /// Build a correlated EXISTS or NOT EXISTS subquery for a DBRefMany quantifier with a predicate.
-    let internal buildFilteredPredicateDus (qb: QueryBuilder) (tgtAlias: string) (predicateExprs: Expression list) =
+    let internal buildFilteredPredicateDus (qb: QueryBuilder) (tgtAlias: string) (targetTable: string) (predicateExprs: Expression list) =
         predicateExprs
         |> List.map (fun predExpr ->
             match tryExtractLambdaExpression predExpr with
@@ -294,7 +294,7 @@ module internal QueryTranslatorVisitDbRefPeelers =
                     raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
                 if containsOuterCapture predLambda then
                     raise (NotSupportedException(filteredWhereOuterCaptureMessage))
-                let subQb = qb.ForSubquery(tgtAlias, predLambda)
+                let subQb = qb.ForSubquery(tgtAlias, predLambda, subqueryRootTable = targetTable)
                 visitDu predLambda.Body subQb
             | ValueNone ->
                 raise (NotSupportedException(

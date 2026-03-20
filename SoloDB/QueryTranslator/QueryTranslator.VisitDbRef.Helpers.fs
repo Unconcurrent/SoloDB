@@ -30,7 +30,7 @@ module internal DBRefManyHelpers =
     /// Translate an IGrouping predicate body (g => g.Count() > N) to a HAVING DU expression.
     /// Recognizes g.Count(), g.Sum(sel), g.Min(sel), g.Max(sel), g.Average(sel), g.Key,
     /// and binary comparisons/logic.
-    let translateGroupingPredicate (qb: QueryBuilder) (tgtAlias: string) (groupKeyDu: SqlExpr) (groupParam: ParameterExpression) (body: Expression) : SqlExpr =
+    let translateGroupingPredicate (qb: QueryBuilder) (tgtAlias: string) (targetTable: string) (groupKeyDu: SqlExpr) (groupParam: ParameterExpression) (body: Expression) (aggregateJoinEdges: ResizeArray<JoinEdge>) : SqlExpr =
         let rec visit (e: Expression) : SqlExpr =
             let e = unwrapConvert e
             match e with
@@ -105,8 +105,9 @@ module internal DBRefManyHelpers =
                             raise (NotSupportedException(sprintf "GroupBy aggregate %s requires a selector lambda." mc.Method.Name))
                         match tryExtractLambdaExpression selectorExpr with
                         | ValueSome selectorLambda ->
-                            let subQb = qb.ForSubquery(tgtAlias, selectorLambda)
+                            let subQb = qb.ForSubquery(tgtAlias, selectorLambda, subqueryRootTable = targetTable)
                             let selectorDu = visitDu selectorLambda.Body subQb
+                            aggregateJoinEdges.AddRange(subQb.SourceContext.Joins)
                             let aggExpr = SqlExpr.AggregateCall(aggKind, Some selectorDu, false, None)
                             if mc.Method.Name = "Sum" then
                                 SqlExpr.Coalesce(aggExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])

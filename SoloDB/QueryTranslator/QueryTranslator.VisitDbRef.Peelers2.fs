@@ -109,12 +109,12 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
         | _ -> ValueNone
 
     /// L3: Build sort key DU expressions from peeled OrderBy key selectors.
-    let internal buildSortKeyDus (qb: QueryBuilder) (tgtAlias: string) (sortKeys: (Expression * SortDirection) list) : OrderBy list =
+    let internal buildSortKeyDus (qb: QueryBuilder) (tgtAlias: string) (targetTable: string) (sortKeys: (Expression * SortDirection) list) : OrderBy list =
         sortKeys
         |> List.map (fun (keyExpr, dir) ->
             match tryExtractLambdaExpression keyExpr with
             | ValueSome keyLambda ->
-                let subQb = qb.ForSubquery(tgtAlias, keyLambda)
+                let subQb = qb.ForSubquery(tgtAlias, keyLambda, subqueryRootTable = targetTable)
                 let keyDu = visitDu keyLambda.Body subQb
                 { Expr = keyDu; Direction = dir }
             | ValueNone ->
@@ -265,12 +265,12 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
                         let wherePredDus =
                             let basePreds =
                                 if wherePreds.IsEmpty then []
-                                else buildFilteredPredicateDus qb tgtAlias wherePreds
+                                else buildFilteredPredicateDus qb tgtAlias targetTable wherePreds
                             match ofTypeName with
                             | Some tn -> basePreds @ [buildOfTypePredicate tgtAlias tn]
                             | None -> basePreds
 
-                        let subQb = qb.ForSubquery(tgtAlias, projLambda)
+                        let subQb = qb.ForSubquery(tgtAlias, projLambda, subqueryRootTable = targetTable)
                         let projectedDu = visitDu projLambda.Body subQb
 
                         let joinOn =
@@ -316,13 +316,13 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
         let lnkAlias = sprintf "_lnk%d" aliasId
 
         let wherePredDus =
-            let basePreds = if wherePredicates.IsEmpty then [] else buildFilteredPredicateDus qb tgtAlias wherePredicates
+            let basePreds = if wherePredicates.IsEmpty then [] else buildFilteredPredicateDus qb tgtAlias targetTable wherePredicates
             match ofTypeName with
             | Some tn -> basePreds @ [buildOfTypePredicate tgtAlias tn]
             | None -> basePreds
-        let sortKeyDus = buildSortKeyDus qb tgtAlias sortKeys
+        let sortKeyDus = buildSortKeyDus qb tgtAlias targetTable sortKeys
 
-        let twSubQb = qb.ForSubquery(tgtAlias, twPredLambda)
+        let twSubQb = qb.ForSubquery(tgtAlias, twPredLambda, subqueryRootTable = targetTable)
         let twPredDu = visitDu twPredLambda.Body twSubQb
         let caseExpr = SqlExpr.CaseExpr(
             (SqlExpr.Unary(UnaryOperator.Not, twPredDu), SqlExpr.Literal(SqlLiteral.Integer 1L)),

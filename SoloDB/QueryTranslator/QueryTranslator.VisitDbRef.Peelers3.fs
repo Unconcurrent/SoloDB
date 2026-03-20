@@ -68,7 +68,7 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
     /// L8: Translate an IGrouping predicate body (g => g.Count() > N) to a HAVING DU expression.
     /// Recognizes g.Count(), g.Sum(sel), g.Min(sel), g.Max(sel), g.Average(sel), g.Key,
     /// and binary comparisons/logic.
-    let internal translateGroupingPredicate (qb: QueryBuilder) (tgtAlias: string) (groupKeyDu: SqlExpr) (groupParam: ParameterExpression) (body: Expression) : SqlExpr =
+    let internal translateGroupingPredicate (qb: QueryBuilder) (tgtAlias: string) (targetTable: string) (groupKeyDu: SqlExpr) (groupParam: ParameterExpression) (body: Expression) : SqlExpr =
         let rec visit (e: Expression) : SqlExpr =
             let e = unwrapConvert e
             match e with
@@ -136,7 +136,7 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
                             raise (NotSupportedException(sprintf "GroupBy aggregate %s requires a selector lambda." mc.Method.Name))
                         match tryExtractLambdaExpression selectorExpr with
                         | ValueSome selectorLambda ->
-                            let subQb = qb.ForSubquery(tgtAlias, selectorLambda)
+                            let subQb = qb.ForSubquery(tgtAlias, selectorLambda, subqueryRootTable = targetTable)
                             let selectorDu = visitDu selectorLambda.Body subQb
                             let aggExpr = SqlExpr.AggregateCall(aggKind, Some selectorDu, false, None)
                             if mc.Method.Name = "Sum" then
@@ -169,8 +169,8 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
         let tgtAlias = sprintf "_tgt%d" aliasId
         let lnkAlias = sprintf "_lnk%d" aliasId
 
-        let predicateDus = buildFilteredPredicateDus qb tgtAlias predicateExprs
-        let sortKeyDus = if sortKeys.IsEmpty then [] else buildSortKeyDus qb tgtAlias sortKeys
+        let predicateDus = buildFilteredPredicateDus qb tgtAlias targetTable predicateExprs
+        let sortKeyDus = if sortKeys.IsEmpty then [] else buildSortKeyDus qb tgtAlias targetTable sortKeys
 
         let joinOn =
             SqlExpr.Binary(
@@ -208,8 +208,8 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
         let aliasId = System.Threading.Interlocked.Increment(&subqueryAliasCounter)
         let tgtAlias = sprintf "_tgt%d" aliasId
         let lnkAlias = sprintf "_lnk%d" aliasId
-        let predicateDus = buildFilteredPredicateDus qb tgtAlias predicateExprs
-        let sortKeyDus = if sortKeys.IsEmpty then [] else buildSortKeyDus qb tgtAlias sortKeys
+        let predicateDus = buildFilteredPredicateDus qb tgtAlias targetTable predicateExprs
+        let sortKeyDus = if sortKeys.IsEmpty then [] else buildSortKeyDus qb tgtAlias targetTable sortKeys
 
         let joinOn =
             SqlExpr.Binary(
