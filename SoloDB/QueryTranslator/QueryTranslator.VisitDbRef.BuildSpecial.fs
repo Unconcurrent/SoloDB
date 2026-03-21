@@ -25,6 +25,38 @@ module internal DBRefManyBuildSpecial =
                 [],
                 Some scalarExpr)
 
+    let private buildTakeWhileProjectedRowsetWithLambda
+        (qb: QueryBuilder)
+        (baseCore: SelectCore)
+        (tgtAlias: string)
+        (targetTable: string)
+        (cfExpr: SqlExpr)
+        (mkSubCore: Projection list -> TableSource option -> SqlExpr option -> SelectCore)
+        (nextAlias: string -> string)
+        (desc: QueryDescriptor)
+        (projLambda: LambdaExpression)
+        (isTakeWhile: bool) : SqlSelect voption =
+        let subQb2 = qb.ForSubquery(tgtAlias, projLambda, subqueryRootTable = targetTable)
+        let projDu = visitDu projLambda.Body subQb2
+        let projJoins = DBRefManyHelpers.joinEdgesToClauses subQb2.SourceContext.Joins
+        let innerProjs2 = [{ Alias = Some "v"; Expr = projDu }; { Alias = Some "_cf"; Expr = cfExpr }]
+        let innerCore2 = { baseCore with Projections = ProjectionSetOps.ofList innerProjs2; Joins = baseCore.Joins @ projJoins }
+        let innerSel2 = { Ctes = []; Body = SingleSelect innerCore2 }
+        let twAlias2 = nextAlias "_tw"
+        let cfFilter2 =
+            if isTakeWhile then SqlExpr.Binary(SqlExpr.Column(Some twAlias2, "_cf"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
+            else SqlExpr.Binary(SqlExpr.Column(Some twAlias2, "_cf"), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
+        let middleCore = mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Column(Some twAlias2, "v") }] (Some(DerivedTable(innerSel2, twAlias2))) (Some cfFilter2)
+        let middleSel = { Ctes = []; Body = SingleSelect middleCore }
+        if desc.Distinct then
+            let distinctAlias = nextAlias "_twd"
+            let distinctCore =
+                { mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Column(Some distinctAlias, "v") }] (Some(DerivedTable(middleSel, distinctAlias))) None with
+                    Distinct = true }
+            ValueSome { Ctes = []; Body = SingleSelect distinctCore }
+        else
+            ValueSome middleSel
+
     let private buildTakeWhileProjectedRowset
         (qb: QueryBuilder)
         (baseCore: SelectCore)
@@ -35,31 +67,9 @@ module internal DBRefManyBuildSpecial =
         (nextAlias: string -> string)
         (desc: QueryDescriptor)
         (isTakeWhile: bool) : SqlSelect voption =
-
         match desc.SelectProjection with
-        | Some projLambda ->
-            let subQb2 = qb.ForSubquery(tgtAlias, projLambda, subqueryRootTable = targetTable)
-            let projDu = visitDu projLambda.Body subQb2
-            let projJoins = DBRefManyHelpers.joinEdgesToClauses subQb2.SourceContext.Joins
-            let innerProjs2 = [{ Alias = Some "v"; Expr = projDu }; { Alias = Some "_cf"; Expr = cfExpr }]
-            let innerCore2 = { baseCore with Projections = ProjectionSetOps.ofList innerProjs2; Joins = baseCore.Joins @ projJoins }
-            let innerSel2 = { Ctes = []; Body = SingleSelect innerCore2 }
-            let twAlias2 = nextAlias "_tw"
-            let cfFilter2 =
-                if isTakeWhile then SqlExpr.Binary(SqlExpr.Column(Some twAlias2, "_cf"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
-                else SqlExpr.Binary(SqlExpr.Column(Some twAlias2, "_cf"), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
-            let middleCore = mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Column(Some twAlias2, "v") }] (Some(DerivedTable(innerSel2, twAlias2))) (Some cfFilter2)
-            let middleSel = { Ctes = []; Body = SingleSelect middleCore }
-            if desc.Distinct then
-                let distinctAlias = nextAlias "_twd"
-                let distinctCore =
-                    { mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Column(Some distinctAlias, "v") }] (Some(DerivedTable(middleSel, distinctAlias))) None with
-                        Distinct = true }
-                ValueSome { Ctes = []; Body = SingleSelect distinctCore }
-            else
-                ValueSome middleSel
-        | None ->
-            ValueNone
+        | Some projLambda -> buildTakeWhileProjectedRowsetWithLambda qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc projLambda isTakeWhile
+        | None -> ValueNone
 
     let private buildAggregateOverRowset
         (insideJsonObjectProjection: bool)
@@ -310,16 +320,44 @@ module internal DBRefManyBuildSpecial =
             match buildTakeWhileProjectedRowset qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc isTakeWhile with
             | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset qb.InsideJsonObjectProjection mkSubCore nextAlias rowsetSel AggregateKind.Sum)
             | ValueNone -> ValueNone
+        | Terminal.Sum selectorExpr ->
+            match tryExtractLambdaExpression selectorExpr with
+            | ValueSome selectorLambda ->
+                match buildTakeWhileProjectedRowsetWithLambda qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc selectorLambda isTakeWhile with
+                | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset qb.InsideJsonObjectProjection mkSubCore nextAlias rowsetSel AggregateKind.Sum)
+                | ValueNone -> ValueNone
+            | ValueNone -> ValueNone
         | Terminal.MinProjected ->
             match buildTakeWhileProjectedRowset qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc isTakeWhile with
             | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset qb.InsideJsonObjectProjection mkSubCore nextAlias rowsetSel AggregateKind.Min)
+            | ValueNone -> ValueNone
+        | Terminal.Min selectorExpr ->
+            match tryExtractLambdaExpression selectorExpr with
+            | ValueSome selectorLambda ->
+                match buildTakeWhileProjectedRowsetWithLambda qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc selectorLambda isTakeWhile with
+                | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset qb.InsideJsonObjectProjection mkSubCore nextAlias rowsetSel AggregateKind.Min)
+                | ValueNone -> ValueNone
             | ValueNone -> ValueNone
         | Terminal.MaxProjected ->
             match buildTakeWhileProjectedRowset qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc isTakeWhile with
             | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset qb.InsideJsonObjectProjection mkSubCore nextAlias rowsetSel AggregateKind.Max)
             | ValueNone -> ValueNone
+        | Terminal.Max selectorExpr ->
+            match tryExtractLambdaExpression selectorExpr with
+            | ValueSome selectorLambda ->
+                match buildTakeWhileProjectedRowsetWithLambda qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc selectorLambda isTakeWhile with
+                | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset qb.InsideJsonObjectProjection mkSubCore nextAlias rowsetSel AggregateKind.Max)
+                | ValueNone -> ValueNone
+            | ValueNone -> ValueNone
         | Terminal.AverageProjected ->
             match buildTakeWhileProjectedRowset qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc isTakeWhile with
             | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset qb.InsideJsonObjectProjection mkSubCore nextAlias rowsetSel AggregateKind.Avg)
+            | ValueNone -> ValueNone
+        | Terminal.Average selectorExpr ->
+            match tryExtractLambdaExpression selectorExpr with
+            | ValueSome selectorLambda ->
+                match buildTakeWhileProjectedRowsetWithLambda qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc selectorLambda isTakeWhile with
+                | ValueSome rowsetSel -> ValueSome(buildAggregateOverRowset qb.InsideJsonObjectProjection mkSubCore nextAlias rowsetSel AggregateKind.Avg)
+                | ValueNone -> ValueNone
             | ValueNone -> ValueNone
         | _ -> ValueNone
