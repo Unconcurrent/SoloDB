@@ -20,6 +20,20 @@ module internal QueryableBuildQueryPartBGroupJoin =
     open QueryableHelperPreprocess
     open QueryableHelperBase
 
+    type GroupJoinElementKind =
+        | FirstLike of orDefault: bool
+        | LastLike of orDefault: bool
+        | SingleLike of orDefault: bool
+        | ElementAtLike of indexExpr: Expression * orDefault: bool
+
+    type GroupJoinElementCall =
+        { Call: MethodCallExpression
+          Kind: GroupJoinElementKind }
+
+    type GroupJoinTranslatedArg =
+        { Value: SqlExpr
+          Error: SqlExpr option }
+
     let internal applyGroupJoin<'T>
         (sourceCtx: QueryContext)
         (tableName: string)
@@ -167,14 +181,37 @@ module internal QueryableBuildQueryPartBGroupJoin =
                 let translateOuterExpr (expr: Expression) =
                     translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars (Some outerParam) expr
 
-                let tryMatchGroupFirstLikeCall (expr: Expression) =
+                let translatedArg value =
+                    { Value = value
+                      Error = None }
+
+                let combineErrorExprs (errors: SqlExpr option list) =
+                    errors
+                    |> List.choose id
+                    |> function
+                        | [] -> None
+                        | [single] -> Some single
+                        | head :: tail -> Some(SqlExpr.Coalesce(head, tail))
+
+                let errorExpr message =
+                    SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String($"__solodb_error__:{message}"))])
+
+                let tryMatchGroupElementCall (expr: Expression) =
                     match expr with
                     | :? MethodCallExpression as mc
-                        when (mc.Method.Name = "First" || mc.Method.Name = "FirstOrDefault")
-                             && mc.Arguments.Count = 1
+                        when mc.Arguments.Count >= 1
                              && mc.Arguments.[0] :? ParameterExpression
                              && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
-                        Some mc
+                        match mc.Method.Name, mc.Arguments.Count with
+                        | "First", 1 -> Some { Call = mc; Kind = FirstLike false }
+                        | "FirstOrDefault", 1 -> Some { Call = mc; Kind = FirstLike true }
+                        | "Last", 1 -> Some { Call = mc; Kind = LastLike false }
+                        | "LastOrDefault", 1 -> Some { Call = mc; Kind = LastLike true }
+                        | "Single", 1 -> Some { Call = mc; Kind = SingleLike false }
+                        | "SingleOrDefault", 1 -> Some { Call = mc; Kind = SingleLike true }
+                        | "ElementAt", 2 -> Some { Call = mc; Kind = ElementAtLike(mc.Arguments.[1], false) }
+                        | "ElementAtOrDefault", 2 -> Some { Call = mc; Kind = ElementAtLike(mc.Arguments.[1], true) }
+                        | _ -> None
                     | _ -> None
 
                 let isNullConstant (expr: Expression) =
@@ -182,39 +219,128 @@ module internal QueryableBuildQueryPartBGroupJoin =
                     | :? ConstantExpression as ce -> isNull ce.Value
                     | _ -> false
 
-                let buildGroupFirstLikeSubquery (groupCall: MethodCallExpression) (projectionBody: Expression) =
+                let buildCountSubquery (baseCore: SelectCore) (limit: int option) =
+                    let countSourceAlias = sprintf "gjc%d" (Interlocked.Increment(innerCtx.AliasCounter) - 1)
+                    let countSourceCore =
+                        { baseCore with
+                            Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                            Limit =
+                                match limit with
+                                | Some n -> Some (SqlExpr.Literal(SqlLiteral.Integer(int64 n)))
+                                | None -> baseCore.Limit }
+                    let countSourceSel = { Ctes = []; Body = SingleSelect countSourceCore }
+                    let countRowAlias = sprintf "gjn%d" (Interlocked.Increment(innerCtx.AliasCounter) - 1)
+                    let countCore =
+                        { Distinct = false
+                          Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
+                          Source = Some(DerivedTable(countSourceSel, countRowAlias))
+                          Joins = []
+                          Where = None
+                          GroupBy = []
+                          Having = None
+                          OrderBy = []
+                          Limit = None
+                          Offset = None }
+                    SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect countCore }
+
+                let buildGroupElementSubquery (groupCall: GroupJoinElementCall) (projectionBody: Expression) =
                     let scalarAlias = sprintf "gjf%d" (Interlocked.Increment(innerCtx.AliasCounter) - 1)
                     let freshInnerCtx =
                         { innerCtx with
                             Joins = ResizeArray() }
                     let innerParam = innerKeySelector.Parameters.[0]
-                    let rewrittenProjection = replaceExpression (groupCall :> Expression) (innerParam :> Expression) projectionBody
+                    let rewrittenProjection = replaceExpression (groupCall.Call :> Expression) (innerParam :> Expression) projectionBody
                     let freshInnerKeyExpr =
                         match tryTranslateDbRefValueIdKey innerParam scalarAlias innerKeySelector.Body with
                         | Some translated -> translated
                         | None -> translateJoinSingleSourceExpression freshInnerCtx scalarAlias ctx.Vars (Some innerParam) innerKeySelector.Body
                     let projectedExpr =
                         translateJoinSingleSourceExpression freshInnerCtx scalarAlias ctx.Vars (Some innerParam) rewrittenProjection
-                    let scalarCore =
+                    let baseScalarCore =
                         { mkCore [{ Alias = None; Expr = projectedExpr }] (Some (DerivedTable(innerSelect, scalarAlias)))
                             with
                                 Joins = materializeDiscoveredJoins freshInnerCtx.Joins None None
-                                Where = Some (SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, freshInnerKeyExpr))
+                                Where = Some (SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, freshInnerKeyExpr)) }
+                    let ascIdOrder = [{ Expr = SqlExpr.Column(Some scalarAlias, "Id"); Direction = SortDirection.Asc }]
+                    let descIdOrder = [{ Expr = SqlExpr.Column(Some scalarAlias, "Id"); Direction = SortDirection.Desc }]
+                    let mkValue core = SqlExpr.ScalarSubquery (wrapCore core)
+                    let noElements = "Sequence contains no elements"
+                    let manyElements = "Sequence contains more than one element"
+                    let outOfRange = "Index was out of range. Must be non-negative and less than the size of the collection."
+                    match groupCall.Kind with
+                    | FirstLike _ ->
+                        translatedArg (mkValue { baseScalarCore with Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) })
+                    | LastLike orDefault ->
+                        let valueCore =
+                            { baseScalarCore with
+                                OrderBy = descIdOrder
                                 Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
-                    SqlExpr.ScalarSubquery (wrapCore scalarCore)
+                        let error =
+                            if orDefault then None
+                            else
+                                let countExpr = buildCountSubquery valueCore (Some 1)
+                                Some (SqlExpr.CaseExpr(
+                                    (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), errorExpr noElements),
+                                    [],
+                                    Some(SqlExpr.Literal(SqlLiteral.Null))))
+                        { Value = mkValue valueCore; Error = error }
+                    | SingleLike orDefault ->
+                        let valueCore =
+                            { baseScalarCore with
+                                OrderBy = ascIdOrder
+                                Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
+                        let countExpr = buildCountSubquery { baseScalarCore with OrderBy = ascIdOrder } (Some 2)
+                        let error =
+                            if orDefault then
+                                Some (SqlExpr.CaseExpr(
+                                    (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), errorExpr manyElements),
+                                    [],
+                                    Some(SqlExpr.Literal(SqlLiteral.Null))))
+                            else
+                                Some (SqlExpr.CaseExpr(
+                                    (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), errorExpr noElements),
+                                    [ (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), errorExpr manyElements) ],
+                                    Some(SqlExpr.Literal(SqlLiteral.Null))))
+                        { Value = mkValue valueCore; Error = error }
+                    | ElementAtLike(indexExpr, orDefault) ->
+                        let idx = Convert.ToInt64(QueryTranslator.evaluateExpr<obj> indexExpr)
+                        if idx < 0L then
+                            { Value = SqlExpr.Literal(SqlLiteral.Null)
+                              Error = if orDefault then None else Some(errorExpr outOfRange) }
+                        else
+                            let valueCore =
+                                { baseScalarCore with
+                                    OrderBy = ascIdOrder
+                                    Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L))
+                                    Offset = Some (SqlExpr.Literal(SqlLiteral.Integer idx)) }
+                            let error =
+                                if orDefault then None
+                                else
+                                    let countExpr = buildCountSubquery valueCore None
+                                    Some (SqlExpr.CaseExpr(
+                                        (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), errorExpr outOfRange),
+                                        [],
+                                        Some(SqlExpr.Literal(SqlLiteral.Null))))
+                            { Value = mkValue valueCore; Error = error }
 
                 let tryTranslateGroupFirstLikeNullComparison (expr: BinaryExpression) =
                     let tryBuild groupExpr nullExpr nodeType =
-                        match tryMatchGroupFirstLikeCall groupExpr with
+                        match tryMatchGroupElementCall groupExpr with
                         | Some groupCall when isNullConstant nullExpr ->
                             let existsExpr =
-                                match buildGroupFirstLikeSubquery groupCall (Expression.Constant(1L) :> Expression) with
-                                | SqlExpr.ScalarSubquery select -> SqlExpr.Exists select
-                                | _ -> failwith "internal invariant violation: expected scalar subquery"
-                            match nodeType with
-                            | ExpressionType.Equal -> Some (SqlExpr.Unary(UnaryOperator.Not, existsExpr))
-                            | ExpressionType.NotEqual -> Some existsExpr
-                            | _ -> failwith "internal invariant violation: expected == or !="
+                                match groupCall.Kind with
+                                | FirstLike _
+                                | LastLike _
+                                | ElementAtLike(_, true) ->
+                                    match buildGroupElementSubquery groupCall (Expression.Constant(1L) :> Expression) with
+                                    | { Value = SqlExpr.ScalarSubquery select } -> Some (SqlExpr.Exists select)
+                                    | _ -> failwith "internal invariant violation: expected scalar subquery"
+                                | _ -> None
+                            match existsExpr, nodeType with
+                            | Some existsExpr, ExpressionType.Equal -> Some (SqlExpr.Unary(UnaryOperator.Not, existsExpr))
+                            | Some existsExpr, ExpressionType.NotEqual -> Some existsExpr
+                            | Some _, _ -> failwith "internal invariant violation: expected == or !="
+                            | None, _ -> None
                         | _ -> None
                     match tryBuild expr.Left expr.Right expr.NodeType with
                     | Some translated -> Some translated
@@ -222,67 +348,71 @@ module internal QueryableBuildQueryPartBGroupJoin =
 
                 // Translate the result selector body. Outer references → outer table.
                 // Group references → SQL aggregates over the inner table.
-                let rec translateGroupJoinArg (expr: Expression) : SqlExpr =
+                let rec translateGroupJoinArg (expr: Expression) : GroupJoinTranslatedArg =
                     match expr with
                     // outer.Prop — direct outer member access
                     | :? MemberExpression as me when not (isNull me.Expression) && me.Expression :? ParameterExpression && (me.Expression :?> ParameterExpression) = outerParam ->
-                        translateOuterExpr expr
+                        translatedArg (translateOuterExpr expr)
                     // group.First().Prop / group.FirstOrDefault().Prop
                     | :? MemberExpression as me when not (isNull me.Expression) ->
-                        match tryMatchGroupFirstLikeCall me.Expression with
-                        | Some groupCall -> buildGroupFirstLikeSubquery groupCall expr
+                        match tryMatchGroupElementCall me.Expression with
+                        | Some groupCall -> buildGroupElementSubquery groupCall expr
                         | None ->
-                            translateOuterExpr expr
+                            translatedArg (translateOuterExpr expr)
                     // group.First() / group.FirstOrDefault()
                     | :? MethodCallExpression as mc ->
-                        match tryMatchGroupFirstLikeCall mc with
+                        match tryMatchGroupElementCall mc with
                         | Some groupCall ->
-                            buildGroupFirstLikeSubquery groupCall expr
+                            buildGroupElementSubquery groupCall expr
                         | None when mc.Method.Name = "Count" && mc.Arguments.Count = 1 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
-                            SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None)
+                            translatedArg (SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None))
                         | None when mc.Method.Name = "Count" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                             let pred = unwrapLambdaExpressionOrThrow "GroupJoin Count predicate" mc.Arguments.[1]
                             let predDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
-                            SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((predDu, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None)
+                            translatedArg (SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((predDu, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None))
                         | None when mc.Method.Name = "LongCount" && mc.Arguments.Count = 1 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
-                            SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None)
+                            translatedArg (SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None))
                         | None when mc.Method.Name = "Sum" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                             let sel = unwrapLambdaExpressionOrThrow "GroupJoin Sum selector" mc.Arguments.[1]
                             let selDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body
-                            SqlExpr.Coalesce(SqlExpr.AggregateCall(AggregateKind.Sum, Some selDu, false, None), [SqlExpr.Literal(SqlLiteral.Integer 0L)])
+                            translatedArg (SqlExpr.Coalesce(SqlExpr.AggregateCall(AggregateKind.Sum, Some selDu, false, None), [SqlExpr.Literal(SqlLiteral.Integer 0L)]))
                         | None when mc.Method.Name = "Min" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                             let sel = unwrapLambdaExpressionOrThrow "GroupJoin Min selector" mc.Arguments.[1]
-                            SqlExpr.AggregateCall(AggregateKind.Min, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None)
+                            translatedArg (SqlExpr.AggregateCall(AggregateKind.Min, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None))
                         | None when mc.Method.Name = "Max" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                             let sel = unwrapLambdaExpressionOrThrow "GroupJoin Max selector" mc.Arguments.[1]
-                            SqlExpr.AggregateCall(AggregateKind.Max, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None)
+                            translatedArg (SqlExpr.AggregateCall(AggregateKind.Max, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None))
                         | None when mc.Method.Name = "Average" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                             let sel = unwrapLambdaExpressionOrThrow "GroupJoin Average selector" mc.Arguments.[1]
-                            SqlExpr.AggregateCall(AggregateKind.Avg, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None)
+                            translatedArg (SqlExpr.AggregateCall(AggregateKind.Avg, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None))
                         | None when mc.Method.Name = "Any" && mc.Arguments.Count = 1 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
-                            SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
+                            translatedArg (SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L)))
                         | None when mc.Method.Name = "Any" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                             let pred = unwrapLambdaExpressionOrThrow "GroupJoin Any predicate" mc.Arguments.[1]
                             let predDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
-                            SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((predDu, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
+                            translatedArg (SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((predDu, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L)))
                         | None when mc.Method.Name = "All" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
                             let pred = unwrapLambdaExpressionOrThrow "GroupJoin All predicate" mc.Arguments.[1]
                             let predDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
-                            SqlExpr.Binary(
+                            translatedArg (SqlExpr.Binary(
                                 SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.Not, predDu), SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None),
-                                BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
+                                BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)))
                         | _ ->
-                            translateOuterExpr expr
+                            translatedArg (translateOuterExpr expr)
                     // Constant / no-group expression
                     | :? ConstantExpression ->
-                        translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars None expr
+                        translatedArg (translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars None expr)
                     // Conditional (ternary)
                     | :? ConditionalExpression as ce ->
-                        SqlExpr.CaseExpr((translateGroupJoinArg ce.Test, translateGroupJoinArg ce.IfTrue), [], Some(translateGroupJoinArg ce.IfFalse))
+                        let test = translateGroupJoinArg ce.Test
+                        let ifTrue = translateGroupJoinArg ce.IfTrue
+                        let ifFalse = translateGroupJoinArg ce.IfFalse
+                        { Value = SqlExpr.CaseExpr((test.Value, ifTrue.Value), [], Some(ifFalse.Value))
+                          Error = combineErrorExprs [test.Error; ifTrue.Error; ifFalse.Error] }
                     // Binary
                     | :? BinaryExpression as be ->
                         match tryTranslateGroupFirstLikeNullComparison be with
-                        | Some translated -> translated
+                        | Some translated -> translatedArg translated
                         | None ->
                             let op =
                                 match be.NodeType with
@@ -300,10 +430,13 @@ module internal QueryableBuildQueryPartBGroupJoin =
                                 | ExpressionType.AndAlso -> BinaryOperator.And
                                 | ExpressionType.OrElse -> BinaryOperator.Or
                                 | _ -> raise (NotSupportedException($"GroupJoin result selector binary operator {be.NodeType} not supported."))
-                            SqlExpr.Binary(translateGroupJoinArg be.Left, op, translateGroupJoinArg be.Right)
+                            let left = translateGroupJoinArg be.Left
+                            let right = translateGroupJoinArg be.Right
+                            { Value = SqlExpr.Binary(left.Value, op, right.Value)
+                              Error = combineErrorExprs [left.Error; right.Error] }
                     // Fallback — try outer translation
                     | _ ->
-                        translateOuterExpr expr
+                        translatedArg (translateOuterExpr expr)
 
                 // Build the result projection from the selector body.
                 // Use json_object (not jsonb_object) so downstream jsonb_extract returns typed SQL values.
@@ -316,17 +449,27 @@ module internal QueryableBuildQueryPartBGroupJoin =
                     | :? NewExpression as newExpr when not (isNull newExpr.Members) ->
                         let memberNames =
                             newExpr.Members |> Seq.map (fun m -> m.Name) |> Seq.toArray
-                        buildJsonObject
+                        let translatedMembers =
                             [ for i in 0 .. newExpr.Arguments.Count - 1 ->
                                 memberNames.[i], translateGroupJoinArg newExpr.Arguments.[i] ]
+                        let jsonExpr = buildJsonObject [ for (name, arg) in translatedMembers -> name, arg.Value ]
+                        match combineErrorExprs [ for (_, arg) in translatedMembers -> arg.Error ] with
+                        | None -> jsonExpr
+                        | Some errorExpr ->
+                            SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNull, errorExpr), jsonExpr), [], Some errorExpr)
                     | :? MemberInitExpression as mi ->
-                        buildJsonObject
+                        let translatedMembers =
                             [ for binding in mi.Bindings do
                                 match binding with
                                 | :? MemberAssignment as ma ->
                                     yield ma.Member.Name, translateGroupJoinArg ma.Expression
                                 | _ ->
                                     raise (NotSupportedException("GroupJoin result selector: only member assignments supported.")) ]
+                        let jsonExpr = buildJsonObject [ for (name, arg) in translatedMembers -> name, arg.Value ]
+                        match combineErrorExprs [ for (_, arg) in translatedMembers -> arg.Error ] with
+                        | None -> jsonExpr
+                        | Some errorExpr ->
+                            SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNull, errorExpr), jsonExpr), [], Some errorExpr)
                     | _ ->
                         raise (NotSupportedException(
                             "Error: GroupJoin result selector must produce an anonymous type or object initializer.\n" +
