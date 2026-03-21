@@ -38,7 +38,7 @@ type Extensions =
     /// </remarks>
     [<Extension>]
     static member Any<'T>(this: ICollection<'T>, condition: Expression<Func<'T, bool>>) =
-        let f = condition.Compile true
+        let f = condition.Compile false
         this |> Seq.exists f.Invoke
 
     /// <summary>

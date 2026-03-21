@@ -222,7 +222,7 @@ module internal QueryableBuildQueryPartAGroupBy =
 
     let internal applyGroupBySelect<'T>
         (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>)
-        (groupByExpressions: Expression array) (havingPreds: Expression list) (selectExpressions: Expression array) =
+        (groupByExpressions: Expression array) (havingPreds: Expression list) (groupOrders: (Expression * bool) list) (selectExpressions: Expression array) =
         let selectLambda = extractLambdaFromExpr selectExpressions.[0]
         let groupParam = selectLambda.Parameters.[0]
         let body = selectLambda.Body
@@ -264,12 +264,26 @@ module internal QueryableBuildQueryPartAGroupBy =
             let jsonObjArgs = projections |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
             // Use json_object (TEXT JSON) so downstream json_extract returns typed SQL values for ORDER BY/TakeWhile.
             let valueExpr = SqlExpr.FunctionCall("json_object", jsonObjArgs)
+            let orderBy =
+                groupOrders
+                |> List.map (fun (orderingExpr, descending) ->
+                    let lambda = extractLambdaFromExpr orderingExpr
+                    let orderExpr =
+                        match tryTranslateGroupArg sourceCtx ctx.TableName "o" lambda.Parameters.[0] ctx.Vars lambda.Body with
+                        | Some sqlExpr -> sqlExpr
+                        | None ->
+                            raise (NotSupportedException(
+                                "Error: GroupBy ordering cannot be translated to SQL.\n" +
+                                "Fix: Order by g.Key or a supported aggregate projection, or call AsEnumerable() before OrderBy."))
+                    { Expr = orderExpr
+                      Direction = if descending then SortDirection.Desc else SortDirection.Asc })
             let core =
                 { mkCore
                     [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
                      { Alias = Some "Value"; Expr = valueExpr }]
                     (Some (DerivedTable(ctx.Inner, "o")))
                   with GroupBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
+                       OrderBy = orderBy
                        Having = havingExpr }
             wrapCore core
         )

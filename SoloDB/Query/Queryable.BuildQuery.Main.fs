@@ -75,6 +75,7 @@ module internal QueryableBuildQueryMain =
         let reversed = preprocessed |> Array.rev
         let mutable pendingGroupByExprs : Expression array option = None
         let mutable pendingGroupByHavingPreds : Expression list = []
+        let mutable pendingGroupByOrders : (Expression * bool) list = []
         let mutable idx = 0
         while idx < reversed.Length do
             let q = reversed.[idx]
@@ -105,19 +106,28 @@ module internal QueryableBuildQueryMain =
                     | SupportedLinqMethods.Where ->
                         pendingGroupByHavingPreds <- m.Expressions.[0] :: pendingGroupByHavingPreds
                         pendingGroupByHandled <- true
+                    | SupportedLinqMethods.OrderBy
+                    | SupportedLinqMethods.OrderByDescending
+                    | SupportedLinqMethods.ThenBy
+                    | SupportedLinqMethods.ThenByDescending ->
+                        pendingGroupByOrders <- pendingGroupByOrders @ [m.Expressions.[0], (m.Value = SupportedLinqMethods.OrderByDescending || m.Value = SupportedLinqMethods.ThenByDescending)]
+                        pendingGroupByHandled <- true
                     | SupportedLinqMethods.Select ->
                         let groupByExprs = pendingGroupByExprs.Value
                         let havingPreds = pendingGroupByHavingPreds |> List.rev
+                        let groupOrders = pendingGroupByOrders
                         pendingGroupByExprs <- None
                         pendingGroupByHavingPreds <- []
+                        pendingGroupByOrders <- []
                         QueryableBuildQueryPartAGroupBy.applyGroupBySelect<'T>
-                            sourceCtx tableName statements groupByExprs havingPreds m.Expressions
+                            sourceCtx tableName statements groupByExprs havingPreds groupOrders m.Expressions
                         pendingGroupByHandled <- true
                     | _ ->
                         let groupByExprs = pendingGroupByExprs.Value
                         pendingGroupByExprs <- None
                         let havingPreds = pendingGroupByHavingPreds |> List.rev
                         pendingGroupByHavingPreds <- []
+                        pendingGroupByOrders <- []
                         QueryableBuildQueryPartAGroupBy.flushGroupByAsJsonGroupArray<'T>
                             sourceCtx tableName statements groupByExprs havingPreds
 
