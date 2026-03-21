@@ -92,6 +92,44 @@ Fix: Join directly against a root SoloDB collection or move the join after AsEnu
 Reason: Expected a quoted lambda expression.
 Fix: Rewrite the query to use direct lambda arguments or move it after AsEnumerable()."))
 
+    let rec internal referencesParam (param: ParameterExpression) (expr: Expression) =
+        if isNull expr then
+            false
+        elif obj.ReferenceEquals(expr, param) then
+            true
+        else
+            match expr with
+            | :? MethodCallExpression as mc ->
+                (not (isNull mc.Object) && referencesParam param mc.Object)
+                || (mc.Arguments |> Seq.exists (referencesParam param))
+            | :? MemberExpression as me ->
+                not (isNull me.Expression) && referencesParam param me.Expression
+            | :? UnaryExpression as ue ->
+                referencesParam param ue.Operand
+            | :? BinaryExpression as be ->
+                referencesParam param be.Left || referencesParam param be.Right
+            | :? ConditionalExpression as ce ->
+                referencesParam param ce.Test || referencesParam param ce.IfTrue || referencesParam param ce.IfFalse
+            | :? NewExpression as ne ->
+                ne.Arguments |> Seq.exists (referencesParam param)
+            | :? MemberInitExpression as mi ->
+                referencesParam param mi.NewExpression
+                || (mi.Bindings
+                    |> Seq.exists (fun binding ->
+                        match binding with
+                        | :? MemberAssignment as ma -> referencesParam param ma.Expression
+                        | _ -> false))
+            | :? NewArrayExpression as na ->
+                na.Expressions |> Seq.exists (referencesParam param)
+            | :? InvocationExpression as ie ->
+                referencesParam param ie.Expression
+                || (ie.Arguments |> Seq.exists (referencesParam param))
+            | :? ListInitExpression as li ->
+                referencesParam param li.NewExpression
+                || (li.Initializers |> Seq.collect (fun init -> init.Arguments) |> Seq.exists (referencesParam param))
+            | _ ->
+                false
+
     let internal isCompositeJoinKeyBody (expr: Expression) =
         match expr with
         | :? NewExpression
@@ -164,6 +202,29 @@ Fix: Rewrite the query to use direct lambda arguments or move it after AsEnumera
             | Some p -> Expression.Lambda(expr, p) :> Expression
             | None -> Expression.Lambda(expr) :> Expression
         translateExprDu ctx tableAlias lambdaExpr vars
+
+    let internal normalizeUnionArm
+        (aliasFactory: unit -> string)
+        (columnNames: string list)
+        (core: SelectCore) =
+        if core.OrderBy.Length > 0 || core.Distinct || core.Limit.IsSome || core.Offset.IsSome then
+            let normAlias = aliasFactory ()
+            let normSel = { Ctes = []; Body = SingleSelect core }
+            { Distinct = false
+              Projections =
+                ProjectionSetOps.ofList (
+                    columnNames
+                    |> List.map (fun name -> { Alias = Some name; Expr = SqlExpr.Column(Some normAlias, name) }))
+              Source = Some(DerivedTable(normSel, normAlias))
+              Joins = []
+              Where = None
+              GroupBy = []
+              Having = None
+              OrderBy = []
+              Limit = None
+              Offset = None }
+        else
+            core
 
     let rec internal translateJoinResultSelectorExpression
         (outerCtx: QueryContext)

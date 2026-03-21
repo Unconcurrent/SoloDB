@@ -53,7 +53,7 @@ module internal SQLiteToolsParams =
     let private processParameter (value: obj) =
         match value with
         | null ->
-            struct (null, -1)
+            struct (DBNull.Value :> obj, -1)
         | :? DateTimeOffset as dto ->
             struct (dto.ToUnixTimeMilliseconds() |> box, sizeof<int64>)
         | :? TrimmedArray as ta ->
@@ -65,7 +65,7 @@ module internal SQLiteToolsParams =
                 if hasValueProp.GetValue value :?> bool then
                     struct (valueProp.GetValue value, -1)
                 else
-                    struct (null, -1)
+                    struct (DBNull.Value :> obj, -1)
             else
                 struct (value, -1)
 

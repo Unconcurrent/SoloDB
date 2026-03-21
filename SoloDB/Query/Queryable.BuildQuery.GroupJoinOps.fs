@@ -181,6 +181,9 @@ module internal QueryableBuildQueryPartBGroupJoin =
                       TranslateOuterExpr = translateOuterExpr }
 
                 let rec translateGroupJoinArg (expr: Expression) : GroupJoinTranslatedArg =
+                    if not (referencesParam groupParam expr) then
+                        translatedArg (translateOuterExpr expr)
+                    else
                     match expr with
                     | :? MemberExpression as me when not (isNull me.Expression) && me.Expression :? ParameterExpression && (me.Expression :?> ParameterExpression) = outerParam ->
                         translatedArg (translateOuterExpr expr)
@@ -284,25 +287,26 @@ module internal QueryableBuildQueryPartBGroupJoin =
                         match tryTranslateGroupFirstLikeNullComparison runtime be with
                         | Some translated -> translatedArg translated
                         | None ->
-                            let op =
-                                match be.NodeType with
-                                | ExpressionType.Add -> BinaryOperator.Add
-                                | ExpressionType.Subtract -> BinaryOperator.Sub
-                                | ExpressionType.Multiply -> BinaryOperator.Mul
-                                | ExpressionType.Divide -> BinaryOperator.Div
-                                | ExpressionType.Modulo -> BinaryOperator.Mod
-                                | ExpressionType.Equal -> BinaryOperator.Eq
-                                | ExpressionType.NotEqual -> BinaryOperator.Ne
-                                | ExpressionType.GreaterThan -> BinaryOperator.Gt
-                                | ExpressionType.GreaterThanOrEqual -> BinaryOperator.Ge
-                                | ExpressionType.LessThan -> BinaryOperator.Lt
-                                | ExpressionType.LessThanOrEqual -> BinaryOperator.Le
-                                | ExpressionType.AndAlso -> BinaryOperator.And
-                                | ExpressionType.OrElse -> BinaryOperator.Or
-                                | _ -> raise (NotSupportedException($"GroupJoin result selector binary operator {be.NodeType} not supported."))
                             let left = translateGroupJoinArg be.Left
                             let right = translateGroupJoinArg be.Right
-                            { Value = SqlExpr.Binary(left.Value, op, right.Value)
+                            let value =
+                                match be.NodeType with
+                                | ExpressionType.Coalesce -> SqlExpr.Coalesce(left.Value, [right.Value])
+                                | ExpressionType.Add -> SqlExpr.Binary(left.Value, BinaryOperator.Add, right.Value)
+                                | ExpressionType.Subtract -> SqlExpr.Binary(left.Value, BinaryOperator.Sub, right.Value)
+                                | ExpressionType.Multiply -> SqlExpr.Binary(left.Value, BinaryOperator.Mul, right.Value)
+                                | ExpressionType.Divide -> SqlExpr.Binary(left.Value, BinaryOperator.Div, right.Value)
+                                | ExpressionType.Modulo -> SqlExpr.Binary(left.Value, BinaryOperator.Mod, right.Value)
+                                | ExpressionType.Equal -> SqlExpr.Binary(left.Value, BinaryOperator.Eq, right.Value)
+                                | ExpressionType.NotEqual -> SqlExpr.Binary(left.Value, BinaryOperator.Ne, right.Value)
+                                | ExpressionType.GreaterThan -> SqlExpr.Binary(left.Value, BinaryOperator.Gt, right.Value)
+                                | ExpressionType.GreaterThanOrEqual -> SqlExpr.Binary(left.Value, BinaryOperator.Ge, right.Value)
+                                | ExpressionType.LessThan -> SqlExpr.Binary(left.Value, BinaryOperator.Lt, right.Value)
+                                | ExpressionType.LessThanOrEqual -> SqlExpr.Binary(left.Value, BinaryOperator.Le, right.Value)
+                                | ExpressionType.AndAlso -> SqlExpr.Binary(left.Value, BinaryOperator.And, right.Value)
+                                | ExpressionType.OrElse -> SqlExpr.Binary(left.Value, BinaryOperator.Or, right.Value)
+                                | _ -> raise (NotSupportedException($"GroupJoin result selector binary operator {be.NodeType} not supported."))
+                            { Value = value
                               Error = combineErrorExprs [left.Error; right.Error] }
                     | _ ->
                         translatedArg (translateOuterExpr expr)

@@ -214,6 +214,25 @@ module internal DBRefManyBuilderElements =
               Offset = None }
         SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
 
+    let buildOrderedRowsetElement
+        (nextAlias: string -> string)
+        (rowsetSel: SqlSelect)
+        (pickLast: bool)
+        : SqlExpr =
+        let rowAlias = nextAlias "_re"
+        let elementCore =
+            { Distinct = false
+              Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Column(Some rowAlias, "v") }]
+              Source = Some(DerivedTable(rowsetSel, rowAlias))
+              Joins = []
+              Where = None
+              GroupBy = []
+              Having = None
+              OrderBy = [{ Expr = SqlExpr.Column(Some rowAlias, "__ord"); Direction = if pickLast then SortDirection.Desc else SortDirection.Asc }]
+              Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L))
+              Offset = None }
+        SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect elementCore }
+
     let buildEntityElement
         (nextAlias: string -> string)
         (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore * string)

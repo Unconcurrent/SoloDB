@@ -12,6 +12,32 @@ open SoloDatabase.DBRefManyDescriptor
 /// Specialized SQL builders for GroupBy and TakeWhile/SkipWhile terminals.
 /// Separated from the main builder to keep file sizes under 400 lines.
 module internal DBRefManyBuildSpecial =
+    let private buildTakeWhileBase
+        (qb: QueryBuilder)
+        (desc: QueryDescriptor)
+        (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore * string)
+        (tryGetRelationOrderByForTakeWhile: DBRefManyDescriptor.DBRefManyOwnerRef -> string -> string -> OrderBy list voption)
+        (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef)
+        (twPredLambda: LambdaExpression)
+        =
+        let tgtAlias, lnkAlias, baseCore0, targetTable = buildCorrelatedCore qb desc ownerRef []
+        let effectiveOrderBy =
+            match baseCore0.OrderBy with
+            | [] ->
+                match tryGetRelationOrderByForTakeWhile ownerRef tgtAlias lnkAlias with
+                | ValueSome orderBy -> orderBy
+                | ValueNone ->
+                    raise (InvalidOperationException(DBRefManyHelpers.takeWhileOrderingRequiredMessage))
+            | orderBy -> orderBy
+        let twSubQb = qb.ForSubquery(tgtAlias, twPredLambda, subqueryRootTable = targetTable)
+        let twPredDu = visitDu twPredLambda.Body twSubQb
+        let twJoins = DBRefManyHelpers.joinEdgesToClauses twSubQb.SourceContext.Joins
+        let baseCore = { baseCore0 with Joins = baseCore0.Joins @ twJoins; OrderBy = effectiveOrderBy }
+        let sortKeyDuPairs = effectiveOrderBy |> List.map (fun ob -> (ob.Expr, ob.Direction))
+        let windowSpec = { Kind = NamedWindowFunction "SUM"; Arguments = [SqlExpr.Unary(UnaryOperator.Not, twPredDu)]; PartitionBy = []; OrderBy = sortKeyDuPairs }
+        let cfExpr = SqlExpr.WindowCall windowSpec
+        tgtAlias, targetTable, baseCore, cfExpr
+
     let private buildTakeWhileProjectedRowsetWithLambda
         (qb: QueryBuilder)
         (baseCore: SelectCore)
@@ -26,19 +52,56 @@ module internal DBRefManyBuildSpecial =
         let subQb2 = qb.ForSubquery(tgtAlias, projLambda, subqueryRootTable = targetTable)
         let projDu = visitDu projLambda.Body subQb2
         let projJoins = DBRefManyHelpers.joinEdgesToClauses subQb2.SourceContext.Joins
-        let innerProjs2 = [{ Alias = Some "v"; Expr = projDu }; { Alias = Some "_cf"; Expr = cfExpr }]
+        let orderBy =
+            baseCore.OrderBy
+            |> List.map (fun ob -> (ob.Expr, ob.Direction))
+        let innerProjs2 =
+            [ { Alias = Some "v"; Expr = projDu }
+              { Alias = Some "_cf"; Expr = cfExpr }
+              { Alias = Some "__ord"
+                Expr =
+                    SqlExpr.WindowCall({
+                        Kind = WindowFunctionKind.RowNumber
+                        Arguments = []
+                        PartitionBy = []
+                        OrderBy = orderBy }) } ]
         let innerCore2 = { baseCore with Projections = ProjectionSetOps.ofList innerProjs2; Joins = baseCore.Joins @ projJoins }
         let innerSel2 = { Ctes = []; Body = SingleSelect innerCore2 }
         let twAlias2 = nextAlias "_tw"
         let cfFilter2 = DBRefManyHelpers.buildTakeWhileCfFilter twAlias2 isTakeWhile
-        let middleCore = mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Column(Some twAlias2, "v") }] (Some(DerivedTable(innerSel2, twAlias2))) (Some cfFilter2)
+        let middleCore =
+            { mkSubCore
+                [ { Alias = Some "v"; Expr = SqlExpr.Column(Some twAlias2, "v") }
+                  { Alias = Some "__ord"; Expr = SqlExpr.Column(Some twAlias2, "__ord") } ]
+                (Some(DerivedTable(innerSel2, twAlias2)))
+                (Some cfFilter2)
+              with OrderBy = [{ Expr = SqlExpr.Column(Some twAlias2, "__ord"); Direction = SortDirection.Asc }] }
         let middleSel = { Ctes = []; Body = SingleSelect middleCore }
         if desc.Distinct then
             let distinctAlias = nextAlias "_twd"
             let distinctCore =
-                { mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Column(Some distinctAlias, "v") }] (Some(DerivedTable(middleSel, distinctAlias))) None with
-                    Distinct = true }
-            ValueSome { Ctes = []; Body = SingleSelect distinctCore }
+                { Distinct = false
+                  Projections =
+                    ProjectionSetOps.ofList [
+                        { Alias = Some "v"; Expr = SqlExpr.Column(Some distinctAlias, "v") }
+                        { Alias = Some "__ord"; Expr = SqlExpr.AggregateCall(AggregateKind.Min, Some(SqlExpr.Column(Some distinctAlias, "__ord")), false, None) } ]
+                  Source = Some(DerivedTable(middleSel, distinctAlias))
+                  Joins = []
+                  Where = None
+                  GroupBy = [SqlExpr.Column(Some distinctAlias, "v")]
+                  Having = None
+                  OrderBy = []
+                  Limit = None
+                  Offset = None }
+            let orderedAlias = nextAlias "_two"
+            let orderedCore =
+                { mkSubCore
+                    [ { Alias = Some "v"; Expr = SqlExpr.Column(Some orderedAlias, "v") }
+                      { Alias = Some "__ord"; Expr = SqlExpr.Column(Some orderedAlias, "__ord") } ]
+                    (Some(DerivedTable({ Ctes = []; Body = SingleSelect distinctCore }, orderedAlias)))
+                    None
+                  with OrderBy = [{ Expr = SqlExpr.Column(Some orderedAlias, "__ord"); Direction = SortDirection.Asc }] }
+            ValueSome { Ctes = []; Body = SingleSelect orderedCore }
         else
             ValueSome middleSel
 
@@ -55,6 +118,57 @@ module internal DBRefManyBuildSpecial =
         match desc.SelectProjection with
         | Some projLambda -> buildTakeWhileProjectedRowsetWithLambda qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc projLambda isTakeWhile
         | None -> ValueNone
+
+    let private buildTakeWhileEntityRowset
+        (tgtAlias: string)
+        (baseCore: SelectCore)
+        (mkSubCore: Projection list -> TableSource option -> SqlExpr option -> SelectCore)
+        (nextAlias: string -> string)
+        (cfExpr: SqlExpr)
+        (isTakeWhile: bool) : SqlSelect =
+        let innerProjs =
+            [ { Alias = Some "Id"; Expr = SqlExpr.Column(Some tgtAlias, "Id") }
+              { Alias = Some "Value"; Expr = SqlExpr.Column(Some tgtAlias, "Value") }
+              { Alias = Some "_cf"; Expr = cfExpr } ]
+        let innerCore = { baseCore with Projections = ProjectionSetOps.ofList innerProjs }
+        let innerSel = { Ctes = []; Body = SingleSelect innerCore }
+        let twAlias = nextAlias "_tw"
+        let cfFilter = DBRefManyHelpers.buildTakeWhileCfFilter twAlias isTakeWhile
+        let outerCore =
+            mkSubCore
+                [ { Alias = Some "Id"; Expr = SqlExpr.Column(Some twAlias, "Id") }
+                  { Alias = Some "Value"; Expr = SqlExpr.Column(Some twAlias, "Value") } ]
+                (Some(DerivedTable(innerSel, twAlias)))
+                (Some cfFilter)
+        { Ctes = []; Body = SingleSelect outerCore }
+
+    let tryBuildTakeWhileProjectedRowset
+        (qb: QueryBuilder)
+        (desc: QueryDescriptor)
+        (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore * string)
+        (mkSubCore: Projection list -> TableSource option -> SqlExpr option -> SelectCore)
+        (nextAlias: string -> string)
+        (tryGetRelationOrderByForTakeWhile: DBRefManyDescriptor.DBRefManyOwnerRef -> string -> string -> OrderBy list voption)
+        (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef)
+        (twPredLambda: LambdaExpression)
+        (isTakeWhile: bool) : SqlSelect voption =
+        let tgtAlias, targetTable, baseCore, cfExpr =
+            buildTakeWhileBase qb desc buildCorrelatedCore tryGetRelationOrderByForTakeWhile ownerRef twPredLambda
+        buildTakeWhileProjectedRowset qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc isTakeWhile
+
+    let tryBuildTakeWhileEntityRowset
+        (qb: QueryBuilder)
+        (desc: QueryDescriptor)
+        (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore * string)
+        (mkSubCore: Projection list -> TableSource option -> SqlExpr option -> SelectCore)
+        (nextAlias: string -> string)
+        (tryGetRelationOrderByForTakeWhile: DBRefManyDescriptor.DBRefManyOwnerRef -> string -> string -> OrderBy list voption)
+        (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef)
+        (twPredLambda: LambdaExpression)
+        (isTakeWhile: bool) : SqlSelect =
+        let tgtAlias, _, baseCore, cfExpr =
+            buildTakeWhileBase qb desc buildCorrelatedCore tryGetRelationOrderByForTakeWhile ownerRef twPredLambda
+        buildTakeWhileEntityRowset tgtAlias baseCore mkSubCore nextAlias cfExpr isTakeWhile
 
     let private buildAggregateOverRowset
         (insideJsonObjectProjection: bool)
@@ -75,12 +189,28 @@ module internal DBRefManyBuildSpecial =
         (buildCorrelatedCore: QueryBuilder -> QueryDescriptor -> DBRefManyDescriptor.DBRefManyOwnerRef -> Projection list -> string * string * SelectCore * string)
         (mkSubCore: Projection list -> TableSource option -> SqlExpr option -> SelectCore)
         (nextAlias: string -> string)
+        (tryGetRelationOrderByForTakeWhile: DBRefManyDescriptor.DBRefManyOwnerRef -> string -> string -> OrderBy list voption)
         (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef)
         (keyLambda: LambdaExpression) : SqlExpr voption =
 
-        let tgtAlias, _, baseCore, targetTable =
-            buildCorrelatedCore qb { desc with Limit = None; Offset = None; SortKeys = [] } ownerRef
-                [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+        let groupDesc =
+            match desc.TakeWhileInfo with
+            | Some _ -> { desc with Limit = None; Offset = None }
+            | None -> { desc with Limit = None; Offset = None; SortKeys = [] }
+        let tgtAlias, baseCore, targetTable =
+            match desc.TakeWhileInfo with
+            | Some (twPredLambda, isTakeWhile) ->
+                let rowsetSel = tryBuildTakeWhileEntityRowset qb groupDesc buildCorrelatedCore mkSubCore nextAlias tryGetRelationOrderByForTakeWhile ownerRef twPredLambda isTakeWhile
+                let rowAlias = nextAlias "_twg"
+                let _, _, _, targetTable =
+                    buildCorrelatedCore qb groupDesc ownerRef [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                rowAlias,
+                (mkSubCore [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] (Some(DerivedTable(rowsetSel, rowAlias))) None),
+                targetTable
+            | None ->
+                let tgtAlias, _, baseCore, targetTable =
+                    buildCorrelatedCore qb groupDesc ownerRef [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                tgtAlias, baseCore, targetTable
         let subQbKey = qb.ForSubquery(tgtAlias, keyLambda, subqueryRootTable = targetTable)
         let groupKeyDu = visitDu keyLambda.Body subQbKey
         let keyJoins = DBRefManyHelpers.joinEdgesToClauses subQbKey.SourceContext.Joins
@@ -210,30 +340,13 @@ module internal DBRefManyBuildSpecial =
         (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef)
         (twPredLambda: LambdaExpression) (isTakeWhile: bool) : SqlExpr voption =
 
-        let tgtAlias, lnkAlias, baseCore0, targetTable = buildCorrelatedCore qb desc ownerRef []
-        let effectiveOrderBy =
-            match baseCore0.OrderBy with
-            | [] ->
-                match tryGetRelationOrderByForTakeWhile ownerRef tgtAlias lnkAlias with
-                | ValueSome orderBy -> orderBy
-                | ValueNone ->
-                    raise (InvalidOperationException(DBRefManyHelpers.takeWhileOrderingRequiredMessage))
-            | orderBy -> orderBy
-        let twSubQb = qb.ForSubquery(tgtAlias, twPredLambda, subqueryRootTable = targetTable)
-        let twPredDu = visitDu twPredLambda.Body twSubQb
-        let twJoins = DBRefManyHelpers.joinEdgesToClauses twSubQb.SourceContext.Joins
-        let baseCore = { baseCore0 with Joins = baseCore0.Joins @ twJoins; OrderBy = effectiveOrderBy }
-        let sortKeyDuPairs = effectiveOrderBy |> List.map (fun ob -> (ob.Expr, ob.Direction))
-        let windowSpec = { Kind = NamedWindowFunction "SUM"; Arguments = [SqlExpr.Unary(UnaryOperator.Not, twPredDu)]; PartitionBy = []; OrderBy = sortKeyDuPairs }
-        let cfExpr = SqlExpr.WindowCall windowSpec
-
-        let innerProjs = [{ Alias = Some "v"; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }; { Alias = Some "_cf"; Expr = cfExpr }]
-        let innerCore = { baseCore with Projections = ProjectionSetOps.ofList innerProjs }
-        let innerSel = { Ctes = []; Body = SingleSelect innerCore }
-        let twAlias = nextAlias "_tw"
-        let cfFilter = DBRefManyHelpers.buildTakeWhileCfFilter twAlias isTakeWhile
-        let outerCore = mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Column(Some twAlias, "v") }] (Some(DerivedTable(innerSel, twAlias))) (Some cfFilter)
-        let outerSel = { Ctes = []; Body = SingleSelect outerCore }
+        let tgtAlias, targetTable, baseCore, cfExpr =
+            buildTakeWhileBase qb desc buildCorrelatedCore tryGetRelationOrderByForTakeWhile ownerRef twPredLambda
+        let outerSel =
+            let entitySel = buildTakeWhileEntityRowset tgtAlias baseCore mkSubCore nextAlias cfExpr isTakeWhile
+            let twAlias = nextAlias "_twc"
+            let outerCore = mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] (Some(DerivedTable(entitySel, twAlias))) None
+            { Ctes = []; Body = SingleSelect outerCore }
 
         match desc.Terminal with
         | Terminal.Count | Terminal.LongCount ->

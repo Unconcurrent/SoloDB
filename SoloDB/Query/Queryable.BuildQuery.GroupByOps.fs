@@ -40,21 +40,6 @@ module internal QueryableBuildQueryPartAGroupBy =
         | :? LambdaExpression as le -> le
         | _ -> raise (NotSupportedException($"Expected lambda expression, got {expr.NodeType}"))
 
-    let rec private referencesParam (param: ParameterExpression) (expr: Expression) =
-        if isNull expr then false
-        elif obj.ReferenceEquals(expr, param) then true
-        else
-            match expr with
-            | :? MethodCallExpression as mc ->
-                (not (isNull mc.Object) && referencesParam param mc.Object) ||
-                (mc.Arguments |> Seq.exists (referencesParam param))
-            | :? MemberExpression as me -> not (isNull me.Expression) && referencesParam param me.Expression
-            | :? UnaryExpression as ue -> referencesParam param ue.Operand
-            | :? BinaryExpression as be -> referencesParam param be.Left || referencesParam param be.Right
-            | :? ConditionalExpression as ce -> referencesParam param ce.Test || referencesParam param ce.IfTrue || referencesParam param ce.IfFalse
-            | :? NewExpression as ne -> ne.Arguments |> Seq.exists (referencesParam param)
-            | _ -> false
-
     let private isGroupSource (expr: Expression) (groupParam: ParameterExpression) =
         match expr with
         | :? ParameterExpression as p -> obj.ReferenceEquals(p, groupParam)

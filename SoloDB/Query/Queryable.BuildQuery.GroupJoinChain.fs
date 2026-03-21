@@ -250,7 +250,50 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
               OrderBy = [{ Expr = SqlExpr.Column(Some dedupedAlias, "__ord"); Direction = SortDirection.Asc }]
               Limit = limitExpr
               Offset = offsetExpr }
-        { Ctes = []; Body = SingleSelect boundedCore }, chain.SelectProjection.IsSome
+        let boundedSel = { Ctes = []; Body = SingleSelect boundedCore }
+        let finalSel =
+            if chain.UsesDefaultIfEmpty then
+                let normalizedBoundedCore =
+                    normalizeUnionArm
+                        (fun () -> sprintf "gju%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1))
+                        (boundedProjections |> List.map (fun p -> p.Alias.Value))
+                        boundedCore
+                let existsAlias = sprintf "gjf%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1)
+                let existsCore =
+                    { Distinct = false
+                      Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                      Source = Some(DerivedTable({ Ctes = []; Body = SingleSelect normalizedBoundedCore }, existsAlias))
+                      Joins = []
+                      Where = None
+                      GroupBy = []
+                      Having = None
+                      OrderBy = []
+                      Limit = None
+                      Offset = None }
+                let defaultProjections =
+                    match chain.SelectProjection with
+                    | Some _ ->
+                        [{ Alias = Some "v"; Expr = SqlExpr.Literal(SqlLiteral.Null) }
+                         { Alias = Some "__ord"; Expr = SqlExpr.Literal(SqlLiteral.Integer 0L) }]
+                    | None ->
+                        [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Null) }
+                         { Alias = Some "Value"; Expr = SqlExpr.Literal(SqlLiteral.Null) }
+                         { Alias = Some "__ord"; Expr = SqlExpr.Literal(SqlLiteral.Integer 0L) }]
+                let defaultCore =
+                    { Distinct = false
+                      Projections = ProjectionSetOps.ofList defaultProjections
+                      Source = None
+                      Joins = []
+                      Where = Some (SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists { Ctes = []; Body = SingleSelect existsCore }))
+                      GroupBy = []
+                      Having = None
+                      OrderBy = []
+                      Limit = None
+                      Offset = None }
+                { Ctes = []; Body = UnionAllSelect(normalizedBoundedCore, [defaultCore]) }
+            else
+                boundedSel
+        finalSel, chain.SelectProjection.IsSome
 
     let buildGroupChainCollection (rt: GroupJoinRuntime) (chain: GroupJoinGroupChainDescriptor) =
         let rowsetSel, isProjected = buildGroupChainRowset rt chain
@@ -391,7 +434,7 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
               Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
               Source = Some(DerivedTable(rowsetSel, rowsetAlias))
               Joins = []
-              Where = Some (SqlExpr.Binary(SqlExpr.Column(Some rowsetAlias, "v"), BinaryOperator.Eq, valueDu))
+              Where = Some (SqlExpr.Binary(SqlExpr.Column(Some rowsetAlias, "v"), BinaryOperator.Is, valueDu))
               GroupBy = []
               Having = None
               OrderBy = []

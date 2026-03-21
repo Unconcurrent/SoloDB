@@ -59,6 +59,22 @@ module internal DBRefManyBuilderCore =
           Joins = []; Where = where; GroupBy = []; Having = None
           OrderBy = []; Limit = None; Offset = None }
 
+    let normalizeUnionArm
+        (mkSubCore: Projection list -> TableSource option -> SqlExpr option -> SelectCore)
+        (nextAlias: string -> string)
+        (columnNames: string list)
+        (core: SelectCore)
+        : SelectCore =
+        if core.OrderBy.Length > 0 || core.Distinct || core.Limit.IsSome || core.Offset.IsSome then
+            let normAlias = nextAlias "_dun"
+            let normSel = { Ctes = []; Body = SingleSelect core }
+            let projections =
+                columnNames
+                |> List.map (fun name -> { Alias = Some name; Expr = SqlExpr.Column(Some normAlias, name) })
+            mkSubCore projections (Some(DerivedTable(normSel, normAlias))) None
+        else
+            core
+
     let private translatePredicates
         (qb: QueryBuilder)
         (targetAlias: string)
@@ -232,12 +248,12 @@ module internal DBRefManyBuilderCore =
                     SqlExpr.Literal(SqlLiteral.Null)
             let existsCore = { effectiveCore with Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] }
             let existsSel = { Ctes = []; Body = SingleSelect existsCore }
-            let flatAlias = nextAlias "_dif"
-            let flatProjs =
-                [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some flatAlias, "Id") }
-                 { Alias = Some "Value"; Expr = SqlExpr.Column(Some flatAlias, "Value") }]
-            let flatSel = { Ctes = []; Body = SingleSelect { effectiveCore with Projections = AllColumns } }
-            let mainCore = mkSubCore flatProjs (Some(DerivedTable(flatSel, flatAlias))) None
+            let mainCore =
+                normalizeUnionArm
+                    mkSubCore
+                    nextAlias
+                    [ "Id"; "Value" ]
+                    { effectiveCore with Projections = AllColumns }
             let defaultProjs =
                 [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
                  { Alias = Some "Value"; Expr = defaultValueDu }]

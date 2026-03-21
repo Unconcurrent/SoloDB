@@ -45,7 +45,13 @@ module internal DBRefManyBuilder =
         let countDbRefManyDepth =
             DBRefManyBuilderTerminals.countDbRefManyDepth unwrapConvert isDBRefManyType
         let buildProjectedRowsetRaw qb desc ownerRef =
-            DBRefManyBuilderTerminals.buildProjectedRowset buildCorrelatedCore nextAlias visitDu joinEdgesToClauses qb desc ownerRef
+            match desc.TakeWhileInfo with
+            | Some (twPredLambda, isTakeWhile) ->
+                match DBRefManyBuildSpecial.tryBuildTakeWhileProjectedRowset qb desc buildCorrelatedCore mkSubCore nextAlias tryGetRelationOrderByForTakeWhile ownerRef twPredLambda isTakeWhile with
+                | ValueSome sel -> sel
+                | ValueNone -> DBRefManyBuilderTerminals.buildProjectedRowset buildCorrelatedCore nextAlias visitDu joinEdgesToClauses qb desc ownerRef
+            | None ->
+                DBRefManyBuilderTerminals.buildProjectedRowset buildCorrelatedCore nextAlias visitDu joinEdgesToClauses qb desc ownerRef
         let projectedType = desc.SelectProjection |> Option.map (fun l -> l.Body.Type)
         let buildProjectedRowset qb desc ownerRef =
             let baseSel = buildProjectedRowsetRaw qb desc ownerRef
@@ -57,10 +63,25 @@ module internal DBRefManyBuilder =
                 // Projected rowset uses alias "v" for the single projected column.
                 match baseSel.Body with
                 | SingleSelect mainCore ->
+                    let hasOrd =
+                        mainCore.Projections
+                        |> ProjectionSetOps.toList
+                        |> List.exists (fun p -> p.Alias = Some "__ord")
+                    let columnNames = if hasOrd then [ "v"; "__ord" ] else [ "v" ]
+                    let mainCore =
+                        normalizeUnionArm
+                            mkSubCore
+                            nextAlias
+                            columnNames
+                            mainCore
                     let existsCore = { mainCore with Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] }
                     let existsSel = { Ctes = []; Body = SingleSelect existsCore }
                     let defaultProjs =
-                        [{ Alias = Some "v"; Expr = defaultValueDu }]
+                        if hasOrd then
+                            [{ Alias = Some "v"; Expr = defaultValueDu }
+                             { Alias = Some "__ord"; Expr = SqlExpr.Literal(SqlLiteral.Integer 0L) }]
+                        else
+                            [{ Alias = Some "v"; Expr = defaultValueDu }]
                     let defaultCore =
                         { mkSubCore defaultProjs None (Some(SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists existsSel))) with
                             Joins = []; OrderBy = []; Limit = None; Offset = None }
@@ -68,8 +89,6 @@ module internal DBRefManyBuilder =
                 | UnionAllSelect _ -> baseSel // Already union — skip
             | None -> baseSel
         let buildProjectedAggregate qb desc ownerRef aggKind =
-            if desc.TakeWhileInfo.IsSome then
-                raise (NotSupportedException("Projected scalar aggregate after TakeWhile/SkipWhile is not supported."))
             DBRefManyBuilderTerminals.buildProjectedAggregate nextAlias qb (buildProjectedRowset qb desc ownerRef) aggKind
         let buildExists = DBRefManyBuilderTerminals.buildExists buildCorrelatedCore
         let buildProjectedPredicateExists qb desc ownerRef pred =
@@ -86,6 +105,12 @@ module internal DBRefManyBuilder =
         let buildEntityElement = DBRefManyBuilderElements.buildEntityElement nextAlias buildCorrelatedCore
         let buildProjectedElement =
             DBRefManyBuilderElements.buildProjectedElement nextAlias buildCorrelatedCore visitDu joinEdgesToClauses
+        let buildProjectedRowsetElement qb desc ownerRef pred pickLast =
+            let desc =
+                match pred with
+                | Some pred -> { desc with WherePredicates = desc.WherePredicates @ [pred] }
+                | None -> desc
+            DBRefManyBuilderElements.buildOrderedRowsetElement nextAlias (buildProjectedRowset qb desc ownerRef) pickLast
         let buildSingleLike =
             DBRefManyBuilderElements.buildSingleLike nextAlias buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses
         let buildEntityElementAt = DBRefManyBuilderElements.buildEntityElementAt buildCorrelatedCore nextAlias visitDu
@@ -102,9 +127,9 @@ module internal DBRefManyBuilder =
 
         // TakeWhile/SkipWhile — delegated to BuildSpecial.
         match desc.TakeWhileInfo with
-        | Some (twPredLambda, isTakeWhile) ->
+        | Some (twPredLambda, isTakeWhile) when desc.SelectProjection.IsNone && desc.GroupByKey.IsNone ->
             DBRefManyBuildSpecial.tryBuildTakeWhile qb desc buildCorrelatedCore mkSubCore nextAlias tryGetRelationOrderByForTakeWhile ownerRef twPredLambda isTakeWhile
-        | None ->
+        | _ ->
 
         // CountBy — delegated to BuildSpecial.
         match desc.Terminal with
@@ -115,7 +140,7 @@ module internal DBRefManyBuilder =
         // GroupBy terminals — delegated to BuildSpecial.
         match desc.GroupByKey with
         | Some keyLambda ->
-            DBRefManyBuildSpecial.tryBuildGroupBy qb desc buildCorrelatedCore mkSubCore nextAlias ownerRef keyLambda
+            DBRefManyBuildSpecial.tryBuildGroupBy qb desc buildCorrelatedCore mkSubCore nextAlias tryGetRelationOrderByForTakeWhile ownerRef keyLambda
         | None ->
 
         // Set operations.
@@ -197,12 +222,17 @@ module internal DBRefManyBuilder =
             | Terminal.Contains value -> buildContains qb desc ownerRef value
             | Terminal.First pred ->
                 match desc.SelectProjection with
+                | Some _ when desc.TakeWhileInfo.IsSome -> buildProjectedRowsetElement qb desc ownerRef pred false
                 | Some _ -> buildProjectedElement qb desc ownerRef pred false
                 | None -> buildEntityElement qb desc ownerRef pred false
             | Terminal.FirstOrDefault pred ->
                 match desc.SelectProjection with
                 | Some _ ->
-                    let elemResult = buildProjectedElement qb desc ownerRef pred false
+                    let elemResult =
+                        if desc.TakeWhileInfo.IsSome then
+                            buildProjectedRowsetElement qb desc ownerRef pred false
+                        else
+                            buildProjectedElement qb desc ownerRef pred false
                     // Post-Select DefaultIfEmpty wrapping for FirstOrDefault.
                     // Use CASE WHEN NOT EXISTS (not COALESCE) to avoid conflating
                     // empty-relation with legitimate NULL first values.
@@ -224,10 +254,12 @@ module internal DBRefManyBuilder =
                 | None -> buildEntityElement qb desc ownerRef pred false
             | Terminal.Last pred ->
                 match desc.SelectProjection with
+                | Some _ when desc.TakeWhileInfo.IsSome -> buildProjectedRowsetElement qb desc ownerRef pred true
                 | Some _ -> buildProjectedElement qb desc ownerRef pred true
                 | None -> buildEntityElement qb desc ownerRef pred true
             | Terminal.LastOrDefault pred ->
                 match desc.SelectProjection with
+                | Some _ when desc.TakeWhileInfo.IsSome -> buildProjectedRowsetElement qb desc ownerRef pred true
                 | Some _ -> buildProjectedElement qb desc ownerRef pred true
                 | None -> buildEntityElement qb desc ownerRef pred true
             | Terminal.Single pred -> buildSingleLike qb desc ownerRef pred false
