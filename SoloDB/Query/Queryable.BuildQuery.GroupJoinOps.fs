@@ -199,73 +199,61 @@ module internal QueryableBuildQueryPartBGroupJoin =
                             let toLambda (e: Expression) = unwrapLambdaExpressionOrThrow "GroupJoin terminal argument" e
                             let hasOps = hasQueryDescriptorChainOps qdesc
                             let chain = toGroupChainDescriptor qdesc
-                            // Fail-closed: TakeWhile/SkipWhile/CountBy/GroupBy on GroupJoin chains
-                            // are not yet supported in the builders. Reject loudly instead of producing wrong SQL.
-                            if qdesc.TakeWhileInfo.IsSome || qdesc.PostBoundTakeWhileInfo.IsSome then
-                                raise (NotSupportedException(
-                                    "Error: GroupJoin TakeWhile/SkipWhile on group chains is not yet supported.\n" +
-                                    "Reason: The GroupJoin builder does not handle windowed TakeWhile/SkipWhile boundaries.\n" +
-                                    "Fix: Move the TakeWhile/SkipWhile after AsEnumerable() or use Where with an explicit predicate."))
-                            if qdesc.GroupByKey.IsSome then
-                                raise (NotSupportedException(
-                                    "Error: GroupJoin CountBy/GroupBy on group chains is not yet supported.\n" +
-                                    "Reason: The GroupJoin builder does not handle GroupBy inside group subqueries.\n" +
-                                    "Fix: Move the CountBy/GroupBy after AsEnumerable() or use a supported aggregate."))
                             match terminal with
-                            // Aggregate terminals
+                            // Aggregate terminals — use Q version for full QueryDescriptor support (TakeWhile etc.)
                             | Terminal.Count | Terminal.LongCount ->
                                 if hasOps then
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Count None false)
+                                    translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Count None false)
                                 else
                                     translatedArg (SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None))
                             | Terminal.Sum sel ->
                                 if hasOps then
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Sum (Some (toLambda sel)) true)
+                                    translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Sum (Some (toLambda sel)) true)
                                 else
                                     let sel = toLambda sel
                                     let selDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body
                                     translatedArg (SqlExpr.Coalesce(SqlExpr.AggregateCall(AggregateKind.Sum, Some selDu, false, None), [SqlExpr.Literal(SqlLiteral.Integer 0L)]))
                             | Terminal.SumProjected ->
                                 if hasOps then
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Sum None true)
+                                    translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Sum None true)
                                 else
                                     raise (NotSupportedException("Error: GroupJoin Sum requires a selector.\nFix: Use .Sum(x => x.Property) or project first with .Select()."))
                             | Terminal.Min sel ->
                                 if hasOps then
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Min (Some (toLambda sel)) false)
+                                    translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Min (Some (toLambda sel)) false)
                                 else
                                     let sel = toLambda sel
                                     translatedArg (SqlExpr.AggregateCall(AggregateKind.Min, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None))
                             | Terminal.Max sel ->
                                 if hasOps then
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Max (Some (toLambda sel)) false)
+                                    translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Max (Some (toLambda sel)) false)
                                 else
                                     let sel = toLambda sel
                                     translatedArg (SqlExpr.AggregateCall(AggregateKind.Max, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None))
                             | Terminal.Average sel ->
                                 if hasOps then
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Avg (Some (toLambda sel)) false)
+                                    translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Avg (Some (toLambda sel)) false)
                                 else
                                     let sel = toLambda sel
                                     translatedArg (SqlExpr.AggregateCall(AggregateKind.Avg, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None))
                             | Terminal.MinProjected ->
-                                if hasOps then translatedArg (buildAggregateOverChain runtime chain AggregateKind.Min None false)
+                                if hasOps then translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Min None false)
                                 else raise (NotSupportedException("Error: GroupJoin Min requires a selector.\nFix: Use .Min(x => x.Property) or project first with .Select()."))
                             | Terminal.MaxProjected ->
-                                if hasOps then translatedArg (buildAggregateOverChain runtime chain AggregateKind.Max None false)
+                                if hasOps then translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Max None false)
                                 else raise (NotSupportedException("Error: GroupJoin Max requires a selector.\nFix: Use .Max(x => x.Property) or project first with .Select()."))
                             | Terminal.AverageProjected ->
-                                if hasOps then translatedArg (buildAggregateOverChain runtime chain AggregateKind.Avg None false)
+                                if hasOps then translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Avg None false)
                                 else raise (NotSupportedException("Error: GroupJoin Average requires a selector.\nFix: Use .Average(x => x.Property) or project first with .Select()."))
-                            // Predicate/exists terminals
+                            // Predicate/exists terminals — use Q version
                             | Terminal.Exists ->
                                 if hasOps then
-                                    translatedArg (buildExistsOverChain runtime chain None false)
+                                    translatedArg (buildExistsOverChainQ runtime qdesc None false)
                                 else
                                     translatedArg (SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L)))
                             | Terminal.Any(Some pred) ->
                                 if hasOps then
-                                    translatedArg (buildExistsOverChain runtime chain (Some (toLambda pred)) false)
+                                    translatedArg (buildExistsOverChainQ runtime qdesc (Some (toLambda pred)) false)
                                 else
                                     let pred = toLambda pred
                                     let predDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
@@ -274,7 +262,7 @@ module internal QueryableBuildQueryPartBGroupJoin =
                                 translatedArg (SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L)))
                             | Terminal.All pred ->
                                 if hasOps then
-                                    translatedArg (buildExistsOverChain runtime chain (Some (toLambda pred)) true)
+                                    translatedArg (buildExistsOverChainQ runtime qdesc (Some (toLambda pred)) true)
                                 else
                                     let pred = toLambda pred
                                     let predDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
