@@ -62,7 +62,11 @@ module internal QueryableBuildQueryPartBGroupJoin =
             addComplexFinal statements (fun ctx ->
                 let outerAlias = "o"
                 let innerAlias = "gj"
-                let innerCtx = QueryContext.SingleSource(innerRootTable)
+                let innerCtx =
+                    { sourceCtx with
+                        RootTable = innerRootTable
+                        RootGraph = QueryRootGraph.Single(innerRootTable)
+                        Joins = ResizeArray() }
                 let innerSelect = translateQueryFn innerCtx ctx.Vars capturedInnerExpr
                 let innerSource = DerivedTable(innerSelect, innerAlias)
 
@@ -140,6 +144,8 @@ module internal QueryableBuildQueryPartBGroupJoin =
                             { innerCtx with
                                 Joins = ResizeArray() }
                         let innerKeySourceAlias = sprintf "gjk%d" (Interlocked.Increment(innerCtx.AliasCounter) - 1)
+                        let innerMaterializedPaths =
+                            if innerCtx.MaterializedPaths.Count > 0 then Some innerCtx.MaterializedPaths else None
                         let correlatedExpr =
                             match tryTranslateDbRefValueIdKey innerKeySelector.Parameters.[0] innerKeySourceAlias innerKeySelector.Body with
                             | Some translated -> translated
@@ -147,7 +153,7 @@ module internal QueryableBuildQueryPartBGroupJoin =
                         let keyCore =
                             { mkCore [{ Alias = None; Expr = correlatedExpr }] (Some (DerivedTable(innerSelect, innerKeySourceAlias)))
                                 with
-                                    Joins = materializeDiscoveredJoins innerKeyCtx.Joins None None
+                                    Joins = materializeDiscoveredJoins innerKeyCtx.Joins (Some ("\"" + innerKeySourceAlias + "\"")) innerMaterializedPaths
                                     Where = Some (SqlExpr.Binary(SqlExpr.Column(Some innerKeySourceAlias, "Id"), BinaryOperator.Eq, SqlExpr.Column(Some innerAlias, "Id")))
                                     Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
                         SqlExpr.ScalarSubquery (wrapCore keyCore)
@@ -182,6 +188,94 @@ module internal QueryableBuildQueryPartBGroupJoin =
                       TranslateOuterExpr = translateOuterExpr }
 
                 let rec translateGroupJoinArg (expr: Expression) : GroupJoinTranslatedArg =
+                    let combineTranslated (parts: GroupJoinTranslatedArg list) (mkValue: SqlExpr list -> SqlExpr) =
+                        { Value = mkValue (parts |> List.map (fun p -> p.Value))
+                          Error = combineErrorExprs (parts |> List.map (fun p -> p.Error)) }
+
+                    let parseFormatPieces (format: string) =
+                        let pieces = ResizeArray<Choice<string, int>>()
+                        let sb = System.Text.StringBuilder()
+                        let flushLiteral () =
+                            if sb.Length > 0 then
+                                pieces.Add(Choice1Of2(sb.ToString()))
+                                sb.Clear() |> ignore
+                        let mutable i = 0
+                        while i < format.Length do
+                            match format.[i] with
+                            | '{' when i + 1 < format.Length && format.[i + 1] = '{' ->
+                                sb.Append('{') |> ignore
+                                i <- i + 2
+                            | '}' when i + 1 < format.Length && format.[i + 1] = '}' ->
+                                sb.Append('}') |> ignore
+                                i <- i + 2
+                            | '{' ->
+                                let close = format.IndexOf('}', i + 1)
+                                if close < 0 then
+                                    raise (NotSupportedException("Error: GroupJoin string format is malformed.\nFix: Use a valid composite format string."))
+                                flushLiteral ()
+                                let placeholder = format.Substring(i + 1, close - i - 1)
+                                let commaIdx = placeholder.IndexOf(',')
+                                let colonIdx = placeholder.IndexOf(':')
+                                let endIdx =
+                                    [ commaIdx; colonIdx ]
+                                    |> List.filter (fun x -> x >= 0)
+                                    |> function
+                                        | [] -> placeholder.Length
+                                        | xs -> List.min xs
+                                let indexText = placeholder.Substring(0, endIdx).Trim()
+                                let index =
+                                    match Int32.TryParse(indexText) with
+                                    | true, value -> value
+                                    | _ ->
+                                        raise (NotSupportedException(
+                                            "Error: GroupJoin string format placeholder is not supported.\n" +
+                                            "Reason: Only numeric placeholders like {0} are supported.\n" +
+                                            "Fix: Use string interpolation without alignment or custom format specifiers."))
+                                pieces.Add(Choice2Of2 index)
+                                i <- close + 1
+                            | ch ->
+                                sb.Append(ch) |> ignore
+                                i <- i + 1
+                        flushLiteral ()
+                        pieces |> Seq.toList
+
+                    let rec translateScalarMethodCall (mc: MethodCallExpression) : GroupJoinTranslatedArg option =
+                        if mc.Method.DeclaringType = typeof<string> && mc.Method.Name = "Concat" then
+                            let args =
+                                if mc.Arguments.Count = 1
+                                   && mc.Arguments.[0] :? NewArrayExpression then
+                                    (mc.Arguments.[0] :?> NewArrayExpression).Expressions |> Seq.toList
+                                else
+                                    mc.Arguments |> Seq.toList
+                            let parts = args |> List.map translateGroupJoinArg
+                            Some (combineTranslated parts (fun values -> SqlExpr.FunctionCall("CONCAT", values)))
+                        elif mc.Method.DeclaringType = typeof<string>
+                             && mc.Method.Name = "Format"
+                             && mc.Arguments.Count >= 2
+                             && mc.Arguments.[0] :? ConstantExpression then
+                            let fmt = (mc.Arguments.[0] :?> ConstantExpression).Value :?> string
+                            let rawArgs =
+                                if mc.Arguments.Count = 2
+                                   && mc.Arguments.[1] :? NewArrayExpression then
+                                    (mc.Arguments.[1] :?> NewArrayExpression).Expressions |> Seq.toList
+                                else
+                                    mc.Arguments |> Seq.skip 1 |> Seq.toList
+                            let translatedArgs = rawArgs |> List.map translateGroupJoinArg
+                            let translated =
+                                parseFormatPieces fmt
+                                |> List.map (function
+                                    | Choice1Of2 literal -> translatedArg (SqlExpr.Literal(SqlLiteral.String literal))
+                                    | Choice2Of2 index when index >= 0 && index < translatedArgs.Length -> translatedArgs.[index]
+                                    | Choice2Of2 _ ->
+                                        raise (NotSupportedException(
+                                            "Error: GroupJoin string format index is out of range.\n" +
+                                            "Fix: Ensure each placeholder refers to an existing interpolation argument.")))
+                            Some (combineTranslated translated (fun values -> SqlExpr.FunctionCall("CONCAT", values)))
+                        elif mc.Method.Name = "ToString" && mc.Arguments.Count = 0 && not (isNull mc.Object) then
+                            Some (translateGroupJoinArg mc.Object)
+                        else
+                            None
+
                     if not (referencesParam groupParam expr) then
                         translatedArg (translateOuterExpr expr)
                     else
@@ -198,7 +292,6 @@ module internal QueryableBuildQueryPartBGroupJoin =
                         | Some (qdesc, terminal) ->
                             let toLambda (e: Expression) = unwrapLambdaExpressionOrThrow "GroupJoin terminal argument" e
                             let hasOps = hasQueryDescriptorChainOps qdesc
-                            let chain = toGroupChainDescriptor qdesc
                             match terminal with
                             // Aggregate terminals — use Q version for full QueryDescriptor support (TakeWhile etc.)
                             | Terminal.Count | Terminal.LongCount ->
@@ -270,35 +363,27 @@ module internal QueryableBuildQueryPartBGroupJoin =
                                         SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.Not, predDu), SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None),
                                         BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)))
                             | Terminal.Contains value ->
-                                translatedArg (buildContainsOverChain runtime chain value)
+                                translatedArg (buildContainsOverChain runtime (toGroupChainDescriptor qdesc) value)
                             // Select terminal → collection output
                             | Terminal.Select _ ->
-                                translatedArg (buildGroupChainCollection runtime chain)
+                                translatedArg (buildGroupChainCollectionQ runtime qdesc)
                             // Element access terminals
                             | Terminal.First _ ->
-                                let elemCall = { Call = mc; Kind = FirstLike false; Chain = chain }
-                                buildGroupElementSubquery runtime elemCall expr
+                                buildGroupElementSubqueryQ runtime qdesc (FirstLike false) expr
                             | Terminal.FirstOrDefault _ ->
-                                let elemCall = { Call = mc; Kind = FirstLike true; Chain = chain }
-                                buildGroupElementSubquery runtime elemCall expr
+                                buildGroupElementSubqueryQ runtime qdesc (FirstLike true) expr
                             | Terminal.Last _ ->
-                                let elemCall = { Call = mc; Kind = LastLike false; Chain = chain }
-                                buildGroupElementSubquery runtime elemCall expr
+                                buildGroupElementSubqueryQ runtime qdesc (LastLike false) expr
                             | Terminal.LastOrDefault _ ->
-                                let elemCall = { Call = mc; Kind = LastLike true; Chain = chain }
-                                buildGroupElementSubquery runtime elemCall expr
+                                buildGroupElementSubqueryQ runtime qdesc (LastLike true) expr
                             | Terminal.Single _ ->
-                                let elemCall = { Call = mc; Kind = SingleLike false; Chain = chain }
-                                buildGroupElementSubquery runtime elemCall expr
+                                buildGroupElementSubqueryQ runtime qdesc (SingleLike false) expr
                             | Terminal.SingleOrDefault _ ->
-                                let elemCall = { Call = mc; Kind = SingleLike true; Chain = chain }
-                                buildGroupElementSubquery runtime elemCall expr
+                                buildGroupElementSubqueryQ runtime qdesc (SingleLike true) expr
                             | Terminal.ElementAt idx ->
-                                let elemCall = { Call = mc; Kind = ElementAtLike(idx, false); Chain = chain }
-                                buildGroupElementSubquery runtime elemCall expr
+                                buildGroupElementSubqueryQ runtime qdesc (ElementAtLike(idx, false)) expr
                             | Terminal.ElementAtOrDefault idx ->
-                                let elemCall = { Call = mc; Kind = ElementAtLike(idx, true); Chain = chain }
-                                buildGroupElementSubquery runtime elemCall expr
+                                buildGroupElementSubqueryQ runtime qdesc (ElementAtLike(idx, true)) expr
                             // Unsupported terminals — fail-closed, NO silent fallthrough
                             | Terminal.MinBy _ | Terminal.MaxBy _ | Terminal.DistinctBy _ | Terminal.CountBy _ ->
                                 raise (NotSupportedException(
@@ -311,16 +396,21 @@ module internal QueryableBuildQueryPartBGroupJoin =
                             | Some groupCall ->
                                 buildGroupElementSubquery runtime groupCall expr
                             | None ->
-                                // Not a group operation — translate as outer expression
-                                if referencesParam groupParam mc then
-                                    raise (NotSupportedException(
-                                        $"Error: GroupJoin group operation '{mc.Method.Name}' is not supported.\n" +
-                                        "Reason: This operation on the group parameter could not be recognized as a supported terminal.\n" +
-                                        "Fix: Use a supported terminal (Count, Sum, Any, All, First, etc.) or move after AsEnumerable()."))
-                                else
-                                    translatedArg (translateOuterExpr expr)
+                                match translateScalarMethodCall mc with
+                                | Some translated -> translated
+                                | None ->
+                                    // Not a group operation — translate as outer expression
+                                    if referencesParam groupParam mc then
+                                        raise (NotSupportedException(
+                                            $"Error: GroupJoin group operation '{mc.Method.Name}' is not supported.\n" +
+                                            "Reason: This operation on the group parameter could not be recognized as a supported terminal.\n" +
+                                            "Fix: Use a supported terminal (Count, Sum, Any, All, First, etc.) or move after AsEnumerable()."))
+                                    else
+                                        translatedArg (translateOuterExpr expr)
                     | :? ConstantExpression ->
                         translatedArg (translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars None expr)
+                    | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert || ue.NodeType = ExpressionType.ConvertChecked || ue.NodeType = ExpressionType.TypeAs ->
+                        translateGroupJoinArg ue.Operand
                     | :? ConditionalExpression as ce ->
                         let test = translateGroupJoinArg ce.Test
                         let ifTrue = translateGroupJoinArg ce.IfTrue
@@ -385,10 +475,11 @@ module internal QueryableBuildQueryPartBGroupJoin =
                         | Some errorExpr ->
                             SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNull, errorExpr), jsonExpr), [], Some errorExpr)
                     | _ ->
-                        raise (NotSupportedException(
-                            "Error: GroupJoin result selector must produce an anonymous type or object initializer.\n" +
-                            "Reason: Scalar result selectors are not supported for GroupJoin.\n" +
-                            "Fix: Use new { ... } in the result selector."))
+                        let translated = translateGroupJoinArg resultSelector.Body
+                        match translated.Error with
+                        | None -> translated.Value
+                        | Some errorExpr ->
+                            SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNull, errorExpr), translated.Value), [], Some errorExpr)
 
                 let outerDiscoveredJoins =
                     materializeDiscoveredJoins outerCtx.Joins (Some ("\"" + outerAlias + "\"")) (Some sourceCtx.MaterializedPaths)

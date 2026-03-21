@@ -7,9 +7,19 @@ open Utils
 open SoloDatabase
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.QueryableBuildQueryPartBGroupJoinChain
+open SoloDatabase.DBRefManyDescriptor
 
 module internal QueryableBuildQueryPartBGroupJoinElements =
     open QueryableHelperBase
+
+    let private defaultScalarExpr (targetType: Type) =
+        if targetType.IsValueType then
+            let defaultValue = Activator.CreateInstance(targetType)
+            let jsonObj = JsonSerializator.JsonValue.Serialize defaultValue
+            let jsonText = jsonObj.ToJsonString()
+            SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.FunctionCall("jsonb", [SqlExpr.Literal(SqlLiteral.String jsonText)]); SqlExpr.Literal(SqlLiteral.String "$")])
+        else
+            SqlExpr.Literal(SqlLiteral.Null)
 
     let tryMatchGroupElementCall (rt: GroupJoinRuntime) (expr: Expression) =
         match expr with
@@ -38,6 +48,90 @@ module internal QueryableBuildQueryPartBGroupJoinElements =
         match expr with
         | :? ConstantExpression as ce -> isNull ce.Value
         | _ -> false
+
+    let buildGroupElementSubqueryQ (rt: GroupJoinRuntime) (desc: QueryDescriptor) (kind: GroupJoinElementKind) (projectionBody: Expression) =
+        let rowsetSel, isProjected = buildGroupChainRowsetQ rt desc
+        let rowsetAlias = sprintf "gje%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1)
+        let mkValueCore orderBy limit offset valueExpr =
+            { Distinct = false
+              Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = valueExpr }]
+              Source = Some(DerivedTable(rowsetSel, rowsetAlias))
+              Joins = []
+              Where = None
+              GroupBy = []
+              Having = None
+              OrderBy = orderBy
+              Limit = limit
+              Offset = offset }
+        let wrapOrDefault valueExpr orDefault =
+            if orDefault && isProjected then
+                SqlExpr.Coalesce(valueExpr, [defaultScalarExpr projectionBody.Type])
+            else
+                valueExpr
+        let mkValue core = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
+        let noElements = "Sequence contains no elements"
+        let manyElements = "Sequence contains more than one element"
+        let outOfRange = "Index was out of range. Must be non-negative and less than the size of the collection."
+        let ascOrd = [{ Expr = SqlExpr.Column(Some rowsetAlias, "__ord"); Direction = SortDirection.Asc }]
+        let descOrd = [{ Expr = SqlExpr.Column(Some rowsetAlias, "__ord"); Direction = SortDirection.Desc }]
+        let valueExpr =
+            if isProjected then SqlExpr.Column(Some rowsetAlias, "v")
+            else entityJsonExpr rowsetAlias
+        match kind with
+        | FirstLike orDefault ->
+            let valueCore = mkValueCore ascOrd (Some (SqlExpr.Literal(SqlLiteral.Integer 1L))) None valueExpr
+            let error =
+                if orDefault then None
+                else
+                    let countExpr = buildCountSelectSubquery rt rowsetSel (Some 1)
+                    Some (SqlExpr.CaseExpr(
+                        (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), rt.ErrorExpr noElements),
+                        [],
+                        Some(SqlExpr.Literal(SqlLiteral.Null))))
+            { Value = wrapOrDefault (mkValue valueCore) orDefault; Error = error }
+        | LastLike orDefault ->
+            let valueCore = mkValueCore descOrd (Some (SqlExpr.Literal(SqlLiteral.Integer 1L))) None valueExpr
+            let error =
+                if orDefault then None
+                else
+                    let countExpr = buildCountSelectSubquery rt rowsetSel (Some 1)
+                    Some (SqlExpr.CaseExpr(
+                        (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), rt.ErrorExpr noElements),
+                        [],
+                        Some(SqlExpr.Literal(SqlLiteral.Null))))
+            { Value = wrapOrDefault (mkValue valueCore) orDefault; Error = error }
+        | SingleLike orDefault ->
+            let valueCore = mkValueCore ascOrd (Some (SqlExpr.Literal(SqlLiteral.Integer 1L))) None valueExpr
+            let countExpr = buildCountSelectSubquery rt rowsetSel (Some 2)
+            let error =
+                if orDefault then
+                    Some (SqlExpr.CaseExpr(
+                        (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), rt.ErrorExpr manyElements),
+                        [],
+                        Some(SqlExpr.Literal(SqlLiteral.Null))))
+                else
+                    Some (SqlExpr.CaseExpr(
+                        (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), rt.ErrorExpr noElements),
+                        [ (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), rt.ErrorExpr manyElements) ],
+                        Some(SqlExpr.Literal(SqlLiteral.Null))))
+            { Value = wrapOrDefault (mkValue valueCore) orDefault; Error = error }
+        | ElementAtLike(indexExpr, orDefault) ->
+            let idx = Convert.ToInt64(QueryTranslator.evaluateExpr<obj> indexExpr)
+            if idx < 0L then
+                { Value = wrapOrDefault (SqlExpr.Literal(SqlLiteral.Null)) orDefault
+                  Error = if orDefault then None else Some(rt.ErrorExpr outOfRange) }
+            else
+                let valueCore =
+                    mkValueCore ascOrd (Some (SqlExpr.Literal(SqlLiteral.Integer 1L))) (Some (SqlExpr.Literal(SqlLiteral.Integer idx))) valueExpr
+                let error =
+                    if orDefault then None
+                    else
+                        let countExpr = buildCountSubquery rt valueCore None
+                        Some (SqlExpr.CaseExpr(
+                            (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), rt.ErrorExpr outOfRange),
+                            [],
+                            Some(SqlExpr.Literal(SqlLiteral.Null))))
+                { Value = wrapOrDefault (mkValue valueCore) orDefault; Error = error }
 
     let buildGroupElementSubquery (rt: GroupJoinRuntime) (groupCall: GroupJoinElementCall) (projectionBody: Expression) =
         if hasGroupChainOps groupCall.Chain then
