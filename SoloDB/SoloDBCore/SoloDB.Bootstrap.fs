@@ -12,6 +12,52 @@ open SoloDatabase.RelationsSharedSql
 /// These functions preserve the exact order and side effects of the original constructor code.
 /// </summary>
 module internal Bootstrap =
+    [<Struct>]
+    type private DecimalParseResult =
+        val HasValue: bool
+        val Value: decimal
+        new (hasValue, value) = { HasValue = hasValue; Value = value }
+
+    let private tryReadDecimal (culture: CultureInfo) (value: obj) =
+        match value with
+        | null -> DecimalParseResult(false, decimal 0)
+        | :? decimal as d -> DecimalParseResult(true, d)
+        | :? string as s ->
+            match Decimal.TryParse(s, Globalization.NumberStyles.Float, culture) with
+            | true, d -> DecimalParseResult(true, d)
+            | _ -> DecimalParseResult(false, decimal 0)
+        | :? int8 as n -> DecimalParseResult(true, decimal n)
+        | :? uint8 as n -> DecimalParseResult(true, decimal n)
+        | :? int16 as n -> DecimalParseResult(true, decimal n)
+        | :? uint16 as n -> DecimalParseResult(true, decimal n)
+        | :? int as n -> DecimalParseResult(true, decimal n)
+        | :? uint32 as n -> DecimalParseResult(true, decimal n)
+        | :? int64 as n -> DecimalParseResult(true, decimal n)
+        | :? uint64 as n -> DecimalParseResult(true, decimal n)
+        | :? single as n -> DecimalParseResult(true, decimal n)
+        | :? double as n -> DecimalParseResult(true, decimal n)
+        | _ ->
+            match Decimal.TryParse(Convert.ToString(value, culture), Globalization.NumberStyles.Float, culture) with
+            | true, d -> DecimalParseResult(true, d)
+            | _ -> DecimalParseResult(false, decimal 0)
+
+    let private divideDecimalString (culture: CultureInfo) (sumValue: obj) (countValue: obj) =
+        let sum = tryReadDecimal culture sumValue
+        let count =
+            match countValue with
+            | null -> 0L
+            | _ -> Convert.ToInt64(countValue, culture)
+        if not sum.HasValue || count <= 0L then
+            null
+        else
+            box ((sum.Value / decimal count).ToString(culture))
+
+    let private formatDecimalString (culture: CultureInfo) (value: obj) =
+        let parsed = tryReadDecimal culture value
+        if parsed.HasValue then
+            box (parsed.Value.ToString(culture))
+        else
+            null
 
     let private parseVersionError (input: string) (detail: string) =
         FormatException($"Invalid sqlite_version value '{input}'. {detail}")
@@ -48,6 +94,8 @@ module internal Bootstrap =
             connection.CreateFunction("SHA_HASH", Func<byte array, obj>(fun o -> Utils.shaHash o), true)
             connection.CreateFunction("TO_LOWER", Func<string, string>(_.ToLower(usCultureInfo)), true)
             connection.CreateFunction("TO_UPPER", Func<string, string>(_.ToUpper(usCultureInfo)), true)
+            connection.CreateFunction("DECIMAL_DIV", Func<obj, obj, obj>(fun sumValue countValue -> divideDecimalString usCultureInfo sumValue countValue), true)
+            connection.CreateFunction("DECIMAL_TEXT", Func<obj, obj>(fun value -> formatDecimalString usCultureInfo value), true)
             connection.CreateFunction("REGEXP", Func<string, string, bool>(fun pattern input ->
                 if isNull pattern || isNull input then
                     false

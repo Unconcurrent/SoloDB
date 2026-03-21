@@ -15,6 +15,7 @@ open SoloDatabase.DBRefManyExtractorHelpers
 open SoloDatabase.SharedDescriptorExtract
 module internal QueryableBuildQueryPartBGroupJoinChain =
     open QueryableHelperJoin
+    open QueryableHelperState
     open QueryableHelperPreprocess
     open QueryableHelperBase
     type GroupJoinElementKind =
@@ -130,6 +131,12 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
         let innerMaterializedPaths =
             if rt.InnerCtx.MaterializedPaths.Count > 0 then Some rt.InnerCtx.MaterializedPaths else None
         rt.MaterializeDiscoveredJoins joins (Some ("\"" + alias + "\"")) innerMaterializedPaths
+    let internal buildExactDecimalAverageExpr (argExpr: SqlExpr) =
+        let countExpr = SqlExpr.AggregateCall(AggregateKind.Count, Some argExpr, false, None)
+        SqlExpr.CaseExpr(
+            (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), SqlExpr.Literal(SqlLiteral.Null)),
+            [],
+            Some(SqlExpr.FunctionCall("DECIMAL_DIV", [SqlExpr.AggregateCall(AggregateKind.Sum, Some argExpr, false, None); countExpr])))
     let private extractorConfig =
         {
             EnsureOfTypeSupported = DBRefManyHelpers.ensureOfTypeSupported
@@ -1023,6 +1030,14 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
         let rowsetSel, isProjected = buildGroupChainRowsetQ rt desc
         let rowsetAlias = sprintf "gjg%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1)
         let aggCtx = QueryContext.SingleSource(rt.InnerRootTable)
+        let aggregateType =
+            match selectorOpt, desc.SelectProjection with
+            | Some sel, _ -> Some sel.Body.Type
+            | None, Some proj when isProjected -> Some proj.Body.Type
+            | _ -> None
+        let useExactDecimalAverage =
+            aggKind = AggregateKind.Avg
+            && (aggregateType |> Option.exists isDecimalOrNullableDecimal)
         let aggregateArg =
             match selectorOpt, desc.SelectProjection, isProjected with
             | Some _, Some _, _ ->
@@ -1047,7 +1062,10 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
         let aggregateSource, aggregateJoins, aggregateExpr =
             match aggregateArg with
             | Some (argExpr, joins) ->
-                Some(DerivedTable(rowsetSel, rowsetAlias)), joins, SqlExpr.AggregateCall(aggKind, Some argExpr, false, None)
+                let expr =
+                    if useExactDecimalAverage then buildExactDecimalAverageExpr argExpr
+                    else SqlExpr.AggregateCall(aggKind, Some argExpr, false, None)
+                Some(DerivedTable(rowsetSel, rowsetAlias)), joins, expr
             | None ->
                 Some(DerivedTable(rowsetSel, rowsetAlias)), [], SqlExpr.AggregateCall(aggKind, None, false, None)
         let aggregateExpr =
@@ -1105,6 +1123,14 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
         let rowsetSel, isProjected = buildGroupChainRowset rt chain
         let rowsetAlias = sprintf "gjg%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1)
         let aggCtx = QueryContext.SingleSource(rt.InnerRootTable)
+        let aggregateType =
+            match selectorOpt, chain.SelectProjection with
+            | Some sel, _ -> Some sel.Body.Type
+            | None, Some proj when isProjected -> Some proj.Body.Type
+            | _ -> None
+        let useExactDecimalAverage =
+            aggKind = AggregateKind.Avg
+            && (aggregateType |> Option.exists isDecimalOrNullableDecimal)
         let aggregateArg =
             match selectorOpt, chain.SelectProjection, isProjected with
             | Some _, Some _, _ ->
@@ -1129,7 +1155,10 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
         let aggregateSource, aggregateJoins, aggregateExpr =
             match aggregateArg with
             | Some (argExpr, joins) ->
-                Some(DerivedTable(rowsetSel, rowsetAlias)), joins, SqlExpr.AggregateCall(aggKind, Some argExpr, false, None)
+                let expr =
+                    if useExactDecimalAverage then buildExactDecimalAverageExpr argExpr
+                    else SqlExpr.AggregateCall(aggKind, Some argExpr, false, None)
+                Some(DerivedTable(rowsetSel, rowsetAlias)), joins, expr
             | None ->
                 Some(DerivedTable(rowsetSel, rowsetAlias)), [], SqlExpr.AggregateCall(aggKind, None, false, None)
         let aggregateExpr =

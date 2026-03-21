@@ -240,6 +240,16 @@ module internal QueryableBuildQueryPartBGroupJoin =
                         pieces |> Seq.toList
 
                     let rec translateScalarMethodCall (mc: MethodCallExpression) : GroupJoinTranslatedArg option =
+                        let rec getInterpolationArgType (expr: Expression) =
+                            match expr with
+                            | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert || ue.NodeType = ExpressionType.ConvertChecked || ue.NodeType = ExpressionType.TypeAs ->
+                                getInterpolationArgType ue.Operand
+                            | _ -> expr.Type
+                        let normalizeInterpolatedArg (originalExpr: Expression) (translated: GroupJoinTranslatedArg) =
+                            if isDecimalOrNullableDecimal (getInterpolationArgType originalExpr) then
+                                { translated with Value = SqlExpr.FunctionCall("DECIMAL_TEXT", [translated.Value]) }
+                            else
+                                translated
                         if mc.Method.DeclaringType = typeof<string> && mc.Method.Name = "Concat" then
                             let args =
                                 if mc.Arguments.Count = 1
@@ -247,7 +257,7 @@ module internal QueryableBuildQueryPartBGroupJoin =
                                     (mc.Arguments.[0] :?> NewArrayExpression).Expressions |> Seq.toList
                                 else
                                     mc.Arguments |> Seq.toList
-                            let parts = args |> List.map translateGroupJoinArg
+                            let parts = args |> List.map (fun arg -> translateGroupJoinArg arg |> normalizeInterpolatedArg arg)
                             Some (combineTranslated parts (fun values -> SqlExpr.FunctionCall("CONCAT", values)))
                         elif mc.Method.DeclaringType = typeof<string>
                              && mc.Method.Name = "Format"
@@ -260,7 +270,7 @@ module internal QueryableBuildQueryPartBGroupJoin =
                                     (mc.Arguments.[1] :?> NewArrayExpression).Expressions |> Seq.toList
                                 else
                                     mc.Arguments |> Seq.skip 1 |> Seq.toList
-                            let translatedArgs = rawArgs |> List.map translateGroupJoinArg
+                            let translatedArgs = rawArgs |> List.map (fun arg -> translateGroupJoinArg arg |> normalizeInterpolatedArg arg)
                             let translated =
                                 parseFormatPieces fmt
                                 |> List.map (function
@@ -328,7 +338,11 @@ module internal QueryableBuildQueryPartBGroupJoin =
                                     translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Avg (Some (toLambda sel)) false)
                                 else
                                     let sel = toLambda sel
-                                    translatedArg (SqlExpr.AggregateCall(AggregateKind.Avg, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None))
+                                    let selDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body
+                                    if isDecimalOrNullableDecimal sel.Body.Type then
+                                        translatedArg (buildExactDecimalAverageExpr selDu)
+                                    else
+                                        translatedArg (SqlExpr.AggregateCall(AggregateKind.Avg, Some selDu, false, None))
                             | Terminal.MinProjected ->
                                 if hasOps then translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Min None false)
                                 else raise (NotSupportedException("Error: GroupJoin Min requires a selector.\nFix: Use .Min(x => x.Property) or project first with .Select()."))
