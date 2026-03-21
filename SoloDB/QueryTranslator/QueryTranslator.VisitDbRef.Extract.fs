@@ -7,10 +7,19 @@ open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.DBRefManyExtractorHelpers
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorVisitPost
-open SoloDatabase.DBRefManyExtractTerminals
-open SoloDatabase.DBRefManyExtractChain
+open SoloDatabase.SharedDescriptorExtract
 
 module internal DBRefManyExtractor =
+    let private extractorConfig =
+        {
+            EnsureOfTypeSupported = DBRefManyHelpers.ensureOfTypeSupported
+            MultipleTakeSkipBoundariesMessage = DBRefManyHelpers.multipleTakeSkipBoundariesMessage
+            TooManyTakeWhileBoundariesMessage =
+                "Error: More than two TakeWhile/SkipWhile boundaries are not supported on DBRefMany.\n" +
+                "Reason: The relation translator currently supports one inner and one outer window boundary.\n" +
+                "Fix: Simplify the query or move additional windowing after AsEnumerable()."
+        }
+
     let tryExtract (expr: Expression) : QueryDescriptor voption =
         let expr, outerDistinct, outerMaterialize = preprocessRoot expr
 
@@ -23,7 +32,7 @@ module internal DBRefManyExtractor =
                 else
                     let state = createState ()
                     let source = normalizeCountBySource recognized.Terminal recognized.Source state
-                    let innerSource = walkChain state source
+                    let innerSource = walkChain extractorConfig state source
                     finalizeState state
                     placeCountPredicate state recognized.CountPredicate
 
@@ -58,6 +67,7 @@ module internal DBRefManyExtractor =
                             state.PostBoundLimit
                             state.PostBoundOffset
                             state.TakeWhileInfo
+                            state.PostBoundTakeWhileInfo
                             state.GroupByKey
                             (state.Distinct || outerDistinct)
                             finalSelectProj

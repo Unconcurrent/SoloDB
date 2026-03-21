@@ -114,6 +114,7 @@
     <Compile Include="QueryTranslator/QueryTranslator.VisitPostJoin.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.Descriptor.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.Helpers.fs" />
+    <Compile Include="QueryTranslator/QueryTranslator.SharedDescriptor.Extract.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.Extract.Helpers.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.Extract.Terminals.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.Extract.Chain.fs" />
