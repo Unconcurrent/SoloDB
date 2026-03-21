@@ -59,11 +59,6 @@ module internal DBRefManyBuilderCore =
           Joins = []; Where = where; GroupBy = []; Having = None
           OrderBy = []; Limit = None; Offset = None }
 
-    let private foldAnd (predicates: SqlExpr list) =
-        match predicates with
-        | [] -> None
-        | h :: t -> Some(List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) h t)
-
     let private translatePredicates
         (qb: QueryBuilder)
         (targetAlias: string)
@@ -180,8 +175,7 @@ module internal DBRefManyBuilderCore =
                 SqlExpr.Column(Some lnkAlias, ownerColumn),
                 BinaryOperator.Eq,
                 SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
-        let fullWhere =
-            allPreds |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) ownerWhere
+        let fullWhere = DBRefManyHelpers.appendPredicatesWithAnd ownerWhere allPreds
 
         let dbRefJoins = DBRefManyHelpers.joinEdgesToClauses innerJoinEdges
         let innerCore =
@@ -216,7 +210,7 @@ module internal DBRefManyBuilderCore =
                 let pbLimitDu, pbOffsetDu = buildLimitOffset visitDu qb desc.PostBoundLimit desc.PostBoundOffset
                 let pbDbRefJoins = DBRefManyHelpers.joinEdgesToClauses pbJoinEdges
                 let outerCore =
-                    { mkSubCore projections (Some(DerivedTable(innerSel, pbAlias))) (foldAnd pbWhereDus) with
+                    { mkSubCore projections (Some(DerivedTable(innerSel, pbAlias))) (DBRefManyHelpers.foldPredicatesWithAnd pbWhereDus) with
                         Joins = pbDbRefJoins
                         OrderBy = pbSortKeyDus
                         Limit = pbLimitDu

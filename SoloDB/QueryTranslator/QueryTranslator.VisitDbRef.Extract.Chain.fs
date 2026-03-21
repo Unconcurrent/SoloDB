@@ -164,8 +164,7 @@ module internal DBRefManyExtractChain =
 
             | "Take" ->
                 if state.SeenBoundary then
-                    raise (NotSupportedException(
-                        "Error: Multiple Take/Skip boundaries in DBRefMany query are not supported.\nReason: The descriptor model admits only one semantic pagination boundary.\nFix: Keep at most one Take or Skip in the DBRefMany chain, or move additional pagination after AsEnumerable()."))
+                    raise (NotSupportedException(DBRefManyHelpers.multipleTakeSkipBoundariesMessage))
                 flushBoundary state
                 state.Limit <- arg
                 state.Offset <- None
@@ -174,8 +173,7 @@ module internal DBRefManyExtractChain =
             | "Skip" ->
                 if state.SeenBoundary
                    && not (state.Limit.IsSome && state.Offset.IsNone && state.PostBoundLimit.IsNone && state.PostBoundOffset.IsNone) then
-                    raise (NotSupportedException(
-                        "Error: Multiple Take/Skip boundaries in DBRefMany query are not supported.\nReason: The descriptor model admits only one semantic pagination boundary.\nFix: Keep at most one Take or Skip in the DBRefMany chain, or move additional pagination after AsEnumerable()."))
+                    raise (NotSupportedException(DBRefManyHelpers.multipleTakeSkipBoundariesMessage))
                 flushBoundary state
                 state.Offset <- arg
                 state.Limit <- None

@@ -11,6 +11,39 @@ open SoloDatabase.QueryTranslatorVisitPost
 /// Shared helpers for DBRefMany query translation.
 /// Used by both the unified Builder and the legacy handler.
 module internal DBRefManyHelpers =
+    [<Literal>]
+    let multipleTakeSkipBoundariesMessage =
+        "Error: Multiple Take/Skip boundaries in DBRefMany query are not supported.\nReason: The descriptor model admits only one semantic pagination boundary.\nFix: Keep at most one Take or Skip in the DBRefMany chain, or move additional pagination after AsEnumerable()."
+
+    [<Literal>]
+    let takeWhileOrderingRequiredMessage =
+        "Error: TakeWhile/SkipWhile requires explicit ordering.\nReason: TakeWhile/SkipWhile needs a deterministic row order.\nFix: Add .OrderBy() before .TakeWhile(), or set OrderBy on the [SoloRef] attribute."
+
+    let appendPredicatesWithAnd (head: SqlExpr) (tail: SqlExpr list) =
+        tail |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) head
+
+    let foldPredicatesWithAnd (predicates: SqlExpr list) =
+        match predicates with
+        | [] -> None
+        | h :: t -> Some(appendPredicatesWithAnd h t)
+
+    let wrapAggregateEmptySemantics (aggKind: AggregateKind) (insideJsonObjectProjection: bool) (scalarExpr: SqlExpr) : SqlExpr =
+        if aggKind = AggregateKind.Sum then
+            SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
+        elif insideJsonObjectProjection then
+            scalarExpr
+        else
+            SqlExpr.CaseExpr(
+                (SqlExpr.Unary(UnaryOperator.IsNull, scalarExpr),
+                 SqlExpr.Literal(SqlLiteral.String "__solodb_error__:Sequence contains no elements")),
+                [],
+                Some scalarExpr)
+
+    let buildTakeWhileCfFilter (alias: string) (isTakeWhile: bool) =
+        if isTakeWhile then
+            SqlExpr.Binary(SqlExpr.Column(Some alias, "_cf"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
+        else
+            SqlExpr.Binary(SqlExpr.Column(Some alias, "_cf"), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
 
     let joinEdgesToClauses (edges: ResizeArray<JoinEdge>) : JoinShape list =
         [ for j in edges ->
@@ -109,9 +142,7 @@ module internal DBRefManyHelpers =
                             let selectorDu = visitDu selectorLambda.Body subQb
                             aggregateJoinEdges.AddRange(subQb.SourceContext.Joins)
                             let aggExpr = SqlExpr.AggregateCall(aggKind, Some selectorDu, false, None)
-                            if mc.Method.Name = "Sum" then
-                                SqlExpr.Coalesce(aggExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
-                            else aggExpr
+                            wrapAggregateEmptySemantics aggKind true aggExpr
                         | ValueNone ->
                             raise (NotSupportedException("Cannot extract selector for GroupBy aggregate."))
                     | other ->

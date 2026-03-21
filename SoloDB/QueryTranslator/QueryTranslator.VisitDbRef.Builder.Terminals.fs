@@ -9,18 +9,6 @@ open SqlDu.Engine.C1.Spec
 open Utils
 
 module internal DBRefManyBuilderTerminals =
-    let private wrapAggregateEmptySemantics (aggKind: AggregateKind) (insideJsonObjectProjection: bool) (scalarExpr: SqlExpr) : SqlExpr =
-        if aggKind = AggregateKind.Sum then
-            SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
-        elif insideJsonObjectProjection then
-            scalarExpr
-        else
-            SqlExpr.CaseExpr(
-                (SqlExpr.Unary(UnaryOperator.IsNull, scalarExpr),
-                 SqlExpr.Literal(SqlLiteral.String "__solodb_error__:Sequence contains no elements")),
-                [],
-                Some scalarExpr)
-
     let countDbRefManyDepth (unwrapConvert: Expression -> Expression) (isDBRefManyType: Type -> bool) (expr: Expression) : int =
         let rec visitExpr (e: Expression) : int =
             let e = unwrapConvert e
@@ -120,12 +108,12 @@ module internal DBRefManyBuilderTerminals =
                 let outerAgg = SqlExpr.AggregateCall(aggKind, Some(SqlExpr.Column(Some pgAlias, "v")), false, None)
                 let outerCore = mkSubCore [{ Alias = None; Expr = outerAgg }] (Some(DerivedTable(innerSel, pgAlias))) None
                 let scalarExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
-                wrapAggregateEmptySemantics aggKind qb.InsideJsonObjectProjection scalarExpr
+                DBRefManyHelpers.wrapAggregateEmptySemantics aggKind qb.InsideJsonObjectProjection scalarExpr
             else
                 let aggProj = [{ Alias = None; Expr = aggExpr }]
                 let core = { baseCore with Projections = ProjectionSetOps.ofList aggProj; Joins = baseCore.Joins @ selectorJoins }
                 let scalarExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
-                wrapAggregateEmptySemantics aggKind qb.InsideJsonObjectProjection scalarExpr
+                DBRefManyHelpers.wrapAggregateEmptySemantics aggKind qb.InsideJsonObjectProjection scalarExpr
         | ValueNone ->
             raise (NotSupportedException("Cannot extract selector for aggregate."))
 
@@ -183,7 +171,7 @@ module internal DBRefManyBuilderTerminals =
               Limit = None
               Offset = None }
         let scalarExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect aggCore }
-        wrapAggregateEmptySemantics aggKind qb.InsideJsonObjectProjection scalarExpr
+        DBRefManyHelpers.wrapAggregateEmptySemantics aggKind qb.InsideJsonObjectProjection scalarExpr
 
     let buildProjectedPredicateExists
         (nextAlias: string -> string)

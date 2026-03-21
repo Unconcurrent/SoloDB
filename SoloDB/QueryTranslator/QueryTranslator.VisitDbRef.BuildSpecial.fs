@@ -12,19 +12,6 @@ open SoloDatabase.DBRefManyDescriptor
 /// Specialized SQL builders for GroupBy and TakeWhile/SkipWhile terminals.
 /// Separated from the main builder to keep file sizes under 400 lines.
 module internal DBRefManyBuildSpecial =
-
-    let private wrapAggregateEmptySemantics (aggKind: AggregateKind) (insideJsonObjectProjection: bool) (scalarExpr: SqlExpr) : SqlExpr =
-        if aggKind = AggregateKind.Sum then
-            SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
-        elif insideJsonObjectProjection then
-            scalarExpr
-        else
-            SqlExpr.CaseExpr(
-                (SqlExpr.Unary(UnaryOperator.IsNull, scalarExpr),
-                 SqlExpr.Literal(SqlLiteral.String "__solodb_error__:Sequence contains no elements")),
-                [],
-                Some scalarExpr)
-
     let private buildTakeWhileProjectedRowsetWithLambda
         (qb: QueryBuilder)
         (baseCore: SelectCore)
@@ -43,9 +30,7 @@ module internal DBRefManyBuildSpecial =
         let innerCore2 = { baseCore with Projections = ProjectionSetOps.ofList innerProjs2; Joins = baseCore.Joins @ projJoins }
         let innerSel2 = { Ctes = []; Body = SingleSelect innerCore2 }
         let twAlias2 = nextAlias "_tw"
-        let cfFilter2 =
-            if isTakeWhile then SqlExpr.Binary(SqlExpr.Column(Some twAlias2, "_cf"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
-            else SqlExpr.Binary(SqlExpr.Column(Some twAlias2, "_cf"), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
+        let cfFilter2 = DBRefManyHelpers.buildTakeWhileCfFilter twAlias2 isTakeWhile
         let middleCore = mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Column(Some twAlias2, "v") }] (Some(DerivedTable(innerSel2, twAlias2))) (Some cfFilter2)
         let middleSel = { Ctes = []; Body = SingleSelect middleCore }
         if desc.Distinct then
@@ -82,7 +67,7 @@ module internal DBRefManyBuildSpecial =
         let aggExpr = SqlExpr.AggregateCall(aggKind, Some(SqlExpr.Column(Some dtAlias, "v")), false, None)
         let aggCore = mkSubCore [{ Alias = None; Expr = aggExpr }] (Some(DerivedTable(rowsetSel, dtAlias))) None
         let scalarExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect aggCore }
-        wrapAggregateEmptySemantics aggKind insideJsonObjectProjection scalarExpr
+        DBRefManyHelpers.wrapAggregateEmptySemantics aggKind insideJsonObjectProjection scalarExpr
 
     /// Build GroupBy terminal SQL from a descriptor.
     let tryBuildGroupBy
@@ -232,10 +217,7 @@ module internal DBRefManyBuildSpecial =
                 match tryGetRelationOrderByForTakeWhile ownerRef tgtAlias lnkAlias with
                 | ValueSome orderBy -> orderBy
                 | ValueNone ->
-                    raise (InvalidOperationException(
-                        "Error: TakeWhile/SkipWhile requires explicit ordering.\n" +
-                        "Reason: TakeWhile/SkipWhile needs a deterministic row order.\n" +
-                        "Fix: Add .OrderBy() before .TakeWhile(), or set OrderBy on the [SoloRef] attribute."))
+                    raise (InvalidOperationException(DBRefManyHelpers.takeWhileOrderingRequiredMessage))
             | orderBy -> orderBy
         let twSubQb = qb.ForSubquery(tgtAlias, twPredLambda, subqueryRootTable = targetTable)
         let twPredDu = visitDu twPredLambda.Body twSubQb
@@ -249,10 +231,7 @@ module internal DBRefManyBuildSpecial =
         let innerCore = { baseCore with Projections = ProjectionSetOps.ofList innerProjs }
         let innerSel = { Ctes = []; Body = SingleSelect innerCore }
         let twAlias = nextAlias "_tw"
-
-        let cfFilter =
-            if isTakeWhile then SqlExpr.Binary(SqlExpr.Column(Some twAlias, "_cf"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
-            else SqlExpr.Binary(SqlExpr.Column(Some twAlias, "_cf"), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
+        let cfFilter = DBRefManyHelpers.buildTakeWhileCfFilter twAlias isTakeWhile
         let outerCore = mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Column(Some twAlias, "v") }] (Some(DerivedTable(innerSel, twAlias))) (Some cfFilter)
         let outerSel = { Ctes = []; Body = SingleSelect outerCore }
 
@@ -287,9 +266,7 @@ module internal DBRefManyBuildSpecial =
                         Joins = baseCore.Joins @ keyJoins }
                 let innerSelWithKey = { Ctes = []; Body = SingleSelect innerWithKey }
                 let twAlias2 = nextAlias "_twg"
-                let cfFilter2 =
-                    if isTakeWhile then SqlExpr.Binary(SqlExpr.Column(Some twAlias2, "_cf"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
-                    else SqlExpr.Binary(SqlExpr.Column(Some twAlias2, "_cf"), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
+                let cfFilter2 = DBRefManyHelpers.buildTakeWhileCfFilter twAlias2 isTakeWhile
                 // Outer: GROUP BY _gk HAVING predicate
                 let havingDu =
                     match desc.GroupByHavingPredicate with

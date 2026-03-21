@@ -139,9 +139,7 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
                             let subQb = qb.ForSubquery(tgtAlias, selectorLambda, subqueryRootTable = targetTable)
                             let selectorDu = visitDu selectorLambda.Body subQb
                             let aggExpr = SqlExpr.AggregateCall(aggKind, Some selectorDu, false, None)
-                            if mc.Method.Name = "Sum" then
-                                SqlExpr.Coalesce(aggExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
-                            else aggExpr
+                            DBRefManyHelpers.wrapAggregateEmptySemantics aggKind true aggExpr
                         | ValueNone ->
                             raise (NotSupportedException("Cannot extract selector for GroupBy aggregate."))
                     | "LongCount" ->
@@ -183,7 +181,7 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
                 BinaryOperator.Eq,
                 SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
         let fullWhere =
-            let withPreds = predicateDus |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) ownerWhere
+            let withPreds = DBRefManyHelpers.appendPredicatesWithAnd ownerWhere predicateDus
             match ofTypeName with
             | Some tn -> SqlExpr.Binary(withPreds, BinaryOperator.And, buildOfTypePredicate tgtAlias tn)
             | None -> withPreds
@@ -222,7 +220,7 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
                 BinaryOperator.Eq,
                 SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
         let fullWhere =
-            let withPreds = predicateDus |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) ownerWhere
+            let withPreds = DBRefManyHelpers.appendPredicatesWithAnd ownerWhere predicateDus
             match ofTypeName with
             | Some tn -> SqlExpr.Binary(withPreds, BinaryOperator.And, buildOfTypePredicate tgtAlias tn)
             | None -> withPreds
