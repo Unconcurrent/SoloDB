@@ -75,6 +75,19 @@ module internal DBRefManyBuilderCore =
         else
             core
 
+    let projectUnionArmColumns
+        (mkSubCore: Projection list -> TableSource option -> SqlExpr option -> SelectCore)
+        (nextAlias: string -> string)
+        (columnNames: string list)
+        (core: SelectCore)
+        : SelectCore =
+        let flatAlias = nextAlias "_dif"
+        let flatSel = { Ctes = []; Body = SingleSelect core }
+        let flatProjections =
+            columnNames
+            |> List.map (fun name -> { Alias = Some name; Expr = SqlExpr.Column(Some flatAlias, name) })
+        mkSubCore flatProjections (Some(DerivedTable(flatSel, flatAlias))) None
+
     let private translatePredicates
         (qb: QueryBuilder)
         (targetAlias: string)
@@ -249,7 +262,7 @@ module internal DBRefManyBuilderCore =
             let existsCore = { effectiveCore with Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] }
             let existsSel = { Ctes = []; Body = SingleSelect existsCore }
             let mainCore =
-                normalizeUnionArm
+                projectUnionArmColumns
                     mkSubCore
                     nextAlias
                     [ "Id"; "Value" ]

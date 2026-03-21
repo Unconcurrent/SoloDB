@@ -43,10 +43,6 @@ module internal QueryableBuildQueryPartBGroupJoinElements =
         if hasGroupChainOps groupCall.Chain then
             let rowsetSel, isProjected = buildGroupChainRowset rt groupCall.Chain
             let rowsetAlias = sprintf "gje%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1)
-            let rowsetSourceCore =
-                match rowsetSel.Body with
-                | SingleSelect core -> core
-                | _ -> failwith "internal invariant violation: expected single-select rowset"
             let rowValueExpr, rowValueJoins =
                 if Object.ReferenceEquals(projectionBody, groupCall.Call :> Expression) then
                     if isProjected then SqlExpr.Column(Some rowsetAlias, "v"), []
@@ -85,7 +81,7 @@ module internal QueryableBuildQueryPartBGroupJoinElements =
                 let error =
                     if orDefault then None
                     else
-                        let countExpr = buildCountSubquery rt rowsetSourceCore (Some 1)
+                        let countExpr = buildCountSelectSubquery rt rowsetSel (Some 1)
                         Some (SqlExpr.CaseExpr(
                             (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), rt.ErrorExpr noElements),
                             [],
@@ -96,7 +92,7 @@ module internal QueryableBuildQueryPartBGroupJoinElements =
                 let error =
                     if orDefault then None
                     else
-                        let countExpr = buildCountSubquery rt rowsetSourceCore (Some 1)
+                        let countExpr = buildCountSelectSubquery rt rowsetSel (Some 1)
                         Some (SqlExpr.CaseExpr(
                             (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), rt.ErrorExpr noElements),
                             [],
@@ -104,7 +100,7 @@ module internal QueryableBuildQueryPartBGroupJoinElements =
                 { Value = mkValue valueCore; Error = error }
             | SingleLike orDefault ->
                 let valueCore = rowsetValueCore ascOrd (Some (SqlExpr.Literal(SqlLiteral.Integer 1L))) None
-                let countExpr = buildCountSubquery rt rowsetSourceCore (Some 2)
+                let countExpr = buildCountSelectSubquery rt rowsetSel (Some 2)
                 let error =
                     if orDefault then
                         Some (SqlExpr.CaseExpr(
