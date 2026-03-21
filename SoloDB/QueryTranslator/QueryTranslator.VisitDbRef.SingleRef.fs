@@ -74,7 +74,11 @@ module internal QueryTranslatorVisitDbRefSingleRef =
                 match findValueBoundary topMe.Expression [topMe.Member.Name] with
                 | ValueSome struct(valueME, propParts) ->
                     let alias = ensureDBRefJoin qb valueME
-                    qb.DuHandlerResult.Value <- ValueSome(SqlExpr.JsonExtractExpr(Some alias, "Value", JsonPathOps.ofList propParts))
+                    let du =
+                        match propParts with
+                        | ["Id"] -> SqlExpr.Column(Some alias, "Id")
+                        | _ -> SqlExpr.JsonExtractExpr(Some alias, "Value", JsonPathOps.ofList propParts)
+                    qb.DuHandlerResult.Value <- ValueSome du
                     true
                 | ValueNone -> false
         | _ -> false
