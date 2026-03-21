@@ -121,8 +121,10 @@
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.Peelers3.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.SingleRef.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.BuildSpecial.fs" />
+    <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.Builder.Core.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.Builder.Elements.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.Builder.SetOps.fs" />
+    <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.Builder.SetOpTerminals.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.Builder.Terminals.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.Builder.fs" />
     <Compile Include="QueryTranslator/QueryTranslator.VisitDbRef.fs" />
