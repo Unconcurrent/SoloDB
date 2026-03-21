@@ -6,7 +6,12 @@ open System.Threading
 open Utils
 open SoloDatabase
 open SoloDatabase.QueryTranslatorBaseTypes
+open SoloDatabase.QueryTranslatorBaseHelpers
+open SoloDatabase.QueryTranslatorVisitPost
 open SqlDu.Engine.C1.Spec
+open SoloDatabase.DBRefManyDescriptor
+open SoloDatabase.DBRefManyExtractorHelpers
+open SoloDatabase.SharedDescriptorExtract
 module internal QueryableBuildQueryPartBGroupJoinChain =
     open QueryableHelperJoin
     open QueryableHelperPreprocess
@@ -23,7 +28,7 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
           Take: Expression option
           SelectProjection: LambdaExpression option
           Distinct: bool
-          UsesDefaultIfEmpty: bool }
+          DefaultIfEmpty: Expression option option }
     type GroupJoinElementCall =
         { Call: MethodCallExpression
           Kind: GroupJoinElementKind
@@ -62,7 +67,7 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
           Take = None
           SelectProjection = None
           Distinct = false
-          UsesDefaultIfEmpty = false }
+          DefaultIfEmpty = None }
     let hasGroupChainOps (desc: GroupJoinGroupChainDescriptor) =
         not desc.WherePredicates.IsEmpty
         || not desc.OrderKeys.IsEmpty
@@ -70,7 +75,42 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
         || desc.Take.IsSome
         || desc.SelectProjection.IsSome
         || desc.Distinct
-        || desc.UsesDefaultIfEmpty
+        || desc.DefaultIfEmpty.IsSome
+
+    let hasQueryDescriptorChainOps (desc: QueryDescriptor) =
+        not desc.WherePredicates.IsEmpty
+        || not desc.SortKeys.IsEmpty
+        || desc.Offset.IsSome
+        || desc.Limit.IsSome
+        || desc.SelectProjection.IsSome
+        || desc.Distinct
+        || desc.DefaultIfEmpty.IsSome
+        || desc.TakeWhileInfo.IsSome
+        || desc.GroupByKey.IsSome
+        || desc.SetOp.IsSome
+
+    /// Convert a QueryDescriptor to the legacy GroupJoinGroupChainDescriptor for builders
+    /// that have not yet been migrated. TEMPORARY — these builders should consume QueryDescriptor directly.
+    let toGroupChainDescriptor (desc: QueryDescriptor) : GroupJoinGroupChainDescriptor =
+        let tryLambda (e: Expression) =
+            match tryExtractLambdaExpression e with
+            | ValueSome l -> Some l
+            | ValueNone -> None
+        {
+            WherePredicates = desc.WherePredicates |> List.choose tryLambda
+            OrderKeys =
+                desc.SortKeys
+                |> List.choose (fun (expr, dir) -> tryLambda expr |> Option.map (fun l -> l, dir))
+            Skip = desc.Offset
+            Take = desc.Limit
+            SelectProjection = desc.SelectProjection
+            Distinct = desc.Distinct
+            DefaultIfEmpty =
+                match desc.DefaultIfEmpty, desc.PostSelectDefaultIfEmpty with
+                | Some d, _ -> Some d
+                | None, Some d -> Some d
+                | None, None -> None
+        }
     let evalNonNegativeInt64 (expr: Expression) =
         let raw = QueryTranslator.evaluateExpr<obj> expr
         let value = Convert.ToInt64(raw)
@@ -85,6 +125,69 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
             | None, None -> None
         let offset = skipValue |> Option.map (fun n -> SqlExpr.Literal(SqlLiteral.Integer n))
         limit, offset
+    let private extractorConfig =
+        {
+            EnsureOfTypeSupported = DBRefManyHelpers.ensureOfTypeSupported
+            MultipleTakeSkipBoundariesMessage =
+                "Error: Multiple Take/Skip boundaries in GroupJoin chain are not supported.\n" +
+                "Reason: The current descriptor admits one semantic pagination boundary.\n" +
+                "Fix: Keep at most one Take or Skip inside the GroupJoin group chain."
+            TooManyTakeWhileBoundariesMessage =
+                "Error: More than two TakeWhile/SkipWhile boundaries are not supported in GroupJoin chain.\n" +
+                "Reason: The current descriptor supports one inner and one outer boundary.\n" +
+                "Fix: Simplify the GroupJoin group chain or move additional windowing after AsEnumerable()."
+        }
+
+    let private tryExtractGroupQueryDescriptor (rt: GroupJoinRuntime) (expr: Expression) =
+        let expr, outerDistinct, _outerMaterialize = preprocessRoot expr
+        match expr with
+        | :? MethodCallExpression as mce ->
+            match tryRecognizeTerminal mce with
+            | None -> None
+            | Some recognized ->
+                let isGroupRoot (e: Expression) =
+                    match unwrapConvert e with
+                    | :? ParameterExpression as p -> Object.ReferenceEquals(p, rt.GroupParam)
+                    | _ -> false
+                if not (isRootedChain unwrapConvert isGroupRoot recognized.Source) then None
+                else
+                    let state = createState ()
+                    let source = normalizeCountBySource recognized.Terminal recognized.Source state
+                    let innerSource = walkChain extractorConfig state source
+                    finalizeState state
+                    placeCountPredicate state recognized.CountPredicate
+                    let tryLambda e =
+                        match tryExtractLambdaExpression e with
+                        | ValueSome l -> Some l
+                        | ValueNone -> None
+                    let orderKeys =
+                        state.SortKeys
+                        |> Seq.map (fun (expr, dir) -> tryLambda expr, dir)
+                        |> Seq.choose (fun (lam, dir) -> lam |> Option.map (fun l -> l, dir))
+                        |> Seq.toList
+                    let desc =
+                        {
+                            WherePredicates =
+                                state.Wheres
+                                |> Seq.choose tryLambda
+                                |> Seq.toList
+                            OrderKeys = orderKeys
+                            Skip = state.Offset
+                            Take = state.Limit
+                            SelectProjection = state.SelectProjection
+                            Distinct = state.Distinct || outerDistinct
+                            DefaultIfEmpty =
+                                match state.DefaultIfEmpty, state.PostSelectDefaultIfEmpty with
+                                | Some d, _ -> Some d
+                                | None, Some d -> Some d
+                                | None, None -> None
+                        }
+                    match unwrapConvert innerSource with
+                    | :? ParameterExpression as p when Object.ReferenceEquals(p, rt.GroupParam) ->
+                        Some desc
+                    | _ -> None
+        | _ -> None
+
     let rec walkGroupChain (rt: GroupJoinRuntime) (expr: Expression) =
         match expr with
         | :? ParameterExpression as p when Object.ReferenceEquals(p, rt.GroupParam) ->
@@ -118,14 +221,65 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
                 | "Distinct", 1 ->
                     Some { desc with Distinct = true }
                 | "DefaultIfEmpty", 1 ->
-                    Some { desc with UsesDefaultIfEmpty = true }
+                    Some { desc with DefaultIfEmpty = Some None }
                 | _ -> None
             | None -> None
         | _ -> None
 
     let tryGetGroupChainDescriptor (rt: GroupJoinRuntime) (expr: Expression) =
+        match tryExtractGroupQueryDescriptor rt expr with
+        | Some desc when hasGroupChainOps desc -> Some desc
+        | _ ->
         match walkGroupChain rt expr with
         | Some desc when hasGroupChainOps desc -> Some desc
+        | _ -> None
+
+    let tryExtractGroupTerminalChain (rt: GroupJoinRuntime) (expr: Expression) : (QueryDescriptor * Terminal) option =
+        let expr, outerDistinct, _outerMaterialize = preprocessRoot expr
+        match expr with
+        | :? MethodCallExpression as mce ->
+            match tryRecognizeTerminal mce with
+            | None -> None
+            | Some recognized ->
+                let isGroupRoot (e: Expression) =
+                    match unwrapConvert e with
+                    | :? ParameterExpression as p -> Object.ReferenceEquals(p, rt.GroupParam)
+                    | _ -> false
+                if not (isRootedChain unwrapConvert isGroupRoot recognized.Source) then None
+                else
+                    let state = createState ()
+                    let source = normalizeCountBySource recognized.Terminal recognized.Source state
+                    let innerSource = walkChain extractorConfig state source
+                    finalizeState state
+                    placeCountPredicate state recognized.CountPredicate
+                    let desc : QueryDescriptor =
+                        {
+                            Source = innerSource
+                            OfTypeName = state.OfTypeName
+                            CastTypeName = state.CastTypeName
+                            WherePredicates = state.Wheres |> Seq.toList
+                            SortKeys = state.SortKeys |> Seq.toList
+                            Limit = state.Limit
+                            Offset = state.Offset
+                            PostBoundWherePredicates = state.PostBoundWheres |> Seq.toList
+                            PostBoundSortKeys = state.PostBoundSortKeys |> Seq.toList
+                            PostBoundLimit = state.PostBoundLimit
+                            PostBoundOffset = state.PostBoundOffset
+                            TakeWhileInfo = state.TakeWhileInfo
+                            PostBoundTakeWhileInfo = state.PostBoundTakeWhileInfo
+                            GroupByKey = state.GroupByKey
+                            Distinct = state.Distinct || outerDistinct
+                            SelectProjection = state.SelectProjection
+                            SetOp = state.SetOp
+                            Terminal = recognized.Terminal
+                            GroupByHavingPredicate = state.GroupByHaving
+                            DefaultIfEmpty = state.DefaultIfEmpty
+                            PostSelectDefaultIfEmpty = state.PostSelectDefaultIfEmpty
+                        }
+                    match unwrapConvert innerSource with
+                    | :? ParameterExpression as p when Object.ReferenceEquals(p, rt.GroupParam) ->
+                        Some (desc, recognized.Terminal)
+                    | _ -> None
         | _ -> None
     let buildCountSubquery (rt: GroupJoinRuntime) (baseCore: SelectCore) (limit: int option) =
         let countSourceAlias = sprintf "gjc%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1)
@@ -267,7 +421,7 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
               Offset = offsetExpr }
         let boundedSel = { Ctes = []; Body = SingleSelect boundedCore }
         let finalSel =
-            if chain.UsesDefaultIfEmpty then
+            if chain.DefaultIfEmpty.IsSome then
                 let normalizedBoundedCore =
                     normalizeUnionArm
                         (fun () -> sprintf "gju%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1))
@@ -288,7 +442,11 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
                 let defaultProjections =
                     match chain.SelectProjection with
                     | Some _ ->
-                        [{ Alias = Some "v"; Expr = SqlExpr.Literal(SqlLiteral.Null) }
+                        let defaultExpr =
+                            match chain.DefaultIfEmpty with
+                            | Some (Some defaultValueExpr) -> rt.TranslateOuterExpr defaultValueExpr
+                            | _ -> SqlExpr.Literal(SqlLiteral.Null)
+                        [{ Alias = Some "v"; Expr = defaultExpr }
                          { Alias = Some "__ord"; Expr = SqlExpr.Literal(SqlLiteral.Integer 0L) }]
                     | None ->
                         [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Null) }

@@ -12,6 +12,7 @@ open SoloDatabase.QueryTranslatorBaseTypes
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.QueryableBuildQueryPartBGroupJoinChain
 open SoloDatabase.QueryableBuildQueryPartBGroupJoinElements
+open SoloDatabase.DBRefManyDescriptor
 
 /// GroupJoin handler — orchestration only. Chain lowering and element handling live in dedicated files.
 module internal QueryableBuildQueryPartBGroupJoin =
@@ -192,88 +193,143 @@ module internal QueryableBuildQueryPartBGroupJoin =
                         | Some groupCall -> buildGroupElementSubquery runtime groupCall expr
                         | None -> translatedArg (translateOuterExpr expr)
                     | :? MethodCallExpression as mc ->
-                        match tryMatchGroupElementCall runtime mc with
-                        | Some groupCall ->
-                            buildGroupElementSubquery runtime groupCall expr
-                        | None ->
-                            match tryGetGroupChainDescriptor runtime expr with
-                            | Some chain ->
-                                translatedArg (buildGroupChainCollection runtime chain)
-                            | None ->
-                                let chainSource =
-                                    if mc.Arguments.Count >= 1 then tryGetGroupChainDescriptor runtime mc.Arguments.[0] else None
-                                match chainSource with
-                                | Some chain when mc.Method.Name = "Count" && mc.Arguments.Count = 1 ->
+                        // PRIMARY PATH: Terminal DU dispatch via shared QueryDescriptor extraction
+                        match tryExtractGroupTerminalChain runtime expr with
+                        | Some (qdesc, terminal) ->
+                            let toLambda (e: Expression) = unwrapLambdaExpressionOrThrow "GroupJoin terminal argument" e
+                            let hasOps = hasQueryDescriptorChainOps qdesc
+                            let chain = toGroupChainDescriptor qdesc
+                            // Fail-closed: TakeWhile/SkipWhile/CountBy/GroupBy on GroupJoin chains
+                            // are not yet supported in the builders. Reject loudly instead of producing wrong SQL.
+                            if qdesc.TakeWhileInfo.IsSome || qdesc.PostBoundTakeWhileInfo.IsSome then
+                                raise (NotSupportedException(
+                                    "Error: GroupJoin TakeWhile/SkipWhile on group chains is not yet supported.\n" +
+                                    "Reason: The GroupJoin builder does not handle windowed TakeWhile/SkipWhile boundaries.\n" +
+                                    "Fix: Move the TakeWhile/SkipWhile after AsEnumerable() or use Where with an explicit predicate."))
+                            if qdesc.GroupByKey.IsSome then
+                                raise (NotSupportedException(
+                                    "Error: GroupJoin CountBy/GroupBy on group chains is not yet supported.\n" +
+                                    "Reason: The GroupJoin builder does not handle GroupBy inside group subqueries.\n" +
+                                    "Fix: Move the CountBy/GroupBy after AsEnumerable() or use a supported aggregate."))
+                            match terminal with
+                            // Aggregate terminals
+                            | Terminal.Count | Terminal.LongCount ->
+                                if hasOps then
                                     translatedArg (buildAggregateOverChain runtime chain AggregateKind.Count None false)
-                                | Some chain when mc.Method.Name = "LongCount" && mc.Arguments.Count = 1 ->
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Count None false)
-                                | Some chain when mc.Method.Name = "Count" && mc.Arguments.Count = 2 ->
-                                    let pred = unwrapLambdaExpressionOrThrow "GroupJoin chained Count predicate" mc.Arguments.[1]
-                                    translatedArg (buildCountPredicateOverChain runtime chain pred)
-                                | Some chain when mc.Method.Name = "Any" && mc.Arguments.Count = 1 ->
-                                    translatedArg (buildExistsOverChain runtime chain None false)
-                                | Some chain when mc.Method.Name = "Any" && mc.Arguments.Count = 2 ->
-                                    let pred = unwrapLambdaExpressionOrThrow "GroupJoin chained Any predicate" mc.Arguments.[1]
-                                    translatedArg (buildExistsOverChain runtime chain (Some pred) false)
-                                | Some chain when mc.Method.Name = "All" && mc.Arguments.Count = 2 ->
-                                    let pred = unwrapLambdaExpressionOrThrow "GroupJoin chained All predicate" mc.Arguments.[1]
-                                    translatedArg (buildExistsOverChain runtime chain (Some pred) true)
-                                | Some chain when mc.Method.Name = "Contains" && mc.Arguments.Count = 2 ->
-                                    translatedArg (buildContainsOverChain runtime chain mc.Arguments.[1])
-                                | Some chain when mc.Method.Name = "Sum" && mc.Arguments.Count = 1 ->
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Sum None true)
-                                | Some chain when mc.Method.Name = "Min" && mc.Arguments.Count = 1 ->
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Min None false)
-                                | Some chain when mc.Method.Name = "Max" && mc.Arguments.Count = 1 ->
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Max None false)
-                                | Some chain when mc.Method.Name = "Average" && mc.Arguments.Count = 1 ->
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Avg None false)
-                                | Some chain when mc.Method.Name = "Sum" && mc.Arguments.Count = 2 ->
-                                    let sel = unwrapLambdaExpressionOrThrow "GroupJoin chained Sum selector" mc.Arguments.[1]
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Sum (Some sel) true)
-                                | Some chain when mc.Method.Name = "Min" && mc.Arguments.Count = 2 ->
-                                    let sel = unwrapLambdaExpressionOrThrow "GroupJoin chained Min selector" mc.Arguments.[1]
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Min (Some sel) false)
-                                | Some chain when mc.Method.Name = "Max" && mc.Arguments.Count = 2 ->
-                                    let sel = unwrapLambdaExpressionOrThrow "GroupJoin chained Max selector" mc.Arguments.[1]
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Max (Some sel) false)
-                                | Some chain when mc.Method.Name = "Average" && mc.Arguments.Count = 2 ->
-                                    let sel = unwrapLambdaExpressionOrThrow "GroupJoin chained Average selector" mc.Arguments.[1]
-                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Avg (Some sel) false)
-                                | _ when mc.Method.Name = "Count" && mc.Arguments.Count = 1 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
+                                else
                                     translatedArg (SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None))
-                                | _ when mc.Method.Name = "Count" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
-                                    let pred = unwrapLambdaExpressionOrThrow "GroupJoin Count predicate" mc.Arguments.[1]
-                                    let predDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
-                                    translatedArg (SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((predDu, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None))
-                                | _ when mc.Method.Name = "LongCount" && mc.Arguments.Count = 1 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
-                                    translatedArg (SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None))
-                                | _ when mc.Method.Name = "Sum" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
-                                    let sel = unwrapLambdaExpressionOrThrow "GroupJoin Sum selector" mc.Arguments.[1]
+                            | Terminal.Sum sel ->
+                                if hasOps then
+                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Sum (Some (toLambda sel)) true)
+                                else
+                                    let sel = toLambda sel
                                     let selDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body
                                     translatedArg (SqlExpr.Coalesce(SqlExpr.AggregateCall(AggregateKind.Sum, Some selDu, false, None), [SqlExpr.Literal(SqlLiteral.Integer 0L)]))
-                                | _ when mc.Method.Name = "Min" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
-                                    let sel = unwrapLambdaExpressionOrThrow "GroupJoin Min selector" mc.Arguments.[1]
+                            | Terminal.SumProjected ->
+                                if hasOps then
+                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Sum None true)
+                                else
+                                    raise (NotSupportedException("Error: GroupJoin Sum requires a selector.\nFix: Use .Sum(x => x.Property) or project first with .Select()."))
+                            | Terminal.Min sel ->
+                                if hasOps then
+                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Min (Some (toLambda sel)) false)
+                                else
+                                    let sel = toLambda sel
                                     translatedArg (SqlExpr.AggregateCall(AggregateKind.Min, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None))
-                                | _ when mc.Method.Name = "Max" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
-                                    let sel = unwrapLambdaExpressionOrThrow "GroupJoin Max selector" mc.Arguments.[1]
+                            | Terminal.Max sel ->
+                                if hasOps then
+                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Max (Some (toLambda sel)) false)
+                                else
+                                    let sel = toLambda sel
                                     translatedArg (SqlExpr.AggregateCall(AggregateKind.Max, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None))
-                                | _ when mc.Method.Name = "Average" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
-                                    let sel = unwrapLambdaExpressionOrThrow "GroupJoin Average selector" mc.Arguments.[1]
+                            | Terminal.Average sel ->
+                                if hasOps then
+                                    translatedArg (buildAggregateOverChain runtime chain AggregateKind.Avg (Some (toLambda sel)) false)
+                                else
+                                    let sel = toLambda sel
                                     translatedArg (SqlExpr.AggregateCall(AggregateKind.Avg, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None))
-                                | _ when mc.Method.Name = "Any" && mc.Arguments.Count = 1 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
+                            | Terminal.MinProjected ->
+                                if hasOps then translatedArg (buildAggregateOverChain runtime chain AggregateKind.Min None false)
+                                else raise (NotSupportedException("Error: GroupJoin Min requires a selector.\nFix: Use .Min(x => x.Property) or project first with .Select()."))
+                            | Terminal.MaxProjected ->
+                                if hasOps then translatedArg (buildAggregateOverChain runtime chain AggregateKind.Max None false)
+                                else raise (NotSupportedException("Error: GroupJoin Max requires a selector.\nFix: Use .Max(x => x.Property) or project first with .Select()."))
+                            | Terminal.AverageProjected ->
+                                if hasOps then translatedArg (buildAggregateOverChain runtime chain AggregateKind.Avg None false)
+                                else raise (NotSupportedException("Error: GroupJoin Average requires a selector.\nFix: Use .Average(x => x.Property) or project first with .Select()."))
+                            // Predicate/exists terminals
+                            | Terminal.Exists ->
+                                if hasOps then
+                                    translatedArg (buildExistsOverChain runtime chain None false)
+                                else
                                     translatedArg (SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L)))
-                                | _ when mc.Method.Name = "Any" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
-                                    let pred = unwrapLambdaExpressionOrThrow "GroupJoin Any predicate" mc.Arguments.[1]
+                            | Terminal.Any(Some pred) ->
+                                if hasOps then
+                                    translatedArg (buildExistsOverChain runtime chain (Some (toLambda pred)) false)
+                                else
+                                    let pred = toLambda pred
                                     let predDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
                                     translatedArg (SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((predDu, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L)))
-                                | _ when mc.Method.Name = "All" && mc.Arguments.Count = 2 && mc.Arguments.[0] :? ParameterExpression && (mc.Arguments.[0] :?> ParameterExpression) = groupParam ->
-                                    let pred = unwrapLambdaExpressionOrThrow "GroupJoin All predicate" mc.Arguments.[1]
+                            | Terminal.Any None ->
+                                translatedArg (SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L)))
+                            | Terminal.All pred ->
+                                if hasOps then
+                                    translatedArg (buildExistsOverChain runtime chain (Some (toLambda pred)) true)
+                                else
+                                    let pred = toLambda pred
                                     let predDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
                                     translatedArg (SqlExpr.Binary(
                                         SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.Not, predDu), SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None),
                                         BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)))
-                                | _ ->
+                            | Terminal.Contains value ->
+                                translatedArg (buildContainsOverChain runtime chain value)
+                            // Select terminal → collection output
+                            | Terminal.Select _ ->
+                                translatedArg (buildGroupChainCollection runtime chain)
+                            // Element access terminals
+                            | Terminal.First _ ->
+                                let elemCall = { Call = mc; Kind = FirstLike false; Chain = chain }
+                                buildGroupElementSubquery runtime elemCall expr
+                            | Terminal.FirstOrDefault _ ->
+                                let elemCall = { Call = mc; Kind = FirstLike true; Chain = chain }
+                                buildGroupElementSubquery runtime elemCall expr
+                            | Terminal.Last _ ->
+                                let elemCall = { Call = mc; Kind = LastLike false; Chain = chain }
+                                buildGroupElementSubquery runtime elemCall expr
+                            | Terminal.LastOrDefault _ ->
+                                let elemCall = { Call = mc; Kind = LastLike true; Chain = chain }
+                                buildGroupElementSubquery runtime elemCall expr
+                            | Terminal.Single _ ->
+                                let elemCall = { Call = mc; Kind = SingleLike false; Chain = chain }
+                                buildGroupElementSubquery runtime elemCall expr
+                            | Terminal.SingleOrDefault _ ->
+                                let elemCall = { Call = mc; Kind = SingleLike true; Chain = chain }
+                                buildGroupElementSubquery runtime elemCall expr
+                            | Terminal.ElementAt idx ->
+                                let elemCall = { Call = mc; Kind = ElementAtLike(idx, false); Chain = chain }
+                                buildGroupElementSubquery runtime elemCall expr
+                            | Terminal.ElementAtOrDefault idx ->
+                                let elemCall = { Call = mc; Kind = ElementAtLike(idx, true); Chain = chain }
+                                buildGroupElementSubquery runtime elemCall expr
+                            // Unsupported terminals — fail-closed, NO silent fallthrough
+                            | Terminal.MinBy _ | Terminal.MaxBy _ | Terminal.DistinctBy _ | Terminal.CountBy _ ->
+                                raise (NotSupportedException(
+                                    $"Error: GroupJoin terminal '{terminal}' is not supported on group chains.\n" +
+                                    "Reason: This terminal requires specialized lowering not yet available in GroupJoin context.\n" +
+                                    "Fix: Move the query after AsEnumerable() or use a supported aggregate."))
+                        | None ->
+                            // FALLBACK: element access on bare group (g.First(), g.Last(), etc.)
+                            match tryMatchGroupElementCall runtime mc with
+                            | Some groupCall ->
+                                buildGroupElementSubquery runtime groupCall expr
+                            | None ->
+                                // Not a group operation — translate as outer expression
+                                if referencesParam groupParam mc then
+                                    raise (NotSupportedException(
+                                        $"Error: GroupJoin group operation '{mc.Method.Name}' is not supported.\n" +
+                                        "Reason: This operation on the group parameter could not be recognized as a supported terminal.\n" +
+                                        "Fix: Use a supported terminal (Count, Sum, Any, All, First, etc.) or move after AsEnumerable()."))
+                                else
                                     translatedArg (translateOuterExpr expr)
                     | :? ConstantExpression ->
                         translatedArg (translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars None expr)
