@@ -62,7 +62,7 @@ module internal QueryableHelperJoin =
         | :? MethodCallExpression as mcl when isSoloDBQueryableExpression mcl ->
             raise (NotSupportedException(
                 "Error: Join inner source is not supported.
-Reason: Composed inner SoloDB queries are deferred in this cycle.
+Reason: Composed inner SoloDB queries are not supported here.
 Fix: Join directly against a root SoloDB collection or move the join after AsEnumerable()."))
         | _ ->
             raise (NotSupportedException(unsupportedJoinMessage))
@@ -214,7 +214,7 @@ Fix: Use an anonymous object, tuple, or move the projection after AsEnumerable()
             | _ ->
                 raise (NotSupportedException(
                     "Error: Join result selector is not supported.
-Reason: Mixed-source selector expressions are limited to object and tuple construction in this cycle.
+Reason: Mixed-source selector expressions are limited to object and tuple construction here.
 Fix: Project outer and inner members into an anonymous object or move the projection after AsEnumerable()."))
 
     let internal tryGetJoinRootSourceTable (expression: Expression) =

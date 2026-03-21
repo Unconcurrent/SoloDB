@@ -165,6 +165,8 @@
 		    <Compile Include="Query/Queryable.BuildLayers.fs" />
 		    <Compile Include="Query/Queryable.BuildQuery.SequenceOps.fs" />
 		    <Compile Include="Query/Queryable.BuildQuery.GroupByOps.fs" />
+		    <Compile Include="Query/Queryable.BuildQuery.GroupJoinChain.fs" />
+		    <Compile Include="Query/Queryable.BuildQuery.GroupJoinElements.fs" />
 		    <Compile Include="Query/Queryable.BuildQuery.GroupJoinOps.fs" />
 		    <Compile Include="Query/Queryable.BuildQuery.SelectManyOps.fs" />
 		    <Compile Include="Query/Queryable.BuildQuery.JoinAndTerminalOps.fs" />

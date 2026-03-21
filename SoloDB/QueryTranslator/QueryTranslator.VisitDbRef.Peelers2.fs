@@ -29,7 +29,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
             if isNull sourceExpr then ValueNone
             else
                 let unwrappedSource = unwrapConvert sourceExpr
-                // L10/composition: Accept DBRefMany, OfType(DBRefMany), or OrderBy(DBRefMany) as valid source.
+                // Accept DBRefMany, OfType(DBRefMany), or OrderBy(DBRefMany) as a valid source.
                 // This allows Where at any position relative to OrderBy in the LINQ chain.
                 let rec isValidDBRefManyChainSource (e: Expression) =
                     let e = unwrapConvert e
@@ -61,7 +61,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
                     | ValueNone -> ValueNone
         | _ -> ValueNone
 
-    /// L3: Peel .OrderBy/.OrderByDescending/.ThenBy/.ThenByDescending calls from a source expression.
+    /// Peel .OrderBy/.OrderByDescending/.ThenBy/.ThenByDescending calls from a source expression.
     /// Returns (innerExpr, sortKeys) where sortKeys is a list of (keySelector, SortDirection).
     /// ThenBy/ThenByDescending APPEND to existing keys; OrderBy/OrderByDescending REPLACE all previous.
     /// Returns ValueNone if the expression has no ordering calls.
@@ -108,7 +108,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
                 | ValueNone -> ValueNone
         | _ -> ValueNone
 
-    /// L3: Build sort key DU expressions from peeled OrderBy key selectors.
+    /// Build sort key DU expressions from peeled OrderBy key selectors.
     let internal buildSortKeyDus (qb: QueryBuilder) (tgtAlias: string) (targetTable: string) (sortKeys: (Expression * SortDirection) list) : OrderBy list =
         sortKeys
         |> List.map (fun (keyExpr, dir) ->
@@ -121,7 +121,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
                 raise (NotSupportedException(
                     "Error: Cannot extract key selector lambda for OrderBy on DBRefMany.\nFix: Use a simple lambda (e.g., x => x.Name).")))
 
-    /// L4: Peel .Take(n) and .Skip(n) calls from a source expression.
+    /// Peel .Take(n) and .Skip(n) calls from a source expression.
     /// Returns (innerExpr, limit: Expression option, offset: Expression option).
     /// Admits only: Take(n), Skip(n), Skip(m).Take(n) (canonical pagination).
     /// Rejects chained: Take.Take, Skip.Skip, Take.Skip (complex composition deferred).
@@ -159,7 +159,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
                 ValueSome (sourceExpr, None, skipArg)
         | _ -> ValueNone
 
-    /// L4: Build LIMIT/OFFSET DU expressions from peeled Take/Skip arguments.
+    /// Build LIMIT/OFFSET DU expressions from peeled Take/Skip arguments.
     let internal buildLimitOffset (qb: QueryBuilder) (limitExpr: Expression option) (offsetExpr: Expression option) : SqlExpr option * SqlExpr option =
         let visitArg (e: Expression) =
             match e with
@@ -179,7 +179,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
             | None -> None
         limit, offset
 
-    /// L10: Peel .OfType<T>() from a source expression.
+    /// Peel .OfType<T>() from a source expression.
     /// Returns (innerExpr, typeName) if the source is OfType on a DBRefMany chain.
     let internal tryPeelOfTypeFromSource (expr: Expression) : (Expression * string) voption =
         match expr with
@@ -203,7 +203,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
                 else ValueNone
         | _ -> ValueNone
 
-    /// L10: Try to get DBRefMany owner ref, peeling through OfType if present.
+    /// Try to get DBRefMany owner ref, peeling through OfType if present.
     /// Returns (ownerRef, ofTypeName option).
     let internal tryGetDBRefManyOwnerRefWithOfType (qb: QueryBuilder) (expr: Expression) : (DBRefManyOwnerRef * string option) voption =
         match tryGetDBRefManyOwnerRef qb expr with
@@ -216,7 +216,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
                 | ValueNone -> ValueNone
             | ValueNone -> ValueNone
 
-    /// L10: Build a type discriminator WHERE predicate for OfType<T>.
+    /// Build a type discriminator WHERE predicate for OfType<T>.
     let internal buildOfTypePredicate (tgtAlias: string) (typeName: string) : SqlExpr =
         SqlExpr.Binary(
             SqlExpr.FunctionCall("jsonb_extract", [
@@ -225,7 +225,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
             BinaryOperator.Eq,
             SqlExpr.Literal(SqlLiteral.String typeName))
 
-    /// L9: Build correlated subquery parts from a Select-on-DBRefMany expression.
+    /// Build correlated subquery parts from a Select-on-DBRefMany expression.
     /// Handles Select(DBRefMany, proj) and Select(Where(DBRefMany, pred), proj).
     /// Returns the subquery core for use in set operations.
     let internal tryBuildProjectedSetOperand (qb: QueryBuilder) (selectExpr: Expression) : (SqlExpr * SelectCore * string) voption =
@@ -297,7 +297,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
                 | ValueNone -> ValueNone
         | _ -> ValueNone
 
-    /// L12: Build a TakeWhile/SkipWhile windowed DerivedTable from a DBRefMany source.
+    /// Build a TakeWhile/SkipWhile windowed DerivedTable from a DBRefMany source.
     /// Returns the inner SELECT with _cf window column and the appropriate outer WHERE filter.
     /// The caller wraps this in the terminal (EXISTS, COUNT, json_group_array).
     let internal buildTakeWhileCore
@@ -372,7 +372,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
                 (Some cfFilter)
         { Ctes = []; Body = SingleSelect outerCore }
 
-    /// L12: Peel TakeWhile/SkipWhile from expression tree.
+    /// Peel TakeWhile/SkipWhile from the expression tree.
     /// Returns (innerExpr, predicateLambda, isTakeWhile).
     let internal tryPeelTakeWhileSkipWhile (expr: Expression) : (Expression * LambdaExpression * bool) voption =
         match expr with
@@ -396,4 +396,4 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
                 | None -> ValueNone
         | _ -> ValueNone
 
-    /// L9: Null-safe equality using SQLite IS operator (treats NULL IS NULL as true).
+    /// Null-safe equality using the SQLite IS operator (treats NULL IS NULL as true).

@@ -276,7 +276,7 @@ module internal DBRefManyExtractor =
                         | None -> ()
                         walkChain src
 
-                    // Newer .NET LINQ operators — R55 DBRefMany parity.
+                    // Newer .NET LINQ operators with DBRefMany parity.
                     | "DistinctBy" ->
                         match arg with
                         | Some keySel -> setOp <- Some (SetOperation.DistinctBy keySel)
@@ -329,7 +329,7 @@ module internal DBRefManyExtractor =
                         walkChain src
 
                     | "ToList" | "ToArray" ->
-                        // Identity passthrough (L11).
+                        // Identity passthrough.
                         walkChain src
 
                     | "DefaultIfEmpty" ->

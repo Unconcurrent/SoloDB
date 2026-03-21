@@ -19,7 +19,7 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
     let internal nullSafeEq (left: SqlExpr) (right: SqlExpr) : SqlExpr =
         SqlExpr.Binary(left, BinaryOperator.Is, right)
 
-    /// L9: Check if a source expression is a set operation (Intersect/Except/Union/Concat)
+    /// Check whether a source expression is a set operation (Intersect/Except/Union/Concat)
     /// on two Select-projected DBRefMany operands.
     let internal tryMatchSetOperation (expr: Expression) : (string * Expression * Expression) voption =
         match expr with
@@ -41,7 +41,7 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
             else ValueSome (mce.Method.Name, leftSource, rightSource)
         | _ -> ValueNone
 
-    /// L8: Peel .GroupBy(keySelector) from a source expression.
+    /// Peel .GroupBy(keySelector) from a source expression.
     /// Returns (innerExpr, keySelector lambda) if the source is a GroupBy on a DBRefMany chain.
     let internal tryPeelGroupByFromSource (expr: Expression) : (Expression * LambdaExpression) voption =
         match expr with
@@ -65,7 +65,7 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
                 | None -> ValueNone
         | _ -> ValueNone
 
-    /// L8: Translate an IGrouping predicate body (g => g.Count() > N) to a HAVING DU expression.
+    /// Translate an IGrouping predicate body (g => g.Count() > N) to a HAVING DU expression.
     /// Recognizes g.Count(), g.Sum(sel), g.Min(sel), g.Max(sel), g.Average(sel), g.Key,
     /// and binary comparisons/logic.
     let internal translateGroupingPredicate (qb: QueryBuilder) (tgtAlias: string) (targetTable: string) (groupKeyDu: SqlExpr) (groupParam: ParameterExpression) (body: Expression) : SqlExpr =
@@ -154,9 +154,9 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
             | _ -> visitDu e qb
         visit body
 
-    /// L1/L3: Build a filtered COUNT subquery for DBRefMany.Where(pred).Count().
+    /// Build a filtered COUNT subquery for DBRefMany.Where(pred).Count().
     /// Emits: ScalarSubquery(SELECT COUNT(*) FROM link JOIN target WHERE ownerLink AND pred1 AND pred2 ... [ORDER BY key])
-    /// L3: sortKeys emitted faithfully (dead SQL, order-vacuous for COUNT).
+    /// sortKeys are emitted faithfully even though ordering is vacuous for COUNT.
     let internal buildFilteredCountSubquery (qb: QueryBuilder) (ownerRef: DBRefManyOwnerRef) (predicateExprs: Expression list) (sortKeys: (Expression * SortDirection) list) (ofTypeName: string option) : SqlExpr =
         let propName = ownerRef.PropertyExpr.Member.Name
         let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName
@@ -195,8 +195,8 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
         let subSelect = { Ctes = []; Body = SingleSelect core }
         SqlExpr.ScalarSubquery subSelect
 
-    /// L1/L3: Build a filtered EXISTS subquery for DBRefMany.Where(pred).Any().
-    /// L3: sortKeys emitted faithfully (dead SQL, order-vacuous for EXISTS).
+    /// Build a filtered EXISTS subquery for DBRefMany.Where(pred).Any().
+    /// sortKeys are emitted faithfully even though ordering is vacuous for EXISTS.
     let internal buildFilteredExistsSubquery (qb: QueryBuilder) (ownerRef: DBRefManyOwnerRef) (predicateExprs: Expression list) (sortKeys: (Expression * SortDirection) list) (ofTypeName: string option) : SqlExpr =
         let propName = ownerRef.PropertyExpr.Member.Name
         let linkTable = dbRefManyLinkTable qb.SourceContext ownerRef.OwnerCollection propName

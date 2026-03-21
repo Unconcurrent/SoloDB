@@ -31,7 +31,7 @@ module internal DBRefManyDescriptor =
         | Select of projection: Expression
         | Contains of value: Expression
         | Exists  // bare Any() without predicate
-        // L4a element-access terminals.
+        // Element-access terminals.
         | First of predicate: Expression option
         | FirstOrDefault of predicate: Expression option
         | Last of predicate: Expression option

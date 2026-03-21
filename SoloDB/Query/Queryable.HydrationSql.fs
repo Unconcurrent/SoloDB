@@ -13,7 +13,7 @@ open SoloDatabase.RelationsTypes
 open SoloDatabase.RelationsSchema
 open SqlDu.Engine.C1.Spec
 
-/// Shared hydration SQL builders for both queryable (R45-9) and non-queryable (R45-10) paths.
+/// Shared hydration SQL builders for both queryable and non-queryable paths.
 /// Single canonical typed DU generator — no duplicated SQL string templates.
 module internal HydrationSqlBuilder =
     open QueryableHelperPreprocess

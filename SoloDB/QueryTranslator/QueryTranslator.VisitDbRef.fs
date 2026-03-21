@@ -151,7 +151,7 @@ module internal QueryTranslatorVisitDbRef =
                 | ValueNone -> false
             | ValueNone -> false
 
-        // L11: ToList/ToArray identity passthrough.
+        // ToList and ToArray identity passthrough.
         | :? MethodCallExpression as mce when mce.Method.Name = "ToList" || mce.Method.Name = "ToArray" ->
             let sourceExpr =
                 if not (isNull mce.Object) then mce.Object

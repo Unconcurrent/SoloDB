@@ -62,7 +62,7 @@ module internal QueryableBuildQueryPartB =
                     | 5 ->
                         raise (NotSupportedException(
                             "Error: Join comparer overload is not supported.
-Reason: SoloDB only supports SQL-translatable equality without custom comparers in this cycle.
+Reason: SoloDB only supports SQL-translatable equality without custom comparers here.
 Fix: Remove the comparer or move the join after AsEnumerable()."))
                     | 4 ->
                         let innerExpression = readSoloDBQueryableUntyped m.Expressions.[0]
@@ -73,7 +73,7 @@ Fix: Remove the comparer or move the join after AsEnumerable()."))
                         if isCompositeJoinKeyBody outerKeySelector.Body || isCompositeJoinKeyBody innerKeySelector.Body then
                             raise (NotSupportedException(
                                 "Error: Join composite key selectors are not supported.
-Reason: Anonymous-type and composite key equality lowering is deferred in this cycle.
+Reason: Anonymous-type and composite key equality lowering is not supported here.
 Fix: Join on a single scalar key or move the join after AsEnumerable()."))
 
                         let innerRootTable =

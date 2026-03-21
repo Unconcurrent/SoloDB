@@ -300,6 +300,6 @@ module internal QueryTranslatorVisitDbRefPeelers =
                 raise (NotSupportedException(
                     "Error: Cannot extract predicate lambda for DBRefMany.Where.\nReason: The predicate is not a simple lambda expression.\nFix: Use a simple lambda or move the operation after AsEnumerable().")))
 
-    /// L1: Peel .Where(pred) calls from a DBRefMany source expression.
+    /// Peel .Where(pred) calls from a DBRefMany source expression.
     /// Returns (innerDBRefManyExpr, predicateExprs) where predicateExprs is a list of
     /// Where predicates in application order (chained .Where().Where() produces multiple).

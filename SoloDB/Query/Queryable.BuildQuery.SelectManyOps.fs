@@ -44,7 +44,7 @@ Fix: Use SelectMany with the standard (carrier, inner) result selector or move t
                         if isCompositeJoinKeyBody composite.OuterKeySelector.Body || isCompositeJoinKeyBody composite.InnerKeySelector.Body then
                             raise (NotSupportedException(
                                 "Error: Left-join composite key selectors are not supported.
-Reason: Anonymous-type and composite key equality lowering is deferred in this cycle.
+Reason: Anonymous-type and composite key equality lowering is not supported here.
 Fix: Join on a single scalar key or move the query after AsEnumerable()."))
 
                         let innerExpression = readSoloDBQueryableUntyped composite.InnerExpression
@@ -65,7 +65,7 @@ Fix: Use another SoloDB IQueryable rooted in a collection or move the query afte
                         if rewriter.TouchesGroup || rewriter.TouchesCarrier then
                             raise (NotSupportedException(
                                 "Error: Left-join result selector is not supported.
-Reason: Only projections over the outer row and the matched inner row are supported; grouped-sequence and carrier-shaped projections are deferred in this cycle.
+Reason: Only projections over the outer row and the matched inner row are supported; grouped-sequence and carrier-shaped projections are not supported here.
 Fix: Project scalar members from the outer row and the SupportedLinqMethods.DefaultIfEmpty inner row, or move the query after AsEnumerable()."))
 
                         addComplexFinal statements (fun ctx ->
@@ -101,7 +101,7 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                             wrapCore core
                         )
                     | None ->
-                        // L6: Check for DBRefMany SelectMany — JOIN-based flattening.
+                        // Check for DBRefMany SelectMany using JOIN-based flattening.
                         let tryMatchDBRefManySelectMany () =
                             match expressions.Length with
                             | 1 | 2 ->
@@ -110,7 +110,7 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                     let lambda = ue.Operand :?> LambdaExpression
                                     match lambda.Body with
                                     | :? MemberExpression as me when DBRefTypeHelpers.isDBRefManyType me.Type ->
-                                        // L6 lock: direct owner-parameter member access only.
+                                        // Restrict this path to direct owner-parameter member access.
                                         // Reject member chains (o.Ref.Value.Tags) and non-parameter bases.
                                         match me.Expression with
                                         | :? ParameterExpression as pe when
@@ -124,7 +124,7 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
 
                         match tryMatchDBRefManySelectMany () with
                         | Some (_selectorLambda, memberExpr, argCount) ->
-                            // L6: DBRefMany SelectMany — JOIN owner → link → target.
+                            // DBRefMany SelectMany lowers to owner, link, and target joins.
                             let propName = memberExpr.Member.Name
                             let targetType = memberExpr.Type.GetGenericArguments().[0]
                             addComplexFinal statements (fun ctx ->
@@ -247,7 +247,7 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                             let lambda = ue.Operand :?> LambdaExpression
                                             match lambda.Body with
                                             | :? MemberExpression as me ->
-                                                // L6 guard: reject DBRefMany-typed members — they must go through
+                                                // Reject DBRefMany-typed members here; they must go through
                                                 // the link-table JOIN path, not json_each on embedded JSON.
                                                 if DBRefTypeHelpers.isDBRefManyType me.Type || DBRefTypeHelpers.isDBRefType me.Type then
                                                     raise (NotSupportedException(
