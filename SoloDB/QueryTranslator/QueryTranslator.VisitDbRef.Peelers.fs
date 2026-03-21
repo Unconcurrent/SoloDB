@@ -30,7 +30,7 @@ module internal QueryTranslatorVisitDbRefPeelers =
 
     [<Literal>]
     let internal filteredWhereOuterCaptureMessage =
-        "Error: DBRefMany.Where() predicate cannot capture the outer owner entity.\nReason: L1 binds the inner predicate only to the relation target alias.\nFix: Rewrite the predicate to depend only on the relation target, or move it after AsEnumerable()."
+        "Error: DBRefMany.Where() predicate cannot capture the outer owner entity.\nReason: The inner predicate binds only to the relation target alias.\nFix: Rewrite the predicate to depend only on the relation target, or move it after AsEnumerable()."
 
     // Unique alias counter for nested EXISTS subqueries (prevents alias collision).
     let mutable internal subqueryAliasCounter = 0L
