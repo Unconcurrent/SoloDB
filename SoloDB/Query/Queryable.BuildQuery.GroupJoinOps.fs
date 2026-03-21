@@ -203,7 +203,7 @@ module internal QueryableBuildQueryPartBGroupJoin =
                             // Aggregate terminals — use Q version for full QueryDescriptor support (TakeWhile etc.)
                             | Terminal.Count | Terminal.LongCount ->
                                 if hasOps then
-                                    translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Count None false)
+                                    translatedArg (SqlExpr.Coalesce(buildAggregateOverChainQ runtime qdesc AggregateKind.Count None false, [SqlExpr.Literal(SqlLiteral.Integer 0L)]))
                                 else
                                     translatedArg (SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None))
                             | Terminal.Sum sel ->
