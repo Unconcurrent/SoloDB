@@ -191,8 +191,14 @@ module internal QueryTranslatorVisitDbRefPeelers =
     type internal DBRefManyOwnerRef = {
         OwnerCollection: string
         OwnerAliasSql: string
+        OwnerIdExpr: SqlExpr option
         PropertyExpr: MemberExpression
     }
+
+    let internal ownerIdExpr (ownerRef: DBRefManyOwnerRef) =
+        match ownerRef.OwnerIdExpr with
+        | Some expr -> expr
+        | None -> SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id")
 
     /// Synthesize a MemberExpression for DBRef<T>.Value from an Invoke arg that is a DBRef property.
     /// F# expression trees emit Invoke(closure, dbrefPropExpr) instead of MemberAccess(Value, dbrefPropExpr).
@@ -228,6 +234,7 @@ module internal QueryTranslatorVisitDbRefPeelers =
                 ValueSome {
                     OwnerCollection = ownerCollection
                     OwnerAliasSql = sourceAlias
+                    OwnerIdExpr = None
                     PropertyExpr = me
                 }
             | :? MemberExpression as valueMe when isDBRefValueBoundary valueMe ->
@@ -239,7 +246,7 @@ module internal QueryTranslatorVisitDbRefPeelers =
                     match qb.SourceContext.TryFindJoinByAlias(alias) with
                     | Some join -> join.TargetTable
                     | None -> qb.SourceContext.RootTable
-                ValueSome { OwnerCollection = joinedOwnerCollection; OwnerAliasSql = alias; PropertyExpr = me }
+                ValueSome { OwnerCollection = joinedOwnerCollection; OwnerAliasSql = alias; OwnerIdExpr = None; PropertyExpr = me }
             // F# expression tree: Items member on Invoke(closure, Ref) — synthesize .Value access.
             | :? MethodCallExpression as mc when mc.Method.Name = "Invoke" ->
                 match tryMakeValueMemberFromInvoke mc with
@@ -251,8 +258,23 @@ module internal QueryTranslatorVisitDbRefPeelers =
                         match qb.SourceContext.TryFindJoinByAlias(alias) with
                         | Some join -> join.TargetTable
                         | None -> qb.SourceContext.RootTable
-                    ValueSome { OwnerCollection = joinedOwnerCollection; OwnerAliasSql = alias; PropertyExpr = me }
+                    ValueSome { OwnerCollection = joinedOwnerCollection; OwnerAliasSql = alias; OwnerIdExpr = None; PropertyExpr = me }
                 | ValueNone -> ValueNone
+            | :? MethodCallExpression as ownerCall ->
+                let ownerCollection =
+                    qb.SourceContext.ResolveCollectionForType(Utils.typeIdentityKey ownerCall.Type, formatName ownerCall.Type.Name)
+                let ownerExprDu = visitDu ownerCall qb
+                let ownerIdExprDu =
+                    SqlExpr.FunctionCall("jsonb_extract", [
+                        ownerExprDu
+                        SqlExpr.Literal(SqlLiteral.String "$.Id")
+                    ])
+                ValueSome {
+                    OwnerCollection = ownerCollection
+                    OwnerAliasSql = ""
+                    OwnerIdExpr = Some ownerIdExprDu
+                    PropertyExpr = me
+                }
             | _ -> ValueNone
         | _ -> ValueNone
 

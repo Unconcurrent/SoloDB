@@ -24,6 +24,7 @@ module internal DBRefManyExtractChain =
             mutable Limit: Expression option
             mutable Offset: Expression option
             mutable TakeWhileInfo: (LambdaExpression * bool) option
+            mutable PostBoundTakeWhileInfo: (LambdaExpression * bool) option
             mutable GroupByKey: LambdaExpression option
             mutable Distinct: bool
             mutable SelectProjection: LambdaExpression option
@@ -48,6 +49,7 @@ module internal DBRefManyExtractChain =
             Limit = None
             Offset = None
             TakeWhileInfo = None
+            PostBoundTakeWhileInfo = None
             GroupByKey = None
             Distinct = false
             SelectProjection = None
@@ -183,7 +185,18 @@ module internal DBRefManyExtractChain =
                 match arg with
                 | Some pred ->
                     match tryExtractLambdaExpression pred with
-                    | ValueSome lambda -> state.TakeWhileInfo <- Some (lambda, mc.Method.Name = "TakeWhile")
+                    | ValueSome lambda ->
+                        match state.TakeWhileInfo, state.PostBoundTakeWhileInfo with
+                        | None, _ ->
+                            state.TakeWhileInfo <- Some (lambda, mc.Method.Name = "TakeWhile")
+                        | Some inner, None ->
+                            state.PostBoundTakeWhileInfo <- Some inner
+                            state.TakeWhileInfo <- Some (lambda, mc.Method.Name = "TakeWhile")
+                        | Some _, Some _ ->
+                            raise (NotSupportedException(
+                                "Error: More than two TakeWhile/SkipWhile boundaries are not supported on DBRefMany.\n" +
+                                "Reason: The relation translator currently supports one inner and one outer window boundary.\n" +
+                                "Fix: Simplify the query or move additional windowing after AsEnumerable()."))
                     | ValueNone -> ()
                 | None -> ()
                 walkChain state src

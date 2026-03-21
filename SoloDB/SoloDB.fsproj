@@ -169,6 +169,7 @@
 		    <Compile Include="Query/Queryable.HydrationSql.fs" />
 		    <Compile Include="Query/Queryable.BuildLayers.fs" />
 		    <Compile Include="Query/Queryable.BuildQuery.SequenceOps.fs" />
+		    <Compile Include="Query/Queryable.BuildQuery.GroupByChained.fs" />
 		    <Compile Include="Query/Queryable.BuildQuery.GroupByOps.fs" />
 		    <Compile Include="Query/Queryable.BuildQuery.GroupJoinChain.fs" />
 		    <Compile Include="Query/Queryable.BuildQuery.GroupJoinElements.fs" />

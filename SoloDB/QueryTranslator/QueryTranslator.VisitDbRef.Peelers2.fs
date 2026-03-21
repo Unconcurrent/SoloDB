@@ -282,7 +282,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
                             SqlExpr.Binary(
                                 SqlExpr.Column(Some lnkAlias, ownerColumn),
                                 BinaryOperator.Eq,
-                                SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
+                                ownerIdExpr ownerRef)
                         let fullWhere = DBRefManyHelpers.appendPredicatesWithAnd ownerWhere wherePredDus
 
                         let core =
@@ -342,7 +342,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
         let ownerWhere =
             SqlExpr.Binary(
                 SqlExpr.Column(Some lnkAlias, ownerColumn), BinaryOperator.Eq,
-                SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
+                ownerIdExpr ownerRef)
         let fullWhere = DBRefManyHelpers.appendPredicatesWithAnd ownerWhere wherePredDus
 
         // Inner: SELECT 1 AS v, _cf FROM link JOIN target WHERE ... ORDER BY key

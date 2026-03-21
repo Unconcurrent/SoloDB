@@ -348,7 +348,7 @@ module internal DBRefManyBuilderTerminals =
                 raise (NotSupportedException("Contains requires an entity with an Id property."))
             let idAccess = Expression.MakeMemberAccess(valueExpr, idProp)
             let entityIdDu = visitDu idAccess qb
-            let ownerWhere = SqlExpr.Binary(SqlExpr.Column(None, ownerColumn), BinaryOperator.Eq, SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
+            let ownerWhere = SqlExpr.Binary(SqlExpr.Column(None, ownerColumn), BinaryOperator.Eq, DBRefManyBuilderCore.ownerIdExpr ownerRef)
             let targetWhere = SqlExpr.Binary(SqlExpr.Column(None, targetColumn), BinaryOperator.Eq, entityIdDu)
             let fullWhere = SqlExpr.Binary(ownerWhere, BinaryOperator.And, targetWhere)
             let core =

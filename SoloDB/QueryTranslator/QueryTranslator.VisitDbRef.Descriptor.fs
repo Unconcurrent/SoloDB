@@ -10,6 +10,7 @@ module internal DBRefManyDescriptor =
     type DBRefManyOwnerRef = {
         OwnerCollection: string
         OwnerAliasSql: string
+        OwnerIdExpr: SqlExpr option
         PropertyExpr: System.Linq.Expressions.MemberExpression
     }
 
@@ -87,6 +88,8 @@ module internal DBRefManyDescriptor =
         PostBoundOffset: Expression option
         /// TakeWhile/SkipWhile predicate and direction.
         TakeWhileInfo: (LambdaExpression * bool) option  // (pred, isTakeWhile)
+        /// Optional second outer TakeWhile/SkipWhile after the inner window.
+        PostBoundTakeWhileInfo: (LambdaExpression * bool) option
         /// GroupBy key selector.
         GroupByKey: LambdaExpression option
         /// Whether Distinct was applied (after Select).

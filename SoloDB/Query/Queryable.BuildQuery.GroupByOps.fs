@@ -223,6 +223,88 @@ module internal QueryableBuildQueryPartAGroupBy =
             wrapCore core
         )
 
+    /// Unwrap Convert expressions (boxing for string interpolation).
+    let rec private unwrapConvertExpr (expr: Expression) : Expression =
+        match expr with
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert || ue.NodeType = ExpressionType.ConvertChecked ->
+            unwrapConvertExpr ue.Operand
+        | _ -> expr
+
+    /// Translate a GroupBy projection argument through both the simple aggregate path and the chained descriptor path.
+    let private translateGroupByProjectionArg
+        (sourceCtx: QueryContext) (tableName: string) (innerSelect: SqlSelect) (groupParam: ParameterExpression) (vars: Dictionary<string, obj>)
+        (groupByExpressions: Expression array) (ctxTableName: string) (expr: Expression) : SqlExpr option =
+        let expr = unwrapConvertExpr expr
+        match tryTranslateGroupArg sourceCtx ctxTableName "o" groupParam vars expr with
+        | Some sqlExpr -> Some sqlExpr
+        | None ->
+            QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr sourceCtx tableName innerSelect "o" groupParam vars groupByExpressions expr
+
+    /// Handle string interpolation (String.Concat / String.Format) in GroupBy Select body.
+    let private tryTranslateGroupByStringInterpolation
+        (sourceCtx: QueryContext) (tableName: string) (innerSelect: SqlSelect) (groupParam: ParameterExpression) (vars: Dictionary<string, obj>)
+        (groupByExpressions: Expression array) (ctxTableName: string) (body: Expression) : SqlExpr option =
+        match body with
+        | :? MethodCallExpression as mc when mc.Method.DeclaringType = typeof<string> && mc.Method.Name = "Concat" ->
+            let args =
+                if mc.Arguments.Count = 1 && mc.Arguments.[0] :? NewArrayExpression then
+                    (mc.Arguments.[0] :?> NewArrayExpression).Expressions |> Seq.toList
+                else
+                    mc.Arguments |> Seq.toList
+            let translated =
+                args |> List.map (fun arg ->
+                    match translateGroupByProjectionArg sourceCtx tableName innerSelect groupParam vars groupByExpressions ctxTableName arg with
+                    | Some sqlExpr -> sqlExpr
+                    | None -> raise (NotSupportedException($"Error: GroupBy string interpolation argument cannot be translated.\nFix: Simplify the expression or call AsEnumerable() before the Select.")))
+            Some (SqlExpr.FunctionCall("CONCAT", translated))
+        | :? MethodCallExpression as mc when mc.Method.DeclaringType = typeof<string> && mc.Method.Name = "Format" && mc.Arguments.Count >= 2 && (mc.Arguments.[0] :? ConstantExpression) ->
+            let fmt = (mc.Arguments.[0] :?> ConstantExpression).Value :?> string
+            let rawArgs =
+                if mc.Arguments.Count = 2 && mc.Arguments.[1] :? NewArrayExpression then
+                    (mc.Arguments.[1] :?> NewArrayExpression).Expressions |> Seq.toList
+                else
+                    mc.Arguments |> Seq.skip 1 |> Seq.toList
+            let translatedArgs =
+                rawArgs |> List.map (fun arg ->
+                    match translateGroupByProjectionArg sourceCtx tableName innerSelect groupParam vars groupByExpressions ctxTableName arg with
+                    | Some sqlExpr -> sqlExpr
+                    | None -> raise (NotSupportedException($"Error: GroupBy string format argument cannot be translated.\nFix: Simplify the expression or call AsEnumerable() before the Select.")))
+            // Simple format piece extraction — replace {N} with the translated arg
+            let pieces = ResizeArray<SqlExpr>()
+            let sb = StringBuilder()
+            let mutable i = 0
+            // Parse format string and substitute translated args
+            let rec parseAt pos =
+                if pos >= fmt.Length then ()
+                else
+                    match fmt.[pos] with
+                    | '{' when pos + 1 < fmt.Length && fmt.[pos + 1] = '{' ->
+                        sb.Append('{') |> ignore; parseAt (pos + 2)
+                    | '}' when pos + 1 < fmt.Length && fmt.[pos + 1] = '}' ->
+                        sb.Append('}') |> ignore; parseAt (pos + 2)
+                    | '{' ->
+                        let close = fmt.IndexOf('}', pos + 1)
+                        if close >= 0 then
+                            if sb.Length > 0 then
+                                pieces.Add(SqlExpr.Literal(SqlLiteral.String(sb.ToString())))
+                                sb.Clear() |> ignore
+                            let placeholder = fmt.Substring(pos + 1, close - pos - 1)
+                            let endIdx =
+                                let comma = placeholder.IndexOf(',')
+                                let colon = placeholder.IndexOf(':')
+                                [comma; colon] |> List.filter (fun x -> x >= 0) |> function [] -> placeholder.Length | xs -> List.min xs
+                            match Int32.TryParse(placeholder.Substring(0, endIdx).Trim()) with
+                            | true, idx when idx >= 0 && idx < translatedArgs.Length ->
+                                pieces.Add(translatedArgs.[idx])
+                            | _ -> ()
+                            parseAt (close + 1)
+                    | ch ->
+                        sb.Append(ch) |> ignore; parseAt (pos + 1)
+            parseAt 0
+            if sb.Length > 0 then pieces.Add(SqlExpr.Literal(SqlLiteral.String(sb.ToString())))
+            Some (SqlExpr.FunctionCall("CONCAT", pieces |> Seq.toList))
+        | _ -> None
+
     let internal applyGroupBySelect<'T>
         (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>)
         (groupByExpressions: Expression array) (havingPreds: Expression list) (groupOrders: (Expression * bool) list) (selectExpressions: Expression array) =
@@ -253,17 +335,24 @@ module internal QueryableBuildQueryPartAGroupBy =
                         match tryTranslateGroupArg sourceCtx ctx.TableName "o" groupParam ctx.Vars arg with
                         | Some sqlExpr -> yield (memberName, sqlExpr)
                         | None ->
-                            raise (NotSupportedException(
-                                $"Error: GroupBy.Select projection member '{memberName}' cannot be translated to SQL.\n" +
-                                "Reason: The expression contains an unsupported aggregate pattern.\n" +
-                                "Fix: Simplify the aggregate or call AsEnumerable() before the Select."))]
+                            // Fallback: try shared descriptor extraction for chained group patterns
+                            match QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr sourceCtx tableName ctx.Inner "o" groupParam ctx.Vars groupByExpressions arg with
+                            | Some sqlExpr -> yield (memberName, sqlExpr)
+                            | None ->
+                                raise (NotSupportedException(
+                                    $"Error: GroupBy.Select projection member '{memberName}' cannot be translated to SQL.\n" +
+                                    "Reason: The expression contains an unsupported aggregate pattern.\n" +
+                                    "Fix: Simplify the aggregate or call AsEnumerable() before the Select."))]
                 | _ ->
-                    match tryTranslateGroupArg sourceCtx ctx.TableName "o" groupParam ctx.Vars body with
+                    match tryTranslateGroupByStringInterpolation sourceCtx tableName ctx.Inner groupParam ctx.Vars groupByExpressions ctx.TableName body with
                     | Some sqlExpr -> ["Value", sqlExpr]
                     | None ->
-                        raise (NotSupportedException(
-                            "Error: GroupBy.Select projection cannot be translated to SQL.\n" +
-                            "Fix: Use a new { } anonymous type or call AsEnumerable() before the Select."))
+                        match translateGroupByProjectionArg sourceCtx tableName ctx.Inner groupParam ctx.Vars groupByExpressions ctx.TableName body with
+                        | Some sqlExpr -> ["Value", sqlExpr]
+                        | None ->
+                            raise (NotSupportedException(
+                                "Error: GroupBy.Select projection cannot be translated to SQL.\n" +
+                                "Fix: Use a new { } anonymous type or call AsEnumerable() before the Select."))
             let jsonObjArgs = projections |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
             // Use json_object (TEXT JSON) so downstream json_extract returns typed SQL values for ORDER BY/TakeWhile.
             let valueExpr = SqlExpr.FunctionCall("json_object", jsonObjArgs)

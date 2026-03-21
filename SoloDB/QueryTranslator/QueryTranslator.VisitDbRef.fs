@@ -35,6 +35,7 @@ module internal QueryTranslatorVisitDbRef =
                     let builderOwnerRef: DBRefManyDescriptor.DBRefManyOwnerRef = {
                         OwnerCollection = ownerRef.OwnerCollection
                         OwnerAliasSql = ownerRef.OwnerAliasSql
+                        OwnerIdExpr = ownerRef.OwnerIdExpr
                         PropertyExpr = ownerRef.PropertyExpr
                     }
                     DBRefManyBuilder.tryBuild qb descWithOfType builderOwnerRef
@@ -49,13 +50,23 @@ module internal QueryTranslatorVisitDbRef =
         // Legacy handler — set ops + reject arms only. All other cases handled by unified path above.
         // Set ops need tryBuildProjectedSetOperand + nullSafeEq which live in this file.
         match exp with
-        // Set-op terminals (Any/Count over Intersect/Except/Union/Concat)
+        // Set-op terminals (Any/Count over Intersect/Except/Union/Concat),
+        // including outer Distinct wrappers that preserve the underlying set-op semantics.
         | :? MethodCallExpression as mce
             when (mce.Method.Name = "Any" || mce.Method.Name = "Count" || mce.Method.Name = "LongCount") ->
             let sourceArg, _predArg = extractSourceAndPredicate mce
             match sourceArg with
             | ValueSome sourceExpr ->
-                match tryMatchSetOperation sourceExpr with
+                let normalizedSourceExpr, distinctOuter =
+                    match sourceExpr with
+                    | :? MethodCallExpression as srcMc when srcMc.Method.Name = "Distinct" ->
+                        let inner =
+                            if not (isNull srcMc.Object) then srcMc.Object
+                            elif srcMc.Arguments.Count > 0 then srcMc.Arguments.[0]
+                            else sourceExpr
+                        inner, true
+                    | _ -> sourceExpr, false
+                match tryMatchSetOperation normalizedSourceExpr with
                 | ValueSome (setOpName, leftExpr, rightExpr) ->
                     match tryBuildProjectedSetOperand qb leftExpr, tryBuildProjectedSetOperand qb rightExpr with
                     | ValueSome (leftProjDu, leftCore, _), ValueSome (_rightProjDu, rightCore, _rightTgtAlias) ->
@@ -102,7 +113,7 @@ module internal QueryTranslatorVisitDbRef =
                                 let outerCore = mkSubCoreLocal countProj (Some(DerivedTable(innerSel, dtAlias))) None
                                 qb.DuHandlerResult.Value <- ValueSome(SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore })
                                 true
-                            | "Concat" ->
+                            | "Concat" when not distinctOuter ->
                                 let leftSel = { Ctes = []; Body = SingleSelect leftCore }
                                 let rightSel = { Ctes = []; Body = SingleSelect rightCore }
                                 let lAlias = sprintf "_cl%d" (System.Threading.Interlocked.Increment(&subqueryAliasCounter))

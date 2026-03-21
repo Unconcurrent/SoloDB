@@ -116,6 +116,8 @@ module internal DBRefManyBuilder =
         let buildEntityElementAt = DBRefManyBuilderElements.buildEntityElementAt buildCorrelatedCore nextAlias visitDu
         let buildProjectedElementAt qb desc ownerRef indexExpr orDefault =
             DBRefManyBuilderElements.buildProjectedElementAt nextAlias visitDu qb (buildProjectedRowset qb desc ownerRef) indexExpr orDefault
+        let buildProjectedSingleLike qb desc ownerRef pred orDefault =
+            DBRefManyBuilderElements.buildSingleLikeFromRowset nextAlias tryExtractLambdaExpression visitDu joinEdgesToClauses qb (buildProjectedRowset qb desc ownerRef) pred orDefault
         let buildDistinctByEntityRowset =
             DBRefManyBuilderSetOps.buildDistinctByEntityRowset buildCorrelatedCore tryExtractLambdaExpression visitDu joinEdgesToClauses nextAlias (DBRefManyBuilderElements.buildEntityValueExpr desc.CastTypeName)
         let buildByFilterEntityRowset =
@@ -262,8 +264,14 @@ module internal DBRefManyBuilder =
                 | Some _ when desc.TakeWhileInfo.IsSome -> buildProjectedRowsetElement qb desc ownerRef pred true
                 | Some _ -> buildProjectedElement qb desc ownerRef pred true
                 | None -> buildEntityElement qb desc ownerRef pred true
-            | Terminal.Single pred -> buildSingleLike qb desc ownerRef pred false
-            | Terminal.SingleOrDefault pred -> buildSingleLike qb desc ownerRef pred true
+            | Terminal.Single pred ->
+                match desc.SelectProjection with
+                | Some _ -> buildProjectedSingleLike qb desc ownerRef pred false
+                | None -> buildSingleLike qb desc ownerRef pred false
+            | Terminal.SingleOrDefault pred ->
+                match desc.SelectProjection with
+                | Some _ -> buildProjectedSingleLike qb desc ownerRef pred true
+                | None -> buildSingleLike qb desc ownerRef pred true
             | Terminal.ElementAt indexExpr ->
                 match desc.SelectProjection with
                 | Some _ -> buildProjectedElementAt qb desc ownerRef indexExpr false

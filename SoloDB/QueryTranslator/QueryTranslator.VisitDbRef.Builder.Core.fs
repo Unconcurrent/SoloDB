@@ -59,6 +59,11 @@ module internal DBRefManyBuilderCore =
           Joins = []; Where = where; GroupBy = []; Having = None
           OrderBy = []; Limit = None; Offset = None }
 
+    let ownerIdExpr (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef) =
+        match ownerRef.OwnerIdExpr with
+        | Some expr -> expr
+        | None -> SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id")
+
     let normalizeUnionArm
         (mkSubCore: Projection list -> TableSource option -> SqlExpr option -> SelectCore)
         (nextAlias: string -> string)
@@ -203,7 +208,7 @@ module internal DBRefManyBuilderCore =
             SqlExpr.Binary(
                 SqlExpr.Column(Some lnkAlias, ownerColumn),
                 BinaryOperator.Eq,
-                SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
+                ownerIdExpr ownerRef)
         let fullWhere = DBRefManyHelpers.appendPredicatesWithAnd ownerWhere allPreds
 
         let dbRefJoins = DBRefManyHelpers.joinEdgesToClauses innerJoinEdges

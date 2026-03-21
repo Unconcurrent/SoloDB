@@ -129,7 +129,14 @@ module internal DBRefManyBuildSpecial =
         let innerProjs =
             [ { Alias = Some "Id"; Expr = SqlExpr.Column(Some tgtAlias, "Id") }
               { Alias = Some "Value"; Expr = SqlExpr.Column(Some tgtAlias, "Value") }
-              { Alias = Some "_cf"; Expr = cfExpr } ]
+              { Alias = Some "_cf"; Expr = cfExpr }
+              { Alias = Some "__ord"
+                Expr =
+                    SqlExpr.WindowCall({
+                        Kind = WindowFunctionKind.RowNumber
+                        Arguments = []
+                        PartitionBy = []
+                        OrderBy = baseCore.OrderBy |> List.map (fun ob -> (ob.Expr, ob.Direction)) }) } ]
         let innerCore = { baseCore with Projections = ProjectionSetOps.ofList innerProjs }
         let innerSel = { Ctes = []; Body = SingleSelect innerCore }
         let twAlias = nextAlias "_tw"
@@ -137,9 +144,68 @@ module internal DBRefManyBuildSpecial =
         let outerCore =
             mkSubCore
                 [ { Alias = Some "Id"; Expr = SqlExpr.Column(Some twAlias, "Id") }
-                  { Alias = Some "Value"; Expr = SqlExpr.Column(Some twAlias, "Value") } ]
+                  { Alias = Some "Value"; Expr = SqlExpr.Column(Some twAlias, "Value") }
+                  { Alias = Some "__ord"; Expr = SqlExpr.Column(Some twAlias, "__ord") } ]
                 (Some(DerivedTable(innerSel, twAlias)))
                 (Some cfFilter)
+        { Ctes = []; Body = SingleSelect outerCore }
+
+    let private applyPostBoundWhileEntityRowset
+        (qb: QueryBuilder)
+        (nextAlias: string -> string)
+        (targetTable: string)
+        (rowsetSel: SqlSelect)
+        (predLambda: LambdaExpression)
+        (isTakeWhile: bool)
+        : SqlSelect =
+        let rowAlias = nextAlias "_pwb"
+        let predQb =
+            { qb.ForSubquery(rowAlias, predLambda, subqueryRootTable = targetTable) with
+                JsonExtractSelfValue = false }
+        let predDu = visitDu predLambda.Body predQb
+        let predJoins = DBRefManyHelpers.joinEdgesToClauses predQb.SourceContext.Joins
+        let cfExpr =
+            SqlExpr.WindowCall({
+                Kind = NamedWindowFunction "SUM"
+                Arguments = [SqlExpr.Unary(UnaryOperator.Not, predDu)]
+                PartitionBy = []
+                OrderBy = [SqlExpr.Column(Some rowAlias, "__ord"), SortDirection.Asc] })
+        let innerCore =
+            { Distinct = false
+              Projections =
+                ProjectionSetOps.ofList [
+                    { Alias = Some "Id"; Expr = SqlExpr.Column(Some rowAlias, "Id") }
+                    { Alias = Some "Value"; Expr = SqlExpr.Column(Some rowAlias, "Value") }
+                    { Alias = Some "__ord"; Expr = SqlExpr.Column(Some rowAlias, "__ord") }
+                    { Alias = Some "_cf"; Expr = cfExpr }
+                ]
+              Source = Some(DerivedTable(rowsetSel, rowAlias))
+              Joins = predJoins
+              Where = None
+              GroupBy = []
+              Having = None
+              OrderBy = [{ Expr = SqlExpr.Column(Some rowAlias, "__ord"); Direction = SortDirection.Asc }]
+              Limit = None
+              Offset = None }
+        let innerSel = { Ctes = []; Body = SingleSelect innerCore }
+        let outerAlias = nextAlias "_pwo"
+        let cfFilter = DBRefManyHelpers.buildTakeWhileCfFilter outerAlias isTakeWhile
+        let outerCore =
+            { Distinct = false
+              Projections =
+                ProjectionSetOps.ofList [
+                    { Alias = Some "Id"; Expr = SqlExpr.Column(Some outerAlias, "Id") }
+                    { Alias = Some "Value"; Expr = SqlExpr.Column(Some outerAlias, "Value") }
+                    { Alias = Some "__ord"; Expr = SqlExpr.Column(Some outerAlias, "__ord") }
+                ]
+              Source = Some(DerivedTable(innerSel, outerAlias))
+              Joins = []
+              Where = Some cfFilter
+              GroupBy = []
+              Having = None
+              OrderBy = [{ Expr = SqlExpr.Column(Some outerAlias, "__ord"); Direction = SortDirection.Asc }]
+              Limit = None
+              Offset = None }
         { Ctes = []; Body = SingleSelect outerCore }
 
     let tryBuildTakeWhileProjectedRowset
@@ -344,6 +410,11 @@ module internal DBRefManyBuildSpecial =
             buildTakeWhileBase qb desc buildCorrelatedCore tryGetRelationOrderByForTakeWhile ownerRef twPredLambda
         let outerSel =
             let entitySel = buildTakeWhileEntityRowset tgtAlias baseCore mkSubCore nextAlias cfExpr isTakeWhile
+            let entitySel =
+                match desc.PostBoundTakeWhileInfo with
+                | Some (postPred, postIsTakeWhile) ->
+                    applyPostBoundWhileEntityRowset qb nextAlias targetTable entitySel postPred postIsTakeWhile
+                | None -> entitySel
             let twAlias = nextAlias "_twc"
             let outerCore = mkSubCore [{ Alias = Some "v"; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] (Some(DerivedTable(entitySel, twAlias))) None
             { Ctes = []; Body = SingleSelect outerCore }
@@ -396,7 +467,52 @@ module internal DBRefManyBuildSpecial =
                            Having = havingDu }
                 ValueSome(SqlExpr.Exists { Ctes = []; Body = SingleSelect gbCore })
             | _ ->
-                ValueSome(SqlExpr.Exists outerSel)
+                match desc.Terminal with
+                | Terminal.Any(Some predExpr) ->
+                    match tryExtractLambdaExpression predExpr with
+                    | ValueSome predLambda ->
+                        let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
+                        let p = Expression.Parameter(targetType, "x")
+                        let identityLambda = Expression.Lambda(p, [| p |])
+                        match buildTakeWhileProjectedRowsetWithLambda qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc identityLambda isTakeWhile with
+                        | ValueSome rowsetSel ->
+                            let rowAlias = nextAlias "_twp"
+                            let valueCore =
+                                { Distinct = false
+                                  Projections = ProjectionSetOps.ofList [{ Alias = Some "Value"; Expr = SqlExpr.Column(Some rowAlias, "v") }]
+                                  Source = Some(DerivedTable(rowsetSel, rowAlias))
+                                  Joins = []
+                                  Where = None
+                                  GroupBy = []
+                                  Having = None
+                                  OrderBy = []
+                                  Limit = None
+                                  Offset = None }
+                            let valueSel = { Ctes = []; Body = SingleSelect valueCore }
+                            let predAlias = nextAlias "_tpp"
+                            let predQb =
+                                { qb.ForSubquery(predAlias, predLambda, subqueryRootTable = targetTable) with
+                                    JsonExtractSelfValue = false }
+                            let predDu = visitDu predLambda.Body predQb
+                            let predJoins = DBRefManyHelpers.joinEdgesToClauses predQb.SourceContext.Joins
+                            let existsCore =
+                                { Distinct = false
+                                  Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                                  Source = Some(DerivedTable(valueSel, predAlias))
+                                  Joins = predJoins
+                                  Where = Some predDu
+                                  GroupBy = []
+                                  Having = None
+                                  OrderBy = []
+                                  Limit = None
+                                  Offset = None }
+                            ValueSome(SqlExpr.Exists { Ctes = []; Body = SingleSelect existsCore })
+                        | ValueNone ->
+                            ValueSome(SqlExpr.Exists outerSel)
+                    | ValueNone ->
+                        ValueSome(SqlExpr.Exists outerSel)
+                | _ ->
+                    ValueSome(SqlExpr.Exists outerSel)
         | Terminal.Select _ ->
             match buildTakeWhileProjectedRowset qb baseCore tgtAlias targetTable cfExpr mkSubCore nextAlias desc isTakeWhile with
             | ValueSome middleSel ->

@@ -214,6 +214,92 @@ module internal DBRefManyBuilderElements =
               Offset = None }
         SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
 
+    let private buildFilteredProjectedRowset
+        (nextAlias: string -> string)
+        (tryExtractLambdaExpression: Expression -> ValueOption<LambdaExpression>)
+        (visitDu: Expression -> QueryBuilder -> SqlExpr)
+        (joinEdgesToClauses: ResizeArray<JoinEdge> -> JoinShape list)
+        (qb: QueryBuilder)
+        (rowsetSel: SqlSelect)
+        (predicateOpt: Expression option)
+        : SqlSelect =
+        match predicateOpt with
+        | None -> rowsetSel
+        | Some predExpr ->
+            match tryExtractLambdaExpression predExpr with
+            | ValueSome predLambda ->
+                let rowAlias = nextAlias "_sp"
+                let valueCore =
+                    { Distinct = false
+                      Projections = ProjectionSetOps.ofList [{ Alias = Some "Value"; Expr = SqlExpr.Column(Some rowAlias, "v") }]
+                      Source = Some(DerivedTable(rowsetSel, rowAlias))
+                      Joins = []
+                      Where = None
+                      GroupBy = []
+                      Having = None
+                      OrderBy = []
+                      Limit = None
+                      Offset = None }
+                let valueSel = { Ctes = []; Body = SingleSelect valueCore }
+                let predAlias = nextAlias "_sv"
+                let predQb =
+                    { qb.ForSubquery(predAlias, predLambda) with
+                        JsonExtractSelfValue = false }
+                let predDu = visitDu predLambda.Body predQb
+                let predJoins = joinEdgesToClauses predQb.SourceContext.Joins
+                let filteredCore =
+                    { Distinct = false
+                      Projections = ProjectionSetOps.ofList [{ Alias = Some "v"; Expr = SqlExpr.Column(Some predAlias, "Value") }]
+                      Source = Some(DerivedTable(valueSel, predAlias))
+                      Joins = predJoins
+                      Where = Some predDu
+                      GroupBy = []
+                      Having = None
+                      OrderBy = []
+                      Limit = None
+                      Offset = None }
+                { Ctes = []; Body = SingleSelect filteredCore }
+            | ValueNone ->
+                raise (NotSupportedException(
+                    "Error: Cannot translate relation-backed DBRefMany.Single/SingleOrDefault predicate.\nReason: The predicate is not a translatable lambda expression.\nFix: Pass the predicate as an inline lambda, not a delegate variable."))
+
+    let buildSingleLikeFromRowset
+        (nextAlias: string -> string)
+        (tryExtractLambdaExpression: Expression -> ValueOption<LambdaExpression>)
+        (visitDu: Expression -> QueryBuilder -> SqlExpr)
+        (joinEdgesToClauses: ResizeArray<JoinEdge> -> JoinShape list)
+        (qb: QueryBuilder)
+        (rowsetSel: SqlSelect)
+        (predicateOpt: Expression option)
+        (orDefault: bool)
+        : SqlExpr =
+        let rowsetSel = buildFilteredProjectedRowset nextAlias tryExtractLambdaExpression visitDu joinEdgesToClauses qb rowsetSel predicateOpt
+        let rowAlias = nextAlias "_sg"
+        let countExpr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None)
+        let firstValueExpr = SqlExpr.FunctionCall("MIN", [SqlExpr.Column(Some rowAlias, "v")])
+        let noElementsExpr =
+            SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String "__solodb_error__:Sequence contains no elements")])
+        let manyElementsExpr =
+            SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String "__solodb_error__:Sequence contains more than one element")])
+        let zeroCase = if orDefault then SqlExpr.Literal(SqlLiteral.Null) else noElementsExpr
+        let valueExpr =
+            SqlExpr.CaseExpr(
+                (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), zeroCase),
+                [(SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L)), firstValueExpr)],
+                Some manyElementsExpr)
+        let outerCore =
+            { Distinct = false
+              Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = valueExpr }]
+              Source = Some(DerivedTable(rowsetSel, rowAlias))
+              Joins = []
+              Where = None
+              GroupBy = []
+              Having = None
+              OrderBy = []
+              Limit = None
+              Offset = None }
+        SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
+
     let buildOrderedRowsetElement
         (nextAlias: string -> string)
         (rowsetSel: SqlSelect)

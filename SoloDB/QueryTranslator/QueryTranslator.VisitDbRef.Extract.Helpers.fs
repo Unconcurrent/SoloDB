@@ -66,6 +66,7 @@ module internal DBRefManyExtractorHelpers =
         postBoundLimit
         postBoundOffset
         takeWhileInfo
+        postBoundTakeWhileInfo
         groupByKey
         distinct
         selectProjection
@@ -87,6 +88,7 @@ module internal DBRefManyExtractorHelpers =
             PostBoundLimit = postBoundLimit
             PostBoundOffset = postBoundOffset
             TakeWhileInfo = takeWhileInfo
+            PostBoundTakeWhileInfo = postBoundTakeWhileInfo
             GroupByKey = groupByKey
             Distinct = distinct
             SelectProjection = selectProjection
@@ -115,6 +117,7 @@ module internal DBRefManyExtractorHelpers =
                     None
                     None
                     None
+                    None
                     false
                     None
                     None
@@ -139,6 +142,7 @@ module internal DBRefManyExtractorHelpers =
                     None
                     []
                     []
+                    None
                     None
                     None
                     None

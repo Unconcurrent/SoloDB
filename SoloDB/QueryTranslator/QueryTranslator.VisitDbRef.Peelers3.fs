@@ -179,7 +179,7 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
             SqlExpr.Binary(
                 SqlExpr.Column(Some lnkAlias, ownerColumn),
                 BinaryOperator.Eq,
-                SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
+                ownerIdExpr ownerRef)
         let fullWhere =
             let withPreds = DBRefManyHelpers.appendPredicatesWithAnd ownerWhere predicateDus
             match ofTypeName with
@@ -218,7 +218,7 @@ module internal QueryTranslatorVisitDbRefPeelers3 =
             SqlExpr.Binary(
                 SqlExpr.Column(Some lnkAlias, ownerColumn),
                 BinaryOperator.Eq,
-                SqlExpr.Column(Some ownerRef.OwnerAliasSql, "Id"))
+                ownerIdExpr ownerRef)
         let fullWhere =
             let withPreds = DBRefManyHelpers.appendPredicatesWithAnd ownerWhere predicateDus
             match ofTypeName with
