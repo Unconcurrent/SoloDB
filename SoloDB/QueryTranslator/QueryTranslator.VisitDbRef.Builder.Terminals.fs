@@ -53,6 +53,11 @@ module internal DBRefManyBuilderTerminals =
         (visitDu: Expression -> QueryBuilder -> SqlExpr)
         (joinEdgesToClauses: ResizeArray<JoinEdge> -> JoinShape list)
         (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef) (allPredExpr: Expression) : SqlExpr =
+        let violationPredicate (predDu: SqlExpr) =
+            SqlExpr.Binary(
+                SqlExpr.Unary(UnaryOperator.Not, predDu),
+                BinaryOperator.Or,
+                SqlExpr.Unary(UnaryOperator.IsNull, predDu))
         let oneProj = [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
         let tgtAlias, _, core, targetTable = buildCorrelatedCore qb desc ownerRef oneProj
         match tryExtractLambdaExpression allPredExpr with
@@ -60,7 +65,7 @@ module internal DBRefManyBuilderTerminals =
             let subQb = qb.ForSubquery(tgtAlias, allPredLambda, subqueryRootTable = targetTable)
             let allPredDu = visitDu allPredLambda.Body subQb
             let allPredJoins = joinEdgesToClauses subQb.SourceContext.Joins
-            let negatedPred = SqlExpr.Unary(UnaryOperator.Not, allPredDu)
+            let negatedPred = violationPredicate allPredDu
             let extendedWhere =
                 match core.Where with
                 | Some w -> Some(SqlExpr.Binary(w, BinaryOperator.And, negatedPred))
@@ -74,7 +79,7 @@ module internal DBRefManyBuilderTerminals =
                 let bndQb = qb.ForSubquery(bndAlias, allPredLambda, subqueryRootTable = targetTable)
                 let bndPredDu = visitDu allPredLambda.Body bndQb
                 let bndJoins = joinEdgesToClauses bndQb.SourceContext.Joins
-                let outerWhere = SqlExpr.Unary(UnaryOperator.Not, bndPredDu)
+                let outerWhere = violationPredicate bndPredDu
                 let outerCore = { mkSubCore oneProj (Some(DerivedTable(boundedSel, bndAlias))) (Some outerWhere) with Joins = bndJoins }
                 let outerSel = { Ctes = []; Body = SingleSelect outerCore }
                 SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists outerSel)
