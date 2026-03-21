@@ -126,10 +126,11 @@ module internal QueryableBuildQueryMain =
                         let groupByExprs = pendingGroupByExprs.Value
                         pendingGroupByExprs <- None
                         let havingPreds = pendingGroupByHavingPreds |> List.rev
+                        let groupOrders = pendingGroupByOrders
                         pendingGroupByHavingPreds <- []
                         pendingGroupByOrders <- []
                         QueryableBuildQueryPartAGroupBy.flushGroupByAsJsonGroupArray<'T>
-                            sourceCtx tableName statements groupByExprs havingPreds
+                            sourceCtx tableName statements groupByExprs havingPreds groupOrders
 
                 if not pendingGroupByHandled then
                     match m.Value with
@@ -217,10 +218,12 @@ module internal QueryableBuildQueryMain =
         if pendingGroupByExprs.IsSome then
             let groupByExprs = pendingGroupByExprs.Value
             let havingPreds = pendingGroupByHavingPreds |> List.rev
+            let groupOrders = pendingGroupByOrders
             pendingGroupByExprs <- None
             pendingGroupByHavingPreds <- []
+            pendingGroupByOrders <- []
             QueryableBuildQueryPartAGroupBy.flushGroupByAsJsonGroupArray<'T>
-                sourceCtx tableName statements groupByExprs havingPreds
+                sourceCtx tableName statements groupByExprs havingPreds groupOrders
 
         match statements.[0] with
         | Simple s ->

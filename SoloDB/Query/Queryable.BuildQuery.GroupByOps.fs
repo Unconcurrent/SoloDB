@@ -32,39 +32,6 @@ module internal QueryableBuildQueryPartAGroupBy =
         (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>) (expressions: Expression array) =
         addLoweredKeySelector statements (lowerKeySelectorLambda sourceCtx tableName expressions.[0] GroupByKey)
 
-    let internal flushGroupByAsJsonGroupArray<'T>
-        (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>)
-        (expressions: Expression array) (havingPreds: Expression list) =
-        addComplexFinal statements (fun ctx ->
-            let havingDu =
-                if havingPreds.IsEmpty then None
-                else
-                    havingPreds
-                    |> List.map (fun pred -> translateExprDu sourceCtx ctx.TableName pred ctx.Vars)
-                    |> List.reduce (fun a b -> SqlExpr.Binary(a, BinaryOperator.And, b))
-                    |> Some
-            let core =
-                { mkCore
-                    [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-                     { Alias = Some "Value"; Expr =
-                        SqlExpr.FunctionCall("jsonb_object", [
-                            SqlExpr.Literal(SqlLiteral.String "Key")
-                            SqlExpr.Column(Some "o", "__solodb_group_key")
-                            SqlExpr.Literal(SqlLiteral.String "Items")
-                            SqlExpr.FunctionCall("jsonb_group_array", [
-                                SqlExpr.FunctionCall("jsonb_set", [
-                                    SqlExpr.Column(Some "o", "Value")
-                                    SqlExpr.Literal(SqlLiteral.String "$.Id")
-                                    SqlExpr.Column(Some "o", "Id")
-                                ])
-                            ])
-                        ]) }]
-                    (Some (DerivedTable(ctx.Inner, "o")))
-                  with GroupBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
-                       Having = havingDu }
-            wrapCore core
-        )
-
     // ── GroupBy aggregate translation helpers ──
 
     let private extractLambdaFromExpr (expr: Expression) : LambdaExpression =
@@ -220,6 +187,57 @@ module internal QueryableBuildQueryPartAGroupBy =
             Some (translateExprDu sourceCtx ctxTableName expr vars)
         | _ -> None
 
+    let private translateGroupOrders
+        (sourceCtx: QueryContext) (ctxTableName: string) (groupRowTableName: string) (vars: Dictionary<string, obj>)
+        (groupOrders: (Expression * bool) list) =
+        groupOrders
+        |> List.map (fun (orderingExpr, descending) ->
+            let lambda = extractLambdaFromExpr orderingExpr
+            let orderExpr =
+                match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName lambda.Parameters.[0] vars lambda.Body with
+                | Some sqlExpr -> sqlExpr
+                | None ->
+                    raise (NotSupportedException(
+                        "Error: GroupBy ordering cannot be translated to SQL.\n" +
+                        "Fix: Order by g.Key or a supported aggregate projection, or call AsEnumerable() before OrderBy."))
+            { Expr = orderExpr
+              Direction = if descending then SortDirection.Desc else SortDirection.Asc })
+
+    let internal flushGroupByAsJsonGroupArray<'T>
+        (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>)
+        (expressions: Expression array) (havingPreds: Expression list) (groupOrders: (Expression * bool) list) =
+        addComplexFinal statements (fun ctx ->
+            let havingDu =
+                if havingPreds.IsEmpty then None
+                else
+                    havingPreds
+                    |> List.map (fun pred -> translateExprDu sourceCtx ctx.TableName pred ctx.Vars)
+                    |> List.reduce (fun a b -> SqlExpr.Binary(a, BinaryOperator.And, b))
+                    |> Some
+            let orderBy = translateGroupOrders sourceCtx ctx.TableName "o" ctx.Vars groupOrders
+            let core =
+                { mkCore
+                    [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                     { Alias = Some "Value"; Expr =
+                        SqlExpr.FunctionCall("jsonb_object", [
+                            SqlExpr.Literal(SqlLiteral.String "Key")
+                            SqlExpr.Column(Some "o", "__solodb_group_key")
+                            SqlExpr.Literal(SqlLiteral.String "Items")
+                            SqlExpr.FunctionCall("jsonb_group_array", [
+                                SqlExpr.FunctionCall("jsonb_set", [
+                                    SqlExpr.Column(Some "o", "Value")
+                                    SqlExpr.Literal(SqlLiteral.String "$.Id")
+                                    SqlExpr.Column(Some "o", "Id")
+                                ])
+                            ])
+                        ]) }]
+                    (Some (DerivedTable(ctx.Inner, "o")))
+                  with GroupBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
+                       OrderBy = orderBy
+                       Having = havingDu }
+            wrapCore core
+        )
+
     let internal applyGroupBySelect<'T>
         (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>)
         (groupByExpressions: Expression array) (havingPreds: Expression list) (groupOrders: (Expression * bool) list) (selectExpressions: Expression array) =
@@ -264,19 +282,7 @@ module internal QueryableBuildQueryPartAGroupBy =
             let jsonObjArgs = projections |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
             // Use json_object (TEXT JSON) so downstream json_extract returns typed SQL values for ORDER BY/TakeWhile.
             let valueExpr = SqlExpr.FunctionCall("json_object", jsonObjArgs)
-            let orderBy =
-                groupOrders
-                |> List.map (fun (orderingExpr, descending) ->
-                    let lambda = extractLambdaFromExpr orderingExpr
-                    let orderExpr =
-                        match tryTranslateGroupArg sourceCtx ctx.TableName "o" lambda.Parameters.[0] ctx.Vars lambda.Body with
-                        | Some sqlExpr -> sqlExpr
-                        | None ->
-                            raise (NotSupportedException(
-                                "Error: GroupBy ordering cannot be translated to SQL.\n" +
-                                "Fix: Order by g.Key or a supported aggregate projection, or call AsEnumerable() before OrderBy."))
-                    { Expr = orderExpr
-                      Direction = if descending then SortDirection.Desc else SortDirection.Asc })
+            let orderBy = translateGroupOrders sourceCtx ctx.TableName "o" ctx.Vars groupOrders
             let core =
                 { mkCore
                     [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
