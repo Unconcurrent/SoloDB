@@ -294,8 +294,16 @@ module internal QueryableBuildQueryPartBGroupJoin =
                         translatedArg (translateOuterExpr expr)
                     | :? MemberExpression as me when not (isNull me.Expression) ->
                         match tryMatchGroupElementCall runtime me.Expression with
-                        | Some groupCall -> buildGroupElementSubquery runtime groupCall expr
-                        | None -> translatedArg (translateOuterExpr expr)
+                        | Some groupCall ->
+                            buildGroupElementDispatch runtime groupCall expr
+                        | None ->
+                            if referencesParam groupParam me.Expression then
+                                raise (NotSupportedException(
+                                    "Error: GroupJoin group element access with unsupported chain operators is not supported.\n" +
+                                    "Reason: The group chain uses operators that cannot be translated in GroupJoin context.\n" +
+                                    "Fix: Simplify the group chain or move the query after AsEnumerable()."))
+                            else
+                                translatedArg (translateOuterExpr expr)
                     | :? MethodCallExpression as mc ->
                         // PRIMARY PATH: Terminal DU dispatch via shared QueryDescriptor extraction
                         match tryExtractGroupTerminalChain runtime expr with
@@ -377,7 +385,7 @@ module internal QueryableBuildQueryPartBGroupJoin =
                                         SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.Not, predDu), SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None),
                                         BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)))
                             | Terminal.Contains value ->
-                                translatedArg (buildContainsOverChain runtime (toGroupChainDescriptor qdesc) value)
+                                translatedArg (buildContainsOverChainQ runtime qdesc value)
                             // Select terminal → collection output
                             | Terminal.Select _ ->
                                 translatedArg (buildGroupChainCollectionQ runtime qdesc)
@@ -408,7 +416,7 @@ module internal QueryableBuildQueryPartBGroupJoin =
                             // FALLBACK: element access on bare group (g.First(), g.Last(), etc.)
                             match tryMatchGroupElementCall runtime mc with
                             | Some groupCall ->
-                                buildGroupElementSubquery runtime groupCall expr
+                                    buildGroupElementDispatch runtime groupCall expr
                             | None ->
                                 match translateScalarMethodCall mc with
                                 | Some translated -> translated

@@ -23,18 +23,10 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
         | LastLike of orDefault: bool
         | SingleLike of orDefault: bool
         | ElementAtLike of indexExpr: Expression * orDefault: bool
-    type GroupJoinGroupChainDescriptor =
-        { WherePredicates: LambdaExpression list
-          OrderKeys: (LambdaExpression * SortDirection) list
-          Skip: Expression option
-          Take: Expression option
-          SelectProjection: LambdaExpression option
-          Distinct: bool
-          DefaultIfEmpty: Expression option option }
     type GroupJoinElementCall =
         { Call: MethodCallExpression
           Kind: GroupJoinElementKind
-          Chain: GroupJoinGroupChainDescriptor }
+          Chain: QueryDescriptor }
     type GroupJoinTranslatedArg =
         { Value: SqlExpr
           Error: SqlExpr option }
@@ -62,23 +54,6 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
             | [] -> None
             | [single] -> Some single
             | head :: tail -> Some(SqlExpr.Coalesce(head, tail))
-    let emptyChainDescriptor =
-        { WherePredicates = []
-          OrderKeys = []
-          Skip = None
-          Take = None
-          SelectProjection = None
-          Distinct = false
-          DefaultIfEmpty = None }
-    let hasGroupChainOps (desc: GroupJoinGroupChainDescriptor) =
-        not desc.WherePredicates.IsEmpty
-        || not desc.OrderKeys.IsEmpty
-        || desc.Skip.IsSome
-        || desc.Take.IsSome
-        || desc.SelectProjection.IsSome
-        || desc.Distinct
-        || desc.DefaultIfEmpty.IsSome
-
     let hasQueryDescriptorChainOps (desc: QueryDescriptor) =
         not desc.WherePredicates.IsEmpty
         || not desc.SortKeys.IsEmpty
@@ -92,28 +67,6 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
         || desc.SetOp.IsSome
         || not desc.SetOps.IsEmpty
 
-    /// Convert a QueryDescriptor to the legacy GroupJoinGroupChainDescriptor for builders
-    /// that have not yet been migrated. TEMPORARY — these builders should consume QueryDescriptor directly.
-    let toGroupChainDescriptor (desc: QueryDescriptor) : GroupJoinGroupChainDescriptor =
-        let tryLambda (e: Expression) =
-            match tryExtractLambdaExpression e with
-            | ValueSome l -> Some l
-            | ValueNone -> None
-        {
-            WherePredicates = desc.WherePredicates |> List.choose tryLambda
-            OrderKeys =
-                desc.SortKeys
-                |> List.choose (fun (expr, dir) -> tryLambda expr |> Option.map (fun l -> l, dir))
-            Skip = desc.Offset
-            Take = desc.Limit
-            SelectProjection = desc.SelectProjection
-            Distinct = desc.Distinct
-            DefaultIfEmpty =
-                match desc.DefaultIfEmpty, desc.PostSelectDefaultIfEmpty with
-                | Some d, _ -> Some d
-                | None, Some d -> Some d
-                | None, None -> None
-        }
     let evalNonNegativeInt64 (expr: Expression) =
         let raw = QueryTranslator.evaluateExpr<obj> expr
         let value = Convert.ToInt64(raw)
@@ -151,7 +104,7 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
                 "Fix: Simplify the GroupJoin group chain or move additional windowing after AsEnumerable()."
         }
 
-    let private tryExtractGroupQueryDescriptor (rt: GroupJoinRuntime) (expr: Expression) =
+    let private tryExtractGroupQueryDescriptor (rt: GroupJoinRuntime) (expr: Expression) : QueryDescriptor option =
         let expr, outerDistinct, _outerMaterialize = preprocessRoot expr
         match expr with
         | :? MethodCallExpression as mce ->
@@ -169,82 +122,99 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
                     let innerSource = walkChain extractorConfig state source
                     finalizeState state
                     placeCountPredicate state recognized.CountPredicate
-                    let tryLambda e =
-                        match tryExtractLambdaExpression e with
-                        | ValueSome l -> Some l
-                        | ValueNone -> None
-                    let orderKeys =
-                        state.SortKeys
-                        |> Seq.map (fun (expr, dir) -> tryLambda expr, dir)
-                        |> Seq.choose (fun (lam, dir) -> lam |> Option.map (fun l -> l, dir))
-                        |> Seq.toList
-                    let desc =
-                        {
-                            WherePredicates =
-                                state.Wheres
-                                |> Seq.choose tryLambda
-                                |> Seq.toList
-                            OrderKeys = orderKeys
-                            Skip = state.Offset
-                            Take = state.Limit
-                            SelectProjection = state.SelectProjection
-                            Distinct = state.Distinct || outerDistinct
-                            DefaultIfEmpty =
-                                match state.DefaultIfEmpty, state.PostSelectDefaultIfEmpty with
-                                | Some d, _ -> Some d
-                                | None, Some d -> Some d
-                                | None, None -> None
-                        }
                     match unwrapConvert innerSource with
                     | :? ParameterExpression as p when Object.ReferenceEquals(p, rt.GroupParam) ->
-                        Some desc
+                        Some {
+                            Source = Expression.Constant(null) :> Expression
+                            OfTypeName = state.OfTypeName
+                            CastTypeName = state.CastTypeName
+                            WherePredicates = state.Wheres |> Seq.toList
+                            SortKeys = state.SortKeys |> Seq.toList
+                            Limit = state.Limit
+                            Offset = state.Offset
+                            PostBoundWherePredicates = state.PostBoundWheres |> Seq.toList
+                            PostBoundSortKeys = state.PostBoundSortKeys |> Seq.toList
+                            PostBoundLimit = state.PostBoundLimit
+                            PostBoundOffset = state.PostBoundOffset
+                            TakeWhileInfo = state.TakeWhileInfo
+                            PostBoundTakeWhileInfo = state.PostBoundTakeWhileInfo
+                            GroupByKey = state.GroupByKey
+                            Distinct = state.Distinct || outerDistinct
+                            SelectProjection = state.SelectProjection
+                            SetOp = state.SetOps |> Seq.tryHead
+                            SetOps = state.SetOps |> Seq.toList
+                            Terminal = recognized.Terminal
+                            GroupByHavingPredicate = state.GroupByHaving
+                            DefaultIfEmpty = state.DefaultIfEmpty
+                            PostSelectDefaultIfEmpty = state.PostSelectDefaultIfEmpty
+                            SelectManyInnerLambda = state.SelectManyLambda
+                        }
                     | _ -> None
         | _ -> None
 
-    let rec walkGroupChain (rt: GroupJoinRuntime) (expr: Expression) =
-        match expr with
-        | :? ParameterExpression as p when Object.ReferenceEquals(p, rt.GroupParam) ->
-            Some emptyChainDescriptor
-        | :? MethodCallExpression as mc when mc.Arguments.Count >= 1 ->
-            match walkGroupChain rt mc.Arguments.[0] with
-            | Some desc ->
-                match mc.Method.Name, mc.Arguments.Count with
-                | "Where", 2 when desc.SelectProjection.IsNone ->
-                    let pred = unwrapLambdaExpressionOrThrow "GroupJoin chain Where" mc.Arguments.[1]
-                    Some { desc with WherePredicates = desc.WherePredicates @ [pred] }
-                | "OrderBy", 2 when desc.SelectProjection.IsNone ->
-                    let keySel = unwrapLambdaExpressionOrThrow "GroupJoin chain OrderBy" mc.Arguments.[1]
-                    Some { desc with OrderKeys = [keySel, SortDirection.Asc] }
-                | "OrderByDescending", 2 when desc.SelectProjection.IsNone ->
-                    let keySel = unwrapLambdaExpressionOrThrow "GroupJoin chain OrderByDescending" mc.Arguments.[1]
-                    Some { desc with OrderKeys = [keySel, SortDirection.Desc] }
-                | "ThenBy", 2 when desc.SelectProjection.IsNone ->
-                    let keySel = unwrapLambdaExpressionOrThrow "GroupJoin chain ThenBy" mc.Arguments.[1]
-                    Some { desc with OrderKeys = desc.OrderKeys @ [keySel, SortDirection.Asc] }
-                | "ThenByDescending", 2 when desc.SelectProjection.IsNone ->
-                    let keySel = unwrapLambdaExpressionOrThrow "GroupJoin chain ThenByDescending" mc.Arguments.[1]
-                    Some { desc with OrderKeys = desc.OrderKeys @ [keySel, SortDirection.Desc] }
-                | "Skip", 2 ->
-                    Some { desc with Skip = Some mc.Arguments.[1] }
-                | "Take", 2 ->
-                    Some { desc with Take = Some mc.Arguments.[1] }
-                | "Select", 2 when desc.SelectProjection.IsNone ->
-                    let proj = unwrapLambdaExpressionOrThrow "GroupJoin chain Select" mc.Arguments.[1]
-                    Some { desc with SelectProjection = Some proj }
-                | "Distinct", 1 ->
-                    Some { desc with Distinct = true }
-                | "DefaultIfEmpty", 1 ->
-                    Some { desc with DefaultIfEmpty = Some None }
-                | _ -> None
-            | None -> None
-        | _ -> None
+    /// Extract a non-terminal source chain (g.Where().OrderBy().Select()) as a QueryDescriptor.
+    /// Uses shared walkChain for non-terminal group source chains.
+    let tryExtractGroupSourceDescriptor (rt: GroupJoinRuntime) (expr: Expression) : QueryDescriptor option =
+        let isGroupRoot (e: Expression) =
+            match unwrapConvert e with
+            | :? ParameterExpression as p -> Object.ReferenceEquals(p, rt.GroupParam)
+            | _ -> false
+        if not (isRootedChain unwrapConvert isGroupRoot expr) then None
+        else
+            let state = createState ()
+            let innerSource = walkChain extractorConfig state expr
+            finalizeState state
+            match unwrapConvert innerSource with
+            | :? ParameterExpression as p when Object.ReferenceEquals(p, rt.GroupParam) ->
+                // Fail-closed guard: reject operators that shared walkChain admits
+                // but GroupJoin rowset builders do not consume.
+                if state.OfTypeName.IsSome
+                   || state.CastTypeName.IsSome
+                   || state.TakeWhileInfo.IsSome
+                   || state.PostBoundTakeWhileInfo.IsSome
+                   || state.GroupByKey.IsSome
+                   || state.GroupByHaving.IsSome
+                   || not (state.SetOps |> Seq.isEmpty)
+                   || state.SelectManyLambda.IsSome
+                   || not (state.PostBoundWheres |> Seq.isEmpty)
+                   || not (state.PostBoundSortKeys |> Seq.isEmpty)
+                   || state.PostBoundLimit.IsSome
+                   || state.PostBoundOffset.IsSome then
+                    None
+                else
+                Some {
+                    Source = Expression.Constant(null) :> Expression
+                    OfTypeName = None
+                    CastTypeName = None
+                    WherePredicates = state.Wheres |> Seq.toList
+                    SortKeys = state.SortKeys |> Seq.toList
+                    Limit = state.Limit
+                    Offset = state.Offset
+                    PostBoundWherePredicates = state.PostBoundWheres |> Seq.toList
+                    PostBoundSortKeys = state.PostBoundSortKeys |> Seq.toList
+                    PostBoundLimit = state.PostBoundLimit
+                    PostBoundOffset = state.PostBoundOffset
+                    TakeWhileInfo = None
+                    PostBoundTakeWhileInfo = None
+                    GroupByKey = None
+                    Distinct = state.Distinct
+                    SelectProjection = state.SelectProjection
+                    SetOp = None
+                    SetOps = []
+                    Terminal = Terminal.Count
+                    GroupByHavingPredicate = None
+                    DefaultIfEmpty = state.DefaultIfEmpty
+                    PostSelectDefaultIfEmpty = state.PostSelectDefaultIfEmpty
+                    SelectManyInnerLambda = None
+                }
+            | _ -> None
 
-    let tryGetGroupChainDescriptor (rt: GroupJoinRuntime) (expr: Expression) =
+    let tryGetGroupChainDescriptor (rt: GroupJoinRuntime) (expr: Expression) : QueryDescriptor option =
         match tryExtractGroupQueryDescriptor rt expr with
-        | Some desc when hasGroupChainOps desc -> Some desc
+        | Some desc when hasQueryDescriptorChainOps desc -> Some desc
         | _ ->
-        match walkGroupChain rt expr with
-        | Some desc when hasGroupChainOps desc -> Some desc
+        match tryExtractGroupSourceDescriptor rt expr with
+        | Some desc when hasQueryDescriptorChainOps desc -> Some desc
         | _ -> None
 
     let tryExtractGroupTerminalChain (rt: GroupJoinRuntime) (expr: Expression) : (QueryDescriptor * Terminal) option =
@@ -1002,43 +972,6 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
               Offset = None }
         SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
 
-    /// Legacy wrapper — delegates to buildGroupChainRowsetQ via toGroupChainDescriptor conversion.
-    let buildGroupChainRowset (rt: GroupJoinRuntime) (chain: GroupJoinGroupChainDescriptor) =
-        let qdesc : QueryDescriptor =
-            { Source = Expression.Constant(null) :> Expression
-              OfTypeName = None; CastTypeName = None
-              WherePredicates = chain.WherePredicates |> List.map (fun l -> l :> Expression)
-              SortKeys = chain.OrderKeys |> List.map (fun (l, d) -> (l :> Expression, d))
-              Limit = chain.Take; Offset = chain.Skip
-              PostBoundWherePredicates = []; PostBoundSortKeys = []
-              PostBoundLimit = None; PostBoundOffset = None
-              TakeWhileInfo = None; PostBoundTakeWhileInfo = None
-              GroupByKey = None; Distinct = chain.Distinct
-              SelectProjection = chain.SelectProjection; SetOp = None; SetOps = []
-              Terminal = Terminal.Count; GroupByHavingPredicate = None
-              DefaultIfEmpty = chain.DefaultIfEmpty; PostSelectDefaultIfEmpty = None
-              SelectManyInnerLambda = None }
-        buildGroupChainRowsetQ rt qdesc
-
-    let buildGroupChainCollection (rt: GroupJoinRuntime) (chain: GroupJoinGroupChainDescriptor) =
-        let rowsetSel, isProjected = buildGroupChainRowset rt chain
-        let rowsetAlias = sprintf "gja%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1)
-        let valueExpr =
-            if isProjected then SqlExpr.Column(Some rowsetAlias, "v")
-            else entityJsonExpr rowsetAlias
-        let outerCore =
-            { Distinct = false
-              Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.FunctionCall("jsonb_group_array", [valueExpr]) }]
-              Source = Some(DerivedTable(rowsetSel, rowsetAlias))
-              Joins = []
-              Where = None
-              GroupBy = []
-              Having = None
-              OrderBy = []
-              Limit = None
-              Offset = None }
-        SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore }
-
     let buildAggregateOverChainQ (rt: GroupJoinRuntime) (desc: QueryDescriptor) (aggKind: AggregateKind) (selectorOpt: LambdaExpression option) (coalesceZero: bool) =
         let rowsetSel, isProjected = buildGroupChainRowsetQ rt desc
         let rowsetAlias = sprintf "gjg%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1)
@@ -1132,126 +1065,8 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
         let existsExpr = SqlExpr.Exists { Ctes = []; Body = SingleSelect existsCore }
         if negate then SqlExpr.Unary(UnaryOperator.Not, existsExpr) else existsExpr
 
-    let buildAggregateOverChain (rt: GroupJoinRuntime) (chain: GroupJoinGroupChainDescriptor) (aggKind: AggregateKind) (selectorOpt: LambdaExpression option) (coalesceZero: bool) =
-        let rowsetSel, isProjected = buildGroupChainRowset rt chain
-        let rowsetAlias = sprintf "gjg%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1)
-        let aggCtx = QueryContext.SingleSource(rt.InnerRootTable)
-        let aggregateType =
-            match selectorOpt, chain.SelectProjection with
-            | Some sel, _ -> Some sel.Body.Type
-            | None, Some proj when isProjected -> Some proj.Body.Type
-            | _ -> None
-        let useExactDecimalAverage =
-            aggKind = AggregateKind.Avg
-            && (aggregateType |> Option.exists isDecimalOrNullableDecimal)
-        let aggregateArg =
-            match selectorOpt, chain.SelectProjection, isProjected with
-            | Some _, Some _, _ ->
-                raise (NotSupportedException(
-                    "Error: GroupJoin chained aggregate cannot apply a selector after Select.\n" +
-                    "Fix: Use the projected chain directly or remove the inner Select."))
-            | Some sel, _, _ ->
-                let selCtx = { aggCtx with Joins = ResizeArray() }
-                let selExpr = rt.TranslateJoinExpr selCtx rowsetAlias rt.Vars (Some sel.Parameters.[0]) sel.Body
-                let joins = materializeInnerRowJoins rt rowsetAlias selCtx.Joins
-                Some(selExpr, joins)
-            | None, Some _, true ->
-                Some(SqlExpr.Column(Some rowsetAlias, "v"), [])
-            | None, _, false when aggKind = AggregateKind.Count ->
-                None
-            | None, _, false ->
-                raise (NotSupportedException(
-                    "Error: GroupJoin chained aggregate requires a selector.\n" +
-                    "Fix: Pass a selector lambda, or project the value first with .Select(...)."))
-            | None, _, true ->
-                Some(SqlExpr.Column(Some rowsetAlias, "v"), [])
-        let aggregateSource, aggregateJoins, aggregateExpr =
-            match aggregateArg with
-            | Some (argExpr, joins) ->
-                let expr =
-                    if useExactDecimalAverage then buildExactDecimalAverageExpr argExpr
-                    else SqlExpr.AggregateCall(aggKind, Some argExpr, false, None)
-                Some(DerivedTable(rowsetSel, rowsetAlias)), joins, expr
-            | None ->
-                Some(DerivedTable(rowsetSel, rowsetAlias)), [], SqlExpr.AggregateCall(aggKind, None, false, None)
-        let aggregateExpr =
-            if coalesceZero then SqlExpr.Coalesce(aggregateExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
-            else aggregateExpr
-        SqlExpr.ScalarSubquery {
-            Ctes = []
-            Body = SingleSelect {
-                Distinct = false
-                Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = aggregateExpr }]
-                Source = aggregateSource
-                Joins = aggregateJoins
-                Where = None
-                GroupBy = []
-                Having = None
-                OrderBy = []
-                Limit = None
-                Offset = None
-            } }
-
-    let buildCountPredicateOverChain (rt: GroupJoinRuntime) (chain: GroupJoinGroupChainDescriptor) (pred: LambdaExpression) =
-        match chain.SelectProjection with
-        | Some _ ->
-            raise (NotSupportedException(
-                "Error: GroupJoin chained Count(predicate) after Select is not supported.\n" +
-                "Fix: Move the predicate before Select, or count the projected chain without a predicate."))
-        | None ->
-            let rowsetSel, _ = buildGroupChainRowset rt chain
-            let rowsetAlias = sprintf "gjp%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1)
-            let predCtx = QueryContext.SingleSource(rt.InnerRootTable)
-            let predCtx = { predCtx with Joins = ResizeArray() }
-            let predExpr = rt.TranslateJoinExpr predCtx rowsetAlias rt.Vars (Some pred.Parameters.[0]) pred.Body
-            let countCore =
-                { Distinct = false
-                  Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
-                  Source = Some(DerivedTable(rowsetSel, rowsetAlias))
-                  Joins = materializeInnerRowJoins rt rowsetAlias predCtx.Joins
-                  Where = Some predExpr
-                  GroupBy = []
-                  Having = None
-                  OrderBy = []
-                  Limit = None
-                  Offset = None }
-            SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect countCore }
-
-    let buildExistsOverChain (rt: GroupJoinRuntime) (chain: GroupJoinGroupChainDescriptor) (predOpt: LambdaExpression option) (negate: bool) =
-        let rowsetSel, isProjected = buildGroupChainRowset rt chain
-        let rowsetAlias = sprintf "gjx%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1)
-        let predicateExpr, predicateJoins =
-            match predOpt with
-            | None -> None, []
-            | Some pred when isProjected ->
-                raise (NotSupportedException(
-                    "Error: GroupJoin chained predicate after Select is not supported.\n" +
-                    "Fix: Move the predicate before Select, or remove the inner Select."))
-            | Some pred ->
-                let predCtx = QueryContext.SingleSource(rt.InnerRootTable)
-                let predCtx = { predCtx with Joins = ResizeArray() }
-                let predExpr = rt.TranslateJoinExpr predCtx rowsetAlias rt.Vars (Some pred.Parameters.[0]) pred.Body
-                Some predExpr, materializeInnerRowJoins rt rowsetAlias predCtx.Joins
-        let existsCore =
-            { Distinct = false
-              Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
-              Source = Some(DerivedTable(rowsetSel, rowsetAlias))
-              Joins = predicateJoins
-              Where =
-                match predicateExpr with
-                | Some pred when negate -> Some(SqlExpr.Unary(UnaryOperator.Not, pred))
-                | Some pred -> Some pred
-                | None -> None
-              GroupBy = []
-              Having = None
-              OrderBy = []
-              Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L))
-              Offset = None }
-        let existsExpr = SqlExpr.Exists { Ctes = []; Body = SingleSelect existsCore }
-        if negate then SqlExpr.Unary(UnaryOperator.Not, existsExpr) else existsExpr
-
-    let buildContainsOverChain (rt: GroupJoinRuntime) (chain: GroupJoinGroupChainDescriptor) (valueExpr: Expression) =
-        let rowsetSel, isProjected = buildGroupChainRowset rt chain
+    let buildContainsOverChainQ (rt: GroupJoinRuntime) (desc: QueryDescriptor) (valueExpr: Expression) =
+        let rowsetSel, isProjected = buildGroupChainRowsetQ rt desc
         if not isProjected then
             raise (NotSupportedException(
                 "Error: GroupJoin Contains requires a projected scalar chain.\n" +
@@ -1270,3 +1085,4 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
               Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L))
               Offset = None }
         SqlExpr.Exists { Ctes = []; Body = SingleSelect containsCore }
+
