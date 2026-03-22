@@ -65,7 +65,19 @@ module internal QueryableBuildQueryPartB =
 Reason: SoloDB only supports SQL-translatable equality without custom comparers here.
 Fix: Remove the comparer or move the join after AsEnumerable()."))
                     | 4 ->
-                        let innerExpression = readSoloDBQueryableUntyped m.Expressions.[0]
+                        let innerSource =
+                            match tryExtractInnerJoinSource m.Expressions.[0] with
+                            | Some source -> source
+                            | None ->
+                                let innerExpression = readSoloDBQueryableUntyped m.Expressions.[0]
+                                match tryGetJoinRootSourceTable innerExpression with
+                                | Some tableName -> { TableName = tableName; WherePredicates = [] }
+                                | None ->
+                                    raise (NotSupportedException(
+                                        "Error: Join inner source is not supported.
+Reason: The inner query does not resolve to a SoloDB root collection.
+Fix: Use another SoloDB IQueryable rooted in a collection or move the join after AsEnumerable()."))
+
                         let outerKeySelector = unwrapLambdaExpressionOrThrow "Join outer key selector" m.Expressions.[1]
                         let innerKeySelector = unwrapLambdaExpressionOrThrow "Join inner key selector" m.Expressions.[2]
                         let resultSelector = unwrapLambdaExpressionOrThrow "Join result selector" m.Expressions.[3]
@@ -76,14 +88,7 @@ Fix: Remove the comparer or move the join after AsEnumerable()."))
 Reason: Anonymous-type and composite key equality lowering is not supported here.
 Fix: Join on a single scalar key or move the join after AsEnumerable()."))
 
-                        let innerRootTable =
-                            match tryGetJoinRootSourceTable innerExpression with
-                            | Some tableName -> tableName
-                            | None ->
-                                raise (NotSupportedException(
-                                    "Error: Join inner source is not supported.
-Reason: The inner query does not resolve to a SoloDB root collection.
-Fix: Use another SoloDB IQueryable rooted in a collection or move the join after AsEnumerable()."))
+                        let innerRootTable = innerSource.TableName
 
                         addComplexFinal statements (fun ctx ->
                             let outerAlias = "o"
@@ -93,6 +98,17 @@ Fix: Use another SoloDB IQueryable rooted in a collection or move the join after
                                 translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars (Some outerKeySelector.Parameters.[0]) outerKeySelector.Body
                             let innerKeyExpr =
                                 translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body
+
+                            let joinCondition =
+                                let keyEq = SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr)
+                                match innerSource.WherePredicates with
+                                | [] -> keyEq
+                                | predicates ->
+                                    let translatedPredicates =
+                                        predicates |> List.map (fun lambda ->
+                                            translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some lambda.Parameters.[0]) lambda.Body)
+                                    translatedPredicates |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) keyEq
+
                             let resultExpr =
                                 translateJoinResultSelectorExpression
                                     sourceCtx
@@ -114,7 +130,7 @@ Fix: Use another SoloDB IQueryable rooted in a collection or move the join after
                                           [ConditionedJoin(
                                               JoinKind.Inner,
                                               BaseTable(innerRootTable, Some innerAlias),
-                                              SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr))] }
+                                              joinCondition)] }
                             wrapCore core
                         )
                     | other ->

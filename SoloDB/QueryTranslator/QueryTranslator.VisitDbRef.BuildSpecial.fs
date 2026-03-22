@@ -267,6 +267,13 @@ module internal DBRefManyBuildSpecial =
             match desc.TakeWhileInfo with
             | Some (twPredLambda, isTakeWhile) ->
                 let rowsetSel = tryBuildTakeWhileEntityRowset qb groupDesc buildCorrelatedCore mkSubCore nextAlias tryGetRelationOrderByForTakeWhile ownerRef twPredLambda isTakeWhile
+                let rowsetSel =
+                    match desc.PostBoundTakeWhileInfo with
+                    | Some (postPred, postIsTakeWhile) ->
+                        let _, _, _, targetTable =
+                            buildCorrelatedCore qb groupDesc ownerRef [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                        applyPostBoundWhileEntityRowset qb nextAlias targetTable rowsetSel postPred postIsTakeWhile
+                    | None -> rowsetSel
                 let rowAlias = nextAlias "_twg"
                 let _, _, _, targetTable =
                     buildCorrelatedCore qb groupDesc ownerRef [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]

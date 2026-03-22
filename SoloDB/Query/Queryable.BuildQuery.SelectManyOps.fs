@@ -47,15 +47,20 @@ Fix: Use SelectMany with the standard (carrier, inner) result selector or move t
 Reason: Anonymous-type and composite key equality lowering is not supported here.
 Fix: Join on a single scalar key or move the query after AsEnumerable()."))
 
-                        let innerExpression = readSoloDBQueryableUntyped composite.InnerExpression
-                        let innerRootTable =
-                            match tryGetJoinRootSourceTable innerExpression with
-                            | Some tableName -> tableName
+                        let innerSource =
+                            match tryExtractInnerJoinSource composite.InnerExpression with
+                            | Some source -> source
                             | None ->
-                                raise (NotSupportedException(
-                                    "Error: Left-join inner source is not supported.
+                                let innerExpression = readSoloDBQueryableUntyped composite.InnerExpression
+                                match tryGetJoinRootSourceTable innerExpression with
+                                | Some tableName -> { TableName = tableName; WherePredicates = [] }
+                                | None ->
+                                    raise (NotSupportedException(
+                                        "Error: Left-join inner source is not supported.
 Reason: The inner query does not resolve to a SoloDB root collection.
 Fix: Use another SoloDB IQueryable rooted in a collection or move the query after AsEnumerable()."))
+
+                        let innerRootTable = innerSource.TableName
 
                         let outerResultParam = composite.ResultSelector.Parameters.[0]
                         let innerResultParam = composite.ResultSelector.Parameters.[1]
@@ -76,6 +81,17 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                 translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars (Some composite.OuterKeySelector.Parameters.[0]) composite.OuterKeySelector.Body
                             let innerKeyExpr =
                                 translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some composite.InnerKeySelector.Parameters.[0]) composite.InnerKeySelector.Body
+
+                            let joinCondition =
+                                let keyEq = SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr)
+                                match innerSource.WherePredicates with
+                                | [] -> keyEq
+                                | predicates ->
+                                    let translatedPredicates =
+                                        predicates |> List.map (fun lambda ->
+                                            translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some lambda.Parameters.[0]) lambda.Body)
+                                    translatedPredicates |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) keyEq
+
                             let resultExpr =
                                 translateJoinResultSelectorExpression
                                     sourceCtx
@@ -97,7 +113,7 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                           [ConditionedJoin(
                                               JoinKind.Left,
                                               BaseTable(innerRootTable, Some innerAlias),
-                                              SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr))] }
+                                              joinCondition)] }
                             wrapCore core
                         )
                     | None ->

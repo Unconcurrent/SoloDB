@@ -60,10 +60,7 @@ module internal QueryableHelperJoin =
             | _ ->
                 raise (NotSupportedException(unsupportedJoinMessage))
         | :? MethodCallExpression as mcl when isSoloDBQueryableExpression mcl ->
-            raise (NotSupportedException(
-                "Error: Join inner source is not supported.
-Reason: Composed inner SoloDB queries are not supported here.
-Fix: Join directly against a root SoloDB collection or move the join after AsEnumerable()."))
+            mcl
         | _ ->
             raise (NotSupportedException(unsupportedJoinMessage))
 
@@ -289,6 +286,31 @@ Fix: Project outer and inner members into an anonymous object or move the projec
                 loop mce.Arguments.[0]
             | _ -> None
         loop expression
+
+    type internal InnerJoinSource = {
+        TableName: string
+        WherePredicates: LambdaExpression list
+    }
+
+    let internal tryExtractInnerJoinSource (expression: Expression) =
+        let rec loop (expr: Expression) (predicates: LambdaExpression list) =
+            match expr with
+            | :? ConstantExpression as ce ->
+                match ce.Value with
+                | :? IQueryable as q when (q.Provider :? SoloDBQueryProvider) ->
+                    match tryGetJoinRootSourceTable q.Expression with
+                    | Some tableName -> Some { TableName = tableName; WherePredicates = List.rev predicates }
+                    | None -> None
+                | :? IRootQueryable as rq ->
+                    Some { TableName = rq.SourceTableName; WherePredicates = List.rev predicates }
+                | _ -> None
+            | :? MethodCallExpression as mce when mce.Method.Name = "Where" && mce.Arguments.Count = 2 ->
+                match unwrapQuotedLambda mce.Arguments.[1] with
+                | :? LambdaExpression as lambda ->
+                    loop mce.Arguments.[0] (lambda :: predicates)
+                | _ -> None
+            | _ -> None
+        loop expression []
 
     type internal GroupJoinCarrierMembers = {
         OuterMember: MemberInfo
