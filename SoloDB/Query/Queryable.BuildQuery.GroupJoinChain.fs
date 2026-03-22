@@ -901,6 +901,71 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
               Limit = limitExpr
               Offset = offsetExpr }
         let boundedSel = { Ctes = []; Body = SingleSelect boundedCore }
+
+        // PostBound layer: apply outer Where/OrderBy/Limit/Offset after the inner boundary.
+        let hasPostBound =
+            not desc.PostBoundWherePredicates.IsEmpty
+            || not desc.PostBoundSortKeys.IsEmpty
+            || desc.PostBoundLimit.IsSome
+            || desc.PostBoundOffset.IsSome
+        let boundedSel =
+            if hasPostBound then
+                let pbAlias = nextAlias "gjpb"
+                let pbLimitExpr, pbOffsetExpr = buildLimitOffset desc.PostBoundLimit desc.PostBoundOffset
+                let pbWhereDus =
+                    desc.PostBoundWherePredicates
+                    |> List.choose (fun predExpr ->
+                        match tryExtractLambdaExpression predExpr with
+                        | ValueSome predLambda ->
+                            let predCtx = QueryContext.SingleSource(rt.InnerRootTable)
+                            let predCtx = { predCtx with Joins = ResizeArray() }
+                            Some (rt.TranslateJoinExpr predCtx pbAlias rt.Vars (Some predLambda.Parameters.[0]) predLambda.Body)
+                        | ValueNone -> None)
+                let pbSortDus =
+                    desc.PostBoundSortKeys
+                    |> List.choose (fun (keyExpr, dir) ->
+                        match tryExtractLambdaExpression keyExpr with
+                        | ValueSome keyLambda ->
+                            let keyCtx = QueryContext.SingleSource(rt.InnerRootTable)
+                            let keyCtx = { keyCtx with Joins = ResizeArray() }
+                            let keyDu = rt.TranslateJoinExpr keyCtx pbAlias rt.Vars (Some keyLambda.Parameters.[0]) keyLambda.Body
+                            Some { Expr = keyDu; Direction = dir }
+                        | ValueNone -> None)
+                let pbWhereExpr =
+                    match pbWhereDus with
+                    | [] -> None
+                    | [single] -> Some single
+                    | head :: tail -> Some (tail |> List.fold (fun acc p -> SqlExpr.Binary(acc, BinaryOperator.And, p)) head)
+                let pbProjs =
+                    if isProjected then
+                        ProjectionSetOps.ofList [
+                            { Alias = Some "v"; Expr = SqlExpr.Column(Some pbAlias, "v") }
+                            { Alias = Some "__ord"; Expr = SqlExpr.Column(Some pbAlias, "__ord") }
+                        ]
+                    else
+                        ProjectionSetOps.ofList [
+                            { Alias = Some "Id"; Expr = SqlExpr.Column(Some pbAlias, "Id") }
+                            { Alias = Some "Value"; Expr = SqlExpr.Column(Some pbAlias, "Value") }
+                            { Alias = Some "__ord"; Expr = SqlExpr.Column(Some pbAlias, "__ord") }
+                        ]
+                let pbOrderBy =
+                    if pbSortDus.IsEmpty then [{ Expr = SqlExpr.Column(Some pbAlias, "__ord"); Direction = SortDirection.Asc }]
+                    else pbSortDus
+                let pbCore =
+                    { Distinct = false
+                      Projections = pbProjs
+                      Source = Some(DerivedTable(boundedSel, pbAlias))
+                      Joins = []
+                      Where = pbWhereExpr
+                      GroupBy = []
+                      Having = None
+                      OrderBy = pbOrderBy
+                      Limit = pbLimitExpr
+                      Offset = pbOffsetExpr }
+                { Ctes = []; Body = SingleSelect pbCore }
+            else
+                boundedSel
+
         let defaultIfEmpty =
             match desc.DefaultIfEmpty, desc.PostSelectDefaultIfEmpty with
             | Some d, _ -> Some d
