@@ -64,6 +64,14 @@ module QueryTranslator =
         let builder = QueryBuilder.New sb variables false tableName expression -1 (ValueSome sourceContext)
         visitDu expression builder
 
+    /// Translate an expression in predicate context (WHERE clause).
+    /// Min/Max aggregates skip the CASE WHEN sentinel, allowing SQL-native NULL propagation.
+    let internal translateToSqlExprForPredicate (sourceContext: QueryContext) (tableName: string) (expression: Expression) (variables: Dictionary<string, obj>) : SqlExpr =
+        ensureDbRefHandlersInitialized()
+        let sb = StringBuilder()
+        let builder = { QueryBuilder.New sb variables false tableName expression -1 (ValueSome sourceContext) with InPredicateContext = true }
+        visitDu expression builder
+
     /// <summary>
     /// Translates an expression and appends the result to an existing StringBuilder.
     /// Routes through DU construction (visitDu) and DU emission (SqlDuMinimalEmit).

@@ -138,6 +138,10 @@ module internal QueryTranslatorBaseTypes =
             OuterParameterAliases: Dictionary<ParameterExpression, string>
             /// <summary>Shared translation step counter for hard fail-closed non-termination protection.</summary>
             TranslationStepCounter: int ref
+            /// <summary>True when translating a WHERE predicate expression.
+            /// Min/Max aggregates skip the CASE WHEN sentinel in this context,
+            /// allowing SQL-native NULL propagation for owner exclusion.</summary>
+            InPredicateContext: bool
         }
         /// <summary>
         /// Returns the generated SQL query string.
@@ -230,4 +234,5 @@ module internal QueryTranslatorBaseTypes =
                 DuHandlerResult = ref ValueNone
                 OuterParameterAliases = Dictionary<ParameterExpression, string>()
                 TranslationStepCounter = ref 0
+                InPredicateContext = false
             }

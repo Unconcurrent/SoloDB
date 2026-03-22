@@ -33,6 +33,11 @@ module internal QueryableHelperBase =
     let internal translateExprDu (sourceCtx: QueryContext) (tableName: string) (expr: Expression) (vars: Dictionary<string, obj>) : SqlExpr =
         QueryTranslator.translateToSqlExpr sourceCtx tableName expr vars
 
+    /// Translate a LINQ expression in predicate context (WHERE clause).
+    /// Min/Max aggregates skip the CASE WHEN sentinel for SQL-native NULL propagation.
+    let internal translateExprDuForPredicate (sourceCtx: QueryContext) (tableName: string) (expr: Expression) (vars: Dictionary<string, obj>) : SqlExpr =
+        QueryTranslator.translateToSqlExprForPredicate sourceCtx tableName expr vars
+
     /// Return the DU expression for extracting Value as JSON if the type is not a primitive SQLite type.
     let internal extractValueAsJsonDu (x: Type) : SqlExpr =
         let isPrimitive = QueryTranslator.isPrimitiveSQLiteType x
@@ -68,6 +73,7 @@ module internal QueryableHelperBase =
             DuHandlerResult = ref ValueNone
             OuterParameterAliases = Dictionary<ParameterExpression, string>()
             TranslationStepCounter = ref 0
+            InPredicateContext = false
         }
         let firstRound =
             PassRunner.runPipeline [

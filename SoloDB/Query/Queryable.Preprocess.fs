@@ -183,7 +183,7 @@ module internal QueryableHelperPreprocess =
             else
                 let exprs =
                     statement.Filters
-                    |> Seq.map (fun f -> translateExprDu sourceCtx contextTable f vars)
+                    |> Seq.map (fun f -> translateExprDuForPredicate sourceCtx contextTable f vars)
                     |> Seq.toList
                 match exprs with
                 | [single] -> Some single
