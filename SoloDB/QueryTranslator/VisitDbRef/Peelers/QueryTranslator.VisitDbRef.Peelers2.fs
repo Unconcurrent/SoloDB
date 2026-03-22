@@ -161,23 +161,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
 
     /// Build LIMIT/OFFSET DU expressions from peeled Take/Skip arguments.
     let internal buildLimitOffset (qb: QueryBuilder) (limitExpr: Expression option) (offsetExpr: Expression option) : SqlExpr option * SqlExpr option =
-        let visitArg (e: Expression) =
-            match e with
-            | :? ConstantExpression as ce -> SqlExpr.Literal(SqlLiteral.Integer(System.Convert.ToInt64(ce.Value)))
-            | _ -> visitDu e qb
-        let limit =
-            match limitExpr with
-            | Some e -> Some (visitArg e)
-            | None ->
-                // SQLite requires LIMIT with OFFSET. If offset present but no limit, use LIMIT -1.
-                match offsetExpr with
-                | Some _ -> Some (SqlExpr.Literal(SqlLiteral.Integer -1L))
-                | None -> None
-        let offset =
-            match offsetExpr with
-            | Some e -> Some (visitArg e)
-            | None -> None
-        limit, offset
+        DBRefManyHelpers.buildLimitOffsetShared visitDu qb limitExpr offsetExpr
 
     /// Peel .OfType<T>() from a source expression.
     /// Returns (innerExpr, typeName) if the source is OfType on a DBRefMany chain.

@@ -131,25 +131,7 @@ module internal DBRefManyBuilderCore =
             | ValueNone ->
                 raise (NotSupportedException(invalidKeyMessage)))
 
-    let private buildLimitOffset (visitDu: Expression -> QueryBuilder -> SqlExpr) (qb: QueryBuilder) (limitExpr: Expression option) (offsetExpr: Expression option) =
-        let limitDu =
-            match limitExpr with
-            | Some e ->
-                match e with
-                | :? ConstantExpression as ce -> Some(SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value))))
-                | _ -> Some(visitDu e qb)
-            | None ->
-                match offsetExpr with
-                | Some _ -> Some(SqlExpr.Literal(SqlLiteral.Integer -1L))
-                | None -> None
-        let offsetDu =
-            match offsetExpr with
-            | Some e ->
-                match e with
-                | :? ConstantExpression as ce -> Some(SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value))))
-                | _ -> Some(visitDu e qb)
-            | None -> None
-        limitDu, offsetDu
+    let private buildLimitOffset = DBRefManyHelpers.buildLimitOffsetShared
 
     /// Walk a SelectMany inner lambda body to find the DBRefMany property and chain operators.
     /// Returns (dbRefManyMemberExpr, innerOfTypeName, innerWherePredicates, innerSelectProjection).
@@ -352,14 +334,8 @@ module internal DBRefManyBuilderCore =
                 Limit = limitDu
                 Offset = offsetDu }
 
-        let hasPostBound =
-            desc.PostBoundWherePredicates.Length > 0 ||
-            desc.PostBoundSortKeys.Length > 0 ||
-            desc.PostBoundLimit.IsSome ||
-            desc.PostBoundOffset.IsSome
-
         let effectiveAlias, effectiveLnk, effectiveCore, effectiveTarget =
-            if hasPostBound then
+            if desc.HasPostBoundWrapperFields then
                 let passThrough = { innerCore with Projections = AllColumns }
                 let innerSel = { Ctes = []; Body = SingleSelect passThrough }
                 let pbAlias = nextAlias "_pb"

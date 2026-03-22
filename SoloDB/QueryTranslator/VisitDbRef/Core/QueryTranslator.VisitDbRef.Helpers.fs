@@ -152,3 +152,24 @@ module internal DBRefManyHelpers =
                 SqlExpr.Unary(UnaryOperator.Not, visit ue.Operand)
             | _ -> visitDu e qb
         visit body
+
+    /// Shared LIMIT/OFFSET builder for correlated subqueries.
+    /// Handles constant expressions as literals, non-constant via visitDu callback.
+    /// SQLite requires LIMIT with OFFSET — emits LIMIT -1 when only offset is present.
+    let buildLimitOffsetShared (visitDu: Expression -> QueryBuilder -> SqlExpr) (qb: QueryBuilder) (limitExpr: Expression option) (offsetExpr: Expression option) =
+        let visitArg (e: Expression) =
+            match e with
+            | :? ConstantExpression as ce -> SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value)))
+            | _ -> visitDu e qb
+        let limit =
+            match limitExpr with
+            | Some e -> Some (visitArg e)
+            | None ->
+                match offsetExpr with
+                | Some _ -> Some (SqlExpr.Literal(SqlLiteral.Integer -1L))
+                | None -> None
+        let offset =
+            match offsetExpr with
+            | Some e -> Some (visitArg e)
+            | None -> None
+        limit, offset

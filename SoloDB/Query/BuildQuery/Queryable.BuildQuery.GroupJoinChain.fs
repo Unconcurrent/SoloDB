@@ -903,13 +903,8 @@ module internal QueryableBuildQueryGroupJoinChain =
         let boundedSel = { Ctes = []; Body = SingleSelect boundedCore }
 
         // PostBound layer: apply outer Where/OrderBy/Limit/Offset after the inner boundary.
-        let hasPostBound =
-            not desc.PostBoundWherePredicates.IsEmpty
-            || not desc.PostBoundSortKeys.IsEmpty
-            || desc.PostBoundLimit.IsSome
-            || desc.PostBoundOffset.IsSome
         let boundedSel =
-            if hasPostBound then
+            if desc.HasPostBoundWrapperFields then
                 let pbAlias = nextAlias "gjpb"
                 let pbLimitExpr, pbOffsetExpr = buildLimitOffset desc.PostBoundLimit desc.PostBoundOffset
                 let pbWhereDus =

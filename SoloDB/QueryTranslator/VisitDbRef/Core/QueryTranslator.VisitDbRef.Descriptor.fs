@@ -113,3 +113,12 @@ module internal DBRefManyDescriptor =
         /// When present, buildCorrelatedCore emits a two-hop JOIN (owner→link1→target1→link2→target2).
         SelectManyInnerLambda: LambdaExpression option
     }
+    with
+        /// Whether the descriptor has outer boundary fields (Where/OrderBy/Limit/Offset)
+        /// that require a DerivedTable wrapping layer after the inner boundary.
+        /// Excludes PostBoundTakeWhileInfo — that is handled on separate paths (applyWhile).
+        member this.HasPostBoundWrapperFields =
+            not this.PostBoundWherePredicates.IsEmpty
+            || not this.PostBoundSortKeys.IsEmpty
+            || this.PostBoundLimit.IsSome
+            || this.PostBoundOffset.IsSome

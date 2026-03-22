@@ -155,33 +155,42 @@ module internal SharedDescriptorExtract =
         | Some tn when not isCast -> state.OfTypeName <- Some tn
         | _ -> ()
 
-    let normalizeCountBySource (terminal: Terminal) (source: Expression) (state: ExtractionState) : Expression =
+    /// Pure logic for CountBy normalization — returns (normalizedSource, groupByKeyOpt).
+    /// Callers apply groupByKeyOpt to their own state type.
+    let normalizeCountBySourceCore (terminal: Terminal) (source: Expression) : Expression * LambdaExpression option =
         match terminal, source with
         | (Terminal.Count | Terminal.LongCount), (:? MethodCallExpression as srcMc) when srcMc.Method.Name = "CountBy" ->
             match getArg srcMc, getSource srcMc with
             | Some keyExpr, src when not (isNull src) ->
                 match tryExtractLambdaExpression keyExpr with
-                | ValueSome keyLambda ->
-                    state.GroupByKey <- Some keyLambda
-                    src
-                | ValueNone -> source
-            | _ -> source
-        // All non-Count/LongCount terminals pass through unchanged.
+                | ValueSome keyLambda -> src, Some keyLambda
+                | ValueNone -> source, None
+            | _ -> source, None
         | (Terminal.Any _, _) | (Terminal.All _, _) | (Terminal.Sum _, _) | (Terminal.SumProjected, _)
         | (Terminal.Min _, _) | (Terminal.MinProjected, _) | (Terminal.Max _, _) | (Terminal.MaxProjected, _)
         | (Terminal.Average _, _) | (Terminal.AverageProjected, _) | (Terminal.Select _, _) | (Terminal.Contains _, _)
         | (Terminal.Exists, _) | (Terminal.First _, _) | (Terminal.FirstOrDefault _, _)
         | (Terminal.Last _, _) | (Terminal.LastOrDefault _, _) | (Terminal.Single _, _) | (Terminal.SingleOrDefault _, _)
         | (Terminal.MinBy _, _) | (Terminal.MaxBy _, _) | (Terminal.DistinctBy _, _)
-        | (Terminal.ElementAt _, _) | (Terminal.ElementAtOrDefault _, _) | (Terminal.CountBy _, _) -> source
-        // Count/LongCount without CountBy source also passes through.
-        | (Terminal.Count, _) | (Terminal.LongCount, _) -> source
+        | (Terminal.ElementAt _, _) | (Terminal.ElementAtOrDefault _, _) | (Terminal.CountBy _, _) -> source, None
+        | (Terminal.Count, _) | (Terminal.LongCount, _) -> source, None
+
+    let normalizeCountBySource (terminal: Terminal) (source: Expression) (state: ExtractionState) : Expression =
+        let result, groupByKeyOpt = normalizeCountBySourceCore terminal source
+        match groupByKeyOpt with Some k -> state.GroupByKey <- Some k | None -> ()
+        result
+
+    /// Place a count predicate into the appropriate where collection based on boundary state.
+    let placeCountPredicateCore
+        (seenBoundary: bool) (addWhere: Expression -> unit) (addPostBoundWhere: Expression -> unit)
+        (countPredicate: Expression option) =
+        match countPredicate with
+        | Some pred when seenBoundary -> addPostBoundWhere pred
+        | Some pred -> addWhere pred
+        | None -> ()
 
     let placeCountPredicate (state: ExtractionState) (countPredicate: Expression option) =
-        match countPredicate with
-        | Some pred when state.SeenBoundary -> state.PostBoundWheres.Add(pred)
-        | Some pred -> state.Wheres.Add(pred)
-        | None -> ()
+        placeCountPredicateCore state.SeenBoundary state.Wheres.Add state.PostBoundWheres.Add countPredicate
 
     let finalizeState (state: ExtractionState) =
         if not state.SeenBoundary then
