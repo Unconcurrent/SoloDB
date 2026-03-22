@@ -386,9 +386,17 @@ module internal QueryableBuildQueryPartBGroupJoin =
                                         BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)))
                             | Terminal.Contains value ->
                                 translatedArg (buildContainsOverChainQ runtime qdesc value)
-                            // Select terminal → collection output
-                            | Terminal.Select _ ->
-                                translatedArg (buildGroupChainCollectionQ runtime qdesc)
+                            // Select terminal → collection output.
+                            // The Select lambda is in the terminal, not in desc.SelectProjection.
+                            // Copy it into the descriptor so the builder projects correctly.
+                            | Terminal.Select projExpr ->
+                                let desc =
+                                    if qdesc.SelectProjection.IsNone then
+                                        match QueryTranslatorVisitPost.tryExtractLambdaExpression projExpr with
+                                        | ValueSome lambda -> { qdesc with SelectProjection = Some lambda }
+                                        | ValueNone -> qdesc
+                                    else qdesc
+                                translatedArg (buildGroupChainCollectionQ runtime desc)
                             // Element access terminals
                             | Terminal.First _ ->
                                 buildGroupElementSubqueryQ runtime qdesc (FirstLike false) expr
