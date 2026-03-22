@@ -153,7 +153,7 @@ let internal hasManyBackReference (ownerType: Type) (targetType: Type) =
     |> Array.exists (fun (_, kind, candidateTargetType, _, _, _, _, _) ->
         kind = Many && candidateTargetType = ownerType)
 
-let private br04Message (ownerType: Type) (ownerTable: string) (linkTable: string) (propNames: string array) =
+let private sharedManyCollisionMessage (ownerType: Type) (ownerTable: string) (linkTable: string) (propNames: string array) =
     let props = String.Join(",", propNames)
     $"Error: contradictory shared-many topology detected for '{ownerType.FullName}'.\nReason: Multiple DBRefMany properties ({props}) on collection '{ownerTable}' resolve to the same link table '{linkTable}'.\nFix: ensure each DBRefMany relation resolves to a distinct link table or redesign the relation topology."
 
@@ -164,7 +164,7 @@ let private validateSharedManyContradictions (ownerType: Type) (ownerTable: stri
     |> Array.iter (fun (linkTable, grp) ->
         if grp.Length > 1 then
             let propNames = grp |> Array.map (fun d -> d.Property.Name) |> Array.sort
-            raise (InvalidOperationException(br04Message ownerType ownerTable linkTable propNames)))
+            raise (InvalidOperationException(sharedManyCollisionMessage ownerType ownerTable linkTable propNames)))
 
 let private validateConflictingPolicies (ownerType: Type) (descriptors: RelationDescriptor array) =
     descriptors

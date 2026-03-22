@@ -29,10 +29,10 @@ module internal QueryTranslatorVisitPost =
 
     /// Deterministic unsupported-shape messages.
     let internal multiSourceCrossRootProjectionMessage =
-        "MSQ002: Cross-root projection requires explicit join key."
+        "Error: Cross-root projection requires an explicit join key.\nReason: The projection accesses columns from multiple query roots without a defined key relationship.\nFix: Add a Join or GroupJoin with explicit key selectors before projecting across roots."
 
     let internal multiSourceClientEvalForbiddenMessage =
-        "MSQ004: Client-side evaluation is forbidden for this query shape."
+        "Error: Client-side evaluation is not supported for this query shape.\nReason: The expression cannot be translated to SQL and cannot be evaluated on the client in this context.\nFix: Restructure the query or call AsEnumerable() before using client-evaluated expressions."
 
     let private unwrapQuote (expr: Expression) =
         match expr with

@@ -95,7 +95,7 @@ let predicateRefsAvailable (predicate: SqlExpr) (innerColumns: Set<string>) (der
 let isInnerPushdownSafe (innerSel: SqlSelect) : bool =
     match innerSel.Body with
     | SingleSelect innerCore ->
-        // R42E: provenance-backed source and projection check.
+        // Provenance-backed source and projection check.
         // Accepts BaseTable OR DerivedTable when all projections resolve to
         // base columns or simple derived column references (not aggregates,
         // not window functions, not opaque expressions).

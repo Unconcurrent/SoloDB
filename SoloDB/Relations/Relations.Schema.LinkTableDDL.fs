@@ -12,8 +12,8 @@ open RelationsTypes
 open RelationsSchemaBuilder
 open RelationsSchemaValidator
 
-let private br05Message (ownerTable: string) (propertyName: string) (phase: string) =
-    $"Error: relation metadata missing for '{ownerTable}.{propertyName}'.\nReason: prior relation evidence exists and auto-heal is not safe (phase={phase}).\nFix: rebuild/repair relation metadata and link-table state before retrying."
+let private metadataResurrectionMessage (ownerTable: string) (propertyName: string) (_phase: string) =
+    $"Error: Relation metadata not found for property {propertyName} on collection {ownerTable}.\nReason: Existing relation evidence was found but automatic recovery is not safe.\nFix: Rebuild or repair relation metadata and link-table state before retrying."
 
 let private hasCatalogRow (connection: SqliteConnection) (ownerTable: string) (propertyName: string) =
     ensureRelationCatalogTable connection
@@ -54,7 +54,7 @@ let internal ensureMetadataNotResurrected (tx: RelationTxContext) (descriptor: R
             // If another (OwnerCollection, PropertyName) pair already owns this link table,
             // the current property is being bootstrapped for the first time — not resurrected.
             if not (linkTableOwnedByOtherProperty tx.Connection descriptor) then
-                raise (InvalidOperationException(br05Message descriptor.OwnerTable descriptor.Property.Name "build"))
+                raise (InvalidOperationException(metadataResurrectionMessage descriptor.OwnerTable descriptor.Property.Name "build"))
 
 /// Detects evolution conflicts between the current descriptor and the stored catalog row.
 /// Raises on target-type mismatch or Many→Single kind narrowing.

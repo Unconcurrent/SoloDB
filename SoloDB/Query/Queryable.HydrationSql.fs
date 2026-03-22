@@ -189,7 +189,7 @@ module internal HydrationSqlBuilder =
                         ()
                     | MissingReadMetadataState.PoisonedWithEvidence ->
                         raise (InvalidOperationException(
-                            $"Error: relation metadata missing for '{ownerTable}.{prop.Name}'.\nReason: prior relation evidence exists and read-time auto-heal is not safe.\nFix: rebuild/repair relation metadata and link-table state before retrying."))
+                            $"Error: Relation metadata not found for property {prop.Name} on collection {ownerTable}.\nReason: Existing relation evidence was found but automatic recovery is not safe.\nFix: Ensure the collection is initialized with Insert or GetCollection before querying, or call AsEnumerable() before accessing this relation."))
 
         if args.Count = 0 then None
         else Some (SqlExpr.FunctionCall("json_object", args |> Seq.toList))

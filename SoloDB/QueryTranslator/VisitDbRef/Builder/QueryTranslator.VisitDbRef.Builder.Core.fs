@@ -17,12 +17,12 @@ module internal DBRefManyBuilderCore =
     let dbRefManyLinkTable (ctx: QueryContext) (ownerTable: string) (propName: string) =
         match ctx.TryResolveRelationLink(ownerTable, propName) with
         | Some mapped when not (String.IsNullOrWhiteSpace mapped) -> formatName mapped
-        | _ -> raise (NotSupportedException(sprintf "Error: relation metadata missing for '%s.%s'.\nReason: The property '%s' on '%s' does not have relation metadata.\nFix: Ensure the property is a DBRef/DBRefMany and the collection is initialized, or call AsEnumerable() before accessing nested relations." propName ownerTable propName ownerTable))
+        | _ -> raise (NotSupportedException(sprintf "Error: Relation metadata not found for property %s on collection %s.\nReason: The property does not have relation metadata.\nFix: Ensure the collection is initialized with Insert or GetCollection before querying, or call AsEnumerable() before accessing this relation." propName ownerTable))
 
     let dbRefManyOwnerUsesSource (ctx: QueryContext) (ownerTable: string) (propName: string) =
         match ctx.TryResolveRelationOwnerUsesSource(ownerTable, propName) with
         | Some value -> value
-        | None -> raise (NotSupportedException(sprintf "Error: relation metadata missing for '%s.%s'.\nReason: The property '%s' on '%s' does not have relation metadata.\nFix: Ensure the property is a DBRef/DBRefMany and the collection is initialized, or call AsEnumerable() before accessing nested relations." propName ownerTable propName ownerTable))
+        | None -> raise (NotSupportedException(sprintf "Error: Relation metadata not found for property %s on collection %s.\nReason: The property does not have relation metadata.\nFix: Ensure the collection is initialized with Insert or GetCollection before querying, or call AsEnumerable() before accessing this relation." propName ownerTable))
 
     let resolveTargetTable (ctx: QueryContext) (ownerCollection: string) (propName: string) (targetType: Type) =
         let defaultTable = formatName targetType.Name

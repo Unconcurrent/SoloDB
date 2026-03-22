@@ -154,13 +154,13 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                     | Some mapped when not (System.String.IsNullOrWhiteSpace mapped) -> formatName mapped
                                     | _ ->
                                         raise (InvalidOperationException(
-                                            sprintf "Error: relation metadata missing for '%s.%s'.\nReason: link table cannot be resolved.\nFix: repair relation metadata." tableName propName))
+                                            sprintf "Error: Relation metadata not found for property %s on collection %s.\nReason: The link table for this relation could not be resolved.\nFix: Ensure the collection is initialized with Insert or GetCollection before querying, or call AsEnumerable() before accessing this relation." propName tableName))
                                 let ownerUsesSource =
                                     match sourceCtx.TryResolveRelationOwnerUsesSource(tableName, propName) with
                                     | Some v -> v
                                     | None ->
                                         raise (InvalidOperationException(
-                                            sprintf "Error: relation metadata missing for '%s.%s'.\nReason: owner-source direction cannot be resolved." tableName propName))
+                                            sprintf "Error: Relation metadata not found for property %s on collection %s.\nReason: The owner-source direction for this relation could not be determined.\nFix: Ensure the collection is initialized with Insert or GetCollection before querying, or call AsEnumerable() before accessing this relation." propName tableName))
                                 let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
                                 let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
                                 let targetTable =

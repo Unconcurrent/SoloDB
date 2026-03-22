@@ -38,10 +38,9 @@ let internal withRelationSqliteWrap (phase: string) (operation: string) (fn: uni
         raise ex
     | :? SqliteException as ex ->
         let message =
-            $"phase={phase} operation={operation} message={relationSqlWrapKey}\n" +
-            "Error: relation SQL operation failed.\n" +
-            $"Reason: underlying SQLite error at relation boundary (sqliteErrorCode={ex.SqliteErrorCode}, sqliteExtendedErrorCode={ex.SqliteExtendedErrorCode}).\n" +
-            "Fix: check schema, relation metadata, link-table integrity, and constraints; then retry with valid state."
+            "Error: Relation SQL operation failed.\n" +
+            $"Reason: Underlying SQLite error (sqliteErrorCode={ex.SqliteErrorCode}, sqliteExtendedErrorCode={ex.SqliteExtendedErrorCode}).\n" +
+            "Fix: Check schema, relation metadata, link-table integrity, and constraints; then retry with valid state."
         raise (InvalidOperationException(message, ex))
 
 let resetDbRefManyTrackers (owner: obj) (committedLinkedIdsByProperty: IReadOnlyDictionary<string, int64 array>) =

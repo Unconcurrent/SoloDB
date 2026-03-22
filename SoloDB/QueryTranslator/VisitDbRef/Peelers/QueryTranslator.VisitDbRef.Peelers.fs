@@ -165,7 +165,7 @@ module internal QueryTranslatorVisitDbRefPeelers =
                 visitExpr lie.NewExpression
                 || (lie.Initializers |> Seq.exists (fun init -> init.Arguments |> Seq.exists visitExpr))
             | :? LambdaExpression as innerLambda ->
-                // Nested lambdas are out of scope for this cycle.
+                // Nested lambdas are out of scope here.
                 not (Object.ReferenceEquals(innerLambda, lambda)) || visitExpr innerLambda.Body
             | _ -> false
         visitExpr lambda.Body
@@ -179,14 +179,14 @@ module internal QueryTranslatorVisitDbRefPeelers =
         | Some mapped when not (String.IsNullOrWhiteSpace mapped) -> formatName mapped
         | _ ->
             raise (InvalidOperationException(
-                $"Error: relation metadata missing for '{ownerTable}.{propName}'.\nReason: link table cannot be resolved without relation metadata (phase=translation).\nFix: repair/rebuild relation metadata before executing this query."))
+                $"Error: Relation metadata not found for property {propName} on collection {ownerTable}.\nReason: The link table for this relation could not be resolved.\nFix: Ensure the collection is initialized with Insert or GetCollection before querying, or call AsEnumerable() before accessing this relation."))
 
     let internal dbRefManyOwnerUsesSource (ctx: QueryContext) (ownerTable: string) (propName: string) =
         match ctx.TryResolveRelationOwnerUsesSource(ownerTable, propName) with
         | Some value -> value
         | None ->
             raise (InvalidOperationException(
-                $"Error: relation metadata missing for '{ownerTable}.{propName}'.\nReason: owner-source direction cannot be resolved without relation metadata (phase=translation).\nFix: repair/rebuild relation metadata before executing this query."))
+                $"Error: Relation metadata not found for property {propName} on collection {ownerTable}.\nReason: The owner-source direction for this relation could not be determined.\nFix: Ensure the collection is initialized with Insert or GetCollection before querying, or call AsEnumerable() before accessing this relation."))
 
     type internal DBRefManyOwnerRef = {
         OwnerCollection: string
