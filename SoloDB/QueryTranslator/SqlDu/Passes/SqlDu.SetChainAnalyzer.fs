@@ -1,4 +1,4 @@
-module SoloDatabase.SetChainAnalyzer
+module internal SoloDatabase.SetChainAnalyzer
 
 open SqlDu.Engine.C1.Spec
 

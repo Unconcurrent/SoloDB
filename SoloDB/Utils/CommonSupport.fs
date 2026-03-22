@@ -15,7 +15,7 @@ open System.Runtime.CompilerServices
 // types without a parameterless constructor.
 #nowarn "0044"
 
-module Utils =
+module internal Utils =
     /// Maximum nesting depth for DBRef/DBRefMany relation traversal.
     /// Shared across translator guards, batch-load, hydration, and join chains.
     [<Literal>]

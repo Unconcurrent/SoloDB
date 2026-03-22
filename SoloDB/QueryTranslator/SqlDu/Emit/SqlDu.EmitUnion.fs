@@ -1,4 +1,4 @@
-module SoloDatabase.EmitUnion
+module internal SoloDatabase.EmitUnion
 
 /// Union emission is handled directly in EmitSelect.emitSelect via the
 /// UnionAllSelect(head, tail) branch of SelectBody.

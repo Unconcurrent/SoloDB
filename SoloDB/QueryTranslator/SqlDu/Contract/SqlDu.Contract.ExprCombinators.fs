@@ -1,7 +1,7 @@
 namespace SqlDu.Engine.C1.Spec
 
 [<AutoOpen>]
-module SqlExprCombinators =
+module internal SqlExprCombinators =
   type SqlExpr with
     static member fold (folder: 'State -> SqlExpr -> 'State) (state: 'State) (expr: SqlExpr) : 'State =
         let rec loop (acc: 'State) (node: SqlExpr) : 'State =

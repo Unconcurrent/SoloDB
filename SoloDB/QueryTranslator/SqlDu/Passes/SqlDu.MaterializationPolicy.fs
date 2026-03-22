@@ -1,4 +1,4 @@
-module SoloDatabase.MaterializationPolicy
+module internal SoloDatabase.MaterializationPolicy
 
 open SqlDu.Engine.C1.Spec
 

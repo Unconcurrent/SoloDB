@@ -1,4 +1,4 @@
-module SoloDatabase.EmitJson
+module internal SoloDatabase.EmitJson
 
 open SqlDu.Engine.C1.Spec
 

@@ -3,7 +3,7 @@ namespace SoloDatabase
 open SoloDatabase.Connections
 open FileStorageHelpers
 
-module FileStorageCopySurface =
+module internal FileStorageCopySurface =
     let copyFile (connection: Connection) fromPath toPath copyMetadata =
         connection.WithTransaction(fun db ->
             copyFileMustBeWithinTransaction db fromPath toPath false copyMetadata

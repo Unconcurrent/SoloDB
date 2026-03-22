@@ -1,4 +1,4 @@
-module SoloDatabase.EmitWindow
+module internal SoloDatabase.EmitWindow
 
 open SqlDu.Engine.C1.Spec
 

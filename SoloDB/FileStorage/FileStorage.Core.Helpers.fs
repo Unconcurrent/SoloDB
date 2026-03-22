@@ -10,7 +10,7 @@ open SoloDatabase.Types
 // NativePtr operations for efficient chunk-based file I/O
 #nowarn "9"
 
-module FileStorageCore =
+module internal FileStorageCore =
     /// <summary>
     /// Defines the chunk size for file storage, approximating a SQLite page size.
     /// </summary>

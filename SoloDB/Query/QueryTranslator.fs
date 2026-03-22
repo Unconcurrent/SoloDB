@@ -15,7 +15,7 @@ open SqlDu.Engine.C1.Spec
 /// Contains functions to translate .NET LINQ expression trees into SQLite SQL queries.
 /// All entry points route through the DU construction path (visitDu) + DU emission (SqlDuMinimalEmit).
 /// </summary>
-module QueryTranslator =
+module internal QueryTranslator =
     let private ensureDbRefHandlersInitialized () =
         let count = QueryTranslatorVisitDbRef.handlerCount
         if count < 3 then

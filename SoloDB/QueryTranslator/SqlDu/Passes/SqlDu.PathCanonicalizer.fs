@@ -1,4 +1,4 @@
-module SoloDatabase.PathCanonicalizer
+module internal SoloDatabase.PathCanonicalizer
 
 open SqlDu.Engine.C1.Spec
 

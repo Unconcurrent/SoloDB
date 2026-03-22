@@ -1,4 +1,4 @@
-module SoloDatabase.EmitStatement
+module internal SoloDatabase.EmitStatement
 
 open SqlDu.Engine.C1.Spec
 

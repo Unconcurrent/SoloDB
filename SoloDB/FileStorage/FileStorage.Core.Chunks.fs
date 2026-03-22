@@ -12,7 +12,7 @@ open FileStorageCore
 // NativePtr operations for efficient chunk-based file I/O
 #nowarn "9"
 
-module FileStorageCoreChunks =
+module internal FileStorageCoreChunks =
     let internal recursiveListAllEntriesInDirectory (db: SqliteConnection) (directoryFullPath: string) =
         let directoryFullPath = [|directoryFullPath|] |> combinePathArr
         let queryCommand = """

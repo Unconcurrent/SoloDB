@@ -1,4 +1,4 @@
-module SoloDatabase.EmitSelect
+module internal SoloDatabase.EmitSelect
 
 open SqlDu.Engine.C1.Spec
 

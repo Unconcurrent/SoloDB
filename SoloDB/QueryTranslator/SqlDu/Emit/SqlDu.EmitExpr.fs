@@ -1,4 +1,4 @@
-module SoloDatabase.EmitExpr
+module internal SoloDatabase.EmitExpr
 
 open SqlDu.Engine.C1.Spec
 
