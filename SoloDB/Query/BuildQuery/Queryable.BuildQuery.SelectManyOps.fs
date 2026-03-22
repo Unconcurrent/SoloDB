@@ -19,7 +19,7 @@ open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseTypes
 open SqlDu.Engine.C1.Spec
 
-module internal QueryableBuildQueryPartBSelectMany =
+module internal QueryableBuildQuerySelectManyOps =
     open QueryableHelperState
     open QueryableHelperJoin
     open QueryableHelperPreprocess

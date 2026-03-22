@@ -21,7 +21,7 @@ open SqlDu.Engine.C1.Spec
 
 /// GroupBy deferred emission + GroupBy+Select fusion for root-level queries.
 /// Separated from SequenceOps to keep files under 400 lines.
-module internal QueryableBuildQueryPartAGroupBy =
+module internal QueryableBuildQueryGroupByOps =
     open QueryableHelperState
     open QueryableHelperJoin
     open QueryableHelperPreprocess

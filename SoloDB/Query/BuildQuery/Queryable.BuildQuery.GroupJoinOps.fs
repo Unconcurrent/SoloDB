@@ -10,12 +10,12 @@ open SoloDatabase
 open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseTypes
 open SqlDu.Engine.C1.Spec
-open SoloDatabase.QueryableBuildQueryPartBGroupJoinChain
-open SoloDatabase.QueryableBuildQueryPartBGroupJoinElements
+open SoloDatabase.QueryableBuildQueryGroupJoinChain
+open SoloDatabase.QueryableBuildQueryGroupJoinElements
 open SoloDatabase.DBRefManyDescriptor
 
 /// GroupJoin handler — orchestration only. Chain lowering and element handling live in dedicated files.
-module internal QueryableBuildQueryPartBGroupJoin =
+module internal QueryableBuildQueryGroupJoinOps =
     open QueryableHelperState
     open QueryableHelperJoin
     open QueryableHelperPreprocess

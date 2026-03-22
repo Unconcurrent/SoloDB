@@ -19,7 +19,7 @@ open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseTypes
 open SqlDu.Engine.C1.Spec
 
-module internal QueryableBuildQueryPartA =
+module internal QueryableBuildQuerySequenceOps =
     open QueryableHelperState
     open QueryableHelperJoin
     open QueryableHelperPreprocess
@@ -326,7 +326,7 @@ module internal QueryableBuildQueryPartA =
 
                 | SupportedLinqMethods.GroupBy ->
                     // GroupBy is intercepted in BuildQuery.Main.fs for look-ahead fusion.
-                    raise (InvalidOperationException("GroupBy should be intercepted in BuildQuery.Main.fs, not dispatched to PartA."))
+                    raise (InvalidOperationException("GroupBy should be intercepted in BuildQuery.Main.fs, not dispatched to SequenceOps."))
                 | SupportedLinqMethods.TakeWhile
                 | SupportedLinqMethods.SkipWhile ->
                     let isTakeWhile = (m.Value = SupportedLinqMethods.TakeWhile)

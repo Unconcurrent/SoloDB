@@ -13,7 +13,7 @@ open SqlDu.Engine.C1.Spec
 open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.DBRefManyExtractorHelpers
 open SoloDatabase.SharedDescriptorExtract
-module internal QueryableBuildQueryPartBGroupJoinChain =
+module internal QueryableBuildQueryGroupJoinChain =
     open QueryableHelperJoin
     open QueryableHelperState
     open QueryableHelperPreprocess
@@ -1150,4 +1150,3 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
               Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L))
               Offset = None }
         SqlExpr.Exists { Ctes = []; Body = SingleSelect containsCore }
-

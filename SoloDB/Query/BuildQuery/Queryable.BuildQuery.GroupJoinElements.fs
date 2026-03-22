@@ -6,10 +6,10 @@ open System.Threading
 open Utils
 open SoloDatabase
 open SqlDu.Engine.C1.Spec
-open SoloDatabase.QueryableBuildQueryPartBGroupJoinChain
+open SoloDatabase.QueryableBuildQueryGroupJoinChain
 open SoloDatabase.DBRefManyDescriptor
 
-module internal QueryableBuildQueryPartBGroupJoinElements =
+module internal QueryableBuildQueryGroupJoinElements =
     open QueryableHelperBase
 
     let private defaultScalarExpr (targetType: Type) =

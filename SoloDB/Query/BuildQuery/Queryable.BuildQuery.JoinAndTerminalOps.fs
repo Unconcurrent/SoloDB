@@ -19,7 +19,7 @@ open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseTypes
 open SqlDu.Engine.C1.Spec
 
-module internal QueryableBuildQueryPartB =
+module internal QueryableBuildQueryJoinAndTerminalOps =
     open QueryableHelperState
     open QueryableHelperJoin
     open QueryableHelperPreprocess
@@ -54,7 +54,7 @@ module internal QueryableBuildQueryPartB =
 
 
                 | SupportedLinqMethods.SelectMany ->
-                    QueryableBuildQueryPartBSelectMany.applySelectMany<'T>
+                    QueryableBuildQuerySelectManyOps.applySelectMany<'T>
                         sourceCtx tableName statements translateQueryFn m.Expressions m.OriginalMethod
 
                 | SupportedLinqMethods.Join ->
@@ -137,7 +137,7 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                         raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
                 | SupportedLinqMethods.GroupJoin ->
-                    QueryableBuildQueryPartBGroupJoin.applyGroupJoin<'T>
+                    QueryableBuildQueryGroupJoinOps.applyGroupJoin<'T>
                         sourceCtx tableName statements translateQueryFn m.Expressions
 
                 | SupportedLinqMethods.Single | SupportedLinqMethods.SingleOrDefault

@@ -25,9 +25,9 @@ module internal QueryableBuildQueryMain =
     open QueryableHelperPreprocess
     open QueryableLayerBuild
     open QueryableHelperBase
-    open QueryableBuildQueryPartA
-    open QueryableBuildQueryPartB
-    open QueryableBuildQueryPartC
+    open QueryableBuildQuerySequenceOps
+    open QueryableBuildQueryJoinAndTerminalOps
+    open QueryableBuildQuerySetAndTypeOps
     let rec internal buildQuery<'T> (translationStepCounter: int ref) (sourceCtx: QueryContext) (statements: SQLSubquery ResizeArray) (e: Expression) =
         let next = translationStepCounter.Value + 1
         translationStepCounter.Value <- next
@@ -119,7 +119,7 @@ module internal QueryableBuildQueryMain =
                         pendingGroupByExprs <- None
                         pendingGroupByHavingPreds <- []
                         pendingGroupByOrders <- []
-                        QueryableBuildQueryPartAGroupBy.applyGroupBySelect<'T>
+                        QueryableBuildQueryGroupByOps.applyGroupBySelect<'T>
                             sourceCtx tableName statements groupByExprs havingPreds groupOrders m.Expressions
                         pendingGroupByHandled <- true
                     | _ ->
@@ -129,7 +129,7 @@ module internal QueryableBuildQueryMain =
                         let groupOrders = pendingGroupByOrders
                         pendingGroupByHavingPreds <- []
                         pendingGroupByOrders <- []
-                        QueryableBuildQueryPartAGroupBy.flushGroupByAsJsonGroupArray<'T>
+                        QueryableBuildQueryGroupByOps.flushGroupByAsJsonGroupArray<'T>
                             sourceCtx tableName statements groupByExprs havingPreds groupOrders
 
                 if not pendingGroupByHandled then
@@ -155,7 +155,7 @@ module internal QueryableBuildQueryMain =
                     | SupportedLinqMethods.CountBy
                     | SupportedLinqMethods.TakeWhile
                     | SupportedLinqMethods.SkipWhile ->
-                        QueryableBuildQueryPartA.apply<'T>
+                        QueryableBuildQuerySequenceOps.apply<'T>
                             sourceCtx
                             tableName
                             statements
@@ -165,7 +165,7 @@ module internal QueryableBuildQueryMain =
                             installTerminalOrdering
                             m
                     | SupportedLinqMethods.GroupBy ->
-                        QueryableBuildQueryPartAGroupBy.applyGroupByKeyOnly<'T>
+                        QueryableBuildQueryGroupByOps.applyGroupByKeyOnly<'T>
                             sourceCtx tableName statements m.Expressions
                         pendingGroupByExprs <- Some m.Expressions
                     | SupportedLinqMethods.Count
@@ -182,7 +182,7 @@ module internal QueryableBuildQueryMain =
                     | SupportedLinqMethods.DefaultIfEmpty
                     | SupportedLinqMethods.Last
                     | SupportedLinqMethods.LastOrDefault ->
-                        QueryableBuildQueryPartB.apply<'T>
+                        QueryableBuildQueryJoinAndTerminalOps.apply<'T>
                             sourceCtx
                             tableName
                             statements
@@ -205,7 +205,7 @@ module internal QueryableBuildQueryMain =
                     | SupportedLinqMethods.ThenInclude
                     | SupportedLinqMethods.ThenExclude
                     | SupportedLinqMethods.Aggregate ->
-                        QueryableBuildQueryPartC.apply<'T>
+                        QueryableBuildQuerySetAndTypeOps.apply<'T>
                             sourceCtx
                             tableName
                             statements
@@ -222,7 +222,7 @@ module internal QueryableBuildQueryMain =
             pendingGroupByExprs <- None
             pendingGroupByHavingPreds <- []
             pendingGroupByOrders <- []
-            QueryableBuildQueryPartAGroupBy.flushGroupByAsJsonGroupArray<'T>
+            QueryableBuildQueryGroupByOps.flushGroupByAsJsonGroupArray<'T>
                 sourceCtx tableName statements groupByExprs havingPreds groupOrders
 
         match statements.[0] with
