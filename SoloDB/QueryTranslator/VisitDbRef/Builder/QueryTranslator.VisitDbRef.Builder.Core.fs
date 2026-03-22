@@ -362,6 +362,8 @@ module internal DBRefManyBuilderCore =
             else
                 effectiveTgtAlias, lnkAlias, innerCore, effectiveTargetTable
 
+        // TakeWhile with set-ops: handled at the Builder.fs dispatch level, not here.
+
         match desc.DefaultIfEmpty with
         | Some defaultValueExprOpt ->
             let defaultValueDu =

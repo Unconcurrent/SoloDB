@@ -136,6 +136,12 @@ module internal DBRefManyBuilder =
             DBRefManyBuilderSetOpTerminals.buildSetOpTerminalFromRowset nextAlias visitDu joinEdgesToClauses tryExtractLambdaExpression qb desc rowsetSel
 
         // TakeWhile/SkipWhile — delegated to BuildSpecial.
+        // Explicit reject: TakeWhile combined with set-ops is not supported in SQL translation.
+        if desc.TakeWhileInfo.IsSome && (desc.SetOp.IsSome || not desc.SetOps.IsEmpty) then
+            raise (NotSupportedException(
+                "Error: TakeWhile/SkipWhile combined with set operations (UnionBy/IntersectBy/ExceptBy/DistinctBy) is not supported in SQL translation.\n" +
+                "Reason: TakeWhile uses window-function boundaries that cannot compose with set-operation deduplication in a single SQL query.\n" +
+                "Fix: Call AsEnumerable() before the set operation to evaluate the TakeWhile boundary client-side."))
         match desc.TakeWhileInfo with
         | Some (twPredLambda, isTakeWhile) when desc.GroupByKey.IsNone ->
             DBRefManyBuildSpecial.tryBuildTakeWhile qb desc buildCorrelatedCore mkSubCore nextAlias tryGetRelationOrderByForTakeWhile ownerRef twPredLambda isTakeWhile

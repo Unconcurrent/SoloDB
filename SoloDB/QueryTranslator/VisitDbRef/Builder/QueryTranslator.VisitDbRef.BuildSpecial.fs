@@ -150,7 +150,7 @@ module internal DBRefManyBuildSpecial =
                 (Some cfFilter)
         { Ctes = []; Body = SingleSelect outerCore }
 
-    let private applyPostBoundWhileEntityRowset
+    let internal applyPostBoundWhileEntityRowset
         (qb: QueryBuilder)
         (nextAlias: string -> string)
         (targetTable: string)
