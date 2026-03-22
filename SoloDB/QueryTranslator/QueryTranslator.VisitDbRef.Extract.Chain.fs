@@ -108,7 +108,15 @@ module internal DBRefManyExtractChain =
                     src
                 | ValueNone -> source
             | _ -> source
-        | _ -> source
+        // All non-Count/LongCount terminals pass through unchanged.
+        | (Terminal.Any _, _) | (Terminal.All _, _) | (Terminal.Sum _, _) | (Terminal.SumProjected, _)
+        | (Terminal.Min _, _) | (Terminal.MinProjected, _) | (Terminal.Max _, _) | (Terminal.MaxProjected, _)
+        | (Terminal.Average _, _) | (Terminal.AverageProjected, _) | (Terminal.Select _, _) | (Terminal.Contains _, _)
+        | (Terminal.Exists, _) | (Terminal.First _, _) | (Terminal.FirstOrDefault _, _)
+        | (Terminal.Last _, _) | (Terminal.LastOrDefault _, _) | (Terminal.Single _, _) | (Terminal.SingleOrDefault _, _)
+        | (Terminal.MinBy _, _) | (Terminal.MaxBy _, _) | (Terminal.DistinctBy _, _)
+        | (Terminal.ElementAt _, _) | (Terminal.ElementAtOrDefault _, _) | (Terminal.CountBy _, _) -> source
+        | (Terminal.Count, _) | (Terminal.LongCount, _) -> source
 
     let placeCountPredicate (state: ExtractionState) (countPredicate: Expression option) =
         match countPredicate with

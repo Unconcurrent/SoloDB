@@ -223,7 +223,8 @@ module internal QueryableHelperPreprocess =
         | s when s.Contains("INNER") -> JoinKind.Inner
         | s when s.Contains("CROSS") ->
             raise (InvalidOperationException("CROSS JOIN must use the CrossJoin DU constructor directly."))
-        | _ -> JoinKind.Left
+        | other ->
+            raise (NotSupportedException(sprintf "Error: Unrecognized join kind '%s'.\nFix: Use LEFT, INNER, or CROSS join." other))
 
     /// Build materialized Value projection (jsonb_set with JOIN data) for relation materialization.
     let internal buildMaterializedValueExpr (ctx: QueryContext) (effectiveTableName: string) (valueColumnExpr: SqlExpr) =

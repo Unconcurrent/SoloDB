@@ -37,7 +37,15 @@ module internal DBRefManyBuilder =
                 | Terminal.First(Some pred) | Terminal.FirstOrDefault(Some pred)
                 | Terminal.Last(Some pred) | Terminal.LastOrDefault(Some pred)
                 | Terminal.Single(Some pred) | Terminal.SingleOrDefault(Some pred) -> peelerDepth pred
-                | _ -> 0
+                // Key/index selector terminals — check their arguments for nested DBRefMany depth.
+                | Terminal.MinBy keySel | Terminal.MaxBy keySel | Terminal.DistinctBy keySel | Terminal.CountBy keySel -> peelerDepth keySel
+                | Terminal.ElementAt indexExpr | Terminal.ElementAtOrDefault indexExpr -> peelerDepth indexExpr
+                // Terminals without expression arguments have depth 0.
+                | Terminal.Any None | Terminal.Count | Terminal.LongCount | Terminal.Exists
+                | Terminal.SumProjected | Terminal.MinProjected | Terminal.MaxProjected | Terminal.AverageProjected
+                | Terminal.Select _ | Terminal.First None | Terminal.FirstOrDefault None
+                | Terminal.Last None | Terminal.LastOrDefault None
+                | Terminal.Single None | Terminal.SingleOrDefault None -> 0
             (predDepths @ [projDepth; termDepth]) |> List.max
         if maxExprDepth >= maxRelationDepth then
             raise (NotSupportedException(nestedDbRefManyNotSupportedMessage))
@@ -131,13 +139,19 @@ module internal DBRefManyBuilder =
         match desc.TakeWhileInfo with
         | Some (twPredLambda, isTakeWhile) when desc.SelectProjection.IsNone && desc.GroupByKey.IsNone ->
             DBRefManyBuildSpecial.tryBuildTakeWhile qb desc buildCorrelatedCore mkSubCore nextAlias tryGetRelationOrderByForTakeWhile ownerRef twPredLambda isTakeWhile
-        | _ ->
+        | Some _ | None ->
 
         // CountBy — delegated to BuildSpecial.
         match desc.Terminal with
         | Terminal.CountBy keySel ->
             DBRefManyBuildSpecial.tryBuildCountBy qb desc buildCorrelatedCore mkSubCore nextAlias ownerRef keySel
-        | _ ->
+        | Terminal.Any _ | Terminal.All _ | Terminal.Count | Terminal.LongCount
+        | Terminal.Sum _ | Terminal.SumProjected | Terminal.Min _ | Terminal.MinProjected
+        | Terminal.Max _ | Terminal.MaxProjected | Terminal.Average _ | Terminal.AverageProjected
+        | Terminal.Select _ | Terminal.Contains _ | Terminal.Exists
+        | Terminal.First _ | Terminal.FirstOrDefault _ | Terminal.Last _ | Terminal.LastOrDefault _
+        | Terminal.Single _ | Terminal.SingleOrDefault _ | Terminal.MinBy _ | Terminal.MaxBy _
+        | Terminal.DistinctBy _ | Terminal.ElementAt _ | Terminal.ElementAtOrDefault _ ->
 
         // GroupBy terminals — delegated to BuildSpecial.
         match desc.GroupByKey with
@@ -155,12 +169,20 @@ module internal DBRefManyBuilder =
             buildSetOpTerminalFromRowset (buildByFilterEntityRowset qb desc ownerRef keySel rightKeys true)
         | Some (SetOperation.UnionBy(rightSource, keySel)) ->
             buildSetOpTerminalFromRowset (buildUnionByEntityRowset qb desc ownerRef rightSource keySel)
-        | Some _ ->
+        | Some (SetOperation.Intersect _ | SetOperation.Except _ | SetOperation.Union _ | SetOperation.Concat _) ->
             ValueNone
         | None ->
 
         // Distinct.Count — null-safe two-layer: inner SELECT DISTINCT, outer COUNT(*).
-        if desc.Distinct && (match desc.Terminal with Terminal.Count | Terminal.LongCount -> true | _ -> false) then
+        if desc.Distinct && (match desc.Terminal with
+                             | Terminal.Count | Terminal.LongCount -> true
+                             | Terminal.Any _ | Terminal.All _ | Terminal.Sum _ | Terminal.SumProjected
+                             | Terminal.Min _ | Terminal.MinProjected | Terminal.Max _ | Terminal.MaxProjected
+                             | Terminal.Average _ | Terminal.AverageProjected | Terminal.Select _ | Terminal.Contains _
+                             | Terminal.Exists | Terminal.First _ | Terminal.FirstOrDefault _
+                             | Terminal.Last _ | Terminal.LastOrDefault _ | Terminal.Single _ | Terminal.SingleOrDefault _
+                             | Terminal.MinBy _ | Terminal.MaxBy _ | Terminal.DistinctBy _
+                             | Terminal.ElementAt _ | Terminal.ElementAtOrDefault _ | Terminal.CountBy _ -> false) then
             match desc.SelectProjection with
             | Some _ ->
                 let distinctSel = buildProjectedRowset qb desc ownerRef

@@ -162,7 +162,10 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                     let limit =
                         match m.Value with
                         | SupportedLinqMethods.Single | SupportedLinqMethods.SingleOrDefault -> 2
-                        | SupportedLinqMethods.ElementAt | SupportedLinqMethods.ElementAtOrDefault -> 1
+                        | SupportedLinqMethods.ElementAt | SupportedLinqMethods.ElementAtOrDefault
+                        | SupportedLinqMethods.First | SupportedLinqMethods.FirstOrDefault
+                        | SupportedLinqMethods.Last | SupportedLinqMethods.LastOrDefault -> 1
+                        // Unreachable: outer dispatch only routes element terminals to this block.
                         | _ -> 1
 
                     match m.Value with

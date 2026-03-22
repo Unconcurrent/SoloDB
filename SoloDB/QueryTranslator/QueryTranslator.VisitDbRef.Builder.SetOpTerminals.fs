@@ -240,10 +240,18 @@ module internal DBRefManyBuilderSetOpTerminals =
             ValueSome(buildExistsFromRowset filteredSel)
         | Terminal.Count
         | Terminal.LongCount -> ValueSome(buildCountFromRowset nextAlias rowsetSel)
-        | Terminal.First pred
+        | Terminal.First pred ->
+            let filteredSel = buildSetOpFilteredRowset nextAlias visitDu joinEdgesToClauses tryExtractLambdaExpression qb rowsetSel pred
+            ValueSome(buildFirstLikeFromRowset nextAlias filteredSel false)
         | Terminal.FirstOrDefault pred ->
             let filteredSel = buildSetOpFilteredRowset nextAlias visitDu joinEdgesToClauses tryExtractLambdaExpression qb rowsetSel pred
-            ValueSome(buildFirstLikeFromRowset nextAlias filteredSel (match desc.Terminal with | Terminal.FirstOrDefault _ -> true | _ -> false))
+            ValueSome(buildFirstLikeFromRowset nextAlias filteredSel true)
         | Terminal.ElementAt indexExpr -> ValueSome(buildElementAtFromRowset nextAlias visitDu qb rowsetSel indexExpr false)
         | Terminal.ElementAtOrDefault indexExpr -> ValueSome(buildElementAtFromRowset nextAlias visitDu qb rowsetSel indexExpr true)
-        | _ -> ValueNone
+        // Terminals not handled by set-op path — fall through to main builder.
+        | Terminal.All _ | Terminal.Sum _ | Terminal.SumProjected
+        | Terminal.Min _ | Terminal.MinProjected | Terminal.Max _ | Terminal.MaxProjected
+        | Terminal.Average _ | Terminal.AverageProjected | Terminal.Contains _
+        | Terminal.Last _ | Terminal.LastOrDefault _
+        | Terminal.Single _ | Terminal.SingleOrDefault _
+        | Terminal.MinBy _ | Terminal.MaxBy _ | Terminal.CountBy _ -> ValueNone
