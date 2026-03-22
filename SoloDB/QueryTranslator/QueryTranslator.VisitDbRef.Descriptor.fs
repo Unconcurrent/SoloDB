@@ -109,4 +109,7 @@ module internal DBRefManyDescriptor =
         DefaultIfEmpty: Expression option option
         /// DefaultIfEmpty on projected rowset (after Select projection).
         PostSelectDefaultIfEmpty: Expression option option
+        /// SelectMany inner lambda for multi-hop DBRefMany flattening.
+        /// When present, buildCorrelatedCore emits a two-hop JOIN (owner→link1→target1→link2→target2).
+        SelectManyInnerLambda: LambdaExpression option
     }

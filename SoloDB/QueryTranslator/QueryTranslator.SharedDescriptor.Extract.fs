@@ -45,6 +45,7 @@ module internal SharedDescriptorExtract =
             mutable GroupByHaving: Expression option
             mutable DefaultIfEmpty: Expression option option
             mutable PostSelectDefaultIfEmpty: Expression option option
+            mutable SelectManyLambda: LambdaExpression option
         }
 
     let mkIdentityLambdaForSequence (expr: Expression) =
@@ -115,6 +116,7 @@ module internal SharedDescriptorExtract =
             GroupByHaving = None
             DefaultIfEmpty = None
             PostSelectDefaultIfEmpty = None
+            SelectManyLambda = None
         }
 
     let private flushBoundary (state: ExtractionState) =
@@ -410,6 +412,42 @@ module internal SharedDescriptorExtract =
                 walkChain config state src
 
             | "ToList" | "ToArray" ->
+                walkChain config state src
+
+            | "SelectMany" ->
+                // Extract the inner lambda for multi-hop DBRefMany flattening.
+                // Only handle the simple case: one collection selector, no result selector.
+                match arg with
+                | Some selectorExpr ->
+                    match tryExtractLambdaExpression selectorExpr with
+                    | ValueSome lambda when state.SelectManyLambda.IsNone ->
+                        state.SelectManyLambda <- Some lambda
+                        // Extract inner Select projection so set-op/terminal builders project the right value.
+                        if state.SelectProjection.IsNone then
+                            let rec findInnerSelect (e: Expression) =
+                                let e = unwrapConvert e
+                                match e with
+                                | :? MethodCallExpression as imc when imc.Method.Name = "Select" ->
+                                    let iarg =
+                                        if not (isNull imc.Object) then
+                                            if imc.Arguments.Count >= 1 then Some imc.Arguments.[0] else None
+                                        elif imc.Arguments.Count >= 2 then Some imc.Arguments.[1]
+                                        else None
+                                    match iarg with
+                                    | Some proj -> tryExtractLambdaExpression proj
+                                    | None -> ValueNone
+                                | :? MethodCallExpression as imc ->
+                                    let isrc =
+                                        if not (isNull imc.Object) then imc.Object
+                                        elif imc.Arguments.Count > 0 then imc.Arguments.[0]
+                                        else null
+                                    if isNull isrc then ValueNone else findInnerSelect isrc
+                                | _ -> ValueNone
+                            match findInnerSelect lambda.Body with
+                            | ValueSome sel -> state.SelectProjection <- Some sel
+                            | ValueNone -> ()
+                    | _ -> ()
+                | None -> ()
                 walkChain config state src
 
             | "DefaultIfEmpty" ->

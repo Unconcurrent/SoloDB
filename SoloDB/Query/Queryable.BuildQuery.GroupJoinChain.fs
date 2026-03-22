@@ -289,6 +289,7 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
                             GroupByHavingPredicate = state.GroupByHaving
                             DefaultIfEmpty = state.DefaultIfEmpty
                             PostSelectDefaultIfEmpty = state.PostSelectDefaultIfEmpty
+                            SelectManyInnerLambda = None
                         }
                     match unwrapConvert innerSource with
                     | :? ParameterExpression as p when Object.ReferenceEquals(p, rt.GroupParam) ->
@@ -1015,7 +1016,8 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
               GroupByKey = None; Distinct = chain.Distinct
               SelectProjection = chain.SelectProjection; SetOp = None; SetOps = []
               Terminal = Terminal.Count; GroupByHavingPredicate = None
-              DefaultIfEmpty = chain.DefaultIfEmpty; PostSelectDefaultIfEmpty = None }
+              DefaultIfEmpty = chain.DefaultIfEmpty; PostSelectDefaultIfEmpty = None
+              SelectManyInnerLambda = None }
         buildGroupChainRowsetQ rt qdesc
 
     let buildGroupChainCollection (rt: GroupJoinRuntime) (chain: GroupJoinGroupChainDescriptor) =

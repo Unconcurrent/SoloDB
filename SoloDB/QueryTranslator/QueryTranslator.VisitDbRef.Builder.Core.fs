@@ -17,12 +17,12 @@ module internal DBRefManyBuilderCore =
     let dbRefManyLinkTable (ctx: QueryContext) (ownerTable: string) (propName: string) =
         match ctx.TryResolveRelationLink(ownerTable, propName) with
         | Some mapped when not (String.IsNullOrWhiteSpace mapped) -> formatName mapped
-        | _ -> raise (InvalidOperationException(sprintf "Error: relation metadata missing for '%s.%s'." ownerTable propName))
+        | _ -> raise (NotSupportedException(sprintf "Error: relation metadata missing for '%s.%s'.\nReason: The property '%s' on '%s' does not have relation metadata.\nFix: Ensure the property is a DBRef/DBRefMany and the collection is initialized, or call AsEnumerable() before accessing nested relations." propName ownerTable propName ownerTable))
 
     let dbRefManyOwnerUsesSource (ctx: QueryContext) (ownerTable: string) (propName: string) =
         match ctx.TryResolveRelationOwnerUsesSource(ownerTable, propName) with
         | Some value -> value
-        | None -> raise (InvalidOperationException(sprintf "Error: relation metadata missing for '%s.%s'." ownerTable propName))
+        | None -> raise (NotSupportedException(sprintf "Error: relation metadata missing for '%s.%s'.\nReason: The property '%s' on '%s' does not have relation metadata.\nFix: Ensure the property is a DBRef/DBRefMany and the collection is initialized, or call AsEnumerable() before accessing nested relations." propName ownerTable propName ownerTable))
 
     let resolveTargetTable (ctx: QueryContext) (ownerCollection: string) (propName: string) (targetType: Type) =
         let defaultTable = formatName targetType.Name
@@ -151,6 +151,68 @@ module internal DBRefManyBuilderCore =
             | None -> None
         limitDu, offsetDu
 
+    /// Walk a SelectMany inner lambda body to find the DBRefMany property and chain operators.
+    /// Returns (dbRefManyMemberExpr, innerOfTypeName, innerWherePredicates, innerSelectProjection).
+    let private parseSelectManyInnerLambda (lambda: LambdaExpression) =
+        let rec unwrap (e: Expression) =
+            match e with
+            | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert || ue.NodeType = ExpressionType.ConvertChecked -> unwrap ue.Operand
+            | _ -> e
+
+        // Walk the chain to collect operators and find the DBRefMany root.
+        let mutable innerOfType: string option = None
+        // Cast is rejected (returns None) — no innerCastType needed.
+        let innerWheres = ResizeArray<Expression>()
+        let mutable innerSelect: LambdaExpression option = None
+        let rec walk (e: Expression) : MemberExpression option =
+            let e = unwrap e
+            match e with
+            | :? MemberExpression as me when isDBRefManyType me.Type ->
+                Some me
+            | :? MethodCallExpression as mc ->
+                let src =
+                    if not (isNull mc.Object) then mc.Object
+                    elif mc.Arguments.Count > 0 then mc.Arguments.[0]
+                    else null
+                let arg =
+                    if not (isNull mc.Object) then
+                        if mc.Arguments.Count >= 1 then Some mc.Arguments.[0] else None
+                    elif mc.Arguments.Count >= 2 then Some mc.Arguments.[1]
+                    else None
+                match mc.Method.Name with
+                | "Where" ->
+                    match arg with Some pred -> innerWheres.Add(pred) | None -> ()
+                    walk src
+                | "Select" ->
+                    match arg with
+                    | Some proj ->
+                        match tryExtractLambdaExpression proj with
+                        | ValueSome l -> innerSelect <- Some l
+                        | ValueNone -> ()
+                    | None -> ()
+                    walk src
+                | "OfType" ->
+                    let genericArgs = mc.Method.GetGenericArguments()
+                    if genericArgs.Length = 1 then
+                        match typeToName genericArgs.[0] with
+                        | Some tn -> innerOfType <- Some tn
+                        | None -> ()
+                    walk src
+                | "Cast" ->
+                    // Reject: Cast has throw-on-mismatch semantics that cannot be replicated in SQL.
+                    // Users should use OfType (which filters) instead.
+                    None
+                | "ToList" | "ToArray" ->
+                    walk src
+                | _ ->
+                    // Fail closed: unrecognized inner chain operator — do not silently strip.
+                    None
+            | _ -> None
+
+        match walk lambda.Body with
+        | Some me -> Some (me, innerOfType, innerWheres |> Seq.toList, innerSelect)
+        | None -> None
+
     /// Build the correlated subquery core from a descriptor.
     /// Returns (tgtAlias, lnkAlias, core, targetTable) with JOIN + WHERE + ORDER BY + LIMIT/OFFSET.
     let buildCorrelatedCore
@@ -173,12 +235,83 @@ module internal DBRefManyBuilderCore =
         let tgtAlias = nextAlias "_tgt"
         let lnkAlias = nextAlias "_lnk"
 
+        // Two-hop SelectMany: owner → link1 → target1 → link2 → target2.
+        // The inner lambda tells us the second hop's DBRefMany property + chain ops.
+        let hop2Joins, hop2Preds, effectiveTgtAlias, effectiveTargetTable =
+            match desc.SelectManyInnerLambda with
+            | Some innerLambda ->
+                match parseSelectManyInnerLambda innerLambda with
+                | Some (innerMemberExpr, innerOfType, innerWheres, _innerSelect) ->
+                    let innerPropName = innerMemberExpr.Member.Name
+                    // Target1 is the intermediate table (e.g., Books). Use it as the owner for hop2.
+                    let hop1TargetTable = targetTable
+                    let hop1TargetType = targetType
+                    let hop1TargetCollection =
+                        ctx.ResolveCollectionForType(typeIdentityKey hop1TargetType, hop1TargetTable.Trim('"'))
+                    let link2Table = dbRefManyLinkTable ctx hop1TargetCollection innerPropName
+                    let owner2UsesSource = dbRefManyOwnerUsesSource ctx hop1TargetCollection innerPropName
+                    let owner2Column = if owner2UsesSource then "SourceId" else "TargetId"
+                    let target2Column = if owner2UsesSource then "TargetId" else "SourceId"
+                    let innerTargetType = innerMemberExpr.Type.GetGenericArguments().[0]
+                    let target2Table = resolveTargetTable ctx hop1TargetCollection innerPropName innerTargetType
+                    let tgt2Alias = nextAlias "_tgt2"
+                    let lnk2Alias = nextAlias "_lnk2"
+
+                    // link2 joins to target1 (hop1 target)
+                    let lnk2JoinOn =
+                        SqlExpr.Binary(
+                            SqlExpr.Column(Some lnk2Alias, owner2Column),
+                            BinaryOperator.Eq,
+                            SqlExpr.Column(Some tgtAlias, "Id"))
+                    // target2 joins to link2
+                    let tgt2JoinOn =
+                        SqlExpr.Binary(
+                            SqlExpr.Column(Some tgt2Alias, "Id"),
+                            BinaryOperator.Eq,
+                            SqlExpr.Column(Some lnk2Alias, target2Column))
+
+                    // Inner chain predicates: OfType + Where on target2
+                    let innerTypePred =
+                        let innerTypeName = innerOfType
+                        match innerTypeName with
+                        | Some tn ->
+                            [SqlExpr.Binary(
+                                SqlExpr.FunctionCall("jsonb_extract", [
+                                    SqlExpr.Column(Some tgt2Alias, "Value")
+                                    SqlExpr.Literal(SqlLiteral.String "$.$type")]),
+                                BinaryOperator.Eq,
+                                SqlExpr.Literal(SqlLiteral.String tn))]
+                        | None -> []
+
+                    let innerJoinEdges2 = ResizeArray<JoinEdge>()
+                    let innerWhereDus =
+                        translatePredicates
+                            qb tgt2Alias target2Table innerJoinEdges2 innerWheres
+                            "Error: Cannot translate SelectMany inner predicate."
+                    let innerDbRefJoins2 = DBRefManyHelpers.joinEdgesToClauses innerJoinEdges2
+
+                    let hop2JoinClauses =
+                        [ConditionedJoin(Inner, BaseTable(link2Table, Some lnk2Alias), lnk2JoinOn)
+                         ConditionedJoin(Inner, BaseTable(target2Table, Some tgt2Alias), tgt2JoinOn)]
+                        @ innerDbRefJoins2
+                    let hop2Predicates = innerWhereDus @ innerTypePred
+
+                    hop2JoinClauses, hop2Predicates, tgt2Alias, target2Table
+                | None ->
+                    // Fail closed: SelectMany inner lambda present but contains unrecognized chain shape.
+                    raise (NotSupportedException(
+                        "Error: SelectMany inner collection contains unsupported operators.\n" +
+                        "Reason: The inner chain uses operators that cannot be translated in a correlated subquery (e.g., OrderBy, Distinct, Take, Skip inside SelectMany).\n" +
+                        "Fix: Simplify the inner collection selector to Where/Select/OfType only, or call AsEnumerable() before SelectMany."))
+            | None ->
+                [], [], tgtAlias, targetTable
+
         let innerJoinEdges = ResizeArray<JoinEdge>()
         let wherePredDus =
             translatePredicates
                 qb
-                tgtAlias
-                targetTable
+                effectiveTgtAlias
+                effectiveTargetTable
                 innerJoinEdges
                 desc.WherePredicates
                 "Error: Cannot translate relation-backed DBRefMany.Any predicate.\nReason: The predicate is not a translatable lambda expression (e.g., Func<> delegate instead of Expression<Func<>>).\nFix: Pass the predicate as an inline lambda, not a delegate variable."
@@ -188,15 +321,15 @@ module internal DBRefManyBuilderCore =
             | Some tn ->
                 [SqlExpr.Binary(
                     SqlExpr.FunctionCall("jsonb_extract", [
-                        SqlExpr.Column(Some tgtAlias, "Value")
+                        SqlExpr.Column(Some effectiveTgtAlias, "Value")
                         SqlExpr.Literal(SqlLiteral.String "$.$type")]),
                     BinaryOperator.Eq,
                     SqlExpr.Literal(SqlLiteral.String tn))]
             | None -> []
 
-        let allPreds = wherePredDus @ ofTypePred
+        let allPreds = wherePredDus @ ofTypePred @ hop2Preds
         let sortKeyDus =
-            translateSortKeys qb tgtAlias targetTable innerJoinEdges desc.SortKeys "Cannot extract key selector for OrderBy."
+            translateSortKeys qb effectiveTgtAlias effectiveTargetTable innerJoinEdges desc.SortKeys "Cannot extract key selector for OrderBy."
         let limitDu, offsetDu = buildLimitOffset visitDu qb desc.Limit desc.Offset
 
         let joinOn =
@@ -214,7 +347,7 @@ module internal DBRefManyBuilderCore =
         let dbRefJoins = DBRefManyHelpers.joinEdgesToClauses innerJoinEdges
         let innerCore =
             { mkSubCore projections (Some(BaseTable(linkTable, Some lnkAlias))) (Some fullWhere) with
-                Joins = [ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), joinOn)] @ dbRefJoins
+                Joins = [ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), joinOn)] @ hop2Joins @ dbRefJoins
                 OrderBy = sortKeyDus
                 Limit = limitDu
                 Offset = offsetDu }
@@ -251,7 +384,7 @@ module internal DBRefManyBuilderCore =
                         Offset = pbOffsetDu }
                 pbAlias, lnkAlias, outerCore, targetTable
             else
-                tgtAlias, lnkAlias, innerCore, targetTable
+                effectiveTgtAlias, lnkAlias, innerCore, effectiveTargetTable
 
         match desc.DefaultIfEmpty with
         | Some defaultValueExprOpt ->

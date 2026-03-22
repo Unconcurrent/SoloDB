@@ -55,6 +55,7 @@ module internal QueryableBuildQueryGroupByChained =
             GroupByHavingPredicate = state.GroupByHaving
             DefaultIfEmpty = state.DefaultIfEmpty
             PostSelectDefaultIfEmpty = state.PostSelectDefaultIfEmpty
+            SelectManyInnerLambda = None
         }
 
     let private tryExtractGroupByQueryDescriptor (groupParam: ParameterExpression) (expr: Expression) : QueryDescriptor option =

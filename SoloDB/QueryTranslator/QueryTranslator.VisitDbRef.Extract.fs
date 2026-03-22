@@ -76,7 +76,8 @@ module internal DBRefManyExtractor =
                             finalTerminal
                             finalGroupByHaving
                             state.DefaultIfEmpty
-                            state.PostSelectDefaultIfEmpty)
+                            state.PostSelectDefaultIfEmpty
+                            state.SelectManyLambda)
 
         // Non-MethodCall expressions (MemberExpression for .Count property, etc.)
         | :? MemberExpression as me when me.Member.Name = "Count" && not (isNull me.Expression) ->
