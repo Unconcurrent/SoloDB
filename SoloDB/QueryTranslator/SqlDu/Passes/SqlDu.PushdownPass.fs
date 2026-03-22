@@ -8,5 +8,5 @@ open SoloDatabase.PushdownTransform
 /// when all pushdown-safety conditions (P-S1 through P-S9) are met.
 let predicatePushdown : Pass = {
     Name = "PredicatePushdown"
-    Transform = pushdownStatement
+    Transform = fun stmt -> pushdownStatement stmt
 }

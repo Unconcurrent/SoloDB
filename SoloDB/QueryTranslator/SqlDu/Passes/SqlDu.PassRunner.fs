@@ -218,15 +218,14 @@ let fingerprint (stmt: SqlStatement) : string =
     sprintf "%016X" h
 
 /// Run a single pass, producing an audit row and the output statement.
+/// Uses explicit changed flag from the pass — no SQL emission for change detection.
 let runPass (pass: Pass) (input: SqlStatement) : PassAuditRow * SqlStatement =
-    let inputFp = fingerprint input
-    let output = pass.Transform input
-    let outputFp = fingerprint output
+    let struct(output, changed) = pass.Transform input
     let audit = {
         PassName = pass.Name
-        InputFingerprint = inputFp
-        OutputFingerprint = outputFp
-        Changed = inputFp <> outputFp
+        InputFingerprint = ""
+        OutputFingerprint = ""
+        Changed = changed
     }
     (audit, output)
 
@@ -241,33 +240,33 @@ let runPipeline (passes: Pass list) (input: SqlStatement) : PipelineResult =
     { Input = input; Output = current; AuditTrail = trail }
 
 /// Continue optimization rounds to a deterministic fixed point.
-/// A round is accepted only if it lowers the canonical metric, verifies,
-/// and reaches a fingerprint frontier point not seen before.
+/// A round is accepted only if at least one pass made a change,
+/// the metric is strictly lower, and the output verifies.
 let runPipelineToFixedPoint (passes: Pass list) (seed: PipelineResult) : PipelineResult =
-    let seen = System.Collections.Generic.HashSet<string>()
     let mutable current = seed.Output
     let mutable trail = seed.AuditTrail
     let mutable continueRounds = true
+    let mutable iterationCount = 0
+    let maxIterations = 10
 
-    while continueRounds do
-        let currentFp = fingerprint current
+    while continueRounds && iterationCount < maxIterations do
+        iterationCount <- iterationCount + 1
         let currentMetric = statementMetric current
-        seen.Add(currentFp) |> ignore
 
         let round = runPipeline passes current
         let candidate = round.Output
-        let candidateFp = fingerprint candidate
-        let candidateMetric = statementMetric candidate
+        let anyChanged = round.AuditTrail |> List.exists (fun a -> a.Changed)
 
-        let acceptCandidate =
-            candidateFp <> currentFp
-            && not (seen.Contains candidateFp)
-            && verifyStatement candidate
-            && metricIsLower candidateMetric currentMetric
-
-        if acceptCandidate then
-            current <- candidate
-            trail <- trail @ round.AuditTrail
+        if anyChanged then
+            let candidateMetric = statementMetric candidate
+            let acceptCandidate =
+                metricIsLower candidateMetric currentMetric
+                && verifyStatement candidate
+            if acceptCandidate then
+                current <- candidate
+                trail <- trail @ round.AuditTrail
+            else
+                continueRounds <- false
         else
             continueRounds <- false
 

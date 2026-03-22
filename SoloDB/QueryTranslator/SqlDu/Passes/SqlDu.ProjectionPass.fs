@@ -9,5 +9,5 @@ open SoloDatabase.ProjectionPushdown
 /// GROUP BY, HAVING, JOIN ON).
 let projectionPushdown : Pass = {
     Name = "ProjectionPushdown"
-    Transform = pushdownProjectionStatement
+    Transform = fun stmt -> pushdownProjectionStatement stmt
 }

@@ -43,7 +43,7 @@ let private rewriteExpr (aliasMap: Map<string, SqlExpr>) (derivedAlias: string) 
 /// Push predicates through a DerivedTable boundary in a single SelectCore.
 /// Returns the modified outer core (with reduced/removed WHERE) and the
 /// modified inner SqlSelect (with additional WHERE conjuncts).
-let private pushdownInCore (outer: SelectCore) : SelectCore =
+let private pushdownInCore (changed: bool ref) (outer: SelectCore) : SelectCore =
     match outer.Source with
     | Some(DerivedTable(innerSel, alias)) when outer.Where.IsSome ->
         match innerSel.Body with
@@ -77,6 +77,7 @@ let private pushdownInCore (outer: SelectCore) : SelectCore =
 
                 if pushable.IsEmpty then outer
                 else
+                    changed.Value <- true
                     // Distribute pushable conjuncts to every arm
                     let distributeToArm (arm: SelectCore) =
                         let armAliasMap = buildAliasMap arm
@@ -121,6 +122,7 @@ let private pushdownInCore (outer: SelectCore) : SelectCore =
                     // Nothing to push — return unchanged
                     outer
                 else
+                    changed.Value <- true
                     // Rewrite pushable conjuncts using alias map
                     let rewrittenPushable =
                         pushable |> List.map (rewriteExpr aliasMap alias)
@@ -150,7 +152,7 @@ let private pushdownInCore (outer: SelectCore) : SelectCore =
     | _ -> outer // No DerivedTable source or no WHERE — nothing to push
 
 /// Recursively apply pushdown to a SqlSelect at every nesting level.
-let rec pushdownSelect (sel: SqlSelect) : SqlSelect =
+let rec pushdownSelect (changed: bool ref) (sel: SqlSelect) : SqlSelect =
     let pushedBody =
         match sel.Body with
         | SingleSelect outer ->
@@ -158,7 +160,7 @@ let rec pushdownSelect (sel: SqlSelect) : SqlSelect =
             let outerWithRecursedSource =
                 match outer.Source with
                 | Some(DerivedTable(innerSel, alias)) ->
-                    { outer with Source = Some(DerivedTable(pushdownSelect innerSel, alias)) }
+                    { outer with Source = Some(DerivedTable(pushdownSelect changed innerSel, alias)) }
                 | _ -> outer
 
             // Recurse into JOINs
@@ -167,9 +169,9 @@ let rec pushdownSelect (sel: SqlSelect) : SqlSelect =
                     Joins = outerWithRecursedSource.Joins |> List.map (fun j ->
                         match j with
                         | CrossJoin(DerivedTable(jSel, jAlias)) ->
-                            CrossJoin(DerivedTable(pushdownSelect jSel, jAlias))
+                            CrossJoin(DerivedTable(pushdownSelect changed jSel, jAlias))
                         | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
-                            ConditionedJoin(kind, DerivedTable(pushdownSelect jSel, jAlias), onExpr)
+                            ConditionedJoin(kind, DerivedTable(pushdownSelect changed jSel, jAlias), onExpr)
                         | CrossJoin _ ->
                             j
                         | ConditionedJoin _ ->
@@ -178,30 +180,33 @@ let rec pushdownSelect (sel: SqlSelect) : SqlSelect =
                 }
 
             // Now try pushdown at this level
-            SingleSelect(pushdownInCore outerWithRecursedJoins)
+            SingleSelect(pushdownInCore changed outerWithRecursedJoins)
 
         | UnionAllSelect(head, tail) ->
             // Recurse into each arm but don't push across UNION ALL
-            let pushHead = pushdownSelectCore head
-            let pushTail = tail |> List.map pushdownSelectCore
+            let pushHead = pushdownSelectCore changed head
+            let pushTail = tail |> List.map (pushdownSelectCore changed)
             UnionAllSelect(pushHead, pushTail)
 
     let pushedCtes =
-        sel.Ctes |> List.map (fun cte -> { cte with Query = pushdownSelect cte.Query })
+        sel.Ctes |> List.map (fun cte -> { cte with Query = pushdownSelect changed cte.Query })
     { Ctes = pushedCtes; Body = pushedBody }
 
 /// Pushdown within a SelectCore (for UNION ALL arms).
-and private pushdownSelectCore (core: SelectCore) : SelectCore =
+and private pushdownSelectCore (changed: bool ref) (core: SelectCore) : SelectCore =
     let sel = { Ctes = []; Body = SingleSelect core }
-    let pushed = pushdownSelect sel
+    let pushed = pushdownSelect changed sel
     match pushed.Body with
     | SingleSelect c -> c
     | _ -> core
 
 /// Push predicates in a SqlStatement.
-let pushdownStatement (stmt: SqlStatement) : SqlStatement =
+let pushdownStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
     match stmt with
-    | SelectStmt sel -> SelectStmt(pushdownSelect sel)
+    | SelectStmt sel ->
+        let changed = ref false
+        let result = pushdownSelect changed sel
+        struct(SelectStmt result, changed.Value)
     // DML predicate optimization is out of scope.
     // UpdateStmt, DeleteStmt, InsertStmt, DdlStmt pass through unchanged.
-    | InsertStmt _ | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> stmt
+    | InsertStmt _ | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)

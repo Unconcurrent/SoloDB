@@ -93,23 +93,23 @@ let private narrowProjections
         | UnionAllSelect _ -> None
 
 /// Apply projection pushdown to a single SelectCore.
-let private pushdownInCore (outer: SelectCore) : SelectCore =
+let private pushdownInCore (changed: bool ref) (outer: SelectCore) : SelectCore =
     match outer.Source with
     | Some(DerivedTable(innerSel, alias)) ->
         match narrowProjections outer innerSel alias with
-        | Some narrowedOuter -> narrowedOuter
+        | Some narrowedOuter -> changed.Value <- true; narrowedOuter
         | None -> outer
     | _ -> outer
 
 /// Recursively apply projection pushdown to a SqlSelect at every nesting level.
-let rec pushdownProjectionSelect (sel: SqlSelect) : SqlSelect =
+let rec pushdownProjectionSelect (changed: bool ref) (sel: SqlSelect) : SqlSelect =
     let pushedBody =
         match sel.Body with
         | SingleSelect outer ->
             let outerWithRecursedSource =
                 match outer.Source with
                 | Some(DerivedTable(innerSel, alias)) ->
-                    { outer with Source = Some(DerivedTable(pushdownProjectionSelect innerSel, alias)) }
+                    { outer with Source = Some(DerivedTable(pushdownProjectionSelect changed innerSel, alias)) }
                 | _ -> outer
 
             let outerWithRecursedJoins =
@@ -117,36 +117,39 @@ let rec pushdownProjectionSelect (sel: SqlSelect) : SqlSelect =
                     Joins = outerWithRecursedSource.Joins |> List.map (fun j ->
                         match j with
                         | CrossJoin(DerivedTable(jSel, jAlias)) ->
-                            CrossJoin(DerivedTable(pushdownProjectionSelect jSel, jAlias))
+                            CrossJoin(DerivedTable(pushdownProjectionSelect changed jSel, jAlias))
                         | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
-                            ConditionedJoin(kind, DerivedTable(pushdownProjectionSelect jSel, jAlias), onExpr)
+                            ConditionedJoin(kind, DerivedTable(pushdownProjectionSelect changed jSel, jAlias), onExpr)
                         | CrossJoin _
                         | ConditionedJoin _ ->
                             j
                     )
                 }
 
-            SingleSelect(pushdownInCore outerWithRecursedJoins)
+            SingleSelect(pushdownInCore changed outerWithRecursedJoins)
 
         | UnionAllSelect(head, tail) ->
-            let pushHead = pushdownProjectionCore head
-            let pushTail = tail |> List.map pushdownProjectionCore
+            let pushHead = pushdownProjectionCore changed head
+            let pushTail = tail |> List.map (pushdownProjectionCore changed)
             UnionAllSelect(pushHead, pushTail)
 
     let pushedCtes =
-        sel.Ctes |> List.map (fun cte -> { cte with Query = pushdownProjectionSelect cte.Query })
+        sel.Ctes |> List.map (fun cte -> { cte with Query = pushdownProjectionSelect changed cte.Query })
     { Ctes = pushedCtes; Body = pushedBody }
 
 /// Pushdown within a SelectCore (for UNION ALL arms).
-and private pushdownProjectionCore (core: SelectCore) : SelectCore =
+and private pushdownProjectionCore (changed: bool ref) (core: SelectCore) : SelectCore =
     let sel = { Ctes = []; Body = SingleSelect core }
-    let pushed = pushdownProjectionSelect sel
+    let pushed = pushdownProjectionSelect changed sel
     match pushed.Body with
     | SingleSelect c -> c
     | _ -> core
 
 /// Push projections in a SqlStatement.
-let pushdownProjectionStatement (stmt: SqlStatement) : SqlStatement =
+let pushdownProjectionStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
     match stmt with
-    | SelectStmt sel -> SelectStmt(pushdownProjectionSelect sel)
-    | InsertStmt _ | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> stmt
+    | SelectStmt sel ->
+        let changed = ref false
+        let result = pushdownProjectionSelect changed sel
+        struct(SelectStmt result, changed.Value)
+    | InsertStmt _ | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)

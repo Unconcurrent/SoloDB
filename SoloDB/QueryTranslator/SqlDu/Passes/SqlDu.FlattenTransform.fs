@@ -51,28 +51,28 @@ let private buildAliasMap (innerCore: SelectCore) : Map<string, SqlExpr> =
     |> Map.map (fun _ expr -> normalizeExprQuoting expr)
 
 /// Rewrite an expression, substituting alias references with inner expressions.
-let rec private rewriteExpr (aliasMap: Map<string, SqlExpr>) (derivedAlias: string) (expr: SqlExpr) : SqlExpr =
+let rec private rewriteExpr (changed: bool ref) (aliasMap: Map<string, SqlExpr>) (derivedAlias: string) (expr: SqlExpr) : SqlExpr =
     rewriteDerivedAliasExpr
         { MatchEmptyDerivedAlias = false
-          OnSubquerySelect = flattenSelect }
+          OnSubquerySelect = flattenSelect changed }
         aliasMap
         derivedAlias
         expr
 
 /// Flatten a single SelectCore that has a DerivedTable source.
-and private flattenCore (outer: SelectCore) (innerCore: SelectCore) (derivedAlias: string) : SelectCore =
+and private flattenCore (changed: bool ref) (outer: SelectCore) (innerCore: SelectCore) (derivedAlias: string) : SelectCore =
     let aliasMap = buildAliasMap innerCore
 
     // Rewrite outer projections using inner expressions
     let rewrittenProjections =
         outer.Projections
         |> ProjectionSetOps.map (fun p ->
-            { p with Expr = rewriteExpr aliasMap derivedAlias p.Expr })
+            { p with Expr = rewriteExpr changed aliasMap derivedAlias p.Expr })
 
     // Merge: take inner's source, joins, where, order, limit, offset
     // Outer's where (if any) gets AND'd with inner's where
     let rewrittenOuterWhere =
-        outer.Where |> Option.map (rewriteExpr aliasMap derivedAlias)
+        outer.Where |> Option.map (rewriteExpr changed aliasMap derivedAlias)
 
     let mergedWhere =
         match rewrittenOuterWhere, innerCore.Where with
@@ -82,13 +82,13 @@ and private flattenCore (outer: SelectCore) (innerCore: SelectCore) (derivedAlia
 
     let rewrittenOuterOrderBy =
         outer.OrderBy
-        |> List.map (fun ob -> { ob with Expr = rewriteExpr aliasMap derivedAlias ob.Expr })
+        |> List.map (fun ob -> { ob with Expr = rewriteExpr changed aliasMap derivedAlias ob.Expr })
 
     let mergedOrderBy =
         if rewrittenOuterOrderBy.IsEmpty then innerCore.OrderBy else rewrittenOuterOrderBy
 
     let rewrittenOuterLimit =
-        outer.Limit |> Option.map (rewriteExpr aliasMap derivedAlias)
+        outer.Limit |> Option.map (rewriteExpr changed aliasMap derivedAlias)
 
     let mergedLimit =
         match rewrittenOuterLimit with
@@ -96,7 +96,7 @@ and private flattenCore (outer: SelectCore) (innerCore: SelectCore) (derivedAlia
         | None -> innerCore.Limit
 
     let rewrittenOuterOffset =
-        outer.Offset |> Option.map (rewriteExpr aliasMap derivedAlias)
+        outer.Offset |> Option.map (rewriteExpr changed aliasMap derivedAlias)
 
     let mergedOffset =
         match rewrittenOuterOffset with
@@ -115,7 +115,7 @@ and private flattenCore (outer: SelectCore) (innerCore: SelectCore) (derivedAlia
       Distinct = innerCore.Distinct || outer.Distinct }
 
 /// Recursively flatten a SqlSelect. Applies flattening at every nesting level.
-and flattenSelect (sel: SqlSelect) : SqlSelect =
+and flattenSelect (changed: bool ref) (sel: SqlSelect) : SqlSelect =
     let flattenedBody =
         match sel.Body with
         | SingleSelect outer ->
@@ -123,7 +123,7 @@ and flattenSelect (sel: SqlSelect) : SqlSelect =
             let outerWithFlattenedSource =
                 match outer.Source with
                 | Some(DerivedTable(innerSel, alias)) ->
-                    let flatInner = flattenSelect innerSel
+                    let flatInner = flattenSelect changed innerSel
                     { outer with Source = Some(DerivedTable(flatInner, alias)) }
                 | _ -> outer
 
@@ -133,9 +133,9 @@ and flattenSelect (sel: SqlSelect) : SqlSelect =
                     Joins = outerWithFlattenedSource.Joins |> List.map (fun j ->
                         match j with
                         | CrossJoin(DerivedTable(jSel, jAlias)) ->
-                            CrossJoin(DerivedTable(flattenSelect jSel, jAlias))
+                            CrossJoin(DerivedTable(flattenSelect changed jSel, jAlias))
                         | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
-                            ConditionedJoin(kind, DerivedTable(flattenSelect jSel, jAlias), onExpr)
+                            ConditionedJoin(kind, DerivedTable(flattenSelect changed jSel, jAlias), onExpr)
                         | CrossJoin _ ->
                             j
                         | ConditionedJoin _ ->
@@ -148,44 +148,53 @@ and flattenSelect (sel: SqlSelect) : SqlSelect =
             | Some(DerivedTable(innerSel, alias)) ->
                 match innerSel.Body with
                 | SingleSelect innerCore when innerSel.Ctes.IsEmpty && isFlattenSafe outerWithFlattenedJoins innerCore ->
-                    SingleSelect(flattenCore outerWithFlattenedJoins innerCore alias)
+                    changed.Value <- true
+                    SingleSelect(flattenCore changed outerWithFlattenedJoins innerCore alias)
                 | _ -> SingleSelect outerWithFlattenedJoins
             | _ -> SingleSelect outerWithFlattenedJoins
 
         | UnionAllSelect(head, tail) ->
             // Flatten inside each arm but don't merge the union
-            let flatHead = flattenSelectCore head
-            let flatTail = tail |> List.map flattenSelectCore
+            let flatHead = flattenSelectCore changed head
+            let flatTail = tail |> List.map (flattenSelectCore changed)
             UnionAllSelect(flatHead, flatTail)
 
     let flatCtes =
-        sel.Ctes |> List.map (fun cte -> { cte with Query = flattenSelect cte.Query })
+        sel.Ctes |> List.map (fun cte -> { cte with Query = flattenSelect changed cte.Query })
     { Ctes = flatCtes; Body = flattenedBody }
 
 /// Flatten DerivedTables within a SelectCore (for UNION ALL arms).
-and private flattenSelectCore (core: SelectCore) : SelectCore =
+and private flattenSelectCore (changed: bool ref) (core: SelectCore) : SelectCore =
     let sel = { Ctes = []; Body = SingleSelect core }
-    let flattened = flattenSelect sel
+    let flattened = flattenSelect changed sel
     match flattened.Body with
     | SingleSelect c -> c
     | _ -> core
 
 /// Flatten a SqlStatement.
-let flattenStatement (stmt: SqlStatement) : SqlStatement =
+let flattenStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
+    let changed = ref false
     match stmt with
-    | SelectStmt sel -> SelectStmt(flattenSelect sel)
+    | SelectStmt sel ->
+        let result = flattenSelect changed sel
+        struct(SelectStmt result, changed.Value)
     | InsertStmt ins ->
-        InsertStmt { ins with Returning = ins.Returning }
+        let result = InsertStmt { ins with Returning = ins.Returning }
+        struct(result, false)
     | UpdateStmt upd ->
         let flatWhere =
             match upd.Where with
-            | Some(InSubquery(e, sel)) -> Some(InSubquery(e, flattenSelect sel))
+            | Some(InSubquery(e, sel)) ->
+                let flatSel = flattenSelect changed sel
+                Some(InSubquery(e, flatSel))
             | w -> w
-        UpdateStmt { upd with Where = flatWhere }
+        struct(UpdateStmt { upd with Where = flatWhere }, changed.Value)
     | DeleteStmt del ->
         let flatWhere =
             match del.Where with
-            | Some(InSubquery(e, sel)) -> Some(InSubquery(e, flattenSelect sel))
+            | Some(InSubquery(e, sel)) ->
+                let flatSel = flattenSelect changed sel
+                Some(InSubquery(e, flatSel))
             | w -> w
-        DeleteStmt { del with Where = flatWhere }
-    | DdlStmt _ -> stmt
+        struct(DeleteStmt { del with Where = flatWhere }, changed.Value)
+    | DdlStmt _ -> struct(stmt, false)

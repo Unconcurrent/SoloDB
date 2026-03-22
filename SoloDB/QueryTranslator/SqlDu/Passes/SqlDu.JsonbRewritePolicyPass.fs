@@ -15,5 +15,5 @@ open SoloDatabase.JsonbRewritePolicy
 /// Create a JsonbRewritePolicy pass with an index model.
 let jsonbRewritePolicy (model: IndexModel) : Pass = {
     Name = "JsonbRewritePolicy"
-    Transform = fun stmt -> rewriteStatementWithModel model stmt
+    Transform = rewriteStatementWithModel model
 }

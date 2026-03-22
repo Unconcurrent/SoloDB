@@ -7,5 +7,5 @@ open SoloDatabase.FlattenTransform
 /// Merges FROM-clause DerivedTables into outer queries when flatten-safe.
 let subqueryFlatten : Pass = {
     Name = "SubqueryFlatten"
-    Transform = flattenStatement
+    Transform = fun stmt -> flattenStatement stmt
 }

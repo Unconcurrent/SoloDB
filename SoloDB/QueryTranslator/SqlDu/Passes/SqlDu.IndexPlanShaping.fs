@@ -138,7 +138,7 @@ let private reshapeJoinsForIndex (model: IndexModel) (core: SelectCore) : Select
         else { core with Joins = sorted }
 
 /// Apply index plan shaping to a single SelectCore.
-let private shapeInCore (model: IndexModel) (core: SelectCore) : SelectCore =
+let private shapeInCore (model: IndexModel) (changed: bool ref) (core: SelectCore) : SelectCore =
     // Refuse at must-not-shape boundaries
     if hasMustNotBoundary core then core
     elif hasAggregateOrWindowProjections core then core
@@ -164,7 +164,7 @@ let private shapeInCore (model: IndexModel) (core: SelectCore) : SelectCore =
                     | Some where ->
                         let canonical = canonicalizePredicate model tName where
                         if canonical = where then shaped
-                        else { shaped with Where = Some canonical }
+                        else changed.Value <- true; { shaped with Where = Some canonical }
                     | None -> shaped
 
             // Canonicalize JOIN ON clauses
@@ -175,16 +175,14 @@ let private shapeInCore (model: IndexModel) (core: SelectCore) : SelectCore =
                         shaped.Joins |> List.map (fun j ->
                             match j with
                             | ConditionedJoin(kind, source, onExpr) ->
-                                // For JOIN ON, we canonicalize against the join source's table
                                 let joinTableName =
                                     match resolveTableName source with
                                     | Some n -> n
-                                    | None -> tName // Fallback to FROM table
+                                    | None -> tName
                                 let canonical = canonicalizePredicate model joinTableName onExpr
-                                // Also canonicalize against the FROM table
                                 let canonical2 = canonicalizePredicate model tName canonical
                                 if canonical2 = onExpr then j
-                                else ConditionedJoin(kind, source, canonical2)
+                                else changed.Value <- true; ConditionedJoin(kind, source, canonical2)
                             | CrossJoin _ -> j)
                     if newJoins = shaped.Joins then shaped
                     else { shaped with Joins = newJoins }
@@ -195,15 +193,17 @@ let private shapeInCore (model: IndexModel) (core: SelectCore) : SelectCore =
                 else
                     let canonical = canonicalizeOrderBy model tName shaped.OrderBy
                     if canonical = shaped.OrderBy then shaped
-                    else { shaped with OrderBy = canonical }
+                    else changed.Value <- true; { shaped with OrderBy = canonical }
 
             // Reshape joins for index
-            shaped <- reshapeJoinsForIndex model shaped
+            let reshaped = reshapeJoinsForIndex model shaped
+            if not (reshaped.Joins = shaped.Joins) then changed.Value <- true
+            shaped <- reshaped
 
             shaped
 
 /// Recursively apply index plan shaping to a SqlSelect.
-let rec shapeIndexSelect (model: IndexModel) (sel: SqlSelect) : SqlSelect =
+let rec shapeIndexSelect (model: IndexModel) (changed: bool ref) (sel: SqlSelect) : SqlSelect =
     let shapedBody =
         match sel.Body with
         | SingleSelect core ->
@@ -211,7 +211,7 @@ let rec shapeIndexSelect (model: IndexModel) (sel: SqlSelect) : SqlSelect =
             let coreWithRecursedSource =
                 match core.Source with
                 | Some(DerivedTable(innerSel, alias)) ->
-                    { core with Source = Some(DerivedTable(shapeIndexSelect model innerSel, alias)) }
+                    { core with Source = Some(DerivedTable(shapeIndexSelect model changed innerSel, alias)) }
                 | _ -> core
 
             // Recurse into JOINs
@@ -220,9 +220,9 @@ let rec shapeIndexSelect (model: IndexModel) (sel: SqlSelect) : SqlSelect =
                     Joins = coreWithRecursedSource.Joins |> List.map (fun j ->
                         match j with
                         | CrossJoin(DerivedTable(jSel, jAlias)) ->
-                            CrossJoin(DerivedTable(shapeIndexSelect model jSel, jAlias))
+                            CrossJoin(DerivedTable(shapeIndexSelect model changed jSel, jAlias))
                         | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
-                            ConditionedJoin(kind, DerivedTable(shapeIndexSelect model jSel, jAlias), onExpr)
+                            ConditionedJoin(kind, DerivedTable(shapeIndexSelect model changed jSel, jAlias), onExpr)
                         | CrossJoin _ ->
                             j
                         | ConditionedJoin _ ->
@@ -230,20 +230,20 @@ let rec shapeIndexSelect (model: IndexModel) (sel: SqlSelect) : SqlSelect =
                 }
 
             // Apply shaping at this level
-            SingleSelect(shapeInCore model coreWithRecursedJoins)
+            SingleSelect(shapeInCore model changed coreWithRecursedJoins)
 
         | UnionAllSelect(head, tail) ->
-            // UNION ALL is a must-not-shape boundary — return entirely unchanged.
-            // No arm-level shaping. Hard fence.
             UnionAllSelect(head, tail)
 
     let shapedCtes =
-        sel.Ctes |> List.map (fun cte -> { cte with Query = shapeIndexSelect model cte.Query })
+        sel.Ctes |> List.map (fun cte -> { cte with Query = shapeIndexSelect model changed cte.Query })
     { Ctes = shapedCtes; Body = shapedBody }
 
 /// Apply index plan shaping to a SqlStatement.
-let shapeIndexStatement (model: IndexModel) (stmt: SqlStatement) : SqlStatement =
+let shapeIndexStatement (model: IndexModel) (stmt: SqlStatement) : struct(SqlStatement * bool) =
     match stmt with
-    | SelectStmt sel -> SelectStmt(shapeIndexSelect model sel)
-    // DML passthrough — out of scope for index shaping.
-    | InsertStmt _ | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> stmt
+    | SelectStmt sel ->
+        let changed = ref false
+        let result = shapeIndexSelect model changed sel
+        struct(SelectStmt result, changed.Value)
+    | InsertStmt _ | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)

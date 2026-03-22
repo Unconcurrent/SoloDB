@@ -64,6 +64,7 @@ let private foldNode (node: SqlExpr) : SqlExpr =
         match liveBranches with
         | [] -> elseExpr |> Option.defaultValue (Literal Null)
         | (Literal(Boolean true), result) :: _ -> result
+        | _ when liveBranches.Length = allBranches.Length -> node // no dead branches eliminated
         | first :: rest -> CaseExpr(first, rest, elseExpr)
     // T6: Whitelist pure function folds (literal args only)
     | FunctionCall("typeof", [Literal Null]) -> Literal(String "null")
@@ -82,81 +83,163 @@ let private foldNode (node: SqlExpr) : SqlExpr =
     | _ -> node
 
 /// Fold constant expressions in a SqlExpr tree.
-let rec private foldExpr (expr: SqlExpr) : SqlExpr =
-    SqlExpr.map
-        (fun node ->
-            let withSelects =
-                match node with
-                | InSubquery(valueExpr, sel) ->
-                    InSubquery(valueExpr, foldSelect sel)
-                | Exists(sel) ->
-                    Exists(foldSelect sel)
-                | ScalarSubquery(sel) ->
-                    ScalarSubquery(foldSelect sel)
-                | _ ->
-                    node
-            foldNode withSelects)
-        expr
+/// Uses custom bottom-up recursion with per-node child-change tracking.
+/// Each node tracks whether any child changed; only when a child or
+/// foldNode produces a new value does the node reconstruct and propagate
+/// the change flag upward. Leaf nodes and unchanged subtrees return the
+/// original reference, so parent ReferenceEquals comparisons work correctly.
+let rec private foldExpr (changed: bool ref) (expr: SqlExpr) : SqlExpr =
+    let rec loop (node: SqlExpr) : SqlExpr =
+        // Per-node flag: did any child in THIS node change?
+        let mutable anyChildChanged = false
+        let loopChild (child: SqlExpr) =
+            let result = loop child
+            if not (obj.ReferenceEquals(result, child)) then anyChildChanged <- true
+            result
+        let loopChildList (lst: SqlExpr list) =
+            lst |> List.map loopChild
+        let loopChildOpt (opt: SqlExpr option) =
+            opt |> Option.map loopChild
+        // Track SqlSelect children the same way as SqlExpr children:
+        // use a local ref to detect whether foldSelect modified the query,
+        // and propagate that into the per-node anyChildChanged flag.
+        let loopSelect (query: SqlSelect) =
+            let subChanged = ref false
+            let result = foldSelect subChanged query
+            if subChanged.Value then anyChildChanged <- true
+            result
+        let mappedNode =
+            match node with
+            | Column _ -> node
+            | Literal _ -> node
+            | Parameter _ -> node
+            | JsonExtractExpr _ -> node
+            | JsonRootExtract _ -> node
+            | JsonSetExpr(target, assignments) ->
+                JsonSetExpr(
+                    loopChild target,
+                    assignments |> List.map (fun (path, value) -> path, loopChild value))
+            | JsonArrayExpr(elements) ->
+                JsonArrayExpr(loopChildList elements)
+            | JsonObjectExpr(properties) ->
+                JsonObjectExpr(properties |> List.map (fun (key, value) -> key, loopChild value))
+            | FunctionCall(name, arguments) ->
+                FunctionCall(name, loopChildList arguments)
+            | AggregateCall(kind, argument, distinct, separator) ->
+                AggregateCall(
+                    kind,
+                    loopChildOpt argument,
+                    distinct,
+                    loopChildOpt separator)
+            | WindowCall(spec) ->
+                WindowCall({
+                    spec with
+                        Arguments = loopChildList spec.Arguments
+                        PartitionBy = loopChildList spec.PartitionBy
+                        OrderBy = spec.OrderBy |> List.map (fun (orderExpr, dir) -> loopChild orderExpr, dir)
+                })
+            | Unary(op, inner) ->
+                Unary(op, loopChild inner)
+            | Binary(left, op, right) ->
+                Binary(loopChild left, op, loopChild right)
+            | Between(valueExpr, lower, upper) ->
+                Between(loopChild valueExpr, loopChild lower, loopChild upper)
+            | InList(valueExpr, head, tail) ->
+                InList(loopChild valueExpr, loopChild head, loopChildList tail)
+            | InSubquery(valueExpr, query) ->
+                InSubquery(loopChild valueExpr, loopSelect query)
+            | Cast(inner, sqlType) ->
+                Cast(loopChild inner, sqlType)
+            | Coalesce(head, tail) ->
+                Coalesce(loopChild head, loopChildList tail)
+            | Exists query ->
+                Exists(loopSelect query)
+            | ScalarSubquery query ->
+                ScalarSubquery(loopSelect query)
+            | CaseExpr(firstBranch, restBranches, elseExpr) ->
+                CaseExpr(
+                    let mapBranch (condExpr, resultExpr) = loopChild condExpr, loopChild resultExpr
+                    mapBranch firstBranch,
+                    restBranches |> List.map mapBranch,
+                    loopChildOpt elseExpr)
+            | UpdateFragment(pathExpr, valueExpr) ->
+                UpdateFragment(loopChild pathExpr, loopChild valueExpr)
+        let folded = foldNode mappedNode
+        let foldChanged = not (obj.ReferenceEquals(folded, mappedNode))
+        if anyChildChanged || foldChanged then
+            changed.Value <- true
+            folded
+        else
+            node // No child or fold change — return original reference
+    loop expr
 
 /// Fold constants in a SelectCore.
-and private foldCore (core: SelectCore) : SelectCore =
+and private foldCore (changed: bool ref) (core: SelectCore) : SelectCore =
     { core with
-        Projections = core.Projections |> ProjectionSetOps.map (fun p -> { p with Expr = foldExpr p.Expr })
-        Where = core.Where |> Option.map foldExpr
-        Having = core.Having |> Option.map foldExpr
-        GroupBy = core.GroupBy |> List.map foldExpr
-        OrderBy = core.OrderBy |> List.map (fun ob -> { ob with Expr = foldExpr ob.Expr })
-        Limit = core.Limit |> Option.map foldExpr
-        Offset = core.Offset |> Option.map foldExpr
-        Source = core.Source |> Option.map foldTableSource
-        Joins = core.Joins |> List.map foldJoin
+        Projections = core.Projections |> ProjectionSetOps.map (fun p -> { p with Expr = foldExpr changed p.Expr })
+        Where = core.Where |> Option.map (foldExpr changed)
+        Having = core.Having |> Option.map (foldExpr changed)
+        GroupBy = core.GroupBy |> List.map (foldExpr changed)
+        OrderBy = core.OrderBy |> List.map (fun ob -> { ob with Expr = foldExpr changed ob.Expr })
+        Limit = core.Limit |> Option.map (foldExpr changed)
+        Offset = core.Offset |> Option.map (foldExpr changed)
+        Source = core.Source |> Option.map (foldTableSource changed)
+        Joins = core.Joins |> List.map (foldJoin changed)
     }
 
 /// Fold constants in a TableSource.
-and private foldTableSource (src: TableSource) : TableSource =
+and private foldTableSource (changed: bool ref) (src: TableSource) : TableSource =
     match src with
     | BaseTable _ -> src
-    | DerivedTable(query, alias) -> DerivedTable(foldSelect query, alias)
-    | FromJsonEach(expr, alias) -> FromJsonEach(foldExpr expr, alias)
+    | DerivedTable(query, alias) -> DerivedTable(foldSelect changed query, alias)
+    | FromJsonEach(expr, alias) -> FromJsonEach(foldExpr changed expr, alias)
 
 /// Fold constants in a JoinShape.
-and private foldJoin (join: JoinShape) : JoinShape =
+and private foldJoin (changed: bool ref) (join: JoinShape) : JoinShape =
     match join with
     | CrossJoin source ->
-        CrossJoin(foldTableSource source)
+        CrossJoin(foldTableSource changed source)
     | ConditionedJoin(kind, source, onExpr) ->
-        ConditionedJoin(kind, foldTableSource source, foldExpr onExpr)
+        ConditionedJoin(kind, foldTableSource changed source, foldExpr changed onExpr)
 
 /// Fold constants in a SqlSelect.
-and private foldSelect (sel: SqlSelect) : SqlSelect =
+and private foldSelect (changed: bool ref) (sel: SqlSelect) : SqlSelect =
     let body =
         match sel.Body with
-        | SingleSelect core -> SingleSelect(foldCore core)
+        | SingleSelect core -> SingleSelect(foldCore changed core)
         | UnionAllSelect(head, tail) ->
-            UnionAllSelect(foldCore head, tail |> List.map foldCore)
+            UnionAllSelect(foldCore changed head, tail |> List.map (foldCore changed))
     let ctes =
-        sel.Ctes |> List.map (fun cte -> { cte with Query = foldSelect cte.Query })
+        sel.Ctes |> List.map (fun cte -> { cte with Query = foldSelect changed cte.Query })
     { Ctes = ctes; Body = body }
 
 /// Fold constants in a SqlStatement.
-let private foldStatement (stmt: SqlStatement) : SqlStatement =
+let private foldStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
+    let changed = ref false
     match stmt with
-    | SelectStmt sel -> SelectStmt(foldSelect sel)
+    | SelectStmt sel ->
+        let result = foldSelect changed sel
+        struct(SelectStmt result, changed.Value)
     | InsertStmt ins ->
-        InsertStmt {
-            ins with
-                Values = ins.Values |> List.map (List.map foldExpr)
-                Returning = ins.Returning |> Option.map (List.map foldExpr)
-        }
+        let result =
+            InsertStmt {
+                ins with
+                    Values = ins.Values |> List.map (List.map (foldExpr changed))
+                    Returning = ins.Returning |> Option.map (List.map (foldExpr changed))
+            }
+        struct(result, changed.Value)
     | UpdateStmt upd ->
-        UpdateStmt {
-            upd with
-                SetClauses = upd.SetClauses |> List.map (fun (col, expr) -> (col, foldExpr expr))
-                Where = upd.Where |> Option.map foldExpr
-        }
+        let result =
+            UpdateStmt {
+                upd with
+                    SetClauses = upd.SetClauses |> List.map (fun (col, expr) -> (col, foldExpr changed expr))
+                    Where = upd.Where |> Option.map (foldExpr changed)
+            }
+        struct(result, changed.Value)
     | DeleteStmt del ->
-        DeleteStmt { del with Where = del.Where |> Option.map foldExpr }
-    | DdlStmt _ -> stmt
+        let result = DeleteStmt { del with Where = del.Where |> Option.map (foldExpr changed) }
+        struct(result, changed.Value)
+    | DdlStmt _ -> struct(stmt, false)
 
 /// The constant folding pass.
 let constantFold : Pass = {
