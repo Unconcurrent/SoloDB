@@ -18,6 +18,7 @@ open DBRefTypeHelpers
 /// Dispatches to unified descriptor path or legacy set-op handler.
 module internal QueryTranslatorVisitDbRef =
     let private handleDBRefManyExpression (qb: QueryBuilder) (exp: Expression) : bool =
+        ()
         let actualExp =
             match exp with
             | :? LambdaExpression as le -> le.Body

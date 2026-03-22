@@ -17,6 +17,7 @@ open SoloDatabase.QueryTranslatorBaseHelpers
 module internal QueryableBuildQueryGroupByChained =
     open QueryableHelperJoin
     open QueryableHelperBase
+    open QueryableBuildQueryWindowHelpers
 
     let private aliasCounter = ref 0L
     let private nextAlias prefix =
@@ -456,11 +457,7 @@ module internal QueryableBuildQueryGroupByChained =
                             |> normalizeProjectedValue projectedLambda.ReturnType }
                         { Alias = Some "__ord"
                           Expr =
-                            SqlExpr.WindowCall({
-                                Kind = WindowFunctionKind.RowNumber
-                                Arguments = []
-                                PartitionBy = []
-                                OrderBy = effectiveOrder |> List.map (fun ob -> ob.Expr, ob.Direction) }) }
+                            rowNumberOver (effectiveOrder |> List.map (fun ob -> ob.Expr, ob.Direction)) }
                     ]
                 Distinct = false
                 OrderBy = effectiveOrder
@@ -607,11 +604,7 @@ module internal QueryableBuildQueryGroupByChained =
                         { Alias = Some "__ord"; Expr = SqlExpr.Column(Some rankAlias, "__ord") }
                         { Alias = Some "__rk"
                           Expr =
-                            SqlExpr.WindowCall({
-                                Kind = WindowFunctionKind.RowNumber
-                                Arguments = []
-                                PartitionBy = [SqlExpr.Column(Some rankAlias, "k")]
-                                OrderBy = [SqlExpr.Column(Some rankAlias, "__ord"), SortDirection.Asc] }) }
+                            rowNumberByKey (SqlExpr.Column(Some rankAlias, "k")) [SqlExpr.Column(Some rankAlias, "__ord"), SortDirection.Asc] }
                     ]
                   Source = Some(DerivedTable(keyedSel, rankAlias))
                   Joins = []
@@ -654,11 +647,7 @@ module internal QueryableBuildQueryGroupByChained =
                         { Alias = Some "__ord"; Expr = SqlExpr.Column(Some filterAlias, "__ord") }
                         { Alias = Some "__rk"
                           Expr =
-                            SqlExpr.WindowCall({
-                                Kind = WindowFunctionKind.RowNumber
-                                Arguments = []
-                                PartitionBy = [SqlExpr.Column(Some filterAlias, "k")]
-                                OrderBy = [SqlExpr.Column(Some filterAlias, "__ord"), SortDirection.Asc] }) }
+                            rowNumberByKey (SqlExpr.Column(Some filterAlias, "k")) [SqlExpr.Column(Some filterAlias, "__ord"), SortDirection.Asc] }
                     ]
                   Source = Some(DerivedTable(keyedSel, filterAlias))
                   Joins = []
@@ -737,14 +726,12 @@ module internal QueryableBuildQueryGroupByChained =
                         { Alias = Some "__ord"; Expr = SqlExpr.Column(Some unionAlias, "__ord") }
                         { Alias = Some "__rk"
                           Expr =
-                            SqlExpr.WindowCall({
-                                Kind = WindowFunctionKind.RowNumber
-                                Arguments = []
-                                PartitionBy = [SqlExpr.Column(Some unionAlias, "k")]
-                                OrderBy = [
+                            rowNumberByKey
+                                (SqlExpr.Column(Some unionAlias, "k"))
+                                [
                                     SqlExpr.Column(Some unionAlias, "__src"), SortDirection.Asc
                                     SqlExpr.Column(Some unionAlias, "__ord"), SortDirection.Asc
-                                ] }) }
+                                ] }
                     ]
                   Source = Some(DerivedTable(unionSel, unionAlias))
                   Joins = []
@@ -763,14 +750,10 @@ module internal QueryableBuildQueryGroupByChained =
                         { Alias = Some "v"; Expr = SqlExpr.Column(Some filteredAlias, "v") }
                         { Alias = Some "__ord"
                           Expr =
-                            SqlExpr.WindowCall({
-                                Kind = WindowFunctionKind.RowNumber
-                                Arguments = []
-                                PartitionBy = []
-                                OrderBy = [
-                                    SqlExpr.Column(Some filteredAlias, "__src"), SortDirection.Asc
-                                    SqlExpr.Column(Some filteredAlias, "__ord"), SortDirection.Asc
-                                ] }) }
+                            rowNumberOver [
+                                SqlExpr.Column(Some filteredAlias, "__src"), SortDirection.Asc
+                                SqlExpr.Column(Some filteredAlias, "__ord"), SortDirection.Asc
+                            ] }
                     ]
                   Source = Some(DerivedTable(rankedSel, filteredAlias))
                   Joins = []
@@ -829,14 +812,10 @@ module internal QueryableBuildQueryGroupByChained =
                         { Alias = Some "v"; Expr = SqlExpr.Column(Some outAlias, "v") }
                         { Alias = Some "__ord"
                           Expr =
-                            SqlExpr.WindowCall({
-                                Kind = WindowFunctionKind.RowNumber
-                                Arguments = []
-                                PartitionBy = []
-                                OrderBy = [
-                                    SqlExpr.Column(Some outAlias, "__src"), SortDirection.Asc
-                                    SqlExpr.Column(Some outAlias, "__ord"), SortDirection.Asc
-                                ] }) }
+                            rowNumberOver [
+                                SqlExpr.Column(Some outAlias, "__src"), SortDirection.Asc
+                                SqlExpr.Column(Some outAlias, "__ord"), SortDirection.Asc
+                            ] }
                     ]
                   Source = Some(DerivedTable(unionSel, outAlias))
                   Joins = []
@@ -927,14 +906,10 @@ module internal QueryableBuildQueryGroupByChained =
                     if desc.SortKeys.IsEmpty then
                         SqlExpr.Column(Some boundedAlias, "__ord")
                     else
-                        SqlExpr.WindowCall({
-                            Kind = WindowFunctionKind.RowNumber
-                            Arguments = []
-                            PartitionBy = []
-                            OrderBy =
-                                finalOrderBy
-                                |> List.map (fun ob -> ob.Expr, ob.Direction)
-                                |> fun orderings -> orderings @ [SqlExpr.Column(Some boundedAlias, "__ord"), SortDirection.Asc] })
+                        rowNumberOver (
+                            finalOrderBy
+                            |> List.map (fun ob -> ob.Expr, ob.Direction)
+                            |> fun orderings -> orderings @ [SqlExpr.Column(Some boundedAlias, "__ord"), SortDirection.Asc])
                 ProjectionSetOps.ofList [
                     { Alias = Some "v"; Expr = SqlExpr.Column(Some boundedAlias, "Value") }
                     { Alias = Some "__ord"; Expr = finalOrdExpr }

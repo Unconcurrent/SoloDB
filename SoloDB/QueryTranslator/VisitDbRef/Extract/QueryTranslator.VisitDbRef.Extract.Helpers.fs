@@ -35,6 +35,9 @@ module internal DBRefManyExtractorHelpers =
             | :? MethodCallExpression as mc ->
                 let src = getSource mc
                 not (isNull src) && isDBRefManyChain unwrapConvert isDBRefManyType src
+            | :? MemberExpression as me when not (isNull me.Expression) ->
+                // Walk through member access (e.g., property on parameter) to find DBRefMany root.
+                isDBRefManyChain unwrapConvert isDBRefManyType me.Expression
             | _ -> false
 
     let preprocessRoot (expr: Expression) : Expression * bool * bool =

@@ -18,6 +18,7 @@ module internal QueryableBuildQueryGroupJoinChain =
     open QueryableHelperState
     open QueryableHelperPreprocess
     open QueryableHelperBase
+    open QueryableBuildQueryWindowHelpers
     type GroupJoinElementKind =
         | FirstLike of orDefault: bool
         | LastLike of orDefault: bool
@@ -397,11 +398,7 @@ module internal QueryableBuildQueryGroupJoinChain =
                         { Alias = Some "Value"; Expr = SqlExpr.Column(Some rowAlias, "Value") }
                         { Alias = Some "__ord"
                           Expr =
-                            SqlExpr.WindowCall({
-                                Kind = WindowFunctionKind.RowNumber
-                                Arguments = []
-                                PartitionBy = []
-                                OrderBy = orderBy |> List.map (fun ob -> ob.Expr, ob.Direction) }) }
+                            rowNumberOver (orderBy |> List.map (fun ob -> ob.Expr, ob.Direction)) }
                     ]
                   Source = Some(DerivedTable(rt.InnerSelect, rowAlias))
                   Joins = materializeInnerRowJoins rt rowAlias baseCtx.Joins
@@ -595,11 +592,7 @@ module internal QueryableBuildQueryGroupJoinChain =
                             { Alias = Some "__ord"; Expr = SqlExpr.Column(Some rankAlias, "__ord") }
                             { Alias = Some "__rk"
                               Expr =
-                                SqlExpr.WindowCall({
-                                    Kind = WindowFunctionKind.RowNumber
-                                    Arguments = []
-                                    PartitionBy = [SqlExpr.Column(Some rankAlias, "k")]
-                                    OrderBy = [SqlExpr.Column(Some rankAlias, "__ord"), SortDirection.Asc] }) }
+                                rowNumberByKey (SqlExpr.Column(Some rankAlias, "k")) [SqlExpr.Column(Some rankAlias, "__ord"), SortDirection.Asc] }
                         ]
                       Source = Some(DerivedTable(keyedSel, rankAlias))
                       Joins = []
@@ -678,11 +671,7 @@ module internal QueryableBuildQueryGroupJoinChain =
                                 { Alias = Some "__ord"; Expr = SqlExpr.Column(Some filterAlias, "__ord") }
                                 { Alias = Some "__rk"
                                   Expr =
-                                    SqlExpr.WindowCall({
-                                        Kind = WindowFunctionKind.RowNumber
-                                        Arguments = []
-                                        PartitionBy = [SqlExpr.Column(Some filterAlias, "k")]
-                                        OrderBy = [SqlExpr.Column(Some filterAlias, "__ord"), SortDirection.Asc] }) }
+                                    rowNumberByKey (SqlExpr.Column(Some filterAlias, "k")) [SqlExpr.Column(Some filterAlias, "__ord"), SortDirection.Asc] }
                             ]
                           Source = Some(DerivedTable(keyedSel, filterAlias))
                           Joins = []
@@ -767,14 +756,12 @@ module internal QueryableBuildQueryGroupJoinChain =
                             { Alias = Some "__ord"; Expr = SqlExpr.Column(Some unionAlias, "__ord") }
                             { Alias = Some "__rk"
                               Expr =
-                                SqlExpr.WindowCall({
-                                    Kind = WindowFunctionKind.RowNumber
-                                    Arguments = []
-                                    PartitionBy = [SqlExpr.Column(Some unionAlias, "k")]
-                                    OrderBy = [
+                                rowNumberByKey
+                                    (SqlExpr.Column(Some unionAlias, "k"))
+                                    [
                                         SqlExpr.Column(Some unionAlias, "__src"), SortDirection.Asc
                                         SqlExpr.Column(Some unionAlias, "__ord"), SortDirection.Asc
-                                    ] }) }
+                                    ] }
                         ]
                       Source = Some(DerivedTable(unionSel, unionAlias))
                       Joins = []
@@ -793,14 +780,10 @@ module internal QueryableBuildQueryGroupJoinChain =
                             { Alias = Some "v"; Expr = SqlExpr.Column(Some filteredAlias, "v") }
                             { Alias = Some "__ord"
                               Expr =
-                                SqlExpr.WindowCall({
-                                    Kind = WindowFunctionKind.RowNumber
-                                    Arguments = []
-                                    PartitionBy = []
-                                    OrderBy = [
-                                        SqlExpr.Column(Some filteredAlias, "__src"), SortDirection.Asc
-                                        SqlExpr.Column(Some filteredAlias, "__ord"), SortDirection.Asc
-                                    ] }) }
+                                rowNumberOver [
+                                    SqlExpr.Column(Some filteredAlias, "__src"), SortDirection.Asc
+                                    SqlExpr.Column(Some filteredAlias, "__ord"), SortDirection.Asc
+                                ] }
                         ]
                       Source = Some(DerivedTable(rankedSel, filteredAlias))
                       Joins = []
