@@ -137,7 +137,7 @@ module internal DBRefManyBuilder =
 
         // TakeWhile/SkipWhile — delegated to BuildSpecial.
         match desc.TakeWhileInfo with
-        | Some (twPredLambda, isTakeWhile) when desc.SelectProjection.IsNone && desc.GroupByKey.IsNone ->
+        | Some (twPredLambda, isTakeWhile) when desc.GroupByKey.IsNone ->
             DBRefManyBuildSpecial.tryBuildTakeWhile qb desc buildCorrelatedCore mkSubCore nextAlias tryGetRelationOrderByForTakeWhile ownerRef twPredLambda isTakeWhile
         | Some _ | None ->
 

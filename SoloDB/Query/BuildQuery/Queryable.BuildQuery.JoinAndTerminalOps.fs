@@ -25,6 +25,39 @@ module internal QueryableBuildQueryJoinAndTerminalOps =
     open QueryableHelperPreprocess
     open QueryableLayerBuild
     open QueryableHelperBase
+
+    let private materializeDiscoveredJoins
+        (joins: ResizeArray<JoinEdge>)
+        (materializedRootAlias: string option)
+        (materializedRootPaths: Collections.Generic.HashSet<string> option) =
+        joins
+        |> Seq.map (fun j ->
+            let rawExpr =
+                SqlExpr.JsonExtractExpr(j.OnSourceAlias, "Value", JsonPath(j.OnPropertyName, []))
+            let arrayIdExpr =
+                SqlExpr.FunctionCall(
+                    "jsonb_extract",
+                    [ SqlExpr.Column(j.OnSourceAlias, "Value")
+                      SqlExpr.Literal(SqlLiteral.String($"$.{j.OnPropertyName}[0]")) ])
+            let onExpr =
+                let valueTypeExpr =
+                    SqlExpr.FunctionCall(
+                        "json_type",
+                        [ SqlExpr.Column(j.OnSourceAlias, "Value")
+                          SqlExpr.Literal(SqlLiteral.String($"$.{j.OnPropertyName}")) ])
+                SqlExpr.CaseExpr(
+                    (SqlExpr.Binary(valueTypeExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.String "array")), arrayIdExpr),
+                    [],
+                    Some rawExpr)
+            ConditionedJoin(
+                parseJoinKind j.JoinKind,
+                BaseTable(j.TargetTable, Some j.TargetAlias),
+                SqlExpr.Binary(
+                    SqlExpr.Column(Some j.TargetAlias, "Id"),
+                    BinaryOperator.Eq,
+                    onExpr)))
+        |> Seq.toList
+
     let internal apply<'T>
         (sourceCtx: QueryContext)
         (tableName: string)
@@ -93,9 +126,16 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                         addComplexFinal statements (fun ctx ->
                             let outerAlias = "o"
                             let innerAlias = "j"
-                            let innerCtx = QueryContext.SingleSource(innerRootTable)
+                            let outerCtx =
+                                { sourceCtx with
+                                    Joins = ResizeArray() }
+                            let innerCtx =
+                                { sourceCtx with
+                                    RootTable = innerRootTable
+                                    RootGraph = QueryRootGraph.Single(innerRootTable)
+                                    Joins = ResizeArray() }
                             let outerKeyExpr =
-                                translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars (Some outerKeySelector.Parameters.[0]) outerKeySelector.Body
+                                translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars (Some outerKeySelector.Parameters.[0]) outerKeySelector.Body
                             let innerKeyExpr =
                                 translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body
 
@@ -111,7 +151,7 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
 
                             let resultExpr =
                                 translateJoinResultSelectorExpression
-                                    sourceCtx
+                                    outerCtx
                                     innerCtx
                                     ctx.Vars
                                     outerAlias
@@ -120,6 +160,10 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                                     resultSelector.Parameters.[1]
                                     resultSelector.Body
 
+                            let outerDiscoveredJoins =
+                                materializeDiscoveredJoins outerCtx.Joins (Some outerAlias) None
+                            let innerDiscoveredJoins =
+                                materializeDiscoveredJoins innerCtx.Joins None None
                             let core =
                                 { mkCore
                                     [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some outerAlias, "Id") }
@@ -127,10 +171,12 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                                     (Some (DerivedTable(ctx.Inner, outerAlias)))
                                   with
                                       Joins =
-                                          [ConditionedJoin(
-                                              JoinKind.Inner,
-                                              BaseTable(innerRootTable, Some innerAlias),
-                                              joinCondition)] }
+                                          outerDiscoveredJoins
+                                          @ [ConditionedJoin(
+                                                JoinKind.Inner,
+                                                BaseTable(innerRootTable, Some innerAlias),
+                                                joinCondition)]
+                                          @ innerDiscoveredJoins }
                             wrapCore core
                         )
                     | other ->

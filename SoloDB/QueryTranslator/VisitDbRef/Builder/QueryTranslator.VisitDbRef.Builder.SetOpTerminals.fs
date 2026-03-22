@@ -220,6 +220,23 @@ module internal DBRefManyBuilderSetOpTerminals =
     let private buildExistsFromRowset (rowsetSel: SqlSelect) : SqlExpr =
         SqlExpr.Exists rowsetSel
 
+    let private buildProjectedAggregate (nextAlias: string -> string) (qb: QueryBuilder) (rowsetSel: SqlSelect) (aggKind: AggregateKind) : SqlExpr =
+        let rowAlias = nextAlias "_sa"
+        let aggExpr = SqlExpr.AggregateCall(aggKind, Some(SqlExpr.Column(Some rowAlias, "v")), false, None)
+        let aggCore =
+            { Distinct = false
+              Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = aggExpr }]
+              Source = Some(DerivedTable(rowsetSel, rowAlias))
+              Joins = []
+              Where = None
+              GroupBy = []
+              Having = None
+              OrderBy = []
+              Limit = None
+              Offset = None }
+        let scalarExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect aggCore }
+        DBRefManyHelpers.wrapAggregateEmptySemantics aggKind qb.InsideJsonObjectProjection scalarExpr
+
     let buildSetOpTerminalFromRowset
         (nextAlias: string -> string)
         (visitDu: Expression -> QueryBuilder -> SqlExpr)
@@ -248,10 +265,14 @@ module internal DBRefManyBuilderSetOpTerminals =
             ValueSome(buildFirstLikeFromRowset nextAlias filteredSel true)
         | Terminal.ElementAt indexExpr -> ValueSome(buildElementAtFromRowset nextAlias visitDu qb rowsetSel indexExpr false)
         | Terminal.ElementAtOrDefault indexExpr -> ValueSome(buildElementAtFromRowset nextAlias visitDu qb rowsetSel indexExpr true)
+        | Terminal.SumProjected -> ValueSome(buildProjectedAggregate nextAlias qb rowsetSel AggregateKind.Sum)
+        | Terminal.MinProjected -> ValueSome(buildProjectedAggregate nextAlias qb rowsetSel AggregateKind.Min)
+        | Terminal.MaxProjected -> ValueSome(buildProjectedAggregate nextAlias qb rowsetSel AggregateKind.Max)
+        | Terminal.AverageProjected -> ValueSome(buildProjectedAggregate nextAlias qb rowsetSel AggregateKind.Avg)
         // Terminals not handled by set-op path — fall through to main builder.
-        | Terminal.All _ | Terminal.Sum _ | Terminal.SumProjected
-        | Terminal.Min _ | Terminal.MinProjected | Terminal.Max _ | Terminal.MaxProjected
-        | Terminal.Average _ | Terminal.AverageProjected | Terminal.Contains _
+        | Terminal.All _ | Terminal.Sum _
+        | Terminal.Min _ | Terminal.Max _
+        | Terminal.Average _ | Terminal.Contains _
         | Terminal.Last _ | Terminal.LastOrDefault _
         | Terminal.Single _ | Terminal.SingleOrDefault _
         | Terminal.MinBy _ | Terminal.MaxBy _ | Terminal.CountBy _ -> ValueNone

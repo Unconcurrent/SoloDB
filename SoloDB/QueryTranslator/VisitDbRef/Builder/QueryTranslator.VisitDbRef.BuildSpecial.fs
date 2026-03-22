@@ -259,10 +259,12 @@ module internal DBRefManyBuildSpecial =
         (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef)
         (keyLambda: LambdaExpression) : SqlExpr voption =
 
+        let hasBoundary = desc.Limit.IsSome || desc.Offset.IsSome
         let groupDesc =
             match desc.TakeWhileInfo with
             | Some _ -> { desc with Limit = None; Offset = None }
-            | None -> { desc with Limit = None; Offset = None; SortKeys = [] }
+            | None when hasBoundary -> desc  // Preserve Limit/Offset/SortKeys for bounded DerivedTable wrapping
+            | None -> { desc with SortKeys = [] }
         let tgtAlias, baseCore, targetTable =
             match desc.TakeWhileInfo with
             | Some (twPredLambda, isTakeWhile) ->
@@ -279,6 +281,16 @@ module internal DBRefManyBuildSpecial =
                     buildCorrelatedCore qb groupDesc ownerRef [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
                 rowAlias,
                 (mkSubCore [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] (Some(DerivedTable(rowsetSel, rowAlias))) None),
+                targetTable
+            | None when hasBoundary ->
+                // Bounded chain (OrderBy+Take): build correlated core with boundaries,
+                // wrap in DerivedTable so GROUP BY operates on the bounded set.
+                let tgtAlias, _, boundedCore, targetTable =
+                    buildCorrelatedCore qb groupDesc ownerRef [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                let boundedSel = { Ctes = []; Body = SingleSelect { boundedCore with Projections = AllColumns } }
+                let dtAlias = nextAlias "_gbbd"
+                dtAlias,
+                (mkSubCore [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] (Some(DerivedTable(boundedSel, dtAlias))) None),
                 targetTable
             | None ->
                 let tgtAlias, _, baseCore, targetTable =
@@ -328,11 +340,8 @@ module internal DBRefManyBuildSpecial =
             let outerCore = mkSubCore countProj (Some(DerivedTable(gbSel, gbAlias))) None
             ValueSome(SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore })
         | Terminal.Exists ->
-            match havingOpt with
-            | Some havingDu ->
-                let gbCore = { baseCore with GroupBy = [groupKeyDu]; Having = Some havingDu }
-                ValueSome(SqlExpr.Exists { Ctes = []; Body = SingleSelect gbCore })
-            | None -> ValueNone
+            let gbCore = { baseCore with GroupBy = [groupKeyDu]; Having = havingOpt }
+            ValueSome(SqlExpr.Exists { Ctes = []; Body = SingleSelect gbCore })
         | Terminal.All _ ->
             match havingOpt with
             | Some havingDu ->
@@ -374,21 +383,50 @@ module internal DBRefManyBuildSpecial =
                     "Fix: Pass the key selector as an inline lambda."))
 
         let tgtAlias, _, baseCore, targetTable =
-            buildCorrelatedCore qb { desc with Limit = None; Offset = None; SortKeys = [] } ownerRef
+            buildCorrelatedCore qb desc ownerRef
                 [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
-        let subQbKey = qb.ForSubquery(tgtAlias, keyLambda, subqueryRootTable = targetTable)
+
+        // If the descriptor has ORDER BY + LIMIT/OFFSET (bounded chain like OrderBy().Take(n)),
+        // wrap the bounded core in a DerivedTable first so GROUP BY operates on the bounded set.
+        let groupSourceAlias, groupSourceTable =
+            if baseCore.Limit.IsSome || baseCore.Offset.IsSome then
+                let boundedSel = { Ctes = []; Body = SingleSelect { baseCore with Projections = AllColumns } }
+                let dtAlias = nextAlias "_cbd"
+                dtAlias, targetTable
+            else
+                tgtAlias, targetTable
+
+        let effectiveSource, effectiveJoins =
+            if baseCore.Limit.IsSome || baseCore.Offset.IsSome then
+                let boundedSel = { Ctes = []; Body = SingleSelect { baseCore with Projections = AllColumns } }
+                let dtAlias = groupSourceAlias
+                Some(DerivedTable(boundedSel, dtAlias)), []
+            else
+                baseCore.Source, baseCore.Joins
+
+        let subQbKey = qb.ForSubquery(groupSourceAlias, keyLambda, subqueryRootTable = groupSourceTable)
         let groupKeyDu = visitDu keyLambda.Body subQbKey
         let keyJoins = DBRefManyHelpers.joinEdgesToClauses subQbKey.SourceContext.Joins
 
-        // Inner: SELECT <key> AS _gk, COUNT(*) AS _gc FROM ... GROUP BY <key>
+        // Inner: SELECT <key> AS _gk, COUNT(*) AS _gc FROM (bounded set) GROUP BY <key>
         let innerCore =
-            { baseCore with
-                Projections = ProjectionSetOps.ofList [
-                    { Alias = Some "_gk"; Expr = groupKeyDu }
-                    { Alias = Some "_gc"; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }
-                ]
-                Joins = baseCore.Joins @ keyJoins
-                GroupBy = [groupKeyDu] }
+            if baseCore.Limit.IsSome || baseCore.Offset.IsSome then
+                { mkSubCore
+                    [{ Alias = Some "_gk"; Expr = groupKeyDu }
+                     { Alias = Some "_gc"; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
+                    effectiveSource
+                    None
+                  with
+                    Joins = keyJoins
+                    GroupBy = [groupKeyDu] }
+            else
+                { baseCore with
+                    Projections = ProjectionSetOps.ofList [
+                        { Alias = Some "_gk"; Expr = groupKeyDu }
+                        { Alias = Some "_gc"; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }
+                    ]
+                    Joins = baseCore.Joins @ keyJoins
+                    GroupBy = [groupKeyDu] }
         let innerSel = { Ctes = []; Body = SingleSelect innerCore }
 
         // Outer: SELECT json_group_array(json_object('Key', _gk, 'Value', _gc))

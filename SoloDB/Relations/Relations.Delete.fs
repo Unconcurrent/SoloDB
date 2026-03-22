@@ -29,7 +29,7 @@ let internal metadataLinkLayout (connection: SqliteConnection) (row: RelationMet
         let useShared = sqliteTableExistsByName connection canonicalTable
         let ownerUsesSourceColumn =
             if useShared then
-                StringComparer.Ordinal.Compare(row.OwnerCollection, row.TargetCollection) <= 0
+                sharedManyOwnerUsesSourceColumn row.OwnerCollection row.TargetCollection
             else
                 true
         let ownerColumn, targetColumn =

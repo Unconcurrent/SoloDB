@@ -22,6 +22,23 @@ type RelationWritePlan = RelationsTypes.RelationWritePlan
 type RelationDeletePlan = RelationsTypes.RelationDeletePlan
 type RelationUpdateManyOp = RelationsTypes.RelationUpdateManyOp
 
+let private emitSingleRelationAssignment (ops: ResizeArray<RelationUpdateManyOp>) (descriptor: RelationDescriptor) (newId: int64) =
+    if newId > 0L then
+        ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, newId))
+    else
+        ops.Add(SetDBRefToNone(descriptor.PropertyPath, descriptor.TargetType))
+
+let private emitClearManyOps (ops: ResizeArray<RelationUpdateManyOp>) (descriptor: RelationDescriptor) =
+    ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
+
+let private emitAddManyOps (ops: ResizeArray<RelationUpdateManyOp>) (descriptor: RelationDescriptor) (ids: int64 array) =
+    for id in ids do
+        ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
+
+let private emitClearAndReAdd (ops: ResizeArray<RelationUpdateManyOp>) (descriptor: RelationDescriptor) (newIds: int64 array) =
+    emitClearManyOps ops descriptor
+    emitAddManyOps ops descriptor newIds
+
 let prepareInsert (tx: RelationTxContext) (owner: obj) =
     ensureTxContext tx
     ensureOwnerInstance tx.OwnerType owner "owner"
@@ -38,8 +55,7 @@ let prepareInsert (tx: RelationTxContext) (owner: obj) =
                 match collectManyTargetIdsAndCascade tx descriptor owner true visited typeStack with
                 | ValueSome ids ->
                     resetMap.[descriptor.Property.Name] <- ids
-                    for id in ids do
-                        ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
+                    emitAddManyOps ops descriptor ids
                 | ValueNone -> ()
 
         applyResetMapIfAny owner resetMap
@@ -64,8 +80,7 @@ let prepareUpsert (tx: RelationTxContext) (oldOwner: obj voption) (newOwner: obj
                 let oldId = match oldOwner with | ValueSome old -> readSingleIdNoCascade descriptor old | ValueNone -> 0L
                 let newId = resolveSingleTargetIdAndCascade tx descriptor newOwner visited typeStack
                 if oldId <> newId then
-                    if newId > 0L then ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, newId))
-                    else ops.Add(SetDBRefToNone(descriptor.PropertyPath, descriptor.TargetType))
+                    emitSingleRelationAssignment ops descriptor newId
             | Many ->
                 let trackerObj = (RelationsAccessorCache.compiledPropGetter descriptor.Property).Invoke(newOwner)
                 if isNull trackerObj then
@@ -75,10 +90,13 @@ let prepareUpsert (tx: RelationTxContext) (oldOwner: obj voption) (newOwner: obj
                 match collectManyTargetIdsAndCascade tx descriptor newOwner true visited typeStack with
                 | ValueSome ids ->
                     resetMap.[descriptor.Property.Name] <- ids
-                    if hadOldOwner then ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
-                    for id in ids do ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
+                    if hadOldOwner then
+                        emitClearAndReAdd ops descriptor ids
+                    else
+                        emitAddManyOps ops descriptor ids
                 | ValueNone ->
-                    if hadOldOwner then ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
+                    if hadOldOwner then
+                        emitClearManyOps ops descriptor
 
         applyResetMapIfAny newOwner resetMap
 
@@ -102,8 +120,7 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                 let oldId = readSingleIdNoCascade descriptor oldOwner
                 let newId = resolveSingleTargetIdAndCascade tx descriptor newOwner visited typeStack
                 if oldId <> newId then
-                    if newId > 0L then ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, newId))
-                    else ops.Add(SetDBRefToNone(descriptor.PropertyPath, descriptor.TargetType))
+                    emitSingleRelationAssignment ops descriptor newId
             | Many ->
                 match (RelationsAccessorCache.compiledPropGetter descriptor.Property).Invoke(newOwner) with
                 | :? IDBRefManyInternal as tracker when tracker.IsLoaded ->
@@ -117,9 +134,7 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                         let newSet = HashSet<int64>(newIds)
                         if not (oldSet.SetEquals(newSet)) then
                             if tracker.WasCleared then
-                                ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
-                                for id in newIds do
-                                    ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
+                                emitClearAndReAdd ops descriptor newIds
                             else
                                 // Delta mode preserves concurrent changes outside this view's OriginalIds.
                                 for id in oldIds do
@@ -135,13 +150,11 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                         | ValueNone | ValueSome [||] ->
                             // Pure clear — no items after clear.
                             resetMap.[descriptor.Property.Name] <- [||]
-                            ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
+                            emitClearManyOps ops descriptor
                         | ValueSome newIds ->
                             // Clear()+Add(): emit clear then re-add for parity with loaded path.
                             resetMap.[descriptor.Property.Name] <- newIds
-                            ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
-                            for id in newIds do
-                                ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
+                            emitClearAndReAdd ops descriptor newIds
                     else
                         // Discriminator: reject only ambiguous unloaded AddOnly with unsaved targets.
                         // Persisted-target AddOnly on an unloaded tracker is treated as explicit replace intent.
@@ -161,8 +174,7 @@ let prepareUpdate (tx: RelationTxContext) (ownerId: int64) (oldOwner: obj) (newO
                                 let oldSet = HashSet<int64>(oldIds)
                                 let newSet = HashSet<int64>(newIds)
                                 if not (oldSet.SetEquals(newSet)) then
-                                    ops.Add(ClearDBRefMany(descriptor.PropertyPath, descriptor.TargetType))
-                                    for id in newIds do ops.Add(AddDBRefMany(descriptor.PropertyPath, descriptor.TargetType, id))
+                                    emitClearAndReAdd ops descriptor newIds
                 | :? IDBRefManyInternal ->
                     // Unloaded + no mutations: no relation operation required.
                     ()

@@ -129,6 +129,12 @@ let internal canonicalManyRelationName (leftTable: string) (rightTable: string) 
 let internal linkTableFromRelationName (name: string) =
     "SoloDBRelLink_" + name
 
+/// For shared many-to-many link tables, the lexicographically smaller collection
+/// owns SourceId and the larger owns TargetId. This must stay canonical across
+/// schema validation and delete-time metadata layout resolution.
+let internal sharedManyOwnerUsesSourceColumn (ownerTable: string) (targetTable: string) =
+    StringComparer.Ordinal.Compare(ownerTable, targetTable) <= 0
+
 let internal stringToRelationKind (value: string) =
     match value with
     | "Single" -> Single

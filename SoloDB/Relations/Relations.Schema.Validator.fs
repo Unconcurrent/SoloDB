@@ -238,7 +238,7 @@ let internal buildRelationDescriptors (tx: RelationTxContext) (ownerType: Type) 
             && (isMutualMany || existingCanonicalTableIsManyKind)
         let ownerUsesSourceColumn =
             if isSharedMany then
-                StringComparer.Ordinal.Compare(ownerTable, targetTable) <= 0
+                sharedManyOwnerUsesSourceColumn ownerTable targetTable
             else
                 true
         let linkSourceTable, linkTargetTable =
