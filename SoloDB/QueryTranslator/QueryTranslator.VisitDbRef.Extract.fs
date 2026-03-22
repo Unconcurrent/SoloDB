@@ -30,7 +30,7 @@ module internal DBRefManyExtractor =
             | Some recognized ->
                 if not (isDBRefManyChain unwrapConvert isDBRefManyType recognized.Source) then ValueNone
                 else
-                    let state = createState ()
+                    let state : SharedDescriptorExtract.ExtractionState = createState ()
                     let source = normalizeCountBySource recognized.Terminal recognized.Source state
                     let innerSource = walkChain extractorConfig state source
                     finalizeState state
@@ -71,7 +71,8 @@ module internal DBRefManyExtractor =
                             state.GroupByKey
                             (state.Distinct || outerDistinct)
                             finalSelectProj
-                            state.SetOp
+                            (state.SetOps |> Seq.tryHead)
+                            (state.SetOps |> Seq.toList)
                             finalTerminal
                             finalGroupByHaving
                             state.DefaultIfEmpty

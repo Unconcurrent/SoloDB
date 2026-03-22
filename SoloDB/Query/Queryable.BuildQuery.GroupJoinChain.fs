@@ -90,6 +90,7 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
         || desc.TakeWhileInfo.IsSome
         || desc.GroupByKey.IsSome
         || desc.SetOp.IsSome
+        || not desc.SetOps.IsEmpty
 
     /// Convert a QueryDescriptor to the legacy GroupJoinGroupChainDescriptor for builders
     /// that have not yet been migrated. TEMPORARY — these builders should consume QueryDescriptor directly.
@@ -282,7 +283,8 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
                             GroupByKey = state.GroupByKey
                             Distinct = state.Distinct || outerDistinct
                             SelectProjection = state.SelectProjection
-                            SetOp = state.SetOp
+                            SetOp = state.SetOps |> Seq.tryHead
+                            SetOps = state.SetOps |> Seq.toList
                             Terminal = recognized.Terminal
                             GroupByHavingPredicate = state.GroupByHaving
                             DefaultIfEmpty = state.DefaultIfEmpty
@@ -842,32 +844,41 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
                       Offset = None }
                 { Ctes = []; Body = SingleSelect filteredCore }
 
-            match desc.SetOp with
-            | None -> projectedSel
-            | Some _ when not isProjected ->
+            let setOps =
+                if desc.SetOps.IsEmpty then
+                    desc.SetOp |> Option.toList
+                else
+                    desc.SetOps
+            let applySetOp rowsetSel setOp =
+                match setOp with
+                | SetOperation.DistinctBy keyExpr ->
+                    match tryExtractLambdaExpression keyExpr with
+                    | ValueSome keyLambda -> buildDistinctByProjectedRowset rowsetSel keyLambda
+                    | ValueNone -> raise (NotSupportedException("Cannot extract key selector for GroupJoin DistinctBy."))
+                | SetOperation.IntersectBy(rightKeys, keyExpr) ->
+                    match tryExtractLambdaExpression keyExpr with
+                    | ValueSome keyLambda -> buildByFilterProjectedRowset rowsetSel keyLambda rightKeys false
+                    | ValueNone -> raise (NotSupportedException("Cannot extract key selector for GroupJoin IntersectBy."))
+                | SetOperation.ExceptBy(rightKeys, keyExpr) ->
+                    match tryExtractLambdaExpression keyExpr with
+                    | ValueSome keyLambda -> buildByFilterProjectedRowset rowsetSel keyLambda rightKeys true
+                    | ValueNone -> raise (NotSupportedException("Cannot extract key selector for GroupJoin ExceptBy."))
+                | SetOperation.UnionBy(rightSource, keyExpr) ->
+                    match tryExtractLambdaExpression keyExpr with
+                    | ValueSome keyLambda -> buildUnionByProjectedRowset rowsetSel rightSource keyLambda
+                    | ValueNone -> raise (NotSupportedException("Cannot extract key selector for GroupJoin UnionBy."))
+                | _ ->
+                    raise (NotSupportedException(
+                        "Error: GroupJoin set operation is not supported on this chain.\n" +
+                        "Fix: Use a By-key set operator on a projected value chain, or move the operation after AsEnumerable()."))
+            match setOps with
+            | [] -> projectedSel
+            | _ when not isProjected ->
                 raise (NotSupportedException(
                     "Error: GroupJoin set operations require a projected value chain.\n" +
                     "Fix: Project the group value first, for example g.Select(x => x.Code).UnionBy(...)."))
-            | Some (SetOperation.DistinctBy keyExpr) ->
-                match tryExtractLambdaExpression keyExpr with
-                | ValueSome keyLambda -> buildDistinctByProjectedRowset projectedSel keyLambda
-                | ValueNone -> raise (NotSupportedException("Cannot extract key selector for GroupJoin DistinctBy."))
-            | Some (SetOperation.IntersectBy(rightKeys, keyExpr)) ->
-                match tryExtractLambdaExpression keyExpr with
-                | ValueSome keyLambda -> buildByFilterProjectedRowset projectedSel keyLambda rightKeys false
-                | ValueNone -> raise (NotSupportedException("Cannot extract key selector for GroupJoin IntersectBy."))
-            | Some (SetOperation.ExceptBy(rightKeys, keyExpr)) ->
-                match tryExtractLambdaExpression keyExpr with
-                | ValueSome keyLambda -> buildByFilterProjectedRowset projectedSel keyLambda rightKeys true
-                | ValueNone -> raise (NotSupportedException("Cannot extract key selector for GroupJoin ExceptBy."))
-            | Some (SetOperation.UnionBy(rightSource, keyExpr)) ->
-                match tryExtractLambdaExpression keyExpr with
-                | ValueSome keyLambda -> buildUnionByProjectedRowset projectedSel rightSource keyLambda
-                | ValueNone -> raise (NotSupportedException("Cannot extract key selector for GroupJoin UnionBy."))
-            | Some _ ->
-                raise (NotSupportedException(
-                    "Error: GroupJoin set operation is not supported on this chain.\n" +
-                    "Fix: Use a By-key set operator on a projected value chain, or move the operation after AsEnumerable()."))
+            | _ ->
+                setOps |> List.fold applySetOp projectedSel
 
         let dedupedSel =
             if desc.Distinct then
@@ -1002,7 +1013,7 @@ module internal QueryableBuildQueryPartBGroupJoinChain =
               PostBoundLimit = None; PostBoundOffset = None
               TakeWhileInfo = None; PostBoundTakeWhileInfo = None
               GroupByKey = None; Distinct = chain.Distinct
-              SelectProjection = chain.SelectProjection; SetOp = None
+              SelectProjection = chain.SelectProjection; SetOp = None; SetOps = []
               Terminal = Terminal.Count; GroupByHavingPredicate = None
               DefaultIfEmpty = chain.DefaultIfEmpty; PostSelectDefaultIfEmpty = None }
         buildGroupChainRowsetQ rt qdesc

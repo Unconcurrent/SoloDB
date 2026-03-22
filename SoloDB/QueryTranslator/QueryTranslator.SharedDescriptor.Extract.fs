@@ -39,7 +39,7 @@ module internal SharedDescriptorExtract =
             mutable GroupByKey: LambdaExpression option
             mutable Distinct: bool
             mutable SelectProjection: LambdaExpression option
-            mutable SetOp: SetOperation option
+            SetOps: ResizeArray<SetOperation>
             mutable OfTypeName: string option
             mutable CastTypeName: string option
             mutable GroupByHaving: Expression option
@@ -109,7 +109,7 @@ module internal SharedDescriptorExtract =
             GroupByKey = None
             Distinct = false
             SelectProjection = None
-            SetOp = None
+            SetOps = ResizeArray()
             OfTypeName = None
             CastTypeName = None
             GroupByHaving = None
@@ -358,31 +358,31 @@ module internal SharedDescriptorExtract =
 
             | "Intersect" ->
                 match arg with
-                | Some rightSrc -> state.SetOp <- Some (SetOperation.Intersect rightSrc)
+                | Some rightSrc -> state.SetOps.Insert(0, SetOperation.Intersect rightSrc)
                 | None -> ()
                 walkChain config state src
 
             | "Except" ->
                 match arg with
-                | Some rightSrc -> state.SetOp <- Some (SetOperation.Except rightSrc)
+                | Some rightSrc -> state.SetOps.Insert(0, SetOperation.Except rightSrc)
                 | None -> ()
                 walkChain config state src
 
             | "Union" ->
                 match arg with
-                | Some rightSrc -> state.SetOp <- Some (SetOperation.Union rightSrc)
+                | Some rightSrc -> state.SetOps.Insert(0, SetOperation.Union rightSrc)
                 | None -> ()
                 walkChain config state src
 
             | "Concat" ->
                 match arg with
-                | Some rightSrc -> state.SetOp <- Some (SetOperation.Concat rightSrc)
+                | Some rightSrc -> state.SetOps.Insert(0, SetOperation.Concat rightSrc)
                 | None -> ()
                 walkChain config state src
 
             | "DistinctBy" ->
                 match arg with
-                | Some keySel -> state.SetOp <- Some (SetOperation.DistinctBy keySel)
+                | Some keySel -> state.SetOps.Insert(0, SetOperation.DistinctBy keySel)
                 | None -> ()
                 walkChain config state src
 
@@ -396,17 +396,17 @@ module internal SharedDescriptorExtract =
 
             | "IntersectBy" ->
                 if mc.Arguments.Count >= 3 then
-                    state.SetOp <- Some (SetOperation.IntersectBy(mc.Arguments.[1], mc.Arguments.[2]))
+                    state.SetOps.Insert(0, SetOperation.IntersectBy(mc.Arguments.[1], mc.Arguments.[2]))
                 walkChain config state src
 
             | "ExceptBy" ->
                 if mc.Arguments.Count >= 3 then
-                    state.SetOp <- Some (SetOperation.ExceptBy(mc.Arguments.[1], mc.Arguments.[2]))
+                    state.SetOps.Insert(0, SetOperation.ExceptBy(mc.Arguments.[1], mc.Arguments.[2]))
                 walkChain config state src
 
             | "UnionBy" ->
                 if mc.Arguments.Count >= 3 then
-                    state.SetOp <- Some (SetOperation.UnionBy(mc.Arguments.[1], mc.Arguments.[2]))
+                    state.SetOps.Insert(0, SetOperation.UnionBy(mc.Arguments.[1], mc.Arguments.[2]))
                 walkChain config state src
 
             | "ToList" | "ToArray" ->

@@ -353,9 +353,13 @@ module internal QueryableBuildQueryPartAGroupBy =
                             raise (NotSupportedException(
                                 "Error: GroupBy.Select projection cannot be translated to SQL.\n" +
                                 "Fix: Use a new { } anonymous type or call AsEnumerable() before the Select."))
-            let jsonObjArgs = projections |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
-            // Use json_object (TEXT JSON) so downstream json_extract returns typed SQL values for ORDER BY/TakeWhile.
-            let valueExpr = SqlExpr.FunctionCall("json_object", jsonObjArgs)
+            let valueExpr =
+                match projections with
+                | [("Value", expr)] -> expr
+                | _ ->
+                    let jsonObjArgs = projections |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
+                    // Use json_object (TEXT JSON) so downstream json_extract returns typed SQL values for ORDER BY/TakeWhile.
+                    SqlExpr.FunctionCall("json_object", jsonObjArgs)
             let orderBy = translateGroupOrders sourceCtx ctx.TableName "o" ctx.Vars groupOrders
             let core =
                 { mkCore

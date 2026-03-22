@@ -98,6 +98,8 @@ module internal DBRefManyDescriptor =
         SelectProjection: LambdaExpression option
         /// Set operation (Intersect/Except/Union/Concat with right operand).
         SetOp: SetOperation option
+        /// Ordered set-operation chain in source-to-terminal order.
+        SetOps: SetOperation list
         /// Terminal operation.
         Terminal: Terminal
         /// GroupBy HAVING predicate (for GroupBy.Any/All terminals).
