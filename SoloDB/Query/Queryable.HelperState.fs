@@ -147,11 +147,6 @@ module internal QueryableHelperState =
          t.GetGenericTypeDefinition() = typedefof<Nullable<_>> &&
          t.GetGenericArguments().[0] = typeof<decimal>)
 
-    let internal rejectDecimalAverageIfNeeded (method: MethodInfo) =
-        if isDecimalOrNullableDecimal method.ReturnType then
-            raise (NotSupportedException(
-                "Decimal Average is not supported on the SQL route because SQLite AVG uses REAL arithmetic and loses decimal precision. Call AsEnumerable() before Average for exact decimal semantics."))
-
     /// <summary>
     /// Extracts the expression for a collection that is an argument to a set-based method like Concat or Except.
     /// </summary>

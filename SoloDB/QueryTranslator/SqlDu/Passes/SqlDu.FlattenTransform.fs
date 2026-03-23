@@ -1,4 +1,4 @@
-module SoloDatabase.FlattenTransform
+module internal SoloDatabase.FlattenTransform
 
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.FlattenSafety

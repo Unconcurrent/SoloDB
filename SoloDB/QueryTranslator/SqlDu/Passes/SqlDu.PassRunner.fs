@@ -1,4 +1,4 @@
-module SoloDatabase.PassRunner
+module internal SoloDatabase.PassRunner
 
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.PassTypes

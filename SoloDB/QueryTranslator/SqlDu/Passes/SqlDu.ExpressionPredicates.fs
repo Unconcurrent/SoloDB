@@ -1,4 +1,4 @@
-module SoloDatabase.ExpressionPredicates
+module internal SoloDatabase.ExpressionPredicates
 
 open SqlDu.Engine.C1.Spec
 

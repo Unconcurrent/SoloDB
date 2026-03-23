@@ -1,4 +1,4 @@
-module SoloDatabase.SelectCoreBoundary
+module internal SoloDatabase.SelectCoreBoundary
 
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.ExpressionPredicates

@@ -1,4 +1,4 @@
-module SoloDatabase.JsonbRewritePolicy
+module internal SoloDatabase.JsonbRewritePolicy
 
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.IndexModel

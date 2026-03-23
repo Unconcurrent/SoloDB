@@ -51,7 +51,7 @@ type internal HasTypeId<'t> =
             | None -> fun (_x: 't) (_y: int64) -> failwithf "Cannot write nonexistant Id from Type %A" typeof<'t>.FullName
 
 
-module JsonFunctions =
+module internal JsonFunctions =
     let inline internal mustIncludeTypeInformationInSerializationFn (t: Type) = 
         t.IsAbstract || not (isNull (t.GetCustomAttribute<Attributes.PolymorphicAttribute>()))
 

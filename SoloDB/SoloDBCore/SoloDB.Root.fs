@@ -57,7 +57,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <summary>
     /// Gets the underlying connection manager for the database.
     /// </summary>
-    member this.Connection = connectionManager
+    member internal this.Connection = connectionManager
     /// <summary>
     /// Gets the connection string used by this database instance.
     /// </summary>
@@ -69,7 +69,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <summary>
     /// Gets the configuration settings for this database instance.
     /// </summary>
-    member val Config = config
+    member internal _.Config = config
     /// <summary>
     /// Gets an API for interacting with the virtual file system within the database.
     /// </summary>

@@ -18,10 +18,10 @@ namespace SqlDu.Engine.C1.Spec
 // until the full engine move in Batch 4.
 // ======================================================================
 
-type JsonPath = JsonPath of head: string * tail: string list
+type internal JsonPath = JsonPath of head: string * tail: string list
 
 [<RequireQualifiedAccess>]
-module JsonPathOps =
+module internal JsonPathOps =
     let ofList (segments: string list) : JsonPath =
         match segments with
         | head :: tail -> JsonPath(head, tail)
@@ -30,15 +30,15 @@ module JsonPathOps =
     let toList (JsonPath(head, tail): JsonPath) : string list =
         head :: tail
 
-type SortDirection =
+type internal SortDirection =
     | Asc
     | Desc
 
-type JoinKind =
+type internal JoinKind =
     | Inner
     | Left
 
-type AggregateKind =
+type internal AggregateKind =
     | Count
     | Sum
     | Avg
@@ -47,35 +47,35 @@ type AggregateKind =
     | GroupConcat
     | JsonGroupArray
 
-type WindowFunctionKind =
+type internal WindowFunctionKind =
     | RowNumber
     | DenseRank
     | Rank
     | NamedWindowFunction of string
 
-type StatementKind =
+type internal StatementKind =
     | Select
     | Insert
     | Update
     | Delete
     | Ddl
 
-type RelationPattern =
+type internal RelationPattern =
     | NoRelations
     | DbRef
     | DbRefMany
     | MixedRelations
 
-type CtePresence =
+type internal CtePresence =
     | WithCte
     | NoCte
 
-type AntiSemiForm =
+type internal AntiSemiForm =
     | NoAntiSemi
     | NotExists
     | NotIn
 
-type JsonbOperationClass =
+type internal JsonbOperationClass =
     | NoJsonb
     | JsonExtract
     | JsonSet
@@ -83,22 +83,22 @@ type JsonbOperationClass =
     | JsonEach
     | MixedJsonb
 
-type Sargability =
+type internal Sargability =
     | Sargable
     | NonSargable
     | ContextDependent
 
-type FlattenSafety =
+type internal FlattenSafety =
     | FlattenSafe
     | FlattenUnsafe
     | FlattenRequiresProof
 
-type IndexEligibility =
+type internal IndexEligibility =
     | IndexEligible
     | IndexHostile
     | RequiresPlanEvidence
 
-type SqlLiteral =
+type internal SqlLiteral =
     | Null
     | Integer of int64
     | Float of float
@@ -106,7 +106,7 @@ type SqlLiteral =
     | Boolean of bool
     | Blob of byte[]
 
-type BinaryOperator =
+type internal BinaryOperator =
     | Eq
     | Ne
     | Lt
@@ -128,7 +128,7 @@ type BinaryOperator =
     | In
     | NotInOp
 
-type UnaryOperator =
+type internal UnaryOperator =
     | Not
     | Neg
     | IsNull

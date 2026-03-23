@@ -1,4 +1,4 @@
-module SoloDatabase.IndexModel
+module internal SoloDatabase.IndexModel
 
 open SqlDu.Engine.C1.Spec
 open Microsoft.Data.Sqlite

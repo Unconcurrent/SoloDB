@@ -1,4 +1,4 @@
-module SoloDatabase.PassTypes
+module internal SoloDatabase.PassTypes
 
 open SqlDu.Engine.C1.Spec
 

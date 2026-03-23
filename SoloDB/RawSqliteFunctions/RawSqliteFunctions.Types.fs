@@ -16,7 +16,7 @@ open SQLitePCL
 /// Valid only during the UDF callback - do not store or use after callback returns.
 /// </summary>
 [<Struct; IsReadOnly>]
-type SqliteRawValue =
+type internal SqliteRawValue =
     internal { Value: sqlite3_value }
 
     /// <summary>Returns the SQLite type of this value.</summary>
@@ -102,7 +102,7 @@ type SqliteRawValue =
 /// Context for setting the result of a raw SQLite function.
 /// </summary>
 [<Struct; IsReadOnly>]
-type SqliteRawContext =
+type internal SqliteRawContext =
     internal { Context: sqlite3_context }
 
     /// <summary>Sets the result to NULL.</summary>
@@ -171,27 +171,27 @@ type SqliteRawContext =
 /// <summary>
 /// Delegate for a raw scalar function with zero-copy value access.
 /// </summary>
-type RawScalarFunc = delegate of ctx: byref<SqliteRawContext> * args: ReadOnlySpan<SqliteRawValue> -> unit
+type internal RawScalarFunc = delegate of ctx: byref<SqliteRawContext> * args: ReadOnlySpan<SqliteRawValue> -> unit
 
 /// <summary>
 /// Delegate for a raw scalar function with 0 arguments.
 /// </summary>
-type RawScalarFunc0 = delegate of ctx: byref<SqliteRawContext> -> unit
+type internal RawScalarFunc0 = delegate of ctx: byref<SqliteRawContext> -> unit
 
 /// <summary>
 /// Delegate for a raw scalar function with 1 argument.
 /// </summary>
-type RawScalarFunc1 = delegate of ctx: byref<SqliteRawContext> * arg0: inref<SqliteRawValue> -> unit
+type internal RawScalarFunc1 = delegate of ctx: byref<SqliteRawContext> * arg0: inref<SqliteRawValue> -> unit
 
 /// <summary>
 /// Delegate for a raw scalar function with 2 arguments.
 /// </summary>
-type RawScalarFunc2 = delegate of ctx: byref<SqliteRawContext> * arg0: inref<SqliteRawValue> * arg1: inref<SqliteRawValue> -> unit
+type internal RawScalarFunc2 = delegate of ctx: byref<SqliteRawContext> * arg0: inref<SqliteRawValue> * arg1: inref<SqliteRawValue> -> unit
 
 /// <summary>
 /// Delegate for a raw scalar function with 3 arguments.
 /// </summary>
-type RawScalarFunc3 = delegate of ctx: byref<SqliteRawContext> * arg0: inref<SqliteRawValue> * arg1: inref<SqliteRawValue> * arg2: inref<SqliteRawValue> -> unit
+type internal RawScalarFunc3 = delegate of ctx: byref<SqliteRawContext> * arg0: inref<SqliteRawValue> * arg1: inref<SqliteRawValue> * arg2: inref<SqliteRawValue> -> unit
 
 /// <summary>
 /// SQLite function flags that control optimization and security behavior.
@@ -203,7 +203,7 @@ type RawScalarFunc3 = delegate of ctx: byref<SqliteRawContext> * arg0: inref<Sql
 /// Innocuous marks a function as safe for all contexts (no side effects, no information leaks).
 /// </remarks>
 [<Flags>]
-type SqliteFunctionFlags =
+type internal SqliteFunctionFlags =
     /// <summary>
     /// No special flags. The function may return different results for same inputs,
     /// can be called from triggers/views/generated columns, and results won't be cached.

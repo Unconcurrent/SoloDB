@@ -1,9 +1,9 @@
 namespace SqlDu.Engine.C1.Spec
-type SelectComposition =
+type internal SelectComposition =
     | SingleSelect
     | UnionAll
 
-type SqlExpr =
+type internal SqlExpr =
     | Column of sourceAlias: string option * column: string
     | Literal of SqlLiteral
     | Parameter of name: string
@@ -26,31 +26,31 @@ type SqlExpr =
     | ScalarSubquery of SqlSelect
     | CaseExpr of firstBranch: (SqlExpr * SqlExpr) * restBranches: (SqlExpr * SqlExpr) list * elseExpr: SqlExpr option
     | UpdateFragment of path: SqlExpr * value: SqlExpr
-and WindowSpec = {
+and internal WindowSpec = {
     Kind: WindowFunctionKind
     Arguments: SqlExpr list
     PartitionBy: SqlExpr list
     OrderBy: (SqlExpr * SortDirection) list
 }
-and TableSource =
+and internal TableSource =
     | BaseTable of table: string * alias: string option
     | DerivedTable of query: SqlSelect * alias: string
     | FromJsonEach of valueExpr: SqlExpr * alias: string option
-and Projection = {
+and internal Projection = {
     Alias: string option
     Expr: SqlExpr
 }
-and JoinShape =
+and internal JoinShape =
     | CrossJoin of source: TableSource
     | ConditionedJoin of kind: JoinKind * source: TableSource * onExpr: SqlExpr
-and OrderBy = {
+and internal OrderBy = {
     Expr: SqlExpr
     Direction: SortDirection
 }
-and ProjectionSet =
+and internal ProjectionSet =
     | AllColumns
     | Explicit of head: Projection * tail: Projection list
-and SelectCore = {
+and internal SelectCore = {
     Source: TableSource option
     Joins: JoinShape list
     Projections: ProjectionSet
@@ -62,14 +62,14 @@ and SelectCore = {
     Offset: SqlExpr option
     Distinct: bool
 }
-and SelectBody =
+and internal SelectBody =
     | SingleSelect of SelectCore
     | UnionAllSelect of head: SelectCore * tail: SelectCore list
-and CteBinding = {
+and internal CteBinding = {
     Name: string
     Query: SqlSelect
 }
-and SqlSelect = {
+and internal SqlSelect = {
     Ctes: CteBinding list
     Body: SelectBody
 }

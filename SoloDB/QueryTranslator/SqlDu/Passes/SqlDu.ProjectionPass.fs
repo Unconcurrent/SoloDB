@@ -1,4 +1,4 @@
-module SoloDatabase.ProjectionPass
+module internal SoloDatabase.ProjectionPass
 
 open SoloDatabase.PassTypes
 open SoloDatabase.ProjectionPushdown

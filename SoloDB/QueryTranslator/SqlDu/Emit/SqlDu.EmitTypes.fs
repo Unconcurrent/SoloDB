@@ -3,12 +3,12 @@ namespace SoloDatabase
 /// Mutable result payload for all emission operations.
 /// Sql contains the emitted SQL text with named parameter placeholders.
 /// Parameters contains the ordered list of (name, value) pairs.
-type Emitted = {
+type internal Emitted = {
     Sql: string
     Parameters: ResizeArray<string * obj>
 }
 
-module Emitted =
+module internal Emitted =
     let emptyParameters () = ResizeArray<string * obj>()
 
     let concatParameterSets (parts: seq<ResizeArray<string * obj>>) =

@@ -1,4 +1,4 @@
-module SoloDatabase.FlattenPass
+module internal SoloDatabase.FlattenPass
 
 open SoloDatabase.PassTypes
 open SoloDatabase.FlattenTransform

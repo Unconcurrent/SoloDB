@@ -1,11 +1,11 @@
 namespace SqlDu.Engine.C1.Spec
 
-type InsertConflictResolution =
+type internal InsertConflictResolution =
     | NoConflictResolution
     | OrIgnore
     | OrReplace
 
-type InsertStatement = {
+type internal InsertStatement = {
     TableName: string
     Columns: string list
     Values: SqlExpr list list
@@ -13,22 +13,22 @@ type InsertStatement = {
     Returning: SqlExpr list option
 }
 
-type UpdateStatement = {
+type internal UpdateStatement = {
     TableName: string
     SetClauses: (string * SqlExpr) list
     Where: SqlExpr option
 }
 
-type DeleteStatement = {
+type internal DeleteStatement = {
     TableName: string
     Where: SqlExpr option
 }
 
-type DdlStatement = {
+type internal DdlStatement = {
     Sql: string
 }
 
-type SqlStatement =
+type internal SqlStatement =
     | SelectStmt of SqlSelect
     | InsertStmt of InsertStatement
     | UpdateStmt of UpdateStatement

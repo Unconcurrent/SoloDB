@@ -9,7 +9,7 @@ open System.Runtime.InteropServices
 /// This is for internal use only, don't touch.
 /// </summary>
 [<CLIMutable>]
-type DbObjectRow = {
+type internal DbObjectRow = {
     /// If the Id is NULL then the ValueJSON is a error message encoded in a JSON string.
     Id: Nullable<int64>
     ValueJSON: string
@@ -20,7 +20,7 @@ type DbObjectRow = {
 }
 
 [<CLIMutable>]
-type Metadata = {
+type internal Metadata = {
     Key: string
     Value: string
 }
@@ -120,7 +120,7 @@ type internal SoloDBFileChunk = {
     Data: byte array
 }
 
-type SoloDBConfiguration = internal {
+type internal SoloDBConfiguration = {
     /// The general switch to enable or disable caching.
     /// By disabling it, any cached data will be automatically cleared.
     mutable CachingEnabled: bool
@@ -150,7 +150,7 @@ type SortDirection =
 
 
 [<Struct; IsByRefLike; StructLayout(LayoutKind.Sequential)>]
-type SoloDBLazyItem<'T> =
+type internal SoloDBLazyItem<'T> =
     // If jsonB <> null then value is None
     // If jsonB = null then value is Some
     val mutable internal valueUnsafe: 'T

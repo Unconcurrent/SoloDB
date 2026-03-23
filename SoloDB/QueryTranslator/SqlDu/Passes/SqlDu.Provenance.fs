@@ -1,4 +1,4 @@
-module SoloDatabase.Provenance
+module internal SoloDatabase.Provenance
 
 open System.Runtime.CompilerServices
 open SqlDu.Engine.C1.Spec

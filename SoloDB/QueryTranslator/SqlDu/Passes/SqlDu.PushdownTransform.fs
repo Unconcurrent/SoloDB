@@ -1,4 +1,4 @@
-module SoloDatabase.PushdownTransform
+module internal SoloDatabase.PushdownTransform
 
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.PushdownSafety

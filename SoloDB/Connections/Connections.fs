@@ -5,7 +5,7 @@ open System.Data
 /// <summary>
 /// Contains types related to database connection management, pooling, and transactions.
 /// </summary>
-module Connections =
+module internal Connections =
     open Microsoft.Data.Sqlite
     open SQLiteTools
     open ConnectionsTransactionHelpers

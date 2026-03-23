@@ -1,4 +1,4 @@
-module SoloDatabase.ConstantFoldPass
+module internal SoloDatabase.ConstantFoldPass
 
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.PassTypes

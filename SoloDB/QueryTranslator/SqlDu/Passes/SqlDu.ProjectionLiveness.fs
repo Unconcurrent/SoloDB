@@ -1,4 +1,4 @@
-module SoloDatabase.ProjectionLiveness
+module internal SoloDatabase.ProjectionLiveness
 
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.ExpressionPredicates

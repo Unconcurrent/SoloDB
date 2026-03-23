@@ -111,7 +111,6 @@ module internal QueryableBuildQuerySequenceOps =
                         zeroIfNullAggregateTranslator sourceCtx "SUM" statements m.OriginalMethod m.Expressions
 
                 | SupportedLinqMethods.Average ->
-                    rejectDecimalAverageIfNeeded m.OriginalMethod
                     if isPostScalarProjection && m.Expressions.Length = 0 then
                         let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
                         let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, extractVal)

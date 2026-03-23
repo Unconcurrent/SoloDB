@@ -10,7 +10,7 @@ open System.Data.Common
 open SQLiteToolsParams
 open SQLiteToolsMapper
 
-module SQLiteToolsExtensions =
+module internal SQLiteToolsExtensions =
     open SQLiteToolsHandlerFaultState
     
     type internal ICachingDbConnectionOps =

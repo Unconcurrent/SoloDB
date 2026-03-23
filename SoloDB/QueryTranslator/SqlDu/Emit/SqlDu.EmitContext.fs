@@ -5,7 +5,7 @@ namespace SoloDatabase
 /// 2. Identifier quoting policy (SQLite double-quote style)
 /// 3. JSON path quoting policy (single-quote with $ prefix)
 /// 4. Literal emission policy (inline vs parameterized)
-type EmitContext() =
+type internal EmitContext() =
     let mutable paramCounter = 0
 
     /// When true, Integer/Float/String literals are emitted inline in SQL.

@@ -1,4 +1,4 @@
-module SoloDatabase.ExpressionMatcher
+module internal SoloDatabase.ExpressionMatcher
 
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.IndexModel

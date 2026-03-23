@@ -1,4 +1,4 @@
-module SoloDatabase.JsonbRewritePolicyPass
+module internal SoloDatabase.JsonbRewritePolicyPass
 
 open SoloDatabase.PassTypes
 open SoloDatabase.IndexModel

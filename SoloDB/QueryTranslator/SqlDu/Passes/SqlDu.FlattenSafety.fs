@@ -1,4 +1,4 @@
-module SoloDatabase.FlattenSafety
+module internal SoloDatabase.FlattenSafety
 
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.ExpressionPredicates

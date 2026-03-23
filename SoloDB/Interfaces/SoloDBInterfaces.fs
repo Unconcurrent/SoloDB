@@ -58,11 +58,11 @@ and ISoloDBItemEventContext<'T> =
     abstract member Item: 'T with get
 
 /// <summary>Internal delegate for insert events.</summary>
-and InsertingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * json: ReadOnlySpan<byte> -> SoloDBEventsResult
+and internal InsertingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * json: ReadOnlySpan<byte> -> SoloDBEventsResult
 /// <summary>Internal delegate for delete events.</summary>
-and DeletingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * json: ReadOnlySpan<byte> -> SoloDBEventsResult
+and internal DeletingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * json: ReadOnlySpan<byte> -> SoloDBEventsResult
 /// <summary>Internal delegate for update events.</summary>
-and UpdatingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * jsonOld: nativeptr<byte> * jsonOldSize: int * jsonNew: nativeptr<byte> * jsonNewSize: int -> SoloDBEventsResult
+and internal UpdatingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * jsonOld: nativeptr<byte> * jsonOldSize: int * jsonNew: nativeptr<byte> * jsonNewSize: int -> SoloDBEventsResult
 
 
 /// <summary>Handler delegate for insert events.</summary>
@@ -1336,7 +1336,7 @@ type IIncludableQueryable<'T, 'TProperty> =
 /// <summary>
 /// Internal wrapper that carries the dotted include-chain path alongside the inner IQueryable.
 /// </summary>
-type IncludableQueryable<'T, 'TProperty> internal (inner: IQueryable<'T>, chainPath: string) =
+type internal IncludableQueryable<'T, 'TProperty> (inner: IQueryable<'T>, chainPath: string) =
     let elementType = typeof<'T>
     let expression = inner.Expression
     let provider = inner.Provider

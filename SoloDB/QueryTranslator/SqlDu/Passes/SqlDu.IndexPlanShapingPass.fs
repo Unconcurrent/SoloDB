@@ -1,4 +1,4 @@
-module SoloDatabase.IndexPlanShapingPass
+module internal SoloDatabase.IndexPlanShapingPass
 
 open SoloDatabase.PassTypes
 open SoloDatabase.IndexModel

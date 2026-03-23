@@ -1,4 +1,4 @@
-module SoloDatabase.IndexPlanShaping
+module internal SoloDatabase.IndexPlanShaping
 
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.IndexModel

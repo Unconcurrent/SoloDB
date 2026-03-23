@@ -1,4 +1,4 @@
-module SoloDatabase.PushdownSafety
+module internal SoloDatabase.PushdownSafety
 
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.ExpressionPredicates

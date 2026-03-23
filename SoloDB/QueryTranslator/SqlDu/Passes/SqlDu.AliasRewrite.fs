@@ -1,4 +1,4 @@
-module SoloDatabase.AliasRewrite
+module internal SoloDatabase.AliasRewrite
 
 open SqlDu.Engine.C1.Spec
 

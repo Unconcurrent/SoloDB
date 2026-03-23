@@ -1,4 +1,4 @@
-module SoloDatabase.PushdownPass
+module internal SoloDatabase.PushdownPass
 
 open SoloDatabase.PassTypes
 open SoloDatabase.PushdownTransform

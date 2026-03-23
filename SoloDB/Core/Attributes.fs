@@ -79,10 +79,10 @@ open System
 
 [<AttributeUsage(AttributeTargets.All, AllowMultiple = false)>]
 [<Sealed>]
-type IsReadOnlyAttribute() =
+type internal IsReadOnlyAttribute() =
     inherit System.Attribute()
 
 [<AttributeUsage(AttributeTargets.All, AllowMultiple = false)>]
 [<Sealed>]
-type IsByRefLikeAttribute() =
+type internal IsByRefLikeAttribute() =
     inherit System.Attribute()
