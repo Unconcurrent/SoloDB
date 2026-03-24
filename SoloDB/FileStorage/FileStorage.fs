@@ -363,8 +363,6 @@ module FileStorage =
             member this.MoveFile(from, toPath) = this.MoveFile(from, toPath)
             member this.MoveReplaceFile(from, toPath) = this.MoveReplaceFile(from, toPath)
             member this.MoveDirectory(from, toPath) = this.MoveDirectory(from, toPath)
-
-        interface IFileSystemCopyInternal with
             member this.CopyFile(fromPath, toPath, copyMetadata) = this.CopyFile(fromPath, toPath, copyMetadata)
             member this.CopyFileAsync(fromPath, toPath, copyMetadata) = this.CopyFileAsync(fromPath, toPath, copyMetadata)
             member this.CopyReplaceFile(fromPath, toPath, copyMetadata) = this.CopyReplaceFile(fromPath, toPath, copyMetadata)

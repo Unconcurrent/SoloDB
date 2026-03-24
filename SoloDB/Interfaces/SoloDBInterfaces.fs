@@ -1135,6 +1135,56 @@ and IFileSystem =
     /// <param name="toPath">The destination path for the directory.</param>
     /// <exception cref="IOException">Thrown if a file or directory already exists at the destination.</exception>
     abstract member MoveDirectory: from: string * toPath: string -> unit
+    /// <summary>
+    /// Copies a file from one path to another. Fails if the destination already exists.
+    /// </summary>
+    /// <param name="fromPath">The source file path.</param>
+    /// <param name="toPath">The destination file path.</param>
+    /// <param name="copyMetadata">If true, copies key-value metadata from source to destination. Timestamps are always set to now.</param>
+    /// <returns>The header of the newly created file.</returns>
+    abstract member CopyFile: fromPath: string * toPath: string * [<Optional; DefaultParameterValue(false)>] copyMetadata: bool -> SoloDBFileHeader
+    /// <summary>
+    /// Asynchronously copies a file from one path to another. Fails if the destination already exists.
+    /// </summary>
+    abstract member CopyFileAsync: fromPath: string * toPath: string * [<Optional; DefaultParameterValue(false)>] copyMetadata: bool -> Task<SoloDBFileHeader>
+    /// <summary>
+    /// Copies a file from one path to another, replacing the destination if it exists.
+    /// </summary>
+    /// <param name="fromPath">The source file path.</param>
+    /// <param name="toPath">The destination file path.</param>
+    /// <param name="copyMetadata">If true, copies key-value metadata from source to destination. Timestamps are always set to now.</param>
+    /// <returns>The header of the newly created file.</returns>
+    abstract member CopyReplaceFile: fromPath: string * toPath: string * [<Optional; DefaultParameterValue(false)>] copyMetadata: bool -> SoloDBFileHeader
+    /// <summary>
+    /// Asynchronously copies a file, replacing the destination if it exists.
+    /// </summary>
+    abstract member CopyReplaceFileAsync: fromPath: string * toPath: string * [<Optional; DefaultParameterValue(false)>] copyMetadata: bool -> Task<SoloDBFileHeader>
+    /// <summary>
+    /// Copies a directory from one path to another. Fails if the destination already exists.
+    /// </summary>
+    /// <param name="fromPath">The source directory path.</param>
+    /// <param name="toPath">The destination directory path.</param>
+    /// <param name="recursive">If true, copies all subdirectories and files recursively.</param>
+    /// <param name="copyMetadata">If true, copies key-value metadata. Timestamps are always set to now.</param>
+    /// <returns>The header of the newly created directory.</returns>
+    abstract member CopyDirectory: fromPath: string * toPath: string * [<Optional; DefaultParameterValue(true)>] recursive: bool * [<Optional; DefaultParameterValue(false)>] copyMetadata: bool -> SoloDBDirectoryHeader
+    /// <summary>
+    /// Asynchronously copies a directory. Fails if the destination already exists.
+    /// </summary>
+    abstract member CopyDirectoryAsync: fromPath: string * toPath: string * [<Optional; DefaultParameterValue(true)>] recursive: bool * [<Optional; DefaultParameterValue(false)>] copyMetadata: bool -> Task<SoloDBDirectoryHeader>
+    /// <summary>
+    /// Copies a directory, replacing the destination if it exists.
+    /// </summary>
+    /// <param name="fromPath">The source directory path.</param>
+    /// <param name="toPath">The destination directory path.</param>
+    /// <param name="recursive">If true, copies all subdirectories and files recursively.</param>
+    /// <param name="copyMetadata">If true, copies key-value metadata. Timestamps are always set to now.</param>
+    /// <returns>The header of the newly created directory.</returns>
+    abstract member CopyReplaceDirectory: fromPath: string * toPath: string * [<Optional; DefaultParameterValue(true)>] recursive: bool * [<Optional; DefaultParameterValue(false)>] copyMetadata: bool -> SoloDBDirectoryHeader
+    /// <summary>
+    /// Asynchronously copies a directory, replacing the destination if it exists.
+    /// </summary>
+    abstract member CopyReplaceDirectoryAsync: fromPath: string * toPath: string * [<Optional; DefaultParameterValue(true)>] recursive: bool * [<Optional; DefaultParameterValue(false)>] copyMetadata: bool -> Task<SoloDBDirectoryHeader>
 
 
 /// <summary>
