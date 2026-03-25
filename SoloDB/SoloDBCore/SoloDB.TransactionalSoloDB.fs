@@ -31,7 +31,7 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
     /// <summary>
     /// Gets the underlying transactional connection.
     /// </summary>
-    member internal _.Connection = connection
+    member _.Connection = connection
     /// <summary>
     /// Gets the SQLite connection string used by this transactional context.
     /// </summary>

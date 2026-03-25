@@ -421,7 +421,7 @@ teamsR.Insert(teamR) |> ignore
 - Existing `DBRef<TTarget>` / `DBRefMany<TTarget>` persistence model remains relation-first (`SoloDBRelLink_*`, `SoloDBRelation`).
 - DBRef traversal depth is bounded: chains deeper than 10 relation hops are rejected during translation.
 - `DBRefMany<T>` item ordering is not a stable ordering contract unless your query/project explicitly orders results.
-- Nested DBRefMany relation predicates such as `Items.Any(i => i.SubItems.Any(...))` are rejected by translation.
+- Nested DBRefMany relation predicates (e.g. `Items.Any(i => i.SubItems.Any(...))`) are supported up to 10 relation hops.
 - `option<DBRef<_>>` / `option<DBRefMany<_>>` relation-property shapes are not supported; use `DBRef<_>.None` for empty single refs.
 - `Include` + `Exclude` on the same relation path is rejected deterministically.
 - For custom-id relation scenarios (`DBRef<TTarget, TId>`), target-side id/index constraints must be satisfied before relation writes.
@@ -459,7 +459,7 @@ var books = products.Where(p => p.Category == "Books").ToList();
 var users = db.GetCollection<User>();
 
 // Create a non-unique expression index.
-users.EnsureIndex(u => u.Username);
+users.EnsureIndex(u => u.Name);
 
 // Create a unique expression index.
 users.EnsureUniqueAndIndex(u => u.Email);
@@ -484,10 +484,10 @@ Composite (tuple) indexes are supported via expression APIs:
 
 ```csharp
 // Composite non-unique index.
-users.EnsureIndex(u => (u.Username, u.Auth));
+products.EnsureIndex(p => new ValueTuple<string, string>(p.Category, p.SKU));
 
 // Composite unique index.
-users.EnsureUniqueAndIndex(u => (u.Username, u.Auth));
+products.EnsureUniqueAndIndex(p => new ValueTuple<string, string>(p.Category, p.SKU));
 ```
 
 `[Indexed]` is property-level only. It does not declare multi-column composite indexes.

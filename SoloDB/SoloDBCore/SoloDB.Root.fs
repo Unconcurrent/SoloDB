@@ -57,7 +57,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <summary>
     /// Gets the underlying connection manager for the database.
     /// </summary>
-    member internal this.Connection = connectionManager
+    member this.Connection = connectionManager
     /// <summary>
     /// Gets the connection string used by this database instance.
     /// </summary>

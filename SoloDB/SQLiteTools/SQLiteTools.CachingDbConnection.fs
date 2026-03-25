@@ -10,7 +10,7 @@ open System.Data.Common
 open SQLiteToolsParams
 open SQLiteToolsMapper
 
-module internal SQLiteTools =
+module SQLiteTools =
     open SQLiteToolsHandlerFaultState
     /// <summary>
     /// A sealed wrapper around SqliteConnection that adds command caching capabilities.
