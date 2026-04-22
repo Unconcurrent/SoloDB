@@ -95,8 +95,30 @@ module internal QueryableBuildQueryGroupByOps =
                     SqlExpr.Literal(SqlLiteral.String ("$." + me.Member.Name))
                 ]))
             | _ -> None
+        | :? NewExpression as ne when ne.Type = typeof<DateTime> && ne.Arguments.Count = 3 && referencesParam groupParam ne ->
+            let translated = ne.Arguments |> Seq.toList |> List.map (tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars)
+            match translated with
+            | [Some y; Some m; Some d] ->
+                Some (SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%04d-%02d-%02d"); y; m; d]))
+            | _ -> None
         | :? MethodCallExpression as mc when referencesParam groupParam mc ->
             match mc.Method.Name with
+            | "ToString" when mc.Arguments.Count <= 1 && not (isNull mc.Object)
+                            && (mc.Object.Type = typeof<DateTime> || mc.Object.Type = typeof<DateTimeOffset>) ->
+                match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars mc.Object with
+                | Some objExpr ->
+                    let fmtOpt =
+                        if mc.Arguments.Count = 0 then Some "G"
+                        else DateTimeFunctions.tryExtractConstantFormat mc.Arguments.[0]
+                    match fmtOpt with
+                    | None -> raise (NotSupportedException "DateTime.ToString: format argument must be a compile-time constant in GroupBy projections")
+                    | Some fmtStr ->
+                        let mode =
+                            match mc.Object with
+                            | :? NewExpression as ne2 when ne2.Type = typeof<DateTime> -> DateTimeTranslationMode.FromIsoString
+                            | _ -> DateTimeTranslationMode.FromEpoch mc.Object.Type
+                        Some (DateTimeFunctions.translateDateTimeToString objExpr mode fmtStr)
+                | None -> None
             | "Count" when mc.Arguments.Count = 1 && isGroupSource mc.Arguments.[0] groupParam ->
                 Some (SqlExpr.AggregateCall(AggregateKind.Count, None, false, None))
             | "Count" when mc.Arguments.Count = 2 && isGroupSource mc.Arguments.[0] groupParam ->
