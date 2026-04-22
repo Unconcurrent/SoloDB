@@ -25,6 +25,7 @@ let private emitBinaryOp (op: BinaryOperator) : string =
     | IsNot -> "IS NOT"
     | In -> "IN"
     | NotInOp -> "NOT IN"
+    | BitwiseAnd -> "&"
 
 /// Emit a SQL literal value.
 /// When ctx.InlineLiterals is true, Integer/Float/String are emitted inline (product behavior).

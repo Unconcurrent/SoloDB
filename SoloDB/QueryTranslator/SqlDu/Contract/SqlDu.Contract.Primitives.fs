@@ -127,6 +127,7 @@ type internal BinaryOperator =
     | IsNot
     | In
     | NotInOp
+    | BitwiseAnd
 
 type internal UnaryOperator =
     | Not
