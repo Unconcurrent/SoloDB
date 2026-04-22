@@ -221,7 +221,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
                 elif m.Arguments.Count >= 1 then
                     match DateTimeFunctions.tryExtractConstantFormat m.Arguments.[0] with
                     | Some fmt -> fmt
-                    | None -> raise (NotSupportedException("DateTime.ToString: format argument must be a compile-time constant — the format string cannot depend on query row data."))
+                    | None -> raise (NotSupportedException("DateTime.ToString(format): the format argument must be a compile-time constant for SQL translation. Use a string literal, or call AsEnumerable() before ToString to evaluate client-side."))
                 else "G"
             let mode =
                 match m.Object with

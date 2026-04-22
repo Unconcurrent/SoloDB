@@ -88,13 +88,10 @@ module internal QueryableBuildQueryGroupByOps =
         | :? MemberExpression as me when not (isNull me.Expression) && me.Expression :? ParameterExpression && obj.ReferenceEquals(me.Expression, groupParam) && me.Member.Name = "Key" ->
             Some (SqlExpr.Column(Some "o", "__solodb_group_key"))
         | :? MemberExpression as me when not (isNull me.Expression) ->
-            match me.Expression with
-            | :? MemberExpression as inner when not (isNull inner.Expression) && inner.Expression :? ParameterExpression && obj.ReferenceEquals(inner.Expression, groupParam) && inner.Member.Name = "Key" ->
-                Some (SqlExpr.FunctionCall("json_extract", [
-                    SqlExpr.Column(Some "o", "__solodb_group_key")
-                    SqlExpr.Literal(SqlLiteral.String ("$." + me.Member.Name))
-                ]))
-            | _ -> None
+            match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars me.Expression with
+            | Some receiverExpr ->
+                Some (DateTimeFunctions.translateGroupKeyMemberAccess receiverExpr me.Expression.Type me.Member.Name)
+            | None -> None
         | :? NewExpression as ne when ne.Type = typeof<DateTime> && ne.Arguments.Count = 3 && referencesParam groupParam ne ->
             let translated = ne.Arguments |> Seq.toList |> List.map (tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars)
             match translated with
@@ -111,7 +108,7 @@ module internal QueryableBuildQueryGroupByOps =
                         if mc.Arguments.Count = 0 then Some "G"
                         else DateTimeFunctions.tryExtractConstantFormat mc.Arguments.[0]
                     match fmtOpt with
-                    | None -> raise (NotSupportedException "DateTime.ToString: format argument must be a compile-time constant in GroupBy projections")
+                    | None -> raise (NotSupportedException "DateTime.ToString(format): the format argument must be a compile-time constant for SQL translation. Use a string literal, or call AsEnumerable() before ToString to evaluate client-side.")
                     | Some fmtStr ->
                         let mode =
                             match mc.Object with
@@ -222,6 +219,11 @@ module internal QueryableBuildQueryGroupByOps =
                     |> List.reduce (fun a b -> SqlExpr.Binary(a, BinaryOperator.And, b))
                     |> Some
             let orderBy = translateGroupOrders sourceCtx ctx.TableName "o" ctx.Vars groupOrders
+            let keyType = (extractLambdaFromExpr expressions.[0]).Body.Type
+            let nullKeyFilter =
+                if keyType.IsGenericType && keyType.GetGenericTypeDefinition() = typedefof<Nullable<_>> then
+                    Some (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some "o", "__solodb_group_key")))
+                else None
             let core =
                 { mkCore
                     [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
@@ -241,7 +243,8 @@ module internal QueryableBuildQueryGroupByOps =
                     (Some (DerivedTable(ctx.Inner, "o")))
                   with GroupBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
                        OrderBy = orderBy
-                       Having = havingDu }
+                       Having = havingDu
+                       Where = nullKeyFilter }
             wrapCore core
         )
 
@@ -377,12 +380,23 @@ module internal QueryableBuildQueryGroupByOps =
                                 "Fix: Use a new { } anonymous type or call AsEnumerable() before the Select."))
             let valueExpr =
                 match projections with
-                | [("Value", expr)] -> expr
+                | [("Value", expr)] ->
+                    // Floating-point scalars go through the ValueJSON string lane. Wrap with printf('%!.17g', ...)
+                    // so the string carries full IEEE 754 precision and round-trips without ULP loss.
+                    let bodyType = selectLambda.Body.Type
+                    if bodyType = typeof<double> || bodyType = typeof<float32> then
+                        SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%!.17g"); expr])
+                    else expr
                 | _ ->
                     let jsonObjArgs = projections |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
                     // Use json_object (TEXT JSON) so downstream json_extract returns typed SQL values for ORDER BY/TakeWhile.
                     SqlExpr.FunctionCall("json_object", jsonObjArgs)
             let orderBy = translateGroupOrders sourceCtx ctx.TableName "o" ctx.Vars groupOrders
+            let keyType = (extractLambdaFromExpr groupByExpressions.[0]).Body.Type
+            let nullKeyFilter =
+                if keyType.IsGenericType && keyType.GetGenericTypeDefinition() = typedefof<Nullable<_>> then
+                    Some (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some "o", "__solodb_group_key")))
+                else None
             let core =
                 { mkCore
                     [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
@@ -390,6 +404,7 @@ module internal QueryableBuildQueryGroupByOps =
                     (Some (DerivedTable(ctx.Inner, "o")))
                   with GroupBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
                        OrderBy = orderBy
-                       Having = havingExpr }
+                       Having = havingExpr
+                       Where = nullKeyFilter }
             wrapCore core
         )

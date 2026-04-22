@@ -79,6 +79,100 @@ module internal DateTimeFunctions =
                 $"DateTime/DateTimeOffset member access '.{other}' is not supported in SQL translation. " +
                 "Supported members: Year, Month, Day, Hour, Minute, Second, Millisecond, DayOfWeek, DayOfYear."))
 
+    // ─── Shared arithmetic primitives (DateOnly / TimeOnly / TimeSpan translators) ──
+
+    let private ms24        = SqlExpr.Literal(SqlLiteral.Integer 24L)
+    let private ms60        = SqlExpr.Literal(SqlLiteral.Integer 60L)
+    let private ms1000      = SqlExpr.Literal(SqlLiteral.Integer 1000L)
+    let private ms60000     = SqlExpr.Literal(SqlLiteral.Integer 60000L)
+    let private ms3600000   = SqlExpr.Literal(SqlLiteral.Integer 3600000L)
+    let private ms86400000  = SqlExpr.Literal(SqlLiteral.Integer 86400000L)
+    let private ms1000R     = SqlExpr.Literal(SqlLiteral.Float 1000.0)
+    let private ms60000R    = SqlExpr.Literal(SqlLiteral.Float 60000.0)
+    let private ms3600000R  = SqlExpr.Literal(SqlLiteral.Float 3600000.0)
+    let private ms86400000R = SqlExpr.Literal(SqlLiteral.Float 86400000.0)
+    let private dayNumberEpoch = SqlExpr.Literal(SqlLiteral.Float 1721425.5)
+
+    let private divInt (a: SqlExpr) (b: SqlExpr) = SqlExpr.Cast(SqlExpr.Binary(a, BinaryOperator.Div, b), "INTEGER")
+    let private modInt (a: SqlExpr) (b: SqlExpr) = SqlExpr.Cast(SqlExpr.Binary(a, BinaryOperator.Mod, b), "INTEGER")
+    let private castReal (e: SqlExpr) = SqlExpr.Cast(e, "REAL")
+    let private divReal (a: SqlExpr) (b: SqlExpr) = SqlExpr.Binary(castReal a, BinaryOperator.Div, b)
+
+    // ─── DateOnly / TimeOnly / TimeSpan member translators ───────────────────────
+
+    let internal translateDateOnlyMember (memberName: string) (rawExpr: SqlExpr) : SqlExpr =
+        // rawExpr is DayNumber (int). Add Julian Day epoch to get SQLite Julian Day at midnight.
+        let julianDay = SqlExpr.Binary(rawExpr, BinaryOperator.Add, dayNumberEpoch)
+        let strftimeInt fmt =
+            SqlExpr.Cast(
+                SqlExpr.FunctionCall("strftime", [SqlExpr.Literal(SqlLiteral.String fmt); julianDay; SqlExpr.Literal(SqlLiteral.String "julianday")]),
+                "INTEGER")
+        match memberName with
+        | "Year"      -> strftimeInt "%Y"
+        | "Month"     -> strftimeInt "%m"
+        | "Day"       -> strftimeInt "%d"
+        | "DayOfWeek" -> strftimeInt "%w"
+        | "DayOfYear" -> strftimeInt "%j"
+        | "DayNumber" -> rawExpr
+        | _ ->
+            raise (NotSupportedException(
+                $"DateOnly member access '.{memberName}' is not supported in SQL translation. " +
+                "Supported: Year, Month, Day, DayOfWeek, DayOfYear, DayNumber."))
+
+    let internal translateTimeOnlyMember (memberName: string) (rawExpr: SqlExpr) : SqlExpr =
+        // rawExpr is milliseconds since midnight (int64).
+        match memberName with
+        | "Hour"        -> divInt rawExpr ms3600000
+        | "Minute"      -> modInt (divInt rawExpr ms60000) ms60
+        | "Second"      -> modInt (divInt rawExpr ms1000) ms60
+        | "Millisecond" -> modInt rawExpr ms1000
+        | _ ->
+            raise (NotSupportedException(
+                $"TimeOnly member access '.{memberName}' is not supported in SQL translation. " +
+                "Supported: Hour, Minute, Second, Millisecond."))
+
+    let internal translateTimeSpanMember (memberName: string) (rawExpr: SqlExpr) : SqlExpr =
+        // rawExpr is TotalMilliseconds as int64 (signed).
+        match memberName with
+        | "TotalMilliseconds" -> castReal rawExpr
+        | "TotalSeconds"      -> divReal rawExpr ms1000R
+        | "TotalMinutes"      -> divReal rawExpr ms60000R
+        | "TotalHours"        -> divReal rawExpr ms3600000R
+        | "TotalDays"         -> divReal rawExpr ms86400000R
+        | "Days"              -> divInt rawExpr ms86400000
+        | "Hours"             -> modInt (divInt rawExpr ms3600000) ms24
+        | "Minutes"           -> modInt (divInt rawExpr ms60000) ms60
+        | "Seconds"           -> modInt (divInt rawExpr ms1000) ms60
+        | "Milliseconds"      -> modInt rawExpr ms1000
+        | _ ->
+            raise (NotSupportedException(
+                $"TimeSpan member access '.{memberName}' is not supported in SQL translation. " +
+                "Supported: TotalMilliseconds, TotalSeconds, TotalMinutes, TotalHours, TotalDays, Days, Hours, Minutes, Seconds, Milliseconds."))
+
+    let internal unwrapNullable (t: Type) : Type =
+        if t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<Nullable<_>>
+        then t.GetGenericArguments().[0]
+        else t
+
+    /// Route group-key member access to the correct type-specific translator.
+    /// For Nullable<T> keys, ".Value" is a pass-through (null rows pre-filtered by caller).
+    let internal translateGroupKeyMemberAccess (keyExpr: SqlExpr) (keyType: Type) (memberName: string) : SqlExpr =
+        let isNullable = keyType.IsGenericType && keyType.GetGenericTypeDefinition() = typedefof<Nullable<_>>
+        if isNullable && memberName = "Value" then
+            keyExpr
+        else
+            let underlying = unwrapNullable keyType
+            if underlying = typeof<DateTime> || underlying = typeof<DateTimeOffset> then
+                translateDateTimeMember memberName keyExpr underlying
+            elif underlying = typeof<DateOnly> then
+                translateDateOnlyMember memberName keyExpr
+            elif underlying = typeof<TimeOnly> then
+                translateTimeOnlyMember memberName keyExpr
+            elif underlying = typeof<TimeSpan> then
+                translateTimeSpanMember memberName keyExpr
+            else
+                SqlExpr.FunctionCall("json_extract", [keyExpr; SqlExpr.Literal(SqlLiteral.String ("$." + memberName))])
+
     // ─── Format tokenizer ─────────────────────────────────────────────────────────
 
     // Standard specifier char set: single-char formats dispatched as standard

@@ -935,12 +935,26 @@ module internal QueryableBuildQueryGroupByChained =
     let tryTranslateGroupByChainedExpr
         (sourceCtx: QueryContext) (baseTableName: string) (innerSelect: SqlSelect) (groupRowAlias: string) (groupParam: ParameterExpression) (vars: Dictionary<string, obj>)
         (groupByExprs: Expression array) (expr: Expression) : SqlExpr option =
-        // Handle MemberExpression wrapping: g.OrderBy().First().Property
+        // Handle MemberExpression wrapping: g.OrderBy().First().Property  or  g.OrderBy().First().Field.Member
+        // memberAccess is a transform: SqlExpr (JSON blob from chain terminal) → SqlExpr (projected value)
         let memberAccess, innerExpr =
             match expr with
             | :? MemberExpression as me when not (isNull me.Expression) && referencesParam groupParam me.Expression ->
                 match me.Expression with
-                | :? MethodCallExpression -> Some me.Member.Name, me.Expression
+                | :? MethodCallExpression ->
+                    // One level: g.Chain().Property — route via type-aware helper (falls to json_extract for row types)
+                    let transform (result: SqlExpr) =
+                        DateTimeFunctions.translateGroupKeyMemberAccess result me.Expression.Type me.Member.Name
+                    Some transform, me.Expression
+                | :? MemberExpression as inner when not (isNull inner.Expression) ->
+                    match inner.Expression with
+                    | :? MethodCallExpression ->
+                        // Two levels: g.Chain().Field.Member — extract field from row JSON, then translate member
+                        let transform (result: SqlExpr) =
+                            let fieldExpr = SqlExpr.FunctionCall("json_extract", [result; SqlExpr.Literal(SqlLiteral.String ("$." + inner.Member.Name))])
+                            DateTimeFunctions.translateGroupKeyMemberAccess fieldExpr inner.Type me.Member.Name
+                        Some transform, inner.Expression
+                    | _ -> None, expr
                 | _ -> None, expr
             | _ -> None, expr
 
@@ -1158,11 +1172,10 @@ module internal QueryableBuildQueryGroupByChained =
                         $"Error: GroupBy chain terminal '{terminal}' is not yet supported.\n" +
                         "Fix: Move the query after AsEnumerable() or use a supported terminal."))
 
-            // Apply member access if wrapping: g.OrderBy().First().Property
+            // Apply member access if wrapping: g.OrderBy().First().Property  or  g.OrderBy().First().Field.Member
             let result =
                 match memberAccess with
-                | Some propName ->
-                    SqlExpr.FunctionCall("json_extract", [result; SqlExpr.Literal(SqlLiteral.String("$." + propName))])
+                | Some transform -> transform result
                 | None -> result
 
             Some result

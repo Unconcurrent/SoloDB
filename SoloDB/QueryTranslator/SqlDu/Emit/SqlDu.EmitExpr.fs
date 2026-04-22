@@ -43,7 +43,7 @@ let private emitLiteral (ctx: EmitContext) (lit: SqlLiteral) : Emitted =
             ctx.AllocParam(box v)
     | SqlLiteral.Float v ->
         if ctx.InlineLiterals then
-            { Sql = sprintf "%g" v; Parameters = Emitted.emptyParameters () }
+            { Sql = sprintf "%.17g" v; Parameters = Emitted.emptyParameters () }
         else
             ctx.AllocParam(box v)
     | SqlLiteral.String v ->
