@@ -117,7 +117,6 @@
     <Compile Include="QueryTranslator/VisitDbRef/Core/QueryTranslator.VisitDbRef.Helpers.fs" />
     <Compile Include="QueryTranslator/SharedDescriptor/QueryTranslator.SharedDescriptor.Extract.fs" />
     <Compile Include="QueryTranslator/VisitDbRef/Extract/QueryTranslator.VisitDbRef.Extract.Helpers.fs" />
-    <Compile Include="QueryTranslator/VisitDbRef/Extract/QueryTranslator.VisitDbRef.Extract.Terminals.fs" />
     <Compile Include="QueryTranslator/VisitDbRef/Extract/QueryTranslator.VisitDbRef.Extract.fs" />
     <Compile Include="QueryTranslator/VisitDbRef/Peelers/QueryTranslator.VisitDbRef.Peelers.fs" />
     <Compile Include="QueryTranslator/VisitDbRef/Peelers/QueryTranslator.VisitDbRef.Peelers2.fs" />
