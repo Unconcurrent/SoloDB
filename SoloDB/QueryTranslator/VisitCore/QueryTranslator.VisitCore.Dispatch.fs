@@ -139,6 +139,8 @@ module internal QueryTranslatorVisitCore =
             | other ->
                 let esc = escapeSQLiteString other
                 SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String $"$.Items.{esc}")])
+        elif m.InputType = typeof<DateTime> || m.InputType = typeof<DateTimeOffset> then
+            DateTimeFunctions.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
         elif (m.ReturnType = typeof<int64> && m.MemberName = "Id")
               || (m.MemberName = "Id" && m.Expression.NodeType = ExpressionType.Parameter && m.Expression.Type.FullName = "SoloDatabase.JsonSerializator.JsonValue") then
             SqlExpr.Column(alias, "Id")
@@ -273,7 +275,11 @@ module internal QueryTranslatorVisitCore =
             else castToDu qb m.Type m.Operand
         | ExpressionType.New ->
             let m = exp :?> NewExpression
-            if isTuple m.Type then SqlExpr.JsonArrayExpr([for arg in m.Arguments -> visitDu arg qb])
+            if m.Type = typeof<DateTime> then
+                if m.Arguments.Count = 3 then
+                    SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%04d-%02d-%02d"); visitDu m.Arguments.[0] qb; visitDu m.Arguments.[1] qb; visitDu m.Arguments.[2] qb])
+                else raise (NotSupportedException($"new DateTime({m.Arguments.Count} arguments) is not supported in SQL queries. Only new DateTime(year, month, day) (3 arguments) is supported."))
+            elif isTuple m.Type then SqlExpr.JsonArrayExpr([for arg in m.Arguments -> visitDu arg qb])
             elif m.Members.Count = m.Arguments.Count then
                 let fieldQb = { qb with InsideJsonObjectProjection = true }
                 newObjectDu [|for membr, expr in m.Arguments |> Seq.zip m.Members -> struct(membr.Name, visitDu expr fieldQb)|]

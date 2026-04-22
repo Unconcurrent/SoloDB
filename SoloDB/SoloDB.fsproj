@@ -108,6 +108,7 @@
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.CastAggregate.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.Binary.fs" />
+    <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.DateTimeFunctions.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.MethodCall.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.Dispatch.fs" />
     <Compile Include="QueryTranslator/VisitPost/QueryTranslator.VisitPost.fs" />
