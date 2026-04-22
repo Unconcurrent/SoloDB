@@ -12,6 +12,7 @@ open Microsoft.Data.Sqlite
 open System.Data.Common
 open Utils
 open SQLiteToolsParams
+open SoloDatabase.QueryableGroupByAliases
 
 /// <summary>
 /// Internal module containing the TypeMapper and query execution helpers for SQLiteTools.
@@ -116,7 +117,7 @@ module internal SQLiteToolsMapper =
 
             | t when t = typeof<JsonValue> ->
                 fun (reader: IDataReader) (startIndex: int) (columns: IDictionary<string, int>) ->
-                    if columns.Count = 1 && (columns.Keys |> Seq.head).StartsWith "json_object" then
+                    if columns.Count = 1 && (columns.Keys |> Seq.head).StartsWith jsonObjectFn then
                         JsonSerializator.JsonValue.Parse (reader.GetString(0)) :> obj :?> 'T
                     else
 

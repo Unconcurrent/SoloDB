@@ -30,6 +30,7 @@
 
 
 	<ItemGroup>
+    <Compile Include="Query/Queryable.GroupByAliases.fs" />
     <Compile Include="Core/Hashing.fs" />
     <Compile Include="Core/CowByteSpanMap.fs" />
     <Compile Include="Core/NativeArray.fs" />
@@ -92,6 +93,8 @@
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.ProjectionLiveness.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.ProjectionPushdown.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.ProjectionPass.fs" />
+    <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.CompositeGroupByCanonicalization.fs" />
+    <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.CompositeGroupByCanonicalizationPass.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.IndexModel.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.ExpressionMatcher.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.IndexPlanShaping.fs" />

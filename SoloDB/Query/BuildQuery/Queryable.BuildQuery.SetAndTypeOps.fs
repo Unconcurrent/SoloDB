@@ -17,6 +17,7 @@ open SoloDatabase
 open SoloDatabase.JsonSerializator
 open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseTypes
+open SoloDatabase.QueryableGroupByAliases
 open SqlDu.Engine.C1.Spec
 
 module internal QueryableBuildQuerySetAndTypeOps =
@@ -216,7 +217,7 @@ module internal QueryableBuildQuerySetAndTypeOps =
                              { Alias = Some "__solodb_rn"; Expr = SqlExpr.WindowCall({
                                 Kind = WindowFunctionKind.RowNumber
                                 Arguments = []
-                                PartitionBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
+                                PartitionBy = [SqlExpr.Column(Some "o", syntheticGroupKeyAlias)]
                                 OrderBy = [(SqlExpr.Column(Some "o", "Id"), SortDirection.Asc)]
                              }) }]
                         let innerCore = mkCore innerProjs (Some (DerivedTable(ctx.Inner, "o")))

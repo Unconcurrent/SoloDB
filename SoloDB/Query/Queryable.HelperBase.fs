@@ -81,6 +81,7 @@ module internal QueryableHelperBase =
                 FlattenPass.subqueryFlatten
                 PushdownPass.predicatePushdown
                 ProjectionPass.projectionPushdown
+                CompositeGroupByCanonicalizationPass.compositeGroupByCanonicalization
                 IndexPlanShapingPass.indexPlanShaping indexModel
                 JsonbRewritePolicyPass.jsonbRewritePolicy indexModel
             ] (SelectStmt sel)
@@ -90,6 +91,7 @@ module internal QueryableHelperBase =
                 FlattenPass.subqueryFlatten
                 PushdownPass.predicatePushdown
                 ProjectionPass.projectionPushdown
+                CompositeGroupByCanonicalizationPass.compositeGroupByCanonicalization
                 IndexPlanShapingPass.indexPlanShaping indexModel
                 JsonbRewritePolicyPass.jsonbRewritePolicy indexModel
             ] firstRound

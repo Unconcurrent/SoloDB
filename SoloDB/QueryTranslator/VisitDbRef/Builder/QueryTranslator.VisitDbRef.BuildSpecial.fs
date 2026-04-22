@@ -8,6 +8,7 @@ open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorVisitCore
 open SoloDatabase.QueryTranslatorVisitPost
 open SoloDatabase.DBRefManyDescriptor
+open SoloDatabase.QueryableGroupByAliases
 
 /// Specialized SQL builders for GroupBy and TakeWhile/SkipWhile terminals.
 /// Separated from the main builder to keep file sizes under 400 lines.
@@ -431,7 +432,7 @@ module internal DBRefManyBuildSpecial =
 
         // Outer: SELECT json_group_array(json_object('Key', _gk, 'Value', _gc))
         let gbAlias = nextAlias "_cb"
-        let kvpObj = SqlExpr.FunctionCall("json_object", [
+        let kvpObj = SqlExpr.FunctionCall(jsonObjectFn, [
             SqlExpr.Literal(SqlLiteral.String "Key")
             SqlExpr.Column(Some gbAlias, "_gk")
             SqlExpr.Literal(SqlLiteral.String "Value")

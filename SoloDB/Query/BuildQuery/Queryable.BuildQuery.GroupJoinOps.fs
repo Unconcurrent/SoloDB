@@ -9,6 +9,7 @@ open Utils
 open SoloDatabase
 open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseTypes
+open SoloDatabase.QueryableGroupByAliases
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.QueryableBuildQueryGroupJoinChain
 open SoloDatabase.QueryableBuildQueryGroupJoinElements
@@ -477,7 +478,7 @@ module internal QueryableBuildQueryGroupJoinOps =
 
                 let buildJsonObject (pairs: (string * SqlExpr) list) =
                     let args = pairs |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
-                    SqlExpr.FunctionCall("json_object", args)
+                    SqlExpr.FunctionCall(jsonObjectFn, args)
 
                 let resultExpr =
                     match resultSelector.Body with

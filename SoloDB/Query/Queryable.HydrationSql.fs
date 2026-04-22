@@ -11,6 +11,7 @@ open Utils
 open SoloDatabase
 open SoloDatabase.RelationsTypes
 open SoloDatabase.RelationsSchema
+open SoloDatabase.QueryableGroupByAliases
 open SqlDu.Engine.C1.Spec
 
 /// Shared hydration SQL builders for both queryable and non-queryable paths.
@@ -151,7 +152,7 @@ module internal HydrationSqlBuilder =
 
                     let subqueryProjection =
                         SqlExpr.FunctionCall("jsonb_group_array",
-                            [SqlExpr.FunctionCall("json_object",
+                            [SqlExpr.FunctionCall(jsonObjectFn,
                                 [SqlExpr.Literal(SqlLiteral.String "Id"); SqlExpr.Column(Some tAlias, "Id")
                                  SqlExpr.Literal(SqlLiteral.String "Value"); SqlExpr.FunctionCall("json_quote", [SqlExpr.Column(Some tAlias, "Value")])])])
 
@@ -192,7 +193,7 @@ module internal HydrationSqlBuilder =
                             $"Error: Relation metadata not found for property {prop.Name} on collection {ownerTable}.\nReason: Existing relation evidence was found but automatic recovery is not safe.\nFix: Ensure the collection is initialized with Insert or GetCollection before querying, or call AsEnumerable() before accessing this relation."))
 
         if args.Count = 0 then None
-        else Some (SqlExpr.FunctionCall("json_object", args |> Seq.toList))
+        else Some (SqlExpr.FunctionCall(jsonObjectFn, args |> Seq.toList))
 
     /// Build a complete hydrated SELECT as SqlSelect DU for non-queryable GetById-style reads.
     /// Returns (sqlString, variables, hasSingleHydration, hasManyHydration).

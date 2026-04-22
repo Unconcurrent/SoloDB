@@ -1,6 +1,7 @@
 module internal SoloDatabase.EmitJson
 
 open SqlDu.Engine.C1.Spec
+open SoloDatabase.QueryableGroupByAliases
 
 /// Escape single quotes and null characters for inline SQLite string literals.
 let escapeSQLiteStringLiteral (input: string) : string =
@@ -56,4 +57,4 @@ let emitJsonObject (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emi
               valueEmitted ])
     let sql = parts |> List.map (fun p -> p.Sql) |> String.concat ", "
     let parms = Emitted.collectParameters parts
-    { Sql = sprintf "json_object(%s)" sql; Parameters = parms }
+    { Sql = sprintf "%s(%s)" jsonObjectFn sql; Parameters = parms }

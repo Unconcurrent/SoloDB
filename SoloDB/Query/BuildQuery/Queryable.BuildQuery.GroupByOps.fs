@@ -17,6 +17,7 @@ open SoloDatabase
 open SoloDatabase.JsonSerializator
 open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseTypes
+open SoloDatabase.QueryableGroupByAliases
 open SqlDu.Engine.C1.Spec
 
 /// GroupBy deferred emission + GroupBy+Select fusion for root-level queries.
@@ -86,7 +87,7 @@ module internal QueryableBuildQueryGroupByOps =
         (expr: Expression) : SqlExpr option =
         match expr with
         | :? MemberExpression as me when not (isNull me.Expression) && me.Expression :? ParameterExpression && obj.ReferenceEquals(me.Expression, groupParam) && me.Member.Name = "Key" ->
-            Some (SqlExpr.Column(Some "o", "__solodb_group_key"))
+            Some (SqlExpr.Column(Some "o", syntheticGroupKeyAlias))
         | :? MemberExpression as me when not (isNull me.Expression) ->
             match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars me.Expression with
             | Some receiverExpr ->
@@ -203,7 +204,7 @@ module internal QueryableBuildQueryGroupByOps =
 
     let private nullableKeyFilter (keyType: Type) : SqlExpr option =
         if keyType.IsGenericType && keyType.GetGenericTypeDefinition() = typedefof<Nullable<_>> then
-            Some (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some "o", "__solodb_group_key")))
+            Some (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some "o", syntheticGroupKeyAlias)))
         else None
 
     let internal flushGroupByAsJsonGroupArray<'T>
@@ -224,9 +225,9 @@ module internal QueryableBuildQueryGroupByOps =
                 { mkCore
                     [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
                      { Alias = Some "Value"; Expr =
-                        SqlExpr.FunctionCall("jsonb_object", [
+                        SqlExpr.FunctionCall(jsonbObjectFn, [
                             SqlExpr.Literal(SqlLiteral.String "Key")
-                            SqlExpr.Column(Some "o", "__solodb_group_key")
+                            SqlExpr.Column(Some "o", syntheticGroupKeyAlias)
                             SqlExpr.Literal(SqlLiteral.String "Items")
                             SqlExpr.FunctionCall("jsonb_group_array", [
                                 SqlExpr.FunctionCall("jsonb_set", [
@@ -237,7 +238,7 @@ module internal QueryableBuildQueryGroupByOps =
                             ])
                         ]) }]
                     (Some (DerivedTable(ctx.Inner, "o")))
-                  with GroupBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
+                  with GroupBy = [SqlExpr.Column(Some "o", syntheticGroupKeyAlias)]
                        OrderBy = orderBy
                        Having = havingDu
                        Where = nullKeyFilter }
@@ -386,7 +387,7 @@ module internal QueryableBuildQueryGroupByOps =
                 | _ ->
                     let jsonObjArgs = projections |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
                     // Use json_object (TEXT JSON) so downstream json_extract returns typed SQL values for ORDER BY/TakeWhile.
-                    SqlExpr.FunctionCall("json_object", jsonObjArgs)
+                    SqlExpr.FunctionCall(jsonObjectFn, jsonObjArgs)
             let orderBy = translateGroupOrders sourceCtx ctx.TableName "o" ctx.Vars groupOrders
             let keyType = (extractLambdaFromExpr groupByExpressions.[0]).Body.Type
             let nullKeyFilter = nullableKeyFilter keyType
@@ -395,7 +396,7 @@ module internal QueryableBuildQueryGroupByOps =
                     [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
                      { Alias = Some "Value"; Expr = valueExpr }]
                     (Some (DerivedTable(ctx.Inner, "o")))
-                  with GroupBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
+                  with GroupBy = [SqlExpr.Column(Some "o", syntheticGroupKeyAlias)]
                        OrderBy = orderBy
                        Having = havingExpr
                        Where = nullKeyFilter }

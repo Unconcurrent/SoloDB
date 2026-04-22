@@ -10,6 +10,7 @@ open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.SharedDescriptorExtract
 open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryTranslatorBaseHelpers
+open SoloDatabase.QueryableGroupByAliases
 
 /// GroupBy chained-expression support — correlated subqueries for
 /// group-item chains that go beyond simple aggregate whitelist.
@@ -165,8 +166,8 @@ module internal QueryableBuildQueryGroupByChained =
     /// Build the null-safe correlation predicate.
     /// Translates the group key expression against the subquery alias and compares to the outer group key.
     let private buildCorrelation (subAlias: string) (groupRowAlias: string) : SqlExpr =
-        let outerKey = SqlExpr.Column(Some groupRowAlias, "__solodb_group_key")
-        let innerKey = SqlExpr.Column(Some subAlias, "__solodb_group_key")
+        let outerKey = SqlExpr.Column(Some groupRowAlias, syntheticGroupKeyAlias)
+        let innerKey = SqlExpr.Column(Some subAlias, syntheticGroupKeyAlias)
         SqlExpr.Binary(innerKey, BinaryOperator.Is, outerKey)
 
     /// Build a correlated subquery core for GroupBy chains.

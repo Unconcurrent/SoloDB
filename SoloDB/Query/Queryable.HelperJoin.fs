@@ -17,6 +17,7 @@ open SoloDatabase
 open SoloDatabase.JsonSerializator
 open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseTypes
+open SoloDatabase.QueryableGroupByAliases
 open SqlDu.Engine.C1.Spec
 
 module internal QueryableHelperJoin =
@@ -254,7 +255,7 @@ Fix: Rewrite the query to use direct lambda arguments or move it after AsEnumera
                         memberNames.[i],
                         translateJoinResultSelectorExpression outerCtx innerCtx vars outerAlias innerAlias outerParam innerParam n.Arguments.[i] ]
                 let args = pairs |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
-                SqlExpr.FunctionCall("json_object", args)
+                SqlExpr.FunctionCall(jsonObjectFn, args)
             | :? MemberInitExpression as mi ->
                 let pairs =
                     [ for binding in mi.Bindings do
@@ -268,7 +269,7 @@ Fix: Rewrite the query to use direct lambda arguments or move it after AsEnumera
 Reason: Only direct member assignments are supported for mixed-source object initialization.
 Fix: Use an anonymous object, tuple, or move the projection after AsEnumerable().")) ]
                 let args = pairs |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
-                SqlExpr.FunctionCall("json_object", args)
+                SqlExpr.FunctionCall(jsonObjectFn, args)
             | _ ->
                 raise (NotSupportedException(
                     "Error: Join result selector is not supported.

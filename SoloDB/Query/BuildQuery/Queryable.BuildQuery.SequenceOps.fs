@@ -17,6 +17,7 @@ open SoloDatabase
 open SoloDatabase.JsonSerializator
 open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseTypes
+open SoloDatabase.QueryableGroupByAliases
 open SqlDu.Engine.C1.Spec
 
 module internal QueryableBuildQuerySequenceOps =
@@ -46,7 +47,7 @@ module internal QueryableBuildQuerySequenceOps =
                             let hasTableName = not (String.IsNullOrEmpty tableName)
                             let idExpr = if hasTableName then SqlExpr.Column(Some tableName, "Id") else SqlExpr.Column(None, "Id")
                             [{ Alias = Some "Id"; Expr = idExpr }
-                             { Alias = Some "Value"; Expr = SqlExpr.Column(None, "__solodb_scalar_slot0") }]
+                             { Alias = Some "Value"; Expr = SqlExpr.Column(None, (syntheticScalarSlotAlias 0)) }]
                         ))
                         pendingDistinctByScalarReuse <- None
                         isPostScalarProjection <- true
@@ -78,7 +79,7 @@ module internal QueryableBuildQuerySequenceOps =
                     | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = orderFingerprint ->
                         let current = ifSelectorNewStatement statements
                         current.Orders.Clear()
-                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = Some (SqlExpr.Column(None, "__solodb_scalar_slot0")) })
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = Some (SqlExpr.Column(None, (syntheticScalarSlotAlias 0))) })
                     | _ ->
                         addOrder statements m.Expressions.[0] descending
                 | SupportedLinqMethods.ThenBy | SupportedLinqMethods.ThenByDescending ->
@@ -87,7 +88,7 @@ module internal QueryableBuildQuerySequenceOps =
                     let current = simpleCurrent()
                     match pendingDistinctByScalarReuse with
                     | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = orderFingerprint ->
-                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = Some (SqlExpr.Column(None, "__solodb_scalar_slot0")) })
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = Some (SqlExpr.Column(None, (syntheticScalarSlotAlias 0))) })
                     | _ ->
                         current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = None })
                 | SupportedLinqMethods.Skip ->
@@ -164,7 +165,7 @@ module internal QueryableBuildQuerySequenceOps =
                         let rawExpr =
                             match pendingDistinctByScalarReuse with
                             | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = orderFingerprint ->
-                                Some (SqlExpr.Column(None, "__solodb_scalar_slot0"))
+                                Some (SqlExpr.Column(None, (syntheticScalarSlotAlias 0)))
                             | _ ->
                                 None
                         installTerminalOrdering m.Expressions.[0] descending rawExpr
@@ -243,12 +244,12 @@ module internal QueryableBuildQuerySequenceOps =
                             [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }
                              { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") }]
                             @ (if lowered.RelationAccess = HasRelationAccess then
-                                   [{ Alias = Some "__solodb_scalar_slot0"; Expr = SqlExpr.Column(Some "o", "__solodb_group_key") }]
+                                   [{ Alias = Some (syntheticScalarSlotAlias 0); Expr = SqlExpr.Column(Some "o", syntheticGroupKeyAlias) }]
                                else [])
                             @ [{ Alias = Some "__solodb_rn"; Expr = SqlExpr.WindowCall({
                                     Kind = WindowFunctionKind.RowNumber
                                     Arguments = []
-                                    PartitionBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
+                                    PartitionBy = [SqlExpr.Column(Some "o", syntheticGroupKeyAlias)]
                                     OrderBy = [(SqlExpr.Column(Some "o", "Id"), SortDirection.Asc)]
                                 }) }]
                         let innerCore = mkCore innerProjs (Some (DerivedTable(ctx.Inner, "o")))
@@ -259,7 +260,7 @@ module internal QueryableBuildQuerySequenceOps =
                             [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }
                              { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") }]
                             @ (if lowered.RelationAccess = HasRelationAccess then
-                                   [{ Alias = Some "__solodb_scalar_slot0"; Expr = SqlExpr.Column(Some "o", "__solodb_scalar_slot0") }]
+                                   [{ Alias = Some (syntheticScalarSlotAlias 0); Expr = SqlExpr.Column(Some "o", (syntheticScalarSlotAlias 0)) }]
                                else [])
                         let outerCore =
                             { mkCore outerProjs (Some (DerivedTable(innerSel, "o")))
@@ -312,14 +313,14 @@ module internal QueryableBuildQuerySequenceOps =
                             { mkCore
                                 [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
                                  { Alias = Some "Value"; Expr =
-                                    SqlExpr.FunctionCall("json_object", [
+                                    SqlExpr.FunctionCall(jsonObjectFn, [
                                         SqlExpr.Literal(SqlLiteral.String "Key")
-                                        SqlExpr.Column(Some "o", "__solodb_group_key")
+                                        SqlExpr.Column(Some "o", syntheticGroupKeyAlias)
                                         SqlExpr.Literal(SqlLiteral.String "Value")
                                         SqlExpr.AggregateCall(AggregateKind.Count, None, false, None)
                                     ]) }]
                                 (Some (DerivedTable(ctx.Inner, "o")))
-                              with GroupBy = [SqlExpr.Column(Some "o", "__solodb_group_key")] }
+                              with GroupBy = [SqlExpr.Column(Some "o", syntheticGroupKeyAlias)] }
                         wrapCore core
                     )
 

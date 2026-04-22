@@ -17,6 +17,7 @@ open SoloDatabase
 open SoloDatabase.JsonSerializator
 open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseTypes
+open SoloDatabase.QueryableGroupByAliases
 open SqlDu.Engine.C1.Spec
 
 module internal QueryableLayerBuild =
@@ -87,12 +88,12 @@ module internal QueryableLayerBuild =
                         if isTypePrimitive then
                             [{ Alias = None; Expr = idColumnExpr }
                              { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("jsonb_extract", [valueColumnExpr; SqlExpr.Literal(SqlLiteral.String "$")]) }
-                             { Alias = Some "__solodb_group_key"; Expr = keyExpr }]
+                             { Alias = Some syntheticGroupKeyAlias; Expr = keyExpr }]
                         else
                             needsValueMaterialization <- true
                             [{ Alias = None; Expr = idColumnExpr }
                              { Alias = Some "Value"; Expr = valueColumnExpr }
-                             { Alias = Some "__solodb_group_key"; Expr = keyExpr }]
+                             { Alias = Some syntheticGroupKeyAlias; Expr = keyExpr }]
                     | Some (DuSelector buildProjections) ->
                         buildProjections layer.TableName vars
                     | None ->
