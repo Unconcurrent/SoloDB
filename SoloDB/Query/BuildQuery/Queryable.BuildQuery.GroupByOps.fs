@@ -40,6 +40,55 @@ module internal QueryableBuildQueryGroupByOps =
         | :? LambdaExpression as le -> le
         | _ -> raise (NotSupportedException($"Expected lambda expression, got {expr.NodeType}"))
 
+    type private GroupKeyConfig = {
+        CompoundSlots: struct(string * string) array option
+        GroupedKeyExpr: SqlExpr
+        GroupByExprs: SqlExpr list
+        NullKeyFilter: SqlExpr option
+    }
+
+    let private tryGetCompoundGroupKeySlots (keySelectorExpr: Expression) : struct(string * string) array option =
+        tryGetCompoundScalarKeyMembers keySelectorExpr
+        |> Option.map (Array.mapi (fun i struct(name, _) -> struct(name, groupKeySlotName i)))
+
+    let private buildGroupedKeyExpr (sourceAlias: string) (compoundSlots: struct(string * string) array option) : SqlExpr =
+        match compoundSlots with
+        | Some slots ->
+            SqlExpr.JsonObjectExpr(
+                [ for struct(name, slotName) in slots ->
+                    name, SqlExpr.Column(Some sourceAlias, slotName) ])
+        | None ->
+            SqlExpr.Column(Some sourceAlias, "__solodb_group_key")
+
+    let private buildGroupByExprs (sourceAlias: string) (compoundSlots: struct(string * string) array option) : SqlExpr list =
+        match compoundSlots with
+        | Some slots ->
+            [ for struct(_, slotName) in slots -> SqlExpr.Column(Some sourceAlias, slotName) ]
+        | None ->
+            [SqlExpr.Column(Some sourceAlias, "__solodb_group_key")]
+
+    let private buildNullKeyFilter (sourceAlias: string) (keyType: Type) (compoundSlots: struct(string * string) array option) : SqlExpr option =
+        match compoundSlots with
+        | Some slots ->
+            slots
+            |> Array.map (fun struct(_, slotName) -> SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some sourceAlias, slotName)))
+            |> Array.reduce (fun acc expr -> SqlExpr.Binary(acc, BinaryOperator.And, expr))
+            |> Some
+        | None when keyType.IsGenericType && keyType.GetGenericTypeDefinition() = typedefof<Nullable<_>> ->
+            Some (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some sourceAlias, "__solodb_group_key")))
+        | None ->
+            None
+
+    let private buildGroupKeyConfig (keySelectorExpr: Expression) (sourceAlias: string) : GroupKeyConfig =
+        let keyType = (extractLambdaFromExpr keySelectorExpr).Body.Type
+        let compoundSlots = tryGetCompoundGroupKeySlots keySelectorExpr
+        {
+            CompoundSlots = compoundSlots
+            GroupedKeyExpr = buildGroupedKeyExpr sourceAlias compoundSlots
+            GroupByExprs = buildGroupByExprs sourceAlias compoundSlots
+            NullKeyFilter = buildNullKeyFilter sourceAlias keyType compoundSlots
+        }
+
     let private isGroupSource (expr: Expression) (groupParam: ParameterExpression) =
         match expr with
         | :? ParameterExpression as p -> obj.ReferenceEquals(p, groupParam)
@@ -82,18 +131,19 @@ module internal QueryableBuildQueryGroupByOps =
         else Some aggExpr
 
     let rec private tryTranslateGroupArg
+        (groupKeyCfg: GroupKeyConfig)
         (sourceCtx: QueryContext) (ctxTableName: string) (groupRowTableName: string) (groupParam: ParameterExpression) (vars: Dictionary<string, obj>)
         (expr: Expression) : SqlExpr option =
         match expr with
         | :? MemberExpression as me when not (isNull me.Expression) && me.Expression :? ParameterExpression && obj.ReferenceEquals(me.Expression, groupParam) && me.Member.Name = "Key" ->
-            Some (SqlExpr.Column(Some "o", "__solodb_group_key"))
+            Some groupKeyCfg.GroupedKeyExpr
         | :? MemberExpression as me when not (isNull me.Expression) ->
-            match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars me.Expression with
+            match tryTranslateGroupArg groupKeyCfg sourceCtx ctxTableName groupRowTableName groupParam vars me.Expression with
             | Some receiverExpr ->
                 Some (DateTimeFunctions.translateGroupKeyMemberAccess receiverExpr me.Expression.Type me.Member.Name)
             | None -> None
         | :? NewExpression as ne when ne.Type = typeof<DateTime> && ne.Arguments.Count = 3 && referencesParam groupParam ne ->
-            let translated = ne.Arguments |> Seq.toList |> List.map (tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars)
+            let translated = ne.Arguments |> Seq.toList |> List.map (tryTranslateGroupArg groupKeyCfg sourceCtx ctxTableName groupRowTableName groupParam vars)
             match translated with
             | [Some y; Some m; Some d] ->
                 Some (SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%04d-%02d-%02d"); y; m; d]))
@@ -102,7 +152,7 @@ module internal QueryableBuildQueryGroupByOps =
             match mc.Method.Name with
             | "ToString" when mc.Arguments.Count <= 1 && not (isNull mc.Object)
                             && (mc.Object.Type = typeof<DateTime> || mc.Object.Type = typeof<DateTimeOffset>) ->
-                match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars mc.Object with
+                match tryTranslateGroupArg groupKeyCfg sourceCtx ctxTableName groupRowTableName groupParam vars mc.Object with
                 | Some objExpr ->
                     Some (DateTimeFunctions.translateDateTimeToStringCall
                               objExpr
@@ -147,8 +197,8 @@ module internal QueryableBuildQueryGroupByOps =
                 ]))
             | _ -> None
         | :? BinaryExpression as be when referencesParam groupParam be ->
-            let left = tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars be.Left
-            let right = tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars be.Right
+            let left = tryTranslateGroupArg groupKeyCfg sourceCtx ctxTableName groupRowTableName groupParam vars be.Left
+            let right = tryTranslateGroupArg groupKeyCfg sourceCtx ctxTableName groupRowTableName groupParam vars be.Right
             match left, right with
             | Some l, Some r ->
                 let op =
@@ -170,13 +220,13 @@ module internal QueryableBuildQueryGroupByOps =
                 Some (SqlExpr.Binary(l, op, r))
             | _ -> None
         | :? ConditionalExpression as ce when referencesParam groupParam ce ->
-            match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars ce.Test,
-                  tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars ce.IfTrue,
-                  tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars ce.IfFalse with
+            match tryTranslateGroupArg groupKeyCfg sourceCtx ctxTableName groupRowTableName groupParam vars ce.Test,
+                  tryTranslateGroupArg groupKeyCfg sourceCtx ctxTableName groupRowTableName groupParam vars ce.IfTrue,
+                  tryTranslateGroupArg groupKeyCfg sourceCtx ctxTableName groupRowTableName groupParam vars ce.IfFalse with
             | Some t, Some tr, Some fa -> Some (SqlExpr.CaseExpr((t, tr), [], Some fa))
             | _ -> None
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Not && referencesParam groupParam ue ->
-            match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars ue.Operand with
+            match tryTranslateGroupArg groupKeyCfg sourceCtx ctxTableName groupRowTableName groupParam vars ue.Operand with
             | Some inner -> Some (SqlExpr.Unary(UnaryOperator.Not, inner))
             | None -> None
         | :? ConstantExpression as ce ->
@@ -186,13 +236,14 @@ module internal QueryableBuildQueryGroupByOps =
         | _ -> None
 
     let private translateGroupOrders
+        (groupKeyCfg: GroupKeyConfig)
         (sourceCtx: QueryContext) (ctxTableName: string) (groupRowTableName: string) (vars: Dictionary<string, obj>)
         (groupOrders: (Expression * bool) list) =
         groupOrders
         |> List.map (fun (orderingExpr, descending) ->
             let lambda = extractLambdaFromExpr orderingExpr
             let orderExpr =
-                match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName lambda.Parameters.[0] vars lambda.Body with
+                match tryTranslateGroupArg groupKeyCfg sourceCtx ctxTableName groupRowTableName lambda.Parameters.[0] vars lambda.Body with
                 | Some sqlExpr -> sqlExpr
                 | None ->
                     raise (NotSupportedException(
@@ -201,15 +252,29 @@ module internal QueryableBuildQueryGroupByOps =
             { Expr = orderExpr
               Direction = if descending then SortDirection.Desc else SortDirection.Asc })
 
-    let private nullableKeyFilter (keyType: Type) : SqlExpr option =
-        if keyType.IsGenericType && keyType.GetGenericTypeDefinition() = typedefof<Nullable<_>> then
-            Some (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some "o", "__solodb_group_key")))
-        else None
+    let private wrapGroupedResult
+        (ctx: struct {|Vars: Dictionary<string, obj>; Inner: SqlSelect; TableName: string|})
+        (keySelectorExpr: Expression)
+        (orderBy: OrderBy list)
+        (havingExpr: SqlExpr option)
+        (valueExpr: SqlExpr) =
+        let keyCfg = buildGroupKeyConfig keySelectorExpr "o"
+        let core =
+            { mkCore
+                [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                 { Alias = Some "Value"; Expr = valueExpr }]
+                (Some (DerivedTable(ctx.Inner, "o")))
+              with GroupBy = keyCfg.GroupByExprs
+                   OrderBy = orderBy
+                   Having = havingExpr
+                   Where = keyCfg.NullKeyFilter }
+        wrapCore core
 
     let internal flushGroupByAsJsonGroupArray<'T>
         (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>)
         (expressions: Expression array) (havingPreds: Expression list) (groupOrders: (Expression * bool) list) =
         addComplexFinal statements (fun ctx ->
+            let keyCfg = buildGroupKeyConfig expressions.[0] "o"
             let havingDu =
                 if havingPreds.IsEmpty then None
                 else
@@ -217,31 +282,21 @@ module internal QueryableBuildQueryGroupByOps =
                     |> List.map (fun pred -> translateExprDu sourceCtx ctx.TableName pred ctx.Vars)
                     |> List.reduce (fun a b -> SqlExpr.Binary(a, BinaryOperator.And, b))
                     |> Some
-            let orderBy = translateGroupOrders sourceCtx ctx.TableName "o" ctx.Vars groupOrders
-            let keyType = (extractLambdaFromExpr expressions.[0]).Body.Type
-            let nullKeyFilter = nullableKeyFilter keyType
-            let core =
-                { mkCore
-                    [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-                     { Alias = Some "Value"; Expr =
-                        SqlExpr.FunctionCall("jsonb_object", [
-                            SqlExpr.Literal(SqlLiteral.String "Key")
-                            SqlExpr.Column(Some "o", "__solodb_group_key")
-                            SqlExpr.Literal(SqlLiteral.String "Items")
-                            SqlExpr.FunctionCall("jsonb_group_array", [
-                                SqlExpr.FunctionCall("jsonb_set", [
-                                    SqlExpr.Column(Some "o", "Value")
-                                    SqlExpr.Literal(SqlLiteral.String "$.Id")
-                                    SqlExpr.Column(Some "o", "Id")
-                                ])
-                            ])
-                        ]) }]
-                    (Some (DerivedTable(ctx.Inner, "o")))
-                  with GroupBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
-                       OrderBy = orderBy
-                       Having = havingDu
-                       Where = nullKeyFilter }
-            wrapCore core
+            let orderBy = translateGroupOrders keyCfg sourceCtx ctx.TableName "o" ctx.Vars groupOrders
+            let valueExpr =
+                SqlExpr.FunctionCall("jsonb_object", [
+                    SqlExpr.Literal(SqlLiteral.String "Key")
+                    keyCfg.GroupedKeyExpr
+                    SqlExpr.Literal(SqlLiteral.String "Items")
+                    SqlExpr.FunctionCall("jsonb_group_array", [
+                        SqlExpr.FunctionCall("jsonb_set", [
+                            SqlExpr.Column(Some "o", "Value")
+                            SqlExpr.Literal(SqlLiteral.String "$.Id")
+                            SqlExpr.Column(Some "o", "Id")
+                        ])
+                    ])
+                ])
+            wrapGroupedResult ctx expressions.[0] orderBy havingDu valueExpr
         )
 
     /// Unwrap Convert expressions (boxing for string interpolation).
@@ -253,16 +308,18 @@ module internal QueryableBuildQueryGroupByOps =
 
     /// Translate a GroupBy projection argument through both the simple aggregate path and the chained descriptor path.
     let private translateGroupByProjectionArg
+        (groupKeyCfg: GroupKeyConfig)
         (sourceCtx: QueryContext) (tableName: string) (innerSelect: SqlSelect) (groupParam: ParameterExpression) (vars: Dictionary<string, obj>)
         (groupByExpressions: Expression array) (ctxTableName: string) (expr: Expression) : SqlExpr option =
         let expr = unwrapConvertExpr expr
-        match tryTranslateGroupArg sourceCtx ctxTableName "o" groupParam vars expr with
+        match tryTranslateGroupArg groupKeyCfg sourceCtx ctxTableName "o" groupParam vars expr with
         | Some sqlExpr -> Some sqlExpr
         | None ->
             QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr sourceCtx tableName innerSelect "o" groupParam vars groupByExpressions expr
 
     /// Handle string interpolation (String.Concat / String.Format) in GroupBy Select body.
     let private tryTranslateGroupByStringInterpolation
+        (groupKeyCfg: GroupKeyConfig)
         (sourceCtx: QueryContext) (tableName: string) (innerSelect: SqlSelect) (groupParam: ParameterExpression) (vars: Dictionary<string, obj>)
         (groupByExpressions: Expression array) (ctxTableName: string) (body: Expression) : SqlExpr option =
         match body with
@@ -274,7 +331,7 @@ module internal QueryableBuildQueryGroupByOps =
                     mc.Arguments |> Seq.toList
             let translated =
                 args |> List.map (fun arg ->
-                    match translateGroupByProjectionArg sourceCtx tableName innerSelect groupParam vars groupByExpressions ctxTableName arg with
+                    match translateGroupByProjectionArg groupKeyCfg sourceCtx tableName innerSelect groupParam vars groupByExpressions ctxTableName arg with
                     | Some sqlExpr -> sqlExpr
                     | None -> raise (NotSupportedException($"Error: GroupBy string interpolation argument cannot be translated.\nFix: Simplify the expression or call AsEnumerable() before the Select.")))
             Some (SqlExpr.FunctionCall("CONCAT", translated))
@@ -287,7 +344,7 @@ module internal QueryableBuildQueryGroupByOps =
                     mc.Arguments |> Seq.skip 1 |> Seq.toList
             let translatedArgs =
                 rawArgs |> List.map (fun arg ->
-                    match translateGroupByProjectionArg sourceCtx tableName innerSelect groupParam vars groupByExpressions ctxTableName arg with
+                    match translateGroupByProjectionArg groupKeyCfg sourceCtx tableName innerSelect groupParam vars groupByExpressions ctxTableName arg with
                     | Some sqlExpr -> sqlExpr
                     | None -> raise (NotSupportedException($"Error: GroupBy string format argument cannot be translated.\nFix: Simplify the expression or call AsEnumerable() before the Select.")))
             // Simple format piece extraction — replace {N} with the translated arg
@@ -333,13 +390,14 @@ module internal QueryableBuildQueryGroupByOps =
         let groupParam = selectLambda.Parameters.[0]
         let body = selectLambda.Body
         addComplexFinal statements (fun ctx ->
+            let keyCfg = buildGroupKeyConfig groupByExpressions.[0] "o"
             let havingExpr =
                 if havingPreds.IsEmpty then None
                 else
                     havingPreds
                     |> List.map (fun pred ->
                         let lambda = extractLambdaFromExpr pred
-                        match tryTranslateGroupArg sourceCtx ctx.TableName "o" lambda.Parameters.[0] ctx.Vars lambda.Body with
+                        match tryTranslateGroupArg keyCfg sourceCtx ctx.TableName "o" lambda.Parameters.[0] ctx.Vars lambda.Body with
                         | Some sqlExpr -> sqlExpr
                         | None ->
                             raise (NotSupportedException(
@@ -353,7 +411,7 @@ module internal QueryableBuildQueryGroupByOps =
                     [for i = 0 to newExpr.Arguments.Count - 1 do
                         let memberName = newExpr.Members.[i].Name
                         let arg = newExpr.Arguments.[i]
-                        match tryTranslateGroupArg sourceCtx ctx.TableName "o" groupParam ctx.Vars arg with
+                        match tryTranslateGroupArg keyCfg sourceCtx ctx.TableName "o" groupParam ctx.Vars arg with
                         | Some sqlExpr -> yield (memberName, sqlExpr)
                         | None ->
                             // Fallback: try shared descriptor extraction for chained group patterns
@@ -365,10 +423,10 @@ module internal QueryableBuildQueryGroupByOps =
                                     "Reason: The expression contains an unsupported aggregate pattern.\n" +
                                     "Fix: Simplify the aggregate or call AsEnumerable() before the Select."))]
                 | _ ->
-                    match tryTranslateGroupByStringInterpolation sourceCtx tableName ctx.Inner groupParam ctx.Vars groupByExpressions ctx.TableName body with
+                    match tryTranslateGroupByStringInterpolation keyCfg sourceCtx tableName ctx.Inner groupParam ctx.Vars groupByExpressions ctx.TableName body with
                     | Some sqlExpr -> ["Value", sqlExpr]
                     | None ->
-                        match translateGroupByProjectionArg sourceCtx tableName ctx.Inner groupParam ctx.Vars groupByExpressions ctx.TableName body with
+                        match translateGroupByProjectionArg keyCfg sourceCtx tableName ctx.Inner groupParam ctx.Vars groupByExpressions ctx.TableName body with
                         | Some sqlExpr -> ["Value", sqlExpr]
                         | None ->
                             raise (NotSupportedException(
@@ -387,17 +445,6 @@ module internal QueryableBuildQueryGroupByOps =
                     let jsonObjArgs = projections |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
                     // Use json_object (TEXT JSON) so downstream json_extract returns typed SQL values for ORDER BY/TakeWhile.
                     SqlExpr.FunctionCall("json_object", jsonObjArgs)
-            let orderBy = translateGroupOrders sourceCtx ctx.TableName "o" ctx.Vars groupOrders
-            let keyType = (extractLambdaFromExpr groupByExpressions.[0]).Body.Type
-            let nullKeyFilter = nullableKeyFilter keyType
-            let core =
-                { mkCore
-                    [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-                     { Alias = Some "Value"; Expr = valueExpr }]
-                    (Some (DerivedTable(ctx.Inner, "o")))
-                  with GroupBy = [SqlExpr.Column(Some "o", "__solodb_group_key")]
-                       OrderBy = orderBy
-                       Having = havingExpr
-                       Where = nullKeyFilter }
-            wrapCore core
+            let orderBy = translateGroupOrders keyCfg sourceCtx ctx.TableName "o" ctx.Vars groupOrders
+            wrapGroupedResult ctx groupByExpressions.[0] orderBy havingExpr valueExpr
         )
