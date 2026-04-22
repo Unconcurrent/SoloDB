@@ -11,7 +11,6 @@ open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorVisitPost
 open SqlDu.Engine.C1.Spec
 open SoloDatabase.DBRefManyDescriptor
-open SoloDatabase.DBRefManyExtractorHelpers
 open SoloDatabase.SharedDescriptorExtract
 module internal QueryableBuildQueryGroupJoinChain =
     open QueryableHelperJoin

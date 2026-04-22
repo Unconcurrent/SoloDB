@@ -6,6 +6,7 @@ open SqlDu.Engine.C1.Spec
 open DBRefTypeHelpers
 open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.QueryTranslatorBaseHelpers
+open SoloDatabase.SharedDescriptorExtract
 
 module internal DBRefManyExtractorHelpers =
     let mkIdentityLambdaForDbRefMany (expr: Expression) =
@@ -15,17 +16,6 @@ module internal DBRefManyExtractorHelpers =
             | None -> raise (InvalidOperationException("Could not resolve DBRefMany target type for identity materialization."))
         let p = Expression.Parameter(targetType)
         Expression.Lambda(p, [| p |])
-
-    let getSource (mce: MethodCallExpression) =
-        if not (isNull mce.Object) then mce.Object
-        elif mce.Arguments.Count > 0 then mce.Arguments.[0]
-        else null
-
-    let getArg (mce: MethodCallExpression) =
-        if not (isNull mce.Object) then
-            if mce.Arguments.Count >= 1 then Some mce.Arguments.[0] else None
-        elif mce.Arguments.Count >= 2 then Some mce.Arguments.[1]
-        else None
 
     let rec isDBRefManyChain (unwrapConvert: Expression -> Expression) (isDBRefManyType: Type -> bool) (expr: Expression) : bool =
         let e = unwrapConvert expr
@@ -39,22 +29,6 @@ module internal DBRefManyExtractorHelpers =
                 // Walk through member access (e.g., property on parameter) to find DBRefMany root.
                 isDBRefManyChain unwrapConvert isDBRefManyType me.Expression
             | _ -> false
-
-    let preprocessRoot (expr: Expression) : Expression * bool * bool =
-        let mutable outerDistinct = false
-        let mutable outerMaterialize = false
-        let rec loop (e: Expression) =
-            match e with
-            | :? MethodCallExpression as mc when mc.Method.Name = "Distinct" ->
-                outerDistinct <- true
-                let src = getSource mc
-                if isNull src then e else loop src
-            | :? MethodCallExpression as mc when mc.Method.Name = "ToList" || mc.Method.Name = "ToArray" ->
-                outerMaterialize <- true
-                let src = getSource mc
-                if isNull src then e else loop src
-            | _ -> e
-        loop expr, outerDistinct, outerMaterialize
 
     let buildDescriptor
         innerSource
