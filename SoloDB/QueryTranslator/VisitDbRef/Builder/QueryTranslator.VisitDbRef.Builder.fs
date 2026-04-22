@@ -137,7 +137,7 @@ module internal DBRefManyBuilder =
 
         // TakeWhile/SkipWhile — delegated to BuildSpecial.
         // Explicit reject: TakeWhile combined with set-ops is not supported in SQL translation.
-        if desc.TakeWhileInfo.IsSome && (desc.SetOp.IsSome || not desc.SetOps.IsEmpty) then
+        if desc.TakeWhileInfo.IsSome && not desc.SetOps.IsEmpty then
             raise (NotSupportedException(
                 "Error: TakeWhile/SkipWhile combined with set operations (UnionBy/IntersectBy/ExceptBy/DistinctBy) is not supported in SQL translation.\n" +
                 "Reason: TakeWhile uses window-function boundaries that cannot compose with set-operation deduplication in a single SQL query.\n" +
@@ -166,7 +166,7 @@ module internal DBRefManyBuilder =
         | None ->
 
         // Set operations.
-        match desc.SetOp with
+        match desc.SetOps |> List.tryHead with
         | Some (SetOperation.DistinctBy(keySel)) ->
             buildSetOpTerminalFromRowset (buildDistinctByEntityRowset qb desc ownerRef keySel)
         | Some (SetOperation.IntersectBy(rightKeys, keySel)) ->

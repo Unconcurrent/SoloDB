@@ -28,7 +28,6 @@ module internal DBRefManyExtractChain =
             mutable GroupByKey: LambdaExpression option
             mutable Distinct: bool
             mutable SelectProjection: LambdaExpression option
-            mutable SetOp: SetOperation option
             mutable OfTypeName: string option
             mutable CastTypeName: string option
             mutable GroupByHaving: Expression option
@@ -53,7 +52,6 @@ module internal DBRefManyExtractChain =
             GroupByKey = None
             Distinct = false
             SelectProjection = None
-            SetOp = None
             OfTypeName = None
             CastTypeName = None
             GroupByHaving = None
@@ -226,32 +224,27 @@ module internal DBRefManyExtractChain =
 
             | "Intersect" ->
                 match arg with
-                | Some rightSrc -> state.SetOp <- Some (SetOperation.Intersect rightSrc)
-                | None -> ()
+                | Some _ | None -> ()
                 walkChain state src
 
             | "Except" ->
                 match arg with
-                | Some rightSrc -> state.SetOp <- Some (SetOperation.Except rightSrc)
-                | None -> ()
+                | Some _ | None -> ()
                 walkChain state src
 
             | "Union" ->
                 match arg with
-                | Some rightSrc -> state.SetOp <- Some (SetOperation.Union rightSrc)
-                | None -> ()
+                | Some _ | None -> ()
                 walkChain state src
 
             | "Concat" ->
                 match arg with
-                | Some rightSrc -> state.SetOp <- Some (SetOperation.Concat rightSrc)
-                | None -> ()
+                | Some _ | None -> ()
                 walkChain state src
 
             | "DistinctBy" ->
                 match arg with
-                | Some keySel -> state.SetOp <- Some (SetOperation.DistinctBy keySel)
-                | None -> ()
+                | Some _ | None -> ()
                 walkChain state src
 
             | "Order" ->
@@ -264,17 +257,17 @@ module internal DBRefManyExtractChain =
 
             | "IntersectBy" ->
                 if mc.Arguments.Count >= 3 then
-                    state.SetOp <- Some (SetOperation.IntersectBy(mc.Arguments.[1], mc.Arguments.[2]))
+                    ()
                 walkChain state src
 
             | "ExceptBy" ->
                 if mc.Arguments.Count >= 3 then
-                    state.SetOp <- Some (SetOperation.ExceptBy(mc.Arguments.[1], mc.Arguments.[2]))
+                    ()
                 walkChain state src
 
             | "UnionBy" ->
                 if mc.Arguments.Count >= 3 then
-                    state.SetOp <- Some (SetOperation.UnionBy(mc.Arguments.[1], mc.Arguments.[2]))
+                    ()
                 walkChain state src
 
             | "ToList" | "ToArray" ->

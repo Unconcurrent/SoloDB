@@ -50,7 +50,6 @@ module internal QueryableBuildQueryGroupByChained =
             GroupByKey = state.GroupByKey
             Distinct = state.Distinct || outerDistinct
             SelectProjection = state.SelectProjection
-            SetOp = state.SetOps |> Seq.tryHead
             SetOps = state.SetOps |> Seq.toList
             Terminal = terminal
             GroupByHavingPredicate = state.GroupByHaving
@@ -165,7 +164,7 @@ module internal QueryableBuildQueryGroupByChained =
 
     /// Build the null-safe correlation predicate.
     /// Translates the group key expression against the subquery alias and compares to the outer group key.
-    let private buildCorrelation (sourceCtx: QueryContext) (subAlias: string) (groupRowAlias: string) (vars: Dictionary<string, obj>) (groupByExprs: Expression array) : SqlExpr =
+    let private buildCorrelation (subAlias: string) (groupRowAlias: string) : SqlExpr =
         let outerKey = SqlExpr.Column(Some groupRowAlias, "__solodb_group_key")
         let innerKey = SqlExpr.Column(Some subAlias, "__solodb_group_key")
         SqlExpr.Binary(innerKey, BinaryOperator.Is, outerKey)
@@ -179,7 +178,7 @@ module internal QueryableBuildQueryGroupByChained =
         let subAlias = nextAlias "_gsub"
 
         // Null-safe group key correlation using the original key expression
-        let correlation = buildCorrelation sourceCtx subAlias groupRowAlias vars groupByExprs
+        let correlation = buildCorrelation subAlias groupRowAlias
 
         // Translate Where predicates against subquery alias
         let wherePreds = desc.WherePredicates |> List.map (translateExprAgainst sourceCtx subAlias vars)
@@ -231,7 +230,7 @@ module internal QueryableBuildQueryGroupByChained =
 
         let subAlias = nextAlias "_gagg"
 
-        let correlation = buildCorrelation sourceCtx subAlias groupRowAlias vars groupByExprs
+        let correlation = buildCorrelation subAlias groupRowAlias
 
         let wherePreds = desc.WherePredicates |> List.map (translateExprAgainst sourceCtx subAlias vars)
 
@@ -329,7 +328,7 @@ module internal QueryableBuildQueryGroupByChained =
         (groupByExprs: Expression array) (desc: QueryDescriptor) (predOpt: Expression option) (negate: bool) : SqlExpr =
 
         let subAlias = nextAlias "_gex"
-        let correlation = buildCorrelation sourceCtx subAlias groupRowAlias vars groupByExprs
+        let correlation = buildCorrelation subAlias groupRowAlias
 
         let wherePreds = desc.WherePredicates |> List.map (translateExprAgainst sourceCtx subAlias vars)
 
@@ -396,12 +395,6 @@ module internal QueryableBuildQueryGroupByChained =
             SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect countCore },
             [SqlExpr.Literal(SqlLiteral.Integer 0L)])
 
-    let private getSetOps (desc: QueryDescriptor) =
-        if desc.SetOps.IsEmpty then
-            desc.SetOp |> Option.toList
-        else
-            desc.SetOps
-
     let private tryExtractInt64 (exprOpt: Expression option) =
         match exprOpt with
         | Some (:? ConstantExpression as ce) -> Some (SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value))))
@@ -419,7 +412,7 @@ module internal QueryableBuildQueryGroupByChained =
         (sourceCtx: QueryContext) (baseTableName: string) (innerSelect: SqlSelect) (groupRowAlias: string) (vars: Dictionary<string, obj>)
         (groupParam: ParameterExpression) (groupByExprs: Expression array) (desc: QueryDescriptor) : SqlSelect =
 
-        let setOps = getSetOps desc
+        let setOps = desc.SetOps
         let descBase =
             { desc with
                 Distinct = false
@@ -433,8 +426,6 @@ module internal QueryableBuildQueryGroupByChained =
                 raise (NotSupportedException(
                     "Error: GroupBy set operations require a projected value chain.\n" +
                     "Fix: Project the group value first, for example g.Select(x => x.Code).UnionBy(...)."))
-        let normalizeProjectedValue (valueType: Type) (expr: SqlExpr) =
-            normalizeScalarExpr valueType expr
 
         let identityKeyLambda =
             let p = Expression.Parameter(projectedLambda.ReturnType, "x")
@@ -454,7 +445,7 @@ module internal QueryableBuildQueryGroupByChained =
                         { Alias = Some "v"
                           Expr =
                             translateExprAgainst sourceCtx subAlias vars (projectedLambda :> Expression)
-                            |> normalizeProjectedValue projectedLambda.ReturnType }
+                            |> normalizeScalarExpr projectedLambda.ReturnType }
                         { Alias = Some "__ord"
                           Expr =
                             rowNumberOver (effectiveOrder |> List.map (fun ob -> ob.Expr, ob.Direction)) }
@@ -961,7 +952,7 @@ module internal QueryableBuildQueryGroupByChained =
         match tryExtractGroupByTerminalChain groupParam innerExpr with
         | None -> None
         | Some (desc, terminal) ->
-            let setOps = getSetOps desc
+            let setOps = desc.SetOps
             let useProjectedRowset = desc.SelectProjection.IsSome && (desc.Distinct || not setOps.IsEmpty)
             let projectedRowset = lazy (buildProjectedChainRowset sourceCtx baseTableName innerSelect groupRowAlias vars groupParam groupByExprs desc)
             let buildProjectedAggregateFromRowset aggKind coalesceZero =
@@ -1038,6 +1029,22 @@ module internal QueryableBuildQueryGroupByChained =
                       Offset = None }
                 SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
 
+            let buildProjectedElementAtFromRowset (descWithOffset: QueryDescriptor) =
+                let projectedRowset = buildProjectedChainRowset sourceCtx baseTableName innerSelect groupRowAlias vars groupParam groupByExprs descWithOffset
+                let rowsetAlias = nextAlias "_gre"
+                let core =
+                    { Distinct = false
+                      Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Column(Some rowsetAlias, "v") }]
+                      Source = Some(DerivedTable(projectedRowset, rowsetAlias))
+                      Joins = []
+                      Where = None
+                      GroupBy = []
+                      Having = None
+                      OrderBy = [{ Expr = SqlExpr.Column(Some rowsetAlias, "__ord"); Direction = SortDirection.Asc }]
+                      Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L))
+                      Offset = None }
+                SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
+
             let result =
                 match terminal with
                 | Terminal.Count | Terminal.LongCount ->
@@ -1091,47 +1098,17 @@ module internal QueryableBuildQueryGroupByChained =
                     else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false true
                 | Terminal.ElementAt idx ->
                     let desc = { desc with Offset = Some idx }
-                    if useProjectedRowset then
-                        let projectedRowset = buildProjectedChainRowset sourceCtx baseTableName innerSelect groupRowAlias vars groupParam groupByExprs desc
-                        let rowsetAlias = nextAlias "_gre"
-                        let core =
-                            { Distinct = false
-                              Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Column(Some rowsetAlias, "v") }]
-                              Source = Some(DerivedTable(projectedRowset, rowsetAlias))
-                              Joins = []
-                              Where = None
-                              GroupBy = []
-                              Having = None
-                              OrderBy = [{ Expr = SqlExpr.Column(Some rowsetAlias, "__ord"); Direction = SortDirection.Asc }]
-                              Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L))
-                              Offset = None }
-                        SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
-                    else
-                        buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false false
+                    if useProjectedRowset then buildProjectedElementAtFromRowset desc
+                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false false
                 | Terminal.ElementAtOrDefault idx ->
                     let desc = { desc with Offset = Some idx }
-                    if useProjectedRowset then
-                        let projectedRowset = buildProjectedChainRowset sourceCtx baseTableName innerSelect groupRowAlias vars groupParam groupByExprs desc
-                        let rowsetAlias = nextAlias "_gre"
-                        let core =
-                            { Distinct = false
-                              Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Column(Some rowsetAlias, "v") }]
-                              Source = Some(DerivedTable(projectedRowset, rowsetAlias))
-                              Joins = []
-                              Where = None
-                              GroupBy = []
-                              Having = None
-                              OrderBy = [{ Expr = SqlExpr.Column(Some rowsetAlias, "__ord"); Direction = SortDirection.Asc }]
-                              Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L))
-                              Offset = None }
-                        SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
-                    else
-                        buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false true
+                    if useProjectedRowset then buildProjectedElementAtFromRowset desc
+                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false true
                 | Terminal.Contains value ->
                     if useProjectedRowset then buildProjectedContainsFromRowset value
                     else
                         let subAlias = nextAlias "_gcon"
-                        let correlation = buildCorrelation sourceCtx subAlias groupRowAlias vars groupByExprs
+                        let correlation = buildCorrelation subAlias groupRowAlias
                         let valueDu = translateExprDu sourceCtx groupRowAlias value vars
                         let projExpr =
                             match desc.SelectProjection with

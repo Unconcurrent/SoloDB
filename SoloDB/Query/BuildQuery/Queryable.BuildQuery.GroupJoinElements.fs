@@ -37,7 +37,7 @@ module internal QueryableBuildQueryGroupJoinElements =
                         PostBoundLimit = None; PostBoundOffset = None
                         TakeWhileInfo = None; PostBoundTakeWhileInfo = None
                         GroupByKey = None; Distinct = false; SelectProjection = None
-                        SetOp = None; SetOps = []
+                        SetOps = []
                         Terminal = Terminal.Count; GroupByHavingPredicate = None
                         DefaultIfEmpty = None; PostSelectDefaultIfEmpty = None
                         SelectManyInnerLambda = None

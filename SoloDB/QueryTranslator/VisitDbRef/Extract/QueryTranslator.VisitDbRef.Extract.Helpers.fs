@@ -73,7 +73,6 @@ module internal DBRefManyExtractorHelpers =
         groupByKey
         distinct
         selectProjection
-        setOp
         setOps
         terminal
         groupByHaving
@@ -97,7 +96,6 @@ module internal DBRefManyExtractorHelpers =
             GroupByKey = groupByKey
             Distinct = distinct
             SelectProjection = selectProjection
-            SetOp = setOp
             SetOps = setOps
             Terminal = terminal
             GroupByHavingPredicate = groupByHaving
@@ -126,7 +124,6 @@ module internal DBRefManyExtractorHelpers =
                     None
                     None
                     false
-                    None
                     None
                     []
                     Terminal.Count
@@ -158,7 +155,6 @@ module internal DBRefManyExtractorHelpers =
                     None
                     false
                     (Some identity)
-                    None
                     []
                     (Terminal.Select(identity :> Expression))
                     None

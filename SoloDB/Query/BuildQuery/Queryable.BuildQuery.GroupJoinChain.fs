@@ -65,7 +65,6 @@ module internal QueryableBuildQueryGroupJoinChain =
         || desc.DefaultIfEmpty.IsSome
         || desc.TakeWhileInfo.IsSome
         || desc.GroupByKey.IsSome
-        || desc.SetOp.IsSome
         || not desc.SetOps.IsEmpty
 
     let evalNonNegativeInt64 (expr: Expression) =
@@ -142,7 +141,6 @@ module internal QueryableBuildQueryGroupJoinChain =
                             GroupByKey = state.GroupByKey
                             Distinct = state.Distinct || outerDistinct
                             SelectProjection = state.SelectProjection
-                            SetOp = state.SetOps |> Seq.tryHead
                             SetOps = state.SetOps |> Seq.toList
                             Terminal = recognized.Terminal
                             GroupByHavingPredicate = state.GroupByHaving
@@ -200,7 +198,6 @@ module internal QueryableBuildQueryGroupJoinChain =
                     GroupByKey = None
                     Distinct = state.Distinct
                     SelectProjection = state.SelectProjection
-                    SetOp = None
                     SetOps = []
                     Terminal = Terminal.Count
                     GroupByHavingPredicate = None
@@ -254,7 +251,6 @@ module internal QueryableBuildQueryGroupJoinChain =
                             GroupByKey = state.GroupByKey
                             Distinct = state.Distinct || outerDistinct
                             SelectProjection = state.SelectProjection
-                            SetOp = state.SetOps |> Seq.tryHead
                             SetOps = state.SetOps |> Seq.toList
                             Terminal = recognized.Terminal
                             GroupByHavingPredicate = state.GroupByHaving
@@ -798,11 +794,7 @@ module internal QueryableBuildQueryGroupJoinChain =
                       Offset = None }
                 { Ctes = []; Body = SingleSelect filteredCore }
 
-            let setOps =
-                if desc.SetOps.IsEmpty then
-                    desc.SetOp |> Option.toList
-                else
-                    desc.SetOps
+            let setOps = desc.SetOps
             let applySetOp rowsetSel setOp =
                 match setOp with
                 | SetOperation.DistinctBy keyExpr ->

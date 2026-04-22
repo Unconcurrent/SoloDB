@@ -215,19 +215,11 @@ module internal QueryTranslatorVisitCoreMethodCall =
             SqlExpr.Binary(visitDu input qb, BinaryOperator.Regexp, visitDu pattern qb)
         | _ when m.Method.Name = "ToString" && not (isNull m.Object)
                  && (m.Object.Type = typeof<DateTime> || m.Object.Type = typeof<DateTimeOffset>) ->
-            let rawExpr = visitDu m.Object qb
-            let fmtStr =
-                if m.Arguments.Count = 0 then "G"
-                elif m.Arguments.Count >= 1 then
-                    match DateTimeFunctions.tryExtractConstantFormat m.Arguments.[0] with
-                    | Some fmt -> fmt
-                    | None -> raise (NotSupportedException("DateTime.ToString(format): the format argument must be a compile-time constant for SQL translation. Use a string literal, or call AsEnumerable() before ToString to evaluate client-side."))
-                else "G"
-            let mode =
-                match m.Object with
-                | :? NewExpression as ne when ne.Type = typeof<DateTime> -> DateTimeTranslationMode.FromIsoString
-                | _ -> DateTimeTranslationMode.FromEpoch m.Object.Type
-            DateTimeFunctions.translateDateTimeToString rawExpr mode fmtStr
+            DateTimeFunctions.translateDateTimeToStringCall
+                (visitDu m.Object qb)
+                m.Object
+                m.Arguments.Count
+                (if m.Arguments.Count >= 1 then Some m.Arguments.[0] else None)
         | _ ->
             raise (NotSupportedException(
                 sprintf "Error: Method '%s' is not supported.\nReason: The method has no SQL translation.\nFix: Rewrite the query or call AsEnumerable() before using this method." m.Method.Name))

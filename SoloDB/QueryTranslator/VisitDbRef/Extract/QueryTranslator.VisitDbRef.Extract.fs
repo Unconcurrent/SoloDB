@@ -71,7 +71,6 @@ module internal DBRefManyExtractor =
                             state.GroupByKey
                             (state.Distinct || outerDistinct)
                             finalSelectProj
-                            (state.SetOps |> Seq.tryHead)
                             (state.SetOps |> Seq.toList)
                             finalTerminal
                             finalGroupByHaving

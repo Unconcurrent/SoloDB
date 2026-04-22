@@ -104,17 +104,11 @@ module internal QueryableBuildQueryGroupByOps =
                             && (mc.Object.Type = typeof<DateTime> || mc.Object.Type = typeof<DateTimeOffset>) ->
                 match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars mc.Object with
                 | Some objExpr ->
-                    let fmtOpt =
-                        if mc.Arguments.Count = 0 then Some "G"
-                        else DateTimeFunctions.tryExtractConstantFormat mc.Arguments.[0]
-                    match fmtOpt with
-                    | None -> raise (NotSupportedException "DateTime.ToString(format): the format argument must be a compile-time constant for SQL translation. Use a string literal, or call AsEnumerable() before ToString to evaluate client-side.")
-                    | Some fmtStr ->
-                        let mode =
-                            match mc.Object with
-                            | :? NewExpression as ne2 when ne2.Type = typeof<DateTime> -> DateTimeTranslationMode.FromIsoString
-                            | _ -> DateTimeTranslationMode.FromEpoch mc.Object.Type
-                        Some (DateTimeFunctions.translateDateTimeToString objExpr mode fmtStr)
+                    Some (DateTimeFunctions.translateDateTimeToStringCall
+                              objExpr
+                              mc.Object
+                              mc.Arguments.Count
+                              (if mc.Arguments.Count >= 1 then Some mc.Arguments.[0] else None))
                 | None -> None
             | "Count" when mc.Arguments.Count = 1 && isGroupSource mc.Arguments.[0] groupParam ->
                 Some (SqlExpr.AggregateCall(AggregateKind.Count, None, false, None))
@@ -207,6 +201,11 @@ module internal QueryableBuildQueryGroupByOps =
             { Expr = orderExpr
               Direction = if descending then SortDirection.Desc else SortDirection.Asc })
 
+    let private nullableKeyFilter (keyType: Type) : SqlExpr option =
+        if keyType.IsGenericType && keyType.GetGenericTypeDefinition() = typedefof<Nullable<_>> then
+            Some (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some "o", "__solodb_group_key")))
+        else None
+
     let internal flushGroupByAsJsonGroupArray<'T>
         (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>)
         (expressions: Expression array) (havingPreds: Expression list) (groupOrders: (Expression * bool) list) =
@@ -220,10 +219,7 @@ module internal QueryableBuildQueryGroupByOps =
                     |> Some
             let orderBy = translateGroupOrders sourceCtx ctx.TableName "o" ctx.Vars groupOrders
             let keyType = (extractLambdaFromExpr expressions.[0]).Body.Type
-            let nullKeyFilter =
-                if keyType.IsGenericType && keyType.GetGenericTypeDefinition() = typedefof<Nullable<_>> then
-                    Some (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some "o", "__solodb_group_key")))
-                else None
+            let nullKeyFilter = nullableKeyFilter keyType
             let core =
                 { mkCore
                     [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
@@ -393,10 +389,7 @@ module internal QueryableBuildQueryGroupByOps =
                     SqlExpr.FunctionCall("json_object", jsonObjArgs)
             let orderBy = translateGroupOrders sourceCtx ctx.TableName "o" ctx.Vars groupOrders
             let keyType = (extractLambdaFromExpr groupByExpressions.[0]).Body.Type
-            let nullKeyFilter =
-                if keyType.IsGenericType && keyType.GetGenericTypeDefinition() = typedefof<Nullable<_>> then
-                    Some (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some "o", "__solodb_group_key")))
-                else None
+            let nullKeyFilter = nullableKeyFilter keyType
             let core =
                 { mkCore
                     [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }

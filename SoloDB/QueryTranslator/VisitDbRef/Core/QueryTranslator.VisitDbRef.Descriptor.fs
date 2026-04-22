@@ -96,8 +96,6 @@ module internal DBRefManyDescriptor =
         Distinct: bool
         /// Select projection (before Distinct, after Where/OrderBy/Take).
         SelectProjection: LambdaExpression option
-        /// Set operation (Intersect/Except/Union/Concat with right operand).
-        SetOp: SetOperation option
         /// Ordered set-operation chain in source-to-terminal order.
         SetOps: SetOperation list
         /// Terminal operation.

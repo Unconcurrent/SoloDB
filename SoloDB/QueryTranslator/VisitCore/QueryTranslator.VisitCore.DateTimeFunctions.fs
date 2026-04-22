@@ -435,3 +435,24 @@ module internal DateTimeFunctions =
             Some(evaluateExpr<string> fmtExpr)
         else
             None
+
+    /// Unified DateTime.ToString→SQL translation shared by MethodCall.fs and GroupByOps.fs.
+    let internal translateDateTimeToStringCall
+        (rawExpr: SqlExpr)
+        (objExpr: Expression)
+        (argCount: int)
+        (firstArg: Expression option) : SqlExpr =
+        let fmtStr =
+            if argCount = 0 then "G"
+            else
+                match firstArg |> Option.bind tryExtractConstantFormat with
+                | Some fmt -> fmt
+                | None ->
+                    raise (NotSupportedException(
+                        "DateTime.ToString(format): the format argument must be a compile-time constant for SQL translation. " +
+                        "Use a string literal, or call AsEnumerable() before ToString to evaluate client-side."))
+        let mode =
+            match objExpr with
+            | :? NewExpression as ne when ne.Type = typeof<DateTime> -> DateTimeTranslationMode.FromIsoString
+            | _ -> DateTimeTranslationMode.FromEpoch objExpr.Type
+        translateDateTimeToString rawExpr mode fmtStr
