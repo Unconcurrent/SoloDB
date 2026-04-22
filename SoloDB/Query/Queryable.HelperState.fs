@@ -21,35 +21,6 @@ open SqlDu.Engine.C1.Spec
 
 module internal QueryableHelperState =
     open QueryableHelperBase
-
-    let internal groupKeySlotName (index: int) = $"__solodb_group_key{index}"
-
-    let internal tryGetCompoundScalarKeyMembers (expr: Expression) : struct(string * Expression) array option =
-        match unwrapQuotedLambda expr with
-        | :? LambdaExpression as lambda ->
-            match lambda.Body with
-            | :? NewExpression as ne when not (isNull ne.Members) && ne.Members.Count = ne.Arguments.Count ->
-                let members =
-                    [| for i = 0 to ne.Arguments.Count - 1 do
-                           let argExpr = Expression.Lambda(ne.Arguments.[i], lambda.Parameters) :> Expression
-                           yield struct(ne.Members.[i].Name, argExpr) |]
-                if members.Length > 1 && ne.Arguments |> Seq.forall (fun arg -> QueryTranslator.isPrimitiveSQLiteType arg.Type) then
-                    Some members
-                else
-                    None
-            | _ -> None
-        | body ->
-            match body with
-            | :? NewExpression as ne when not (isNull ne.Members) && ne.Members.Count = ne.Arguments.Count ->
-                let members =
-                    [| for i = 0 to ne.Arguments.Count - 1 do
-                           yield struct(ne.Members.[i].Name, ne.Arguments.[i]) |]
-                if members.Length > 1 && members |> Array.forall (fun struct(_, arg) -> QueryTranslator.isPrimitiveSQLiteType arg.Type) then
-                    Some members
-                else
-                    None
-            | _ -> None
-
     let internal emptySQLStatement () =
         { Filters = ResizeArray(4); Orders = ResizeArray(1); Selector = None; Skip = None; Take = None; TableName = ""; UnionAll = ResizeArray<string -> Dictionary<string, obj> -> SelectCore>(0) }
 

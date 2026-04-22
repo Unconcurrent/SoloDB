@@ -20,7 +20,6 @@ open SoloDatabase.QueryTranslatorBaseTypes
 open SqlDu.Engine.C1.Spec
 
 module internal QueryableLayerBuild =
-    open QueryableHelperState
     open QueryableHelperPreprocess
     open QueryableHelperBase
     let internal buildLayersDu<'T>
@@ -85,36 +84,15 @@ module internal QueryableLayerBuild =
                     | Some (KeyProjection selector) ->
                         let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
                         let keyExpr = translateExprDu currentCtx effectiveTableName selector vars
-                        let selectorParameters =
-                            match unwrapQuotedLambda selector with
-                            | :? LambdaExpression as lambda -> Some lambda.Parameters
-                            | _ -> None
-                        let compoundSlotProjections =
-                            match tryGetCompoundScalarKeyMembers selector with
-                            | Some members ->
-                                [ for i = 0 to Array.length members - 1 do
-                                      let struct(_, argExpr) = Array.get members i
-                                      let slotExpr =
-                                          match selectorParameters, argExpr with
-                                          | Some parameters, (:? LambdaExpression as lambdaExpr) ->
-                                              lambdaExpr :> Expression
-                                          | Some parameters, _ ->
-                                              Expression.Lambda(argExpr, parameters) :> Expression
-                                          | None, _ ->
-                                              argExpr
-                                      yield { Alias = Some (groupKeySlotName i); Expr = translateExprDu currentCtx effectiveTableName slotExpr vars } ]
-                            | None -> []
                         if isTypePrimitive then
                             [{ Alias = None; Expr = idColumnExpr }
                              { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("jsonb_extract", [valueColumnExpr; SqlExpr.Literal(SqlLiteral.String "$")]) }
                              { Alias = Some "__solodb_group_key"; Expr = keyExpr }]
-                            @ compoundSlotProjections
                         else
                             needsValueMaterialization <- true
                             [{ Alias = None; Expr = idColumnExpr }
                              { Alias = Some "Value"; Expr = valueColumnExpr }
                              { Alias = Some "__solodb_group_key"; Expr = keyExpr }]
-                            @ compoundSlotProjections
                     | Some (DuSelector buildProjections) ->
                         buildProjections layer.TableName vars
                     | None ->
