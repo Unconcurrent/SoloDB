@@ -24,24 +24,49 @@ module SQLiteTools =
         let maxCacheSize = 1000
         // Connection-level reader-active guard to prevent indefinite hang from overlapping readers.
         let mutable readerActive = false
-    
+        // Serializes mutations of preparedCache and of the SqliteConnection-owned internal command list
+        // (which CreateCommand appends to and SqliteCommand.Dispose removes from). Without this lock,
+        // concurrent QueryFirst/CreateCommand on one thread races with ClearCache/Command.Dispose on
+        // another, causing an NRE inside SqliteConnection.RemoveCommand under Release-tightened timing.
+        let cacheLock = obj()
+
+        // SQLITE_SCHEMA compensation: Microsoft.Data.Sqlite throws ArgumentOutOfRangeException
+        // from PrepareAndEnumerateStatements when concurrent DDL invalidates the schema cache.
+        // SQLite re-prepares on SQLITE_SCHEMA internally; the .NET wrapper does not. Under heavy
+        // DDL+query contention a single retry is insufficient — bounded loop of up to 3 attempts
+        // yields the thread between attempts so a competing DDL can complete its schema flush.
+        let prepareWithSchemaRetry (command: SqliteCommand) =
+            let mutable attempt = 0
+            let mutable lastExn : ArgumentOutOfRangeException = null
+            let mutable ok = false
+            while not ok && attempt < 3 do
+                try
+                    command.Prepare()
+                    ok <- true
+                with :? ArgumentOutOfRangeException as ex ->
+                    lastExn <- ex
+                    attempt <- attempt + 1
+                    if attempt < 3 then Threading.Thread.Sleep(0)
+            if not ok then raise lastExn
+
         let tryCachedCommand (this: CachingDbConnection) (sql: string) (parameters: obj) =
             // @VAR variable names are randomly generated, so caching them is not possible.
             if sql.Contains "@VAR" then ValueNone else
             if not config.CachingEnabled then
                 ValueNone
             else
-    
+            lock cacheLock (fun () ->
+
             // Delete from cache 1/4 of the least used commands.
             if preparedCache.Count >= maxCacheSize then
                 let arr = preparedCache |> Seq.toArray
                 arr |> Array.sortInPlaceBy (fun (KeyValue(_sql, item)) -> !item.CallCount)
-    
+
                 for i in 0..(maxCacheSize / 4 - 1) do
                     preparedCache.Remove (arr.[i].Key) |> ignore
                     arr.[i].Value.Command.Dispose()
-    
-    
+
+
             let item =
                 match preparedCache.TryGetValue sql with
                 | true, x -> x
@@ -49,24 +74,34 @@ module SQLiteTools =
                     let command = this.CreateCommand()
                     command.CommandText <- sql
                     processParameters addParameter command parameters
-                    // SQLITE_SCHEMA compensation: Microsoft.Data.Sqlite throws ArgumentOutOfRangeException
-                    // from PrepareAndEnumerateStatements when concurrent DDL invalidates the schema cache.
-                    // SQLite re-prepares on SQLITE_SCHEMA internally; the .NET wrapper does not. Single retry.
-                    try command.Prepare()
-                    with :? ArgumentOutOfRangeException -> command.Prepare()
-    
+                    prepareWithSchemaRetry command
+
                     let item = {| Command = command; ColumnDict = Dictionary<string, int>(); CallCount = ref 0L; InUse = ref false |}
                     preparedCache.[sql] <- item
                     item
-    
+
             if !item.InUse then ValueNone else
-    
+
             item.CallCount := !item.CallCount + 1L
             item.InUse := true
-    
+
             processParameters setOrAddParameter item.Command parameters
             match sqlTraceCallback with ValueSome cb -> cb.Invoke(sql) | ValueNone -> ()
-            struct (item.Command, item.ColumnDict, item.InUse) |> ValueSome
+            struct (item.Command, item.ColumnDict, item.InUse) |> ValueSome)
+
+        // Uncached command lifecycle helpers. The SqliteConnection internal command list is
+        // appended to by CreateCommand and removed from by SqliteCommand.Dispose. Both sides
+        // must run under cacheLock to stay race-free with ClearCache and the cached path.
+        let createUncachedLocked (this: CachingDbConnection) (sql: string) (parameters: obj) : SqliteCommand * IDisposable =
+            let command =
+                lock cacheLock (fun () ->
+                    let c = createCommand this sql parameters
+                    prepareWithSchemaRetry c
+                    c)
+            let guard =
+                { new IDisposable with
+                    member _.Dispose() = lock cacheLock (fun () -> command.Dispose()) }
+            command, guard
     
         // Per-connection event-handler depth counter for savepoint suppression.
         // Tracks how many nested handler invocations are active on THIS connection.
@@ -133,35 +168,40 @@ module SQLiteTools =
         /// </summary>
         member this.ClearCache() =
             if preparedCache.Count = 0 then () else
-    
-            let oldCache = preparedCache
-            preparedCache <- Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
-    
+
+            let oldCache =
+                lock cacheLock (fun () ->
+                    let old = preparedCache
+                    preparedCache <- Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
+                    old)
+
             // Bounded timeout to prevent livelock from permanently in-use commands.
             let deadline = System.Diagnostics.Stopwatch.StartNew()
             let maxWaitMs = 5000L
             while oldCache.Count > 0 && deadline.ElapsedMilliseconds < maxWaitMs do
-                for KeyValue(k, v) in oldCache |> Seq.toArray do
-                    if (not !v.InUse) then
-                        v.Command.Dispose()
-                        ignore (oldCache.Remove k)
+                lock cacheLock (fun () ->
+                    for KeyValue(k, v) in oldCache |> Seq.toArray do
+                        if (not !v.InUse) then
+                            v.Command.Dispose()
+                            ignore (oldCache.Remove k))
                 if oldCache.Count > 0 then
                     Threading.Thread.Sleep(1)
-    
+
             // Force-dispose any commands still in-use after deadline.
-            for KeyValue(_, v) in oldCache do
-                v.Command.Dispose()
-            oldCache.Clear()
+            lock cacheLock (fun () ->
+                for KeyValue(_, v) in oldCache do
+                    v.Command.Dispose()
+                oldCache.Clear())
     
         /// <summary>Executes a non-query SQL command, utilizing the cache if possible.</summary>
         /// <param name="sql">The SQL command text.</param>
         /// <param name="parameters">The parameters for the command.</param>
         /// <returns>The number of rows affected.</returns>
         member internal this.ReaderActive
-            with get() = readerActive
-            and set(v) = readerActive <- v
+            with get() = lock cacheLock (fun () -> readerActive)
+            and set(v) = lock cacheLock (fun () -> readerActive <- v)
         member internal this.CheckNoActiveReader() =
-            if readerActive then
+            if lock cacheLock (fun () -> readerActive) then
                 raise (InvalidOperationException("A data reader is already active on this connection. Close the existing reader before executing another command."))
     
         member this.Execute(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
@@ -176,16 +216,15 @@ module SQLiteTools =
                     finally
                         inUse := false
                 | ValueNone ->
-                    use command = createCommand this sql parameters
-                    try command.Prepare()
-                    with :? ArgumentOutOfRangeException -> command.Prepare()
+                    let command, cmdGuard = createUncachedLocked this sql parameters
+                    use _guard = cmdGuard
                     let affected = command.ExecuteNonQuery()
                     raiseIfHandlerFaultRecorded (this :> SqliteConnection)
                     affected
             with ex ->
                 tryRecordHandlerFault (this :> SqliteConnection) ex
                 reraise()
-    
+
         /// <summary>Opens a data reader, utilizing the cache if possible.</summary>
         /// <param name="sql">The SQL query text.</param>
         /// <param name="outReader">The output SqliteDataReader.</param>
@@ -198,7 +237,7 @@ module SQLiteTools =
                 try
                     let reader = command.ExecuteReader()
                     outReader <- reader
-                    readerActive <- true
+                    lock cacheLock (fun () -> readerActive <- true)
                     let conn = this
                     { new IDisposable with
                         member _.Dispose() =
@@ -211,18 +250,16 @@ module SQLiteTools =
                     inUse := false
                     reraise()
             | ValueNone ->
-                let command = createCommand this sql parameters
-                try command.Prepare()
-                with :? ArgumentOutOfRangeException -> command.Prepare()
+                let command, cmdGuard = createUncachedLocked this sql parameters
                 let reader = command.ExecuteReader()
                 outReader <- reader
-                readerActive <- true
+                lock cacheLock (fun () -> readerActive <- true)
                 let conn = this
                 { new IDisposable with
                     member _.Dispose() =
                         conn.ReaderActive <- false
                         reader.Dispose()
-                        command.Dispose()
+                        cmdGuard.Dispose()
                 }
     
         /// <summary>Executes a query and maps the results to a sequence of 'T, utilizing the cache if possible.</summary>
@@ -238,7 +275,8 @@ module SQLiteTools =
                     try yield! queryCommand<'T> command columnDict
                     finally inUse := false
                 | ValueNone ->
-                    use command = createCommand this sql parameters
+                    let command, cmdGuard = createUncachedLocked this sql parameters
+                    use _guard = cmdGuard
                     yield! queryCommand<'T> command null
             with ex ->
                 tryRecordHandlerFault (this :> SqliteConnection) ex
@@ -262,7 +300,8 @@ module SQLiteTools =
                     finally
                         inUse := false
                 | ValueNone ->
-                    use command = createCommand this sql parameters
+                    let command, cmdGuard = createUncachedLocked this sql parameters
+                    use _guard = cmdGuard
                     let result = queryCommand<'T> command null |> Seq.head
                     raiseIfHandlerFaultRecorded (this :> SqliteConnection)
                     result
@@ -289,7 +328,8 @@ module SQLiteTools =
                         result
                     finally inUse := false
                 | ValueNone ->
-                    use command = createCommand this sql parameters
+                    let command, cmdGuard = createUncachedLocked this sql parameters
+                    use _guard = cmdGuard
                     let result =
                         match queryCommand<'T> command null |> Seq.tryHead with
                         | Some x -> x
@@ -311,33 +351,34 @@ module SQLiteTools =
         /// <returns>A sequence of 'TReturn objects.</returns>
         member this.Query<'T1, 'T2, 'TReturn>(sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = seq {
             this.CheckNoActiveReader()
-            let struct (command, dict, dispose, inUse) =
+            let struct (command, dict, uncachedGuard, inUse) =
                 match tryCachedCommand this sql parameters with
                 | ValueSome struct (command, columnDict, inUse) ->
-                    struct (command, columnDict, false, Some inUse)
+                    struct (command, columnDict, (null: IDisposable), Some inUse)
                 | ValueNone ->
-                    struct (createCommand this sql parameters, Dictionary<string, int>(), true, None)
+                    let c, g = createUncachedLocked this sql parameters
+                    struct (c, Dictionary<string, int>(), g, None)
             try
                 use reader = command.ExecuteReader()
-    
+
                 if dict.Count = 0 then
                     for i in 0..(reader.FieldCount - 1) do
                         dict.Add(reader.GetName(i), i)
-    
+
                 let splitIndex = reader.GetOrdinal(splitOn)
-    
+
                 while reader.Read() do
                     let t1 = TypeMapper<'T1>.Map reader 0 dict
                     let t2 =
                         if reader.IsDBNull(splitIndex) then Unchecked.defaultof<'T2>
                         else TypeMapper<'T2>.Map reader splitIndex dict
-    
+
                     yield map.Invoke (t1, t2)
             finally
                 match inUse with
                 | Some inUse -> inUse := false
                 | _ -> ()
-                if dispose then command.Dispose()
+                if not (isNull uncachedGuard) then uncachedGuard.Dispose()
         }
     
         /// <summary>
