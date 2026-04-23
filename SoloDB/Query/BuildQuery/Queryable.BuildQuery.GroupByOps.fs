@@ -16,6 +16,7 @@ open Connections
 open SoloDatabase
 open SoloDatabase.JsonSerializator
 open SoloDatabase.RelationsTypes
+open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryableGroupByAliases
 open SqlDu.Engine.C1.Spec
@@ -86,23 +87,37 @@ module internal QueryableBuildQueryGroupByOps =
         (sourceCtx: QueryContext) (ctxTableName: string) (groupRowTableName: string) (groupParam: ParameterExpression) (vars: Dictionary<string, obj>)
         (expr: Expression) : SqlExpr option =
         match expr with
+        | :? ConstantExpression as ce ->
+            Some (match ce.Value with null -> SqlExpr.Literal(SqlLiteral.Null) | _ -> allocateParam vars ce.Value)
         | :? MemberExpression as me when not (isNull me.Expression) && me.Expression :? ParameterExpression && obj.ReferenceEquals(me.Expression, groupParam) && me.Member.Name = "Key" ->
             Some (SqlExpr.Column(Some "o", syntheticGroupKeyAlias))
+        | :? MemberExpression as me when not (isNull me.Expression) && obj.ReferenceEquals(me.Expression, groupParam) ->
+            Some (translateExprDu sourceCtx groupRowTableName (Expression.Lambda(me, [| groupParam |]) :> Expression) vars)
         | :? MemberExpression as me when not (isNull me.Expression) ->
             match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars me.Expression with
             | Some receiverExpr ->
                 Some (DateTimeFunctions.translateGroupKeyMemberAccess receiverExpr me.Expression.Type me.Member.Name)
             | None -> None
-        | :? NewExpression as ne when ne.Type = typeof<DateTime> && ne.Arguments.Count = 3 && referencesParam groupParam ne ->
-            let translated = ne.Arguments |> Seq.toList |> List.map (tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars)
-            match translated with
-            | [Some y; Some m; Some d] ->
-                Some (SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%04d-%02d-%02d"); y; m; d]))
-            | _ -> None
+        | :? NewExpression as ne when DateTimeFunctions.isDateTimeLikeType ne.Type && referencesParam groupParam ne ->
+            let translatedArgs =
+                ne.Arguments
+                |> Seq.map (tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars)
+                |> Seq.toArray
+            if translatedArgs |> Array.exists Option.isNone then None
+            else
+                let argMap = System.Collections.Generic.Dictionary<Expression, SqlExpr>(HashIdentity.Reference)
+                for i = 0 to ne.Arguments.Count - 1 do
+                    argMap.[ne.Arguments.[i]] <- translatedArgs.[i].Value
+                Some (
+                    DateTimeFunctions.translateDateTimeLikeConstructor ne (fun expr ->
+                        match argMap.TryGetValue expr with
+                        | true, value -> value
+                        | _ -> translateExprDu sourceCtx groupRowTableName expr vars)
+                    |> Option.get)
         | :? MethodCallExpression as mc when referencesParam groupParam mc ->
             match mc.Method.Name with
-            | "ToString" when mc.Arguments.Count <= 1 && not (isNull mc.Object)
-                            && (mc.Object.Type = typeof<DateTime> || mc.Object.Type = typeof<DateTimeOffset>) ->
+            | "ToString" when mc.Arguments.Count <= 2 && not (isNull mc.Object)
+                            && DateTimeFunctions.supportsTemporalToStringTranslationType mc.Object.Type ->
                 match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars mc.Object with
                 | Some objExpr ->
                     Some (DateTimeFunctions.translateDateTimeToStringCall
@@ -180,10 +195,11 @@ module internal QueryableBuildQueryGroupByOps =
             match tryTranslateGroupArg sourceCtx ctxTableName groupRowTableName groupParam vars ue.Operand with
             | Some inner -> Some (SqlExpr.Unary(UnaryOperator.Not, inner))
             | None -> None
-        | :? ConstantExpression as ce ->
-            Some (allocateParam vars (box ce.Value))
         | _ when not (referencesParam groupParam expr) ->
-            Some (translateExprDu sourceCtx ctxTableName expr vars)
+            if isFullyConstant expr then
+                Some (allocateParam vars (evaluateExpr<obj> expr))
+            else
+                Some (translateExprDu sourceCtx ctxTableName (Expression.Lambda(expr, Array.empty<ParameterExpression>) :> Expression) vars)
         | _ -> None
 
     let private translateGroupOrders
@@ -207,6 +223,47 @@ module internal QueryableBuildQueryGroupByOps =
             Some (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some "o", syntheticGroupKeyAlias)))
         else None
 
+    let rec private collectNullSensitiveKeyParts (expr: Expression) : Expression list =
+        let expr =
+            match expr with
+            | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert || ue.NodeType = ExpressionType.ConvertChecked ->
+                ue.Operand
+            | _ -> expr
+        match expr with
+        | :? NewExpression as ne when not (DateTimeFunctions.isDateTimeLikeType ne.Type) ->
+            ne.Arguments |> Seq.toList |> List.collect collectNullSensitiveKeyParts
+        | :? MemberInitExpression as mi ->
+            let fromNew = collectNullSensitiveKeyParts mi.NewExpression
+            let fromBindings =
+                mi.Bindings
+                |> Seq.cast<MemberAssignment>
+                |> Seq.toList
+                |> List.collect (fun binding -> collectNullSensitiveKeyParts binding.Expression)
+            fromNew @ fromBindings
+        | _ ->
+            let isNullable =
+                expr.Type.IsGenericType
+                && expr.Type.GetGenericTypeDefinition() = typedefof<Nullable<_>>
+            if isNullable || DateTimeFunctions.isDateTimeLikeType expr.Type then [ expr ] else []
+
+    let private buildNullKeyFilter
+        (sourceCtx: QueryContext)
+        (ctxTableName: string)
+        (vars: Dictionary<string, obj>)
+        (keyLambdaExpr: Expression) : SqlExpr option =
+        let keyLambda = extractLambdaFromExpr keyLambdaExpr
+        let predicates =
+            collectNullSensitiveKeyParts keyLambda.Body
+            |> List.map (fun keyPart ->
+                let keyPartExpr =
+                    match tryTranslateGroupArg sourceCtx ctxTableName "o" keyLambda.Parameters.[0] vars keyPart with
+                    | Some sqlExpr -> sqlExpr
+                    | None -> translateExprDu sourceCtx ctxTableName (Expression.Lambda(keyPart, keyLambda.Parameters) :> Expression) vars
+                SqlExpr.Unary(UnaryOperator.IsNotNull, keyPartExpr))
+        match predicates with
+        | [] -> None
+        | head :: tail -> Some (tail |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) head)
+
     let internal flushGroupByAsJsonGroupArray<'T>
         (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>)
         (expressions: Expression array) (havingPreds: Expression list) (groupOrders: (Expression * bool) list) =
@@ -220,7 +277,10 @@ module internal QueryableBuildQueryGroupByOps =
                     |> Some
             let orderBy = translateGroupOrders sourceCtx ctx.TableName "o" ctx.Vars groupOrders
             let keyType = (extractLambdaFromExpr expressions.[0]).Body.Type
-            let nullKeyFilter = nullableKeyFilter keyType
+            let nullKeyFilter =
+                match buildNullKeyFilter sourceCtx ctx.TableName ctx.Vars expressions.[0] with
+                | Some filter -> Some filter
+                | None -> nullableKeyFilter keyType
             let core =
                 { mkCore
                     [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
@@ -390,7 +450,10 @@ module internal QueryableBuildQueryGroupByOps =
                     SqlExpr.FunctionCall(jsonObjectFn, jsonObjArgs)
             let orderBy = translateGroupOrders sourceCtx ctx.TableName "o" ctx.Vars groupOrders
             let keyType = (extractLambdaFromExpr groupByExpressions.[0]).Body.Type
-            let nullKeyFilter = nullableKeyFilter keyType
+            let nullKeyFilter =
+                match buildNullKeyFilter sourceCtx ctx.TableName ctx.Vars groupByExpressions.[0] with
+                | Some filter -> Some filter
+                | None -> nullableKeyFilter keyType
             let core =
                 { mkCore
                     [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }

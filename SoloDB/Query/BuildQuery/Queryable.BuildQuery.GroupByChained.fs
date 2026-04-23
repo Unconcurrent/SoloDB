@@ -193,7 +193,7 @@ module internal QueryableBuildQueryGroupByChained =
         let orderBy =
             desc.SortKeys
             |> List.map (fun (keyExpr, dir) ->
-                { Expr = translateExprAgainst sourceCtx subAlias vars keyExpr; Direction = dir })
+                { Expr = DateTimeFunctions.canonicalizeForCompareOrOrder keyExpr.Type (translateExprAgainst sourceCtx subAlias vars keyExpr); Direction = dir })
 
         // Default ordering by Id if no explicit order
         let orderBy =

@@ -26,6 +26,9 @@ module internal QueryableBuildQuerySequenceOps =
     open QueryableHelperPreprocess
     open QueryableLayerBuild
     open QueryableHelperBase
+
+    let private normalizeOrderKeyExpr (expr: SqlExpr) (clrType: Type) =
+        DateTimeFunctions.canonicalizeForCompareOrOrder clrType expr
     let internal apply<'T>
         (sourceCtx: QueryContext)
         (tableName: string)
@@ -354,7 +357,7 @@ module internal QueryableBuildQuerySequenceOps =
                                     match o.RawExpr with
                                     | Some duExpr -> duExpr
                                     | None -> translateExprDu sourceCtx ctx.TableName o.OrderingRule ctx.Vars
-                                { Expr = expr; Direction = if o.Descending then SortDirection.Desc else SortDirection.Asc }
+                                { Expr = normalizeOrderKeyExpr expr (orderKeyClrType o.OrderingRule); Direction = if o.Descending then SortDirection.Desc else SortDirection.Asc }
                             ) |> Array.toList
                         // SUM(NOT pred) OVER (ORDER BY key) — cumulative failure window.
                         let windowSpec = {

@@ -19,7 +19,7 @@
     <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
 	<DebugType>embedded</DebugType>
     <PackageOutputPath>$(OutputPath)</PackageOutputPath>
-    <VersionPrefix>1.2.0</VersionPrefix>
+    <VersionPrefix>1.2.1</VersionPrefix>
     <LangVersion>10</LangVersion>
     <ParallelCompilation>true</ParallelCompilation>
     <Deterministic>false</Deterministic>
@@ -110,8 +110,8 @@
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Helpers.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.CastAggregate.fs" />
-    <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.Binary.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.DateTimeFunctions.fs" />
+    <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.Binary.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.MethodCall.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.Dispatch.fs" />
     <Compile Include="QueryTranslator/VisitPost/QueryTranslator.VisitPost.fs" />

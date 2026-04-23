@@ -23,6 +23,9 @@ module internal QueryableHelperPreprocess =
     open QueryableHelperState
     open QueryableHelperJoin
     open QueryableHelperBase
+
+    let private normalizeOrderKeyExpr (expr: SqlExpr) (clrType: Type) =
+        DateTimeFunctions.canonicalizeForCompareOrOrder clrType expr
     let internal preprocessQuery (expression: Expression) : PreprocessedQuery seq = seq {
         let mutable expression = expression
 
@@ -198,7 +201,7 @@ module internal QueryableHelperPreprocess =
                     match o.RawExpr with
                     | Some duExpr -> duExpr
                     | None -> translateExprDu sourceCtx contextTable o.OrderingRule vars
-                { Expr = expr; Direction = if o.Descending then SortDirection.Desc else SortDirection.Asc }
+                { Expr = normalizeOrderKeyExpr expr (orderKeyClrType o.OrderingRule); Direction = if o.Descending then SortDirection.Desc else SortDirection.Asc }
             ) |> Seq.toList
 
         let limit =

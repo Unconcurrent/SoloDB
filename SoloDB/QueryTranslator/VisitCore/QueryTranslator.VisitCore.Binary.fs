@@ -16,6 +16,14 @@ open SoloDatabase.QueryTranslatorBase
 open SqlDu.Engine.C1.Spec
 
 module internal QueryTranslatorVisitCoreBinary =
+    let private isRelationalBinary (nodeType: ExpressionType) =
+        nodeType = ExpressionType.Equal
+        || nodeType = ExpressionType.NotEqual
+        || nodeType = ExpressionType.LessThan
+        || nodeType = ExpressionType.LessThanOrEqual
+        || nodeType = ExpressionType.GreaterThan
+        || nodeType = ExpressionType.GreaterThanOrEqual
+
     let internal visitBinaryDu (visitDu: Expression -> QueryBuilder -> SqlExpr) (normalizeKnownJsonForJsonEachValueDu: SqlExpr -> obj -> obj) (b: BinaryExpression) (qb: QueryBuilder) : SqlExpr =
         if b.NodeType = ExpressionType.Add && (b.Left.Type = typeof<string> || b.Right.Type = typeof<string>) then
             let expr = Expression.Call(typeof<String>.GetMethod("Concat", [|typeof<string seq>|]), Expression.NewArrayInit(typeof<string>, [|b.Left; b.Right|]))
@@ -40,6 +48,17 @@ module internal QueryTranslatorVisitCoreBinary =
         | _ ->
         let leftDu = visitDu left qb
         let rightDu = visitDu right qb
+        let leftType = DateTimeFunctions.unwrapNullable left.Type
+        let rightType = DateTimeFunctions.unwrapNullable right.Type
+        let struct(leftDu, rightDu) =
+            if isRelationalBinary b.NodeType then
+                if DateTimeFunctions.isDateTimeLikeType leftType || DateTimeFunctions.isDateTimeLikeType rightType then
+                    DateTimeFunctions.ensureComparableDateTimeLikeTypes left.Type right.Type
+                    struct(DateTimeFunctions.canonicalizeForCompareOrOrder left.Type leftDu, DateTimeFunctions.canonicalizeForCompareOrOrder right.Type rightDu)
+                else
+                    struct(leftDu, rightDu)
+            else
+                struct(leftDu, rightDu)
         let op =
             match b.NodeType with
             | ExpressionType.And | ExpressionType.AndAlso -> BinaryOperator.And

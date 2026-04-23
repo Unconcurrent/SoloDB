@@ -33,11 +33,10 @@ module internal DBRefManyHelpers =
         elif insideJsonObjectProjection then
             scalarExpr
         else
-            SqlExpr.CaseExpr(
-                (SqlExpr.Unary(UnaryOperator.IsNull, scalarExpr),
-                 SqlExpr.Literal(SqlLiteral.String "__solodb_error__:Sequence contains no elements")),
-                [],
-                Some scalarExpr)
+            SqlExpr.FunctionCall(
+                "IFNULL",
+                [ scalarExpr
+                  SqlExpr.Literal(SqlLiteral.String "__solodb_error__:Sequence contains no elements") ])
 
     let buildTakeWhileCfFilter (alias: string) (isTakeWhile: bool) =
         if isTakeWhile then

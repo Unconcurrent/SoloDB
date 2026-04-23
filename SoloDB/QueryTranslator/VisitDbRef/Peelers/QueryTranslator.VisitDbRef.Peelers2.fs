@@ -15,6 +15,9 @@ open Utils
 
 /// Shared peeler functions and builder helpers (part 2).
 module internal QueryTranslatorVisitDbRefPeelers2 =
+    let private normalizeOrderKeyExpr (expr: SqlExpr) (clrType: Type) =
+        DateTimeFunctions.canonicalizeForCompareOrOrder clrType expr
+
     /// Returns ValueNone if the expression is not a .Where() on a DBRefMany source.
     let rec internal tryPeelWhereFromDBRefMany (expr: Expression) : (Expression * Expression list) voption =
         match expr with
@@ -116,7 +119,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
             | ValueSome keyLambda ->
                 let subQb = qb.ForSubquery(tgtAlias, keyLambda, subqueryRootTable = targetTable)
                 let keyDu = visitDu keyLambda.Body subQb
-                { Expr = keyDu; Direction = dir }
+                { Expr = normalizeOrderKeyExpr keyDu keyLambda.Body.Type; Direction = dir }
             | ValueNone ->
                 raise (NotSupportedException(
                     "Error: Cannot extract key selector lambda for OrderBy on DBRefMany.\nFix: Use a simple lambda (e.g., x => x.Name).")))

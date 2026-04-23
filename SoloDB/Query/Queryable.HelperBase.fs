@@ -20,6 +20,15 @@ open SoloDatabase.QueryTranslatorBaseTypes
 open SqlDu.Engine.C1.Spec
 
 module internal QueryableHelperBase =
+    let internal orderKeyClrType (orderingExpr: Expression) =
+        match orderingExpr with
+        | :? LambdaExpression as lambda -> lambda.Body.Type
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote ->
+            match ue.Operand with
+            | :? LambdaExpression as lambda -> lambda.Body.Type
+            | other -> other.Type
+        | other -> other.Type
+
     /// Allocate a parameter in the shared Variables dict and return a SqlExpr referencing it.
     let internal allocateParam (variables: Dictionary<string, obj>) (value: obj) : SqlExpr =
         let value = match value with :? bool as b -> box (if b then 1 else 0) | _ -> value
@@ -42,7 +51,14 @@ module internal QueryableHelperBase =
     let internal extractValueAsJsonDu (x: Type) : SqlExpr =
         let isPrimitive = QueryTranslator.isPrimitiveSQLiteType x
         if isPrimitive then
-            SqlExpr.Column(None, "Value")
+            let value = SqlExpr.Column(None, "Value")
+            if x = typeof<double> || x = typeof<float32> then
+                SqlExpr.CaseExpr(
+                    (SqlExpr.Unary(UnaryOperator.IsNull, value), SqlExpr.Literal(SqlLiteral.Null)),
+                    [],
+                    Some (SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%!.17g"); value])))
+            else
+                value
         elif x = typeof<obj> || typeof<JsonValue>.IsAssignableFrom x then
             SqlExpr.CaseExpr(
                 (SqlExpr.Binary(

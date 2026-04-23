@@ -43,10 +43,7 @@ let private containsUnionHostedRelationRefType (rootType: Type) =
         if isNull t then false
         elif DBRefTypeHelpers.isOptionWrappedRelationRefType t || DBRefTypeHelpers.isAnyRelationRefType t then true
         elif t = typeof<string> || t.IsPrimitive || t.IsEnum
-             || t = typeof<decimal> || t = typeof<Guid>
-             || t = typeof<DateTime> || t = typeof<DateTimeOffset>
-             || t = typeof<DateOnly> || t = typeof<TimeOnly>
-             || t = typeof<TimeSpan> then false
+             || t = typeof<decimal> || t = typeof<Guid> || isDateTimeLikeType t then false
         elif not (visited.Add t) then false
         elif t.IsArray then
             scan (t.GetElementType())

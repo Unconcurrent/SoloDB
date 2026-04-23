@@ -127,20 +127,39 @@ module internal QueryTranslatorVisitCore =
             match m.Expression with
             | :? ParameterExpression as pe -> resolveAliasForParameter pe qb
             | _ -> if String.IsNullOrEmpty qb.TableNameDot then None else Some(qb.TableNameDot.TrimEnd([|'.'|]))
+        let isNullableValueType =
+            m.InputType.IsGenericType && m.InputType.GetGenericTypeDefinition() = typedefof<Nullable<_>>
         if m.MemberName = "Length" && m.InputType.GetInterface(typeof<IEnumerable>.FullName) <> null then
             if m.InputType = typeof<string> then SqlExpr.FunctionCall("length", [visitDu m.Expression qb])
             elif m.InputType = typeof<byte array> then SqlExpr.FunctionCall("length", [SqlExpr.FunctionCall("base64", [visitDu m.Expression qb])])
             else SqlExpr.FunctionCall("json_array_length", [visitDu m.Expression qb])
         elif m.MemberName = "Count" && m.InputType.GetInterface(typeof<IEnumerable>.FullName) <> null then
             SqlExpr.FunctionCall("json_array_length", [visitDu m.Expression qb])
+        elif isNullableValueType && m.MemberName = "HasValue" then
+            SqlExpr.Unary(UnaryOperator.IsNotNull, visitDu m.Expression qb)
+        elif isNullableValueType && m.MemberName = "Value" then
+            visitDu m.Expression qb
         elif typedefof<System.Linq.IGrouping<_,_>>.IsAssignableFrom(m.InputType) then
             match m.MemberName with
             | "Key" -> SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$.Key")])
             | other ->
                 let esc = escapeSQLiteString other
                 SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String $"$.Items.{esc}")])
-        elif m.InputType = typeof<DateTime> || m.InputType = typeof<DateTimeOffset> then
+        elif m.InputType = typeof<DateTimeOffset> then
+            match m.Expression with
+            | :? NewExpression as ne ->
+                match DateTimeFunctions.tryTranslateDateTimeOffsetConstructorMember m.MemberName ne (fun expr -> visitDu expr qb) with
+                | Some translated -> translated
+                | None -> DateTimeFunctions.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
+            | _ -> DateTimeFunctions.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
+        elif m.InputType = typeof<DateTime> then
             DateTimeFunctions.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
+        elif m.InputType = typeof<DateOnly> then
+            DateTimeFunctions.translateDateOnlyMember m.MemberName (visitDu m.Expression qb)
+        elif m.InputType = typeof<TimeOnly> then
+            DateTimeFunctions.translateTimeOnlyMember m.MemberName (visitDu m.Expression qb)
+        elif m.InputType = typeof<TimeSpan> then
+            DateTimeFunctions.translateTimeSpanMember m.MemberName (visitDu m.Expression qb)
         elif (m.ReturnType = typeof<int64> && m.MemberName = "Id")
               || (m.MemberName = "Id" && m.Expression.NodeType = ExpressionType.Parameter && m.Expression.Type.FullName = "SoloDatabase.JsonSerializator.JsonValue") then
             SqlExpr.Column(alias, "Id")
@@ -243,6 +262,7 @@ module internal QueryTranslatorVisitCore =
             && exp.NodeType <> ExpressionType.Quote
             && not (isByRefLikeType exp.Type)
             && isFullyConstant exp
+            && (match exp with :? NewExpression as ne when DateTimeFunctions.isDateTimeLikeType ne.Type -> false | _ -> true)
             && (match exp with :? ConstantExpression as ce when ce.Value = null -> false | _ -> true) then
             qb.AllocateParamExpr(evaluateExpr<obj> exp)
         else
@@ -275,15 +295,13 @@ module internal QueryTranslatorVisitCore =
             else castToDu qb m.Type m.Operand
         | ExpressionType.New ->
             let m = exp :?> NewExpression
-            if m.Type = typeof<DateTime> then
-                if m.Arguments.Count = 3 then
-                    SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%04d-%02d-%02d"); visitDu m.Arguments.[0] qb; visitDu m.Arguments.[1] qb; visitDu m.Arguments.[2] qb])
-                else raise (NotSupportedException($"new DateTime({m.Arguments.Count} arguments) is not supported in SQL translation. Only new DateTime(year, month, day) with 3 arguments is supported."))
-            elif isTuple m.Type then SqlExpr.JsonArrayExpr([for arg in m.Arguments -> visitDu arg qb])
-            elif m.Members.Count = m.Arguments.Count then
+            match DateTimeFunctions.translateDateTimeLikeConstructor m (fun arg -> visitDu arg qb) with
+            | Some translated -> translated
+            | None when isTuple m.Type -> SqlExpr.JsonArrayExpr([for arg in m.Arguments -> visitDu arg qb])
+            | None when m.Members.Count = m.Arguments.Count ->
                 let fieldQb = { qb with InsideJsonObjectProjection = true }
                 newObjectDu [|for membr, expr in m.Arguments |> Seq.zip m.Members -> struct(membr.Name, visitDu expr fieldQb)|]
-            else raise (NotSupportedException(sprintf "Cannot construct new in SQL query %A" m.Type))
+            | None -> raise (NotSupportedException(sprintf "Cannot construct new in SQL query %A" m.Type))
         | ExpressionType.Parameter -> visitParameterDu (exp :?> ParameterExpression) qb
         | ExpressionType.ArrayIndex ->
             match exp with

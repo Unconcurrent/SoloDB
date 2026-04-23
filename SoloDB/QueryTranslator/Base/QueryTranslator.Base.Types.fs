@@ -88,7 +88,7 @@ module internal QueryTranslatorBaseTypes =
     let internal isPrimitiveSQLiteType (x: Type) =
         Utils.isIntegerBasedType x || Utils.isFloatBasedType x || x = typedefof<string> || x = typedefof<char> || x = typedefof<bool> || x = typedefof<Guid>
         || x = typedefof<Type>
-        || x = typedefof<DateTime> || x = typedefof<DateTimeOffset> || x = typedefof<DateOnly> || x = typedefof<TimeOnly> || x = typedefof<TimeSpan>
+        || Utils.isDateTimeLikeType x
         || x = typeof<byte array> || x = typeof<System.Collections.Generic.List<byte>> || x = typeof<byte list> || x = typeof<byte seq>
         || x.Name = "Nullable`1"
         || x.IsEnum

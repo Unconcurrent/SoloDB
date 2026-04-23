@@ -182,7 +182,14 @@ module internal JsonFunctions =
             row.ValueJSON :> obj :?> 'R
         else
 
+        let isNonNullableDateTimeLikeNull =
+            isNull row.ValueJSON
+            && isDateTimeLikeType typeof<'R>
+            && unwrapNullableType typeof<'R> = typeof<'R>
+
         match typeof<'R> with
+        | _ when isNonNullableDateTimeLikeNull ->
+            raise (InvalidOperationException "Invalid operation on a value type.")
         | OfType float when isNull row.ValueJSON -> (genericReinterpret Double.NaN)
         | OfType float32 when isNull row.ValueJSON -> (genericReinterpret Single.NaN)
         | OfType float when row.ValueJSON <> null -> (genericReinterpret << float) row.ValueJSON

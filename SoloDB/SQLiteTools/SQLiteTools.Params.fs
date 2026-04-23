@@ -15,6 +15,43 @@ open System.Data.Common
 /// Internal helpers for SQLiteTools: parameter processing, command creation, and type-mapper building blocks.
 /// </summary>
 module internal SQLiteToolsParams =
+    type internal DateTimeFamilyReaderSpec = {
+        ClrType: Type
+        BuildExpression: Expression -> Expression
+        MapInt64: int64 -> obj
+    }
+
+    let private dateTimeFamilyReaderSpecs =
+        [|
+            { ClrType = typeof<DateTime>
+              BuildExpression = fun expr ->
+                  Expression.Call(typeof<DateTime>.GetMethod("FromBinary", [| typeof<int64> |]), expr) :> Expression
+              MapInt64 = fun value -> DateTime.FromBinary value :> obj }
+            { ClrType = typeof<DateTimeOffset>
+              BuildExpression = fun expr ->
+                  Expression.Call(typeof<DateTimeOffset>.GetMethod("FromUnixTimeMilliseconds", [| typeof<int64> |]), expr) :> Expression
+              MapInt64 = fun value -> DateTimeOffset.FromUnixTimeMilliseconds value :> obj }
+            { ClrType = typeof<DateOnly>
+              BuildExpression = fun expr ->
+                  Expression.Call(typeof<DateOnly>.GetMethod("FromDayNumber", [| typeof<int> |]), Expression.Convert(expr, typeof<int>)) :> Expression
+              MapInt64 = fun value -> DateOnly.FromDayNumber(int value) :> obj }
+            { ClrType = typeof<TimeOnly>
+              BuildExpression = fun expr ->
+                  let ms = Expression.Convert(expr, typeof<float>)
+                  let ts = Expression.Call(typeof<TimeSpan>.GetMethod("FromMilliseconds", [| typeof<float> |]), ms)
+                  Expression.Call(typeof<TimeOnly>.GetMethod("FromTimeSpan", [| typeof<TimeSpan> |]), ts) :> Expression
+              MapInt64 = fun value -> value |> float |> TimeSpan.FromMilliseconds |> TimeOnly.FromTimeSpan :> obj }
+            { ClrType = typeof<TimeSpan>
+              BuildExpression = fun expr ->
+                  let ms = Expression.Convert(expr, typeof<float>)
+                  Expression.Call(typeof<TimeSpan>.GetMethod("FromMilliseconds", [| typeof<float> |]), ms) :> Expression
+              MapInt64 = fun value -> value |> float |> TimeSpan.FromMilliseconds :> obj }
+        |]
+
+    let internal tryGetDateTimeFamilyReaderSpec (t: Type) =
+        dateTimeFamilyReaderSpecs
+        |> Array.tryFind (fun spec -> spec.ClrType = t)
+
     /// Optional SQL trace callback for corpus capture and diagnostics.
     /// Set by test harnesses to intercept all SQL at the execution boundary.
     let mutable internal sqlTraceCallback: Action<string> voption = ValueNone
@@ -212,60 +249,60 @@ module internal SQLiteToolsParams =
     /// Shared logic used by both member-based and type-based expression builders.
     /// </summary>
     let private resolveReaderMethod (t: Type) : string * bool * (Expression -> Expression) option =
-        match t with
-        | t when t = typeof<byte> || t = typeof<int8> ->
-            "GetByte", false, None
-        | t when t = typeof<uint8> ->
-            "GetByte", true, Some (fun (expr: Expression) -> Expression.Convert(expr, typeof<uint8>) :> Expression)
-        | t when t = typeof<int16> ->
-            "GetInt16", false, None
-        | t when t = typeof<uint16> ->
-            "GetInt32", true, Some (fun (expr: Expression) ->
-                Expression.Convert(Expression.Call(
-                    null,
-                    typeof<uint16>.GetMethod("op_Explicit", [|typeof<int32>|]),
-                    expr),
-                    typeof<uint16>) :> Expression)
-        | t when t = typeof<int32> ->
-            "GetInt32", false, None
-        | t when t = typeof<uint32> ->
-            "GetInt64", true, Some (fun (expr: Expression) ->
-                Expression.Convert(Expression.Call(
-                    null,
-                    typeof<uint32>.GetMethod("op_Explicit", [|typeof<int64>|]),
-                    expr),
-                    typeof<uint32>) :> Expression)
-        | t when t = typeof<int64> ->
-            "GetInt64", false, None
-        | t when t = typeof<uint64> ->
-            "GetInt64", true, Some (fun (expr: Expression) ->
-                Expression.Convert(Expression.Call(
-                    null,
-                    typeof<uint64>.GetMethod("op_Explicit", [|typeof<int64>|]),
-                    expr),
-                    typeof<uint64>) :> Expression)
-        | t when t = typeof<float32> || t = typeof<float> ->
-            "GetFloat", false, None
-        | t when t = typeof<double> ->
-            "GetDouble", false, None
-        | t when t = typeof<decimal> ->
-            "GetDecimal", false, None
-        | t when t = typeof<string> ->
-            "GetString", false, None
-        | t when t = typeof<bool> ->
-            "GetBoolean", false, None
-        | t when t = typeof<NativeArray.NativeArray> ->
-            "GetStream", true, Some (fun (expr: Expression) -> streamToNativeArray (Expression.TypeAs(expr, typeof<SqliteBlob>)) :> Expression)
-        | t when t = typeof<byte[]> ->
-            "GetValue", true, Some (fun (expr: Expression) -> Expression.TypeAs(expr, typeof<byte[]>) :> Expression)
-        | t when t = typeof<Guid> ->
-            "GetGuid", false, None
-        | t when t = typeof<DateTime> ->
-            "GetDateTime", false, None
-        | t when t = typeof<DateTimeOffset> ->
-            "GetInt64", true, Some (fun (expr: Expression) -> Expression.Call(typeof<DateTimeOffset>.GetMethod("FromUnixTimeMilliseconds", [|typeof<int64>|]), expr) :> Expression)
-        | _ ->
-            "GetValue", true, Some (fun (expr: Expression) -> Expression.Convert(expr, t) :> Expression)
+        match tryGetDateTimeFamilyReaderSpec t with
+        | Some spec ->
+            "GetInt64", true, Some spec.BuildExpression
+        | None ->
+            match t with
+            | t when t = typeof<byte> || t = typeof<int8> ->
+                "GetByte", false, None
+            | t when t = typeof<uint8> ->
+                "GetByte", true, Some (fun (expr: Expression) -> Expression.Convert(expr, typeof<uint8>) :> Expression)
+            | t when t = typeof<int16> ->
+                "GetInt16", false, None
+            | t when t = typeof<uint16> ->
+                "GetInt32", true, Some (fun (expr: Expression) ->
+                    Expression.Convert(Expression.Call(
+                        null,
+                        typeof<uint16>.GetMethod("op_Explicit", [|typeof<int32>|]),
+                        expr),
+                        typeof<uint16>) :> Expression)
+            | t when t = typeof<int32> ->
+                "GetInt32", false, None
+            | t when t = typeof<uint32> ->
+                "GetInt64", true, Some (fun (expr: Expression) ->
+                    Expression.Convert(Expression.Call(
+                        null,
+                        typeof<uint32>.GetMethod("op_Explicit", [|typeof<int64>|]),
+                        expr),
+                        typeof<uint32>) :> Expression)
+            | t when t = typeof<int64> ->
+                "GetInt64", false, None
+            | t when t = typeof<uint64> ->
+                "GetInt64", true, Some (fun (expr: Expression) ->
+                    Expression.Convert(Expression.Call(
+                        null,
+                        typeof<uint64>.GetMethod("op_Explicit", [|typeof<int64>|]),
+                        expr),
+                        typeof<uint64>) :> Expression)
+            | t when t = typeof<float32> || t = typeof<float> ->
+                "GetFloat", false, None
+            | t when t = typeof<double> ->
+                "GetDouble", false, None
+            | t when t = typeof<decimal> ->
+                "GetDecimal", false, None
+            | t when t = typeof<string> ->
+                "GetString", false, None
+            | t when t = typeof<bool> ->
+                "GetBoolean", false, None
+            | t when t = typeof<NativeArray.NativeArray> ->
+                "GetStream", true, Some (fun (expr: Expression) -> streamToNativeArray (Expression.TypeAs(expr, typeof<SqliteBlob>)) :> Expression)
+            | t when t = typeof<byte[]> ->
+                "GetValue", true, Some (fun (expr: Expression) -> Expression.TypeAs(expr, typeof<byte[]>) :> Expression)
+            | t when t = typeof<Guid> ->
+                "GetGuid", false, None
+            | _ ->
+                "GetValue", true, Some (fun (expr: Expression) -> Expression.Convert(expr, t) :> Expression)
 
     /// <summary>
     /// Builds the final reader call expression from the resolved method and conversion.
@@ -298,60 +335,60 @@ module internal SQLiteToolsParams =
     let internal matchMethodWithMemberType (prop: MemberInfo) (readerParam: Expression) (columnVar: Expression) =
         let (getMethodName, needsConversion, conversionFunc) =
             let t = match prop with | :? PropertyInfo as p -> p.PropertyType | :? FieldInfo as p -> p.FieldType | _ -> failwithf "Unknown member type."
-            match t with
-            | t when t = typeof<byte> || t = typeof<int8> ->
-                "GetByte", false, None
-            | t when t = typeof<uint8> ->
-                "GetByte", true, Some (fun (expr: Expression) -> Expression.Convert(expr, typeof<uint8>) :> Expression)
-            | t when t = typeof<int16> ->
-                "GetInt16", false, None
-            | t when t = typeof<uint16> ->
-                "GetInt32", true, Some (fun expr ->
-                    Expression.Convert(Expression.Call(
-                        null,
-                        typeof<uint16>.GetMethod("op_Explicit", [|typeof<int32>|]),
-                        expr),
-                        typeof<uint16>))
-            | t when t = typeof<int32> ->
-                "GetInt32", false, None
-            | t when t = typeof<uint32> ->
-                "GetInt64", true, Some (fun expr ->
-                    Expression.Convert(Expression.Call(
-                        null,
-                        typeof<uint32>.GetMethod("op_Explicit", [|typeof<int64>|]),
-                        expr),
-                        typeof<uint32>))
-            | t when t = typeof<int64> ->
-                "GetInt64", false, None
-            | t when t = typeof<uint64> ->
-                "GetInt64", true, Some (fun expr ->
-                    Expression.Convert(Expression.Call(
-                        null,
-                        typeof<uint64>.GetMethod("op_Explicit", [|typeof<int64>|]),
-                        expr),
-                        typeof<uint64>))
-            | t when t = typeof<float32> || t = typeof<float> ->
-                "GetFloat", false, None
-            | t when t = typeof<double> ->
-                "GetDouble", false, None
-            | t when t = typeof<decimal> ->
-                "GetDecimal", false, None
-            | t when t = typeof<string> ->
-                "GetString", false, None
-            | t when t = typeof<bool> ->
-                "GetBoolean", false, None
-            | t when t = typeof<NativeArray.NativeArray> ->
-                "GetStream", true, Some (fun expr -> streamToNativeArray (Expression.TypeAs(expr, typeof<SqliteBlob>)))
-            | t when t = typeof<byte[]> ->
-                "GetValue", true, Some (fun expr -> Expression.TypeAs(expr, typeof<byte[]>))
-            | t when t = typeof<Guid> ->
-                "GetGuid", false, None
-            | t when t = typeof<DateTime> ->
-                "GetDateTime", false, None
-            | t when t = typeof<DateTimeOffset> ->
-                "GetInt64", true, Some (fun (expr: Expression) -> Expression.Call(typeof<DateTimeOffset>.GetMethod("FromUnixTimeMilliseconds", [|typeof<int64>|]), expr))
-            | _ ->
-                "GetValue", true, Some (fun expr -> Expression.Convert(expr, t))
+            match tryGetDateTimeFamilyReaderSpec t with
+            | Some spec ->
+                "GetInt64", true, Some spec.BuildExpression
+            | None ->
+                match t with
+                | t when t = typeof<byte> || t = typeof<int8> ->
+                    "GetByte", false, None
+                | t when t = typeof<uint8> ->
+                    "GetByte", true, Some (fun (expr: Expression) -> Expression.Convert(expr, typeof<uint8>) :> Expression)
+                | t when t = typeof<int16> ->
+                    "GetInt16", false, None
+                | t when t = typeof<uint16> ->
+                    "GetInt32", true, Some (fun expr ->
+                        Expression.Convert(Expression.Call(
+                            null,
+                            typeof<uint16>.GetMethod("op_Explicit", [|typeof<int32>|]),
+                            expr),
+                            typeof<uint16>))
+                | t when t = typeof<int32> ->
+                    "GetInt32", false, None
+                | t when t = typeof<uint32> ->
+                    "GetInt64", true, Some (fun expr ->
+                        Expression.Convert(Expression.Call(
+                            null,
+                            typeof<uint32>.GetMethod("op_Explicit", [|typeof<int64>|]),
+                            expr),
+                            typeof<uint32>))
+                | t when t = typeof<int64> ->
+                    "GetInt64", false, None
+                | t when t = typeof<uint64> ->
+                    "GetInt64", true, Some (fun expr ->
+                        Expression.Convert(Expression.Call(
+                            null,
+                            typeof<uint64>.GetMethod("op_Explicit", [|typeof<int64>|]),
+                            expr),
+                            typeof<uint64>))
+                | t when t = typeof<float32> || t = typeof<float> ->
+                    "GetFloat", false, None
+                | t when t = typeof<double> ->
+                    "GetDouble", false, None
+                | t when t = typeof<decimal> ->
+                    "GetDecimal", false, None
+                | t when t = typeof<string> ->
+                    "GetString", false, None
+                | t when t = typeof<bool> ->
+                    "GetBoolean", false, None
+                | t when t = typeof<NativeArray.NativeArray> ->
+                    "GetStream", true, Some (fun expr -> streamToNativeArray (Expression.TypeAs(expr, typeof<SqliteBlob>)))
+                | t when t = typeof<byte[]> ->
+                    "GetValue", true, Some (fun expr -> Expression.TypeAs(expr, typeof<byte[]>))
+                | t when t = typeof<Guid> ->
+                    "GetGuid", false, None
+                | _ ->
+                    "GetValue", true, Some (fun expr -> Expression.Convert(expr, t))
 
 
         let method = dataReaderMethods |> List.find(fun m -> m.Name = getMethodName)

@@ -214,12 +214,14 @@ module internal QueryTranslatorVisitCoreMethodCall =
         | OfShape1 null OfString "IsMatch" (OfString) (input, pattern) when m.Method.DeclaringType = typeof<System.Text.RegularExpressions.Regex> ->
             SqlExpr.Binary(visitDu input qb, BinaryOperator.Regexp, visitDu pattern qb)
         | _ when m.Method.Name = "ToString" && not (isNull m.Object)
-                 && (m.Object.Type = typeof<DateTime> || m.Object.Type = typeof<DateTimeOffset>) ->
+                 && DateTimeFunctions.supportsTemporalToStringTranslationType m.Object.Type ->
             DateTimeFunctions.translateDateTimeToStringCall
                 (visitDu m.Object qb)
                 m.Object
                 m.Arguments.Count
                 (if m.Arguments.Count >= 1 then Some m.Arguments.[0] else None)
+        | _ when m.Method.Name = "ToUnixTimeMilliseconds" && not (isNull m.Object) && m.Object.Type = typeof<DateTimeOffset> ->
+            visitDu m.Object qb
         | _ ->
             raise (NotSupportedException(
                 sprintf "Error: Method '%s' is not supported.\nReason: The method has no SQL translation.\nFix: Rewrite the query or call AsEnumerable() before using this method." m.Method.Name))

@@ -37,6 +37,16 @@ module internal Utils =
         not t.IsArray &&
         (typeof<Tuple>.IsAssignableFrom t || typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "Tuple`" || t.Name.StartsWith "ValueTuple`")
 
+    let internal unwrapNullableType (t: Type) =
+        if t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<Nullable<_>> then
+            t.GetGenericArguments().[0]
+        else
+            t
+
+    let internal isDateTimeLikeType (t: Type) =
+        let u = unwrapNullableType t
+        u = typeof<DateTime> || u = typeof<DateTimeOffset> || u = typeof<DateOnly> || u = typeof<TimeOnly> || u = typeof<TimeSpan>
+
     type System.Char with
         static member IsAsciiLetterOrDigit this =
             (this >= '0' && this <= '9') ||

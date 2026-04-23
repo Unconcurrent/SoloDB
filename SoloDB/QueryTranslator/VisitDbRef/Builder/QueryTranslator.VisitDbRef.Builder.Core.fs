@@ -125,7 +125,7 @@ module internal DBRefManyBuilderCore =
             match tryExtractLambdaExpression keyExpr with
             | ValueSome keyLambda ->
                 let subQb = qb.ForSubquery(targetAlias, keyLambda, subqueryRootTable = targetTable)
-                let result = { Expr = visitDu keyLambda.Body subQb; Direction = dir }
+                let result = { Expr = DateTimeFunctions.canonicalizeForCompareOrOrder keyLambda.Body.Type (visitDu keyLambda.Body subQb); Direction = dir }
                 joinEdges.AddRange(subQb.SourceContext.Joins)
                 result
             | ValueNone ->
