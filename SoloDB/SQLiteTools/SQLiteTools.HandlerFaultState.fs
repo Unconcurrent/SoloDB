@@ -195,3 +195,12 @@ Fix: Let handler-side database faults abort the outer operation, or avoid swallo
                 commitEx.Data["SoloDB.HandlerScopedFault"] <- handlerEx
                 raise commitEx
             | None -> ()
+
+    let internal withHandlerFaultWrap<'T> (connection: SqliteConnection) (body: unit -> 'T) : 'T =
+        try
+            let result = body()
+            raiseIfHandlerFaultRecorded connection
+            result
+        with ex ->
+            tryRecordHandlerFault connection ex
+            reraise()

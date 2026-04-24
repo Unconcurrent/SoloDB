@@ -4,6 +4,7 @@ open System
 open System.Collections.Generic
 open System.Data
 open System.Runtime.CompilerServices
+open System.Runtime.ExceptionServices
 open System.Runtime.InteropServices
 open Microsoft.Data.Sqlite
 open System.Data.Common
@@ -167,13 +168,16 @@ module SQLiteTools =
         /// Clears the prepared statement cache, waiting for any in-use commands to be released.
         /// </summary>
         member this.ClearCache() =
-            if preparedCache.Count = 0 then () else
-
             let oldCache =
                 lock cacheLock (fun () ->
-                    let old = preparedCache
-                    preparedCache <- Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
-                    old)
+                    if preparedCache.Count = 0 then
+                        null
+                    else
+                        let old = preparedCache
+                        preparedCache <- Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
+                        old)
+
+            if isNull oldCache then () else
 
             // Bounded timeout to prevent livelock from permanently in-use commands.
             let deadline = System.Diagnostics.Stopwatch.StartNew()
@@ -193,37 +197,30 @@ module SQLiteTools =
                     v.Command.Dispose()
                 oldCache.Clear())
     
-        /// <summary>Executes a non-query SQL command, utilizing the cache if possible.</summary>
-        /// <param name="sql">The SQL command text.</param>
-        /// <param name="parameters">The parameters for the command.</param>
-        /// <returns>The number of rows affected.</returns>
         member internal this.ReaderActive
             with get() = lock cacheLock (fun () -> readerActive)
             and set(v) = lock cacheLock (fun () -> readerActive <- v)
         member internal this.CheckNoActiveReader() =
             if lock cacheLock (fun () -> readerActive) then
                 raise (InvalidOperationException("A data reader is already active on this connection. Close the existing reader before executing another command."))
-    
+
+        /// <summary>Executes a non-query SQL command, utilizing the cache if possible.</summary>
+        /// <param name="sql">The SQL command text.</param>
+        /// <param name="parameters">The parameters for the command.</param>
+        /// <returns>The number of rows affected.</returns>
         member this.Execute(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
-            try
+            withHandlerFaultWrap (this :> SqliteConnection) (fun () ->
                 this.CheckNoActiveReader()
                 match tryCachedCommand this sql parameters with
                 | ValueSome struct (command, _columnDict, inUse) ->
                     try
-                        let affected = command.ExecuteNonQuery()
-                        raiseIfHandlerFaultRecorded (this :> SqliteConnection)
-                        affected
+                        command.ExecuteNonQuery()
                     finally
                         inUse := false
                 | ValueNone ->
                     let command, cmdGuard = createUncachedLocked this sql parameters
                     use _guard = cmdGuard
-                    let affected = command.ExecuteNonQuery()
-                    raiseIfHandlerFaultRecorded (this :> SqliteConnection)
-                    affected
-            with ex ->
-                tryRecordHandlerFault (this :> SqliteConnection) ex
-                reraise()
+                    command.ExecuteNonQuery())
 
         /// <summary>Opens a data reader, utilizing the cache if possible.</summary>
         /// <param name="sql">The SQL query text.</param>
@@ -236,51 +233,88 @@ module SQLiteTools =
             | ValueSome struct (command, _columnDict, inUse) ->
                 try
                     let reader = command.ExecuteReader()
-                    outReader <- reader
-                    lock cacheLock (fun () -> readerActive <- true)
                     let conn = this
-                    { new IDisposable with
-                        member _.Dispose() =
-                            conn.ReaderActive <- false
-                            try
-                                reader.Dispose()
-                            finally
-                                inUse := false }
-                with _ ->
+                    let lease =
+                        { new IDisposable with
+                            member _.Dispose() =
+                                conn.ReaderActive <- false
+                                try
+                                    reader.Dispose()
+                                finally
+                                    inUse := false }
+                    try
+                        raiseIfHandlerFaultRecorded (this :> SqliteConnection)
+                        outReader <- reader
+                        lock cacheLock (fun () -> readerActive <- true)
+                        lease
+                    with ex ->
+                        try
+                            lease.Dispose()
+                        with _ -> ()
+                        tryRecordHandlerFault (this :> SqliteConnection) ex
+                        reraise()
+                with ex ->
                     inUse := false
+                    tryRecordHandlerFault (this :> SqliteConnection) ex
                     reraise()
             | ValueNone ->
                 let command, cmdGuard = createUncachedLocked this sql parameters
-                let reader = command.ExecuteReader()
-                outReader <- reader
-                lock cacheLock (fun () -> readerActive <- true)
-                let conn = this
-                { new IDisposable with
-                    member _.Dispose() =
-                        conn.ReaderActive <- false
-                        reader.Dispose()
+                try
+                    let reader = command.ExecuteReader()
+                    let conn = this
+                    let lease =
+                        { new IDisposable with
+                            member _.Dispose() =
+                                conn.ReaderActive <- false
+                                try
+                                    reader.Dispose()
+                                finally
+                                    cmdGuard.Dispose() }
+                    try
+                        raiseIfHandlerFaultRecorded (this :> SqliteConnection)
+                        outReader <- reader
+                        lock cacheLock (fun () -> readerActive <- true)
+                        lease
+                    with ex ->
+                        try
+                            lease.Dispose()
+                        with _ -> ()
+                        tryRecordHandlerFault (this :> SqliteConnection) ex
+                        reraise()
+                with ex ->
+                    try
                         cmdGuard.Dispose()
-                }
+                    with _ -> ()
+                    tryRecordHandlerFault (this :> SqliteConnection) ex
+                    reraise()
     
-        /// <summary>Executes a query and maps the results to a sequence of 'T, utilizing the cache if possible.</summary>
+        /// <summary>
+        /// Executes a query and maps the results to a sequence of 'T, utilizing the cache if possible.
+        /// Handler faults are checked once before command acquisition and again after full successful enumeration.
+        /// </summary>
         /// <typeparam name="'T">The type to map results to.</typeparam>
         /// <param name="sql">The SQL query text.</param>
         /// <param name="parameters">The parameters for the query.</param>
-        /// <returns>A sequence of 'T objects.</returns>
+        /// <returns>A sequence of 'T objects. Callers that stop early observe the pre-check but not the post-enumeration check.</returns>
         member this.Query<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = seq {
             try
                 this.CheckNoActiveReader()
+                raiseIfHandlerFaultRecorded (this :> SqliteConnection)
                 match tryCachedCommand this sql parameters with
                 | ValueSome struct (command, columnDict, inUse) ->
-                    try yield! queryCommand<'T> command columnDict
-                    finally inUse := false
+                    try
+                        yield! queryCommand<'T> command columnDict
+                        raiseIfHandlerFaultRecorded (this :> SqliteConnection)
+                    finally
+                        inUse := false
                 | ValueNone ->
                     let command, cmdGuard = createUncachedLocked this sql parameters
                     use _guard = cmdGuard
                     yield! queryCommand<'T> command null
+                    raiseIfHandlerFaultRecorded (this :> SqliteConnection)
             with ex ->
                 tryRecordHandlerFault (this :> SqliteConnection) ex
-                raise ex
+                ExceptionDispatchInfo.Capture(ex).Throw()
         }
     
         /// <summary>Executes a query and returns the first result, utilizing the cache if possible.</summary>
@@ -289,25 +323,18 @@ module SQLiteTools =
         /// <param name="parameters">The parameters for the query.</param>
         /// <returns>The first 'T object from the result set.</returns>
         member this.QueryFirst<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
-            try
+            withHandlerFaultWrap (this :> SqliteConnection) (fun () ->
                 this.CheckNoActiveReader()
                 match tryCachedCommand this sql parameters with
                 | ValueSome struct (command, columnDict, inUse) ->
                     try
-                        let result = queryCommand<'T> command columnDict |> Seq.head
-                        raiseIfHandlerFaultRecorded (this :> SqliteConnection)
-                        result
+                        queryCommand<'T> command columnDict |> Seq.head
                     finally
                         inUse := false
                 | ValueNone ->
                     let command, cmdGuard = createUncachedLocked this sql parameters
                     use _guard = cmdGuard
-                    let result = queryCommand<'T> command null |> Seq.head
-                    raiseIfHandlerFaultRecorded (this :> SqliteConnection)
-                    result
-            with ex ->
-                tryRecordHandlerFault (this :> SqliteConnection) ex
-                reraise()
+                    queryCommand<'T> command null |> Seq.head)
     
         /// <summary>Executes a query and returns the first result, or a default value if the sequence is empty, utilizing the cache if possible.</summary>
         /// <typeparam name="'T">The type to map the result to.</typeparam>
@@ -315,32 +342,26 @@ module SQLiteTools =
         /// <param name="parameters">The parameters for the query.</param>
         /// <returns>The first 'T object from the result set, or default.</returns>
         member this.QueryFirstOrDefault<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
-            try
+            withHandlerFaultWrap (this :> SqliteConnection) (fun () ->
                 this.CheckNoActiveReader()
                 match tryCachedCommand this sql parameters with
                 | ValueSome struct (command, columnDict, inUse) ->
                     try
-                        let result =
-                            match queryCommand<'T> command columnDict |> Seq.tryHead with
-                            | Some x -> x
-                            | None -> defaultOf<'T>()
-                        raiseIfHandlerFaultRecorded (this :> SqliteConnection)
-                        result
+                        match queryCommand<'T> command columnDict |> Seq.tryHead with
+                        | Some x -> x
+                        | None -> defaultOf<'T>()
                     finally inUse := false
                 | ValueNone ->
                     let command, cmdGuard = createUncachedLocked this sql parameters
                     use _guard = cmdGuard
-                    let result =
-                        match queryCommand<'T> command null |> Seq.tryHead with
-                        | Some x -> x
-                        | None -> defaultOf<'T>()
-                    raiseIfHandlerFaultRecorded (this :> SqliteConnection)
-                    result
-            with ex ->
-                tryRecordHandlerFault (this :> SqliteConnection) ex
-                reraise()
+                    match queryCommand<'T> command null |> Seq.tryHead with
+                    | Some x -> x
+                    | None -> defaultOf<'T>())
     
-        /// <summary>Executes a multi-mapping query, utilizing the cache if possible.</summary>
+        /// <summary>
+        /// Executes a multi-mapping query, utilizing the cache if possible.
+        /// Handler faults are checked once before command acquisition and again after full successful enumeration.
+        /// </summary>
         /// <typeparam name="'T1">The type of the first object.</typeparam>
         /// <typeparam name="'T2">The type of the second object.</typeparam>
         /// <typeparam name="'TReturn">The return type after mapping.</typeparam>
@@ -348,37 +369,44 @@ module SQLiteTools =
         /// <param name="map">The function to map the two objects to the return type.</param>
         /// <param name="parameters">The parameters for the query.</param>
         /// <param name="splitOn">The column name to split the results on.</param>
-        /// <returns>A sequence of 'TReturn objects.</returns>
+        /// <returns>A sequence of 'TReturn objects. Callers that stop early observe the pre-check but not the post-enumeration check.</returns>
         member this.Query<'T1, 'T2, 'TReturn>(sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = seq {
-            this.CheckNoActiveReader()
-            let struct (command, dict, uncachedGuard, inUse) =
-                match tryCachedCommand this sql parameters with
-                | ValueSome struct (command, columnDict, inUse) ->
-                    struct (command, columnDict, (null: IDisposable), Some inUse)
-                | ValueNone ->
-                    let c, g = createUncachedLocked this sql parameters
-                    struct (c, Dictionary<string, int>(), g, None)
             try
-                use reader = command.ExecuteReader()
+                this.CheckNoActiveReader()
+                raiseIfHandlerFaultRecorded (this :> SqliteConnection)
+                let struct (command, dict, uncachedGuard, inUse) =
+                    match tryCachedCommand this sql parameters with
+                    | ValueSome struct (command, columnDict, inUse) ->
+                        struct (command, columnDict, (null: IDisposable), Some inUse)
+                    | ValueNone ->
+                        let c, g = createUncachedLocked this sql parameters
+                        struct (c, Dictionary<string, int>(), g, None)
+                try
+                    use reader = command.ExecuteReader()
 
-                if dict.Count = 0 then
-                    for i in 0..(reader.FieldCount - 1) do
-                        dict.Add(reader.GetName(i), i)
+                    if dict.Count = 0 then
+                        for i in 0..(reader.FieldCount - 1) do
+                            dict.Add(reader.GetName(i), i)
 
-                let splitIndex = reader.GetOrdinal(splitOn)
+                    let splitIndex = reader.GetOrdinal(splitOn)
 
-                while reader.Read() do
-                    let t1 = TypeMapper<'T1>.Map reader 0 dict
-                    let t2 =
-                        if reader.IsDBNull(splitIndex) then Unchecked.defaultof<'T2>
-                        else TypeMapper<'T2>.Map reader splitIndex dict
+                    while reader.Read() do
+                        let t1 = TypeMapper<'T1>.Map reader 0 dict
+                        let t2 =
+                            if reader.IsDBNull(splitIndex) then Unchecked.defaultof<'T2>
+                            else TypeMapper<'T2>.Map reader splitIndex dict
 
-                    yield map.Invoke (t1, t2)
-            finally
-                match inUse with
-                | Some inUse -> inUse := false
-                | _ -> ()
-                if not (isNull uncachedGuard) then uncachedGuard.Dispose()
+                        yield map.Invoke (t1, t2)
+
+                    raiseIfHandlerFaultRecorded (this :> SqliteConnection)
+                finally
+                    match inUse with
+                    | Some inUse -> inUse := false
+                    | _ -> ()
+                    if not (isNull uncachedGuard) then uncachedGuard.Dispose()
+            with ex ->
+                tryRecordHandlerFault (this :> SqliteConnection) ex
+                ExceptionDispatchInfo.Capture(ex).Throw()
         }
     
         /// <summary>
