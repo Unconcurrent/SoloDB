@@ -30,7 +30,7 @@ module internal QueryTranslatorVisitDbRefSingleRef =
                 if String.IsNullOrEmpty prefix then None
                 else Some(prefix.TrimEnd('.'))
 
-            // Case 1: Direct member on DBRef<T> — o.Ref.Id, o.Ref.HasValue
+            // Case 1: Direct member on DBRef<T> — o.Ref.Id, o.Ref.HasValue, o.Ref.TypedId (typed only)
             if isDBRefType innerExpr.Type then
                 match topMe.Member.Name with
                 | "Id" ->
@@ -52,6 +52,30 @@ module internal QueryTranslatorVisitDbRefSingleRef =
                                 SqlExpr.Binary(extract, BinaryOperator.Ne, SqlExpr.Literal(SqlLiteral.Integer 0L))))
                         true
                     | _ -> false
+                | "TypedId" when isDBRefTypedType innerExpr.Type ->
+                    // o.Ref.TypedId: JOIN the target collection (excluded relations correctly throw via
+                    // ensureDBRefJoin, mirroring .Value semantics) and read the target's [<SoloId>] field
+                    // from its JSON Value column. Index already required by RelationsSchemaLinkTableDDL
+                    // for typed relations, so this is a key lookup.
+                    match innerExpr with
+                    | :? MemberExpression as dbrefPropExpr ->
+                        let targetType = (dbrefPropExpr.Type.GetGenericArguments()).[0]
+                        match SoloIdAccessor.TryGetProperty targetType with
+                        | ValueNone ->
+                            raise (NotSupportedException(
+                                sprintf "Cannot translate DBRef<%s,_>.TypedId: target type has no [<SoloId>] property." targetType.Name))
+                        | ValueSome soloIdProp ->
+                            let valueProp = dbrefPropExpr.Type.GetProperty("Value", BindingFlags.Public ||| BindingFlags.Instance)
+                            if isNull valueProp then false
+                            else
+                                let valueME = Expression.MakeMemberAccess(dbrefPropExpr, valueProp)
+                                let alias = ensureDBRefJoin qb valueME
+                                qb.DuHandlerResult.Value <- ValueSome(SqlExpr.JsonExtractExpr(Some alias, "Value", JsonPath(soloIdProp.Name, [])))
+                                true
+                    | _ -> false
+                | "TypedId" ->
+                    raise (NotSupportedException(
+                        sprintf "DBRef<%s>.TypedId is not available on the single-arg DBRef form. Use .Id for row-id comparisons, or declare the relation as DBRef<%s,'TId> for typed-id queries." innerExpr.Type.Name innerExpr.Type.Name))
                 | _ -> false
 
             // Case 2: Property through DBRef<T>.Value — o.Ref.Value.Name

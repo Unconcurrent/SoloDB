@@ -141,36 +141,71 @@ let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor
         ensureTargetExists tx descriptor.TargetTable id
         id
     else
-        match tryGetPendingTypedId value with
-        | ValueSome typedId ->
-            ensureRelationSchema tx descriptor
-            let resolvedId = resolveTypedIdToTargetId tx descriptor typedId
-            let dbRef = createDbRefTo descriptor.Property.PropertyType resolvedId
-            (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(owner, dbRef)
-            resolvedId
+        // PendingEntity tested first (Anvil v2 BLOCKER 1): under v3 the eager .From(entityWithSoloId)
+        // sets _hasTypedId=true && _isLoaded=true. The tightened HasPendingTypedId predicate
+        // (_id=0 && _hasTypedId && not _isLoaded) is false in that case, so tryGetPendingTypedId
+        // returns None and this branch correctly falls through to the entity-cascade path below.
+        // The explicit ordering guards against a future relaxation of HasPendingTypedId reintroducing
+        // the alias bug — a .From(unsaved) MUST cascade-insert, not look up an existing target row.
+        let dbRefType = descriptor.Property.PropertyType
+        let isTyped = isTypedDbRef dbRefType
+        match tryGetPendingEntity value with
+        | ValueSome pending ->
+            let entityId = readEntityIdOrZero descriptor.TargetType pending
+            if entityId > 0L then
+                // Entity already persisted (Id > 0) — link-only, no re-insert.
+                ensureTargetExists tx descriptor.TargetTable entityId
+                let dbRef =
+                    if isTyped then
+                        let typedId = extractSoloIdOrFail descriptor.TargetType pending
+                        createDbRefLoadedTyped dbRefType entityId typedId pending
+                    else
+                        createDbRefTo dbRefType entityId
+                (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(owner, dbRef)
+                entityId
+            else
+                // Type-stack guard: detect semantic cycles through cloned instances.
+                if not (typeStack.Add(descriptor.TargetType)) then
+                    raise (InvalidOperationException(
+                        $"Circular cascade-insert detected for type '{descriptor.TargetType.FullName}'. " +
+                        "Circular DBRef.From chains are not supported. Use DBRef.To(id) to break the cycle."))
+                let insertedId =
+                    try cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType pending visited typeStack
+                    finally typeStack.Remove(descriptor.TargetType) |> ignore
+                let dbRef =
+                    if isTyped then
+                        // Post-insert: cascade primitive (insertTargetEntity) ran the shared
+                        // IIdGenerator+SetId helper. For non-generic IIdGenerator users `pending`
+                        // carries its [<SoloId>] in-memory and we stamp the typed id directly.
+                        // For typed-only IIdGenerator<'T> users, the cascade silently skipped
+                        // the generator (no typed collection in scope) — the row persisted with
+                        // empty SoloId and will be canonicalised by the next GetCollection<'T>()
+                        // heal probe. In that case stamp the rowid-only Loaded form; .TypedId
+                        // will throw "not hydrated" until heal runs, which is the correct contract.
+                        match tryExtractSoloId descriptor.TargetType pending with
+                        | ValueSome typedId ->
+                            createDbRefLoadedTyped dbRefType insertedId typedId pending
+                        | ValueNone ->
+                            createDbRefLoaded dbRefType insertedId pending
+                    else
+                        createDbRefTo dbRefType insertedId
+                (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(owner, dbRef)
+                insertedId
         | ValueNone ->
-            match tryGetPendingEntity value with
-            | ValueSome pending ->
-                let entityId = readEntityIdOrZero descriptor.TargetType pending
-                if entityId > 0L then
-                    // Entity already persisted (Id > 0) — link-only, no re-insert.
-                    // Preflight target-exists for From(existing) before owner mutation.
-                    ensureTargetExists tx descriptor.TargetTable entityId
-                    let dbRef = createDbRefTo descriptor.Property.PropertyType entityId
-                    (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(owner, dbRef)
-                    entityId
-                else
-                    // Type-stack guard: detect semantic cycles through cloned instances.
-                    if not (typeStack.Add(descriptor.TargetType)) then
-                        raise (InvalidOperationException(
-                            $"Circular cascade-insert detected for type '{descriptor.TargetType.FullName}'. " +
-                            "Circular DBRef.From chains are not supported. Use DBRef.To(id) to break the cycle."))
-                    let insertedId =
-                        try cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType pending visited typeStack
-                        finally typeStack.Remove(descriptor.TargetType) |> ignore
-                    let dbRef = createDbRefTo descriptor.Property.PropertyType insertedId
-                    (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(owner, dbRef)
-                    insertedId
+            match tryGetPendingTypedId value with
+            | ValueSome typedId ->
+                ensureRelationSchema tx descriptor
+                let resolvedId = resolveTypedIdToTargetId tx descriptor typedId
+                let dbRef =
+                    if isTyped then
+                        // Pending typed-id from .To(typedId): the typed id is already known and survived
+                        // the resolver; stamp it onto the result so .TypedId on the post-cascade DBRef
+                        // returns the original typed id without a hydration step.
+                        createDbRefResolvedTyped dbRefType resolvedId typedId
+                    else
+                        createDbRefTo dbRefType resolvedId
+                (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(owner, dbRef)
+                resolvedId
             | ValueNone ->
                 0L
 

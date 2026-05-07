@@ -2189,8 +2189,31 @@ and private JsonDeserializerImpl<'A> =
 
         | t when DBRefTypeHelpers.isDBRefType t ->
             let targetType = (GenericTypeArgCache.Get t).[0]
-            let unloadedMethod = t.GetMethod("Unloaded", BindingFlags.NonPublic ||| BindingFlags.Static)
-            let loadedMethod = t.GetMethod("Loaded", BindingFlags.NonPublic ||| BindingFlags.Static)
+            let unloadedMethod = t.GetMethod("Unloaded", BindingFlags.NonPublic ||| BindingFlags.Static, null, [| typeof<int64> |], null)
+            // Explicit 2-arg signature: pinning (int64, 'TTarget) keeps JsonSerializator's bare deserialize
+            // path bound to the original overload even after the typed-aware Loaded(int64, 'TId, 'TTarget)
+            // is added in DBRef.fs.
+            let loadedMethod = t.GetMethod("Loaded", BindingFlags.NonPublic ||| BindingFlags.Static, null, [| typeof<int64>; targetType |], null)
+            // Typed DBRef`2: pre-compile the typed-aware Loaded(int64, 'TId, 'TTarget) overload so the
+            // List-2 (LEFT-JOIN-materialized) path can stamp the typed id directly from the deserialized
+            // target entity. This uses SoloIdAccessor (Core layer) — no Relations dependency.
+            let isDbRef2 = DBRefTypeHelpers.isDBRefTypedType t
+            let loadedTypedFn =
+                if isDbRef2 then
+                    let tidType = (GenericTypeArgCache.Get t).[1]
+                    let lt = t.GetMethod("Loaded", BindingFlags.NonPublic ||| BindingFlags.Static, null, [| typeof<int64>; tidType; targetType |], null)
+                    if isNull lt then Unchecked.defaultof<Func<int64, obj, obj, obj>>
+                    else
+                        let idP = Expression.Parameter(typeof<int64>)
+                        let tidP = Expression.Parameter(typeof<obj>)
+                        let entP = Expression.Parameter(typeof<obj>)
+                        let castTid = Expression.Convert(tidP, tidType)
+                        let castEnt = Expression.Convert(entP, targetType)
+                        let call = Expression.Call(lt, idP, castTid, castEnt)
+                        let boxed = Expression.Convert(call, typeof<obj>)
+                        Expression.Lambda<Func<int64, obj, obj, obj>>(boxed, idP, tidP, entP).Compile(false)
+                else
+                    Unchecked.defaultof<Func<int64, obj, obj, obj>>
 
             // Pre-compile Unloaded(int64) delegate
             let int64Param = Expression.Parameter(typeof<int64>)
@@ -2254,7 +2277,16 @@ and private JsonDeserializerImpl<'A> =
                     // Materialized: [id, entityJson] from LEFT JOIN json_set
                     let id = int64 (items.[0].ToObject<decimal>())
                     let value = targetDeserializeFn.Invoke(items.[1])
-                    loadedFn.Invoke(id, value) // DBRef.Loaded(id, entity)
+                    if isDbRef2 && not (isNull (loadedTypedFn :> obj)) then
+                        // Typed DBRef`2: stamp typed id from the materialized target's [<SoloId>] so
+                        // .TypedId on the hydrated reference is readable without an extra query. Falls
+                        // through to the legacy 2-arg Loaded form when the target has no [<SoloId>]
+                        // (then .TypedId throws "not hydrated", which is the correct contract for that case).
+                        match SoloIdAccessor.TryGetBoxedValue(targetType, value) with
+                        | ValueSome typedId -> loadedTypedFn.Invoke(id, typedId, value) :?> 'A
+                        | ValueNone -> loadedFn.Invoke(id, value)
+                    else
+                        loadedFn.Invoke(id, value) // DBRef.Loaded(id, entity)
                 | Object o when o.ContainsKey "$dbrefTypedId" ->
                     // Transient wire marker for pending typed-id (DBRef`2 only).
                     match typedIdToFn with
@@ -2506,13 +2538,16 @@ and private JsonSerializerImpl<'A> =
                 failwithf "Invalid DBRef serializer contract for type %s. Expected public Id and HasValue properties." t.FullName
 
             // DBRef`2: detect pending typed-id for transient wire roundtrip marker.
+            // HasPendingTypedId is the tightened internal predicate (_id=0 && _hasTypedId && not _isLoaded);
+            // it remains the source of truth for emitting the $dbrefTypedId object form. .From(entityWithSoloId)
+            // is _isLoaded=true → the predicate is false → wire bytes are Null exactly as before.
             let isDbRef2 = DBRefTypeHelpers.isDBRefTypedType t
             let hasPendingTypedIdProp =
                 if isDbRef2 then t.GetProperty("HasPendingTypedId", BindingFlags.NonPublic ||| BindingFlags.Instance) else null
-            let typedIdOrDefaultProp =
-                if isDbRef2 then t.GetProperty("TypedIdOrDefault", BindingFlags.NonPublic ||| BindingFlags.Instance) else null
+            let typedIdProp =
+                if isDbRef2 then t.GetProperty("TypedId", BindingFlags.Public ||| BindingFlags.Instance) else null
             let typedIdSerializeFn =
-                if isDbRef2 && not (isNull typedIdOrDefaultProp) then
+                if isDbRef2 && not (isNull typedIdProp) then
                     let tidType = (GenericTypeArgCache.Get t).[1]
                     let meth =
                         typedefof<JsonSerializerImpl<_>>
@@ -2538,7 +2573,7 @@ and private JsonSerializerImpl<'A> =
                     elif isDbRef2 && not (isNull hasPendingTypedIdProp) &&
                          (hasPendingTypedIdProp.GetValue(boxed, null) :?> bool) then
                         // Transient wire marker for pending typed-id (roundtrip-safe).
-                        let tidVal = typedIdOrDefaultProp.GetValue(boxed, null)
+                        let tidVal = typedIdProp.GetValue(boxed, null)
                         let dict = Dictionary<string, JsonValue>(1)
                         dict.["$dbrefTypedId"] <- typedIdSerializeFn.Invoke(tidVal)
                         Object(dict)

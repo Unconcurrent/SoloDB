@@ -107,11 +107,27 @@ let rec batchLoadDBRefProperties
                         idWriter.Invoke(targetObj, row.Id)
                         loadedTargets.[row.Id] <- targetObj
 
+            // Typed DBRef<'TTarget,'TId>: stamp _typedId from the materialized target's [<SoloId>] so
+            // .TypedId on the hydrated reference returns the typed id without a separate query.
+            // Single-arg DBRef<'T>: keep the legacy 2-arg Loaded path.
             let propSetter = RelationsAccessorCache.compiledPropSetter prop
+            let isTyped = isTypedDbRef prop.PropertyType
             for (ownerObj, targetId) in ownerTargets do
                 match loadedTargets.TryGetValue(targetId) with
                 | true, targetObj ->
-                    let loadedRef = createDbRefLoaded prop.PropertyType targetId targetObj
+                    let loadedRef =
+                        if isTyped then
+                            match SoloIdAccessor.TryGetBoxedValue(targetType, targetObj) with
+                            | ValueSome typedId ->
+                                createDbRefLoadedTyped prop.PropertyType targetId typedId targetObj
+                            | ValueNone ->
+                                // Target row exists but has no [<SoloId>] populated. Fall back to the
+                                // legacy unstamped form — .TypedId access on this DBRef will throw with
+                                // the "not hydrated" diagnostic, which is correct: the typed id is
+                                // genuinely unknown at this row.
+                                createDbRefLoaded prop.PropertyType targetId targetObj
+                        else
+                            createDbRefLoaded prop.PropertyType targetId targetObj
                     propSetter.Invoke(ownerObj, loadedRef)
                 | _ -> ()
 

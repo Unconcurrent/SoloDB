@@ -66,6 +66,13 @@ let internal insertTargetEntity (tx: RelationTxContext) (targetTable: string) (t
 
     ensureCollectionTableExists tx.Connection targetTable
 
+    // Single source of truth for IIdGenerator + SetId: same helper that direct Insert (insertImpl)
+    // calls. Mutates `entity` by writing the generated [<SoloId>] when the registered IIdGenerator
+    // reports IsEmpty. After this call, the entity carries its SoloId in-memory so cascade can
+    // stamp typed DBRefs from a single in-memory path — no fallback to a post-insert DB read.
+    if id <= 0L then
+        CustomIdRunner.RunBoxed(targetType, entity)
+
     let json = serializeEntityForStorage targetType entity
     let qTarget = quoteIdentifier targetTable
     let insertedId =
@@ -119,8 +126,22 @@ let internal tryGetVOptionProperty (dbRefObj: obj) (propertyName: string) =
 let internal tryGetPendingEntity (dbRefObj: obj) =
     tryGetVOptionProperty dbRefObj "PendingEntity"
 
-let internal tryGetPendingTypedId (dbRefObj: obj) =
-    tryGetVOptionProperty dbRefObj "PendingTypedId"
+/// Returns the pending typed id only when the DBRef is in the transient $dbrefTypedId-marker state
+/// — _id=0 && _hasTypedId && not _isLoaded. Reads HasPendingTypedId + TypedId via reflection, so
+/// it stays out of the JsonSerializator layering (PropertyInfo lookup only, no Relations dep).
+let internal tryGetPendingTypedId (dbRefObj: obj) : obj voption =
+    if isNull dbRefObj then ValueNone
+    else
+        let t = dbRefObj.GetType()
+        let hasPredicate = t.GetProperty("HasPendingTypedId", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance)
+        if isNull hasPredicate then ValueNone
+        else
+            let isPending = hasPredicate.GetValue(dbRefObj, null) :?> bool
+            if not isPending then ValueNone
+            else
+                let typedIdProp = t.GetProperty("TypedId", BindingFlags.Public ||| BindingFlags.Instance)
+                if isNull typedIdProp then ValueNone
+                else ValueSome (typedIdProp.GetValue(dbRefObj, null))
 
 let internal createDbRefTo (dbRefType: Type) (id: int64) =
     let factories = RelationsAccessorCache.compiledDbRefFactories dbRefType
@@ -129,6 +150,41 @@ let internal createDbRefTo (dbRefType: Type) (id: int64) =
 let internal createDbRefLoaded (dbRefType: Type) (id: int64) (entity: obj) =
     let factories = RelationsAccessorCache.compiledDbRefFactories dbRefType
     factories.Loaded.Invoke(id, entity)
+
+/// Typed DBRef<'TTarget,'TId>: builds .Resolved(id, typedId). For single-arg DBRef<'T> the typed factory
+/// is null and the caller must fall back to createDbRefTo.
+let internal createDbRefResolvedTyped (dbRefType: Type) (id: int64) (typedId: obj) =
+    let factories = RelationsAccessorCache.compiledDbRefFactories dbRefType
+    factories.ResolvedTyped.Invoke(id, typedId)
+
+/// Typed DBRef<'TTarget,'TId>: builds .Loaded(id, typedId, entity). For single-arg DBRef<'T> the typed
+/// factory is null and the caller must fall back to createDbRefLoaded.
+let internal createDbRefLoadedTyped (dbRefType: Type) (id: int64) (typedId: obj) (entity: obj) =
+    let factories = RelationsAccessorCache.compiledDbRefFactories dbRefType
+    factories.LoadedTyped.Invoke(id, typedId, entity)
+
+/// True iff the DBRef type is the two-arg form DBRef<'TTarget,'TId>. Decides whether the cascade
+/// path uses the typed factory (Resolved/Loaded with typed id) or the legacy single-arg factory.
+let internal isTypedDbRef (dbRefType: Type) =
+    dbRefType.IsGenericType && dbRefType.GetGenericArguments().Length = 2
+
+/// Reads the [<SoloId>] value from a target entity, boxed. Returns ValueNone when the entity has
+/// no [<SoloId>] property or the value is null/default. After CustomIdRunner runs in the cascade
+/// primitive (insertTargetEntity), the in-memory entity always carries a non-default SoloId for
+/// typed-id targets — single source, no fallback to a post-insert DB read.
+let internal tryExtractSoloId (targetType: Type) (entity: obj) : obj voption =
+    SoloIdAccessor.TryGetBoxedValue(targetType, entity)
+
+/// Cascade typed-id resolver: in-memory only. Fail-loud when the entity's [<SoloId>] is null/default
+/// after cascade-insert, which means the registered IIdGenerator did not produce a value
+/// (programmer error in the generator) — the diagnostic surfaces the real cause instead of papering
+/// over it with a DB read.
+let internal extractSoloIdOrFail (targetType: Type) (entity: obj) : obj =
+    match tryExtractSoloId targetType entity with
+    | ValueSome v -> v
+    | ValueNone ->
+        raise (InvalidOperationException(
+            sprintf "Error: cannot stamp typed DBRef<%s,_>: the entity's [<SoloId>] is null/default after cascade-insert.\nReason: the registered IIdGenerator either did not run or produced an empty value (its IsEmpty returned true even after GenerateId).\nFix: ensure the IIdGenerator's GenerateId returns a non-empty value and that IsEmpty correctly recognises that value as non-empty." targetType.Name))
 
 let internal updateDbRefJson (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) (propertyPath: string) (targetId: int64) =
     let path = "$." + propertyPath

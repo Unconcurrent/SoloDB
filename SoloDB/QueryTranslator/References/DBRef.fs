@@ -142,8 +142,10 @@ type DBRef<'TTarget, 'TId> =
     /// <summary>The internal row Id of the referenced entity. 0 means no reference or pending typed-id resolution.</summary>
     member this.Id = this._id
 
-    /// <summary>True if a reference exists (either by row Id or typed Id).</summary>
-    member this.HasValue = this._id <> 0L || this._hasTypedId
+    /// <summary>True if a persisted reference exists (either by row Id or pending typed-id lookup).
+    /// Pre-cascade pending entities (.From) report HasValue=false, since the entity is not yet in the DB —
+    /// matches the pre-v3 behaviour and keeps the JSON wire bytes byte-equal for that transient state.</summary>
+    member this.HasValue = this._id <> 0L || (this._hasTypedId && not this._isLoaded)
 
     /// <summary>True if the referenced entity has been loaded from the database.</summary>
     member this.IsLoaded = this._isLoaded
@@ -162,29 +164,58 @@ type DBRef<'TTarget, 'TId> =
         else
             this._value
 
+    /// <summary>True iff <see cref="TypedId"/> is readable on this reference.</summary>
+    member this.HasTypedId = this._hasTypedId
+
+    /// <summary>The typed Id of the referenced entity.</summary>
+    /// <exception cref="System.InvalidOperationException">
+    /// Thrown when the typed id is not available on this reference state. Three diagnostic cases:
+    /// (a) Empty reference (.None);
+    /// (b) Constructed via .From(entity) whose [&lt;SoloId&gt;] field was not yet populated (cascade has not run);
+    /// (c) Raw deserialized or excluded reference whose typed id was never hydrated (use .Id or Include the relation).
+    /// </exception>
+    member this.TypedId : 'TId =
+        if not this._hasTypedId then
+            if this._id = 0L && not this._isLoaded then
+                raise (InvalidOperationException(
+                    sprintf "Error: DBRef<%s,%s>.TypedId is not available.\nReason: Empty reference (HasValue is false).\nFix: Check .HasValue / .HasTypedId before accessing .TypedId." typeof<'TTarget>.Name typeof<'TId>.Name))
+            elif this._id = 0L then
+                raise (InvalidOperationException(
+                    sprintf "Error: DBRef<%s,%s>.TypedId is not yet resolved.\nReason: The entity's [<SoloId>] was not populated at .From() time.\nFix: Access .TypedId after the parent Insert completes (cascade-insert generates and stamps the typed id), or set the [<SoloId>] field on the entity before .From()." typeof<'TTarget>.Name typeof<'TId>.Name))
+            else
+                raise (InvalidOperationException(
+                    sprintf "Error: DBRef<%s,%s>.TypedId is not hydrated.\nReason: The reference was raw-deserialized or the relation was Excluded — only the row Id is in scope.\nFix: Include() the relation in the query, or use .Id." typeof<'TTarget>.Name typeof<'TId>.Name))
+        else
+            this._typedId
+
     member internal this.PendingEntity: 'TTarget voption =
         if this._id = 0L && this._isLoaded && not (obj.ReferenceEquals(this._value :> obj, null)) then
             ValueSome this._value
         else
             ValueNone
 
-    member internal this.PendingTypedId: 'TId voption =
-        if this._id = 0L && this._hasTypedId then ValueSome this._typedId else ValueNone
-
-    // Serializer introspection: pending typed-id state for transient wire roundtrip.
-    member internal this.HasPendingTypedId = this._id = 0L && this._hasTypedId
-    member internal this.TypedIdOrDefault = this._typedId
+    /// True iff the persisted form is the transient $dbrefTypedId marker AND cascade should route
+    /// this through the typed-id resolver. Tightened by also requiring not _isLoaded so that
+    /// .From(entity) with an eagerly-captured SoloId does NOT trip the marker (avoiding wire-format change).
+    member internal this.HasPendingTypedId =
+        this._id = 0L && this._hasTypedId && not this._isLoaded
 
     static member internal Loaded(id: int64, value: 'TTarget) =
         DBRef<'TTarget, 'TId>(id, Unchecked.defaultof<'TId>, false, value, true)
 
+    /// Hydrated/cascade-stamped construction with a known typed id alongside the entity. Used by the
+    /// Relations hydration pipeline (BatchLoad/Sync) and the cascade-insert post-resolution path,
+    /// after the [&lt;SoloId&gt;] has been extracted from the materialized entity.
+    static member internal Loaded(id: int64, typedId: 'TId, value: 'TTarget) =
+        DBRef<'TTarget, 'TId>(id, typedId, true, value, true)
+
     static member internal Unloaded(id: int64) =
         DBRef<'TTarget, 'TId>(id, Unchecked.defaultof<'TId>, false, Unchecked.defaultof<'TTarget>, false)
 
-    static member internal Resolved(id: int64) =
+    static member internal Resolved(id: int64, typedId: 'TId) =
         if id <= 0L then
             raise (ArgumentOutOfRangeException(nameof id, id, "Resolved DBRef id must be > 0."))
-        DBRef<'TTarget, 'TId>(id, Unchecked.defaultof<'TId>, false, Unchecked.defaultof<'TTarget>, false)
+        DBRef<'TTarget, 'TId>(id, typedId, true, Unchecked.defaultof<'TTarget>, false)
 
     /// <summary>Creates a reference to an existing entity by its typed Id.</summary>
     /// <param name="id">The typed Id of the target entity. Must not be null.</param>
@@ -194,13 +225,22 @@ type DBRef<'TTarget, 'TId> =
             raise (ArgumentNullException(nameof id, "DBRef.To requires a non-null typed id."))
         DBRef<'TTarget, 'TId>(0L, id, true, Unchecked.defaultof<'TTarget>, false)
 
-    /// <summary>Creates a reference from an unsaved entity. The entity will be cascade-inserted when the owner is saved.</summary>
+    /// <summary>Creates a reference from an unsaved entity. The entity will be cascade-inserted when the
+    /// owner is saved. If the entity already carries a populated [&lt;SoloId&gt;], the typed id is captured
+    /// eagerly so .TypedId is readable without waiting for cascade. Otherwise .TypedId throws until
+    /// cascade-insert generates and stamps it.</summary>
     /// <param name="entity">The entity instance to reference. Must not be null.</param>
     /// <exception cref="System.ArgumentNullException">Thrown if <paramref name="entity"/> is null.</exception>
     static member From(entity: 'TTarget) =
         if obj.ReferenceEquals(entity, null) then
             raise (ArgumentNullException(nameof entity, "DBRef.From requires a non-null entity. Use DBRef.None for an empty reference."))
-        DBRef<'TTarget, 'TId>(0L, Unchecked.defaultof<'TId>, false, entity, true)
+        match SoloIdAccessor.TryGetValue<'TTarget, 'TId> entity with
+        | ValueSome typedId ->
+            // _isLoaded stays true. The serializer's HasPendingTypedId predicate (which now requires
+            // not _isLoaded) does NOT fire here — wire bytes for .From(entityWithSoloId) remain Null.
+            DBRef<'TTarget, 'TId>(0L, typedId, true, entity, true)
+        | ValueNone ->
+            DBRef<'TTarget, 'TId>(0L, Unchecked.defaultof<'TId>, false, entity, true)
 
     /// <summary>An empty reference with no target entity.</summary>
     static member None = DBRef<'TTarget, 'TId>(0L, Unchecked.defaultof<'TId>, false, Unchecked.defaultof<'TTarget>, false)

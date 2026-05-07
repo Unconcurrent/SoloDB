@@ -125,37 +125,91 @@ let internal compiledDbRefIdReader (dbRefType: Type) =
 
 [<Struct>]
 type internal DbRefFactories = {
+    /// Single-arg DBRef<'T>: builds via .To(int64). Two-arg DBRef<'TTarget,'TId>: null when 'TId is not int64,
+    /// because typed DBRefs cannot be constructed from a row id alone — use ResolvedTyped/LoadedTyped instead.
     ToOrResolved: Func<int64, obj>
+    /// Single-arg DBRef<'T>: builds via .Loaded(int64, 'T). Two-arg DBRef<'TTarget,'TId>: builds via the
+    /// 2-arg .Loaded(int64, 'TTarget) overload that exists on both single-arg and two-arg forms; this path
+    /// is what JsonSerializator's deserialize code calls on raw materialization (no typed id known yet).
     Loaded: Func<int64, obj, obj>
+    /// Two-arg DBRef<'TTarget,'TId>: builds .Resolved(int64, 'TId). Null on single-arg DBRef<'T>.
+    ResolvedTyped: Func<int64, obj, obj>
+    /// Two-arg DBRef<'TTarget,'TId>: builds the 3-arg .Loaded(int64, 'TId, 'TTarget) overload introduced
+    /// for the Relations hydration stamp + cascade post-resolution path. Null on single-arg DBRef<'T>.
+    LoadedTyped: Func<int64, obj, obj, obj>
 }
 
 let private dbRefFactoryCache = ConcurrentDictionary<Type, DbRefFactories>()
 
 let internal compiledDbRefFactories (dbRefType: Type) =
     dbRefFactoryCache.GetOrAdd(dbRefType, fun (t: Type) ->
-        let toMethod = t.GetMethod("To", BindingFlags.Public ||| BindingFlags.Static, null, [| typeof<int64> |], null)
-        let resolvedMethod = t.GetMethod("Resolved", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Static, null, [| typeof<int64> |], null)
-        let factoryMethod =
-            if not (isNull toMethod) then toMethod
-            elif not (isNull resolvedMethod) then resolvedMethod
-            else raise (InvalidOperationException($"No To(int64) or Resolved(int64) on '{t.FullName}'."))
-        let toParam = Expression.Parameter(typeof<int64>, "id")
-        let toCall = Expression.Call(factoryMethod, toParam)
-        let toBoxed = Expression.Convert(toCall, typeof<obj>)
-        let toDelegate = Expression.Lambda<Func<int64, obj>>(toBoxed, toParam).Compile()
+        // Single-arg path: .To(int64) lives on DBRef<'T>. Typed-arg path: typed-id .Resolved(int64,'TId)
+        // lives on DBRef<'TTarget,'TId>. Distinguish by generic-arity to pick the right factory shape.
+        let genericArgs = t.GetGenericArguments()
+        let isTyped = genericArgs.Length = 2
 
+        let toMethod =
+            if isTyped then null
+            else t.GetMethod("To", BindingFlags.Public ||| BindingFlags.Static, null, [| typeof<int64> |], null)
+
+        let toDelegate =
+            if isNull toMethod then Unchecked.defaultof<Func<int64, obj>>
+            else
+                let toParam = Expression.Parameter(typeof<int64>, "id")
+                let toCall = Expression.Call(toMethod, toParam)
+                let toBoxed = Expression.Convert(toCall, typeof<obj>)
+                Expression.Lambda<Func<int64, obj>>(toBoxed, toParam).Compile()
+
+        // 2-arg Loaded(int64, 'TTarget) is the JSON deserialize overload — exists on BOTH single-arg
+        // and typed-arg DBRef forms. Pin signature explicitly so the new 3-arg overload doesn't shadow it.
+        let entityType = if isTyped then genericArgs.[0] else genericArgs.[0]
         let loadedMethod =
-            t.GetMethods(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Static)
-            |> Array.find (fun m -> m.Name = "Loaded" && m.GetParameters().Length = 2)
-        let idParam = Expression.Parameter(typeof<int64>, "id")
-        let entityParam = Expression.Parameter(typeof<obj>, "entity")
-        let entityType = loadedMethod.GetParameters().[1].ParameterType
-        let castEntity = Expression.Convert(entityParam, entityType)
-        let loadedCall = Expression.Call(loadedMethod, idParam, castEntity)
-        let loadedBoxed = Expression.Convert(loadedCall, typeof<obj>)
-        let loadedDelegate = Expression.Lambda<Func<int64, obj, obj>>(loadedBoxed, idParam, entityParam).Compile()
+            t.GetMethod("Loaded", BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Static, null, [| typeof<int64>; entityType |], null)
+        let loadedDelegate =
+            if isNull loadedMethod then Unchecked.defaultof<Func<int64, obj, obj>>
+            else
+                let idParam = Expression.Parameter(typeof<int64>, "id")
+                let entityParam = Expression.Parameter(typeof<obj>, "entity")
+                let castEntity = Expression.Convert(entityParam, entityType)
+                let loadedCall = Expression.Call(loadedMethod, idParam, castEntity)
+                let loadedBoxed = Expression.Convert(loadedCall, typeof<obj>)
+                Expression.Lambda<Func<int64, obj, obj>>(loadedBoxed, idParam, entityParam).Compile()
 
-        { ToOrResolved = toDelegate; Loaded = loadedDelegate }
+        // Typed-only: Resolved(int64, 'TId) and Loaded(int64, 'TId, 'TTarget).
+        let resolvedTypedDelegate =
+            if not isTyped then Unchecked.defaultof<Func<int64, obj, obj>>
+            else
+                let tidType = genericArgs.[1]
+                let m = t.GetMethod("Resolved", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Static, null, [| typeof<int64>; tidType |], null)
+                if isNull m then Unchecked.defaultof<Func<int64, obj, obj>>
+                else
+                    let idParam = Expression.Parameter(typeof<int64>, "id")
+                    let tidParam = Expression.Parameter(typeof<obj>, "typedId")
+                    let castTid = Expression.Convert(tidParam, tidType)
+                    let call = Expression.Call(m, idParam, castTid)
+                    let boxed = Expression.Convert(call, typeof<obj>)
+                    Expression.Lambda<Func<int64, obj, obj>>(boxed, idParam, tidParam).Compile()
+
+        let loadedTypedDelegate =
+            if not isTyped then Unchecked.defaultof<Func<int64, obj, obj, obj>>
+            else
+                let tidType = genericArgs.[1]
+                let m = t.GetMethod("Loaded", BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Static, null, [| typeof<int64>; tidType; entityType |], null)
+                if isNull m then Unchecked.defaultof<Func<int64, obj, obj, obj>>
+                else
+                    let idParam = Expression.Parameter(typeof<int64>, "id")
+                    let tidParam = Expression.Parameter(typeof<obj>, "typedId")
+                    let entParam = Expression.Parameter(typeof<obj>, "entity")
+                    let castTid = Expression.Convert(tidParam, tidType)
+                    let castEnt = Expression.Convert(entParam, entityType)
+                    let call = Expression.Call(m, idParam, castTid, castEnt)
+                    let boxed = Expression.Convert(call, typeof<obj>)
+                    Expression.Lambda<Func<int64, obj, obj, obj>>(boxed, idParam, tidParam, entParam).Compile()
+
+        { ToOrResolved = toDelegate
+          Loaded = loadedDelegate
+          ResolvedTyped = resolvedTypedDelegate
+          LoadedTyped = loadedTypedDelegate }
     )
 
 // ─── ValueOption introspection ───────────────────────────────────────────────

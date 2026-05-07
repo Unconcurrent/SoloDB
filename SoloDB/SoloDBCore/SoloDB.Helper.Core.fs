@@ -22,6 +22,71 @@ open System.Linq
 open SoloDatabase.Attributes
 
 /// <summary>
+/// Single source of truth for running the registered IIdGenerator and writing the generated SoloId
+/// back onto the .NET entity object. Used by both direct-Insert (typed call site) and cascade-Insert
+/// (reflection call site via MakeGenericMethod), so the cascade no longer silently skips generators
+/// for typed-id targets — closing the historical gap that left typed-DBRef target rows with NULL
+/// SoloId fields when inserted via DBRef.From cascade.
+/// </summary>
+[<AbstractClass; Sealed>]
+type internal CustomIdRunner =
+
+    /// Strongly-typed entry point. insertImpl calls this directly. Cascade calls it via
+    /// MakeGenericMethod when only Type is known statically.
+    static member Run<'T when 'T :> obj> (item: 'T, collection: ISoloDBCollection<'T>) : unit =
+        match CustomTypeId<'T>.Value with
+        | Some x ->
+            let boxedItem = box item
+            let oldId = x.GetId boxedItem
+            match x.Generator with
+            | :? SoloDatabase.Attributes.IIdGenerator as generator ->
+                if generator.IsEmpty oldId then
+                    let id = generator.GenerateId (box collection) boxedItem
+                    x.SetId id boxedItem
+            | :? SoloDatabase.Attributes.IIdGenerator<'T> as generator ->
+                if generator.IsEmpty oldId then
+                    if obj.ReferenceEquals(collection, null) then
+                        // Cascade-context with a typed-only IIdGenerator<'T>: there is no typed
+                        // ISoloDBCollection<'T> reference reachable from the cascade primitive, so
+                        // we cannot invoke this generator now. Silently skip — the row persists with
+                        // its empty [<SoloId>] (matching the historical pre-fix cascade shape) and
+                        // the next GetCollection<'T>() heal probe canonicalises it because heal IS
+                        // a typed-collection context. Heal is the single recovery path for this
+                        // limitation — there is no second path, no fallback.
+                        ()
+                    else
+                        let id = generator.GenerateId collection item
+                        x.SetId id boxedItem
+            | other -> raise (System.InvalidOperationException(
+                sprintf "Error: Invalid Id generator type.\nReason: Type '%s' is not supported.\nFix: Use a supported Id generator or configure a custom Id strategy." (other.GetType().ToString())))
+        | None -> ()
+
+    /// Per-Type cache of the closed generic Run<'T> MethodInfo. Cascade-heavy workloads pay only
+    /// the first MakeGenericMethod cost per target type; subsequent invocations reuse the cached
+    /// closed method (Linus F3a).
+    static let runMiCache = System.Collections.Concurrent.ConcurrentDictionary<System.Type, System.Reflection.MethodInfo>()
+
+    static let runOpenMethod =
+        typeof<CustomIdRunner>.GetMethods(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Static)
+        |> Array.tryFind (fun m -> m.Name = "Run" && m.IsGenericMethodDefinition)
+        |> Option.defaultWith (fun () ->
+            raise (System.InvalidOperationException("CustomIdRunner.Run<'T> not found via reflection — internal SoloDB defect.")))
+
+    /// Reflection entry point for code paths that hold only a runtime Type plus a boxed entity
+    /// (cascade-insert). Resolves to the generic Run via MakeGenericMethod (cached per Type) so the
+    /// work is identical to the direct-Insert path. The boxed `collection` is null in those paths;
+    /// the typed-IIdGenerator-without-collection branch above silently skips so cascade matches
+    /// historical pre-fix behaviour and the next GetCollection<'T>() heal canonicalises the row.
+    static member RunBoxed (targetType: System.Type, item: obj) : unit =
+        let mi = runMiCache.GetOrAdd(targetType, fun (t: System.Type) -> runOpenMethod.MakeGenericMethod(t))
+        try
+            mi.Invoke(null, [| item; null |]) |> ignore
+        with
+        | :? System.Reflection.TargetInvocationException as tie when not (isNull tie.InnerException) ->
+            // Unwrap the inner exception so callers see the real diagnostic, not the reflection wrapper.
+            raise tie.InnerException
+
+/// <summary>
 /// Contains internal helper functions for database and collection management.
 /// </summary>
 module internal Helper =
@@ -178,21 +243,10 @@ module internal Helper =
         let existsWritebleDirectId = HasTypeId<'T>.Value
 
 
-        match customIdGen with
-        | Some x ->
-            let oldId = x.GetId item
-            match x.Generator with
-            | :? SoloDatabase.Attributes.IIdGenerator as generator ->
-                if generator.IsEmpty oldId then
-                    let id = generator.GenerateId collection item
-                    x.SetId id item
-            | :? SoloDatabase.Attributes.IIdGenerator<'T> as generator ->
-                if generator.IsEmpty oldId then
-                    let id = generator.GenerateId collection item
-                    x.SetId id item
-            | other -> raise (InvalidOperationException(
-                sprintf "Error: Invalid Id generator type.\nReason: Type '%s' is not supported.\nFix: Use a supported Id generator or configure a custom Id strategy." (other.GetType().ToString())))
-        | None -> ()
+        // Single source of truth: shared helper used by both this direct-insert path and the
+        // cascade-insert primitive in Relations.Entity.Sync.fs. Mutates `item` by writing the
+        // generated SoloId via SetId when the registered IIdGenerator reports IsEmpty.
+        CustomIdRunner.Run(item, collection)
         
         let json = if typed then toTypedJson item else toJson item
         
