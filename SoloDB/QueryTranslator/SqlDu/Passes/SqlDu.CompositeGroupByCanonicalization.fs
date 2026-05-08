@@ -4,7 +4,7 @@ open SqlDu.Engine.C1.Spec
 open SoloDatabase.QueryableGroupByAliases
 
 // ══════════════════════════════════════════════════════════════
-// CompositeGroupByCanonicalization — R-108.
+// CompositeGroupByCanonicalization.
 //
 // Decomposes compound-key GROUP BY over a JSON object constructor into
 // canonical scalar multi-column GROUP BY so SQLite can match composite
@@ -23,11 +23,10 @@ open SoloDatabase.QueryableGroupByAliases
 // Post-order traversal: at each SelectCore, children (Source DerivedTable,
 // Joins DerivedTables, CTEs) are rewritten BEFORE the parent core's own
 // rewrite runs. Outer rewrites therefore see already-rewritten inner
-// children (anvil-rev constraint, 2026-04-22_23-13).
+// children.
 //
-// Null-exclusion filter (Captain 23:04): AND-of-IsNotNull over all slot
-// columns is AND-combined into the outer WHERE in lockstep with the
-// GroupBy rewrite.
+// Null-exclusion filter: AND-of-IsNotNull over all slot columns is
+// AND-combined into the outer WHERE in lockstep with the GroupBy rewrite.
 //
 // Function-name match convention (two distinct rules by origin):
 //   - Endogenous constructor names WE emit (json_object, jsonb_object):
@@ -97,12 +96,11 @@ let private coreQualifiers (core: SelectCore) : Set<string> =
             | ConditionedJoin(_, s, _) -> s
         Set.union acc (sourceQualifiers src)) fromSource
 
-/// Row-scope context threaded through the P6 purity walk. `Scope` is the set
+/// Row-scope context threaded through the purity walk. `Scope` is the set
 /// of valid qualifier strings for local Columns. `AllowUnqualified` is true
 /// only when the core has exactly one visible qualifier source (Source
-/// present and Joins empty) — anvil-rev tightening 23:35, accepted by Linus
-/// and Data. In multi-source cores, unqualified columns are schema-ambiguous
-/// from the pass's perspective and must be refused.
+/// present and Joins empty). In multi-source cores, unqualified columns are
+/// schema-ambiguous from the pass's perspective and must be refused.
 type private RowScope = {
     Scope: Set<string>
     AllowUnqualified: bool
@@ -112,10 +110,10 @@ let private rowScopeFor (core: SelectCore) : RowScope =
     { Scope = coreQualifiers core
       AllowUnqualified = core.Source.IsSome && core.Joins.IsEmpty }
 
-/// P6 purity walk: component expression must be deterministic, aggregate-free,
+/// Purity walk: component expression must be deterministic, aggregate-free,
 /// window-free, subquery-free, parameter-free, and built from row-visible scalars
-/// only. Additionally enforces row-scope safety (anvil-rev/Linus B2 ruling 23:35):
-/// every `Column(Some q, _)` must have `q` in the local scope set;
+/// only. Additionally enforces row-scope safety: every `Column(Some q, _)` must
+/// have `q` in the local scope set;
 /// `Column(None, _)` is accepted only when the core has exactly one visible
 /// qualifier source (single-source canonical shape).
 let rec private isPureScalarComponent (scope: RowScope) (expr: SqlExpr) : bool =
@@ -263,7 +261,7 @@ let private tryRewriteP1a (outer: SelectCore) : SelectCore option =
                             if slotNames |> List.exists existingAliases.Contains then None
                             else
                                 // Rewrite step 2: append slot projections; preserve all
-                                // existing projections byte-for-byte (anvil-rev 23:13).
+                                // existing projections byte-for-byte.
                                 let slotProjections =
                                     List.zip slotNames values
                                     |> List.map (fun (a, e) -> { Alias = Some a; Expr = e })
@@ -277,7 +275,7 @@ let private tryRewriteP1a (outer: SelectCore) : SelectCore option =
                                 let slotColumns =
                                     slotNames |> List.map (fun sa -> Column(Some "o", sa))
                                 // Rewrite step 5: null-exclusion filter, AND-combined
-                                // with any existing outer.Where (Captain 23:04).
+                                // with any existing outer.Where.
                                 let filter = conjoinIsNotNull slotColumns
                                 let newWhere = andCombineOptional outer.Where filter
                                 Some
@@ -294,9 +292,9 @@ let private tryRewriteP1a (outer: SelectCore) : SelectCore option =
 /// P1b rewrite: outer core with a single inlined JSON-object GROUP BY term
 /// (defensive post-flatten shape; currently unreachable due to FlattenSafety F8
 /// at `SqlDu.FlattenSafety.fs:64-65`, but locked as dormant scaffolding against
-/// any future weakening — plan E41, L6).
+/// any future weakening).
 ///
-/// Lockstep contract with synthetic-key projection (Linus 23:43 / Data 23:43):
+/// Lockstep contract with synthetic-key projection:
 ///   - exactly one `__solodb_group_key` projection in outer → leave its Expr
 ///     untouched (it IS already the correct synthetic key by construction;
 ///     substituting or rebuilding adds risk for zero gain);

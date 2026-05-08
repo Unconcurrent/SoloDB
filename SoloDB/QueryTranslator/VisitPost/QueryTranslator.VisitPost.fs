@@ -212,12 +212,11 @@ module internal QueryTranslatorVisitPost =
         | _ -> ValueNone
 
     /// Asserts that a chain's type sequence does not form a closed-loop cycle through
-    /// distinct types. Captain's rulings combine to form this contract:
-    ///   Q5 = Yes: a chain that visits A, then a different type B, then returns to A
-    ///             rejects (T -> S -> T). This includes longer cycles A -> B -> C -> A.
-    ///   Q6 = No-cap depth: a chain that walks a self-recursive type repeatedly
-    ///             (T -> T -> T -> ... -> T) is allowed at any depth — it is depth,
-    ///             not a cycle.
+    /// distinct types. Two contracts apply:
+    ///   - A chain that visits A, then a different type B, then returns to A rejects
+    ///     (T -> S -> T). This includes longer cycles A -> B -> C -> A.
+    ///   - A chain that walks a self-recursive type repeatedly (T -> T -> T -> ... -> T)
+    ///     is allowed at any depth — it is depth, not a cycle.
     /// Implementation: build the type sequence (entry-owner :: per-hop targets), collapse
     /// consecutive runs of the same type, then detect duplicates in the collapsed sequence.
     /// A duplicate after collapsing means the chain LEFT a type and RETURNED to it, which
