@@ -86,7 +86,18 @@ module internal SoloDBRootOps =
                         let reProbe = conn.QueryFirstOrDefault<obj>(probeSql)
                         if isNull reProbe then ()
                         else
-                            Helper.dropTriggersForTable targetTable conn
+                            // Capture EVERY trigger on this table — SoloDB-internal AND any
+                            // user-registered triggers — drop them all, run heal UPDATEs, then
+                            // recreate them from the captured SQL. SQLite transactional DDL
+                            // ensures process death rolls back both the DROP and the heal
+                            // updates, restoring the table+triggers to their pre-heal state.
+                            let triggerRows =
+                                conn.Query<{| Name: string; Sql: string |}>(
+                                    "SELECT name AS Name, sql AS Sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = @t AND sql IS NOT NULL;",
+                                    {| t = targetTable |})
+                                |> Seq.toArray
+                            for trig in triggerRows do
+                                conn.Execute(sprintf "DROP TRIGGER IF EXISTS \"%s\";" (trig.Name.Replace("\"", "\"\""))) |> ignore
                             let selectAllSql =
                                 sprintf "SELECT Id, json(Value) AS ValueJson FROM %s WHERE %s;" qTable predicateFragment
                             let rows =
@@ -105,7 +116,8 @@ module internal SoloDBRootOps =
                                 let updateSql =
                                     sprintf "UPDATE %s SET Value = jsonb_set(Value, '%s', jsonb(@v)) WHERE Id = @id;" qTable soloIdJsonPath
                                 conn.Execute(updateSql, {| v = newSoloIdLiteral; id = row.Id |}) |> ignore
-                            Helper.createTriggersForTable targetTable conn
+                            for trig in triggerRows do
+                                conn.Execute(trig.Sql) |> ignore
                     )
                 with
                 | :? Microsoft.Data.Sqlite.SqliteException as ex when ex.SqliteErrorCode = 8 ->
