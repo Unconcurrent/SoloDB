@@ -8,52 +8,20 @@ open Utils
 
 module internal SoloDBRootOps =
 
-    /// Repairs target rows whose [<SoloId>] field is null/empty in the persisted JSON Value column —
-    /// the historical state left by SoloDB cascade-insert before the IIdGenerator was wired into
-    /// `insertTargetEntity`. One indexed probe per collection-open; if no bug, return; if bug found,
-    /// fix all matching rows in one BEGIN IMMEDIATE transaction so a process death is a clean ROLLBACK.
-    ///
-    /// Probe leverages the unique index on jsonb_extract(Value, '$.<SoloId>') that typed relations
-    /// require (RelationsSchemaLinkTableDDL). On healthy collections the probe is a single index seek
-    /// that returns nothing — no UPDATEs, no cache, no full scan. The probe runs every GetCollection
-    /// because the index makes it cheap; if it ever stops being cheap we should fix the index, not
-    /// add a memo on top.
-    ///
-    /// Auto-heal is restricted to STRING SoloIds because their bug shape (NULL or empty) is
-    /// unambiguous. Value-type SoloIds (int64 0L, Guid.Empty, default struct) cannot be safely
-    /// distinguished from legitimate user-chosen ids and are therefore left alone — users who hit
-    /// the value-type-default bug must regenerate manually.
-    /// True iff the collection is currently registered as a TARGET of any typed-DBRef relation.
-    /// Heal is gated on this: the historical cascade-insert-skipped-IIdGenerator bug only affects
-    /// rows of typed-relation target collections, AND the unique index on jsonb_extract(Value, '$.<SoloId>')
-    /// (created by RelationsSchemaLinkTableDDL) only exists for those collections — without it, the
-    /// probe would scan every row of every collection on every GetCollection call. Gating restricts
-    /// the probe to the subset where (a) the bug can exist and (b) the index makes the probe an
-    /// index seek instead of a scan.
-    let private isTypedRelationTarget (connectionManager: ConnectionManager) (collectionName: string) : bool =
-        try
-            use conn = connectionManager.Borrow()
-            let exists =
-                conn.QueryFirst<int64>(
-                    "SELECT CASE WHEN EXISTS (SELECT 1 FROM SoloDBRelation WHERE TargetCollection = @t) THEN 1 ELSE 0 END;",
-                    {| t = collectionName |})
-            exists = 1L
-        with
-        | _ -> false  // Catalog absent (very early bootstrap) → not a relation target by definition.
-
-    let private healCustomIdRows<'T>
+    /// Per-target heal body. Operates on a single typed-relation TARGET type. Probes the target
+    /// collection for bug-shape SoloId rows; repairs them inside a BEGIN IMMEDIATE transaction.
+    /// The string-only predicate is preserved here; per-type widening lands in a follow-up commit.
+    let private healOneTargetTyped<'TTarget>
         (connectionManager: ConnectionManager)
-        (name: string)
-        (collection: ISoloDBCollection<'T>) =
-        match CustomTypeId<'T>.Value with
+        (targetTable: string) =
+        match CustomTypeId<'TTarget>.Value with
         | None -> ()
         | Some custom ->
             let isStringSoloId = custom.Property.PropertyType = typeof<string>
-            if not isStringSoloId then () // Value-type SoloIds are not auto-repaired; ambiguous between bug and intent.
-            elif not (isTypedRelationTarget connectionManager name) then ()
+            if not isStringSoloId then ()
             else
                 let soloIdName = custom.Property.Name
-                let qTable = sprintf "\"%s\"" (name.Replace("\"", "\"\""))
+                let qTable = sprintf "\"%s\"" (targetTable.Replace("\"", "\"\""))
                 let badRowPredicate =
                     sprintf "jsonb_extract(Value, '$.%s') IS NULL OR jsonb_extract(Value, '$.%s') = ''"
                         soloIdName soloIdName
@@ -78,12 +46,13 @@ module internal SoloDBRootOps =
                                     |> Seq.toArray
                                 for row in rows do
                                     let json = JsonSerializator.JsonValue.Parse row.ValueJson
-                                    let entity = json.ToObject(typeof<'T>)
-                                    CustomIdRunner.RunIfEmpty<'T>(entity :?> 'T, collection)
-                                    match SoloIdAccessor.TryGetBoxedValue(typeof<'T>, entity) with
+                                    let entity = json.ToObject(typeof<'TTarget>)
+                                    let typedNull : ISoloDBCollection<'TTarget> = Unchecked.defaultof<_>
+                                    CustomIdRunner.RunIfEmpty<'TTarget>(entity :?> 'TTarget, typedNull)
+                                    match SoloIdAccessor.TryGetBoxedValue(typeof<'TTarget>, entity) with
                                     | ValueNone ->
                                         raise (InvalidOperationException(
-                                            sprintf "Error: heal-repair could not produce a non-empty [<SoloId>] for row Id=%d in collection '%s'.\nReason: the registered IIdGenerator returned an empty value during heal.\nFix: ensure the generator's GenerateId returns a non-empty value." row.Id name))
+                                            sprintf "Error: heal-repair could not produce a non-empty [<SoloId>] for row Id=%d in collection '%s'.\nReason: the registered IIdGenerator returned an empty value during heal.\nFix: ensure the generator's GenerateId returns a non-empty value." row.Id targetTable))
                                     | ValueSome _ -> ()
                                     let regenerated = JsonSerializator.JsonValue.Serialize(entity).ToJsonString()
                                     let updateSql =
@@ -93,7 +62,42 @@ module internal SoloDBRootOps =
                     with
                     | :? Microsoft.Data.Sqlite.SqliteException as ex when ex.SqliteErrorCode = 8 ->
                         raise (InvalidOperationException(
-                            sprintf "Error: collection '%s' contains rows with missing [<SoloId>] (a known historical defect from earlier typed-DBRef cascade-insert) but the database was opened read-only.\nFix: reopen the database with read+write access; the next GetCollection call will repair the affected rows." name, ex))
+                            sprintf "Error: collection '%s' contains rows with missing [<SoloId>] (a known historical defect from earlier typed-DBRef cascade-insert) but the database was opened read-only.\nFix: reopen the database with read+write access; the next GetCollection call will repair the affected rows." targetTable, ex))
+
+    /// Trampoline cache: target Type → closed MethodInfo for healOneTargetTyped<TargetType>.
+    let private healOneTargetMiCache =
+        System.Collections.Concurrent.ConcurrentDictionary<System.Type, System.Reflection.MethodInfo>()
+
+    let private healOneTargetOpenMethod : System.Reflection.MethodInfo =
+        let asm = typeof<RelationsTypes.RelationKind>.Assembly
+        let m = asm.GetType("SoloDatabase.SoloDBRootOps")
+        if isNull m then null
+        else
+            m.GetMethods(System.Reflection.BindingFlags.NonPublic ||| System.Reflection.BindingFlags.Static)
+            |> Array.tryFind (fun mi -> mi.Name = "healOneTargetTyped" && mi.IsGenericMethodDefinition)
+            |> Option.toObj
+
+    let private healOneTarget (connectionManager: ConnectionManager) (targetTable: string) (targetType: System.Type) =
+        if isNull healOneTargetOpenMethod then ()
+        else
+            let mi = healOneTargetMiCache.GetOrAdd(targetType, fun (t: System.Type) -> healOneTargetOpenMethod.MakeGenericMethod(t))
+            try
+                mi.Invoke(null, [| box connectionManager; box targetTable |]) |> ignore
+            with
+            | :? System.Reflection.TargetInvocationException as tie when not (isNull tie.InnerException) ->
+                raise tie.InnerException
+
+    /// Owner-side heal trigger. When a typed collection opens, walk every DBRef/DBRefMany
+    /// property declared on the opened type via reflection and heal each property's target
+    /// collection. The .NET model is the authority for "what does this type reference".
+    let private healOwnerRelationTargets<'TOwner> (connectionManager: ConnectionManager) (ownerTable: string) =
+        let specs = RelationsSchema.getRelationSpecs typeof<'TOwner>
+        if specs.Length > 0 then
+            use conn = connectionManager.Borrow()
+            for spec in specs do
+                let prop, _kind, targetType, _typedIdType, _onDelete, _onOwnerDelete, _isUnique, _orderBy = spec
+                let targetTable = RelationsSchema.resolveTargetCollectionName conn ownerTable prop.Name targetType
+                healOneTarget connectionManager targetTable targetType
 
     let initializeCollection<'T>
         (checkDisposed: unit -> unit)
@@ -152,7 +156,7 @@ module internal SoloDBRootOps =
 
         let collection = Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = clearCache; EventSystem = events })
 
-        healCustomIdRows<'T> connectionManager name (collection :> ISoloDBCollection<'T>)
+        healOwnerRelationTargets<'T> connectionManager name
 
         use snapshotConnection = connectionManager.Borrow()
         collection.RefreshIndexModelSnapshot(snapshotConnection)
