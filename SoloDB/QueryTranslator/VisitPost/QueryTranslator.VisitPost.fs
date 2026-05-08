@@ -450,16 +450,19 @@ module internal QueryTranslatorVisitPost =
             SetDBRefToNone(propertyPath, targetType)
 
         | _ ->
-            // Closure-captured DBRef value (e.g. `let r = DBRef.From(unsaved)` hoisted out of
-            // the lambda; body uses `p.Ref.Set r`). Inspect at runtime via reflection on the
-            // PendingEntity voption property — if a pending entity is present, the captured
-            // DBRef came from DBRef.From(...), and the From-cascade rejection applies.
+            // Closure-captured DBRef value: a hoisted `DBRef.None`, `DBRef.To(id)`,
+            // `DBRef.To(typedId)`, or `DBRef.From(unsaved)`. The AST shape here is the
+            // closure access (e.g. MemberExpression onto a captured local), so we
+            // evaluate to the runtime DBRef instance and classify by inspecting public
+            // surface (Id, HasTypedId, TypedId) plus the internal PendingEntity probe.
             let captured = evaluateExpr<obj> valueExpr
-            let hasPendingEntity =
-                if isNull captured then false
-                else
-                    let t = captured.GetType()
-                    let pendingProp = t.GetProperty("PendingEntity", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance)
+            if isNull captured then
+                SetDBRefToNone(propertyPath, targetType)
+            else
+                let t = captured.GetType()
+                // Reject DBRef.From(unsaved) — pending entity present means cascade-insert.
+                let pendingProp = t.GetProperty("PendingEntity", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance)
+                let hasPendingEntity =
                     if isNull pendingProp then false
                     else
                         let raw = pendingProp.GetValue(captured, null)
@@ -470,9 +473,33 @@ module internal QueryTranslatorVisitPost =
                             if isNull isSomeProp then false
                             elif isSomeProp.GetGetMethod(true).IsStatic then isSomeProp.GetValue(null, [| raw |]) :?> bool
                             else isSomeProp.GetValue(raw, null) :?> bool
-            if hasPendingEntity then
-                raise (NotSupportedException updateManyDbRefFromUnsupportedMessage)
-            raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                if hasPendingEntity then
+                    raise (NotSupportedException updateManyDbRefFromUnsupportedMessage)
+                // Legal capture: classify into SetDBRefToId / SetDBRefToTypedId / SetDBRefToNone.
+                let readId () =
+                    let idProp = t.GetProperty("Id", BindingFlags.Public ||| BindingFlags.Instance)
+                    if isNull idProp then ValueNone
+                    else tryAsInt64 (idProp.GetValue(captured))
+                if DBRefTypeHelpers.isDBRefSingleDefinition dbRefDef then
+                    match readId () with
+                    | ValueSome id when id > 0L -> SetDBRefToId(propertyPath, targetType, id)
+                    | _ -> SetDBRefToNone(propertyPath, targetType)
+                else
+                    let hasTypedIdProp = t.GetProperty("HasTypedId", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance)
+                    let hasTypedId =
+                        if isNull hasTypedIdProp then false
+                        else
+                            match hasTypedIdProp.GetValue(captured) with
+                            | :? bool as b -> b
+                            | _ -> false
+                    if hasTypedId then
+                        let typedIdProp = t.GetProperty("TypedId", BindingFlags.Public ||| BindingFlags.Instance)
+                        let typedIdVal = if isNull typedIdProp then null else typedIdProp.GetValue(captured)
+                        SetDBRefToTypedId(propertyPath, targetType, args.[1], typedIdVal)
+                    else
+                        match readId () with
+                        | ValueSome id when id > 0L -> SetDBRefToId(propertyPath, targetType, id)
+                        | _ -> SetDBRefToNone(propertyPath, targetType)
 
     let private extractTargetIdForDbRefManyOrThrow (expr: Expression) =
         let valueObj = evaluateExpr<obj> expr
