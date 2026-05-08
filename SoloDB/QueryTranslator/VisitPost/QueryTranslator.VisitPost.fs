@@ -324,35 +324,24 @@ module internal QueryTranslatorVisitPost =
             | _ -> ()
         scan lhs false
 
-    /// Tries to recognise a chain LHS of the shape `p.A.Value.B.Value. … .Z.Value.<TargetProp>`
-    /// with depth >= 2. On success returns (hops, leafTargetPropertyName).
-    /// Depth=1 (`p.Ref.Value.X`) returns ValueNone here — caller falls through to the single-hop
-    /// path which preserves existing behaviour until subsumed in commit ζ.
+    /// Recognises any Ref.Value chain LHS of the shape `p.A.Value [.B.Value ...] .<TargetProp>`
+    /// at depth >= 1 (single-hop and N-hop). On success returns (hops, leafTargetPropertyName).
+    /// Single-hop is just a chain with one hop; routing it through this parser unifies the
+    /// emit/execute path through the SqlDu pipeline.
     let private tryParseRefChainAssignmentLhs (lhs: Expression) : voption<ChainHopSpec list * string> =
         let lhs = unwrapConvertAll lhs
         match lhs with
         | :? MemberExpression as me when not (isNull me.Expression) ->
             match tryAsDbRefValueAccessor me.Expression with
             | ValueSome innerDbRefExpr ->
-                // Single-hop path: innerDbRefExpr is `p.<Rel>` — relMe.Expression is the
-                // ParameterExpression itself (NOT a deeper structure). Chain path: anything
-                // else, including nested .Value accesses. Use a non-recursive parent check
-                // here — `isRootParameter` follows MemberExpression.Expression all the way
-                // down, which would mis-classify every multi-hop chain rooted at the lambda
-                // parameter as 'depth-1' and defer the chain back to the single-hop parser.
-                let unwrapped = unwrapConvertAll innerDbRefExpr
-                match unwrapped with
-                | :? MemberExpression as relMe when not (isNull relMe.Expression) && (match unwrapConvertAll relMe.Expression with :? ParameterExpression -> true | _ -> false) ->
-                    // True depth-1 — defer to single-hop path.
-                    ValueNone
-                | _ ->
-                    let hops = walkRefChainBackwards innerDbRefExpr
-                    assertChainHasNoTypeCycle hops
-                    ValueSome (hops, me.Member.Name)
+                let hops = walkRefChainBackwards innerDbRefExpr
+                assertChainHasNoTypeCycle hops
+                ValueSome (hops, me.Member.Name)
             | ValueNone -> ValueNone
         | _ -> ValueNone
 
-    /// Chain variant of the setter-call shape `p.A.Value.B.Value. … .set_<TargetProp>(rhs)`.
+    /// Chain variant of the setter-call shape `p.A.Value [.B.Value ...] .set_<TargetProp>(rhs)`
+    /// at depth >= 1.
     let private tryParseRefChainSetterMethodCall (mc: MethodCallExpression) : voption<ChainHopSpec list * string * Expression> =
         if isNull mc.Method.Name || not (mc.Method.Name.StartsWith "set_") then ValueNone
         elif isNull mc.Object then ValueNone
@@ -360,15 +349,10 @@ module internal QueryTranslatorVisitPost =
         else
             match tryAsDbRefValueAccessor mc.Object with
             | ValueSome innerDbRefExpr ->
-                let unwrapped = unwrapConvertAll innerDbRefExpr
-                match unwrapped with
-                | :? MemberExpression as relMe when not (isNull relMe.Expression) && (match unwrapConvertAll relMe.Expression with :? ParameterExpression -> true | _ -> false) ->
-                    ValueNone
-                | _ ->
-                    let propName = mc.Method.Name.Substring(4)
-                    let hops = walkRefChainBackwards innerDbRefExpr
-                    assertChainHasNoTypeCycle hops
-                    ValueSome (hops, propName, mc.Arguments.[0])
+                let propName = mc.Method.Name.Substring(4)
+                let hops = walkRefChainBackwards innerDbRefExpr
+                assertChainHasNoTypeCycle hops
+                ValueSome (hops, propName, mc.Arguments.[0])
             | ValueNone -> ValueNone
 
     /// Chain-leaf DBRefMany source recognition. Source expression for Add/Remove/Clear is
@@ -420,68 +404,6 @@ module internal QueryTranslatorVisitPost =
         let jsonLiteral = JsonSerializator.JsonValue.Serialize(rhsValue).ToJsonString()
         let leafJsonPath = "$." + leafTargetPropertyName
         MutateRefChainProperty(hops, leafTargetType, leafJsonPath, jsonLiteral)
-
-    /// Tries to recognise an LHS of the shape `p.<RelationProp>.Value.<TargetProp>`.
-    /// On success returns the root DBRef-typed MemberExpression and the target property name.
-    /// Multi-hop paths (`p.X.Value.Y.Z`) return ValueNone here — caller treats as out of scope.
-    let private tryParseDbRefValueAssignmentLhs (lhs: Expression) =
-        let lhs = unwrapConvertAll lhs
-        match lhs with
-        | :? MemberExpression as me when not (isNull me.Expression) ->
-            match tryAsDbRefValueAccessor me.Expression with
-            | ValueSome dbRefExpr ->
-                match tryGetRootRelationMember dbRefExpr with
-                | ValueSome rootMe when DBRefTypeHelpers.isDBRefType rootMe.Type -> ValueSome (rootMe, me.Member.Name)
-                | _ -> ValueNone
-            | ValueNone -> ValueNone
-        | _ -> ValueNone
-
-    /// Tries to recognise an LHS of the shape `p.<RelationProp>.Value.set_<TargetProp>(rhs)`.
-    /// Returns the root DBRef MemberExpression, target property name, and RHS expression.
-    let private tryParseDbRefValueSetterMethodCall (mc: MethodCallExpression) =
-        if isNull mc.Method.Name || not (mc.Method.Name.StartsWith "set_") then ValueNone
-        elif isNull mc.Object then ValueNone
-        elif mc.Arguments.Count <> 1 then ValueNone
-        else
-            match tryAsDbRefValueAccessor mc.Object with
-            | ValueSome dbRefExpr ->
-                match tryGetRootRelationMember dbRefExpr with
-                | ValueSome rootMe when DBRefTypeHelpers.isDBRefType rootMe.Type ->
-                    let propName = mc.Method.Name.Substring(4)
-                    ValueSome (rootMe, propName, mc.Arguments.[0])
-                | _ -> ValueNone
-            | ValueNone -> ValueNone
-
-    /// B4 — property mutation of the target row through a single-arg DBRef.Value.<X>.
-    /// Validates: target X is not [<SoloId>]; RHS is a closure-captured constant.
-    let private parseDbRefValueMutation
-            (rootMe: MemberExpression)
-            (targetPropertyName: string)
-            (rhsExpr: Expression) =
-        let dbRefType = unwrapConvertAll rootMe.Expression |> ignore; rootMe.Type
-        let args = dbRefType.GetGenericArguments()
-        let targetType = args.[0]
-        // Reject [<SoloId>] target — closes the bypass around Item I.
-        let targetSoloIdProp =
-            targetType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-            |> Array.tryFind (fun p -> not (isNull (p.GetCustomAttribute<SoloDatabase.Attributes.SoloId>(true))))
-        match targetSoloIdProp with
-        | Some prop when prop.Name = targetPropertyName ->
-            raise (InvalidOperationException(
-                sprintf "Error: Cannot use UpdateMany to write the [<SoloId>] field '%s.%s' through a DBRef.Value mutation.\nReason: The [<SoloId>] field is the type's identity and may not be mutated through UpdateMany. To re-identify a row, delete and re-insert the entity."
-                    targetType.FullName targetPropertyName))
-        | _ -> ()
-        // RHS must evaluate to a closure-captured constant — no reference to the lambda parameter.
-        let rhsValue =
-            try evaluateExpr<obj> rhsExpr
-            with _ ->
-                raise (InvalidOperationException(
-                    sprintf "Error: UpdateMany DBRef.Value.%s mutation requires a closure-captured constant on the right-hand side.\nReason: The expression references the lambda parameter or a target-state value that cannot be reduced at translate time.\nFix: Hoist the value into a local variable above the UpdateMany call and reference that local in the lambda body."
-                        targetPropertyName))
-        let jsonLiteral = JsonSerializator.JsonValue.Serialize(rhsValue).ToJsonString()
-        let ownerProperty = (tryGetRootRelationMember (rootMe :> Expression) |> ValueOption.get).Member.Name
-        let targetPropertyJsonPath = "$." + targetPropertyName
-        MutateDBRefTargetProperty(ownerProperty, targetType, targetPropertyJsonPath, jsonLiteral)
 
     let private parseDbRefSetValue (dbRefType: Type) (propertyPath: string) (valueExpr: Expression) =
         let dbRefDef = dbRefType.GetGenericTypeDefinition()
@@ -578,56 +500,44 @@ module internal QueryTranslatorVisitPost =
         // method-call mutations) fall through to the existing rejection paths.
         match body with
         | :? BinaryExpression as be when be.NodeType = ExpressionType.Assign ->
-            // Try the multi-hop chain shape first (depth >= 2). Single-hop falls through.
             match tryParseRefChainAssignmentLhs be.Left with
             | ValueSome (hops, leafPropName) ->
                 buildChainPropertyMutation hops leafPropName be.Right |> ValueSome
             | ValueNone ->
-                match tryParseDbRefValueAssignmentLhs be.Left with
-                | ValueSome (rootMe, targetPropName) ->
-                    parseDbRefValueMutation rootMe targetPropName be.Right |> ValueSome
-                | ValueNone ->
-                    // Classify mid-chain violations (plain CLR property, method call,
-                    // positional indexer past a `.Value` accessor) before the generic
-                    // single-hop rejection so each shape gets its specific hop-trail vocab.
-                    tryRaiseMidChainClassified be.Left
-                    if containsDBRefValueMutationPath body then
-                        raise (InvalidOperationException updateManyDbRefValueMutationMessage)
-                    match tryGetRootRelationMember be.Left with
-                    | ValueSome me when DBRefTypeHelpers.isDBRefType me.Type || DBRefTypeHelpers.isDBRefManyType me.Type ->
-                        raise (NotSupportedException updateManyRelationUnsupportedMessage)
-                    | _ -> ValueNone
+                // Classify mid-chain violations (plain CLR property, method call, positional
+                // indexer past a `.Value` accessor) so each unsupported shape gets a specific
+                // hop-trail vocabulary instead of falling to the generic rejection.
+                tryRaiseMidChainClassified be.Left
+                if containsDBRefValueMutationPath body then
+                    raise (InvalidOperationException updateManyDbRefValueMutationMessage)
+                match tryGetRootRelationMember be.Left with
+                | ValueSome me when DBRefTypeHelpers.isDBRefType me.Type || DBRefTypeHelpers.isDBRefManyType me.Type ->
+                    raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                | _ -> ValueNone
 
         | :? MethodCallExpression as mc when mc.Method.Name.StartsWith "set_" ->
             match tryParseRefChainSetterMethodCall mc with
             | ValueSome (hops, leafPropName, rhsExpr) ->
                 buildChainPropertyMutation hops leafPropName rhsExpr |> ValueSome
             | ValueNone ->
-                match tryParseDbRefValueSetterMethodCall mc with
-                | ValueSome (rootMe, targetPropName, rhsExpr) ->
-                    parseDbRefValueMutation rootMe targetPropName rhsExpr |> ValueSome
-                | ValueNone ->
-                    // set_Item indexer at mid-chain (DBRefMany positional after a `.Value`)
-                    // gets the positional-mid-chain diagnostic. The set_X chain classifier
-                    // covers method-call mid-chain shapes too.
-                    if mc.Method.Name = "set_Item" && not (isNull mc.Object) then
-                        let obj = unwrapConvertAll mc.Object
-                        let rec hasValueInChain (e: Expression) =
-                            match e with
-                            | null -> false
-                            | :? MemberExpression as me when me.Member.Name = "Value" &&
-                                                             not (isNull me.Expression) &&
-                                                             DBRefTypeHelpers.isDBRefType (unwrapConvertAll me.Expression).Type -> true
-                            | :? MemberExpression as me -> hasValueInChain me.Expression
-                            | :? MethodCallExpression as inner -> hasValueInChain inner.Object
-                            | _ -> false
-                        if hasValueInChain obj then
-                            raise (NotSupportedException(chainPositionalMidChainMessage 0))
-                    if not (isNull mc.Object) then
-                        tryRaiseMidChainClassified mc.Object
-                    if containsDBRefValueMutationPath body then
-                        raise (InvalidOperationException updateManyDbRefValueMutationMessage)
-                    ValueNone
+                if mc.Method.Name = "set_Item" && not (isNull mc.Object) then
+                    let obj = unwrapConvertAll mc.Object
+                    let rec hasValueInChain (e: Expression) =
+                        match e with
+                        | null -> false
+                        | :? MemberExpression as me when me.Member.Name = "Value" &&
+                                                         not (isNull me.Expression) &&
+                                                         DBRefTypeHelpers.isDBRefType (unwrapConvertAll me.Expression).Type -> true
+                        | :? MemberExpression as me -> hasValueInChain me.Expression
+                        | :? MethodCallExpression as inner -> hasValueInChain inner.Object
+                        | _ -> false
+                    if hasValueInChain obj then
+                        raise (NotSupportedException(chainPositionalMidChainMessage 0))
+                if not (isNull mc.Object) then
+                    tryRaiseMidChainClassified mc.Object
+                if containsDBRefValueMutationPath body then
+                    raise (InvalidOperationException updateManyDbRefValueMutationMessage)
+                ValueNone
 
         | :? MethodCallExpression as mc when mc.Method.Name = "Set" ->
             let oldValue, newValue =

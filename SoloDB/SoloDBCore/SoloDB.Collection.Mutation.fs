@@ -354,15 +354,11 @@ type internal CollectionMutationOps<'T>() =
 
                 let mutable affected = executeJsonUpdateManyByRows conn selectedRows jsonTransforms
 
-                // Partition: single-hop target-side B4 mutations vs N-hop chain ops vs
-                // link-touching apply ops.
-                let mutateOps = ResizeArray<string * Type * string * string>()
+                // Partition: B4 chain ops (depth >= 1) vs link-touching apply ops.
                 let chainOps = ResizeArray<QueryTranslatorBase.UpdateManyRelationTransform>()
                 let applyOpsRaw = ResizeArray<QueryTranslatorBase.UpdateManyRelationTransform>()
                 for op in relationTransforms do
                     match op with
-                    | QueryTranslatorBaseTypes.MutateDBRefTargetProperty(ownerProp, targetType, jsonPath, jsonLiteral) ->
-                        mutateOps.Add (ownerProp, targetType, jsonPath, jsonLiteral)
                     | QueryTranslatorBaseTypes.MutateRefChainProperty _
                     | QueryTranslatorBaseTypes.RefChainManyAdd _
                     | QueryTranslatorBaseTypes.RefChainManyRemove _
@@ -370,37 +366,7 @@ type internal CollectionMutationOps<'T>() =
                         chainOps.Add op
                     | other -> applyOpsRaw.Add other
 
-                // Target-side first: drive UPDATE on the target collection through the link table,
-                // anchored on selected owner ids snapshot. Empty selectedRows → no-op.
-                if mutateOps.Count > 0 && selectedRows.Length > 0 then
-                    let descriptors = RelationsSchemaValidator.buildRelationDescriptors tx typeof<'T>
-                    for (ownerProp, _targetType, jsonPath, jsonLiteral) in mutateOps do
-                        let descriptor =
-                            match descriptors |> Array.tryFind (fun d -> d.PropertyPath = ownerProp) with
-                            | Some d -> d
-                            | None ->
-                                raise (InvalidOperationException(
-                                    sprintf "Error: UpdateMany cannot resolve a relation descriptor for owner property '%s' on type '%s'.\nReason: The translated transform refers to a DBRef property that has no registered relation descriptor for this owner type. This typically indicates a two-hop chain like p.Ref.Value.Other.Value.X where Other is not a relation property of the owner type, or a malformed transform expression.\nFix: Confirm the property is a DBRef on the owner type and use a single-hop p.Ref.Value.Field shape."
-                                        ownerProp typeof<'T>.FullName))
-                        let qLink = sprintf "\"%s\"" (descriptor.LinkTable.Replace("\"", "\"\""))
-                        let qTarget = sprintf "\"%s\"" (descriptor.TargetTable.Replace("\"", "\"\""))
-                        let sourceCol, targetCol =
-                            if descriptor.OwnerUsesSourceColumn then "SourceId", "TargetId"
-                            else "TargetId", "SourceId"
-                        let idVars = Dictionary<string, obj>()
-                        idVars.["v"] <- jsonLiteral
-                        let inListBuilder = StringBuilder()
-                        for i in 0 .. selectedRows.Length - 1 do
-                            if i > 0 then inListBuilder.Append(",") |> ignore
-                            let key = sprintf "muid%d" i
-                            inListBuilder.Append("@").Append(key) |> ignore
-                            idVars.[key] <- selectedRows.[i].Id.Value :> obj
-                        let updateSql =
-                            sprintf "UPDATE %s SET Value = jsonb_set(Value, '%s', jsonb(@v)) WHERE Id IN (SELECT %s FROM %s WHERE %s IN (%s));"
-                                qTarget jsonPath targetCol qLink sourceCol (inListBuilder.ToString())
-                        conn.Execute(updateSql, idVars) |> ignore
-
-                // N-hop chain executor. Resolves per-hop relation descriptors and emits a chain
+                // Chain executor. Resolves per-hop relation descriptors and emits a chain
                 // SELECT (joins through link tables hop-by-hop) anchored on selectedRows ids,
                 // then wraps as UPDATE / DELETE / INSERT … SELECT depending on the op shape.
                 if chainOps.Count > 0 && selectedRows.Length > 0 then
@@ -662,8 +628,6 @@ type internal CollectionMutationOps<'T>() =
                             | QueryTranslatorBaseTypes.AddDBRefMany(path, targetType, targetId) -> RelationsTypes.AddDBRefMany(path, targetType, targetId)
                             | QueryTranslatorBaseTypes.RemoveDBRefMany(path, targetType, targetId) -> RelationsTypes.RemoveDBRefMany(path, targetType, targetId)
                             | QueryTranslatorBaseTypes.ClearDBRefMany(path, targetType) -> RelationsTypes.ClearDBRefMany(path, targetType)
-                            | QueryTranslatorBaseTypes.MutateDBRefTargetProperty _ ->
-                                failwith "MutateDBRefTargetProperty already handled in target-side pass"
                             | QueryTranslatorBaseTypes.MutateRefChainProperty _
                             | QueryTranslatorBaseTypes.RefChainManyAdd _
                             | QueryTranslatorBaseTypes.RefChainManyRemove _

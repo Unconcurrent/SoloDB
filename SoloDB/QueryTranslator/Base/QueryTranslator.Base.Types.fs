@@ -65,10 +65,10 @@ module internal QueryTranslatorBaseTypes =
         | AddDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
         | RemoveDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
         | ClearDBRefMany of PropertyPath: string * TargetType: Type
-        /// N-hop B4 chain: Hops length >= 1; non-leaf hops are DBRef-shape (single); the
-        /// LeafJsonPath addresses a non-[<SoloId>] property on the innermost target.
-        /// NewValueJsonLiteral is the RHS serialized to JSON; RHS must be a closure-captured
-        /// constant. Subsumes the depth=1 single-hop MutateDBRefTargetProperty in commit ζ.
+        /// B4 property mutation through a Ref.Value chain. Hops length >= 1; each hop is
+        /// DBRef-shape on the previous target type; the LeafJsonPath addresses a
+        /// non-`[<SoloId>]` property on the innermost target. NewValueJsonLiteral is the
+        /// RHS serialized to JSON; RHS must be a closure-captured constant.
         | MutateRefChainProperty of
             Hops: ChainHopSpec list
             * LeafTargetType: Type
@@ -91,19 +91,6 @@ module internal QueryTranslatorBaseTypes =
             Hops: ChainHopSpec list
             * LeafManyPropertyName: string
             * LeafTargetType: Type
-        /// Mutation of a property on the target row reached through a DBRef relation.
-        /// OwnerProperty: name of the DBRef property on the owner type (used to resolve the
-        ///                relation descriptor → link table → target collection).
-        /// TargetType:    the target's .NET type.
-        /// TargetPropertyJsonPath: '$.<segment>' with a single segment (no nested traversal),
-        ///                pre-validated to NOT be a [<SoloId>]-marked property.
-        /// NewValueJsonLiteral: the RHS serialized to a JSON wire literal — RHS must be a
-        ///                closure-captured constant (no parameter reference).
-        | MutateDBRefTargetProperty of
-            OwnerProperty: string
-            * TargetType: Type
-            * TargetPropertyJsonPath: string
-            * NewValueJsonLiteral: string
 
     /// <summary>
     /// Appends a value to the query as a parameter or literal, handling various primitive types and JSON serialization.
