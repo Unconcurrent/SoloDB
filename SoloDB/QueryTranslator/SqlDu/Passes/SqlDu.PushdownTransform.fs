@@ -207,6 +207,17 @@ let pushdownStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
         let changed = ref false
         let result = pushdownSelect changed sel
         struct(SelectStmt result, changed.Value)
-    // DML predicate optimization is out of scope.
-    // UpdateStmt, DeleteStmt, InsertStmt, DdlStmt pass through unchanged.
-    | InsertStmt _ | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)
+    // INSERT … SELECT recurses so predicate pushdown reaches the chain SELECT subtree
+    // emitted for N-hop B4. UPDATE/DELETE WHERE is intentionally skipped: pushing predicates
+    // through a DML WHERE has no inner subquery to push them into, and the chain SELECT used
+    // by N-hop B4 lives inside Update.Where as InSubquery — flattenSelect (FlattenTransform)
+    // already handles that nested-SELECT shape and pushdown runs on the SELECT before it is
+    // wrapped into the predicate. DDL has no expression tree.
+    | InsertStmt ins ->
+        match ins.Source with
+        | InsertValues _ -> struct(stmt, false)
+        | InsertSelect sel ->
+            let changed = ref false
+            let pushed = pushdownSelect changed sel
+            struct(InsertStmt { ins with Source = InsertSelect pushed }, changed.Value)
+    | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)

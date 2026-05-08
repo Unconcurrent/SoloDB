@@ -246,4 +246,17 @@ let shapeIndexStatement (model: IndexModel) (stmt: SqlStatement) : struct(SqlSta
         let changed = ref false
         let result = shapeIndexSelect model changed sel
         struct(SelectStmt result, changed.Value)
-    | InsertStmt _ | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)
+    | InsertStmt ins ->
+        // INSERT … VALUES has no SELECT subtree to shape; INSERT … SELECT must recurse so the
+        // chain SELECT emitted for N-hop B4 receives index-plan shaping (Captain Q3: no SCAN /
+        // no TEMP B-TREE on chain SELECTs). UPDATE/DELETE WHERE is left unshaped at this layer:
+        // index choice for DML predicates is delegated to SQLite's planner via the surrounding
+        // UPDATE/DELETE statement, which the JSON1-aware index model already covers at insert
+        // time. DDL has no expression tree.
+        match ins.Source with
+        | InsertValues _ -> struct(stmt, false)
+        | InsertSelect sel ->
+            let changed = ref false
+            let shaped = shapeIndexSelect model changed sel
+            struct(InsertStmt { ins with Source = InsertSelect shaped }, changed.Value)
+    | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)

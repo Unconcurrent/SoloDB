@@ -152,4 +152,15 @@ let pushdownProjectionStatement (stmt: SqlStatement) : struct(SqlStatement * boo
         let changed = ref false
         let result = pushdownProjectionSelect changed sel
         struct(SelectStmt result, changed.Value)
-    | InsertStmt _ | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)
+    // INSERT … SELECT recurses so projection pushdown reaches the chain SELECT subtree
+    // emitted for N-hop B4. UPDATE/DELETE/DDL have no SELECT subtree at this layer: the chain
+    // SELECT used by N-hop B4 inside Update.Where is reached via FlattenTransform's
+    // flattenExprDeep before this pass runs at the top level on the wrapped statement.
+    | InsertStmt ins ->
+        match ins.Source with
+        | InsertValues _ -> struct(stmt, false)
+        | InsertSelect sel ->
+            let changed = ref false
+            let pushed = pushdownProjectionSelect changed sel
+            struct(InsertStmt { ins with Source = InsertSelect pushed }, changed.Value)
+    | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)

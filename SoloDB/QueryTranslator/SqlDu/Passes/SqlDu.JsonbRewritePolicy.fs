@@ -196,8 +196,22 @@ let rewriteStatementWithModel (model: IndexModel) (stmt: SqlStatement) : struct(
         let changed = ref false
         let result = rewriteSelectWithModel model changed sel
         struct(SelectStmt result, changed.Value)
-    // DML passthrough — out of scope for JSONB rewrite policy
-    | InsertStmt _ | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)
+    // INSERT … SELECT recurses so the JSONB rewrite policy reaches the chain SELECT subtree
+    // emitted for N-hop B4 — projections and predicates over jsonb_extract on link/target
+    // tables benefit from index-aligned rewrites. UPDATE/DELETE WHERE is skipped: the chain
+    // SELECT used inside Update.Where is rewritten via FlattenTransform-driven InSubquery
+    // descent before this pass runs at the wrapped-statement boundary, and rewriting raw
+    // UPDATE SET expressions on a JSON column is the responsibility of the SET-clause builder
+    // in the executor (which already emits jsonb_set with the canonical wire shape). DDL has
+    // no expression tree.
+    | InsertStmt ins ->
+        match ins.Source with
+        | InsertValues _ -> struct(stmt, false)
+        | InsertSelect sel ->
+            let changed = ref false
+            let rewritten = rewriteSelectWithModel model changed sel
+            struct(InsertStmt { ins with Source = InsertSelect rewritten }, changed.Value)
+    | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)
 
 /// Apply the JSONB rewrite policy to a SqlStatement (no index model — empty).
 let rewriteStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
