@@ -191,9 +191,13 @@ let private statementMetric (stmt: SqlStatement) =
     | SelectStmt select ->
         selectMetric select
     | InsertStmt insert ->
-        insert.Values
-        |> List.fold (fun acc row ->
-            row |> List.fold (fun rowAcc expr -> addMetric rowAcc (exprMetric expr)) acc) (0, 0, 0, 0)
+        match insert.Source with
+        | InsertValues rows ->
+            rows
+            |> List.fold (fun acc row ->
+                row |> List.fold (fun rowAcc expr -> addMetric rowAcc (exprMetric expr)) acc) (0, 0, 0, 0)
+        | InsertSelect select ->
+            selectMetric select
     | UpdateStmt update ->
         let setMetric =
             update.SetClauses

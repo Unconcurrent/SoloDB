@@ -19,17 +19,25 @@ let emitInsert (ctx: EmitContext) (ins: InsertStatement) : Emitted =
     let tableSql = ctx.QuoteIdent(ins.TableName)
     let colsSql = ins.Columns |> List.map (EmitJson.quoteIdentifier ctx) |> String.concat ", "
 
-    let rowsSql =
-        ins.Values
-        |> List.map (fun row ->
-            let rowParts = row |> List.map (emitE ctx)
-            let rowSql = rowParts |> List.map (fun e -> e.Sql) |> String.concat ", "
-            let rowParams = Emitted.collectParameters rowParts
-            allParams.AddRange(rowParams)
-            sprintf "(%s)" rowSql)
-        |> String.concat ", "
+    let sourceSql =
+        match ins.Source with
+        | InsertValues rows ->
+            let rowsSql =
+                rows
+                |> List.map (fun row ->
+                    let rowParts = row |> List.map (emitE ctx)
+                    let rowSql = rowParts |> List.map (fun e -> e.Sql) |> String.concat ", "
+                    let rowParams = Emitted.collectParameters rowParts
+                    allParams.AddRange(rowParams)
+                    sprintf "(%s)" rowSql)
+                |> String.concat ", "
+            sprintf "VALUES %s" rowsSql
+        | InsertSelect select ->
+            let selectEmitted = EmitSelect.emitSelect ctx select
+            allParams.AddRange(selectEmitted.Parameters)
+            selectEmitted.Sql
 
-    let mutable sql = sprintf "%s INTO %s (%s) VALUES %s" conflictStr tableSql colsSql rowsSql
+    let mutable sql = sprintf "%s INTO %s (%s) %s" conflictStr tableSql colsSql sourceSql
 
     match ins.Returning with
     | Some returningExprs ->

@@ -171,6 +171,18 @@ and private flattenSelectCore (changed: bool ref) (core: SelectCore) : SelectCor
     | SingleSelect c -> c
     | _ -> core
 
+/// Recursively flatten any nested SELECT inside an SqlExpr — covers InSubquery, ScalarSubquery,
+/// and Exists at any depth (including nested under Binary, Unary, CaseExpr, FunctionCall, etc.).
+/// Used by DML predicate flattening so chain expressions like Binary(InSubquery(_), And, Eq(_))
+/// get their inner subqueries flattened, not only the top-level InSubquery shape.
+let private flattenExprDeep (changed: bool ref) (expr: SqlExpr) : SqlExpr =
+    SqlExpr.map (fun node ->
+        match node with
+        | InSubquery(e, sel) -> InSubquery(e, flattenSelect changed sel)
+        | ScalarSubquery sel -> ScalarSubquery (flattenSelect changed sel)
+        | Exists sel -> Exists (flattenSelect changed sel)
+        | _ -> node) expr
+
 /// Flatten a SqlStatement.
 let flattenStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
     let changed = ref false
@@ -179,22 +191,15 @@ let flattenStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
         let result = flattenSelect changed sel
         struct(SelectStmt result, changed.Value)
     | InsertStmt ins ->
-        let result = InsertStmt { ins with Returning = ins.Returning }
-        struct(result, false)
+        let flattenedSource =
+            match ins.Source with
+            | InsertValues rows -> InsertValues rows
+            | InsertSelect sel -> InsertSelect (flattenSelect changed sel)
+        struct(InsertStmt { ins with Source = flattenedSource }, changed.Value)
     | UpdateStmt upd ->
-        let flatWhere =
-            match upd.Where with
-            | Some(InSubquery(e, sel)) ->
-                let flatSel = flattenSelect changed sel
-                Some(InSubquery(e, flatSel))
-            | w -> w
+        let flatWhere = upd.Where |> Option.map (flattenExprDeep changed)
         struct(UpdateStmt { upd with Where = flatWhere }, changed.Value)
     | DeleteStmt del ->
-        let flatWhere =
-            match del.Where with
-            | Some(InSubquery(e, sel)) ->
-                let flatSel = flattenSelect changed sel
-                Some(InSubquery(e, flatSel))
-            | w -> w
+        let flatWhere = del.Where |> Option.map (flattenExprDeep changed)
         struct(DeleteStmt { del with Where = flatWhere }, changed.Value)
     | DdlStmt _ -> struct(stmt, false)

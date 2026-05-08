@@ -5,10 +5,14 @@ type internal InsertConflictResolution =
     | OrIgnore
     | OrReplace
 
+type internal InsertSource =
+    | InsertValues of SqlExpr list list
+    | InsertSelect of SqlSelect
+
 type internal InsertStatement = {
     TableName: string
     Columns: string list
-    Values: SqlExpr list list
+    Source: InsertSource
     ConflictResolution: InsertConflictResolution
     Returning: SqlExpr list option
 }

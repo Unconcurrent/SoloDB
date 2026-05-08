@@ -221,10 +221,14 @@ let private foldStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
         let result = foldSelect changed sel
         struct(SelectStmt result, changed.Value)
     | InsertStmt ins ->
+        let foldedSource =
+            match ins.Source with
+            | InsertValues rows -> InsertValues (rows |> List.map (List.map (foldExpr changed)))
+            | InsertSelect sel -> InsertSelect (foldSelect changed sel)
         let result =
             InsertStmt {
                 ins with
-                    Values = ins.Values |> List.map (List.map (foldExpr changed))
+                    Source = foldedSource
                     Returning = ins.Returning |> Option.map (List.map (foldExpr changed))
             }
         struct(result, changed.Value)
