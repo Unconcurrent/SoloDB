@@ -587,6 +587,10 @@ module internal QueryTranslatorVisitPost =
                 | ValueSome (rootMe, targetPropName) ->
                     parseDbRefValueMutation rootMe targetPropName be.Right |> ValueSome
                 | ValueNone ->
+                    // Classify mid-chain violations (plain CLR property, method call,
+                    // positional indexer past a `.Value` accessor) before the generic
+                    // single-hop rejection so each shape gets its specific hop-trail vocab.
+                    tryRaiseMidChainClassified be.Left
                     if containsDBRefValueMutationPath body then
                         raise (InvalidOperationException updateManyDbRefValueMutationMessage)
                     match tryGetRootRelationMember be.Left with
@@ -603,6 +607,24 @@ module internal QueryTranslatorVisitPost =
                 | ValueSome (rootMe, targetPropName, rhsExpr) ->
                     parseDbRefValueMutation rootMe targetPropName rhsExpr |> ValueSome
                 | ValueNone ->
+                    // set_Item indexer at mid-chain (DBRefMany positional after a `.Value`)
+                    // gets the positional-mid-chain diagnostic. The set_X chain classifier
+                    // covers method-call mid-chain shapes too.
+                    if mc.Method.Name = "set_Item" && not (isNull mc.Object) then
+                        let obj = unwrapConvertAll mc.Object
+                        let rec hasValueInChain (e: Expression) =
+                            match e with
+                            | null -> false
+                            | :? MemberExpression as me when me.Member.Name = "Value" &&
+                                                             not (isNull me.Expression) &&
+                                                             DBRefTypeHelpers.isDBRefType (unwrapConvertAll me.Expression).Type -> true
+                            | :? MemberExpression as me -> hasValueInChain me.Expression
+                            | :? MethodCallExpression as inner -> hasValueInChain inner.Object
+                            | _ -> false
+                        if hasValueInChain obj then
+                            raise (NotSupportedException(chainPositionalMidChainMessage 0))
+                    if not (isNull mc.Object) then
+                        tryRaiseMidChainClassified mc.Object
                     if containsDBRefValueMutationPath body then
                         raise (InvalidOperationException updateManyDbRefValueMutationMessage)
                     ValueNone
