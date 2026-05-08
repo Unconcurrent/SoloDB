@@ -21,7 +21,7 @@ module internal QueryTranslatorVisitPost =
 
     [<Literal>]
     let private updateManyDbRefManyPersistedIdMessage =
-        "Error: UpdateMany DBRefMany Add/Remove requires a persisted target Id.\nReason: The target Id must be > 0 to reference an existing row.\nFix: Save the target first or use a valid persisted Id."
+        "Error: UpdateMany DBRefMany Add/Remove requires a persisted target Id.\nReason: The target Id must be > 0 to reference an existing row. Cascade-insert via DBRef.From(unsaved) is not supported in UpdateMany.\nFix: Pass either an int64 row id or an entity whose Id property is > 0. Insert the target first via the target collection if the entity is unsaved."
 
     [<Literal>]
     let private updateManyDbRefValueMutationMessage =
