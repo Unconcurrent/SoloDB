@@ -31,6 +31,10 @@ module internal QueryTranslatorVisitPost =
     let private updateManyDbRefFromUnsupportedMessage =
         "Error: UpdateMany cannot cascade-insert from DBRef.From in a transform.\nReason: DBRef.From is an insertion shape; cascade composition through UpdateMany is not supported.\nFix: Insert the target row via targetCollection.Insert(item) first, then reference its rowid in the UpdateMany transform via DBRef.To(item.Id)."
 
+    [<Literal>]
+    let private updateManyDbRefManyPositionalMessage =
+        "Error: UpdateMany cannot mutate a DBRefMany by position (Insert, SetAt, RemoveAt, indexer assignment).\nReason: DBRefMany has set semantics; positional / Ordered ops require a Position column on the relation link table that the current schema does not declare.\nFix: Use Add, Append, Remove, or Clear by row id or saved entity. Positional ordering on DBRefMany requires schema-level Ordered support that this version does not provide."
+
     /// Deterministic unsupported-shape messages.
     let internal multiSourceCrossRootProjectionMessage =
         "Error: Cross-root projection requires an explicit join key.\nReason: The projection accesses columns from multiple query roots without a defined key relationship.\nFix: Add a Join or GroupJoin with explicit key selectors before projecting across roots."
@@ -388,7 +392,7 @@ module internal QueryTranslatorVisitPost =
                 raise (NotSupportedException updateManyRelationUnsupportedMessage)
             | _ -> ValueNone
 
-        | :? MethodCallExpression as mc when mc.Method.Name = "Add" || mc.Method.Name = "Append" || mc.Method.Name = "Remove" || mc.Method.Name = "Clear" || mc.Method.Name = "SetAt" || mc.Method.Name = "RemoveAt" ->
+        | :? MethodCallExpression as mc when mc.Method.Name = "Add" || mc.Method.Name = "Append" || mc.Method.Name = "Remove" || mc.Method.Name = "Clear" || mc.Method.Name = "SetAt" || mc.Method.Name = "RemoveAt" || mc.Method.Name = "Insert" || mc.Method.Name = "set_Item" ->
             match tryGetCallSourceAndArgStart mc with
             | ValueSome struct (sourceExpr, argStart) ->
                 match tryGetRootRelationMember sourceExpr with
@@ -409,6 +413,11 @@ module internal QueryTranslatorVisitPost =
                         RemoveDBRefMany(propertyPath, targetType, targetId) |> ValueSome
                     | "Clear" ->
                         ClearDBRefMany(propertyPath, targetType) |> ValueSome
+                    | "Insert"
+                    | "SetAt"
+                    | "RemoveAt"
+                    | "set_Item" ->
+                        raise (NotSupportedException updateManyDbRefManyPositionalMessage)
                     | _ ->
                         raise (NotSupportedException updateManyRelationUnsupportedMessage)
                 | ValueSome me when DBRefTypeHelpers.isDBRefType me.Type ->
