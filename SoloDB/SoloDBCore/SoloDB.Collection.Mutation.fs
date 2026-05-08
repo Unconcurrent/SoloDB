@@ -31,7 +31,7 @@ type private SoloIdWriteScanner(soloIdProp: System.Reflection.PropertyInfo) =
 
 type internal CollectionMutationOps<'T>() =
 
-    /// Item I — UpdateMany SoloId-write rejection at translate time. Walks each json transform
+    /// UpdateMany [<SoloId>]-write rejection at translate time. Walks each json transform
     /// for assignments to the [<SoloId>] property; raises before any SQL runs. Narrow: rejects
     /// exactly the assignment shape; non-SoloId UpdateMany transforms are unaffected.
     static member private RejectSoloIdWriteInTransforms (transforms: Expression<System.Action<'T>> array) =
@@ -46,9 +46,9 @@ type internal CollectionMutationOps<'T>() =
                             typeof<'T>.FullName custom.Property.Name))
         | None -> ()
 
-    /// Layer-1 validation: whole-row write paths (Update, ReplaceOne, ReplaceMany) accept a
-    /// user-supplied entity. If the registered IIdGenerator considers the SoloId empty, fail
-    /// loud — generation is for Insert/cascade-create only.
+    /// Whole-row write paths (Update, ReplaceOne, ReplaceMany) accept a user-supplied entity.
+    /// If the registered IIdGenerator considers the SoloId empty, fail loud — generation is
+    /// for Insert and cascade-create only.
     static member private ValidateNonEmptySoloId (opName: string) (item: 'T) =
         match CustomTypeId<'T>.Value with
         | Some custom ->

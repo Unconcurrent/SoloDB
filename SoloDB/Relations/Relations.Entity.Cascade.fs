@@ -141,12 +141,13 @@ let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor
         ensureTargetExists tx descriptor.TargetTable id
         id
     else
-        // PendingEntity tested first (Anvil v2 BLOCKER 1): under v3 the eager .From(entityWithSoloId)
-        // sets _hasTypedId=true && _isLoaded=true. The tightened HasPendingTypedId predicate
-        // (_id=0 && _hasTypedId && not _isLoaded) is false in that case, so tryGetPendingTypedId
-        // returns None and this branch correctly falls through to the entity-cascade path below.
-        // The explicit ordering guards against a future relaxation of HasPendingTypedId reintroducing
-        // the alias bug — a .From(unsaved) MUST cascade-insert, not look up an existing target row.
+        // PendingEntity is tested first because the eager .From(entityWithSoloId) constructor
+        // sets _hasTypedId=true && _isLoaded=true on the DBRef instance, while
+        // HasPendingTypedId additionally requires not _isLoaded — so tryGetPendingTypedId
+        // returns None and this branch correctly falls through to the entity-cascade path
+        // below. The ordering also guards against a future relaxation of HasPendingTypedId
+        // reintroducing the alias bug — a .From(unsaved) MUST cascade-insert, not look up
+        // an existing target row.
         let dbRefType = descriptor.Property.PropertyType
         let isTyped = isTypedDbRef dbRefType
         match tryGetPendingEntity value with

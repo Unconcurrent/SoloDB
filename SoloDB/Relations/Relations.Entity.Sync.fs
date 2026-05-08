@@ -172,10 +172,11 @@ let internal tryExtractSoloId (targetType: Type) (entity: obj) : obj voption =
     SoloIdAccessor.TryGetBoxedValue(targetType, entity)
 
 /// Cascade typed-id resolver: fails loud when the entity's [<SoloId>] is missing OR equal to its
-/// CLR-default value. The default-equality check defends Layer-3 against the value-type DBRef
-/// collision pattern (N parents aliasing on the same default literal under JOIN). After Items A
-/// and C-bis this branch is unreachable in normal flow; it is the tripwire for any future
-/// regression that reintroduces a path to the broken shape.
+/// CLR-default value. The default-equality check defends the read side against the value-type
+/// DBRef collision pattern (N parents aliasing on the same default literal under JOIN). With
+/// the cascade write site running the IIdGenerator and the runner refactor in place, this
+/// branch is unreachable in normal flow; it is the tripwire for any future regression that
+/// reintroduces a path to the broken shape.
 let internal extractSoloIdOrFail (targetType: Type) (entity: obj) : obj =
     match tryExtractSoloId targetType entity with
     | ValueNone ->

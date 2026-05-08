@@ -136,7 +136,7 @@ module internal Helper =
     /// <param name="name">The name of the collection to drop.</param>
     /// <param name="connection">The active SQLite connection.</param>
     let internal dropCollection (name: string) (connection: SqliteConnection) =
-        // Phase 2 guard: check SoloDBRelation for inbound/outbound references before dropping.
+        // Relation-aware drop: check SoloDBRelation for inbound/outbound references before dropping.
         let relationCatalogExists =
             connection.QueryFirst<int64>(
                 "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelation') THEN 1 ELSE 0 END") = 1L
