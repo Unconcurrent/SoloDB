@@ -38,18 +38,8 @@ type internal CustomIdRunner =
                     x.SetId id boxedItem
             | :? SoloDatabase.Attributes.IIdGenerator<'T> as generator ->
                 if generator.IsEmpty oldId then
-                    if obj.ReferenceEquals(collection, null) then
-                        // Cascade-context with a typed-only IIdGenerator<'T>: there is no typed
-                        // ISoloDBCollection<'T> reference reachable from the cascade primitive, so
-                        // we cannot invoke this generator now. Silently skip — the row persists with
-                        // its empty [<SoloId>] (matching the historical pre-fix cascade shape) and
-                        // the next GetCollection<'T>() heal probe canonicalises it because heal IS
-                        // a typed-collection context. Heal is the single recovery path for this
-                        // limitation — there is no second path, no fallback.
-                        ()
-                    else
-                        let id = generator.GenerateId collection item
-                        x.SetId id boxedItem
+                    let id = generator.GenerateId collection item
+                    x.SetId id boxedItem
             | other -> raise (System.InvalidOperationException(
                 sprintf "Error: Invalid Id generator type.\nReason: Type '%s' is not supported.\nFix: Use a supported Id generator or configure a custom Id strategy." (other.GetType().ToString())))
         | None -> ()
