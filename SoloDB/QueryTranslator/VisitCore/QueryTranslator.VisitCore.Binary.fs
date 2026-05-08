@@ -25,7 +25,15 @@ module internal QueryTranslatorVisitCoreBinary =
         || nodeType = ExpressionType.GreaterThanOrEqual
 
     let internal visitBinaryDu (visitDu: Expression -> QueryBuilder -> SqlExpr) (normalizeKnownJsonForJsonEachValueDu: SqlExpr -> obj -> obj) (b: BinaryExpression) (qb: QueryBuilder) : SqlExpr =
-        if b.NodeType = ExpressionType.Add && (b.Left.Type = typeof<string> || b.Right.Type = typeof<string>) then
+        // In UpdateMode an `Assign` on a member access lowers to the same
+        // UpdateFragment shape that the `Extensions.Set(member, value)` path emits.
+        // This accepts the F# canonical owner-side property-mutation form
+        // `o.Field <- value` alongside `o.Field.Set value`.
+        if b.NodeType = ExpressionType.Assign && qb.UpdateMode then
+            let pathExpr = visitDu b.Left qb
+            let valueExpr = visitDu b.Right qb
+            SqlExpr.UpdateFragment(pathExpr, valueExpr)
+        elif b.NodeType = ExpressionType.Add && (b.Left.Type = typeof<string> || b.Right.Type = typeof<string>) then
             let expr = Expression.Call(typeof<String>.GetMethod("Concat", [|typeof<string seq>|]), Expression.NewArrayInit(typeof<string>, [|b.Left; b.Right|]))
             visitDu expr qb
         else

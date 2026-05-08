@@ -271,7 +271,8 @@ module internal QueryTranslatorVisitCore =
         | ExpressionType.And | ExpressionType.AndAlso | ExpressionType.Or | ExpressionType.OrElse
         | ExpressionType.Equal | ExpressionType.NotEqual | ExpressionType.LessThan | ExpressionType.LessThanOrEqual
         | ExpressionType.GreaterThan | ExpressionType.GreaterThanOrEqual
-        | ExpressionType.Add | ExpressionType.Subtract | ExpressionType.Multiply | ExpressionType.Divide | ExpressionType.Modulo ->
+        | ExpressionType.Add | ExpressionType.Subtract | ExpressionType.Multiply | ExpressionType.Divide | ExpressionType.Modulo
+        | ExpressionType.Assign ->
             visitBinaryDu (exp :?> BinaryExpression) qb
         | ExpressionType.Coalesce ->
             let b = exp :?> BinaryExpression
