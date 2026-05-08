@@ -14,6 +14,24 @@ open SqlDu.Engine.C1.Spec
 
 type internal CollectionMutationOps<'T>() =
 
+    /// Layer-1 validation: whole-row write paths (Update, ReplaceOne, ReplaceMany) accept a
+    /// user-supplied entity. If the registered IIdGenerator considers the SoloId empty, fail
+    /// loud — generation is for Insert/cascade-create only.
+    static member private ValidateNonEmptySoloId (opName: string) (item: 'T) =
+        match CustomTypeId<'T>.Value with
+        | Some custom ->
+            let extractedId = custom.GetId(box item)
+            let isEmpty =
+                match custom.Generator with
+                | :? SoloDatabase.Attributes.IIdGenerator as g -> g.IsEmpty extractedId
+                | :? SoloDatabase.Attributes.IIdGenerator<'T> as g -> g.IsEmpty extractedId
+                | _ -> false
+            if isEmpty then
+                raise (InvalidOperationException(
+                    sprintf "Error: %s requires a populated [<SoloId>] field on the supplied entity.\nReason: the registered IIdGenerator '%s' considers the current SoloId value empty.\nFix: hydrate the SoloId from the existing row before mutating, or use Insert/InsertOrReplace which generates the id automatically."
+                        opName (custom.Generator.GetType().FullName)))
+        | None -> ()
+
     static member Update
         (item: 'T)
         (name: string)
@@ -24,6 +42,7 @@ type internal CollectionMutationOps<'T>() =
         (setSerializedItem: IDictionary<string, obj> -> 'T -> unit) =
 
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
+        CollectionMutationOps<'T>.ValidateNonEmptySoloId "Update" item
 
         // translateWhereExpr returns SqlExpr DU + variables (canonical predicate path).
         let filterExpr, variables =
@@ -182,6 +201,7 @@ type internal CollectionMutationOps<'T>() =
 
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
+        CollectionMutationOps<'T>.ValidateNonEmptySoloId "ReplaceMany" item
 
         // translateWhereExpr canonical predicate path for ReplaceMany.
         let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
@@ -229,6 +249,7 @@ type internal CollectionMutationOps<'T>() =
 
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
+        CollectionMutationOps<'T>.ValidateNonEmptySoloId "ReplaceOne" item
 
         // translateWhereExpr canonical predicate path for ReplaceOne.
         let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
