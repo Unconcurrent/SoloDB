@@ -12,7 +12,39 @@ open SQLiteTools
 open SoloDatabase
 open SqlDu.Engine.C1.Spec
 
+type private SoloIdWriteScanner(soloIdProp: System.Reflection.PropertyInfo) =
+    inherit ExpressionVisitor()
+    let setterMethod = soloIdProp.GetSetMethod(true)
+    let mutable found = false
+    member _.Found = found
+    override this.VisitBinary(node: BinaryExpression) =
+        if node.NodeType = ExpressionType.Assign then
+            match node.Left with
+            | :? MemberExpression as me when obj.Equals(me.Member, soloIdProp :> System.Reflection.MemberInfo) ->
+                found <- true
+            | _ -> ()
+        base.VisitBinary(node)
+    override this.VisitMethodCall(node: MethodCallExpression) =
+        if not (isNull setterMethod) && obj.Equals(node.Method, setterMethod) then
+            found <- true
+        base.VisitMethodCall(node)
+
 type internal CollectionMutationOps<'T>() =
+
+    /// Item I — UpdateMany SoloId-write rejection at translate time. Walks each json transform
+    /// for assignments to the [<SoloId>] property; raises before any SQL runs. Narrow: rejects
+    /// exactly the assignment shape; non-SoloId UpdateMany transforms are unaffected.
+    static member private RejectSoloIdWriteInTransforms (transforms: Expression<System.Action<'T>> array) =
+        match CustomTypeId<'T>.Value with
+        | Some custom ->
+            for expression in transforms do
+                let scanner = SoloIdWriteScanner(custom.Property)
+                scanner.Visit(expression) |> ignore
+                if scanner.Found then
+                    raise (InvalidOperationException(
+                        sprintf "Error: Cannot use UpdateMany to write the [<SoloId>] field '%s.%s'.\nReason: The [<SoloId>] field is the type's identity and may not be mutated through UpdateMany.\nFix: Use Update<'T>(item), ReplaceOne, or ReplaceMany if the entity must be re-saved with a new identity."
+                            typeof<'T>.FullName custom.Property.Name))
+        | None -> ()
 
     /// Layer-1 validation: whole-row write paths (Update, ReplaceOne, ReplaceMany) accept a
     /// user-supplied entity. If the registered IIdGenerator considers the SoloId empty, fail
@@ -299,6 +331,8 @@ type internal CollectionMutationOps<'T>() =
         match transform.Length with
         | 0 -> 0
         | _ ->
+
+        CollectionMutationOps<'T>.RejectSoloIdWriteInTransforms transform
 
         let relationTransforms = ResizeArray<QueryTranslatorBase.UpdateManyRelationTransform>()
         let jsonTransforms = ResizeArray<Expression<System.Action<'T>>>()
