@@ -42,7 +42,7 @@ type internal CollectionMutationOps<'T>() =
                 scanner.Visit(expression) |> ignore
                 if scanner.Found then
                     raise (InvalidOperationException(
-                        sprintf "Error: Cannot use UpdateMany to write the [<SoloId>] field '%s.%s'.\nReason: The [<SoloId>] field is the type's identity and may not be mutated through UpdateMany.\nFix: Use Update<'T>(item), ReplaceOne, or ReplaceMany if the entity must be re-saved with a new identity."
+                        sprintf "Error: Cannot use UpdateMany to write the [<SoloId>] field '%s.%s'.\nReason: The [<SoloId>] field is the type's identity and may not be mutated through UpdateMany. To re-identify a row, delete and re-insert the entity."
                             typeof<'T>.FullName custom.Property.Name))
         | None -> ()
 
