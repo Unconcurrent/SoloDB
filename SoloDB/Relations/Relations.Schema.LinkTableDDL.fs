@@ -215,6 +215,7 @@ let internal ensureRelationSchema (tx: RelationTxContext) (descriptor: RelationD
 
     match descriptor.TypedIdType, descriptor.TargetSoloIdProperty with
     | ValueSome _, ValueSome soloIdProp ->
+        HelperSchema.ensureUniqueIndexForProperty descriptor.TargetTable descriptor.TargetType tx.Connection soloIdProp
         let needle = $"jsonb_extract(value,'$.{soloIdProp.Name}')".ToLowerInvariant()
         let hasUniqueSoloIdIndex =
             tx.Connection.QueryFirst<int64>(
