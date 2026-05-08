@@ -209,32 +209,7 @@ module internal QueryTranslatorVisitPost =
             SetDBRefToNone(propertyPath, targetType)
 
         | _ ->
-            // Closure-captured DBRef (e.g., let pending = DBRef<T,_>.From unsaved hoisted
-            // out of the lambda; body uses `p.Ref.Set pending`). Evaluate and inspect for
-            // pending state via reflection on the PendingEntity voption property.
-            let captured = evaluateExpr<obj> valueExpr
-            if isNull captured then
-                raise (NotSupportedException updateManyRelationUnsupportedMessage)
-            let t = captured.GetType()
-            let pendingProp = t.GetProperty("PendingEntity", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance)
-            if isNull pendingProp then
-                raise (NotSupportedException updateManyRelationUnsupportedMessage)
-            let raw = pendingProp.GetValue(captured, null)
-            if isNull raw then
-                raise (NotSupportedException updateManyRelationUnsupportedMessage)
-            let voptionType = raw.GetType()
-            let isSomeProp = voptionType.GetProperty("IsSome", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance ||| BindingFlags.Static)
-            let isSome =
-                if isNull isSomeProp then false
-                elif isSomeProp.GetGetMethod(true).IsStatic then isSomeProp.GetValue(null, [| raw |]) :?> bool
-                else isSomeProp.GetValue(raw, null) :?> bool
-            if not isSome then
-                raise (NotSupportedException updateManyRelationUnsupportedMessage)
-            let valueProp = voptionType.GetProperty("Value", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance)
-            let pendingEntity = valueProp.GetValue(raw, null)
-            if isNull pendingEntity then
-                raise (NotSupportedException updateManyRelationUnsupportedMessage)
-            SetDBRefToPendingEntity(propertyPath, targetType, pendingEntity)
+            raise (NotSupportedException updateManyRelationUnsupportedMessage)
 
     let private extractTargetIdForDbRefManyOrThrow (expr: Expression) =
         let valueObj = evaluateExpr<obj> expr
@@ -296,26 +271,8 @@ module internal QueryTranslatorVisitPost =
                     | "Append" ->
                         if mc.Arguments.Count <= argStart then
                             raise (NotSupportedException updateManyRelationUnsupportedMessage)
-                        // Detect unsaved-entity case: if the argument is an instance of the
-                        // target type with no usable Id, emit the cascade shape; otherwise
-                        // fall back to the persisted-id path.
-                        let argValue = evaluateExpr<obj> mc.Arguments.[argStart]
-                        if not (isNull argValue) && targetType.IsInstanceOfType(argValue) then
-                            let idProp = argValue.GetType().GetProperty("Id", BindingFlags.Public ||| BindingFlags.Instance)
-                            let hasPersistedId =
-                                if isNull idProp then false
-                                else
-                                    match tryAsInt64 (idProp.GetValue argValue) with
-                                    | ValueSome id when id > 0L -> true
-                                    | _ -> false
-                            if hasPersistedId then
-                                let targetId = extractTargetIdForDbRefManyOrThrow mc.Arguments.[argStart]
-                                AddDBRefMany(propertyPath, targetType, targetId) |> ValueSome
-                            else
-                                AddDBRefManyPendingEntity(propertyPath, targetType, argValue) |> ValueSome
-                        else
-                            let targetId = extractTargetIdForDbRefManyOrThrow mc.Arguments.[argStart]
-                            AddDBRefMany(propertyPath, targetType, targetId) |> ValueSome
+                        let targetId = extractTargetIdForDbRefManyOrThrow mc.Arguments.[argStart]
+                        AddDBRefMany(propertyPath, targetType, targetId) |> ValueSome
                     | "Remove" ->
                         if mc.Arguments.Count <= argStart then
                             raise (NotSupportedException updateManyRelationUnsupportedMessage)

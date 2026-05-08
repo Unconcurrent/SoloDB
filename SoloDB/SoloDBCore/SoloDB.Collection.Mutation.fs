@@ -355,27 +355,13 @@ type internal CollectionMutationOps<'T>() =
                 let mutable affected = executeJsonUpdateManyByRows conn selectedRows jsonTransforms
 
                 if relationTransforms.Count > 0 then
-                    // Pre-cascade pass for unsaved-target ops: cascade-insert each pending entity
-                    // ONCE inside the same transaction, capture the resulting rowid, and substitute
-                    // the persisted-id form. Every matching parent in the per-parent loop below
-                    // then references the same just-inserted target row.
-                    let resolveTargetTable (targetType: Type) =
-                        Utils.sanitizeName targetType.Name
                     let mappedOps =
                         relationTransforms
                         |> Seq.map (function
                             | QueryTranslatorBaseTypes.SetDBRefToId(path, targetType, targetId) -> RelationsTypes.SetDBRefToId(path, targetType, targetId)
                             | QueryTranslatorBaseTypes.SetDBRefToTypedId(path, targetType, targetIdType, targetTypedId) -> RelationsTypes.SetDBRefToTypedId(path, targetType, targetIdType, targetTypedId)
-                            | QueryTranslatorBaseTypes.SetDBRefToPendingEntity(path, targetType, pendingEntity) ->
-                                let targetTable = resolveTargetTable targetType
-                                let insertedId = Relations.insertTargetEntity tx targetTable targetType pendingEntity
-                                RelationsTypes.SetDBRefToId(path, targetType, insertedId)
                             | QueryTranslatorBaseTypes.SetDBRefToNone(path, targetType) -> RelationsTypes.SetDBRefToNone(path, targetType)
                             | QueryTranslatorBaseTypes.AddDBRefMany(path, targetType, targetId) -> RelationsTypes.AddDBRefMany(path, targetType, targetId)
-                            | QueryTranslatorBaseTypes.AddDBRefManyPendingEntity(path, targetType, pendingEntity) ->
-                                let targetTable = resolveTargetTable targetType
-                                let insertedId = Relations.insertTargetEntity tx targetTable targetType pendingEntity
-                                RelationsTypes.AddDBRefMany(path, targetType, insertedId)
                             | QueryTranslatorBaseTypes.RemoveDBRefMany(path, targetType, targetId) -> RelationsTypes.RemoveDBRefMany(path, targetType, targetId)
                             | QueryTranslatorBaseTypes.ClearDBRefMany(path, targetType) -> RelationsTypes.ClearDBRefMany(path, targetType))
                         |> Seq.toList
