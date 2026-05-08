@@ -27,6 +27,10 @@ module internal QueryTranslatorVisitPost =
     let private updateManyDbRefValueMutationMessage =
         "Error: UpdateMany supports only single-hop DBRef.Value property mutation.\nReason: A two-hop chain like p.Ref.Value.Other.Value.X is not lowerable through the relation link table; only p.Ref.Value.Field is supported.\nFix: Run the inner-collection UpdateMany separately, or assign through the immediate Ref.Value only."
 
+    [<Literal>]
+    let private updateManyDbRefFromUnsupportedMessage =
+        "Error: UpdateMany cannot cascade-insert from DBRef.From in a transform.\nReason: DBRef.From is an insertion shape; cascade composition through UpdateMany is not supported.\nFix: Insert the target row via targetCollection.Insert(item) first, then reference its rowid in the UpdateMany transform via DBRef.To(item.Id)."
+
     /// Deterministic unsupported-shape messages.
     let internal multiSourceCrossRootProjectionMessage =
         "Error: Cross-root projection requires an explicit join key.\nReason: The projection accesses columns from multiple query roots without a defined key relationship.\nFix: Add a Join or GroupJoin with explicit key selectors before projecting across roots."
@@ -257,6 +261,14 @@ module internal QueryTranslatorVisitPost =
         let valueExpr = unwrapConvertAll valueExpr
 
         match valueExpr with
+        // DBRef.From(...) — explicit cascade-insert shape; reject with a tailored Fix line.
+        | :? MethodCallExpression as mc
+            when mc.Method.Name = "From"
+              && not (isNull mc.Method.DeclaringType)
+              && mc.Method.DeclaringType.IsGenericType
+              && DBRefTypeHelpers.isDBRefDefinition (mc.Method.DeclaringType.GetGenericTypeDefinition()) ->
+            raise (NotSupportedException updateManyDbRefFromUnsupportedMessage)
+
         | :? MethodCallExpression as mc
             when mc.Method.Name = "To"
               && not (isNull mc.Method.DeclaringType)
@@ -288,6 +300,28 @@ module internal QueryTranslatorVisitPost =
             SetDBRefToNone(propertyPath, targetType)
 
         | _ ->
+            // Closure-captured DBRef value (e.g. `let r = DBRef.From(unsaved)` hoisted out of
+            // the lambda; body uses `p.Ref.Set r`). Inspect at runtime via reflection on the
+            // PendingEntity voption property — if a pending entity is present, the captured
+            // DBRef came from DBRef.From(...), and the From-cascade rejection applies.
+            let captured = evaluateExpr<obj> valueExpr
+            let hasPendingEntity =
+                if isNull captured then false
+                else
+                    let t = captured.GetType()
+                    let pendingProp = t.GetProperty("PendingEntity", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance)
+                    if isNull pendingProp then false
+                    else
+                        let raw = pendingProp.GetValue(captured, null)
+                        if isNull raw then false
+                        else
+                            let voptionType = raw.GetType()
+                            let isSomeProp = voptionType.GetProperty("IsSome", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance ||| BindingFlags.Static)
+                            if isNull isSomeProp then false
+                            elif isSomeProp.GetGetMethod(true).IsStatic then isSomeProp.GetValue(null, [| raw |]) :?> bool
+                            else isSomeProp.GetValue(raw, null) :?> bool
+            if hasPendingEntity then
+                raise (NotSupportedException updateManyDbRefFromUnsupportedMessage)
             raise (NotSupportedException updateManyRelationUnsupportedMessage)
 
     let private extractTargetIdForDbRefManyOrThrow (expr: Expression) =
