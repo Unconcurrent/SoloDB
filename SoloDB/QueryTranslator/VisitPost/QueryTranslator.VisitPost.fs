@@ -25,7 +25,7 @@ module internal QueryTranslatorVisitPost =
 
     [<Literal>]
     let private updateManyDbRefValueMutationMessage =
-        "Error: UpdateMany supports only single-hop DBRef.Value property mutation.\nReason: A two-hop chain like p.Ref.Value.Other.Value.X is not lowerable through the relation link table; only p.Ref.Value.Field is supported.\nFix: Run the inner-collection UpdateMany separately, or assign through the immediate Ref.Value only."
+        "Error: UpdateMany supports only single-hop DBRef.Value property mutation.\nReason: Any nested Ref.Value chain deeper than one hop (two-hop p.Ref.Value.Other.Value.X, three-hop p.A.Value.B.Value.C.Value.X, and deeper) is not lowerable through a single relation link table.\nFix: Run the inner-collection UpdateMany separately for each hop, or assign through the immediate p.Ref.Value.<Field> only."
 
     [<Literal>]
     let private updateManyDbRefFromUnsupportedMessage =
