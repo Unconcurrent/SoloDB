@@ -27,6 +27,13 @@ type private SoloIdWriteScanner(soloIdProp: System.Reflection.PropertyInfo) =
     override this.VisitMethodCall(node: MethodCallExpression) =
         if not (isNull setterMethod) && obj.Equals(node.Method, setterMethod) then
             found <- true
+        elif node.Method.Name = "Set" && node.Method.IsStatic && node.Arguments.Count >= 1 then
+            // Extensions.Set(<member>, value) — the UpdateMany DSL setter form. Treat as a
+            // write to the first-argument member if it resolves to the [<SoloId>] property.
+            match node.Arguments.[0] with
+            | :? MemberExpression as me when obj.Equals(me.Member, soloIdProp :> System.Reflection.MemberInfo) ->
+                found <- true
+            | _ -> ()
         base.VisitMethodCall(node)
 
 type internal CollectionMutationOps<'T>() =
