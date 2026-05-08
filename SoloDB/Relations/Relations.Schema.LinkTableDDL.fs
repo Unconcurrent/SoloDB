@@ -322,8 +322,9 @@ let internal relationSchemaRequiresEnsure (connection: SqliteConnection) (ownerT
         if not needsEnsure then
             match storedByProp.TryGetValue prop.Name with
             | false, _ ->
-                // Missing catalog row — check for BR-05 (link table without catalog = resurrection).
-                // Either way, ensure must run: to bootstrap or to reject.
+                // Missing catalog row — a link table without a catalog entry indicates
+                // resurrection from a prior schema generation. Either way, ensure must run:
+                // to bootstrap or to reject.
                 needsEnsure <- true
             | true, stored ->
                 // Check for evolution: kind change, target change, policy drift.
