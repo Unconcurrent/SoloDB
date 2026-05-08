@@ -46,6 +46,42 @@ type internal CollectionMutationOps<'T>() =
                             typeof<'T>.FullName custom.Property.Name))
         | None -> ()
 
+    /// Whole-row write paths must reject any mutation of the [<SoloId>] field. If the
+    /// supplied entity carries a SoloId value that differs from the stored row's SoloId,
+    /// raise — identity is immutable through Replace/Update.
+    static member private ValidateSoloIdNotMutated (opName: string) (storedId: obj) (newId: obj) =
+        let equal =
+            if isNull storedId && isNull newId then true
+            elif isNull storedId || isNull newId then false
+            else storedId.Equals(newId)
+        if not equal then
+            raise (InvalidOperationException(
+                sprintf "Error: %s cannot mutate the [<SoloId>] field on an existing row.\nReason: The supplied entity carries a SoloId value '%A' that differs from the row's stored SoloId '%A'. The [<SoloId>] field is the type's identity and may not be changed via Replace/Update.\nFix: Hydrate the SoloId from the existing row, or delete and re-insert if you need to re-identify."
+                    opName newId storedId))
+
+    /// SELECT-and-compare variant for non-relation write paths that don't already load the
+    /// existing row. Reads the matched row's SoloId via jsonb_extract on the same connection
+    /// + variables and compares to the supplied entity's SoloId.
+    static member private ValidateSoloIdNotMutatedAgainstStored
+            (opName: string)
+            (conn: SqliteConnection)
+            (collectionName: string)
+            (filterSql: string)
+            (variables: IDictionary<string, obj>)
+            (item: 'T) =
+        match CustomTypeId<'T>.Value with
+        | Some custom ->
+            let newId = custom.GetId(box item)
+            let soloPath = "$." + custom.Property.Name
+            let storedIdSql =
+                sprintf "SELECT jsonb_extract(Value, '%s') FROM \"%s\" WHERE (%s) LIMIT 1"
+                    soloPath collectionName filterSql
+            let storedId = conn.QueryFirstOrDefault<obj>(storedIdSql, variables)
+            // Only enforce when the row exists; non-existent rows are a no-op for Replace.
+            if not (isNull storedId) then
+                CollectionMutationOps<'T>.ValidateSoloIdNotMutated opName storedId newId
+        | None -> ()
+
     /// Whole-row write paths (Update, ReplaceOne, ReplaceMany) accept a user-supplied entity.
     /// If the registered IIdGenerator considers the SoloId empty, fail loud — generation is
     /// for Insert and cascade-create only.
@@ -303,12 +339,19 @@ type internal CollectionMutationOps<'T>() =
                         let hydMap = Dictionary<int64, string>()
                         hydMap.[oldRow.Id.Value] <- oldRow.HydrationJSON
                         HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (oldRow.Id.Value, box oldOwner) |] hydMap
+                    match CustomTypeId<'T>.Value with
+                    | Some custom ->
+                        let storedId = custom.GetId(box oldOwner)
+                        let newId = custom.GetId(box item)
+                        CollectionMutationOps<'T>.ValidateSoloIdNotMutated "ReplaceOne" storedId newId
+                    | None -> ()
                     Relations.syncReplaceOne tx oldRow.Id.Value (box oldOwner) (box item)
                     setSerializedItem variables item
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id = @id", {| item = variables.["item"]; id = oldRow.Id.Value |})
             )
         else
             withTransaction (fun conn ->
+                CollectionMutationOps<'T>.ValidateSoloIdNotMutatedAgainstStored "ReplaceOne" conn name filterSql variables item
                 setSerializedItem variables item
                 conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filterSql}) LIMIT 1)", variables))
 
