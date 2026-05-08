@@ -384,10 +384,26 @@ type internal CollectionMutationOps<'T>() =
 
         CollectionMutationOps<'T>.RejectSoloIdWriteInTransforms transform
 
+        // Decompose `Action<'T>` lambdas whose body is a BlockExpression into one lambda
+        // per child statement. F# `fun o -> a; b; c` lowers to a Block whose children are
+        // executed in order; treating each child as its own transform preserves the
+        // last-writer-wins semantics expected by callers and lets each statement be
+        // classified individually as relation-op vs. json-set.
+        let expandedTransforms =
+            [|
+                for expr in transform do
+                    let lambda = expr :> LambdaExpression
+                    match lambda.Body with
+                    | :? BlockExpression as block when block.Variables.Count = 0 ->
+                        for child in block.Expressions do
+                            yield Expression.Lambda<System.Action<'T>>(child, lambda.Parameters)
+                    | _ -> yield expr
+            |]
+
         let relationTransforms = ResizeArray<QueryTranslatorBase.UpdateManyRelationTransform>()
         let jsonTransforms = ResizeArray<Expression<System.Action<'T>>>()
 
-        for expression in transform do
+        for expression in expandedTransforms do
             match QueryTranslatorVisitPost.tryTranslateUpdateManyRelationTransform expression with
             | ValueSome op -> relationTransforms.Add op
             | ValueNone -> jsonTransforms.Add expression
@@ -402,7 +418,12 @@ type internal CollectionMutationOps<'T>() =
                     else
                         selectMutationRows conn filter false
 
-                let mutable affected = executeJsonUpdateManyByRows conn selectedRows jsonTransforms
+                // Composition order: target-side chain mutations (and link writes) fire
+                // BEFORE owner-side JSON transforms. The chain SELECT anchors on
+                // selectedRows ids snapshotted before any mutation, so target-side rewrites
+                // see the pre-mutation owner set; the owner JSON pass then writes the
+                // owner side last.
+                let mutable affected = 0
 
                 // Partition: B4 chain ops (depth >= 1) vs link-touching apply ops.
                 let chainOps = ResizeArray<QueryTranslatorBase.UpdateManyRelationTransform>()
@@ -695,6 +716,12 @@ type internal CollectionMutationOps<'T>() =
 
                     if jsonTransforms.Count = 0 then
                         affected <- selectedRows.Length
+
+                // Owner-side JSON transforms run AFTER the target-side chain mutations and
+                // link writes, completing the target-first composition order.
+                let jsonAffected = executeJsonUpdateManyByRows conn selectedRows jsonTransforms
+                if jsonTransforms.Count > 0 then
+                    affected <- jsonAffected
 
                 affected
             )
