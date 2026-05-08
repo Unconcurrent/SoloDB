@@ -39,6 +39,11 @@ module internal SoloDBRootOps =
                             let reProbe = conn.QueryFirstOrDefault<obj>(probeSql)
                             if isNull reProbe then ()
                             else
+                                // Drop the SoloDB-internal triggers for the duration of the heal
+                                // UPDATE batch; recreate before COMMIT. SQLite transactional DDL
+                                // ensures process death rolls back both the DROP and the heal
+                                // updates, leaving the table+triggers in their pre-heal state.
+                                Helper.dropTriggersForTable targetTable conn
                                 let selectAllSql =
                                     sprintf "SELECT Id, json(Value) AS ValueJson FROM %s WHERE %s;" qTable badRowPredicate
                                 let rows =
@@ -58,6 +63,7 @@ module internal SoloDBRootOps =
                                     let updateSql =
                                         sprintf "UPDATE %s SET Value = jsonb(@v) WHERE Id = @id;" qTable
                                     conn.Execute(updateSql, {| v = regenerated; id = row.Id |}) |> ignore
+                                Helper.createTriggersForTable targetTable conn
                         )
                     with
                     | :? Microsoft.Data.Sqlite.SqliteException as ex when ex.SqliteErrorCode = 8 ->
