@@ -196,14 +196,43 @@ module internal QueryTranslatorVisitPost =
             else ValueNone
         | _ -> ValueNone
 
+    /// Asserts that a chain's type sequence does not form a closed-loop cycle through
+    /// distinct types. Captain's rulings combine to form this contract:
+    ///   Q5 = Yes: a chain that visits A, then a different type B, then returns to A
+    ///             rejects (T -> S -> T). This includes longer cycles A -> B -> C -> A.
+    ///   Q6 = No-cap depth: a chain that walks a self-recursive type repeatedly
+    ///             (T -> T -> T -> ... -> T) is allowed at any depth — it is depth,
+    ///             not a cycle.
+    /// Implementation: build the type sequence (entry-owner :: per-hop targets), collapse
+    /// consecutive runs of the same type, then detect duplicates in the collapsed sequence.
+    /// A duplicate after collapsing means the chain LEFT a type and RETURNED to it, which
+    /// is a closed-loop cycle. Same-type runs (linked-list-style self-recursion) collapse
+    /// to a single entry and pass.
+    let private assertChainHasNoTypeCycle (hops: ChainHopSpec list) : unit =
+        match hops with
+        | [] -> ()
+        | firstHop :: _ ->
+            let typeSeq = firstHop.OwnerType :: (hops |> List.map (fun h -> h.TargetType))
+            let collapsed =
+                typeSeq
+                |> List.fold (fun acc t ->
+                    match acc with
+                    | head :: _ when head = t -> acc
+                    | _ -> t :: acc) []
+                |> List.rev
+            let visited = HashSet<Type>()
+            for t in collapsed do
+                if not (visited.Add(t)) then
+                    raise (InvalidOperationException(
+                        sprintf "Error: UpdateMany Ref-chain mutation revisits a previously-visited type '%s' (cycle).\nReason: The Ref.Value chain forms a closed-loop cycle through distinct types — leaving a type and returning to it (e.g. T -> S -> T or A -> B -> C -> A). Such a chain cannot be lowered to a finite SQL plan.\nFix: Restructure the chain so distinct types do not form a closed loop. Pure self-recursion (T -> T -> T at any depth) is allowed; only loops through different types are rejected."
+                            t.FullName))
+
     /// Walks a Ref.Value chain backwards from the innermost DBRef-typed expression to the root
     /// query parameter, producing a hop list ordered root-first. Validates each hop is a
-    /// DBRef-shape property on the previous target type, and rejects cycles. Raises
-    /// NotSupportedException for any non-chain shape encountered during the walk and
-    /// InvalidOperationException with 'previously-visited' / 'cycle' vocabulary when the
-    /// chain re-enters a type already seen in the hop sequence INCLUDING the entry-point
-    /// owner type. Single-hop self-reference (T -> T at depth 1) is allowed at this layer
-    /// (single-hop never reaches this walker).
+    /// DBRef-shape property on the previous target type. Raises NotSupportedException for
+    /// any non-chain shape encountered during the walk. Cycle detection is NOT performed
+    /// here; callers that require it (B4 property-mutation paths) call
+    /// assertChainHasNoTypeCycle on the result.
     let private walkRefChainBackwards (innerDbRefExpr: Expression) : ChainHopSpec list =
         let rec walk (relMe: MemberExpression) (acc: ChainHopSpec list) : ChainHopSpec list =
             if isNull relMe.Expression then
@@ -231,26 +260,12 @@ module internal QueryTranslatorVisitPost =
                     | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
                 | ValueNone -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
             | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
-        let hops =
-            match unwrapConvertAll innerDbRefExpr with
-            | :? MemberExpression as relMe -> walk relMe []
-            | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
-        // Cycle detection: walk the hops in chain order and seed `visited` with the entry-point
-        // owner type (== hops.[0].OwnerType, which equals the lambda parameter type). Any hop
-        // whose target type is already in the set is a cycle: T -> S -> T re-enters T, T -> T
-        // at depth 2 re-enters T, A -> B -> C -> A re-enters A. Depth-1 self-reference is not
-        // possible here because depth-1 chains are deferred to the single-hop parser.
-        match hops with
-        | [] -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
-        | firstHop :: _ ->
-            let visited = HashSet<Type>()
-            visited.Add(firstHop.OwnerType) |> ignore
-            for hop in hops do
-                if not (visited.Add(hop.TargetType)) then
-                    raise (InvalidOperationException(
-                        sprintf "Error: UpdateMany Ref-chain mutation revisits a previously-visited type '%s' (cycle).\nReason: The Ref.Value chain re-enters a type already seen earlier in the hop stack (entry-point owner type or any earlier hop's target type). Such a chain cannot be lowered to a finite SQL plan.\nFix: Restructure the chain so it terminates without revisiting any type already seen in the hop sequence."
-                            hop.TargetType.FullName))
+        match unwrapConvertAll innerDbRefExpr with
+        | :? MemberExpression as relMe ->
+            let hops = walk relMe []
+            if hops.IsEmpty then raise (NotSupportedException updateManyRelationUnsupportedMessage)
             hops
+        | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
 
     /// Tries to recognise a chain LHS of the shape `p.A.Value.B.Value. … .Z.Value.<TargetProp>`
     /// with depth >= 2. On success returns (hops, leafTargetPropertyName).
@@ -275,6 +290,7 @@ module internal QueryTranslatorVisitPost =
                     ValueNone
                 | _ ->
                     let hops = walkRefChainBackwards innerDbRefExpr
+                    assertChainHasNoTypeCycle hops
                     ValueSome (hops, me.Member.Name)
             | ValueNone -> ValueNone
         | _ -> ValueNone
@@ -294,6 +310,7 @@ module internal QueryTranslatorVisitPost =
                 | _ ->
                     let propName = mc.Method.Name.Substring(4)
                     let hops = walkRefChainBackwards innerDbRefExpr
+                    assertChainHasNoTypeCycle hops
                     ValueSome (hops, propName, mc.Arguments.[0])
             | ValueNone -> ValueNone
 
