@@ -121,6 +121,15 @@ let rec internal cascadeInsertDeep
                                 try cascadeInsertDeep childTx descriptor.TargetTable descriptor.TargetType item visited typeStack
                                 finally typeStack.Remove(descriptor.TargetType) |> ignore
                         if itemId > 0L then
+                            // Defense-in-depth symmetric with the Single path: when the
+                            // descriptor declares a typed-id, verify the just-cascade-inserted
+                            // child carries a non-default [<SoloId>] before linking. After the
+                            // cascade write-path fix this branch is unreachable in normal flow;
+                            // the assertion catches any future regression that reintroduces a
+                            // default-shape child SoloId.
+                            match descriptor.TypedIdType with
+                            | ValueSome _ -> extractSoloIdOrFail descriptor.TargetType item |> ignore
+                            | ValueNone -> ()
                             let sourceId, targetId =
                                 if descriptor.OwnerUsesSourceColumn then insertedId, itemId
                                 else itemId, insertedId
