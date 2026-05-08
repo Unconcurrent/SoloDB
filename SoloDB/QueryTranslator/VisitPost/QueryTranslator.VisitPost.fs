@@ -171,6 +171,85 @@ module internal QueryTranslatorVisitPost =
         else
             ValueNone
 
+    /// Walks a Value-accessor expression: either MemberExpression(Value) on a DBRef-typed
+    /// expression, or the equivalent get_Value method call. Returns the underlying DBRef
+    /// expression on success, ValueNone otherwise.
+    let private tryAsDbRefValueAccessor (expr: Expression) =
+        let expr = unwrapConvertAll expr
+        match expr with
+        | :? MemberExpression as me when me.Member.Name = "Value" && not (isNull me.Expression)
+                                          && DBRefTypeHelpers.isDBRefType (unwrapConvertAll me.Expression).Type ->
+            ValueSome (unwrapConvertAll me.Expression)
+        | :? MethodCallExpression as mc when mc.Method.Name = "get_Value" ->
+            if not (isNull mc.Object) && DBRefTypeHelpers.isDBRefType (unwrapConvertAll mc.Object).Type then
+                ValueSome (unwrapConvertAll mc.Object)
+            elif mc.Arguments.Count > 0 && DBRefTypeHelpers.isDBRefType (unwrapConvertAll mc.Arguments.[0]).Type then
+                ValueSome (unwrapConvertAll mc.Arguments.[0])
+            else ValueNone
+        | _ -> ValueNone
+
+    /// Tries to recognise an LHS of the shape `p.<RelationProp>.Value.<TargetProp>`.
+    /// On success returns the root DBRef-typed MemberExpression and the target property name.
+    /// Multi-hop paths (`p.X.Value.Y.Z`) return ValueNone here — caller treats as out of scope.
+    let private tryParseDbRefValueAssignmentLhs (lhs: Expression) =
+        let lhs = unwrapConvertAll lhs
+        match lhs with
+        | :? MemberExpression as me when not (isNull me.Expression) ->
+            match tryAsDbRefValueAccessor me.Expression with
+            | ValueSome dbRefExpr ->
+                match tryGetRootRelationMember dbRefExpr with
+                | ValueSome rootMe when DBRefTypeHelpers.isDBRefType rootMe.Type -> ValueSome (rootMe, me.Member.Name)
+                | _ -> ValueNone
+            | ValueNone -> ValueNone
+        | _ -> ValueNone
+
+    /// Tries to recognise an LHS of the shape `p.<RelationProp>.Value.set_<TargetProp>(rhs)`.
+    /// Returns the root DBRef MemberExpression, target property name, and RHS expression.
+    let private tryParseDbRefValueSetterMethodCall (mc: MethodCallExpression) =
+        if isNull mc.Method.Name || not (mc.Method.Name.StartsWith "set_") then ValueNone
+        elif isNull mc.Object then ValueNone
+        elif mc.Arguments.Count <> 1 then ValueNone
+        else
+            match tryAsDbRefValueAccessor mc.Object with
+            | ValueSome dbRefExpr ->
+                match tryGetRootRelationMember dbRefExpr with
+                | ValueSome rootMe when DBRefTypeHelpers.isDBRefType rootMe.Type ->
+                    let propName = mc.Method.Name.Substring(4)
+                    ValueSome (rootMe, propName, mc.Arguments.[0])
+                | _ -> ValueNone
+            | ValueNone -> ValueNone
+
+    /// B4 — property mutation of the target row through a single-arg DBRef.Value.<X>.
+    /// Validates: target X is not [<SoloId>]; RHS is a closure-captured constant.
+    let private parseDbRefValueMutation
+            (rootMe: MemberExpression)
+            (targetPropertyName: string)
+            (rhsExpr: Expression) =
+        let dbRefType = unwrapConvertAll rootMe.Expression |> ignore; rootMe.Type
+        let args = dbRefType.GetGenericArguments()
+        let targetType = args.[0]
+        // Reject [<SoloId>] target — closes the bypass around Item I.
+        let targetSoloIdProp =
+            targetType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+            |> Array.tryFind (fun p -> not (isNull (p.GetCustomAttribute<SoloDatabase.Attributes.SoloId>(true))))
+        match targetSoloIdProp with
+        | Some prop when prop.Name = targetPropertyName ->
+            raise (InvalidOperationException(
+                sprintf "Error: Cannot use UpdateMany to write the [<SoloId>] field '%s.%s' through a DBRef.Value mutation.\nReason: The [<SoloId>] field is the type's identity and may not be mutated through UpdateMany. To re-identify a row, delete and re-insert the entity."
+                    targetType.FullName targetPropertyName))
+        | _ -> ()
+        // RHS must evaluate to a closure-captured constant — no reference to the lambda parameter.
+        let rhsValue =
+            try evaluateExpr<obj> rhsExpr
+            with _ ->
+                raise (InvalidOperationException(
+                    sprintf "Error: UpdateMany DBRef.Value.%s mutation requires a closure-captured constant on the right-hand side.\nReason: The expression references the lambda parameter or a target-state value that cannot be reduced at translate time.\nFix: Hoist the value into a local variable above the UpdateMany call and reference that local in the lambda body."
+                        targetPropertyName))
+        let jsonLiteral = JsonSerializator.JsonValue.Serialize(rhsValue).ToJsonString()
+        let ownerProperty = (tryGetRootRelationMember (rootMe :> Expression) |> ValueOption.get).Member.Name
+        let targetPropertyJsonPath = "$." + targetPropertyName
+        MutateDBRefTargetProperty(ownerProperty, targetType, targetPropertyJsonPath, jsonLiteral)
+
     let private parseDbRefSetValue (dbRefType: Type) (propertyPath: string) (valueExpr: Expression) =
         let dbRefDef = dbRefType.GetGenericTypeDefinition()
         let args = dbRefType.GetGenericArguments()
@@ -231,15 +310,31 @@ module internal QueryTranslatorVisitPost =
             if isNull raw then null else normalizeUpdateManyBody raw
         if isNull body then ValueNone else
 
-        if containsDBRefValueMutationPath body then
-            raise (InvalidOperationException updateManyDbRefValueMutationMessage)
-
+        // B4 — DBRef.Value.<TargetProp> mutation. Try the supported single-hop shape first.
+        // Out-of-scope variants (multi-hop, DBRefMany.Value, target-state-dependent RHS,
+        // method-call mutations) fall through to the existing rejection paths.
         match body with
         | :? BinaryExpression as be when be.NodeType = ExpressionType.Assign ->
-            match tryGetRootRelationMember be.Left with
-            | ValueSome me when DBRefTypeHelpers.isDBRefType me.Type || DBRefTypeHelpers.isDBRefManyType me.Type ->
-                raise (NotSupportedException updateManyRelationUnsupportedMessage)
-            | _ -> ValueNone
+            match tryParseDbRefValueAssignmentLhs be.Left with
+            | ValueSome (rootMe, targetPropName) ->
+                parseDbRefValueMutation rootMe targetPropName be.Right |> ValueSome
+            | ValueNone ->
+                // Fall through to the existing rejection / generic-assign handling.
+                if containsDBRefValueMutationPath body then
+                    raise (InvalidOperationException updateManyDbRefValueMutationMessage)
+                match tryGetRootRelationMember be.Left with
+                | ValueSome me when DBRefTypeHelpers.isDBRefType me.Type || DBRefTypeHelpers.isDBRefManyType me.Type ->
+                    raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                | _ -> ValueNone
+
+        | :? MethodCallExpression as mc when mc.Method.Name.StartsWith "set_" ->
+            match tryParseDbRefValueSetterMethodCall mc with
+            | ValueSome (rootMe, targetPropName, rhsExpr) ->
+                parseDbRefValueMutation rootMe targetPropName rhsExpr |> ValueSome
+            | ValueNone ->
+                if containsDBRefValueMutationPath body then
+                    raise (InvalidOperationException updateManyDbRefValueMutationMessage)
+                ValueNone
 
         | :? MethodCallExpression as mc when mc.Method.Name = "Set" ->
             let oldValue, newValue =

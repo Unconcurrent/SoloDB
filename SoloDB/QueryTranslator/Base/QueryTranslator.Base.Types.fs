@@ -56,6 +56,19 @@ module internal QueryTranslatorBaseTypes =
         | AddDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
         | RemoveDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
         | ClearDBRefMany of PropertyPath: string * TargetType: Type
+        /// Mutation of a property on the target row reached through a DBRef relation.
+        /// OwnerProperty: name of the DBRef property on the owner type (used to resolve the
+        ///                relation descriptor → link table → target collection).
+        /// TargetType:    the target's .NET type.
+        /// TargetPropertyJsonPath: '$.<segment>' with a single segment (no nested traversal),
+        ///                pre-validated to NOT be a [<SoloId>]-marked property.
+        /// NewValueJsonLiteral: the RHS serialized to a JSON wire literal — RHS must be a
+        ///                closure-captured constant (no parameter reference).
+        | MutateDBRefTargetProperty of
+            OwnerProperty: string
+            * TargetType: Type
+            * TargetPropertyJsonPath: string
+            * NewValueJsonLiteral: string
 
     /// <summary>
     /// Appends a value to the query as a parameter or literal, handling various primitive types and JSON serialization.
