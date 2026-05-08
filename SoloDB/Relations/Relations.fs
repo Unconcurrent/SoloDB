@@ -9,6 +9,8 @@ let internal withRelationSqliteWrap = RelationsCore.withRelationSqliteWrap
 let resetDbRefManyTrackers = RelationsCore.resetDbRefManyTrackers
 let ensureSchemaForOwnerType = RelationsCore.ensureSchemaForOwnerType
 
+let insertTargetEntity = RelationsEntity.insertTargetEntity
+
 let prepareInsert = RelationsPlan.prepareInsert
 let prepareUpsert = RelationsPlan.prepareUpsert
 let prepareUpdate = RelationsPlan.prepareUpdate
