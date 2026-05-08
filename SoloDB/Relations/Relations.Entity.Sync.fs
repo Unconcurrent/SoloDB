@@ -171,16 +171,25 @@ let internal isTypedDbRef (dbRefType: Type) =
 let internal tryExtractSoloId (targetType: Type) (entity: obj) : obj voption =
     SoloIdAccessor.TryGetBoxedValue(targetType, entity)
 
-/// Cascade typed-id resolver: in-memory only. Fail-loud when the entity's [<SoloId>] is null/default
-/// after cascade-insert, which means the registered IIdGenerator did not produce a value
-/// (programmer error in the generator) — the diagnostic surfaces the real cause instead of papering
-/// over it with a DB read.
+/// Cascade typed-id resolver: fails loud when the entity's [<SoloId>] is missing OR equal to its
+/// CLR-default value. The default-equality check defends Layer-3 against the value-type DBRef
+/// collision pattern (N parents aliasing on the same default literal under JOIN). After Items A
+/// and C-bis this branch is unreachable in normal flow; it is the tripwire for any future
+/// regression that reintroduces a path to the broken shape.
 let internal extractSoloIdOrFail (targetType: Type) (entity: obj) : obj =
     match tryExtractSoloId targetType entity with
-    | ValueSome v -> v
     | ValueNone ->
         raise (InvalidOperationException(
-            sprintf "Error: cannot stamp typed DBRef<%s,_>: the entity's [<SoloId>] is null/default after cascade-insert.\nReason: the registered IIdGenerator either did not run or produced an empty value (its IsEmpty returned true even after GenerateId).\nFix: ensure the IIdGenerator's GenerateId returns a non-empty value and that IsEmpty correctly recognises that value as non-empty." targetType.Name))
+            sprintf "Error: cannot stamp typed DBRef<%s,_>: the entity's [<SoloId>] is null/missing after cascade-insert.\nReason: the registered IIdGenerator either did not run or produced an empty value.\nFix: ensure the IIdGenerator's GenerateId returns a non-empty value." targetType.Name))
+    | ValueSome v ->
+        match SoloIdAccessor.TryGetProperty targetType with
+        | ValueSome prop when prop.PropertyType.IsValueType ->
+            let defaultValue = Activator.CreateInstance(prop.PropertyType)
+            if obj.Equals(v, defaultValue) then
+                raise (InvalidOperationException(
+                    sprintf "Error: cannot stamp typed DBRef<%s,_>: the entity's [<SoloId>] equals the CLR default value for type '%s' after cascade-insert.\nReason: the registered IIdGenerator did not run or produced a default value, which would alias every default-keyed row under JOIN.\nFix: ensure the IIdGenerator's GenerateId returns a non-default value." targetType.Name prop.PropertyType.Name))
+            v
+        | _ -> v
 
 let internal updateDbRefJson (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) (propertyPath: string) (targetId: int64) =
     let path = "$." + propertyPath

@@ -53,15 +53,13 @@ type internal SoloIdAccessor =
         | ValueSome (_, g) -> ValueSome g
         | ValueNone -> ValueNone
 
-    /// Reads the [<SoloId>] value from an entity instance, typed as 'TId. ValueNone when:
-    ///   - entity is null;
-    ///   - the type has no [<SoloId>];
-    ///   - the value is null;
-    ///   - the value is a string that is null/empty/whitespace (matches IIdGenerator.IsEmpty
-    ///     conventions).
-    /// Value-type defaults (Guid.Empty, 0L, default-struct) are user-chosen values and pass through
-    /// as ValueSome — the heal-sweep + cascade-runs-IIdGenerator guarantees that persisted rows
-    /// carry real SoloIds, so post-deserialize values are trusted whatever they are.
+    /// Low-level accessor; does NOT enforce the Layer-1+2 invariant. ValueNone when entity is
+    /// null, the type has no [<SoloId>], the value is null, or the value is a string that is
+    /// null/empty/whitespace. Value-type defaults (Guid.Empty, 0L, default-struct) pass through
+    /// as ValueSome regardless of whether they are user-chosen or bug-shape — this accessor
+    /// cannot tell the difference. Callers requiring non-default value-type SoloIds (cascade
+    /// post-stamp, hydration paths) must use `extractSoloIdOrFail` or the equivalent default-
+    /// literal check; relying on this accessor's return alone is a Layer-3 invariant violation.
     static member TryGetValue<'T, 'TId> (entity: 'T) : 'TId voption =
         if obj.ReferenceEquals(entity, null) then ValueNone
         else

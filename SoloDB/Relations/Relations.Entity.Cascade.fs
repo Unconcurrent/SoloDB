@@ -174,19 +174,8 @@ let internal resolveSingleTargetIdAndCascade (tx: RelationTxContext) (descriptor
                     finally typeStack.Remove(descriptor.TargetType) |> ignore
                 let dbRef =
                     if isTyped then
-                        // Post-insert: cascade primitive (insertTargetEntity) ran the shared
-                        // IIdGenerator+SetId helper. For non-generic IIdGenerator users `pending`
-                        // carries its [<SoloId>] in-memory and we stamp the typed id directly.
-                        // For typed-only IIdGenerator<'T> users, the cascade silently skipped
-                        // the generator (no typed collection in scope) — the row persisted with
-                        // empty SoloId and will be canonicalised by the next GetCollection<'T>()
-                        // heal probe. In that case stamp the rowid-only Loaded form; .TypedId
-                        // will throw "not hydrated" until heal runs, which is the correct contract.
-                        match tryExtractSoloId descriptor.TargetType pending with
-                        | ValueSome typedId ->
-                            createDbRefLoadedTyped dbRefType insertedId typedId pending
-                        | ValueNone ->
-                            createDbRefLoaded dbRefType insertedId pending
+                        let typedId = extractSoloIdOrFail descriptor.TargetType pending
+                        createDbRefLoadedTyped dbRefType insertedId typedId pending
                     else
                         createDbRefTo dbRefType insertedId
                 (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(owner, dbRef)
