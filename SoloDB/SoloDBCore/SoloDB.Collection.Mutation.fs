@@ -608,6 +608,7 @@ type internal CollectionMutationOps<'T>() =
                         let firstRound = PassRunner.runPipeline passes stmt
                         let pipelineResult = PassRunner.runPipelineToFixedPoint passes firstRound
                         let emitted = EmitStatement.emitStatement (EmitContext(InlineLiterals = true)) pipelineResult.Output
+                        SqlCapture.OnSqlEmitted |> Option.iter (fun cb -> cb emitted.Sql)
                         conn.Execute(emitted.Sql, vars) |> ignore
 
                     let jsonbSetExpr (jsonPath: string) (paramName: string) =
