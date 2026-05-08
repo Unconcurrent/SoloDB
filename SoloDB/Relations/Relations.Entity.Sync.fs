@@ -66,12 +66,8 @@ let internal insertTargetEntity (tx: RelationTxContext) (targetTable: string) (t
 
     ensureCollectionTableExists tx.Connection targetTable
 
-    // Single source of truth for IIdGenerator + SetId: same helper that direct Insert (insertImpl)
-    // calls. Mutates `entity` by writing the generated [<SoloId>] when the registered IIdGenerator
-    // reports IsEmpty. After this call, the entity carries its SoloId in-memory so cascade can
-    // stamp typed DBRefs from a single in-memory path — no fallback to a post-insert DB read.
     if id <= 0L then
-        CustomIdRunner.RunBoxed(targetType, entity)
+        CustomIdRunner.RunBoxedIfEmpty(targetType, entity)
 
     let json = serializeEntityForStorage targetType entity
     let qTarget = quoteIdentifier targetTable

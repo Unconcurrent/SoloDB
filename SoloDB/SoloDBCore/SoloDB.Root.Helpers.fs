@@ -54,29 +54,18 @@ module internal SoloDBRootOps =
             else
                 let soloIdName = custom.Property.Name
                 let qTable = sprintf "\"%s\"" (name.Replace("\"", "\"\""))
-                // Bug shape for string SoloId: NULL or empty in the persisted JSON. Whitespace-only
-                // is left to user-led repair — adding `trim(...)` here would defeat the index.
                 let badRowPredicate =
                     sprintf "jsonb_extract(Value, '$.%s') IS NULL OR jsonb_extract(Value, '$.%s') = ''"
                         soloIdName soloIdName
                 let probeSql =
                     sprintf "SELECT Id FROM %s WHERE %s ORDER BY Id LIMIT 1;" qTable badRowPredicate
 
-                // Stage 1: cheap read probe on a borrowed connection — NO transaction. Healthy
-                // collections (no bad rows) cost exactly one indexed SELECT and return immediately,
-                // never touching BEGIN IMMEDIATE. Read-only DBs that are healthy never throw.
                 let probeHit =
                     use conn = connectionManager.Borrow()
                     let row = conn.QueryFirstOrDefault<obj>(probeSql)
                     not (isNull row)
 
                 if probeHit then
-                    // Stage 2: bug confirmed by the read probe → escalate to write transaction.
-                    // Re-probe under the write lock because another process may have repaired the
-                    // rows in the window between our read probe and acquiring BEGIN IMMEDIATE
-                    // (concurrency safety). Read-only DBs throw with the actionable message via
-                    // SQLITE_READONLY (code 8) — stable across driver/SQLite-version message
-                    // changes — only when an actual bug demands repair.
                     try
                         connectionManager.WithTransaction(fun conn ->
                             let reProbe = conn.QueryFirstOrDefault<obj>(probeSql)
@@ -90,10 +79,7 @@ module internal SoloDBRootOps =
                                 for row in rows do
                                     let json = JsonSerializator.JsonValue.Parse row.ValueJson
                                     let entity = json.ToObject(typeof<'T>)
-                                    // Heal context has the typed collection (we are inside
-                                    // GetCollection<'T>'s body), so the shared primitive drives both
-                                    // non-generic IIdGenerator and generic IIdGenerator<'T>.
-                                    CustomIdRunner.Run<'T>(entity :?> 'T, collection)
+                                    CustomIdRunner.RunIfEmpty<'T>(entity :?> 'T, collection)
                                     match SoloIdAccessor.TryGetBoxedValue(typeof<'T>, entity) with
                                     | ValueNone ->
                                         raise (InvalidOperationException(
@@ -107,7 +93,7 @@ module internal SoloDBRootOps =
                     with
                     | :? Microsoft.Data.Sqlite.SqliteException as ex when ex.SqliteErrorCode = 8 ->
                         raise (InvalidOperationException(
-                            sprintf "Error: collection '%s' contains rows with missing [<SoloId>] (a known historical defect from earlier typed-DBRef cascade-insert) but the database was opened read-only.\nFix: reopen the database with read+write access; the next GetCollection call will repair the affected rows. The repair runs once and is a no-op on subsequent opens." name, ex))
+                            sprintf "Error: collection '%s' contains rows with missing [<SoloId>] (a known historical defect from earlier typed-DBRef cascade-insert) but the database was opened read-only.\nFix: reopen the database with read+write access; the next GetCollection call will repair the affected rows." name, ex))
 
     let initializeCollection<'T>
         (checkDisposed: unit -> unit)
@@ -166,11 +152,6 @@ module internal SoloDBRootOps =
 
         let collection = Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = clearCache; EventSystem = events })
 
-        // Heal historical NULL/empty-SoloId rows produced by pre-fix cascade-insert (string SoloIds
-        // only). One indexed probe per GetCollection<'T>(); if no bug, no further work. If bug, all
-        // affected rows are repaired in one transaction. The just-constructed typed collection is
-        // threaded through so the shared generator/writeback primitive can drive generic
-        // IIdGenerator<'T> registrations (e.g., CountryCodeGenerator) — they are not unhealable.
         healCustomIdRows<'T> connectionManager name (collection :> ISoloDBCollection<'T>)
 
         use snapshotConnection = connectionManager.Borrow()
