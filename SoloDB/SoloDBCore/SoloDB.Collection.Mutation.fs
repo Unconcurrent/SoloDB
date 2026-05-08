@@ -404,7 +404,12 @@ type internal CollectionMutationOps<'T>() =
                             | QueryTranslatorBaseTypes.RemoveDBRefMany(path, targetType, targetId) -> RelationsTypes.RemoveDBRefMany(path, targetType, targetId)
                             | QueryTranslatorBaseTypes.ClearDBRefMany(path, targetType) -> RelationsTypes.ClearDBRefMany(path, targetType)
                             | QueryTranslatorBaseTypes.MutateDBRefTargetProperty _ ->
-                                failwith "MutateDBRefTargetProperty already handled in target-side pass")
+                                failwith "MutateDBRefTargetProperty already handled in target-side pass"
+                            | QueryTranslatorBaseTypes.MutateRefChainProperty _
+                            | QueryTranslatorBaseTypes.RefChainManyAdd _
+                            | QueryTranslatorBaseTypes.RefChainManyRemove _
+                            | QueryTranslatorBaseTypes.RefChainManyClear _ ->
+                                raise (NotImplementedException "Chain-mutation executor lands in commit δ; the translator emits these for chain depth >= 1 once the chain walker ships, until then they are unreachable from VisitPost."))
                         |> Seq.toList
 
                     for row in selectedRows do

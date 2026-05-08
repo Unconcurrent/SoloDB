@@ -49,6 +49,15 @@ module internal QueryTranslatorBaseTypes =
                 OriginalExpression = expr |> Some
             }
 
+    /// One hop in a Ref.Value chain. Schema-neutral: the translator emits these via reflection
+    /// only; the executor resolves the relation descriptor (link table, column orientation,
+    /// target collection name) at run time, where the Relations.Schema APIs are in scope.
+    type internal ChainHopSpec = {
+        OwnerType: Type                   // type of the previous hop's target (or owner for hop 0)
+        RelationPropertyName: string      // name of the DBRef property on OwnerType
+        TargetType: Type                  // target type via reflection on the property
+    }
+
     type internal UpdateManyRelationTransform =
         | SetDBRefToId of PropertyPath: string * TargetType: Type * TargetId: int64
         | SetDBRefToTypedId of PropertyPath: string * TargetType: Type * TargetIdType: Type * TargetTypedId: obj
@@ -56,6 +65,32 @@ module internal QueryTranslatorBaseTypes =
         | AddDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
         | RemoveDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
         | ClearDBRefMany of PropertyPath: string * TargetType: Type
+        /// N-hop B4 chain: Hops length >= 1; non-leaf hops are DBRef-shape (single); the
+        /// LeafJsonPath addresses a non-[<SoloId>] property on the innermost target.
+        /// NewValueJsonLiteral is the RHS serialized to JSON; RHS must be a closure-captured
+        /// constant. Subsumes the depth=1 single-hop MutateDBRefTargetProperty in commit ζ.
+        | MutateRefChainProperty of
+            Hops: ChainHopSpec list
+            * LeafTargetType: Type
+            * LeafJsonPath: string
+            * NewValueJsonLiteral: string
+        /// Chain-to-leaf DBRefMany Add/Remove/Clear. Hops length >= 1; leaf is the inner-owner's
+        /// DBRefMany property. SavedTargetId is the rowid of the existing target row (typed-id
+        /// surface resolves to rowid before reaching the executor).
+        | RefChainManyAdd of
+            Hops: ChainHopSpec list
+            * LeafManyPropertyName: string
+            * LeafTargetType: Type
+            * SavedTargetId: int64
+        | RefChainManyRemove of
+            Hops: ChainHopSpec list
+            * LeafManyPropertyName: string
+            * LeafTargetType: Type
+            * SavedTargetId: int64
+        | RefChainManyClear of
+            Hops: ChainHopSpec list
+            * LeafManyPropertyName: string
+            * LeafTargetType: Type
         /// Mutation of a property on the target row reached through a DBRef relation.
         /// OwnerProperty: name of the DBRef property on the owner type (used to resolve the
         ///                relation descriptor → link table → target collection).
