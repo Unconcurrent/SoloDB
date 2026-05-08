@@ -198,11 +198,13 @@ module internal QueryTranslatorVisitPost =
 
     /// Walks a Ref.Value chain backwards from the innermost DBRef-typed expression to the root
     /// query parameter, producing a hop list ordered root-first. Validates each hop is a
-    /// DBRef-shape property on the previous target type, and rejects cycles (a target type
-    /// repeated in the chain). Raises NotSupportedException for any non-chain shape encountered
-    /// during the walk and InvalidOperationException with 'cycle' vocabulary on cycle detection.
+    /// DBRef-shape property on the previous target type, and rejects cycles. Raises
+    /// NotSupportedException for any non-chain shape encountered during the walk and
+    /// InvalidOperationException with 'previously-visited' / 'cycle' vocabulary when the
+    /// chain re-enters a type already seen in the hop sequence INCLUDING the entry-point
+    /// owner type. Single-hop self-reference (T -> T at depth 1) is allowed at this layer
+    /// (single-hop never reaches this walker).
     let private walkRefChainBackwards (innerDbRefExpr: Expression) : ChainHopSpec list =
-        let visited = HashSet<Type>()
         let rec walk (relMe: MemberExpression) (acc: ChainHopSpec list) : ChainHopSpec list =
             if isNull relMe.Expression then
                 raise (NotSupportedException updateManyRelationUnsupportedMessage)
@@ -216,10 +218,6 @@ module internal QueryTranslatorVisitPost =
             if not (DBRefTypeHelpers.isDBRefType propType) then
                 raise (NotSupportedException updateManyRelationUnsupportedMessage)
             let targetType = propType.GetGenericArguments().[0]
-            if not (visited.Add(targetType)) then
-                raise (InvalidOperationException(
-                    sprintf "Error: UpdateMany Ref-chain mutation revisits a previously-visited target type '%s' (cycle).\nReason: The Ref.Value chain crosses the same type twice, which cannot be lowered to a finite SQL plan.\nFix: Restructure the chain so it terminates without revisiting a target type already seen in the hop sequence."
-                        targetType.FullName))
             let hop = { OwnerType = ownerType; RelationPropertyName = propName; TargetType = targetType }
             let acc = hop :: acc
             match ownerExpr with
@@ -233,9 +231,26 @@ module internal QueryTranslatorVisitPost =
                     | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
                 | ValueNone -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
             | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
-        match unwrapConvertAll innerDbRefExpr with
-        | :? MemberExpression as relMe -> walk relMe []
-        | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+        let hops =
+            match unwrapConvertAll innerDbRefExpr with
+            | :? MemberExpression as relMe -> walk relMe []
+            | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+        // Cycle detection: walk the hops in chain order and seed `visited` with the entry-point
+        // owner type (== hops.[0].OwnerType, which equals the lambda parameter type). Any hop
+        // whose target type is already in the set is a cycle: T -> S -> T re-enters T, T -> T
+        // at depth 2 re-enters T, A -> B -> C -> A re-enters A. Depth-1 self-reference is not
+        // possible here because depth-1 chains are deferred to the single-hop parser.
+        match hops with
+        | [] -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+        | firstHop :: _ ->
+            let visited = HashSet<Type>()
+            visited.Add(firstHop.OwnerType) |> ignore
+            for hop in hops do
+                if not (visited.Add(hop.TargetType)) then
+                    raise (InvalidOperationException(
+                        sprintf "Error: UpdateMany Ref-chain mutation revisits a previously-visited type '%s' (cycle).\nReason: The Ref.Value chain re-enters a type already seen earlier in the hop stack (entry-point owner type or any earlier hop's target type). Such a chain cannot be lowered to a finite SQL plan.\nFix: Restructure the chain so it terminates without revisiting any type already seen in the hop sequence."
+                            hop.TargetType.FullName))
+            hops
 
     /// Tries to recognise a chain LHS of the shape `p.A.Value.B.Value. … .Z.Value.<TargetProp>`
     /// with depth >= 2. On success returns (hops, leafTargetPropertyName).
@@ -247,12 +262,16 @@ module internal QueryTranslatorVisitPost =
         | :? MemberExpression as me when not (isNull me.Expression) ->
             match tryAsDbRefValueAccessor me.Expression with
             | ValueSome innerDbRefExpr ->
-                // Single-hop path: innerDbRefExpr is `p.<Rel>` (parent = parameter).
-                // Chain path: innerDbRefExpr contains a nested .Value access.
+                // Single-hop path: innerDbRefExpr is `p.<Rel>` — relMe.Expression is the
+                // ParameterExpression itself (NOT a deeper structure). Chain path: anything
+                // else, including nested .Value accesses. Use a non-recursive parent check
+                // here — `isRootParameter` follows MemberExpression.Expression all the way
+                // down, which would mis-classify every multi-hop chain rooted at the lambda
+                // parameter as 'depth-1' and defer the chain back to the single-hop parser.
                 let unwrapped = unwrapConvertAll innerDbRefExpr
                 match unwrapped with
-                | :? MemberExpression as relMe when not (isNull relMe.Expression) && isRootParameter relMe.Expression ->
-                    // Depth=1 — defer to single-hop path.
+                | :? MemberExpression as relMe when not (isNull relMe.Expression) && (match unwrapConvertAll relMe.Expression with :? ParameterExpression -> true | _ -> false) ->
+                    // True depth-1 — defer to single-hop path.
                     ValueNone
                 | _ ->
                     let hops = walkRefChainBackwards innerDbRefExpr
@@ -270,7 +289,7 @@ module internal QueryTranslatorVisitPost =
             | ValueSome innerDbRefExpr ->
                 let unwrapped = unwrapConvertAll innerDbRefExpr
                 match unwrapped with
-                | :? MemberExpression as relMe when not (isNull relMe.Expression) && isRootParameter relMe.Expression ->
+                | :? MemberExpression as relMe when not (isNull relMe.Expression) && (match unwrapConvertAll relMe.Expression with :? ParameterExpression -> true | _ -> false) ->
                     ValueNone
                 | _ ->
                     let propName = mc.Method.Name.Substring(4)
