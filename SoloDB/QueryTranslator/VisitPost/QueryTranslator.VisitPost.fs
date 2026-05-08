@@ -35,6 +35,21 @@ module internal QueryTranslatorVisitPost =
     let private updateManyDbRefManyPositionalMessage =
         "Error: UpdateMany cannot mutate a DBRefMany by position (Insert, SetAt, RemoveAt, indexer assignment).\nReason: DBRefMany has set semantics; positional / Ordered ops require a Position column on the relation link table that the current schema does not declare.\nFix: Use Add, Append, Remove, or Clear by row id or saved entity. Positional ordering on DBRefMany requires schema-level Ordered support that this version does not provide."
 
+    /// ε hop-trail diagnostics. Each message names the hop position and identifies the
+    /// specific shape that is unsupported, so test cells can anchor on a precise vocabulary
+    /// rather than the generic 'unsupported' fallback.
+    let private chainPlainPropertyMidChainMessage (hopIndex: int) (ownerTypeName: string) (propertyName: string) =
+        sprintf "Error: UpdateMany Ref-chain mutation encountered a non-relation (plain CLR) property '%s.%s' mid-chain at hop %d.\nReason: Every non-leaf hop in a Ref.Value chain must be DBRef-shape; '%s' is not DBRef-shape so the chain cannot be lowered to a finite SQL plan.\nFix: Replace the mid-chain plain CLR property with a DBRef property, or split the transform so the plain property is only addressed at the leaf."
+            ownerTypeName propertyName hopIndex propertyName
+
+    let private chainMethodCallMidChainMessage (hopIndex: int) =
+        sprintf "Error: UpdateMany Ref-chain mutation encountered an unsupported method call mid-chain at hop %d.\nReason: Mid-chain method invocations are not lowerable — the chain walker only accepts DBRef property access and `.Value` accessors between hops.\nFix: Hoist the method call's result into a closure-captured local before the UpdateMany lambda and reference the hoisted value, or restructure the chain so no method call appears in the non-leaf hops."
+            hopIndex
+
+    let private chainPositionalMidChainMessage (hopIndex: int) =
+        sprintf "Error: UpdateMany Ref-chain mutation encountered a non-leaf positional / mid-chain indexer at hop %d.\nReason: Positional access (indexer / IndexExpression) is not supported as a mid-chain positional hop — DBRefMany is a set, not a list, and positional addressing of the chain has no SQL lowering.\nFix: Use Add, Append, Remove, or Clear at the leaf hop, and avoid positional indexing in non-leaf hops."
+            hopIndex
+
     /// Deterministic unsupported-shape messages.
     let internal multiSourceCrossRootProjectionMessage =
         "Error: Cross-root projection requires an explicit join key.\nReason: The projection accesses columns from multiple query roots without a defined key relationship.\nFix: Add a Join or GroupJoin with explicit key selectors before projecting across roots."
@@ -234,7 +249,11 @@ module internal QueryTranslatorVisitPost =
     /// here; callers that require it (B4 property-mutation paths) call
     /// assertChainHasNoTypeCycle on the result.
     let private walkRefChainBackwards (innerDbRefExpr: Expression) : ChainHopSpec list =
-        let rec walk (relMe: MemberExpression) (acc: ChainHopSpec list) : ChainHopSpec list =
+        // hopIndex grows as we walk inward (toward the leaf); when we walk backwards the
+        // counter starts at the leaf-side hop and increments as we step toward the root.
+        // The numeric is for diagnostics only — the resulting hop list is reversed at the
+        // end so it ends up root-first.
+        let rec walk (relMe: MemberExpression) (acc: ChainHopSpec list) (hopIndex: int) : ChainHopSpec list =
             if isNull relMe.Expression then
                 raise (NotSupportedException updateManyRelationUnsupportedMessage)
             let ownerExpr = unwrapConvertAll relMe.Expression
@@ -242,10 +261,10 @@ module internal QueryTranslatorVisitPost =
             let propName = relMe.Member.Name
             let propInfo = ownerType.GetProperty(propName, BindingFlags.Public ||| BindingFlags.Instance)
             if isNull propInfo then
-                raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                raise (NotSupportedException(chainPlainPropertyMidChainMessage hopIndex ownerType.Name propName))
             let propType = propInfo.PropertyType
             if not (DBRefTypeHelpers.isDBRefType propType) then
-                raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                raise (NotSupportedException(chainPlainPropertyMidChainMessage hopIndex ownerType.Name propName))
             let targetType = propType.GetGenericArguments().[0]
             let hop = { OwnerType = ownerType; RelationPropertyName = propName; TargetType = targetType }
             let acc = hop :: acc
@@ -256,13 +275,15 @@ module internal QueryTranslatorVisitPost =
                 match tryAsDbRefValueAccessor ownerExpr with
                 | ValueSome priorRelExpr ->
                     match unwrapConvertAll priorRelExpr with
-                    | :? MemberExpression as priorRelMe -> walk priorRelMe acc
+                    | :? MemberExpression as priorRelMe -> walk priorRelMe acc (hopIndex + 1)
+                    | :? MethodCallExpression -> raise (NotSupportedException(chainMethodCallMidChainMessage (hopIndex + 1)))
                     | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
-                | ValueNone -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                | ValueNone -> raise (NotSupportedException(chainMethodCallMidChainMessage hopIndex))
+            | :? IndexExpression -> raise (NotSupportedException(chainPositionalMidChainMessage hopIndex))
             | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
         match unwrapConvertAll innerDbRefExpr with
         | :? MemberExpression as relMe ->
-            let hops = walk relMe []
+            let hops = walk relMe [] 0
             if hops.IsEmpty then raise (NotSupportedException updateManyRelationUnsupportedMessage)
             hops
         | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
