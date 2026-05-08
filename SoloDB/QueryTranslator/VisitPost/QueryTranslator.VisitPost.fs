@@ -196,6 +196,138 @@ module internal QueryTranslatorVisitPost =
             else ValueNone
         | _ -> ValueNone
 
+    /// Walks a Ref.Value chain backwards from the innermost DBRef-typed expression to the root
+    /// query parameter, producing a hop list ordered root-first. Validates each hop is a
+    /// DBRef-shape property on the previous target type, and rejects cycles (a target type
+    /// repeated in the chain). Raises NotSupportedException for any non-chain shape encountered
+    /// during the walk and InvalidOperationException with 'cycle' vocabulary on cycle detection.
+    let private walkRefChainBackwards (innerDbRefExpr: Expression) : ChainHopSpec list =
+        let visited = HashSet<Type>()
+        let rec walk (relMe: MemberExpression) (acc: ChainHopSpec list) : ChainHopSpec list =
+            if isNull relMe.Expression then
+                raise (NotSupportedException updateManyRelationUnsupportedMessage)
+            let ownerExpr = unwrapConvertAll relMe.Expression
+            let ownerType = ownerExpr.Type
+            let propName = relMe.Member.Name
+            let propInfo = ownerType.GetProperty(propName, BindingFlags.Public ||| BindingFlags.Instance)
+            if isNull propInfo then
+                raise (NotSupportedException updateManyRelationUnsupportedMessage)
+            let propType = propInfo.PropertyType
+            if not (DBRefTypeHelpers.isDBRefType propType) then
+                raise (NotSupportedException updateManyRelationUnsupportedMessage)
+            let targetType = propType.GetGenericArguments().[0]
+            if not (visited.Add(targetType)) then
+                raise (InvalidOperationException(
+                    sprintf "Error: UpdateMany Ref-chain mutation revisits a previously-visited target type '%s' (cycle).\nReason: The Ref.Value chain crosses the same type twice, which cannot be lowered to a finite SQL plan.\nFix: Restructure the chain so it terminates without revisiting a target type already seen in the hop sequence."
+                        targetType.FullName))
+            let hop = { OwnerType = ownerType; RelationPropertyName = propName; TargetType = targetType }
+            let acc = hop :: acc
+            match ownerExpr with
+            | :? ParameterExpression -> acc
+            | :? MemberExpression
+            | :? MethodCallExpression ->
+                match tryAsDbRefValueAccessor ownerExpr with
+                | ValueSome priorRelExpr ->
+                    match unwrapConvertAll priorRelExpr with
+                    | :? MemberExpression as priorRelMe -> walk priorRelMe acc
+                    | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                | ValueNone -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+            | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+        match unwrapConvertAll innerDbRefExpr with
+        | :? MemberExpression as relMe -> walk relMe []
+        | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+
+    /// Tries to recognise a chain LHS of the shape `p.A.Value.B.Value. … .Z.Value.<TargetProp>`
+    /// with depth >= 2. On success returns (hops, leafTargetPropertyName).
+    /// Depth=1 (`p.Ref.Value.X`) returns ValueNone here — caller falls through to the single-hop
+    /// path which preserves existing behaviour until subsumed in commit ζ.
+    let private tryParseRefChainAssignmentLhs (lhs: Expression) : voption<ChainHopSpec list * string> =
+        let lhs = unwrapConvertAll lhs
+        match lhs with
+        | :? MemberExpression as me when not (isNull me.Expression) ->
+            match tryAsDbRefValueAccessor me.Expression with
+            | ValueSome innerDbRefExpr ->
+                // Single-hop path: innerDbRefExpr is `p.<Rel>` (parent = parameter).
+                // Chain path: innerDbRefExpr contains a nested .Value access.
+                let unwrapped = unwrapConvertAll innerDbRefExpr
+                match unwrapped with
+                | :? MemberExpression as relMe when not (isNull relMe.Expression) && isRootParameter relMe.Expression ->
+                    // Depth=1 — defer to single-hop path.
+                    ValueNone
+                | _ ->
+                    let hops = walkRefChainBackwards innerDbRefExpr
+                    ValueSome (hops, me.Member.Name)
+            | ValueNone -> ValueNone
+        | _ -> ValueNone
+
+    /// Chain variant of the setter-call shape `p.A.Value.B.Value. … .set_<TargetProp>(rhs)`.
+    let private tryParseRefChainSetterMethodCall (mc: MethodCallExpression) : voption<ChainHopSpec list * string * Expression> =
+        if isNull mc.Method.Name || not (mc.Method.Name.StartsWith "set_") then ValueNone
+        elif isNull mc.Object then ValueNone
+        elif mc.Arguments.Count <> 1 then ValueNone
+        else
+            match tryAsDbRefValueAccessor mc.Object with
+            | ValueSome innerDbRefExpr ->
+                let unwrapped = unwrapConvertAll innerDbRefExpr
+                match unwrapped with
+                | :? MemberExpression as relMe when not (isNull relMe.Expression) && isRootParameter relMe.Expression ->
+                    ValueNone
+                | _ ->
+                    let propName = mc.Method.Name.Substring(4)
+                    let hops = walkRefChainBackwards innerDbRefExpr
+                    ValueSome (hops, propName, mc.Arguments.[0])
+            | ValueNone -> ValueNone
+
+    /// Chain-leaf DBRefMany source recognition. Source expression for Add/Remove/Clear is
+    /// `p.A.Value.B.Value. … .<RelMany>` where `<RelMany>` is DBRefMany-shape and depth >= 1.
+    /// On success returns (hops, leafManyPropertyName, leafTargetType).
+    let private tryParseRefChainManySource (sourceExpr: Expression) : voption<ChainHopSpec list * string * Type> =
+        let sourceExpr = unwrapConvertAll sourceExpr
+        match sourceExpr with
+        | :? MemberExpression as leafMe when
+                not (isNull leafMe.Expression) &&
+                DBRefTypeHelpers.isDBRefManyType leafMe.Type ->
+            let leafManyName = leafMe.Member.Name
+            let leafTargetType = leafMe.Type.GetGenericArguments().[0]
+            let parent = unwrapConvertAll leafMe.Expression
+            // If parent is the root parameter, this is the single-hop DBRefMany shape — defer.
+            if parent :? ParameterExpression then ValueNone
+            else
+                match tryAsDbRefValueAccessor parent with
+                | ValueSome innerDbRefExpr ->
+                    let hops = walkRefChainBackwards innerDbRefExpr
+                    ValueSome (hops, leafManyName, leafTargetType)
+                | ValueNone -> ValueNone
+        | _ -> ValueNone
+
+    /// Build a MutateRefChainProperty op from a parsed chain assignment / setter LHS, applying
+    /// leaf-side validations: target leaf property is not [<SoloId>]-marked, and RHS reduces to
+    /// a closure-captured constant.
+    let private buildChainPropertyMutation
+            (hops: ChainHopSpec list)
+            (leafTargetPropertyName: string)
+            (rhsExpr: Expression) =
+        let leafHop = List.last hops
+        let leafTargetType = leafHop.TargetType
+        let targetSoloIdProp =
+            leafTargetType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+            |> Array.tryFind (fun p -> not (isNull (p.GetCustomAttribute<SoloDatabase.Attributes.SoloId>(true))))
+        match targetSoloIdProp with
+        | Some prop when prop.Name = leafTargetPropertyName ->
+            raise (InvalidOperationException(
+                sprintf "Error: Cannot use UpdateMany to write the [<SoloId>] field '%s.%s' through a Ref-chain mutation.\nReason: The [<SoloId>] field is the type's identity and may not be mutated through UpdateMany. To re-identify a row, delete and re-insert the entity."
+                    leafTargetType.FullName leafTargetPropertyName))
+        | _ -> ()
+        let rhsValue =
+            try evaluateExpr<obj> rhsExpr
+            with _ ->
+                raise (InvalidOperationException(
+                    sprintf "Error: UpdateMany Ref-chain mutation of '%s' requires a closure-captured constant on the right-hand side.\nReason: The expression references the lambda parameter or a target-state value that cannot be reduced at translate time.\nFix: Hoist the value into a local variable above the UpdateMany call and reference that local in the lambda body."
+                        leafTargetPropertyName))
+        let jsonLiteral = JsonSerializator.JsonValue.Serialize(rhsValue).ToJsonString()
+        let leafJsonPath = "$." + leafTargetPropertyName
+        MutateRefChainProperty(hops, leafTargetType, leafJsonPath, jsonLiteral)
+
     /// Tries to recognise an LHS of the shape `p.<RelationProp>.Value.<TargetProp>`.
     /// On success returns the root DBRef-typed MemberExpression and the target property name.
     /// Multi-hop paths (`p.X.Value.Y.Z`) return ValueNone here — caller treats as out of scope.
@@ -353,26 +485,34 @@ module internal QueryTranslatorVisitPost =
         // method-call mutations) fall through to the existing rejection paths.
         match body with
         | :? BinaryExpression as be when be.NodeType = ExpressionType.Assign ->
-            match tryParseDbRefValueAssignmentLhs be.Left with
-            | ValueSome (rootMe, targetPropName) ->
-                parseDbRefValueMutation rootMe targetPropName be.Right |> ValueSome
+            // Try the multi-hop chain shape first (depth >= 2). Single-hop falls through.
+            match tryParseRefChainAssignmentLhs be.Left with
+            | ValueSome (hops, leafPropName) ->
+                buildChainPropertyMutation hops leafPropName be.Right |> ValueSome
             | ValueNone ->
-                // Fall through to the existing rejection / generic-assign handling.
-                if containsDBRefValueMutationPath body then
-                    raise (InvalidOperationException updateManyDbRefValueMutationMessage)
-                match tryGetRootRelationMember be.Left with
-                | ValueSome me when DBRefTypeHelpers.isDBRefType me.Type || DBRefTypeHelpers.isDBRefManyType me.Type ->
-                    raise (NotSupportedException updateManyRelationUnsupportedMessage)
-                | _ -> ValueNone
+                match tryParseDbRefValueAssignmentLhs be.Left with
+                | ValueSome (rootMe, targetPropName) ->
+                    parseDbRefValueMutation rootMe targetPropName be.Right |> ValueSome
+                | ValueNone ->
+                    if containsDBRefValueMutationPath body then
+                        raise (InvalidOperationException updateManyDbRefValueMutationMessage)
+                    match tryGetRootRelationMember be.Left with
+                    | ValueSome me when DBRefTypeHelpers.isDBRefType me.Type || DBRefTypeHelpers.isDBRefManyType me.Type ->
+                        raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                    | _ -> ValueNone
 
         | :? MethodCallExpression as mc when mc.Method.Name.StartsWith "set_" ->
-            match tryParseDbRefValueSetterMethodCall mc with
-            | ValueSome (rootMe, targetPropName, rhsExpr) ->
-                parseDbRefValueMutation rootMe targetPropName rhsExpr |> ValueSome
+            match tryParseRefChainSetterMethodCall mc with
+            | ValueSome (hops, leafPropName, rhsExpr) ->
+                buildChainPropertyMutation hops leafPropName rhsExpr |> ValueSome
             | ValueNone ->
-                if containsDBRefValueMutationPath body then
-                    raise (InvalidOperationException updateManyDbRefValueMutationMessage)
-                ValueNone
+                match tryParseDbRefValueSetterMethodCall mc with
+                | ValueSome (rootMe, targetPropName, rhsExpr) ->
+                    parseDbRefValueMutation rootMe targetPropName rhsExpr |> ValueSome
+                | ValueNone ->
+                    if containsDBRefValueMutationPath body then
+                        raise (InvalidOperationException updateManyDbRefValueMutationMessage)
+                    ValueNone
 
         | :? MethodCallExpression as mc when mc.Method.Name = "Set" ->
             let oldValue, newValue =
@@ -395,6 +535,31 @@ module internal QueryTranslatorVisitPost =
         | :? MethodCallExpression as mc when mc.Method.Name = "Add" || mc.Method.Name = "Append" || mc.Method.Name = "Remove" || mc.Method.Name = "Clear" || mc.Method.Name = "SetAt" || mc.Method.Name = "RemoveAt" || mc.Method.Name = "Insert" || mc.Method.Name = "set_Item" ->
             match tryGetCallSourceAndArgStart mc with
             | ValueSome struct (sourceExpr, argStart) ->
+                // Try the multi-hop chain-leaf-Many shape first; single-hop falls through.
+                match tryParseRefChainManySource sourceExpr with
+                | ValueSome (hops, leafManyName, leafTargetType) ->
+                    match mc.Method.Name with
+                    | "Add"
+                    | "Append" ->
+                        if mc.Arguments.Count <= argStart then
+                            raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                        let targetId = extractTargetIdForDbRefManyOrThrow mc.Arguments.[argStart]
+                        RefChainManyAdd(hops, leafManyName, leafTargetType, targetId) |> ValueSome
+                    | "Remove" ->
+                        if mc.Arguments.Count <= argStart then
+                            raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                        let targetId = extractTargetIdForDbRefManyOrThrow mc.Arguments.[argStart]
+                        RefChainManyRemove(hops, leafManyName, leafTargetType, targetId) |> ValueSome
+                    | "Clear" ->
+                        RefChainManyClear(hops, leafManyName, leafTargetType) |> ValueSome
+                    | "Insert"
+                    | "SetAt"
+                    | "RemoveAt"
+                    | "set_Item" ->
+                        raise (NotSupportedException updateManyDbRefManyPositionalMessage)
+                    | _ ->
+                        raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                | ValueNone ->
                 match tryGetRootRelationMember sourceExpr with
                 | ValueSome me when DBRefTypeHelpers.isDBRefManyType me.Type ->
                     let propertyPath = computePathKeyForUpdate me
