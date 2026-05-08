@@ -25,7 +25,7 @@ module internal QueryTranslatorVisitPost =
 
     [<Literal>]
     let private updateManyDbRefValueMutationMessage =
-        "Error: UpdateMany cannot mutate DBRef.Value members.\nReason: DBRef.Value is not mutable through UpdateMany.\nFix: Update the target collection explicitly, then update the reference."
+        "Error: UpdateMany supports only single-hop DBRef.Value property mutation.\nReason: A two-hop chain like p.Ref.Value.Other.Value.X is not lowerable through the relation link table; only p.Ref.Value.Field is supported.\nFix: Run the inner-collection UpdateMany separately, or assign through the immediate Ref.Value only."
 
     /// Deterministic unsupported-shape messages.
     let internal multiSourceCrossRootProjectionMessage =
