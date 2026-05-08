@@ -593,6 +593,23 @@ collection.Insert(newItem); // newItem.Id is now populated with a GUID string.
 Console.WriteLine($"Generated ID: {newItem.Id}");
 ```
 
+#### IIdGenerator contract: cascade-context behaviour
+
+`GenerateId` is invoked from two paths: (a) direct `Insert` of an entity
+of `MyObject`, where `collection` is the typed `ISoloDBCollection<MyObject>`
+the user just opened; (b) cascade insertion when the entity is reached
+through `DBRef.From(unsavedTarget)` on a parent of a different type, where
+the cascade primitive does NOT have a typed `ISoloDBCollection<MyObject>`
+in scope and **passes `null`**.
+
+Generators that do not need to consult the collection (the common case —
+`Guid.NewGuid()`, hashing the entity's own fields, etc.) work in both
+contexts unchanged. Generators that DO consult the collection (e.g. to
+read `OrderByDescending(x => x.Id).FirstOrDefault()` to compute the next
+sequential id) must handle `collection == null` defensively, or accept
+that cascade-context invocation throws `NullReferenceException` and the
+parent's `Insert` aborts cleanly via the surrounding transaction.
+
 ### Integrated File Storage
 
 SoloDB includes a powerful file storage system for managing binary data, large documents, or any kind of file.
