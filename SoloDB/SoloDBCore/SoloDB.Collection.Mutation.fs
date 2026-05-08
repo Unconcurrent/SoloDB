@@ -368,7 +368,13 @@ type internal CollectionMutationOps<'T>() =
                 if mutateOps.Count > 0 && selectedRows.Length > 0 then
                     let descriptors = RelationsSchemaValidator.buildRelationDescriptors tx typeof<'T>
                     for (ownerProp, _targetType, jsonPath, jsonLiteral) in mutateOps do
-                        let descriptor = descriptors |> Array.find (fun d -> d.PropertyPath = ownerProp)
+                        let descriptor =
+                            match descriptors |> Array.tryFind (fun d -> d.PropertyPath = ownerProp) with
+                            | Some d -> d
+                            | None ->
+                                raise (InvalidOperationException(
+                                    sprintf "Error: UpdateMany cannot resolve a relation descriptor for owner property '%s' on type '%s'.\nReason: The translated transform refers to a DBRef property that has no registered relation descriptor for this owner type. This typically indicates a two-hop chain like p.Ref.Value.Other.Value.X where Other is not a relation property of the owner type, or a malformed transform expression.\nFix: Confirm the property is a DBRef on the owner type and use a single-hop p.Ref.Value.Field shape."
+                                        ownerProp typeof<'T>.FullName))
                         let qLink = sprintf "\"%s\"" (descriptor.LinkTable.Replace("\"", "\"\""))
                         let qTarget = sprintf "\"%s\"" (descriptor.TargetTable.Replace("\"", "\"\""))
                         let sourceCol, targetCol =
