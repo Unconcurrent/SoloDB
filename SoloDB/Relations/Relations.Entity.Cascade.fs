@@ -233,6 +233,13 @@ let internal collectManyTargetIdsAndCascade (tx: RelationTxContext) (descriptor:
                             id <-
                                 try cascadeInsertDeep tx descriptor.TargetTable descriptor.TargetType item visited typeStack
                                 finally typeStack.Remove(descriptor.TargetType) |> ignore
+                            // Defense-in-depth symmetric with the Single path and the recursive
+                            // Many branch in cascadeInsertDeep: when the relation declares a
+                            // typed-id contract, the just-cascade-inserted item must carry a
+                            // non-default [<SoloId>] before its rowid is added to the link plan.
+                            match descriptor.TypedIdType with
+                            | ValueSome _ -> extractSoloIdOrFail descriptor.TargetType item |> ignore
+                            | ValueNone -> ()
                         elif id > 0L then
                             // Preflight target-exists for pre-existing many items before owner mutation.
                             ensureTargetExists tx descriptor.TargetTable id
