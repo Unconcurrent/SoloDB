@@ -286,7 +286,43 @@ module internal QueryTranslatorVisitPost =
             let hops = walk relMe [] 0
             if hops.IsEmpty then raise (NotSupportedException updateManyRelationUnsupportedMessage)
             hops
+        | :? MethodCallExpression -> raise (NotSupportedException(chainMethodCallMidChainMessage 0))
+        | :? IndexExpression -> raise (NotSupportedException(chainPositionalMidChainMessage 0))
         | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+
+    /// Inspects an LHS that has a `.Value` somewhere in its parent chain but did not match
+    /// any of the chain or single-hop shapes. Classifies the specific mid-chain violation
+    /// (plain CLR property, method call, positional indexer) and raises with the matching
+    /// hop-trail vocabulary. Returns unit on no match (caller continues the existing
+    /// fall-through).
+    let private tryRaiseMidChainClassified (lhs: Expression) : unit =
+        // Walk the LHS expression chain looking for the first non-DBRef-shape hop AFTER
+        // a `.Value` accessor. The presence of a `.Value` means the user expressed a
+        // chain intent; an unsupported shape after that is a mid-chain violation.
+        let rec scan (expr: Expression) (sawValue: bool) : unit =
+            let expr = unwrapConvertAll expr
+            match expr with
+            | null -> ()
+            | :? MemberExpression as me ->
+                if me.Member.Name = "Value" && not (isNull me.Expression) &&
+                   DBRefTypeHelpers.isDBRefType (unwrapConvertAll me.Expression).Type then
+                    scan me.Expression true
+                elif sawValue then
+                    // Mid-chain plain CLR property (or non-relation property continuation).
+                    let ownerName =
+                        if isNull me.Expression then "<unknown>"
+                        else (unwrapConvertAll me.Expression).Type.Name
+                    raise (NotSupportedException(chainPlainPropertyMidChainMessage 0 ownerName me.Member.Name))
+                else
+                    scan me.Expression sawValue
+            | :? MethodCallExpression as mc when sawValue ->
+                raise (NotSupportedException(chainMethodCallMidChainMessage 0))
+            | :? IndexExpression when sawValue ->
+                raise (NotSupportedException(chainPositionalMidChainMessage 0))
+            | :? MethodCallExpression as mc ->
+                if not (isNull mc.Object) then scan mc.Object sawValue
+            | _ -> ()
+        scan lhs false
 
     /// Tries to recognise a chain LHS of the shape `p.A.Value.B.Value. … .Z.Value.<TargetProp>`
     /// with depth >= 2. On success returns (hops, leafTargetPropertyName).
