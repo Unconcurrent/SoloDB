@@ -24,6 +24,10 @@ type internal CustomTypeId<'t> =
         |> Seq.tryHead
         |> Option.bind(
             fun (p, gt) ->
+                if p.PropertyType = typeof<bool> || p.PropertyType = typeof<nativeint> || p.PropertyType = typeof<unativeint> then
+                    failwithf "Error: Invalid [<SoloId>] type on '%s.%s'.\nReason: '%s' has a value space too small or too platform-dependent to serve as a stable identity key (bool: 2 values; IntPtr/UIntPtr: width depends on runtime).\nFix: Use a wider type — int64, Guid, string, or a custom struct."
+                        typeof<'t>.FullName p.Name p.PropertyType.Name
+
                 if gt.GetInterfaces() |> Seq.exists(fun i -> i.FullName.StartsWith "SoloDatabase.Attributes.IIdGenerator" && not i.IsArray) |> not then
                     failwithf "Generator type for Id property (%s) does not implement the IIdGenerator or IIdGenerator<'T> interface." p.Name
 
