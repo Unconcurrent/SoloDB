@@ -91,26 +91,9 @@ module internal QueryableHelperBase =
             TranslationStepCounter = ref 0
             InPredicateContext = false
         }
-        let firstRound =
-            PassRunner.runPipeline [
-                ConstantFoldPass.constantFold
-                FlattenPass.subqueryFlatten
-                PushdownPass.predicatePushdown
-                ProjectionPass.projectionPushdown
-                CompositeGroupByCanonicalizationPass.compositeGroupByCanonicalization
-                IndexPlanShapingPass.indexPlanShaping indexModel
-                JsonbRewritePolicyPass.jsonbRewritePolicy indexModel
-            ] (SelectStmt sel)
-        let pipelineResult =
-            PassRunner.runPipelineToFixedPoint [
-                ConstantFoldPass.constantFold
-                FlattenPass.subqueryFlatten
-                PushdownPass.predicatePushdown
-                ProjectionPass.projectionPushdown
-                CompositeGroupByCanonicalizationPass.compositeGroupByCanonicalization
-                IndexPlanShapingPass.indexPlanShaping indexModel
-                JsonbRewritePolicyPass.jsonbRewritePolicy indexModel
-            ] firstRound
+        let passes = PassPipeline.standardWithIndexModel indexModel
+        let firstRound = PassRunner.runPipeline passes (SelectStmt sel)
+        let pipelineResult = PassRunner.runPipelineToFixedPoint passes firstRound
         match pipelineResult.Output with
         | SelectStmt outSel -> SqlDuMinimalEmit.emitSelect qb outSel
         | _ -> failwith "internal invariant violation: expected SelectStmt from optimizer pipeline"

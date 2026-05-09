@@ -107,6 +107,7 @@
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.JsonbRewritePolicy.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.JsonbRewritePolicyPass.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.PassRunner.fs" />
+    <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.PassPipeline.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Types.fs" />
     <Compile Include="QueryTranslator/SqlDu/Emit/SqlDu.MinimalEmit.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Helpers.fs" />

@@ -635,15 +635,7 @@ type internal CollectionMutationOps<'T>() =
                         collectStmt stmt
 
                         let indexModel = SoloDatabase.IndexModel.loadModelForTables tx.Connection (tables :> seq<string>)
-                        let passes = [
-                            ConstantFoldPass.constantFold
-                            FlattenPass.subqueryFlatten
-                            PushdownPass.predicatePushdown
-                            ProjectionPass.projectionPushdown
-                            CompositeGroupByCanonicalizationPass.compositeGroupByCanonicalization
-                            IndexPlanShapingPass.indexPlanShaping indexModel
-                            JsonbRewritePolicyPass.jsonbRewritePolicy indexModel
-                        ]
+                        let passes = PassPipeline.standardWithIndexModel indexModel
                         let firstRound = PassRunner.runPipeline passes stmt
                         let pipelineResult = PassRunner.runPipelineToFixedPoint passes firstRound
                         let emitted = EmitStatement.emitStatement (EmitContext(InlineLiterals = true)) pipelineResult.Output
