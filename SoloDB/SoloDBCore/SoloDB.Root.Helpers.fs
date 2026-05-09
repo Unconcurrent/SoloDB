@@ -162,10 +162,16 @@ module internal SoloDBRootOps =
 
     // Per-ConnectionManager × collection name positive cache: "this collection has
     // been observed as a relation target". Once a collection is recorded as a target,
-    // cache it indefinitely. Spurious positives after an owner-drop are harmless —
-    // heal probes for bug-shape rows and exits cleanly when none exist.
+    // cache it indefinitely (per DB instance). Spurious positives after an owner-drop
+    // are harmless — heal probes for bug-shape rows and exits cleanly when none exist.
+    //
+    // Wrapped in a ConditionalWeakTable keyed by ConnectionManager so the inner per-DB
+    // dictionary is GC-eligible when the SoloDB instance disposes; otherwise this
+    // cache would hold strong references to every ConnectionManager ever opened in
+    // the process, leaking linearly with DB-instance count for transient/test or
+    // multi-tenant workloads.
     let private knownRelationTargets =
-        System.Collections.Concurrent.ConcurrentDictionary<obj * string, unit>()
+        System.Runtime.CompilerServices.ConditionalWeakTable<ConnectionManager, System.Collections.Concurrent.ConcurrentDictionary<string, unit>>()
 
     /// Target-side heal trigger. When a collection opens that is itself recorded as a
     /// typed-relation TARGET (some other owner declares DBRef/DBRefMany pointing at it),
@@ -175,10 +181,18 @@ module internal SoloDBRootOps =
     /// TargetCollection; CustomTypeId-less types short-circuit inside healOneTargetTyped.
     /// The two SQLite probes are cached: catalog-presence per ConnectionManager,
     /// target-membership per (ConnectionManager, collection name).
+    let private perDbTargetsFactory =
+        System.Runtime.CompilerServices.ConditionalWeakTable<ConnectionManager, System.Collections.Concurrent.ConcurrentDictionary<string, unit>>.CreateValueCallback(
+            fun _ -> System.Collections.Concurrent.ConcurrentDictionary<string, unit>())
+
+    let private catalogPresentFactory =
+        System.Runtime.CompilerServices.ConditionalWeakTable<ConnectionManager, obj>.CreateValueCallback(
+            fun _ -> box ())
+
     let private healCollectionTargetIfNeeded<'T> (connectionManager: ConnectionManager) (collectionName: string) =
-        let cacheKey = (box connectionManager, collectionName)
+        let perDbTargets = knownRelationTargets.GetValue(connectionManager, perDbTargetsFactory)
         let isRelationTarget =
-            if knownRelationTargets.ContainsKey(cacheKey) then true
+            if perDbTargets.ContainsKey(collectionName) then true
             else
                 let mutable _placeholder = null
                 let catalogKnownPresent = soloDBRelationCatalogPresent.TryGetValue(connectionManager, &_placeholder)
@@ -190,7 +204,7 @@ module internal SoloDBRootOps =
                             conn.QueryFirst<int64>(
                                 "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelation') THEN 1 ELSE 0 END;")
                         if exists = 1L then
-                            soloDBRelationCatalogPresent.AddOrUpdate(connectionManager, box ())
+                            soloDBRelationCatalogPresent.GetValue(connectionManager, catalogPresentFactory) |> ignore
                             true
                         else
                             false
@@ -200,7 +214,7 @@ module internal SoloDBRootOps =
                         conn.QueryFirst<int64>(
                             "SELECT CASE WHEN EXISTS (SELECT 1 FROM SoloDBRelation WHERE TargetCollection = @target LIMIT 1) THEN 1 ELSE 0 END;",
                             {| target = collectionName |}) = 1L
-                    if isTarget then knownRelationTargets.TryAdd(cacheKey, ()) |> ignore
+                    if isTarget then perDbTargets.TryAdd(collectionName, ()) |> ignore
                     isTarget
         if isRelationTarget then
             healOneTarget connectionManager collectionName typeof<'T>

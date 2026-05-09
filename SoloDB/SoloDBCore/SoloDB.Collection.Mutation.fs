@@ -157,7 +157,7 @@ type internal CollectionMutationOps<'T>() =
                 match CustomTypeId<'T>.Get() with
                 | Some customId ->
                     let id = customId.GetId (item |> box)
-                    let idProp = CustomTypeId<'T>.Get().Value.Property
+                    let idProp = customId.Property
                     QueryTranslator.translateWhereExpr name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = id))
                 | None ->
                     let typeName = typeof<'T>.Name
