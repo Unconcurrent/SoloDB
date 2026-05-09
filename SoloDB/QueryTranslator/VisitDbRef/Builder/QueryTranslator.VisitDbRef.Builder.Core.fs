@@ -49,10 +49,10 @@ module internal DBRefManyBuilderCore =
         | _ ->
             ValueNone
 
-    let mutable private aliasCounter = 0L
-    let nextAlias prefix =
-        let id = System.Threading.Interlocked.Increment(&aliasCounter)
-        sprintf "%s%d" prefix id
+    /// Per-QueryContext alias generator. Emitted SQL alias numerals are
+    /// deterministic per query instead of process-history-dependent.
+    let nextAlias (ctx: QueryContext) (prefix: string) : string =
+        sprintf "%s%d" prefix (System.Threading.Interlocked.Increment(ctx.AliasCounter))
 
     let mkSubCore projections source where =
         { Distinct = false; Projections = ProjectionSetOps.ofList projections; Source = source
@@ -214,8 +214,8 @@ module internal DBRefManyBuilderCore =
         let targetTable = resolveTargetTable ctx ownerRef.OwnerCollection propName targetType
         if desc.OfTypeName.IsSome || desc.CastTypeName.IsSome then
             DBRefManyHelpers.ensureOfTypeSupported targetType
-        let tgtAlias = nextAlias "_tgt"
-        let lnkAlias = nextAlias "_lnk"
+        let tgtAlias = nextAlias ctx "_tgt"
+        let lnkAlias = nextAlias ctx "_lnk"
 
         // Two-hop SelectMany: owner → link1 → target1 → link2 → target2.
         // The inner lambda tells us the second hop's DBRefMany property + chain ops.
@@ -236,8 +236,8 @@ module internal DBRefManyBuilderCore =
                     let target2Column = if owner2UsesSource then "TargetId" else "SourceId"
                     let innerTargetType = innerMemberExpr.Type.GetGenericArguments().[0]
                     let target2Table = resolveTargetTable ctx hop1TargetCollection innerPropName innerTargetType
-                    let tgt2Alias = nextAlias "_tgt2"
-                    let lnk2Alias = nextAlias "_lnk2"
+                    let tgt2Alias = nextAlias ctx "_tgt2"
+                    let lnk2Alias = nextAlias ctx "_lnk2"
 
                     // link2 joins to target1 (hop1 target)
                     let lnk2JoinOn =
@@ -338,7 +338,7 @@ module internal DBRefManyBuilderCore =
             if desc.HasPostBoundWrapperFields then
                 let passThrough = { innerCore with Projections = AllColumns }
                 let innerSel = { Ctes = []; Body = SingleSelect passThrough }
-                let pbAlias = nextAlias "_pb"
+                let pbAlias = nextAlias ctx "_pb"
                 let pbJoinEdges = ResizeArray<JoinEdge>()
                 let pbWhereDus =
                     translatePredicates
@@ -380,7 +380,7 @@ module internal DBRefManyBuilderCore =
             let mainCore =
                 projectUnionArmColumns
                     mkSubCore
-                    nextAlias
+                    (nextAlias ctx)
                     [ "Id"; "Value" ]
                     { effectiveCore with Projections = AllColumns }
             let defaultProjs =
@@ -390,7 +390,7 @@ module internal DBRefManyBuilderCore =
                 { mkSubCore defaultProjs None (Some(SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists existsSel))) with
                     Joins = []; OrderBy = []; Limit = None; Offset = None }
             let unionSel = { Ctes = []; Body = UnionAllSelect(mainCore, [defaultCore]) }
-            let dtAlias = nextAlias "_die"
+            let dtAlias = nextAlias ctx "_die"
             let wrappedCore = mkSubCore projections (Some(DerivedTable(unionSel, dtAlias))) None
             dtAlias, effectiveLnk, wrappedCore, effectiveTarget
         | None -> effectiveAlias, effectiveLnk, effectiveCore, effectiveTarget

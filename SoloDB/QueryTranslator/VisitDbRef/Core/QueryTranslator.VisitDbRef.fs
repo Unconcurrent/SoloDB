@@ -109,7 +109,7 @@ module internal QueryTranslatorVisitDbRef =
                             | "Intersect" | "Except" ->
                                 let filtered = addExistsCheck (setOpName = "Intersect") { leftCore with Distinct = true }
                                 let innerSel = { Ctes = []; Body = SingleSelect filtered }
-                                let dtAlias = sprintf "_sc%d" (System.Threading.Interlocked.Increment(&subqueryAliasCounter))
+                                let dtAlias = sprintf "_sc%d" (System.Threading.Interlocked.Increment(qb.SourceContext.AliasCounter))
                                 let countProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
                                 let outerCore = mkSubCoreLocal countProj (Some(DerivedTable(innerSel, dtAlias))) None
                                 qb.DuHandlerResult.Value <- ValueSome(SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect outerCore })
@@ -117,8 +117,8 @@ module internal QueryTranslatorVisitDbRef =
                             | "Concat" when not distinctOuter ->
                                 let leftSel = { Ctes = []; Body = SingleSelect leftCore }
                                 let rightSel = { Ctes = []; Body = SingleSelect rightCore }
-                                let lAlias = sprintf "_cl%d" (System.Threading.Interlocked.Increment(&subqueryAliasCounter))
-                                let rAlias = sprintf "_cr%d" (System.Threading.Interlocked.Increment(&subqueryAliasCounter))
+                                let lAlias = sprintf "_cl%d" (System.Threading.Interlocked.Increment(qb.SourceContext.AliasCounter))
+                                let rAlias = sprintf "_cr%d" (System.Threading.Interlocked.Increment(qb.SourceContext.AliasCounter))
                                 let countProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
                                 let lCount = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect (mkSubCoreLocal countProj (Some(DerivedTable(leftSel, lAlias))) None) }
                                 let rCount = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect (mkSubCoreLocal countProj (Some(DerivedTable(rightSel, rAlias))) None) }
@@ -129,8 +129,8 @@ module internal QueryTranslatorVisitDbRef =
                                 | ValueSome (leftProjDu2, leftCore2, _), ValueSome (_rightProjDu2, rightCore2, _) ->
                                     let leftSel = { Ctes = []; Body = SingleSelect { leftCore2 with Distinct = true } }
                                     let rightSel = { Ctes = []; Body = SingleSelect { rightCore2 with Distinct = true } }
-                                    let lAlias = sprintf "_ul%d" (System.Threading.Interlocked.Increment(&subqueryAliasCounter))
-                                    let rAlias = sprintf "_ur%d" (System.Threading.Interlocked.Increment(&subqueryAliasCounter))
+                                    let lAlias = sprintf "_ul%d" (System.Threading.Interlocked.Increment(qb.SourceContext.AliasCounter))
+                                    let rAlias = sprintf "_ur%d" (System.Threading.Interlocked.Increment(qb.SourceContext.AliasCounter))
                                     let countProj = [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
                                     let mkCount sel alias = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect (mkSubCoreLocal countProj (Some(DerivedTable(sel, alias))) None) }
                                     let lCount = mkCount leftSel lAlias
@@ -153,7 +153,7 @@ module internal QueryTranslatorVisitDbRef =
                                                 | Some w -> Some(SqlExpr.Binary(w, BinaryOperator.And, SqlExpr.Exists rightExistsSel3))
                                                 | None -> Some(SqlExpr.Exists rightExistsSel3) }
                                     let iSel = { Ctes = []; Body = SingleSelect intersectCore }
-                                    let iAlias = sprintf "_ui%d" (System.Threading.Interlocked.Increment(&subqueryAliasCounter))
+                                    let iAlias = sprintf "_ui%d" (System.Threading.Interlocked.Increment(qb.SourceContext.AliasCounter))
                                     let iCount = mkCount iSel iAlias
                                     qb.DuHandlerResult.Value <- ValueSome(SqlExpr.Binary(SqlExpr.Binary(lCount, BinaryOperator.Add, rCount), BinaryOperator.Sub, iCount))
                                     true

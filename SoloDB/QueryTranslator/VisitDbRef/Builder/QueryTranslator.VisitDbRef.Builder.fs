@@ -25,6 +25,9 @@ module internal DBRefManyBuilder =
 
     let tryBuild (qb: QueryBuilder) (desc: QueryDescriptor) (ownerRef: DBRefManyOwnerRef) : SqlExpr voption =
         qb.StepTranslation()
+        // Per-context alias generator. Closes over qb.SourceContext.AliasCounter so
+        // alias numerals are deterministic per query rather than process-history-dependent.
+        let nextAlias = nextAlias qb.SourceContext
         // Depth guard — check all predicate/projection expressions for nested DBRefMany depth.
         let peelerDepth = QueryTranslatorVisitDbRefPeelers.countDbRefManyDepth
         let maxExprDepth =

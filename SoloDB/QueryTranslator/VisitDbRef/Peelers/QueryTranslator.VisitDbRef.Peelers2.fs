@@ -245,7 +245,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
                         let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
                         let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
                         let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
-                        let aliasId = System.Threading.Interlocked.Increment(&subqueryAliasCounter)
+                        let aliasId = System.Threading.Interlocked.Increment(qb.SourceContext.AliasCounter)
                         let tgtAlias = sprintf "_tgt%d" aliasId
                         let lnkAlias = sprintf "_lnk%d" aliasId
 
@@ -297,7 +297,7 @@ module internal QueryTranslatorVisitDbRefPeelers2 =
         let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
         let targetType = ownerRef.PropertyExpr.Type.GetGenericArguments().[0]
         let targetTable = resolveTargetCollectionForRelation qb.SourceContext ownerRef.OwnerCollection propName targetType
-        let aliasId = System.Threading.Interlocked.Increment(&subqueryAliasCounter)
+        let aliasId = System.Threading.Interlocked.Increment(qb.SourceContext.AliasCounter)
         let tgtAlias = sprintf "_tgt%d" aliasId
         let lnkAlias = sprintf "_lnk%d" aliasId
 
