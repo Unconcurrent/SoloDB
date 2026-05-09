@@ -215,15 +215,13 @@ let internal ensureRelationSchema (tx: RelationTxContext) (descriptor: RelationD
 
     match descriptor.TypedIdType, descriptor.TargetSoloIdProperty with
     | ValueSome _, ValueSome soloIdProp ->
-        // Typed-id relations require a unique index on the target's `[<SoloId>]`
-        // property. Callers must bootstrap the target collection — typically via
-        // `GetCollection<TTarget>()` which runs the standard target-side init —
-        // before opening any owner that declares `DBRef<TTarget,_>` /
-        // `DBRefMany<TTarget,_>`. Silently auto-creating the index here would
-        // mask configuration defects (the index dropped or never declared on a
-        // pre-existing target) so the validator below fails loud whenever the
-        // index is missing, regardless of whether this is the target's first
-        // touch from the owner side.
+        // Typed-id relations require a unique index on the target's [<SoloId>]
+        // property. Auto-create it idempotently so owner-before-target open is
+        // order-independent. The validator below still runs to catch any
+        // post-bootstrap schema regression (e.g. user raw-SQL DROP INDEX) that
+        // would otherwise let typed-relation queries return wrong results
+        // silently.
+        HelperSchema.ensureUniqueIndexForProperty descriptor.TargetTable descriptor.TargetType tx.Connection soloIdProp
         let needle = $"jsonb_extract(value,'$.{soloIdProp.Name}')".ToLowerInvariant()
         let hasUniqueSoloIdIndex =
             tx.Connection.QueryFirst<int64>(
