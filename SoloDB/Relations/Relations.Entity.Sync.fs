@@ -72,7 +72,7 @@ let internal insertTargetEntity (tx: RelationTxContext) (targetTable: string) (t
         with
         | :? InvalidOperationException -> reraise()
         | ex ->
-            raise (System.Exception(
+            raise (InvalidOperationException(
                 sprintf "Error: Cascade-insert generator failed for target '%s'; the transaction is being rolled back.\nReason: %s\nFix: ensure the registered IIdGenerator does not access the target collection or null-dereferenceable state during cascade context." targetType.FullName ex.Message,
                 ex))
 
