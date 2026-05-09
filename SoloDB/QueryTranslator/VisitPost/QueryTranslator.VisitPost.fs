@@ -35,7 +35,7 @@ module internal QueryTranslatorVisitPost =
     let private updateManyDbRefManyPositionalMessage =
         "Error: UpdateMany cannot mutate a DBRefMany by position (Insert, SetAt, RemoveAt, indexer assignment).\nReason: DBRefMany has set semantics; positional / Ordered ops require a Position column on the relation link table that the current schema does not declare.\nFix: Use Add, Append, Remove, or Clear by row id or saved entity. Positional ordering on DBRefMany requires schema-level Ordered support that this version does not provide."
 
-    /// ε hop-trail diagnostics. Each message names the hop position and identifies the
+    /// Hop-trail diagnostics. Each message names the hop position and identifies the
     /// specific shape that is unsupported, so test cells can anchor on a precise vocabulary
     /// rather than the generic 'unsupported' fallback.
     let private chainPlainPropertyMidChainMessage (hopIndex: int) (ownerTypeName: string) (propertyName: string) =
