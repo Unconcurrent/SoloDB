@@ -567,12 +567,8 @@ type internal CollectionMutationOps<'T>() =
 
                         { Ctes = []; Body = SingleSelect core }, leafProj
 
-                    // Run a SqlDu statement through the same pass pipeline that
-                    // Queryable.HelperBase.fs:95-113 uses for SELECTs, then emit and execute.
-                    // The pass list mirrors the SELECT-path visitor coverage:
-                    //   ConstantFoldPass, FlattenPass, PushdownPass, ProjectionPass,
-                    //   CompositeGroupByCanonicalizationPass, IndexPlanShapingPass (with
-                    //   IndexModel), JsonbRewritePolicyPass (with IndexModel).
+                    // Run a SqlDu statement through the canonical SqlDu pass pipeline
+                    // (PassPipeline.standardWithIndexModel) and execute the result.
                     // The IndexModel is loaded for every base table referenced by the
                     // statement (chain link tables + leaf target/link table) so chain
                     // SELECT joins through link tables receive index-plan shaping.
