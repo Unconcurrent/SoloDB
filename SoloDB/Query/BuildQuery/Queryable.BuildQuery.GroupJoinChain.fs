@@ -162,6 +162,10 @@ module internal QueryableBuildQueryGroupJoinChain =
                    || state.PostBoundOffset.IsSome then
                     None
                 else
+                // Intentional zero-out shape — does NOT use buildDescriptorFromState
+                // because the helper propagates 8 of these fields from state, and
+                // this extractor explicitly nulls them as a fail-closed guard. A
+                // zero-out-subset parameter on the helper would obscure the intent.
                 Some {
                     Source = Expression.Constant(null) :> Expression
                     OfTypeName = None
