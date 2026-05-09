@@ -452,12 +452,17 @@ type internal CollectionMutationOps<'T>() =
                     else
                         selectMutationRows conn filter false
 
-                // Composition order: target-side chain mutations (and link writes) fire
-                // BEFORE owner-side JSON transforms. The chain SELECT anchors on
-                // selectedRows ids snapshotted before any mutation, so target-side rewrites
-                // see the pre-mutation owner set; the owner JSON pass then writes the
-                // owner side last.
-                let mutable affected = 0
+                // Composition order: owner-side JSON transforms fire FIRST, then target-side
+                // chain mutations and link writes. Owner-row triggers — including event
+                // handler subscriptions watching the owner row — observe one consolidated
+                // mutation per row in the JSON pass, then any subsequent chain pass writes
+                // its own statements. Reversing this would fire the owner trigger twice
+                // per row (once from the chain executor's relation-version increment and
+                // once from the JSON pass), and a one-shot RemoveHandler would consume
+                // the first fire (pre-JSON state) and miss the user-observable post-JSON
+                // state. Snapshot anchoring on chain-side selectedRows is preserved
+                // because the snapshot is captured before either pass runs.
+                let mutable affected = executeJsonUpdateManyByRows conn selectedRows jsonTransforms
 
                 // Partition: B4 chain ops (depth >= 1) vs link-touching apply ops.
                 let chainOps = ResizeArray<QueryTranslatorBase.UpdateManyRelationTransform>()
@@ -751,12 +756,6 @@ type internal CollectionMutationOps<'T>() =
 
                     if jsonTransforms.Count = 0 then
                         affected <- selectedRows.Length
-
-                // Owner-side JSON transforms run AFTER the target-side chain mutations and
-                // link writes, completing the target-first composition order.
-                let jsonAffected = executeJsonUpdateManyByRows conn selectedRows jsonTransforms
-                if jsonTransforms.Count > 0 then
-                    affected <- jsonAffected
 
                 affected
             )
