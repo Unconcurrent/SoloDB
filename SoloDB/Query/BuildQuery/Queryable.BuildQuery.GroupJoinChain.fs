@@ -123,30 +123,12 @@ module internal QueryableBuildQueryGroupJoinChain =
                     placeCountPredicate state recognized.CountPredicate
                     match unwrapConvert innerSource with
                     | :? ParameterExpression as p when Object.ReferenceEquals(p, rt.GroupParam) ->
-                        Some {
-                            Source = Expression.Constant(null) :> Expression
-                            OfTypeName = state.OfTypeName
-                            CastTypeName = state.CastTypeName
-                            WherePredicates = state.Wheres |> Seq.toList
-                            SortKeys = state.SortKeys |> Seq.toList
-                            Limit = state.Limit
-                            Offset = state.Offset
-                            PostBoundWherePredicates = state.PostBoundWheres |> Seq.toList
-                            PostBoundSortKeys = state.PostBoundSortKeys |> Seq.toList
-                            PostBoundLimit = state.PostBoundLimit
-                            PostBoundOffset = state.PostBoundOffset
-                            TakeWhileInfo = state.TakeWhileInfo
-                            PostBoundTakeWhileInfo = state.PostBoundTakeWhileInfo
-                            GroupByKey = state.GroupByKey
-                            Distinct = state.Distinct || outerDistinct
-                            SelectProjection = state.SelectProjection
-                            SetOps = state.SetOps |> Seq.toList
-                            Terminal = recognized.Terminal
-                            GroupByHavingPredicate = state.GroupByHaving
-                            DefaultIfEmpty = state.DefaultIfEmpty
-                            PostSelectDefaultIfEmpty = state.PostSelectDefaultIfEmpty
-                            SelectManyInnerLambda = state.SelectManyLambda
-                        }
+                        Some (buildDescriptorFromState
+                                (Expression.Constant(null) :> Expression)
+                                recognized.Terminal
+                                outerDistinct
+                                state.SelectManyLambda
+                                state)
                     | _ -> None
         | _ -> None
 
@@ -232,31 +214,8 @@ module internal QueryableBuildQueryGroupJoinChain =
                     let innerSource = walkChain extractorConfig state source
                     finalizeState state
                     placeCountPredicate state recognized.CountPredicate
-                    let desc : QueryDescriptor =
-                        {
-                            Source = innerSource
-                            OfTypeName = state.OfTypeName
-                            CastTypeName = state.CastTypeName
-                            WherePredicates = state.Wheres |> Seq.toList
-                            SortKeys = state.SortKeys |> Seq.toList
-                            Limit = state.Limit
-                            Offset = state.Offset
-                            PostBoundWherePredicates = state.PostBoundWheres |> Seq.toList
-                            PostBoundSortKeys = state.PostBoundSortKeys |> Seq.toList
-                            PostBoundLimit = state.PostBoundLimit
-                            PostBoundOffset = state.PostBoundOffset
-                            TakeWhileInfo = state.TakeWhileInfo
-                            PostBoundTakeWhileInfo = state.PostBoundTakeWhileInfo
-                            GroupByKey = state.GroupByKey
-                            Distinct = state.Distinct || outerDistinct
-                            SelectProjection = state.SelectProjection
-                            SetOps = state.SetOps |> Seq.toList
-                            Terminal = recognized.Terminal
-                            GroupByHavingPredicate = state.GroupByHaving
-                            DefaultIfEmpty = state.DefaultIfEmpty
-                            PostSelectDefaultIfEmpty = state.PostSelectDefaultIfEmpty
-                            SelectManyInnerLambda = None
-                        }
+                    let desc =
+                        buildDescriptorFromState innerSource recognized.Terminal outerDistinct None state
                     match unwrapConvert innerSource with
                     | :? ParameterExpression as p when Object.ReferenceEquals(p, rt.GroupParam) ->
                         Some (desc, recognized.Terminal)

@@ -192,6 +192,44 @@ module internal SharedDescriptorExtract =
     let placeCountPredicate (state: ExtractionState) (countPredicate: Expression option) =
         placeCountPredicateCore state.SeenBoundary state.Wheres.Add state.PostBoundWheres.Add countPredicate
 
+    /// Centralised descriptor construction from a finalised ExtractionState.
+    /// Callers declare only the intentional differences via parameters:
+    ///   source                   — the chain's outer source expression
+    ///   terminal                 — the resolved Terminal value
+    ///   outerDistinct            — OR'd into Distinct alongside state.Distinct
+    ///   selectManyInnerLambda    — caller override (None for non-SelectMany contexts)
+    /// Every other field is read directly from state.
+    let buildDescriptorFromState
+        (source: Expression)
+        (terminal: Terminal)
+        (outerDistinct: bool)
+        (selectManyInnerLambda: LambdaExpression option)
+        (state: ExtractionState) : QueryDescriptor =
+        {
+            Source = source
+            OfTypeName = state.OfTypeName
+            CastTypeName = state.CastTypeName
+            WherePredicates = state.Wheres |> Seq.toList
+            SortKeys = state.SortKeys |> Seq.toList
+            Limit = state.Limit
+            Offset = state.Offset
+            PostBoundWherePredicates = state.PostBoundWheres |> Seq.toList
+            PostBoundSortKeys = state.PostBoundSortKeys |> Seq.toList
+            PostBoundLimit = state.PostBoundLimit
+            PostBoundOffset = state.PostBoundOffset
+            TakeWhileInfo = state.TakeWhileInfo
+            PostBoundTakeWhileInfo = state.PostBoundTakeWhileInfo
+            GroupByKey = state.GroupByKey
+            Distinct = state.Distinct || outerDistinct
+            SelectProjection = state.SelectProjection
+            SetOps = state.SetOps |> Seq.toList
+            Terminal = terminal
+            GroupByHavingPredicate = state.GroupByHaving
+            DefaultIfEmpty = state.DefaultIfEmpty
+            PostSelectDefaultIfEmpty = state.PostSelectDefaultIfEmpty
+            SelectManyInnerLambda = selectManyInnerLambda
+        }
+
     let finalizeState (state: ExtractionState) =
         if not state.SeenBoundary then
             state.Wheres.AddRange(state.PostBoundWheres)

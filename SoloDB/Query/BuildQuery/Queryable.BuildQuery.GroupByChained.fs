@@ -34,30 +34,7 @@ module internal QueryableBuildQueryGroupByChained =
     }
 
     let private buildDescriptor (source: Expression) (outerDistinct: bool) (state: ExtractionState) (terminal: Terminal) : QueryDescriptor =
-        {
-            Source = source
-            OfTypeName = state.OfTypeName
-            CastTypeName = state.CastTypeName
-            WherePredicates = state.Wheres |> Seq.toList
-            SortKeys = state.SortKeys |> Seq.toList
-            Limit = state.Limit
-            Offset = state.Offset
-            PostBoundWherePredicates = state.PostBoundWheres |> Seq.toList
-            PostBoundSortKeys = state.PostBoundSortKeys |> Seq.toList
-            PostBoundLimit = state.PostBoundLimit
-            PostBoundOffset = state.PostBoundOffset
-            TakeWhileInfo = state.TakeWhileInfo
-            PostBoundTakeWhileInfo = state.PostBoundTakeWhileInfo
-            GroupByKey = state.GroupByKey
-            Distinct = state.Distinct || outerDistinct
-            SelectProjection = state.SelectProjection
-            SetOps = state.SetOps |> Seq.toList
-            Terminal = terminal
-            GroupByHavingPredicate = state.GroupByHaving
-            DefaultIfEmpty = state.DefaultIfEmpty
-            PostSelectDefaultIfEmpty = state.PostSelectDefaultIfEmpty
-            SelectManyInnerLambda = None
-        }
+        buildDescriptorFromState source terminal outerDistinct None state
 
     let private tryExtractGroupByQueryDescriptor (groupParam: ParameterExpression) (expr: Expression) : QueryDescriptor option =
         let expr, outerDistinct, _ = preprocessRoot expr
