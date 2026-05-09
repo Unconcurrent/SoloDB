@@ -4,10 +4,10 @@ open System
 open System.Collections
 open System.Collections.Generic
 
-// ─── IDBRefManyInternal: non-generic interface for Relations.fs ───────────────
+// ─── IDBRefManyInternal: non-generic interface for RelationsSync ───────────────
 
 /// <summary>
-/// Non-generic interface for accessing DBRefMany change tracking state from Relations.fs
+/// Non-generic interface for accessing DBRefMany change tracking state from RelationsSync
 /// without requiring the generic type parameter. Internal to the SoloDB assembly.
 /// </summary>
 type internal IDBRefManyInternal =
@@ -23,7 +23,7 @@ type internal IDBRefManyInternal =
     /// Ids present at the last load/reset checkpoint (snapshot before user mutations).
     abstract OriginalIds: IReadOnlyCollection<int64>
 
-    /// Current items as boxed objects. Relations.fs uses HasTypeId to extract Ids.
+    /// Current items as boxed objects. RelationsSync uses HasTypeId to extract Ids.
     abstract GetCurrentItemsBoxed: unit -> obj seq
 
     /// Reset change tracking after Insert or Update commits.
@@ -68,15 +68,15 @@ type DBRefMany<'T>() =
     /// <summary>True if Clear() was called since construction or last reset.</summary>
     member _.WasCleared = _wasCleared
 
-    // ─── Internal: for Relations.fs ───────────────────────────────────────────
+    // ─── Internal: for RelationsSync ───────────────────────────────────────────
 
     /// The set of Ids that were present at the last load/reset checkpoint.
     member internal _.OriginalIds = _originalIds
 
-    /// Direct typed access to current items list. Relations.fs uses this for typed operations.
+    /// Direct typed access to current items list. RelationsSync uses this for typed operations.
     member internal _.CurrentItems = _currentItems
 
-    /// Set loaded state from typed items (used by Relations.fs batch loading pipeline).
+    /// Set loaded state from typed items (used by RelationsSync batch loading pipeline).
     member internal _.SetLoaded(items: 'T seq, ids: int64 seq) =
         _currentItems.Clear()
         _currentItems.AddRange items
@@ -96,7 +96,7 @@ type DBRefMany<'T>() =
         _wasCleared <- false
         _hasPendingMutations <- false
 
-    // ─── IDBRefManyInternal (non-generic interface for Relations.fs) ──────────
+    // ─── IDBRefManyInternal (non-generic interface for RelationsSync) ──────────
 
     interface IDBRefManyInternal with
         member _.IsLoaded = _isLoaded
@@ -235,15 +235,15 @@ type DBRefMany<'TTarget, 'TId>() =
     /// <summary>True if Clear() was called since construction or last reset.</summary>
     member _.WasCleared = _wasCleared
 
-    // ─── Internal: for Relations.fs ───────────────────────────────────────────
+    // ─── Internal: for RelationsSync ───────────────────────────────────────────
 
     /// The set of Ids that were present at the last load/reset checkpoint.
     member internal _.OriginalIds = _originalIds
 
-    /// Direct typed access to current items list. Relations.fs uses this for typed operations.
+    /// Direct typed access to current items list. RelationsSync uses this for typed operations.
     member internal _.CurrentItems = _currentItems
 
-    /// Set loaded state from typed items (used by Relations.fs batch loading pipeline).
+    /// Set loaded state from typed items (used by RelationsSync batch loading pipeline).
     member internal _.SetLoaded(items: 'TTarget seq, ids: int64 seq) =
         _currentItems.Clear()
         _currentItems.AddRange items
@@ -263,7 +263,7 @@ type DBRefMany<'TTarget, 'TId>() =
         _wasCleared <- false
         _hasPendingMutations <- false
 
-    // ─── IDBRefManyInternal (non-generic interface for Relations.fs) ──────────
+    // ─── IDBRefManyInternal (non-generic interface for RelationsSync) ──────────
 
     interface IDBRefManyInternal with
         member _.IsLoaded = _isLoaded

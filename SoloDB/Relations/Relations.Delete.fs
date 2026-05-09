@@ -7,8 +7,12 @@ open SoloDatabase.Attributes
 open SoloDatabase.Utils
 open SQLiteTools
 open RelationsTypes
-open RelationsSchema
-open RelationsEntity
+open RelationsSchemaBuilder
+open RelationsSchemaValidator
+open RelationsSchemaLinkTableDDL
+open RelationsEntitySync
+open RelationsEntityCascade
+open RelationsEntityApplyOps
 
 let internal withDeleteGuard (deleteCtx: DeleteTraversalContext) (tableName: string) (id: int64) (fn: unit -> unit) =
     let key = $"{tableName}|{id}"

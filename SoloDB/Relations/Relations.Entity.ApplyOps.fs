@@ -10,7 +10,9 @@ open SoloDatabase.Attributes
 open SoloDatabase.Utils
 open SQLiteTools
 open RelationsTypes
-open RelationsSchema
+open RelationsSchemaBuilder
+open RelationsSchemaValidator
+open RelationsSchemaLinkTableDDL
 open RelationsEntitySync
 
 let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) (updateOwnerJson: bool) =

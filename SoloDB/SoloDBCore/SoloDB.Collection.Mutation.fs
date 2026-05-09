@@ -42,7 +42,7 @@ type internal CollectionMutationOps<'T>() =
     /// for assignments to the [<SoloId>] property; raises before any SQL runs. Narrow: rejects
     /// exactly the assignment shape; non-SoloId UpdateMany transforms are unaffected.
     static member private RejectSoloIdWriteInTransforms (transforms: Expression<System.Action<'T>> array) =
-        match CustomTypeId<'T>.Value with
+        match CustomTypeId<'T>.Get() with
         | Some custom ->
             for expression in transforms do
                 let scanner = SoloIdWriteScanner(custom.Property)
@@ -64,7 +64,7 @@ type internal CollectionMutationOps<'T>() =
             (filterSql: string)
             (variables: IDictionary<string, obj>)
             (item: 'T) =
-        match CustomTypeId<'T>.Value with
+        match CustomTypeId<'T>.Get() with
         | Some custom ->
             let newId = custom.GetId(box item)
             let isNewEmpty =
@@ -100,7 +100,7 @@ type internal CollectionMutationOps<'T>() =
     /// SoloIds are equal (including both being IsEmpty for primitive-id types whose
     /// "empty" value is also a stored value), the operation is accepted.
     static member private RejectEmptyMutationOfNonEmptySoloId (opName: string) (oldEntity: 'T) (newEntity: 'T) =
-        match CustomTypeId<'T>.Value with
+        match CustomTypeId<'T>.Get() with
         | Some custom ->
             let oldId = custom.GetId(box oldEntity)
             let newId = custom.GetId(box newEntity)
@@ -123,7 +123,7 @@ type internal CollectionMutationOps<'T>() =
     /// If the registered IIdGenerator considers the SoloId empty, fail loud — generation is
     /// for Insert and cascade-create only.
     static member private ValidateNonEmptySoloId (opName: string) (item: 'T) =
-        match CustomTypeId<'T>.Value with
+        match CustomTypeId<'T>.Get() with
         | Some custom ->
             let extractedId = custom.GetId(box item)
             let isEmpty =
@@ -142,7 +142,7 @@ type internal CollectionMutationOps<'T>() =
         (name: string)
         (hasRelations: bool)
         (withTransaction: (SqliteConnection -> unit) -> unit)
-        (ensureRelationTx: SqliteConnection -> Relations.RelationTxContext)
+        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
         (mkRelationPathSets: unit -> 'a * 'b)
         (setSerializedItem: IDictionary<string, obj> -> 'T -> unit) =
 
@@ -154,10 +154,10 @@ type internal CollectionMutationOps<'T>() =
                 let id = HasTypeId<'T>.Read item
                 QueryTranslator.translateWhereExpr name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<int64>("Id") = id))
             else
-                match CustomTypeId<'T>.Value with
+                match CustomTypeId<'T>.Get() with
                 | Some customId ->
                     let id = customId.GetId (item |> box)
-                    let idProp = CustomTypeId<'T>.Value.Value.Property
+                    let idProp = CustomTypeId<'T>.Get().Value.Property
                     QueryTranslator.translateWhereExpr name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = id))
                 | None ->
                     let typeName = typeof<'T>.Name
@@ -180,7 +180,7 @@ type internal CollectionMutationOps<'T>() =
                         manyVars.["_mid0"] <- box id
                         SqlExpr.Binary(SqlExpr.Column(Some "o", "Id"), BinaryOperator.Eq, SqlExpr.Parameter "_mid0")
                     else
-                        match CustomTypeId<'T>.Value with
+                        match CustomTypeId<'T>.Get() with
                         | Some customId ->
                             let id = customId.GetId(item |> box)
                             manyVars.["_mid0"] <- id
@@ -203,14 +203,14 @@ type internal CollectionMutationOps<'T>() =
                     hydMap.[oldRow.Id.Value] <- oldRow.HydrationJSON
                     HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (oldRow.Id.Value, box oldOwner) |] hydMap
                 CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloId "Update" oldOwner item
-                let writePlan = Relations.prepareUpdate tx oldRow.Id.Value (box oldOwner) (box item)
+                let writePlan = RelationsPlan.prepareUpdate tx oldRow.Id.Value (box oldOwner) (box item)
 
                 setSerializedItem variables item
                 let count = conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {whereSql}", variables)
                 if count <= 0 then
                     raise (KeyNotFoundException "Could not Update any entities with specified Id.")
 
-                Relations.syncUpdate tx oldRow.Id.Value writePlan
+                RelationsSync.syncUpdate tx oldRow.Id.Value writePlan
             )
         else
             withTransaction (fun conn ->
@@ -225,7 +225,7 @@ type internal CollectionMutationOps<'T>() =
         (name: string)
         (withTransaction: (SqliteConnection -> int) -> int)
         (requiresRelationDeleteHandling: SqliteConnection -> bool)
-        (ensureRelationTx: SqliteConnection -> Relations.RelationTxContext)
+        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
         (selectMutationRows: SqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array) =
 
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
@@ -243,8 +243,8 @@ type internal CollectionMutationOps<'T>() =
                     for row in rows do
                         let owner = fromSQLite<'T> row
                         let ownerId = row.Id.Value
-                        let deletePlan = Relations.prepareDeleteOwner tx ownerId (box owner)
-                        Relations.syncDeleteOwner tx deletePlan
+                        let deletePlan = RelationsPlan.prepareDeleteOwner tx ownerId (box owner)
+                        RelationsSync.syncDeleteOwner tx deletePlan
 
                     let deleteVars = Dictionary<string, obj>(rows.Length)
                     let ids = ResizeArray<string>(rows.Length)
@@ -268,7 +268,7 @@ type internal CollectionMutationOps<'T>() =
         (name: string)
         (withTransaction: (SqliteConnection -> int) -> int)
         (requiresRelationDeleteHandling: SqliteConnection -> bool)
-        (ensureRelationTx: SqliteConnection -> Relations.RelationTxContext)
+        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
         (selectMutationRows: SqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array) =
 
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
@@ -285,8 +285,8 @@ type internal CollectionMutationOps<'T>() =
                 else
                     let oldRow = rows.[0]
                     let owner = fromSQLite<'T> oldRow
-                    let deletePlan = Relations.prepareDeleteOwner tx oldRow.Id.Value (box owner)
-                    Relations.syncDeleteOwner tx deletePlan
+                    let deletePlan = RelationsPlan.prepareDeleteOwner tx oldRow.Id.Value (box owner)
+                    RelationsSync.syncDeleteOwner tx deletePlan
                     conn.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {| id = oldRow.Id.Value |})
             else
                 // translateWhereExpr + emitted WHERE for DeleteOne no-rel.
@@ -301,7 +301,7 @@ type internal CollectionMutationOps<'T>() =
         (name: string)
         (hasRelations: bool)
         (withTransaction: (SqliteConnection -> int) -> int)
-        (ensureRelationTx: SqliteConnection -> Relations.RelationTxContext)
+        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
         (mkRelationPathSets: unit -> 'a * 'b)
         (setSerializedItem: IDictionary<string, obj> -> 'T -> unit) =
 
@@ -342,7 +342,7 @@ type internal CollectionMutationOps<'T>() =
                         let oldOwner = fromSQLite<'T> row
                         CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloId "ReplaceMany" oldOwner item
                     | None -> ()
-                    Relations.syncReplaceMany tx (ownerIds :> seq<_>) (oldOwners :> seq<_>) (box item)
+                    RelationsSync.syncReplaceMany tx (ownerIds :> seq<_>) (oldOwners :> seq<_>) (box item)
                     setSerializedItem variables item
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {filterSql}", variables)
             )
@@ -358,7 +358,7 @@ type internal CollectionMutationOps<'T>() =
         (name: string)
         (hasRelations: bool)
         (withTransaction: (SqliteConnection -> int) -> int)
-        (ensureRelationTx: SqliteConnection -> Relations.RelationTxContext)
+        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
         (mkRelationPathSets: unit -> 'a * 'b)
         (setSerializedItem: IDictionary<string, obj> -> 'T -> unit) =
 
@@ -386,7 +386,7 @@ type internal CollectionMutationOps<'T>() =
                         hydMap.[oldRow.Id.Value] <- oldRow.HydrationJSON
                         HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (oldRow.Id.Value, box oldOwner) |] hydMap
                     CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloId "ReplaceOne" oldOwner item
-                    Relations.syncReplaceOne tx oldRow.Id.Value (box oldOwner) (box item)
+                    RelationsSync.syncReplaceOne tx oldRow.Id.Value (box oldOwner) (box item)
                     setSerializedItem variables item
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id = @id", {| item = variables.["item"]; id = oldRow.Id.Value |})
             )
@@ -403,7 +403,7 @@ type internal CollectionMutationOps<'T>() =
         (hasRelations: bool)
         (getConnection: unit -> SqliteConnection)
         (withTransaction: (SqliteConnection -> int) -> int)
-        (ensureRelationTx: SqliteConnection -> Relations.RelationTxContext)
+        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
         (selectMutationRows: SqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array)
         (executeJsonUpdateManyByRows: SqliteConnection -> DbObjectRow array -> ResizeArray<Expression<System.Action<'T>>> -> int) =
 
@@ -747,12 +747,12 @@ type internal CollectionMutationOps<'T>() =
                         |> Seq.toList
 
                     for row in selectedRows do
-                        let writePlan: Relations.RelationWritePlan = {
+                        let writePlan: RelationsTypes.RelationWritePlan = {
                             Kind = RelationsTypes.RelationPlanKind.UpdateMany
                             OwnerType = typeof<'T>
                             Ops = mappedOps
                         }
-                        Relations.syncUpdate tx row.Id.Value writePlan
+                        RelationsSync.syncUpdate tx row.Id.Value writePlan
 
                     if jsonTransforms.Count = 0 then
                         affected <- selectedRows.Length

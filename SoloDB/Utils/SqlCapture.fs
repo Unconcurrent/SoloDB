@@ -1,12 +1,10 @@
 module internal SoloDatabase.SqlCapture
 
-/// Test-side SQL emission hook. When set, every SQL statement that the
-/// chain-executor pipeline emits is forwarded to the callback before it is
-/// executed against the SQLite connection. Callers must restore the previous
-/// value (typically `None`) once they no longer need to capture, otherwise
-/// every subsequent UpdateMany on any collection emits to a stale callback.
-///
-/// Scope: currently fires from the chain executor's executeSqlDu helper.
-/// Other SQL paths in SoloDB do not yet emit through this hook; expand the
-/// emission sites if a future test cell needs broader coverage.
+/// Chain-executor SQL emission hook. The chain executor's executeSqlDu helper
+/// (SoloDB.Collection.Mutation.fs) forwards every SQL statement it emits to
+/// this callback before sending it to the SQLite connection. The hook is
+/// scoped to that one emission path — callers must not assume any other
+/// product write path emits here. Callers must restore the previous value
+/// (typically `None`) when done capturing; otherwise every subsequent
+/// chain-executor UpdateMany on any collection emits to a stale callback.
 let mutable internal OnSqlEmitted : (string -> unit) option = None

@@ -53,15 +53,15 @@ type internal EventDbCache(connectionString: string, directConnection: SqliteCon
 
         Helper.registerTypeCollection<'U> collectionName directConnection
 
-        let hasRelations = RelationsSchema.getRelationSpecs typeof<'U> |> Array.isEmpty |> not
+        let hasRelations = RelationsSchemaValidator.getRelationSpecs typeof<'U> |> Array.isEmpty |> not
         if hasRelations then
-            let relationTx: Relations.RelationTxContext = {
+            let relationTx: RelationsTypes.RelationTxContext = {
                 Connection = directConnection
                 OwnerTable = collectionName
                 OwnerType = typeof<'U>
                 InTransaction = true
             }
-            Relations.ensureSchemaForOwnerType relationTx typeof<'U>
+            RelationsCore.ensureSchemaForOwnerType relationTx typeof<'U>
 
     member this.FileSystem : IFileSystem =
         if isNull cachedFileSystem then

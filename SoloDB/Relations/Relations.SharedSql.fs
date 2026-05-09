@@ -21,7 +21,7 @@ let createCollectionTableSql (qTable: string) =
     $"CREATE TABLE {qTable} ({collectionTableColumnsSql});"
 
 /// Canonical trigger SQL for collection event hooks.
-/// Used by HelperSchema.createTriggersForTable and RelationsSchema.ensureCollectionTableExists.
+/// Used by HelperSchema.createTriggersForTable and RelationsSchemaBuilder.ensureCollectionTableExists.
 let getSQLForTriggersForTable (name: string) =
     let updateTriggerName = $"SoloDB_Update_{name}"
     let insertTriggerName = $"SoloDB_Insert_{name}"

@@ -12,8 +12,12 @@ open SoloDatabase.JsonSerializator
 open SQLiteTools
 open JsonFunctions
 open RelationsTypes
-open RelationsSchema
-open RelationsEntity
+open RelationsSchemaBuilder
+open RelationsSchemaValidator
+open RelationsSchemaLinkTableDDL
+open RelationsEntitySync
+open RelationsEntityCascade
+open RelationsEntityApplyOps
 
 let private maxRecursiveDepth = Utils.maxRelationDepth
 

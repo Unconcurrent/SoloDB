@@ -27,7 +27,7 @@ type internal CustomIdRunner =
     /// Insert / cascade-write entry. IsEmpty gate, then GenerateId + SetId. Idempotent on
     /// already-set ids.
     static member RunIfEmpty<'T when 'T :> obj> (item: 'T, collection: ISoloDBCollection<'T>) : unit =
-        match CustomTypeId<'T>.Value with
+        match CustomTypeId<'T>.Get() with
         | Some x ->
             let boxedItem = box item
             let oldId = x.GetId boxedItem
@@ -47,7 +47,7 @@ type internal CustomIdRunner =
     /// Heal entry. NO IsEmpty gate. GenerateId + SetId; the SQL probe already proved the row
     /// is bug-shaped, so regeneration is unconditional.
     static member ForceRegenerate<'T when 'T :> obj> (item: 'T, collection: ISoloDBCollection<'T>) : unit =
-        match CustomTypeId<'T>.Value with
+        match CustomTypeId<'T>.Get() with
         | Some x ->
             let boxedItem = box item
             match x.Generator with
@@ -232,7 +232,7 @@ module internal Helper =
     /// <param name="collection">The collection instance, used for ID generation context.</param>
     /// <returns>The ID of the inserted item.</returns>
     let private insertImpl<'T when 'T :> obj> (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) (orReplace: bool) (collection: ISoloDBCollection<'T>) =
-        let customIdGen = CustomTypeId<'T>.Value
+        let customIdGen = CustomTypeId<'T>.Get()
         let existsWritebleDirectId = HasTypeId<'T>.Value
 
 

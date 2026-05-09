@@ -10,7 +10,9 @@ open SoloDatabase.Attributes
 open SoloDatabase.Utils
 open SQLiteTools
 open RelationsTypes
-open RelationsSchema
+open RelationsSchemaBuilder
+open RelationsSchemaValidator
+open RelationsSchemaLinkTableDDL
 
 let internal readMetadataByOwner (connection: SqliteConnection) (ownerTable: string) =
     connection.Query<RelationMetadataRow>(

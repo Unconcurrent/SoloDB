@@ -10,16 +10,16 @@ type internal CollectionInsertOps<'T>() =
         (item: 'T)
         (hasRelations: bool)
         (withTransaction: (SqliteConnection -> int64) -> int64)
-        (ensureRelationTx: SqliteConnection -> Relations.RelationTxContext)
+        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
         (insertInner: SqliteConnection -> int64) =
 
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if hasRelations then
             withTransaction (fun conn ->
                 let tx = ensureRelationTx conn
-                let plan = Relations.prepareInsert tx (box item)
+                let plan = RelationsPlan.prepareInsert tx (box item)
                 let id = insertInner conn
-                Relations.syncInsert tx id plan
+                RelationsSync.syncInsert tx id plan
                 id
             )
         else
@@ -30,7 +30,7 @@ type internal CollectionInsertOps<'T>() =
         (hasRelations: bool)
         (name: string)
         (withTransaction: (SqliteConnection -> int64) -> int64)
-        (ensureRelationTx: SqliteConnection -> Relations.RelationTxContext)
+        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
         (tryLoadExistingOwnerForUpsert: SqliteConnection -> obj voption * int64 voption)
         (insertOrReplaceInner: SqliteConnection -> int64) =
 
@@ -41,12 +41,12 @@ type internal CollectionInsertOps<'T>() =
                 let oldOwner, oldOwnerId = tryLoadExistingOwnerForUpsert conn
 
                 match oldOwnerId with
-                | ValueSome ownerId -> Relations.applyOwnerReplacePolicies tx name ownerId
+                | ValueSome ownerId -> RelationsSync.applyOwnerReplacePolicies tx name ownerId
                 | ValueNone -> ()
 
-                let plan = Relations.prepareUpsert tx oldOwner (box item)
+                let plan = RelationsPlan.prepareUpsert tx oldOwner (box item)
                 let id = insertOrReplaceInner conn
-                Relations.syncUpsert tx id plan
+                RelationsSync.syncUpsert tx id plan
                 id
             )
         else
@@ -61,16 +61,16 @@ type internal CollectionInsertOps<'T>() =
 
     static member InsertBatchCore
         (items: 'T array)
-        (tx: Relations.RelationTxContext voption)
+        (tx: RelationsTypes.RelationTxContext voption)
         (insertInner: 'T -> int64) =
 
         let ids = List<int64>()
         for item in items do
             match tx with
             | ValueSome tx ->
-                let plan = Relations.prepareInsert tx (box item)
+                let plan = RelationsPlan.prepareInsert tx (box item)
                 let id = insertInner item
-                Relations.syncInsert tx id plan
+                RelationsSync.syncInsert tx id plan
                 ids.Add id
             | ValueNone ->
                 insertInner item |> ids.Add
@@ -78,7 +78,7 @@ type internal CollectionInsertOps<'T>() =
 
     static member InsertOrReplaceBatchCore
         (items: 'T array)
-        (tx: Relations.RelationTxContext voption)
+        (tx: RelationsTypes.RelationTxContext voption)
         (name: string)
         (tryLoadExistingOwnerForUpsert: 'T -> obj voption * int64 voption)
         (insertOrReplaceInner: 'T -> int64) =
@@ -90,12 +90,12 @@ type internal CollectionInsertOps<'T>() =
                 let oldOwner, oldOwnerId = tryLoadExistingOwnerForUpsert item
 
                 match oldOwnerId with
-                | ValueSome ownerId -> Relations.applyOwnerReplacePolicies tx name ownerId
+                | ValueSome ownerId -> RelationsSync.applyOwnerReplacePolicies tx name ownerId
                 | ValueNone -> ()
 
-                let plan = Relations.prepareUpsert tx oldOwner (box item)
+                let plan = RelationsPlan.prepareUpsert tx oldOwner (box item)
                 let id = insertOrReplaceInner item
-                Relations.syncUpsert tx id plan
+                RelationsSync.syncUpsert tx id plan
                 ids.Add id
             | ValueNone ->
                 insertOrReplaceInner item |> ids.Add

@@ -23,7 +23,7 @@ type internal CollectionScaffold<'T>(connection: Connection, connectionString: s
             use conn = connection.Get()
             RuntimeIndexModelCache.loadAndStore conn connectionString name
 
-    member _.MkRelationTx(conn: SqliteConnection) : Relations.RelationTxContext = {
+    member _.MkRelationTx(conn: SqliteConnection) : RelationsTypes.RelationTxContext = {
         Connection = conn
         OwnerTable = name
         OwnerType = typeof<'T>
@@ -34,13 +34,13 @@ type internal CollectionScaffold<'T>(connection: Connection, connectionString: s
         HashSet<string>(StringComparer.Ordinal),
         HashSet<string>(StringComparer.Ordinal)
 
-    member this.EnsureRelationTx(conn: SqliteConnection) : Relations.RelationTxContext =
+    member this.EnsureRelationTx(conn: SqliteConnection) : RelationsTypes.RelationTxContext =
         let tx = this.MkRelationTx conn
-        Relations.ensureSchemaForOwnerType tx typeof<'T>
+        RelationsCore.ensureSchemaForOwnerType tx typeof<'T>
         this.InvalidateIndexModelSnapshot()
         tx
 
-    member this.TryEnsureRelationTx(conn: SqliteConnection) : Relations.RelationTxContext voption =
+    member this.TryEnsureRelationTx(conn: SqliteConnection) : RelationsTypes.RelationTxContext voption =
         if hasRelations then
             ValueSome (this.EnsureRelationTx conn)
         else

@@ -171,16 +171,16 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
             let transientCollection = Collection<'T>(directConnection, name, connectionString, parentData)
             f transientCollection)
 
-    member private this.mkRelationTx (conn: SqliteConnection) : Relations.RelationTxContext =
+    member private this.mkRelationTx (conn: SqliteConnection) : RelationsTypes.RelationTxContext =
         scaffold.MkRelationTx(conn)
 
     static member internal mkRelationPathSets() =
         CollectionScaffold<'T>.MkRelationPathSets()
 
-    member internal this.ensureRelationTx (conn: SqliteConnection) : Relations.RelationTxContext =
+    member internal this.ensureRelationTx (conn: SqliteConnection) : RelationsTypes.RelationTxContext =
         scaffold.EnsureRelationTx(conn)
 
-    member internal this.tryEnsureRelationTx (conn: SqliteConnection) : Relations.RelationTxContext voption =
+    member internal this.tryEnsureRelationTx (conn: SqliteConnection) : RelationsTypes.RelationTxContext voption =
         scaffold.TryEnsureRelationTx(conn)
 
     member internal this.setSerializedItem (variables: IDictionary<string, obj>) (item: 'T) =
@@ -197,7 +197,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
                 else
                     ValueNone
             else
-                match CustomTypeId<'T>.Value with
+                match CustomTypeId<'T>.Get() with
                 | Some customId ->
                     // DU-built SELECT for upsert existence check.
                     let idValue = customId.GetId(item |> box)
@@ -246,21 +246,21 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     member this.TryGetById(id: int64) =
         CollectionInstanceCrud.tryGetByIdInt64<'T> id name this.HasRelations (fun () -> connection.Get()) (fun conn entityId entity ->
             let excludedPaths, includedPaths = Collection<'T>.mkRelationPathSets()
-            Relations.batchLoadDBRefProperties conn name typeof<'T> excludedPaths includedPaths false [| (entityId, entity) |] this.InTransaction
-            Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths false [| (entityId, entity) |] this.InTransaction
-            Relations.captureRelationVersionForEntities conn name [| (entityId, entity) |])
+            RelationsSync.batchLoadDBRefProperties conn name typeof<'T> excludedPaths includedPaths false [| (entityId, entity) |] this.InTransaction
+            RelationsSync.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths false [| (entityId, entity) |] this.InTransaction
+            RelationsSync.captureRelationVersionForEntities conn name [| (entityId, entity) |])
     member this.GetById(id: int64) =
         CollectionInstanceCrud.requireByIdInt64<'T> id name (this.TryGetById id)
     member this.DeleteById(id: int64) =
         CollectionInstanceCrud.deleteByIdInt64<'T> id name connection.WithTransaction this.RequiresRelationDeleteHandling this.ensureRelationTx (fun tx ownerId owner ->
-            let deletePlan = Relations.prepareDeleteOwner tx ownerId owner
-            Relations.syncDeleteOwner tx deletePlan)
+            let deletePlan = RelationsPlan.prepareDeleteOwner tx ownerId owner
+            RelationsSync.syncDeleteOwner tx deletePlan)
     member this.TryGetById<'IdType when 'IdType : equality>(id: 'IdType) : 'T option =
         let hydrateRelations (conn: SqliteConnection) (entityId: int64) (entity: obj) =
             let excludedPaths, includedPaths = Collection<'T>.mkRelationPathSets()
-            Relations.batchLoadDBRefProperties conn name typeof<'T> excludedPaths includedPaths false [| (entityId, entity) |] this.InTransaction
-            Relations.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths false [| (entityId, entity) |] this.InTransaction
-            Relations.captureRelationVersionForEntities conn name [| (entityId, entity) |]
+            RelationsSync.batchLoadDBRefProperties conn name typeof<'T> excludedPaths includedPaths false [| (entityId, entity) |] this.InTransaction
+            RelationsSync.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths false [| (entityId, entity) |] this.InTransaction
+            RelationsSync.captureRelationVersionForEntities conn name [| (entityId, entity) |]
         let tryGetByCustomId () =
             CollectionInstanceCrud.tryGetByCustomId<'T, 'IdType> id name this.HasRelations (fun () -> connection.Get()) hydrateRelations
         CollectionInstanceCrud.tryGetByIdWithFallback<'T, 'IdType> id (fun (id64: int64) -> this.TryGetById(id64)) tryGetByCustomId
@@ -271,8 +271,8 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     member this.DeleteById<'IdType when 'IdType : equality>(id: 'IdType) : int =
         let deleteByCustomId () =
             CollectionInstanceCrud.deleteByCustomId<'T, 'IdType> id name connection.WithTransaction this.RequiresRelationDeleteHandling this.ensureRelationTx (fun tx ownerId owner ->
-                let deletePlan = Relations.prepareDeleteOwner tx ownerId owner
-                Relations.syncDeleteOwner tx deletePlan)
+                let deletePlan = RelationsPlan.prepareDeleteOwner tx ownerId owner
+                RelationsSync.syncDeleteOwner tx deletePlan)
         CollectionInstanceCrud.deleteByIdWithFallback<'T, 'IdType> id (fun (id64: int64) -> this.DeleteById(id64)) deleteByCustomId
     member this.Update(item: 'T) =
         CollectionInstanceCrud.update<'T> item name this.HasRelations connection.WithTransaction this.ensureRelationTx Collection<'T>.mkRelationPathSets this.setSerializedItem

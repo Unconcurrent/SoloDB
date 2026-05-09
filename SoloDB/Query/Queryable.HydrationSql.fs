@@ -10,7 +10,9 @@ open SQLiteTools
 open Utils
 open SoloDatabase
 open SoloDatabase.RelationsTypes
-open SoloDatabase.RelationsSchema
+open SoloDatabase.RelationsSchemaBuilder
+open SoloDatabase.RelationsSchemaValidator
+open SoloDatabase.RelationsSchemaLinkTableDDL
 open SoloDatabase.QueryableGroupByAliases
 open SqlDu.Engine.C1.Spec
 

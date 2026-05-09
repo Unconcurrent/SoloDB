@@ -164,7 +164,7 @@ module internal QueryableTranslationCore =
         let ctx = QueryContext.SingleSource(source.Name)
         let hasRelations = hasRelationProperties typeof<'T>
         if hasRelations then
-            let relationTx: Relations.RelationTxContext = {
+            let relationTx: RelationsTypes.RelationTxContext = {
                 Connection = metadataConnection
                 OwnerTable = source.Name
                 OwnerType = typeof<'T>
@@ -174,8 +174,8 @@ module internal QueryableTranslationCore =
                     | :? CachingDbConnection as cc -> cc.InsideTransaction
                     | _ -> false
             }
-            Relations.withRelationSqliteWrap "build" "startTranslation.ensureSchemaForOwnerType" (fun () ->
-                Relations.ensureSchemaForOwnerType relationTx typeof<'T>
+            RelationsCore.withRelationSqliteWrap "build" "startTranslation.ensureSchemaForOwnerType" (fun () ->
+                RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
             )
 
         preloadQueryContextMetadata ctx metadataConnection

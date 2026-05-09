@@ -78,7 +78,6 @@
     <Compile Include="QueryTranslator/SqlDu/Emit/SqlDu.EmitWindow.fs" />
     <Compile Include="QueryTranslator/SqlDu/Emit/SqlDu.EmitExpr.fs" />
     <Compile Include="QueryTranslator/SqlDu/Emit/SqlDu.EmitSelect.fs" />
-    <Compile Include="QueryTranslator/SqlDu/Emit/SqlDu.EmitUnion.fs" />
     <Compile Include="QueryTranslator/SqlDu/Emit/SqlDu.EmitStatement.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.PassTypes.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.Provenance.fs" />
@@ -152,17 +151,14 @@
 		    <Compile Include="Relations/Relations.Schema.Builder.fs" />
 		    <Compile Include="Relations/Relations.Schema.Validator.fs" />
 		    <Compile Include="Relations/Relations.Schema.LinkTableDDL.fs" />
-		    <Compile Include="Relations/Relations.Schema.fs" />
 	    <Compile Include="Relations/Relations.Entity.Sync.fs" />
 	    <Compile Include="Relations/Relations.Entity.Cascade.fs" />
 	    <Compile Include="Relations/Relations.Entity.ApplyOps.fs" />
-	    <Compile Include="Relations/Relations.Entity.fs" />
 	    <Compile Include="Relations/Relations.Delete.fs" />
 	    <Compile Include="Relations/Relations.BatchLoad.fs" />
 	    <Compile Include="Relations/Relations.Core.fs" />
 	    <Compile Include="Relations/Relations.Plan.fs" />
 	    <Compile Include="Relations/Relations.Sync.fs" />
-	    <Compile Include="Relations/Relations.fs" />
 		    <Compile Include="Query/Queryable.Types.fs" />
 		    <Compile Include="Query/Queryable.HelperBase.fs" />
 		    <Compile Include="Query/Queryable.HelperState.fs" />
@@ -184,7 +180,6 @@
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.Main.fs" />
 		    <Compile Include="Query/Queryable.Translation.fs" />
 		    <Compile Include="Query/Queryable.Provider.fs" />
-		    <Compile Include="Query/Queryable.fs" />
 	    <Compile Include="SoloDBCore/SoloDB.Location.fs" />
     <Compile Include="SoloDBCore/SoloDB.ToCollectionData.fs" />
     <Compile Include="SoloDBCore/SoloDB.Bootstrap.fs" />

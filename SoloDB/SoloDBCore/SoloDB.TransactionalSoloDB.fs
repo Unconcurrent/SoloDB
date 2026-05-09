@@ -48,15 +48,15 @@ type TransactionalSoloDB internal (connection: TransactionalConnection, parentDa
         Helper.registerTypeCollection<'T> name connection
 
         // Validate relation topology after table creation.
-        let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
+        let hasRelations = RelationsSchemaValidator.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
         if hasRelations then
-            let relationTx: Relations.RelationTxContext = {
+            let relationTx: RelationsTypes.RelationTxContext = {
                 Connection = connection
                 OwnerTable = name
                 OwnerType = typeof<'T>
                 InTransaction = true // TransactionalSoloDB is always inside a transaction.
             }
-            Relations.ensureSchemaForOwnerType relationTx typeof<'T>
+            RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
 
         let collection = Collection<'T>(Transactional connection, name, connectionString, { ClearCacheFunction = ignore; EventSystem = parentData.EventSystem })
         collection.RefreshIndexModelSnapshot(connection)

@@ -31,7 +31,7 @@ type internal CollectionReadDeleteOps<'T>() =
 
         use connection = getConnection()
         if hasRelations && HydrationSqlBuilder.hasRelationProperties typeof<'T> then
-            Relations.withRelationSqliteWrap "read" "TryGetById.hydrated" (fun () ->
+            RelationsCore.withRelationSqliteWrap "read" "TryGetById.hydrated" (fun () ->
                 // Single-SQL hydration for non-queryable path.
                 let vars = Dictionary<string, obj>()
                 vars.["id"] <- box id
@@ -54,8 +54,8 @@ type internal CollectionReadDeleteOps<'T>() =
                         HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (json.Id.Value, box entity) |] hydMap
                     if singleHydrated || manyHydrated then
                         let excludedPaths, includedPaths = HashSet<string>(), HashSet<string>()
-                        Relations.recurseLoadedRelationTargets connection name typeof<'T> excludedPaths includedPaths false [| (json.Id.Value, box entity) |] false
-                    Relations.captureRelationVersionForEntities connection name [| (json.Id.Value, box entity) |]
+                        RelationsSync.recurseLoadedRelationTargets connection name typeof<'T> excludedPaths includedPaths false [| (json.Id.Value, box entity) |] false
+                    RelationsSync.captureRelationVersionForEntities connection name [| (json.Id.Value, box entity) |]
                     Some entity)
         else
             QueryCommandInstrumentation.Increment()
@@ -77,8 +77,8 @@ type internal CollectionReadDeleteOps<'T>() =
         (name: string)
         (withTransaction: (SqliteConnection -> int) -> int)
         (requiresRelationDeleteHandling: SqliteConnection -> bool)
-        (ensureRelationTx: SqliteConnection -> Relations.RelationTxContext)
-        (syncDeleteOwner: Relations.RelationTxContext -> int64 -> obj -> unit) =
+        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
+        (syncDeleteOwner: RelationsTypes.RelationTxContext -> int64 -> obj -> unit) =
 
         withTransaction (fun conn ->
             let requiresRelationHandling = requiresRelationDeleteHandling conn
@@ -102,7 +102,7 @@ type internal CollectionReadDeleteOps<'T>() =
         (getConnection: unit -> SqliteConnection)
         (hydrateRelations: SqliteConnection -> int64 -> obj -> unit) : 'T option =
 
-        let custom = CustomTypeId<'T>.Value
+        let custom = CustomTypeId<'T>.Get()
         let idProp =
             match custom with
             | Some c -> c.Property
@@ -110,7 +110,7 @@ type internal CollectionReadDeleteOps<'T>() =
 
         use connection = getConnection()
         if hasRelations && HydrationSqlBuilder.hasRelationProperties typeof<'T> then
-            Relations.withRelationSqliteWrap "read" "TryGetByCustomId.hydrated" (fun () ->
+            RelationsCore.withRelationSqliteWrap "read" "TryGetByCustomId.hydrated" (fun () ->
                 // Single-SQL hydration for custom-id non-queryable path.
                 // Build WHERE as SqlExpr DU (not raw string splice) to keep query in the DU tree.
                 // Custom-id filter is: jsonb_extract(Value, '$.PropName') = @param
@@ -135,8 +135,8 @@ type internal CollectionReadDeleteOps<'T>() =
                         HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (json.Id.Value, box entity) |] hydMap
                     if singleHydrated || manyHydrated then
                         let excludedPaths, includedPaths = HashSet<string>(), HashSet<string>()
-                        Relations.recurseLoadedRelationTargets connection name typeof<'T> excludedPaths includedPaths false [| (json.Id.Value, box entity) |] false
-                    Relations.captureRelationVersionForEntities connection name [| (json.Id.Value, box entity) |]
+                        RelationsSync.recurseLoadedRelationTargets connection name typeof<'T> excludedPaths includedPaths false [| (json.Id.Value, box entity) |] false
+                    RelationsSync.captureRelationVersionForEntities connection name [| (json.Id.Value, box entity) |]
                     Some entity)
         else
             // DU-built SELECT for custom-id no-relations fallback.
@@ -162,10 +162,10 @@ type internal CollectionReadDeleteOps<'T>() =
         (name: string)
         (withTransaction: (SqliteConnection -> int) -> int)
         (requiresRelationDeleteHandling: SqliteConnection -> bool)
-        (ensureRelationTx: SqliteConnection -> Relations.RelationTxContext)
-        (syncDeleteOwner: Relations.RelationTxContext -> int64 -> obj -> unit) =
+        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
+        (syncDeleteOwner: RelationsTypes.RelationTxContext -> int64 -> obj -> unit) =
 
-        let custom = CustomTypeId<'T>.Value
+        let custom = CustomTypeId<'T>.Get()
         let idProp =
             match custom with
             | Some c -> c.Property

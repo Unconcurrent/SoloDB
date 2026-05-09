@@ -161,15 +161,15 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         // Skip batchLoadDBRefProperties when single relations are hydrated
                         // inline via correlated subqueries in the SQL projection.
                         if ctx.HasSingleRelations && not ctx.SingleRelationsHydrated then
-                            Relations.withRelationSqliteWrap "query-batch-load" "ExecuteEnumerable.batchLoadDBRefProperties" (fun () ->
-                                Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
+                            RelationsCore.withRelationSqliteWrap "query-batch-load" "ExecuteEnumerable.batchLoadDBRefProperties" (fun () ->
+                                RelationsSync.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
                             )
 
                         // Skip batchLoadDBRefManyProperties when many relations are hydrated
                         // inline via HydrationJSON column with json_group_array subqueries.
                         if ctx.HasManyRelations && not ctx.ManyRelationsHydrated then
-                            Relations.withRelationSqliteWrap "query-batch-load" "ExecuteEnumerable.batchLoadDBRefManyProperties" (fun () ->
-                                Relations.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
+                            RelationsCore.withRelationSqliteWrap "query-batch-load" "ExecuteEnumerable.batchLoadDBRefManyProperties" (fun () ->
+                                RelationsSync.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
                             )
 
                         // Populate DBRefMany trackers from HydrationJSON.
@@ -179,10 +179,10 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         // Inline hydration loads hop-1 relations, but nested traversal still
                         // belongs to the recursive batch-loader.
                         if ctx.SingleRelationsHydrated || ctx.ManyRelationsHydrated then
-                            Relations.recurseLoadedRelationTargets connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
+                            RelationsSync.recurseLoadedRelationTargets connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
 
                         if ctx.HasSingleRelations || ctx.HasManyRelations then
-                            Relations.captureRelationVersionForEntities connection ctx.OwnerTable ownerEntities
+                            RelationsSync.captureRelationVersionForEntities connection ctx.OwnerTable ownerEntities
 
                 for (_id, entity) in buffer do
                     yield entity
@@ -216,12 +216,12 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                 match batchCtx with
                 | ValueSome ctx when (ctx.HasSingleRelations || ctx.HasManyRelations) && not (isNull (box entity)) && row.Id.HasValue && ctx.OwnerType.IsAssignableFrom(typeof<'TResult>) ->
                     if ctx.HasSingleRelations && not ctx.SingleRelationsHydrated then
-                        Relations.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefProperties" (fun () ->
-                            Relations.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
+                        RelationsCore.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefProperties" (fun () ->
+                            RelationsSync.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
                         )
                     if ctx.HasManyRelations && not ctx.ManyRelationsHydrated then
-                        Relations.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefManyProperties" (fun () ->
-                            Relations.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
+                        RelationsCore.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefManyProperties" (fun () ->
+                            RelationsSync.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
                         )
                     // Populate DBRefMany from HydrationJSON for scalar path.
                     if ctx.ManyRelationsHydrated && not (isNull row.HydrationJSON) then
@@ -229,9 +229,9 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         hydMap.[row.Id.Value] <- row.HydrationJSON
                         HydrationManyPopulator.populateFromHydrationJson ctx.OwnerType [| (row.Id.Value, box entity) |] hydMap
                     if ctx.SingleRelationsHydrated || ctx.ManyRelationsHydrated then
-                        Relations.recurseLoadedRelationTargets connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
+                        RelationsSync.recurseLoadedRelationTargets connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
                     if ctx.HasSingleRelations || ctx.HasManyRelations then
-                        Relations.captureRelationVersionForEntities connection ctx.OwnerTable [| (row.Id.Value, box entity) |]
+                        RelationsSync.captureRelationVersionForEntities connection ctx.OwnerTable [| (row.Id.Value, box entity) |]
                 | _ -> ()
                 entity
 

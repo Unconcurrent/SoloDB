@@ -266,7 +266,7 @@ let internal getLoadedRelationVersion (entity: obj) =
 let [<Literal>] internal relationVersionMetadataPath = "$.RelationVersion"
 
 /// Increment the RelationVersion in the Metadata column for a given owner table and entity id.
-/// Shared by Relations.fs (sync paths) and Relations.Delete.fs (delete traversal).
+/// Shared by RelationsSync (sync paths) and Relations.Delete.fs (delete traversal).
 let internal incrementRelationVersionForTable (connection: SqliteConnection) (ownerTable: string) (ownerId: int64) =
     let qOwner = quoteIdentifier (formatName ownerTable)
     connection.Execute(

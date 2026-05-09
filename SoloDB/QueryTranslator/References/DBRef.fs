@@ -49,7 +49,7 @@ type DBRef<'T> =
         else
             this._value
 
-    // ─── Internal: used by Relations.fs and query pipeline ────────────────────
+    // ─── Internal: used by RelationsSync and query pipeline ────────────────────
 
     /// Returns the pending entity for cascade-insert (From(entity) with Id=0).
     member internal this.PendingEntity: 'T voption =

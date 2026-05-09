@@ -5,7 +5,9 @@ open System.Reflection
 open Microsoft.Data.Sqlite
 open SQLiteTools
 open SoloDatabase.RelationsTypes
-open SoloDatabase.RelationsSchema
+open SoloDatabase.RelationsSchemaBuilder
+open SoloDatabase.RelationsSchemaValidator
+open SoloDatabase.RelationsSchemaLinkTableDDL
 
 module internal HydrationSqlMetadata =
     [<Struct>]
