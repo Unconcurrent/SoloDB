@@ -44,3 +44,16 @@ type internal CustomTypeId<'t> =
                     Property = p
                 |}
         )
+
+    /// Touches CustomTypeId<'t>.Value once and unwraps the
+    /// TypeInitializationException that F# wraps a `static member val`
+    /// initializer's throw with, so callers see the actionable
+    /// InvalidOperationException directly. All call sites that need to read
+    /// CustomTypeId<'t>.Value must go through this helper; reading .Value
+    /// directly leaks the .NET wrapper.
+    static member internal Get () : _ =
+        try
+            CustomTypeId<'t>.Value
+        with
+        | :? System.TypeInitializationException as tie when not (Utils.isNull tie.InnerException) ->
+            raise tie.InnerException
