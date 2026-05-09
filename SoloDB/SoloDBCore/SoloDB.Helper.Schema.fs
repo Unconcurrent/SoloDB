@@ -224,10 +224,6 @@ module internal HelperSchema =
         let indexName = $"{name}_index_{expressionStr}"
         indexName, whereSQL
 
-    let internal ensureUniqueIndexForProperty (collectionName: string) (entityType: Type) (conn: SqliteConnection) (pi: PropertyInfo) =
-        let indexName, whereSQL = getIndexWhereAndNameForPropertyShared collectionName entityType pi
-        conn.Execute($"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}") |> ignore
-
     let private ensureDeclaredIndexesFieldsLocal<'T> (name: string) (conn: SqliteConnection) =
         for (pi, indexed) in getIndexesFieldsShared<'T>() do
             let isSoloId = not (isNull (pi.GetCustomAttribute<SoloDatabase.Attributes.SoloId>(true)))
