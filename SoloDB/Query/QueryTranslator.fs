@@ -22,7 +22,7 @@ module internal QueryTranslator =
             raise (InvalidOperationException(
                 $"DBRef handler registration incomplete: count={count}, expected=3"))
 
-    // Re-export symbols from split modules used by Queryable.fs, Helper.Schema.fs, and other product code.
+    // Re-export symbols from split modules used by Helper.Schema.fs and other product code.
     let internal escapeSQLiteString input = QueryTranslatorBase.escapeSQLiteString input
     let inline internal evaluateExpr<'O> (e: Expression) = QueryTranslatorBase.evaluateExpr<'O> e
     let internal isAnyConstant expr = QueryTranslatorBase.isAnyConstant expr
