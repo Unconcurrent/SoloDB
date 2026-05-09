@@ -215,7 +215,18 @@ let internal ensureRelationSchema (tx: RelationTxContext) (descriptor: RelationD
 
     match descriptor.TypedIdType, descriptor.TargetSoloIdProperty with
     | ValueSome _, ValueSome soloIdProp ->
-        HelperSchema.ensureUniqueIndexForProperty descriptor.TargetTable descriptor.TargetType tx.Connection soloIdProp
+        // Discriminate first-touch-from-owner vs the broken-state: if the target
+        // collection table doesn't exist yet (the owner is being opened before the
+        // target collection has ever been touched), bootstrap the target side
+        // — including creating the unique index on its [<SoloId>] property —
+        // before the typed-id resolver hits it. If the target table already exists
+        // but the unique index doesn't, that's a configuration defect and we fail
+        // loud so callers see the missing-index error at bootstrap time rather than
+        // silently letting an inconsistent schema through.
+        let targetExisted =
+            sqliteTableExistsByName tx.Connection descriptor.TargetTable
+        if not targetExisted then
+            HelperSchema.ensureUniqueIndexForProperty descriptor.TargetTable descriptor.TargetType tx.Connection soloIdProp
         let needle = $"jsonb_extract(value,'$.{soloIdProp.Name}')".ToLowerInvariant()
         let hasUniqueSoloIdIndex =
             tx.Connection.QueryFirst<int64>(
