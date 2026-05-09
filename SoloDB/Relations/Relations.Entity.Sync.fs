@@ -67,7 +67,14 @@ let internal insertTargetEntity (tx: RelationTxContext) (targetTable: string) (t
     ensureCollectionTableExists tx.Connection targetTable
 
     if id <= 0L then
-        CustomIdRunner.RunBoxedIfEmpty(targetType, entity)
+        try
+            CustomIdRunner.RunBoxedIfEmpty(targetType, entity)
+        with
+        | :? InvalidOperationException -> reraise()
+        | ex ->
+            raise (System.Exception(
+                sprintf "Error: Cascade-insert generator failed for target '%s'; the transaction is being rolled back.\nReason: %s\nFix: ensure the registered IIdGenerator does not access the target collection or null-dereferenceable state during cascade context." targetType.FullName ex.Message,
+                ex))
 
     let json = serializeEntityForStorage targetType entity
     let qTarget = quoteIdentifier targetTable
