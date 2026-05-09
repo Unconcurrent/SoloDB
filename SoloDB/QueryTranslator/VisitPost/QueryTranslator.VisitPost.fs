@@ -21,7 +21,7 @@ module internal QueryTranslatorVisitPost =
 
     [<Literal>]
     let private updateManyDbRefManyPersistedIdMessage =
-        "Error: UpdateMany DBRefMany Add/Remove requires a persisted target Id.\nReason: The target Id must be > 0 to reference an existing row. Cascade-insert via DBRef.From(unsaved) is not supported in UpdateMany.\nFix: Pass either an int64 row id or an entity whose Id property is > 0. Insert the target first via the target collection if the entity is unsaved."
+        "Error: UpdateMany DBRefMany Add/Remove requires a persisted target Id.\nReason: The target Id must be > 0 to reference an existing row. Cascade-insert via DBRef.From(unsaved) is not supported in UpdateMany.\nFix: Save the target first or pass either an int64 row id or an entity whose Id property is > 0. Insert the target first via the target collection if the entity is unsaved."
 
     [<Literal>]
     let private updateManyDbRefValueMutationMessage =
@@ -581,7 +581,16 @@ module internal QueryTranslatorVisitPost =
                 parseDbRefSetValue me.Type propertyPath newValue |> ValueSome
             | ValueSome me when DBRefTypeHelpers.isDBRefManyType me.Type ->
                 raise (NotSupportedException updateManyRelationUnsupportedMessage)
-            | _ -> ValueNone
+            | _ ->
+                // Multi-hop chain access reaching a `.Set(...)` extension call (e.g.
+                // `o.Ref.Value.Other.Value.Label.Set v`) doesn't match the single-hop
+                // root-relation shape above. Reject it explicitly via the same path the
+                // Assign and set_X fall-throughs use; otherwise the body slides into the
+                // regular json-set emission and lowers to invalid SQL referencing
+                // unresolved relation aliases.
+                if containsDBRefValueMutationPath body then
+                    raise (InvalidOperationException updateManyDbRefValueMutationMessage)
+                ValueNone
 
         | :? MethodCallExpression as mc when mc.Method.Name = "Add" || mc.Method.Name = "Append" || mc.Method.Name = "Remove" || mc.Method.Name = "Clear" || mc.Method.Name = "SetAt" || mc.Method.Name = "RemoveAt" || mc.Method.Name = "Insert" || mc.Method.Name = "set_Item" ->
             match tryGetCallSourceAndArgStart mc with
