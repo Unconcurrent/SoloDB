@@ -530,7 +530,7 @@ type internal CollectionMutationOps<'T>() =
 
                     // Run a SqlDu statement through the same pass pipeline that
                     // Queryable.HelperBase.fs:95-113 uses for SELECTs, then emit and execute.
-                    // The pass list mirrors the locked design v3.2 visitor coverage:
+                    // The pass list mirrors the SELECT-path visitor coverage:
                     //   ConstantFoldPass, FlattenPass, PushdownPass, ProjectionPass,
                     //   CompositeGroupByCanonicalizationPass, IndexPlanShapingPass (with
                     //   IndexModel), JsonbRewritePolicyPass (with IndexModel).
