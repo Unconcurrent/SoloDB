@@ -53,6 +53,72 @@ type internal CollectionMutationOps<'T>() =
                             typeof<'T>.FullName custom.Property.Name))
         | None -> ()
 
+    /// SELECT-and-check variant for non-relation write paths that don't already load
+    /// the existing row. Reads the matched row's SoloId via jsonb_extract on the same
+    /// connection + variables and applies the same accept/reject rule as the in-memory
+    /// helper below.
+    static member private RejectEmptyMutationOfNonEmptySoloIdAgainstStored
+            (opName: string)
+            (conn: SqliteConnection)
+            (collectionName: string)
+            (filterSql: string)
+            (variables: IDictionary<string, obj>)
+            (item: 'T) =
+        match CustomTypeId<'T>.Value with
+        | Some custom ->
+            let newId = custom.GetId(box item)
+            let isNewEmpty =
+                match custom.Generator with
+                | :? SoloDatabase.Attributes.IIdGenerator as g -> g.IsEmpty newId
+                | :? SoloDatabase.Attributes.IIdGenerator<'T> as g -> g.IsEmpty newId
+                | _ -> false
+            if isNewEmpty then
+                let soloPath = "$." + custom.Property.Name
+                let storedIdSql =
+                    sprintf "SELECT jsonb_extract(Value, '%s') FROM \"%s\" WHERE (%s) LIMIT 1"
+                        soloPath collectionName filterSql
+                let storedId = conn.QueryFirstOrDefault<obj>(storedIdSql, variables)
+                if not (isNull storedId) then
+                    // The SQLite reader returns numeric values as int64; normalize into
+                    // the property's declared CLR type before equality / IsEmpty checks.
+                    let normalizedStored =
+                        try System.Convert.ChangeType(storedId, custom.Property.PropertyType)
+                        with _ -> storedId
+                    let equal =
+                        if isNull normalizedStored && isNull newId then true
+                        elif isNull normalizedStored || isNull newId then false
+                        else normalizedStored.Equals(newId)
+                    if not equal then
+                        raise (InvalidOperationException(
+                            sprintf "Error: %s requires a populated [<SoloId>] field on the supplied entity.\nReason: the registered IIdGenerator '%s' considers the supplied SoloId value empty while the stored row carries a different SoloId. Updating with an empty SoloId would silently overwrite the stored identity.\nFix: hydrate the SoloId from the existing row before mutating, or use Insert/InsertOrReplace which generates the id automatically."
+                                opName (custom.Generator.GetType().FullName)))
+        | None -> ()
+
+    /// Reject when the supplied entity carries an empty `[<SoloId>]` value AND the stored
+    /// row's SoloId is non-empty — that's the silent-identity-overwrite case where a
+    /// caller forgot to hydrate the SoloId before mutating. When stored and supplied
+    /// SoloIds are equal (including both being IsEmpty for primitive-id types whose
+    /// "empty" value is also a stored value), the operation is accepted.
+    static member private RejectEmptyMutationOfNonEmptySoloId (opName: string) (oldEntity: 'T) (newEntity: 'T) =
+        match CustomTypeId<'T>.Value with
+        | Some custom ->
+            let oldId = custom.GetId(box oldEntity)
+            let newId = custom.GetId(box newEntity)
+            let isNewEmpty =
+                match custom.Generator with
+                | :? SoloDatabase.Attributes.IIdGenerator as g -> g.IsEmpty newId
+                | :? SoloDatabase.Attributes.IIdGenerator<'T> as g -> g.IsEmpty newId
+                | _ -> false
+            let equal =
+                if isNull oldId && isNull newId then true
+                elif isNull oldId || isNull newId then false
+                else oldId.Equals(newId)
+            if isNewEmpty && not equal then
+                raise (InvalidOperationException(
+                    sprintf "Error: %s requires a populated [<SoloId>] field on the supplied entity.\nReason: the registered IIdGenerator '%s' considers the supplied SoloId value empty while the stored row carries a non-empty SoloId. Updating with an empty SoloId would silently overwrite the stored identity.\nFix: hydrate the SoloId from the existing row before mutating, or use Insert/InsertOrReplace which generates the id automatically."
+                        opName (custom.Generator.GetType().FullName)))
+        | None -> ()
+
     /// Whole-row write paths (Update, ReplaceOne, ReplaceMany) accept a user-supplied entity.
     /// If the registered IIdGenerator considers the SoloId empty, fail loud — generation is
     /// for Insert and cascade-create only.
@@ -136,6 +202,7 @@ type internal CollectionMutationOps<'T>() =
                     let hydMap = Dictionary<int64, string>()
                     hydMap.[oldRow.Id.Value] <- oldRow.HydrationJSON
                     HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (oldRow.Id.Value, box oldOwner) |] hydMap
+                CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloId "Update" oldOwner item
                 let writePlan = Relations.prepareUpdate tx oldRow.Id.Value (box oldOwner) (box item)
 
                 setSerializedItem variables item
@@ -147,6 +214,7 @@ type internal CollectionMutationOps<'T>() =
             )
         else
             withTransaction (fun conn ->
+                CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloIdAgainstStored "Update" conn name whereSql variables item
                 setSerializedItem variables item
                 let count = conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {whereSql}", variables)
                 if count <= 0 then
@@ -265,12 +333,22 @@ type internal CollectionMutationOps<'T>() =
                             if not (isNull row.HydrationJSON) then
                                 hydMap.[row.Id.Value] <- row.HydrationJSON
                         HydrationManyPopulator.populateFromHydrationJson typeof<'T> ownerPairs hydMap
+                    // Reject empty-SoloId mutation against any matched row whose stored
+                    // SoloId is non-empty; the helper compares on the first matched row,
+                    // which is sufficient for the rejection contract because all rows
+                    // would receive the same supplied entity content.
+                    match oldRows |> Array.tryHead with
+                    | Some row ->
+                        let oldOwner = fromSQLite<'T> row
+                        CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloId "ReplaceMany" oldOwner item
+                    | None -> ()
                     Relations.syncReplaceMany tx (ownerIds :> seq<_>) (oldOwners :> seq<_>) (box item)
                     setSerializedItem variables item
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {filterSql}", variables)
             )
         else
             withTransaction (fun conn ->
+                CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloIdAgainstStored "ReplaceMany" conn name filterSql variables item
                 setSerializedItem variables item
                 conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {filterSql}", variables))
 
@@ -307,12 +385,14 @@ type internal CollectionMutationOps<'T>() =
                         let hydMap = Dictionary<int64, string>()
                         hydMap.[oldRow.Id.Value] <- oldRow.HydrationJSON
                         HydrationManyPopulator.populateFromHydrationJson typeof<'T> [| (oldRow.Id.Value, box oldOwner) |] hydMap
+                    CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloId "ReplaceOne" oldOwner item
                     Relations.syncReplaceOne tx oldRow.Id.Value (box oldOwner) (box item)
                     setSerializedItem variables item
                     conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id = @id", {| item = variables.["item"]; id = oldRow.Id.Value |})
             )
         else
             withTransaction (fun conn ->
+                CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloIdAgainstStored "ReplaceOne" conn name filterSql variables item
                 setSerializedItem variables item
                 conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filterSql}) LIMIT 1)", variables))
 
