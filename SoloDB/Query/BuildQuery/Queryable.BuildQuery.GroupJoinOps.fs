@@ -185,7 +185,7 @@ module internal QueryableBuildQueryGroupJoinOps =
                       MaterializeDiscoveredJoins = materializeDiscoveredJoins
                       TryTranslateDbRefValueIdKey = tryTranslateDbRefValueIdKey
                       ReplaceExpression = replaceExpression
-                      ErrorExpr = fun message -> SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String($"__solodb_error__:{message}"))])
+                      ErrorExpr = fun message -> SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String((ErrorTag.Prefix + message)))])
                       TranslateOuterExpr = translateOuterExpr }
 
                 let rec translateGroupJoinArg (expr: Expression) : GroupJoinTranslatedArg =

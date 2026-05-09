@@ -173,9 +173,9 @@ module internal JsonFunctions =
             let exc = toJson<string> row.ValueJSON
             raise (exn exc)
             
-        if not (isNull row.ValueJSON) && row.ValueJSON.StartsWith("__solodb_error__:", StringComparison.Ordinal) then
-            raise (InvalidOperationException(row.ValueJSON.Substring("__solodb_error__:".Length)))
-        else
+        match ErrorTag.tryDetect row.ValueJSON with
+        | ValueSome message -> raise (InvalidOperationException(message))
+        | ValueNone ->
 
         // Checking if the SQLite returned a raw string.
         if typeof<'R> = typeof<string> then
@@ -216,8 +216,9 @@ module internal JsonFunctions =
             JsonValue.Null :> obj :?> 'R
         | Null when typeof<'R>.IsValueType && typeof<float> <> typeof<'R> && typeof<float32> <> typeof<'R> -> 
             Unchecked.defaultof<'R>
-        | String s when s.StartsWith("__solodb_error__:", StringComparison.Ordinal) ->
-            raise (InvalidOperationException(s.Substring("__solodb_error__:".Length)))
+        | String s when (ErrorTag.tryDetect s).IsSome ->
+            let message = (ErrorTag.tryDetect s).Value
+            raise (InvalidOperationException(message))
         | String s when typeof<'R> <> typeof<string> && s.StartsWith("Sequence contains", StringComparison.Ordinal) ->
             raise (InvalidOperationException(s))
         | json when typeof<JsonValue> = typeof<'R> ->

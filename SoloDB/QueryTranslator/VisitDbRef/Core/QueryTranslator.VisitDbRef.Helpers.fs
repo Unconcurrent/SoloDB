@@ -36,7 +36,7 @@ module internal DBRefManyHelpers =
             SqlExpr.FunctionCall(
                 "IFNULL",
                 [ scalarExpr
-                  SqlExpr.Literal(SqlLiteral.String "__solodb_error__:Sequence contains no elements") ])
+                  SqlExpr.Literal(SqlLiteral.String (ErrorTag.Prefix + "Sequence contains no elements")) ])
 
     let buildTakeWhileCfFilter (alias: string) (isTakeWhile: bool) =
         if isTakeWhile then

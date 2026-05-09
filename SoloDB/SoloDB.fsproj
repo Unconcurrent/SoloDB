@@ -41,6 +41,7 @@
     <Compile Include="Core/DBRefTypeHelpers.fs" />
     <Compile Include="Utils/AssemblyInternals.fs" />
     <Compile Include="Utils/SqlCapture.fs" />
+    <Compile Include="Utils/SoloDB.ErrorTag.fs" />
     <Compile Include="Utils/ReflectionSupport.fs" />
     <Compile Include="Utils/CommonSupport.fs" />
     <Compile Include="Core/SoloIdAccessor.fs" />
