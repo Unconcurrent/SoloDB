@@ -25,6 +25,27 @@ module internal QueryableBuildQueryGroupByChained =
     let private nextAlias (sourceCtx: QueryContext) (prefix: string) =
         sprintf "gb%s%d" prefix (Interlocked.Increment(sourceCtx.AliasCounter))
 
+    /// Evaluate a Take/Skip bound expression to a non-negative int64 SqlExpr.
+    /// Constant-folds at extract time and clamps negatives to zero — matches
+    /// the GroupJoin chain extractor's policy so the two GroupBy chain
+    /// translators agree on dynamic-bound handling. Previously dropped
+    /// non-constant bounds silently; now evaluates them as closed-over values.
+    let private evalNonNegativeInt64 (expr: Expression) : SqlExpr =
+        let raw = QueryTranslator.evaluateExpr<obj> expr
+        let value = Convert.ToInt64(raw)
+        let clamped = if value < 0L then 0L else value
+        SqlExpr.Literal(SqlLiteral.Integer clamped)
+
+    let private buildLimitOffset (takeExpr: Expression option) (skipExpr: Expression option) =
+        let takeValue = takeExpr |> Option.map evalNonNegativeInt64
+        let skipValue = skipExpr |> Option.map evalNonNegativeInt64
+        let limit =
+            match takeValue, skipValue with
+            | Some n, _ -> Some n
+            | None, Some _ -> Some(SqlExpr.Literal(SqlLiteral.Integer -1L))
+            | None, None -> None
+        limit, skipValue
+
     let private extractorConfig : ExtractorConfig = {
         EnsureOfTypeSupported = fun _ -> ()
         MultipleTakeSkipBoundariesMessage =
@@ -177,15 +198,11 @@ module internal QueryableBuildQueryGroupByChained =
             if orderBy.IsEmpty then [{ Expr = SqlExpr.Column(Some subAlias, "Id"); Direction = SortDirection.Asc }]
             else orderBy
 
-        // Limit/Offset
-        let limitDu =
-            match desc.Limit with
-            | Some e -> match e with | :? ConstantExpression as ce -> Some(SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value)))) | _ -> None
-            | None -> None
-        let offsetDu =
-            match desc.Offset with
-            | Some e -> match e with | :? ConstantExpression as ce -> Some(SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value)))) | _ -> None
-            | None -> None
+        // Limit/Offset — evaluate constant or closed-over bound expressions to a
+        // non-negative int64 literal, matching the buildLimitOffset policy used
+        // by the chain extractor and by GroupJoin chain emission.
+        let limitDu = desc.Limit |> Option.map evalNonNegativeInt64
+        let offsetDu = desc.Offset |> Option.map evalNonNegativeInt64
 
         let core =
             { Distinct = desc.Distinct && desc.SelectProjection.IsSome
@@ -406,19 +423,6 @@ module internal QueryableBuildQueryGroupByChained =
         SqlExpr.Coalesce(
             SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect countCore },
             [SqlExpr.Literal(SqlLiteral.Integer 0L)])
-
-    let private tryExtractInt64 (exprOpt: Expression option) =
-        match exprOpt with
-        | Some (:? ConstantExpression as ce) -> Some (SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value))))
-        | _ -> None
-
-    let private buildLimitOffset (takeExpr: Expression option) (skipExpr: Expression option) =
-        let limit =
-            match tryExtractInt64 takeExpr, tryExtractInt64 skipExpr with
-            | Some n, _ -> Some n
-            | None, Some _ -> Some(SqlExpr.Literal(SqlLiteral.Integer -1L))
-            | None, None -> None
-        limit, tryExtractInt64 skipExpr
 
     let rec private buildProjectedChainRowset
         (sourceCtx: QueryContext) (baseTableName: string) (innerSelect: SqlSelect) (groupRowAlias: string) (vars: Dictionary<string, obj>)
