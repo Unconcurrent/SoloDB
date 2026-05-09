@@ -64,7 +64,7 @@ module internal SoloDBRootOps =
     let private healOneTargetTyped<'TTarget>
         (connectionManager: ConnectionManager)
         (targetTable: string) =
-        match CustomTypeId<'TTarget>.Value with
+        match CustomTypeId<'TTarget>.Get() with
         | None -> ()
         | Some custom ->
             let idType = custom.Property.PropertyType
@@ -145,13 +145,27 @@ module internal SoloDBRootOps =
     /// property declared on the opened type via reflection and heal each property's target
     /// collection. The .NET model is the authority for "what does this type reference".
     let private healOwnerRelationTargets<'TOwner> (connectionManager: ConnectionManager) (ownerTable: string) =
-        let specs = RelationsSchema.getRelationSpecs typeof<'TOwner>
+        let specs = RelationsSchemaValidator.getRelationSpecs typeof<'TOwner>
         if specs.Length > 0 then
             use conn = connectionManager.Borrow()
             for spec in specs do
                 let prop, _kind, targetType, _typedIdType, _onDelete, _onOwnerDelete, _isUnique, _orderBy = spec
-                let targetTable = RelationsSchema.resolveTargetCollectionName conn ownerTable prop.Name targetType
+                let targetTable = RelationsSchemaBuilder.resolveTargetCollectionName conn ownerTable prop.Name targetType
                 healOneTarget connectionManager targetTable targetType
+
+    // Per-ConnectionManager cache: "SoloDBRelation catalog table is known to exist".
+    // The catalog table is created once by the relation bootstrap and is not dropped
+    // by any normal product path; once true, stays true. Lets us skip the sqlite_master
+    // EXISTS probe on every typed GetCollection<'T>() after the first hit per DB.
+    let private soloDBRelationCatalogPresent =
+        System.Runtime.CompilerServices.ConditionalWeakTable<ConnectionManager, obj>()
+
+    // Per-ConnectionManager × collection name positive cache: "this collection has
+    // been observed as a relation target". Once a collection is recorded as a target,
+    // cache it indefinitely. Spurious positives after an owner-drop are harmless —
+    // heal probes for bug-shape rows and exits cleanly when none exist.
+    let private knownRelationTargets =
+        System.Collections.Concurrent.ConcurrentDictionary<obj * string, unit>()
 
     /// Target-side heal trigger. When a collection opens that is itself recorded as a
     /// typed-relation TARGET (some other owner declares DBRef/DBRefMany pointing at it),
@@ -159,18 +173,35 @@ module internal SoloDBRootOps =
     /// fires regardless of whether the user opens the target or the owner first.
     /// Probes the SoloDBRelation catalog for any row referencing this name as
     /// TargetCollection; CustomTypeId-less types short-circuit inside healOneTargetTyped.
+    /// The two SQLite probes are cached: catalog-presence per ConnectionManager,
+    /// target-membership per (ConnectionManager, collection name).
     let private healCollectionTargetIfNeeded<'T> (connectionManager: ConnectionManager) (collectionName: string) =
+        let cacheKey = (box connectionManager, collectionName)
         let isRelationTarget =
-            use conn = connectionManager.Borrow()
-            // Catalog table may not exist yet on a fresh database; treat absence as "not a target".
-            let exists =
-                conn.QueryFirst<int64>(
-                    "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelation') THEN 1 ELSE 0 END;")
-            if exists = 0L then false
+            if knownRelationTargets.ContainsKey(cacheKey) then true
             else
-                conn.QueryFirst<int64>(
-                    "SELECT CASE WHEN EXISTS (SELECT 1 FROM SoloDBRelation WHERE TargetCollection = @target LIMIT 1) THEN 1 ELSE 0 END;",
-                    {| target = collectionName |}) = 1L
+                let mutable _placeholder = null
+                let catalogKnownPresent = soloDBRelationCatalogPresent.TryGetValue(connectionManager, &_placeholder)
+                use conn = connectionManager.Borrow()
+                let catalogPresent =
+                    if catalogKnownPresent then true
+                    else
+                        let exists =
+                            conn.QueryFirst<int64>(
+                                "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelation') THEN 1 ELSE 0 END;")
+                        if exists = 1L then
+                            soloDBRelationCatalogPresent.AddOrUpdate(connectionManager, box ())
+                            true
+                        else
+                            false
+                if not catalogPresent then false
+                else
+                    let isTarget =
+                        conn.QueryFirst<int64>(
+                            "SELECT CASE WHEN EXISTS (SELECT 1 FROM SoloDBRelation WHERE TargetCollection = @target LIMIT 1) THEN 1 ELSE 0 END;",
+                            {| target = collectionName |}) = 1L
+                    if isTarget then knownRelationTargets.TryAdd(cacheKey, ()) |> ignore
+                    isTarget
         if isRelationTarget then
             healOneTarget connectionManager collectionName typeof<'T>
 
@@ -189,7 +220,7 @@ module internal SoloDBRootOps =
             use connection = connectionManager.Borrow()
             Helper.existsCollection name connection
 
-        let hasRelations = RelationsSchema.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
+        let hasRelations = RelationsSchemaValidator.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
 
         if not existsAlready then
             lock ddlLock (fun () ->
@@ -201,31 +232,31 @@ module internal SoloDBRootOps =
                     Helper.registerTypeCollection<'T> name connection
 
                     if hasRelations then
-                        let relationTx: Relations.RelationTxContext = {
+                        let relationTx: RelationsTypes.RelationTxContext = {
                             Connection = connection
                             OwnerTable = name
                             OwnerType = typeof<'T>
                             InTransaction = true
                         }
-                        Relations.ensureSchemaForOwnerType relationTx typeof<'T>
+                        RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
                 )
             )
         elif hasRelations then
             let needsEnsure =
                 use conn = connectionManager.Borrow()
-                RelationsSchema.relationSchemaRequiresEnsure conn name typeof<'T>
+                RelationsSchemaLinkTableDDL.relationSchemaRequiresEnsure conn name typeof<'T>
             if needsEnsure then
                 lock ddlLock (fun () ->
                     connectionManager.WithTransaction(fun connection ->
                         Helper.registerTypeCollection<'T> name connection
 
-                        let relationTx: Relations.RelationTxContext = {
+                        let relationTx: RelationsTypes.RelationTxContext = {
                             Connection = connection
                             OwnerTable = name
                             OwnerType = typeof<'T>
                             InTransaction = true
                         }
-                        Relations.ensureSchemaForOwnerType relationTx typeof<'T>
+                        RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
                     )
                 )
 
