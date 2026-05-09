@@ -267,10 +267,49 @@ module internal QueryableBuildQueryGroupByChained =
 
         SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
 
+    /// Element-access cardinality semantics. SingleLike is the strict variant:
+    /// raises on >1 elements, and on 0 elements unless `orDefault` is true.
+    type private ElementCardinality =
+        | FirstLike
+        | SingleLike
+
+    /// Wraps a value scalar-subquery in a CASE-WHEN cardinality guard against a
+    /// sibling COUNT(LIMIT 2) subquery built over the same correlated core. The
+    /// error sentinels use the json_quote-wrapped tag that JsonFunctions.fs
+    /// hydration translates to InvalidOperationException with the .NET LINQ
+    /// standard wording.
+    let private wrapCardinalityCase
+        (sourceCtx: QueryContext) (baseCore: SelectCore)
+        (orDefault: bool) (valueScalar: SqlExpr) : SqlExpr =
+        let limitedSourceCore =
+            { baseCore with
+                Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 2L)) }
+        let limitedSourceSel = { Ctes = []; Body = SingleSelect limitedSourceCore }
+        let countAlias = nextAlias sourceCtx "_gcd"
+        let countOuterCore =
+            { Distinct = false
+              Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
+              Source = Some(DerivedTable(limitedSourceSel, countAlias))
+              Joins = []; Where = None; GroupBy = []; Having = None; OrderBy = []; Limit = None; Offset = None }
+        let countExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect countOuterCore }
+        let errorTagJson (message: string) =
+            SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String (ErrorTag.Prefix + message))])
+        let manyArm =
+            (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)),
+             errorTagJson "Sequence contains more than one element")
+        if orDefault then
+            SqlExpr.CaseExpr(manyArm, [], Some valueScalar)
+        else
+            let zeroArm =
+                (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)),
+                 errorTagJson "Sequence contains no elements")
+            SqlExpr.CaseExpr(zeroArm, [manyArm], Some valueScalar)
+
     /// Build a scalar subquery for an element terminal (First, FirstOrDefault, Last, etc.)
     let private buildElementSubquery
         (sourceCtx: QueryContext) (baseTableName: string) (innerSelect: SqlSelect) (groupRowAlias: string) (vars: Dictionary<string, obj>)
-        (groupByExprs: Expression array) (desc: QueryDescriptor) (pickLast: bool) (orDefault: bool) : SqlExpr =
+        (groupByExprs: Expression array) (desc: QueryDescriptor) (pickLast: bool) (orDefault: bool) (cardinality: ElementCardinality) : SqlExpr =
 
         // Build correlated core first — this determines the subquery alias
         let dummyProj = [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
@@ -294,18 +333,9 @@ module internal QueryableBuildQueryGroupByChained =
                 { core with OrderBy = core.OrderBy |> List.map (fun ob -> { ob with Direction = if ob.Direction = SortDirection.Asc then SortDirection.Desc else SortDirection.Asc }) }
             else core
 
-        // LIMIT 1 for element access
+        // LIMIT 1 for element access (SingleLike still emits LIMIT 1 for the
+        // value; cardinality is checked by a sibling COUNT subquery).
         let core = { core with Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L)) }
-
-        let valueExpr =
-            match desc.SelectProjection with
-            | Some _ -> SqlExpr.Column(Some subAlias, "v")
-            | None ->
-                SqlExpr.FunctionCall("jsonb_set", [
-                    SqlExpr.Column(Some subAlias, "Value")
-                    SqlExpr.Literal(SqlLiteral.String "$.Id")
-                    SqlExpr.Column(Some subAlias, "Id")
-                ])
 
         // Wrap in scalar subquery
         let wrapAlias = nextAlias sourceCtx "_gew"
@@ -321,7 +351,11 @@ module internal QueryableBuildQueryGroupByChained =
               Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L))
               Offset = None }
 
-        SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect resultCore }
+        let valueScalar = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect resultCore }
+
+        match cardinality with
+        | FirstLike -> valueScalar
+        | SingleLike -> wrapCardinalityCase sourceCtx baseCore orDefault valueScalar
 
     /// Build an EXISTS subquery for Any/All terminals.
     let private buildExistsSubquery
@@ -986,7 +1020,7 @@ module internal QueryableBuildQueryGroupByChained =
                       Limit = None
                       Offset = None }
                 SqlExpr.Coalesce(SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
-            let buildProjectedElementFromRowset pickLast =
+            let buildProjectedElementFromRowset pickLast (cardinality: ElementCardinality) (orDefault: bool) =
                 let rowsetAlias = nextAlias sourceCtx "_gre"
                 let core =
                     { Distinct = false
@@ -999,7 +1033,19 @@ module internal QueryableBuildQueryGroupByChained =
                       OrderBy = [{ Expr = SqlExpr.Column(Some rowsetAlias, "__ord"); Direction = if pickLast then SortDirection.Desc else SortDirection.Asc }]
                       Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L))
                       Offset = None }
-                SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
+                let valueScalar = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
+                match cardinality with
+                | FirstLike -> valueScalar
+                | SingleLike ->
+                    // Wrap with cardinality guard against the projected rowset.
+                    // The base SelectCore for the count subquery is the rowset-derived
+                    // shape; wrapCardinalityCase emits the COUNT(LIMIT 2) sibling.
+                    let baseCore =
+                        { Distinct = false
+                          Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
+                          Source = Some(DerivedTable(projectedRowset.Value, rowsetAlias))
+                          Joins = []; Where = None; GroupBy = []; Having = None; OrderBy = []; Limit = None; Offset = None }
+                    wrapCardinalityCase sourceCtx baseCore orDefault valueScalar
             let buildProjectedContainsFromRowset value =
                 let rowsetAlias = nextAlias sourceCtx "_grn"
                 let valueDu = translateExprDu sourceCtx groupRowAlias value vars
@@ -1080,31 +1126,31 @@ module internal QueryableBuildQueryGroupByChained =
                 | Terminal.All pred ->
                     buildExistsSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc (Some pred) true
                 | Terminal.First _ ->
-                    if useProjectedRowset then buildProjectedElementFromRowset false
-                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false false
+                    if useProjectedRowset then buildProjectedElementFromRowset false FirstLike false
+                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false false FirstLike
                 | Terminal.FirstOrDefault _ ->
-                    if useProjectedRowset then buildProjectedElementFromRowset false
-                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false true
+                    if useProjectedRowset then buildProjectedElementFromRowset false FirstLike true
+                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false true FirstLike
                 | Terminal.Last _ ->
-                    if useProjectedRowset then buildProjectedElementFromRowset true
-                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc true false
+                    if useProjectedRowset then buildProjectedElementFromRowset true FirstLike false
+                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc true false FirstLike
                 | Terminal.LastOrDefault _ ->
-                    if useProjectedRowset then buildProjectedElementFromRowset true
-                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc true true
+                    if useProjectedRowset then buildProjectedElementFromRowset true FirstLike true
+                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc true true FirstLike
                 | Terminal.Single _ ->
-                    if useProjectedRowset then buildProjectedElementFromRowset false
-                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false false
+                    if useProjectedRowset then buildProjectedElementFromRowset false SingleLike false
+                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false false SingleLike
                 | Terminal.SingleOrDefault _ ->
-                    if useProjectedRowset then buildProjectedElementFromRowset false
-                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false true
+                    if useProjectedRowset then buildProjectedElementFromRowset false SingleLike true
+                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false true SingleLike
                 | Terminal.ElementAt idx ->
                     let desc = { desc with Offset = Some idx }
                     if useProjectedRowset then buildProjectedElementAtFromRowset desc
-                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false false
+                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false false FirstLike
                 | Terminal.ElementAtOrDefault idx ->
                     let desc = { desc with Offset = Some idx }
                     if useProjectedRowset then buildProjectedElementAtFromRowset desc
-                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false true
+                    else buildElementSubquery sourceCtx baseTableName innerSelect groupRowAlias vars groupByExprs desc false true FirstLike
                 | Terminal.Contains value ->
                     if useProjectedRowset then buildProjectedContainsFromRowset value
                     else
