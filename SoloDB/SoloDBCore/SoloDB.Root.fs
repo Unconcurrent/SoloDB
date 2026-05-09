@@ -99,8 +99,18 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <typeparam name="'T">The type of the documents in the collection.</typeparam>
     /// <returns>An <c>ISoloDBCollection<'T></c> instance.</returns>
     member this.GetCollection<'T>() =
+        // CustomTypeId<'T> validates the [<SoloId>]-marked property the first time it's
+        // accessed. F# `static member val` initializers that throw raise a
+        // TypeInitializationException at the access site, wrapping the actionable inner
+        // message. Touch the static once and unwrap so callers see the original
+        // InvalidOperationException directly.
+        try
+            CustomTypeId<'T>.Value |> ignore
+        with
+        | :? System.TypeInitializationException as tie when not (isNull tie.InnerException) ->
+            raise tie.InnerException
         let name = Helper.collectionNameOf<'T>
-        
+
         this.InitializeCollection<'T>(name)
 
     /// <summary>
