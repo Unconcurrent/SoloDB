@@ -54,11 +54,11 @@ module internal DateTimeFunctions =
 
     /// Unix seconds from unix milliseconds.
     let private unixSec (ms: SqlExpr) : SqlExpr =
-        SqlExpr.Binary(ms, BinaryOperator.Div, SqlExpr.Literal(SqlLiteral.Integer 1000L))
+        SqlExpr.Binary(ms, BinaryOperator.Div, ms1000)
 
     /// Milliseconds part from unix milliseconds (epoch mode only).
     let private millisPart (ms: SqlExpr) : SqlExpr =
-        SqlExpr.Binary(ms, BinaryOperator.Mod, SqlExpr.Literal(SqlLiteral.Integer 1000L))
+        SqlExpr.Binary(ms, BinaryOperator.Mod, ms1000)
 
     let private strftimeFromEpoch (fmt: string) (ms: SqlExpr) : SqlExpr =
         SqlExpr.FunctionCall("strftime", [SqlExpr.Literal(SqlLiteral.String fmt); unixSec ms; SqlExpr.Literal(SqlLiteral.String "unixepoch")])
@@ -297,7 +297,7 @@ module internal DateTimeFunctions =
             | "Hour" -> strftimeInt "%H"
             | "Minute" -> strftimeInt "%M"
             | "Second" -> strftimeInt "%S"
-            | "Millisecond" -> castInt (SqlExpr.Binary(unixMs, BinaryOperator.Mod, SqlExpr.Literal(SqlLiteral.Integer 1000L)))
+            | "Millisecond" -> castInt (SqlExpr.Binary(unixMs, BinaryOperator.Mod, ms1000))
             | "DayOfWeek" -> strftimeInt "%w"
             | "DayOfYear" -> strftimeInt "%j"
             | _ -> raise (NotSupportedException($"DateTimeOffset member access '.{memberName}' is not supported in SQL translation."))
@@ -392,7 +392,7 @@ module internal DateTimeFunctions =
         | "Hour"        -> strftimeInt "%H"
         | "Minute"      -> strftimeInt "%M"
         | "Second"      -> strftimeInt "%S"
-        | "Millisecond" -> castInt (SqlExpr.Binary(ms, BinaryOperator.Mod, SqlExpr.Literal(SqlLiteral.Integer 1000L)))
+        | "Millisecond" -> castInt (SqlExpr.Binary(ms, BinaryOperator.Mod, ms1000))
         | "DayOfWeek"   -> strftimeInt "%w"
         | "DayOfYear"   -> strftimeInt "%j"
         | other ->
@@ -638,7 +638,7 @@ module internal DateTimeFunctions =
             | FromDayNumber ->
                 SqlExpr.Literal(SqlLiteral.Integer 0L), SqlExpr.Literal(SqlLiteral.Integer 0L)
             | FromMillisecondsSinceMidnight ->
-                unixSec rawExpr, SqlExpr.Binary(rawExpr, BinaryOperator.Mod, SqlExpr.Literal(SqlLiteral.Integer 1000L))
+                unixSec rawExpr, SqlExpr.Binary(rawExpr, BinaryOperator.Mod, ms1000)
 
         let sf fmt =
             match mode with
@@ -704,7 +704,7 @@ module internal DateTimeFunctions =
         | Specifier('f', 3) -> SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%03d"); msPart])
         | Specifier('f', 4) -> SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%04d"); SqlExpr.Binary(msPart, BinaryOperator.Mul, SqlExpr.Literal(SqlLiteral.Integer 10L))])
         | Specifier('f', 5) -> SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%05d"); SqlExpr.Binary(msPart, BinaryOperator.Mul, SqlExpr.Literal(SqlLiteral.Integer 100L))])
-        | Specifier('f', 6) -> SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%06d"); SqlExpr.Binary(msPart, BinaryOperator.Mul, SqlExpr.Literal(SqlLiteral.Integer 1000L))])
+        | Specifier('f', 6) -> SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%06d"); SqlExpr.Binary(msPart, BinaryOperator.Mul, ms1000)])
         | Specifier('f', _) -> SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%07d"); SqlExpr.Binary(msPart, BinaryOperator.Mul, SqlExpr.Literal(SqlLiteral.Integer 10000L))])
 
         | Specifier('F', count) ->
