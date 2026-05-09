@@ -230,6 +230,16 @@ module internal SharedDescriptorExtract =
             SelectManyInnerLambda = selectManyInnerLambda
         }
 
+    /// Evaluate a Take/Skip bound expression once at extract time and clamp
+    /// the resulting value to the non-negative int64 range. Single source of
+    /// truth for the dynamic-bound evaluation policy used by both GroupBy
+    /// and GroupJoin chain extractors; callers wrap the int64 in their own
+    /// emit-time SqlExpr literal as needed.
+    let evalNonNegativeInt64Bound (expr: Expression) : int64 =
+        let raw = evaluateExpr<obj> expr
+        let value = Convert.ToInt64(raw)
+        if value < 0L then 0L else value
+
     let finalizeState (state: ExtractionState) =
         if not state.SeenBoundary then
             state.Wheres.AddRange(state.PostBoundWheres)

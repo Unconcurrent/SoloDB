@@ -25,16 +25,9 @@ module internal QueryableBuildQueryGroupByChained =
     let private nextAlias (sourceCtx: QueryContext) (prefix: string) =
         sprintf "gb%s%d" prefix (Interlocked.Increment(sourceCtx.AliasCounter))
 
-    /// Evaluate a Take/Skip bound expression to a non-negative int64 SqlExpr.
-    /// Constant-folds at extract time and clamps negatives to zero — matches
-    /// the GroupJoin chain extractor's policy so the two GroupBy chain
-    /// translators agree on dynamic-bound handling. Previously dropped
-    /// non-constant bounds silently; now evaluates them as closed-over values.
+    /// Wrap the shared eval+clamp policy as a SqlExpr literal for chain emission.
     let private evalNonNegativeInt64 (expr: Expression) : SqlExpr =
-        let raw = QueryTranslator.evaluateExpr<obj> expr
-        let value = Convert.ToInt64(raw)
-        let clamped = if value < 0L then 0L else value
-        SqlExpr.Literal(SqlLiteral.Integer clamped)
+        SqlExpr.Literal(SqlLiteral.Integer(evalNonNegativeInt64Bound expr))
 
     let private buildLimitOffset (takeExpr: Expression option) (skipExpr: Expression option) =
         let takeValue = takeExpr |> Option.map evalNonNegativeInt64

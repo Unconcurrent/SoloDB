@@ -66,10 +66,10 @@ module internal QueryableBuildQueryGroupJoinChain =
         || desc.GroupByKey.IsSome
         || not desc.SetOps.IsEmpty
 
-    let evalNonNegativeInt64 (expr: Expression) =
-        let raw = QueryTranslator.evaluateExpr<obj> expr
-        let value = Convert.ToInt64(raw)
-        if value < 0L then 0L else value
+    /// Re-export of the shared eval+clamp policy at the int64 layer used by
+    /// the GroupJoin chain emitter. SharedDescriptorExtract holds the source
+    /// of truth.
+    let evalNonNegativeInt64 = evalNonNegativeInt64Bound
     let buildLimitOffset (takeExpr: Expression option) (skipExpr: Expression option) =
         let takeValue = takeExpr |> Option.map evalNonNegativeInt64
         let skipValue = skipExpr |> Option.map evalNonNegativeInt64
