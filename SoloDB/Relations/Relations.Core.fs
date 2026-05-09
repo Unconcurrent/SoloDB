@@ -38,16 +38,18 @@ let internal withRelationSqliteWrap (phase: string) (operation: string) (fn: uni
         raise ex
     | :? SqliteException as ex when ex.SqliteErrorCode = 19 && ex.SqliteExtendedErrorCode = 2067 ->
         // SQLITE_CONSTRAINT_UNIQUE on a typed-relation INSERT/UPDATE means two rows share
-        // the same [<SoloId>] typed-id value — the SELECT-resolver path uses the same
-        // 'Ambiguous typed relation target' diagnostic for the equivalent multi-match
-        // condition. Emit the same vocabulary at the write boundary so callers see a
-        // consistent message regardless of which side of the relation flow surfaces the
-        // duplicate.
+        // the same [<SoloId>] typed-id value. The outer wrapper line keeps the existing
+        // "Relation SQL operation failed" anchor that downstream tests grep for; the
+        // reason line carries the more specific "Ambiguous typed relation target"
+        // vocabulary the SELECT-resolver path uses for the equivalent multi-match
+        // condition, so callers see a consistent message regardless of which side of
+        // the relation flow surfaces the duplicate.
         let message =
-            "Error: Ambiguous typed relation target during '" + operation + "' (" + phase + ").\n" +
-            "Reason: SQLite UNIQUE constraint violation (sqliteErrorCode=" + string ex.SqliteErrorCode +
-            ", sqliteExtendedErrorCode=" + string ex.SqliteExtendedErrorCode + "). " +
-            "A typed-relation [SoloId] value collided with an existing row, or two rows in the target table share the same identity.\n" +
+            "Error: Relation SQL operation failed.\n" +
+            "Reason: Ambiguous typed relation target during '" + operation + "' (" + phase +
+            "). SQLite UNIQUE constraint violation (sqliteErrorCode=" + string ex.SqliteErrorCode +
+            ", sqliteExtendedErrorCode=" + string ex.SqliteExtendedErrorCode +
+            "). A typed-relation [SoloId] value collided with an existing row, or two rows in the target table share the same identity.\n" +
             "Fix: Enforce a unique index on the typed [<SoloId>] path, deduplicate target data, and retry."
         raise (InvalidOperationException(message, ex))
     | :? SqliteException as ex ->
