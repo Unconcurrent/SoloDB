@@ -153,6 +153,27 @@ module internal SoloDBRootOps =
                 let targetTable = RelationsSchema.resolveTargetCollectionName conn ownerTable prop.Name targetType
                 healOneTarget connectionManager targetTable targetType
 
+    /// Target-side heal trigger. When a collection opens that is itself recorded as a
+    /// typed-relation TARGET (some other owner declares DBRef/DBRefMany pointing at it),
+    /// heal the just-opened collection. Pairs with the owner-side trigger above so heal
+    /// fires regardless of whether the user opens the target or the owner first.
+    /// Probes the SoloDBRelation catalog for any row referencing this name as
+    /// TargetCollection; CustomTypeId-less types short-circuit inside healOneTargetTyped.
+    let private healCollectionTargetIfNeeded<'T> (connectionManager: ConnectionManager) (collectionName: string) =
+        let isRelationTarget =
+            use conn = connectionManager.Borrow()
+            // Catalog table may not exist yet on a fresh database; treat absence as "not a target".
+            let exists =
+                conn.QueryFirst<int64>(
+                    "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelation') THEN 1 ELSE 0 END;")
+            if exists = 0L then false
+            else
+                conn.QueryFirst<int64>(
+                    "SELECT CASE WHEN EXISTS (SELECT 1 FROM SoloDBRelation WHERE TargetCollection = @target LIMIT 1) THEN 1 ELSE 0 END;",
+                    {| target = collectionName |}) = 1L
+        if isRelationTarget then
+            healOneTarget connectionManager collectionName typeof<'T>
+
     let initializeCollection<'T>
         (checkDisposed: unit -> unit)
         (ddlLock: obj)
@@ -210,7 +231,14 @@ module internal SoloDBRootOps =
 
         let collection = Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = clearCache; EventSystem = events })
 
+        // Heal fires on either side: when an OWNER opens, the owner-side trigger walks
+        // its DBRef/DBRefMany properties and heals each target's collection; when a
+        // TARGET opens directly (the user pattern that GetCollection<TypedTarget>()
+        // covers without first opening the owner), the target-side trigger heals just
+        // the opened collection. Both paths converge on healOneTargetTyped, which
+        // short-circuits when the type has no [<SoloId>]-driven CustomTypeId.
         healOwnerRelationTargets<'T> connectionManager name
+        healCollectionTargetIfNeeded<'T> connectionManager name
 
         use snapshotConnection = connectionManager.Borrow()
         collection.RefreshIndexModelSnapshot(snapshotConnection)
