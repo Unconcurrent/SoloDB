@@ -138,9 +138,12 @@ type internal QueryContext = {
 
     /// Generate a unique alias (_ref0, _ref1, ...).
     /// AliasCounter is a ref cell — shared across cloned contexts to prevent collisions.
+    /// Uses Interlocked.Increment so mutation is atomic; sibling alias-generators in
+    /// the GroupBy/GroupJoin chain builders use the same pattern on the same ref cell,
+    /// and mixing atomic with non-atomic increments could lose counts under concurrent
+    /// access of a cloned context.
     member this.NextAlias() =
-        let n = this.AliasCounter.Value
-        this.AliasCounter.Value <- n + 1
+        let n = System.Threading.Interlocked.Increment(this.AliasCounter) - 1
         sprintf "_ref%d" n
 
     /// Find existing join for a property path, or None (deduplication).
