@@ -37,17 +37,29 @@ module SQLiteTools =
         // DDL+query contention a single retry is insufficient — bounded loop of up to 3 attempts
         // yields the thread between attempts so a competing DDL can complete its schema flush.
         let prepareWithSchemaRetry (command: SqliteCommand) =
+            // Microsoft.Data.Sqlite's PrepareAndEnumerateStatements surfaces transient
+            // ArgumentOutOfRangeException when concurrent DDL invalidates the schema
+            // cache mid-prepare. SQLite itself recovers via SQLITE_SCHEMA, but the
+            // managed wrapper does not retry. We do — bounded loop with linear backoff
+            // so a competing DDL can complete its schema flush between attempts.
             let mutable attempt = 0
             let mutable lastExn : ArgumentOutOfRangeException = null
             let mutable ok = false
-            while not ok && attempt < 3 do
+            let maxAttempts = 8
+            while not ok && attempt < maxAttempts do
                 try
                     command.Prepare()
                     ok <- true
                 with :? ArgumentOutOfRangeException as ex ->
                     lastExn <- ex
                     attempt <- attempt + 1
-                    if attempt < 3 then Threading.Thread.Sleep(0)
+                    if attempt < maxAttempts then
+                        // First retry: yield only. Subsequent: true geometric backoff
+                        // (1, 2, 4, 8, 16, 32 ms; total tail ~63 ms across 7 retries)
+                        // so the wait outlasts a typical DDL burst that triggered the
+                        // SQLITE_SCHEMA cross-connection invalidation.
+                        if attempt = 1 then Threading.Thread.Sleep(0)
+                        else Threading.Thread.Sleep(1 <<< (attempt - 2))
             if not ok then raise lastExn
 
         let tryCachedCommand (this: CachingDbConnection) (sql: string) (parameters: obj) =
