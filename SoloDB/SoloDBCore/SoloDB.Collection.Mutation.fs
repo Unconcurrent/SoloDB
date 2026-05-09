@@ -81,7 +81,6 @@ type internal CollectionMutationOps<'T>() =
         (setSerializedItem: IDictionary<string, obj> -> 'T -> unit) =
 
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
-        CollectionMutationOps<'T>.ValidateNonEmptySoloId "Update" item
 
         // translateWhereExpr returns SqlExpr DU + variables (canonical predicate path).
         let filterExpr, variables =
@@ -240,7 +239,6 @@ type internal CollectionMutationOps<'T>() =
 
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
-        CollectionMutationOps<'T>.ValidateNonEmptySoloId "ReplaceMany" item
 
         // translateWhereExpr canonical predicate path for ReplaceMany.
         let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
@@ -288,7 +286,6 @@ type internal CollectionMutationOps<'T>() =
 
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
-        CollectionMutationOps<'T>.ValidateNonEmptySoloId "ReplaceOne" item
 
         // translateWhereExpr canonical predicate path for ReplaceOne.
         let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
