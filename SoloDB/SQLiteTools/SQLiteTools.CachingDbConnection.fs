@@ -33,15 +33,16 @@ module SQLiteTools =
 
         // SQLITE_SCHEMA compensation: Microsoft.Data.Sqlite throws ArgumentOutOfRangeException
         // from PrepareAndEnumerateStatements when concurrent DDL invalidates the schema cache.
-        // SQLite re-prepares on SQLITE_SCHEMA internally; the .NET wrapper does not. Under heavy
-        // DDL+query contention a single retry is insufficient — bounded loop of up to 3 attempts
-        // yields the thread between attempts so a competing DDL can complete its schema flush.
+        // SQLite re-prepares on SQLITE_SCHEMA internally; the .NET wrapper does not. Under
+        // tight cross-connection DDL bursts on the same DB file a single retry is
+        // insufficient — bounded loop of up to 8 attempts with geometric backoff so a
+        // competing DDL can complete its schema flush between attempts.
         let prepareWithSchemaRetry (command: SqliteCommand) =
             // Microsoft.Data.Sqlite's PrepareAndEnumerateStatements surfaces transient
             // ArgumentOutOfRangeException when concurrent DDL invalidates the schema
             // cache mid-prepare. SQLite itself recovers via SQLITE_SCHEMA, but the
-            // managed wrapper does not retry. We do — bounded loop with linear backoff
-            // so a competing DDL can complete its schema flush between attempts.
+            // managed wrapper does not retry. We do — 8 attempts with geometric backoff
+            // (1, 2, 4, 8, 16, 32 ms tail) so the wait outlasts a typical DDL burst.
             let mutable attempt = 0
             let mutable lastExn : ArgumentOutOfRangeException = null
             let mutable ok = false
