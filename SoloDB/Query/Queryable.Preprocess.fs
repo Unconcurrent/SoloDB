@@ -163,6 +163,7 @@ module internal QueryableHelperPreprocess =
             RelationLinks = Dictionary(sourceCtx.RelationLinks, System.StringComparer.Ordinal)
             RelationOwnerUsesSource = Dictionary(sourceCtx.RelationOwnerUsesSource, System.StringComparer.Ordinal)
             TypeCollections = typeCollections
+            IsAtTopLevel = sourceCtx.IsAtTopLevel
         }
 
     let internal serializeForCollection (value: 'T) =

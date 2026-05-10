@@ -98,6 +98,27 @@ module internal QueryableHelperBase =
         | SelectStmt outSel -> SqlDuMinimalEmit.emitSelect qb outSel
         | _ -> failwith "internal invariant violation: expected SelectStmt from optimizer pipeline"
 
+    /// Map the closed-enum RuntimeErrorKind to its string name embedded in the
+    /// typed-payload JSON object. Adding a new kind requires updates here AND at
+    /// JsonFunctions.fromSQLite (Id=NULL dispatch arm) in lockstep.
+    let internal runtimeErrorKindName (kind: RuntimeErrorKind) =
+        match kind with
+        | CardinalityError -> "CardinalityError"
+        | CastError -> "CastError"
+        | RangeError -> "RangeError"
+
+    /// Build a typed-payload SqlExpr that encodes a runtime error as a JSON object:
+    /// {"kind": "<kind-name>", "msg": "<message>"}. Used as the Value column on
+    /// Id=NULL rows; the materializer decodes the kind and dispatches to the
+    /// matching .NET exception type.
+    let internal runtimeErrorPayload (kind: RuntimeErrorKind) (message: string) : SqlExpr =
+        SqlExpr.FunctionCall("json_object", [
+            SqlExpr.Literal(SqlLiteral.String "kind")
+            SqlExpr.Literal(SqlLiteral.String (runtimeErrorKindName kind))
+            SqlExpr.Literal(SqlLiteral.String "msg")
+            SqlExpr.Literal(SqlLiteral.String message)
+        ])
+
     /// Helper to build a simple SelectCore with default empty fields.
     let internal mkCore projections source =
         { Distinct = false; Projections = ProjectionSetOps.ofList projections; Source = source

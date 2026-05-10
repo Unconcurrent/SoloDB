@@ -168,14 +168,38 @@ module internal JsonFunctions =
             Unchecked.defaultof<'R>
         else
 
-        // If the Id is NULL then the ValueJSON is a error message encoded in a JSON string.
+        // Id=NULL is the SoloDB internal error-signaling channel. When the Id column
+        // is NULL, the ValueJSON column carries a typed-payload JSON object emitted
+        // by the translator's runtime-error sites:
+        //     {"kind": "<closed-enum-name>", "msg": "<message>"}
+        // The closed kind names dispatch to the matching .NET LINQ exception type.
+        // The kind names are translator-emitted from the closed F# DU
+        // SoloDatabase.RuntimeErrorKind; user expression-trees cannot fabricate
+        // Id=NULL emit (rowid is set by SQLite, not user data), so the structural
+        // payload is collision-free.
         if not row.Id.HasValue then
-            let exc = toJson<string> row.ValueJSON
-            raise (exn exc)
-            
-        match ErrorTag.tryDetect row.ValueJSON with
-        | ValueSome message -> raise (InvalidOperationException(message))
-        | ValueNone ->
+            match JsonValue.Parse row.ValueJSON with
+            | Object o ->
+                let kind =
+                    match o.TryGetValue "kind" with
+                    | true, String s -> s
+                    | _ -> ""
+                let msg =
+                    match o.TryGetValue "msg" with
+                    | true, String s -> s
+                    | _ -> row.ValueJSON
+                match kind with
+                | "CardinalityError" -> raise (InvalidOperationException msg)
+                | "CastError" -> raise (InvalidCastException msg)
+                | "RangeError" -> raise (ArgumentOutOfRangeException(null, msg))
+                | _ ->
+                    // Internal invariant violation: Id=NULL row carried an unrecognized
+                    // kind. All translator emit sites must use the closed
+                    // RuntimeErrorKind enum (CardinalityError | CastError | RangeError).
+                    raise (InvalidOperationException msg)
+            | _ ->
+                // Internal invariant violation: Id=NULL row payload is not a JSON object.
+                raise (InvalidOperationException row.ValueJSON)
 
         // Checking if the SQLite returned a raw string.
         if typeof<'R> = typeof<string> then
@@ -216,11 +240,6 @@ module internal JsonFunctions =
             JsonValue.Null :> obj :?> 'R
         | Null when typeof<'R>.IsValueType && typeof<float> <> typeof<'R> && typeof<float32> <> typeof<'R> -> 
             Unchecked.defaultof<'R>
-        | String s when (ErrorTag.tryDetect s).IsSome ->
-            let message = (ErrorTag.tryDetect s).Value
-            raise (InvalidOperationException(message))
-        | String s when typeof<'R> <> typeof<string> && s.StartsWith("Sequence contains", StringComparison.Ordinal) ->
-            raise (InvalidOperationException(s))
         | json when typeof<JsonValue> = typeof<'R> ->
             let id = row.Id.Value
             if json.JsonType = JsonValueType.Object && not (json.Contains "Id") && id >= 0 then

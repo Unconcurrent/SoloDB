@@ -1,10 +1,21 @@
 namespace SoloDatabase
 
 open System.Collections.Generic
+open SqlDu.Engine.C1.Spec
 
 type internal LayerPosition =
 | BaseLayer
 | OuterLayer
+
+/// Closed-enum kinds for translator-emitted runtime errors. The kind is encoded
+/// into the typed-payload JSON object on Id=NULL rows; the materializer dispatches
+/// by kind to the matching .NET exception type. Adding a new kind requires
+/// JsonFunctions.fromSQLite (Id=NULL dispatch arm) and runtimeErrorPayload (kind name)
+/// updates in lockstep.
+type internal RuntimeErrorKind =
+    | CardinalityError
+    | CastError
+    | RangeError
 
 /// Represents a named source root in a LINQ multi-source query graph.
 type internal QueryRootSource = {
@@ -98,6 +109,13 @@ type internal QueryContext = {
     RelationOwnerUsesSource: Dictionary<string, bool>
     /// Type -> known collection names mapping (used to resolve custom collection names)
     TypeCollections: Dictionary<string, HashSet<string>>
+    /// True ONLY at the OUTERMOST translation context (top-level user query
+    /// terminator). Cleared in CloneForSubquery (any nested subquery loses the flag)
+    /// so cardinality emit sites can detect they are nested and emit bare scalars
+    /// (default(T) propagation) rather than typed exceptions, per the SoloDB 1.2.2
+    /// contract: top-level cardinality errors throw via the Id=NULL channel; nested
+    /// cardinality silently propagates default values to the outer chain.
+    mutable IsAtTopLevel: bool
 }
     with
     /// Create a single-source context (backward-compatible default).
@@ -114,7 +132,8 @@ type internal QueryContext = {
           RelationTargets = Dictionary(System.StringComparer.Ordinal)
           RelationLinks = Dictionary(System.StringComparer.Ordinal)
           RelationOwnerUsesSource = Dictionary(System.StringComparer.Ordinal)
-          TypeCollections = Dictionary(System.StringComparer.Ordinal) }
+          TypeCollections = Dictionary(System.StringComparer.Ordinal)
+          IsAtTopLevel = false }
 
     /// Create a multi-source context while preserving the first root as the primary table.
     static member MultiSource(rootTable: string, roots: seq<string * string>) =
@@ -134,7 +153,8 @@ type internal QueryContext = {
           RelationTargets = Dictionary(System.StringComparer.Ordinal)
           RelationLinks = Dictionary(System.StringComparer.Ordinal)
           RelationOwnerUsesSource = Dictionary(System.StringComparer.Ordinal)
-          TypeCollections = Dictionary(System.StringComparer.Ordinal) }
+          TypeCollections = Dictionary(System.StringComparer.Ordinal)
+          IsAtTopLevel = false }
 
     /// Generate a unique alias (_ref0, _ref1, ...).
     /// AliasCounter is a ref cell — shared across cloned contexts to prevent collisions.
@@ -158,7 +178,8 @@ type internal QueryContext = {
     member this.CloneForSubquery(?rootTable: string) =
         { this with
             Joins = ResizeArray()
-            RootTable = defaultArg rootTable this.RootTable }
+            RootTable = defaultArg rootTable this.RootTable
+            IsAtTopLevel = false }
 
     /// Resolve or create an additional query root for multi-source planning.
     member this.ResolveRoot(sourceKey: string, tableName: string) =

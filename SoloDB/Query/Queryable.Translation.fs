@@ -162,6 +162,10 @@ module internal QueryableTranslationCore =
                 expression.Type
 
         let ctx = QueryContext.SingleSource(source.Name)
+        // Mark this as the OUTERMOST translation context. Cleared in CloneForSubquery
+        // so nested cardinality emit sites can detect they are nested and emit bare
+        // scalars (default(T) propagation) rather than typed exceptions.
+        ctx.IsAtTopLevel <- true
         let hasRelations = hasRelationProperties typeof<'T>
         if hasRelations then
             let relationTx: RelationsTypes.RelationTxContext = {
@@ -227,13 +231,26 @@ module internal QueryableTranslationCore =
             else
                 None
 
-        // Build the outer wrapper: SELECT Id/(-1), valueDecoded as ValueJSON [, HydrationJSON] FROM (inner)
+        // Outer (Id, Value) projection. Translator emit sites for typed runtime
+        // errors (Cast / cardinality / out-of-range) build their own complete
+        // CASE wrappers on Id+Value inline at their callsite via addComplexFinal,
+        // emitting Id=NULL+typed-payload Value when the error condition fires.
+        // The materializer (JsonFunctions.fromSQLite) detects Id=NULL (rowid is
+        // unforgeable — user data structurally cannot reach NULL) and dispatches
+        // by the kind field on the JSON Value object.
+        let rawIdExpr =
+            if doesNotReturnIdFn expression then SqlExpr.Literal(SqlLiteral.Integer -1L)
+            else SqlExpr.Column(None, "Id")
+        // Preserve the master alias shape for backward-compat with column-name
+        // resolution: Alias=Some "Id" only when doesNotReturnIdFn=true (synthetic Id);
+        // Alias=None for the natural Id column projection so DbObjectRow maps via
+        // the implicit "Id" column name.
         let baseProjections =
             if doesNotReturnIdFn expression then
-                [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                [{ Alias = Some "Id"; Expr = rawIdExpr }
                  { Alias = Some "ValueJSON"; Expr = effectiveValueDecodedExpr }]
             else
-                [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
+                [{ Alias = None; Expr = rawIdExpr }
                  { Alias = Some "ValueJSON"; Expr = effectiveValueDecodedExpr }]
 
         let outerProjections =

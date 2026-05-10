@@ -185,13 +185,9 @@ module internal QueryableBuildQueryGroupJoinOps =
                       MaterializeDiscoveredJoins = materializeDiscoveredJoins
                       TryTranslateDbRefValueIdKey = tryTranslateDbRefValueIdKey
                       ReplaceExpression = replaceExpression
-                      ErrorExpr = fun message -> SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String((ErrorTag.Prefix + message)))])
                       TranslateOuterExpr = translateOuterExpr }
 
-                let rec translateGroupJoinArg (expr: Expression) : GroupJoinTranslatedArg =
-                    let combineTranslated (parts: GroupJoinTranslatedArg list) (mkValue: SqlExpr list -> SqlExpr) =
-                        { Value = mkValue (parts |> List.map (fun p -> p.Value))
-                          Error = combineErrorExprs (parts |> List.map (fun p -> p.Error)) }
+                let rec translateGroupJoinArg (expr: Expression) : SqlExpr =
 
                     let parseFormatPieces (format: string) =
                         let pieces = ResizeArray<Choice<string, int>>()
@@ -240,15 +236,15 @@ module internal QueryableBuildQueryGroupJoinOps =
                         flushLiteral ()
                         pieces |> Seq.toList
 
-                    let rec translateScalarMethodCall (mc: MethodCallExpression) : GroupJoinTranslatedArg option =
+                    let rec translateScalarMethodCall (mc: MethodCallExpression) : SqlExpr option =
                         let rec getInterpolationArgType (expr: Expression) =
                             match expr with
                             | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert || ue.NodeType = ExpressionType.ConvertChecked || ue.NodeType = ExpressionType.TypeAs ->
                                 getInterpolationArgType ue.Operand
                             | _ -> expr.Type
-                        let normalizeInterpolatedArg (originalExpr: Expression) (translated: GroupJoinTranslatedArg) =
+                        let normalizeInterpolatedArg (originalExpr: Expression) (translated: SqlExpr) =
                             if isDecimalOrNullableDecimal (getInterpolationArgType originalExpr) then
-                                { translated with Value = SqlExpr.FunctionCall("DECIMAL_TEXT", [translated.Value]) }
+                                SqlExpr.FunctionCall("DECIMAL_TEXT", [translated])
                             else
                                 translated
                         if mc.Method.DeclaringType = typeof<string> && mc.Method.Name = "Concat" then
@@ -259,7 +255,7 @@ module internal QueryableBuildQueryGroupJoinOps =
                                 else
                                     mc.Arguments |> Seq.toList
                             let parts = args |> List.map (fun arg -> translateGroupJoinArg arg |> normalizeInterpolatedArg arg)
-                            Some (combineTranslated parts (fun values -> SqlExpr.FunctionCall("CONCAT", values)))
+                            Some (SqlExpr.FunctionCall("CONCAT", parts))
                         elif mc.Method.DeclaringType = typeof<string>
                              && mc.Method.Name = "Format"
                              && mc.Arguments.Count >= 2
@@ -275,24 +271,24 @@ module internal QueryableBuildQueryGroupJoinOps =
                             let translated =
                                 parseFormatPieces fmt
                                 |> List.map (function
-                                    | Choice1Of2 literal -> translatedArg (SqlExpr.Literal(SqlLiteral.String literal))
+                                    | Choice1Of2 literal -> SqlExpr.Literal(SqlLiteral.String literal)
                                     | Choice2Of2 index when index >= 0 && index < translatedArgs.Length -> translatedArgs.[index]
                                     | Choice2Of2 _ ->
                                         raise (NotSupportedException(
                                             "Error: GroupJoin string format index is out of range.\n" +
                                             "Fix: Ensure each placeholder refers to an existing interpolation argument.")))
-                            Some (combineTranslated translated (fun values -> SqlExpr.FunctionCall("CONCAT", values)))
+                            Some (SqlExpr.FunctionCall("CONCAT", translated))
                         elif mc.Method.Name = "ToString" && mc.Arguments.Count = 0 && not (isNull mc.Object) then
                             Some (translateGroupJoinArg mc.Object)
                         else
                             None
 
                     if not (referencesParam groupParam expr) then
-                        translatedArg (translateOuterExpr expr)
+                        translateOuterExpr expr
                     else
                     match expr with
                     | :? MemberExpression as me when not (isNull me.Expression) && me.Expression :? ParameterExpression && (me.Expression :?> ParameterExpression) = outerParam ->
-                        translatedArg (translateOuterExpr expr)
+                        translateOuterExpr expr
                     | :? MemberExpression as me when not (isNull me.Expression) ->
                         match tryMatchGroupElementCall runtime me.Expression with
                         | Some groupCall ->
@@ -304,7 +300,7 @@ module internal QueryableBuildQueryGroupJoinOps =
                                     "Reason: The group chain uses operators that cannot be translated in GroupJoin context.\n" +
                                     "Fix: Simplify the group chain or move the query after AsEnumerable()."))
                             else
-                                translatedArg (translateOuterExpr expr)
+                                translateOuterExpr expr
                     | :? MethodCallExpression as mc ->
                         // PRIMARY PATH: Terminal DU dispatch via shared QueryDescriptor extraction
                         match tryExtractGroupTerminalChain runtime expr with
@@ -315,78 +311,78 @@ module internal QueryableBuildQueryGroupJoinOps =
                             // Aggregate terminals — use Q version for full QueryDescriptor support (TakeWhile etc.)
                             | Terminal.Count | Terminal.LongCount ->
                                 if hasOps then
-                                    translatedArg (SqlExpr.Coalesce(buildAggregateOverChainQ runtime qdesc AggregateKind.Count None false, [SqlExpr.Literal(SqlLiteral.Integer 0L)]))
+                                    SqlExpr.Coalesce(buildAggregateOverChainQ runtime qdesc AggregateKind.Count None false, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
                                 else
-                                    translatedArg (SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None))
+                                    SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None)
                             | Terminal.Sum sel ->
                                 if hasOps then
-                                    translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Sum (Some (toLambda sel)) true)
+                                    buildAggregateOverChainQ runtime qdesc AggregateKind.Sum (Some (toLambda sel)) true
                                 else
                                     let sel = toLambda sel
                                     let selDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body
-                                    translatedArg (SqlExpr.Coalesce(SqlExpr.AggregateCall(AggregateKind.Sum, Some selDu, false, None), [SqlExpr.Literal(SqlLiteral.Integer 0L)]))
+                                    SqlExpr.Coalesce(SqlExpr.AggregateCall(AggregateKind.Sum, Some selDu, false, None), [SqlExpr.Literal(SqlLiteral.Integer 0L)])
                             | Terminal.SumProjected ->
                                 if hasOps then
-                                    translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Sum None true)
+                                    buildAggregateOverChainQ runtime qdesc AggregateKind.Sum None true
                                 else
                                     raise (NotSupportedException("Error: GroupJoin Sum requires a selector.\nFix: Use .Sum(x => x.Property) or project first with .Select()."))
                             | Terminal.Min sel ->
                                 if hasOps then
-                                    translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Min (Some (toLambda sel)) false)
+                                    buildAggregateOverChainQ runtime qdesc AggregateKind.Min (Some (toLambda sel)) false
                                 else
                                     let sel = toLambda sel
-                                    translatedArg (SqlExpr.AggregateCall(AggregateKind.Min, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None))
+                                    SqlExpr.AggregateCall(AggregateKind.Min, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None)
                             | Terminal.Max sel ->
                                 if hasOps then
-                                    translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Max (Some (toLambda sel)) false)
+                                    buildAggregateOverChainQ runtime qdesc AggregateKind.Max (Some (toLambda sel)) false
                                 else
                                     let sel = toLambda sel
-                                    translatedArg (SqlExpr.AggregateCall(AggregateKind.Max, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None))
+                                    SqlExpr.AggregateCall(AggregateKind.Max, Some(translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body), false, None)
                             | Terminal.Average sel ->
                                 if hasOps then
-                                    translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Avg (Some (toLambda sel)) false)
+                                    buildAggregateOverChainQ runtime qdesc AggregateKind.Avg (Some (toLambda sel)) false
                                 else
                                     let sel = toLambda sel
                                     let selDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some sel.Parameters.[0]) sel.Body
                                     if isDecimalOrNullableDecimal sel.Body.Type then
-                                        translatedArg (buildExactDecimalAverageExpr selDu)
+                                        buildExactDecimalAverageExpr selDu
                                     else
-                                        translatedArg (SqlExpr.AggregateCall(AggregateKind.Avg, Some selDu, false, None))
+                                        SqlExpr.AggregateCall(AggregateKind.Avg, Some selDu, false, None)
                             | Terminal.MinProjected ->
-                                if hasOps then translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Min None false)
+                                if hasOps then buildAggregateOverChainQ runtime qdesc AggregateKind.Min None false
                                 else raise (NotSupportedException("Error: GroupJoin Min requires a selector.\nFix: Use .Min(x => x.Property) or project first with .Select()."))
                             | Terminal.MaxProjected ->
-                                if hasOps then translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Max None false)
+                                if hasOps then buildAggregateOverChainQ runtime qdesc AggregateKind.Max None false
                                 else raise (NotSupportedException("Error: GroupJoin Max requires a selector.\nFix: Use .Max(x => x.Property) or project first with .Select()."))
                             | Terminal.AverageProjected ->
-                                if hasOps then translatedArg (buildAggregateOverChainQ runtime qdesc AggregateKind.Avg None false)
+                                if hasOps then buildAggregateOverChainQ runtime qdesc AggregateKind.Avg None false
                                 else raise (NotSupportedException("Error: GroupJoin Average requires a selector.\nFix: Use .Average(x => x.Property) or project first with .Select()."))
                             // Predicate/exists terminals — use Q version
                             | Terminal.Exists ->
                                 if hasOps then
-                                    translatedArg (buildExistsOverChainQ runtime qdesc None false)
+                                    buildExistsOverChainQ runtime qdesc None false
                                 else
-                                    translatedArg (SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L)))
+                                    SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
                             | Terminal.Any(Some pred) ->
                                 if hasOps then
-                                    translatedArg (buildExistsOverChainQ runtime qdesc (Some (toLambda pred)) false)
+                                    buildExistsOverChainQ runtime qdesc (Some (toLambda pred)) false
                                 else
                                     let pred = toLambda pred
                                     let predDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
-                                    translatedArg (SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((predDu, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L)))
+                                    SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((predDu, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
                             | Terminal.Any None ->
-                                translatedArg (SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L)))
+                                SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
                             | Terminal.All pred ->
                                 if hasOps then
-                                    translatedArg (buildExistsOverChainQ runtime qdesc (Some (toLambda pred)) true)
+                                    buildExistsOverChainQ runtime qdesc (Some (toLambda pred)) true
                                 else
                                     let pred = toLambda pred
                                     let predDu = translateJoinSingleSourceExpression innerAggCtx innerAlias ctx.Vars (Some pred.Parameters.[0]) pred.Body
-                                    translatedArg (SqlExpr.Binary(
+                                    SqlExpr.Binary(
                                         SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.Not, predDu), SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None),
-                                        BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)))
+                                        BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
                             | Terminal.Contains value ->
-                                translatedArg (buildContainsOverChainQ runtime qdesc value)
+                                buildContainsOverChainQ runtime qdesc value
                             // Select terminal → collection output.
                             // The Select lambda is in the terminal, not in desc.SelectProjection.
                             // Copy it into the descriptor so the builder projects correctly.
@@ -397,7 +393,7 @@ module internal QueryableBuildQueryGroupJoinOps =
                                         | ValueSome lambda -> { qdesc with SelectProjection = Some lambda }
                                         | ValueNone -> qdesc
                                     else qdesc
-                                translatedArg (buildGroupChainCollectionQ runtime desc)
+                                buildGroupChainCollectionQ runtime desc
                             // Element access terminals
                             | Terminal.First _ ->
                                 buildGroupElementSubqueryQ runtime qdesc (FirstLike false) expr
@@ -437,44 +433,40 @@ module internal QueryableBuildQueryGroupJoinOps =
                                             "Reason: This operation on the group parameter could not be recognized as a supported terminal.\n" +
                                             "Fix: Use a supported terminal (Count, Sum, Any, All, First, etc.) or move after AsEnumerable()."))
                                     else
-                                        translatedArg (translateOuterExpr expr)
+                                        translateOuterExpr expr
                     | :? ConstantExpression ->
-                        translatedArg (translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars None expr)
+                        translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars None expr
                     | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert || ue.NodeType = ExpressionType.ConvertChecked || ue.NodeType = ExpressionType.TypeAs ->
                         translateGroupJoinArg ue.Operand
                     | :? ConditionalExpression as ce ->
                         let test = translateGroupJoinArg ce.Test
                         let ifTrue = translateGroupJoinArg ce.IfTrue
                         let ifFalse = translateGroupJoinArg ce.IfFalse
-                        { Value = SqlExpr.CaseExpr((test.Value, ifTrue.Value), [], Some(ifFalse.Value))
-                          Error = combineErrorExprs [test.Error; ifTrue.Error; ifFalse.Error] }
+                        SqlExpr.CaseExpr((test, ifTrue), [], Some ifFalse)
                     | :? BinaryExpression as be ->
                         match tryTranslateGroupFirstLikeNullComparison runtime be with
-                        | Some translated -> translatedArg translated
+                        | Some translated -> translated
                         | None ->
                             let left = translateGroupJoinArg be.Left
                             let right = translateGroupJoinArg be.Right
-                            let value =
-                                match be.NodeType with
-                                | ExpressionType.Coalesce -> SqlExpr.Coalesce(left.Value, [right.Value])
-                                | ExpressionType.Add -> SqlExpr.Binary(left.Value, BinaryOperator.Add, right.Value)
-                                | ExpressionType.Subtract -> SqlExpr.Binary(left.Value, BinaryOperator.Sub, right.Value)
-                                | ExpressionType.Multiply -> SqlExpr.Binary(left.Value, BinaryOperator.Mul, right.Value)
-                                | ExpressionType.Divide -> SqlExpr.Binary(left.Value, BinaryOperator.Div, right.Value)
-                                | ExpressionType.Modulo -> SqlExpr.Binary(left.Value, BinaryOperator.Mod, right.Value)
-                                | ExpressionType.Equal -> SqlExpr.Binary(left.Value, BinaryOperator.Eq, right.Value)
-                                | ExpressionType.NotEqual -> SqlExpr.Binary(left.Value, BinaryOperator.Ne, right.Value)
-                                | ExpressionType.GreaterThan -> SqlExpr.Binary(left.Value, BinaryOperator.Gt, right.Value)
-                                | ExpressionType.GreaterThanOrEqual -> SqlExpr.Binary(left.Value, BinaryOperator.Ge, right.Value)
-                                | ExpressionType.LessThan -> SqlExpr.Binary(left.Value, BinaryOperator.Lt, right.Value)
-                                | ExpressionType.LessThanOrEqual -> SqlExpr.Binary(left.Value, BinaryOperator.Le, right.Value)
-                                | ExpressionType.AndAlso -> SqlExpr.Binary(left.Value, BinaryOperator.And, right.Value)
-                                | ExpressionType.OrElse -> SqlExpr.Binary(left.Value, BinaryOperator.Or, right.Value)
-                                | _ -> raise (NotSupportedException($"GroupJoin result selector binary operator {be.NodeType} not supported."))
-                            { Value = value
-                              Error = combineErrorExprs [left.Error; right.Error] }
+                            match be.NodeType with
+                            | ExpressionType.Coalesce -> SqlExpr.Coalesce(left, [right])
+                            | ExpressionType.Add -> SqlExpr.Binary(left, BinaryOperator.Add, right)
+                            | ExpressionType.Subtract -> SqlExpr.Binary(left, BinaryOperator.Sub, right)
+                            | ExpressionType.Multiply -> SqlExpr.Binary(left, BinaryOperator.Mul, right)
+                            | ExpressionType.Divide -> SqlExpr.Binary(left, BinaryOperator.Div, right)
+                            | ExpressionType.Modulo -> SqlExpr.Binary(left, BinaryOperator.Mod, right)
+                            | ExpressionType.Equal -> SqlExpr.Binary(left, BinaryOperator.Eq, right)
+                            | ExpressionType.NotEqual -> SqlExpr.Binary(left, BinaryOperator.Ne, right)
+                            | ExpressionType.GreaterThan -> SqlExpr.Binary(left, BinaryOperator.Gt, right)
+                            | ExpressionType.GreaterThanOrEqual -> SqlExpr.Binary(left, BinaryOperator.Ge, right)
+                            | ExpressionType.LessThan -> SqlExpr.Binary(left, BinaryOperator.Lt, right)
+                            | ExpressionType.LessThanOrEqual -> SqlExpr.Binary(left, BinaryOperator.Le, right)
+                            | ExpressionType.AndAlso -> SqlExpr.Binary(left, BinaryOperator.And, right)
+                            | ExpressionType.OrElse -> SqlExpr.Binary(left, BinaryOperator.Or, right)
+                            | _ -> raise (NotSupportedException($"GroupJoin result selector binary operator {be.NodeType} not supported."))
                     | _ ->
-                        translatedArg (translateOuterExpr expr)
+                        translateOuterExpr expr
 
                 let buildJsonObject (pairs: (string * SqlExpr) list) =
                     let args = pairs |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
@@ -487,11 +479,7 @@ module internal QueryableBuildQueryGroupJoinOps =
                         let translatedMembers =
                             [ for i in 0 .. newExpr.Arguments.Count - 1 ->
                                 memberNames.[i], translateGroupJoinArg newExpr.Arguments.[i] ]
-                        let jsonExpr = buildJsonObject [ for (name, arg) in translatedMembers -> name, arg.Value ]
-                        match combineErrorExprs [ for (_, arg) in translatedMembers -> arg.Error ] with
-                        | None -> jsonExpr
-                        | Some errorExpr ->
-                            SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNull, errorExpr), jsonExpr), [], Some errorExpr)
+                        buildJsonObject translatedMembers
                     | :? MemberInitExpression as mi ->
                         let translatedMembers =
                             [ for binding in mi.Bindings do
@@ -500,17 +488,9 @@ module internal QueryableBuildQueryGroupJoinOps =
                                     yield ma.Member.Name, translateGroupJoinArg ma.Expression
                                 | _ ->
                                     raise (NotSupportedException("GroupJoin result selector: only member assignments supported.")) ]
-                        let jsonExpr = buildJsonObject [ for (name, arg) in translatedMembers -> name, arg.Value ]
-                        match combineErrorExprs [ for (_, arg) in translatedMembers -> arg.Error ] with
-                        | None -> jsonExpr
-                        | Some errorExpr ->
-                            SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNull, errorExpr), jsonExpr), [], Some errorExpr)
+                        buildJsonObject translatedMembers
                     | _ ->
-                        let translated = translateGroupJoinArg resultSelector.Body
-                        match translated.Error with
-                        | None -> translated.Value
-                        | Some errorExpr ->
-                            SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNull, errorExpr), translated.Value), [], Some errorExpr)
+                        translateGroupJoinArg resultSelector.Body
 
                 let outerDiscoveredJoins =
                     materializeDiscoveredJoins outerCtx.Joins (Some ("\"" + outerAlias + "\"")) (Some sourceCtx.MaterializedPaths)

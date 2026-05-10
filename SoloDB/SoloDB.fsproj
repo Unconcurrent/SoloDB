@@ -41,7 +41,6 @@
     <Compile Include="Core/DBRefTypeHelpers.fs" />
     <Compile Include="Utils/AssemblyInternals.fs" />
     <Compile Include="Utils/SqlCapture.fs" />
-    <Compile Include="Utils/SoloDB.ErrorTag.fs" />
     <Compile Include="Utils/ReflectionSupport.fs" />
     <Compile Include="Utils/CommonSupport.fs" />
     <Compile Include="Core/SoloIdAccessor.fs" />
@@ -68,9 +67,9 @@
     <Compile Include="Interfaces/SoloDBInterfaces.fs" />
     <Compile Include="Core/IdGenerator.fs" />
     <Compile Include="Core/CustomTypeId.fs" />
-    <Compile Include="Query/QueryContext.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.Contract.Primitives.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.Contract.ExprTypes.fs" />
+    <Compile Include="Query/QueryContext.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.Contract.ExprCombinators.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.Contract.StatementTypes.fs" />
     <Compile Include="QueryTranslator/SqlDu/Emit/SqlDu.EmitTypes.fs" />

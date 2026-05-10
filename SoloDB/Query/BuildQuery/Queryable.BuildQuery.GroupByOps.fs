@@ -408,11 +408,17 @@ module internal QueryableBuildQueryGroupByOps =
                                 "Fix: Simplify the HAVING predicate or call AsEnumerable() before the Where.")))
                     |> List.reduce (fun a b -> SqlExpr.Binary(a, BinaryOperator.And, b))
                     |> Some
+            // Resolve anon-record member names. C# anonymous records expose Members
+            // populated by the compiler; F# anonymous records compile with Members=null
+            // — fall back to constructor parameter names which carry the field names.
+            let memberNameAt (newExpr: NewExpression) (i: int) : string =
+                if not (isNull newExpr.Members) then newExpr.Members.[i].Name
+                else newExpr.Constructor.GetParameters().[i].Name
             let projections =
                 match body with
-                | :? NewExpression as newExpr when not (isNull newExpr.Members) ->
+                | :? NewExpression as newExpr when newExpr.Arguments.Count > 0 ->
                     [for i = 0 to newExpr.Arguments.Count - 1 do
-                        let memberName = newExpr.Members.[i].Name
+                        let memberName = memberNameAt newExpr i
                         let arg = newExpr.Arguments.[i]
                         match tryTranslateGroupArg sourceCtx ctx.TableName "o" groupParam ctx.Vars arg with
                         | Some sqlExpr -> yield (memberName, sqlExpr)

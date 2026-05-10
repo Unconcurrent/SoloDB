@@ -28,15 +28,15 @@ module internal DBRefManyHelpers =
         | h :: t -> Some(appendPredicatesWithAnd h t)
 
     let wrapAggregateEmptySemantics (aggKind: AggregateKind) (insideJsonObjectProjection: bool) (scalarExpr: SqlExpr) : SqlExpr =
+        // DBRefMany aggregate sites are always nested. Per the SoloDB 1.2.2 contract,
+        // nested cardinality DOES NOT throw — empty/multiple silently emits default(T)
+        // via NULL propagation to the materializer (Unchecked.defaultof<T>).
+        // Sum branch keeps Coalesce(scalar, 0) so Sum-over-empty returns 0 (matches
+        // .NET LINQ Sum-on-empty contract: returns 0, no throw).
         if aggKind = AggregateKind.Sum then
             SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
-        elif insideJsonObjectProjection then
-            scalarExpr
         else
-            SqlExpr.FunctionCall(
-                "IFNULL",
-                [ scalarExpr
-                  SqlExpr.Literal(SqlLiteral.String (ErrorTag.Prefix + "Sequence contains no elements")) ])
+            scalarExpr
 
     let buildTakeWhileCfFilter (alias: string) (isTakeWhile: bool) =
         if isTakeWhile then

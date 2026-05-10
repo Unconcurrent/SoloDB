@@ -255,10 +255,11 @@ module internal QueryableBuildQuerySetAndTypeOps =
                                     (typeIsNull, SqlExpr.Literal(SqlLiteral.Null)),
                                     [(typeMismatch, SqlExpr.Literal(SqlLiteral.Null))],
                                     Some(SqlExpr.Column(None, "Id")))
-                                // Value: error string when type missing/mismatched, else preserve Value
+                                // Value: typed-payload JSON object when type missing/mismatched, else preserve Value.
+                                // Paired with idExpr=NULL: JsonFunctions detects Id=NULL, parses payload kind, raises InvalidCastException.
                                 let valueExpr = SqlExpr.CaseExpr(
-                                    (typeIsNull, SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String "The type of item is not stored in the database, if you want to include it, then add the Polymorphic attribute to the type and reinsert all elements.")])),
-                                    [(typeMismatch, SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String "Unable to cast object to the specified type, because the types are different.")]))],
+                                    (typeIsNull, runtimeErrorPayload RuntimeErrorKind.CastError "The type of item is not stored in the database, if you want to include it, then add the Polymorphic attribute to the type and reinsert all elements."),
+                                    [(typeMismatch, runtimeErrorPayload RuntimeErrorKind.CastError "Unable to cast object to the specified type, because the types are different.")],
                                     Some(SqlExpr.Column(None, "Value")))
                                 let projs = [{ Alias = Some "Id"; Expr = idExpr }; { Alias = Some "Value"; Expr = valueExpr }]
                                 let core = mkCore projs (Some (DerivedTable(ctx.Inner, "o")))

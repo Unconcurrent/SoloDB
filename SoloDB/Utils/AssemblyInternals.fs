@@ -33,8 +33,6 @@ open System.Runtime.CompilerServices
 [<assembly: InternalsVisibleTo("CSharpTests.DocsExamples")>]
 [<assembly: InternalsVisibleTo("DocsExampleTests")>]
 [<assembly: InternalsVisibleTo("DocsVerification.CSharp.Tests")>]
-[<assembly: InternalsVisibleTo("R75.FinalStress.Tests")>]
-[<assembly: InternalsVisibleTo("VL1.SystemInvariants.Bellard.Tests")>]
 [<assembly: InternalsVisibleTo("Tests.Core")>]
 [<assembly: InternalsVisibleTo("Tests.CSharpProxy")>]
 [<assembly: InternalsVisibleTo("StressGen.Core")>]

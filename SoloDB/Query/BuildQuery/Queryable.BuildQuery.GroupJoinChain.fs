@@ -27,9 +27,6 @@ module internal QueryableBuildQueryGroupJoinChain =
         { Call: MethodCallExpression
           Kind: GroupJoinElementKind
           Chain: QueryDescriptor }
-    type GroupJoinTranslatedArg =
-        { Value: SqlExpr
-          Error: SqlExpr option }
     type GroupJoinRuntime =
         { InnerCtx: QueryContext
           InnerRootTable: string
@@ -44,16 +41,7 @@ module internal QueryableBuildQueryGroupJoinChain =
           MaterializeDiscoveredJoins: ResizeArray<JoinEdge> -> string option -> Collections.Generic.HashSet<string> option -> JoinShape list
           TryTranslateDbRefValueIdKey: ParameterExpression -> string -> Expression -> SqlExpr option
           ReplaceExpression: Expression -> Expression -> Expression -> Expression
-          ErrorExpr: string -> SqlExpr
           TranslateOuterExpr: Expression -> SqlExpr }
-    let translatedArg value = { Value = value; Error = None }
-    let combineErrorExprs (errors: SqlExpr option list) =
-        errors
-        |> List.choose id
-        |> function
-            | [] -> None
-            | [single] -> Some single
-            | head :: tail -> Some(SqlExpr.Coalesce(head, tail))
     let hasQueryDescriptorChainOps (desc: QueryDescriptor) =
         not desc.WherePredicates.IsEmpty
         || not desc.SortKeys.IsEmpty

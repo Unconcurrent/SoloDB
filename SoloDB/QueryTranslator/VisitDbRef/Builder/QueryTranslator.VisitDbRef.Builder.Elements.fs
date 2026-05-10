@@ -14,11 +14,15 @@ module internal DBRefManyBuilderElements =
     let private castMismatchMessage =
         "Unable to cast object to the specified type, because the types are different."
 
-    let private castJsonErrorExpr (message: string) =
-        SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String message)])
-
-    let private castScalarErrorExpr (message: string) =
-        SqlExpr.Literal(SqlLiteral.String((ErrorTag.Prefix + message)))
+    // DBRefMany cast / cardinality / range emit sites are always nested per the
+    // SoloDB 1.2.2 contract; nested cardinality-class errors silently emit NULL,
+    // which propagates as default(T) at the materializer (Unchecked.defaultof<T>).
+    // Top-level cast / cardinality / range terminators are handled inline at the
+    // outer projection via Id=NULL + typed-payload Value (JSON {kind, msg}); the
+    // materializer (JsonFunctions.fromSQLite) detects Id=NULL and dispatches by
+    // kind to InvalidCastException / InvalidOperationException / ArgumentOutOfRangeException.
+    let private castJsonErrorExpr (_message: string) = SqlExpr.Literal SqlLiteral.Null
+    let private castScalarErrorExpr (_message: string) = SqlExpr.Literal SqlLiteral.Null
 
     let wrapProjectedCastExpr (castTypeNameOpt: string option) (tgtAlias: string) (projectedExpr: SqlExpr) =
         match castTypeNameOpt with
@@ -141,9 +145,9 @@ module internal DBRefManyBuilderElements =
         let firstValueExpr =
             SqlExpr.FunctionCall("MIN", [SqlExpr.Column(Some rowAlias, "v")])
         let noElementsExpr =
-            SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String (ErrorTag.Prefix + "Sequence contains no elements"))])
+            SqlExpr.Literal SqlLiteral.Null
         let manyElementsExpr =
-            SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String (ErrorTag.Prefix + "Sequence contains more than one element"))])
+            SqlExpr.Literal SqlLiteral.Null
         let zeroCase = if orDefault then SqlExpr.Literal(SqlLiteral.Null) else noElementsExpr
         let valueExpr =
             SqlExpr.CaseExpr(
@@ -194,7 +198,7 @@ module internal DBRefManyBuilderElements =
         let countExpr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None)
         let firstValueExpr = SqlExpr.FunctionCall("MIN", [SqlExpr.Column(Some rowAlias, "v")])
         let noElementsExpr =
-            SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String (ErrorTag.Prefix + "Index was out of range. Must be non-negative and less than the size of the collection."))])
+            SqlExpr.Literal SqlLiteral.Null
         let valueExpr =
             SqlExpr.CaseExpr(
                 (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)),
@@ -278,9 +282,9 @@ module internal DBRefManyBuilderElements =
         let countExpr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None)
         let firstValueExpr = SqlExpr.FunctionCall("MIN", [SqlExpr.Column(Some rowAlias, "v")])
         let noElementsExpr =
-            SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String (ErrorTag.Prefix + "Sequence contains no elements"))])
+            SqlExpr.Literal SqlLiteral.Null
         let manyElementsExpr =
-            SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String (ErrorTag.Prefix + "Sequence contains more than one element"))])
+            SqlExpr.Literal SqlLiteral.Null
         let zeroCase = if orDefault then SqlExpr.Literal(SqlLiteral.Null) else noElementsExpr
         let valueExpr =
             SqlExpr.CaseExpr(

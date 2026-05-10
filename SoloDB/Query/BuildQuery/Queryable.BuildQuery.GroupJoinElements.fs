@@ -83,9 +83,7 @@ module internal QueryableBuildQueryGroupJoinElements =
             else
                 valueExpr
         let mkValue core = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect core }
-        let noElements = "Sequence contains no elements"
-        let manyElements = "Sequence contains more than one element"
-        let outOfRange = "Index was out of range. Must be non-negative and less than the size of the collection."
+        let nullLit = SqlExpr.Literal(SqlLiteral.Null)
         let ascOrd = [{ Expr = SqlExpr.Column(Some rowsetAlias, "__ord"); Direction = SortDirection.Asc }]
         let descOrd = [{ Expr = SqlExpr.Column(Some rowsetAlias, "__ord"); Direction = SortDirection.Desc }]
         // Detect if projectionBody is a member access on the element result.
@@ -119,61 +117,38 @@ module internal QueryableBuildQueryGroupJoinElements =
                     if isProjected then SqlExpr.Column(Some rowsetAlias, "v")
                     else entityJsonExpr rowsetAlias
                 v, []
+        // Nested GroupJoin element access: cardinality is folded into Value via CASE.
+        // empty group → NULL silent default; SingleLike multi-element → NULL silent
+        // default. Both materialize as default(T) per the nested no-throw contract.
         match kind with
         | FirstLike orDefault ->
             let valueCore = mkValueCore ascOrd (Some (SqlExpr.Literal(SqlLiteral.Integer 1L))) None valueExpr valueJoins
-            let error =
-                if orDefault then None
-                else
-                    let countExpr = buildCountSelectSubquery rt rowsetSel (Some 1)
-                    Some (SqlExpr.CaseExpr(
-                        (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), rt.ErrorExpr noElements),
-                        [],
-                        Some(SqlExpr.Literal(SqlLiteral.Null))))
-            { Value = wrapOrDefault (mkValue valueCore) orDefault; Error = error }
+            wrapOrDefault (mkValue valueCore) orDefault
         | LastLike orDefault ->
             let valueCore = mkValueCore descOrd (Some (SqlExpr.Literal(SqlLiteral.Integer 1L))) None valueExpr valueJoins
-            let error =
-                if orDefault then None
-                else
-                    let countExpr = buildCountSelectSubquery rt rowsetSel (Some 1)
-                    Some (SqlExpr.CaseExpr(
-                        (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), rt.ErrorExpr noElements),
-                        [],
-                        Some(SqlExpr.Literal(SqlLiteral.Null))))
-            { Value = wrapOrDefault (mkValue valueCore) orDefault; Error = error }
+            wrapOrDefault (mkValue valueCore) orDefault
         | SingleLike orDefault ->
             let valueCore = mkValueCore ascOrd (Some (SqlExpr.Literal(SqlLiteral.Integer 1L))) None valueExpr valueJoins
             let countExpr = buildCountSelectSubquery rt rowsetSel (Some 2)
-            let error =
-                if orDefault then
-                    Some (SqlExpr.CaseExpr(
-                        (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), rt.ErrorExpr manyElements),
-                        [],
-                        Some(SqlExpr.Literal(SqlLiteral.Null))))
-                else
-                    Some (SqlExpr.CaseExpr(
-                        (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), rt.ErrorExpr noElements),
-                        [ (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), rt.ErrorExpr manyElements) ],
-                        Some(SqlExpr.Literal(SqlLiteral.Null))))
-            { Value = wrapOrDefault (mkValue valueCore) orDefault; Error = error }
+            let baseValue = wrapOrDefault (mkValue valueCore) orDefault
+            if orDefault then
+                SqlExpr.CaseExpr(
+                    (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), nullLit),
+                    [],
+                    Some baseValue)
+            else
+                SqlExpr.CaseExpr(
+                    (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), nullLit),
+                    [ (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), nullLit) ],
+                    Some baseValue)
         | ElementAtLike(indexExpr, orDefault) ->
             let idx = Convert.ToInt64(QueryTranslator.evaluateExpr<obj> indexExpr)
             if idx < 0L then
-                { Value = wrapOrDefault (SqlExpr.Literal(SqlLiteral.Null)) orDefault
-                  Error = if orDefault then None else Some(rt.ErrorExpr outOfRange) }
+                wrapOrDefault nullLit orDefault
             else
                 let valueCore =
                     mkValueCore ascOrd (Some (SqlExpr.Literal(SqlLiteral.Integer 1L))) (Some (SqlExpr.Literal(SqlLiteral.Integer idx))) valueExpr valueJoins
-                let error =
-                    if orDefault then None
-                    else
-                        let countExpr = buildCountSubquery rt valueCore None
-                        Some (SqlExpr.CaseExpr(
-                            (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), rt.ErrorExpr outOfRange),
-                            [],
-                            Some(SqlExpr.Literal(SqlLiteral.Null))))
-                { Value = wrapOrDefault (mkValue valueCore) orDefault; Error = error }
+                wrapOrDefault (mkValue valueCore) orDefault
 
     /// Bare-group scalar element access (no chain ops): translates the projection body
     /// directly against the inner select, without going through the rowset builder.
@@ -200,64 +175,42 @@ module internal QueryableBuildQueryGroupJoinElements =
         let ascIdOrder = [{ Expr = SqlExpr.Column(Some scalarAlias, "Id"); Direction = SortDirection.Asc }]
         let descIdOrder = [{ Expr = SqlExpr.Column(Some scalarAlias, "Id"); Direction = SortDirection.Desc }]
         let mkValue core = SqlExpr.ScalarSubquery (wrapCore core)
-        let noElements = "Sequence contains no elements"
-        let manyElements = "Sequence contains more than one element"
-        let outOfRange = "Index was out of range. Must be non-negative and less than the size of the collection."
+        let nullLit = SqlExpr.Literal(SqlLiteral.Null)
         match groupCall.Kind with
         | FirstLike _ ->
-            translatedArg (mkValue { baseScalarCore with Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) })
-        | LastLike orDefault ->
-            let valueCore =
+            mkValue { baseScalarCore with Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
+        | LastLike _ ->
+            mkValue
                 { baseScalarCore with
                     OrderBy = descIdOrder
                     Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
-            let error =
-                if orDefault then None
-                else
-                    let countExpr = buildCountSubquery rt valueCore (Some 1)
-                    Some (SqlExpr.CaseExpr(
-                        (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), rt.ErrorExpr noElements),
-                        [],
-                        Some(SqlExpr.Literal(SqlLiteral.Null))))
-            { Value = mkValue valueCore; Error = error }
         | SingleLike orDefault ->
             let valueCore =
                 { baseScalarCore with
                     OrderBy = ascIdOrder
                     Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
             let countExpr = buildCountSubquery rt { baseScalarCore with OrderBy = ascIdOrder } (Some 2)
-            let error =
-                if orDefault then
-                    Some (SqlExpr.CaseExpr(
-                        (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), rt.ErrorExpr manyElements),
-                        [],
-                        Some(SqlExpr.Literal(SqlLiteral.Null))))
-                else
-                    Some (SqlExpr.CaseExpr(
-                        (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), rt.ErrorExpr noElements),
-                        [ (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), rt.ErrorExpr manyElements) ],
-                        Some(SqlExpr.Literal(SqlLiteral.Null))))
-            { Value = mkValue valueCore; Error = error }
-        | ElementAtLike(indexExpr, orDefault) ->
+            let baseValue = mkValue valueCore
+            if orDefault then
+                SqlExpr.CaseExpr(
+                    (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), nullLit),
+                    [],
+                    Some baseValue)
+            else
+                SqlExpr.CaseExpr(
+                    (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), nullLit),
+                    [ (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), nullLit) ],
+                    Some baseValue)
+        | ElementAtLike(indexExpr, _orDefault) ->
             let idx = Convert.ToInt64(QueryTranslator.evaluateExpr<obj> indexExpr)
             if idx < 0L then
-                { Value = SqlExpr.Literal(SqlLiteral.Null)
-                  Error = if orDefault then None else Some(rt.ErrorExpr outOfRange) }
+                nullLit
             else
-                let valueCore =
+                mkValue
                     { baseScalarCore with
                         OrderBy = ascIdOrder
                         Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L))
                         Offset = Some (SqlExpr.Literal(SqlLiteral.Integer idx)) }
-                let error =
-                    if orDefault then None
-                    else
-                        let countExpr = buildCountSubquery rt valueCore None
-                        Some (SqlExpr.CaseExpr(
-                            (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), rt.ErrorExpr outOfRange),
-                            [],
-                            Some(SqlExpr.Literal(SqlLiteral.Null))))
-                { Value = mkValue valueCore; Error = error }
 
     /// Unified dispatch for group element access: routes to Q rowset path (chained)
     /// or bare scalar path (no chain ops) based on descriptor content.
@@ -277,7 +230,7 @@ module internal QueryableBuildQueryGroupJoinElements =
                     | LastLike _
                     | ElementAtLike(_, true) ->
                         match buildGroupElementDispatch rt groupCall (Expression.Constant(1L) :> Expression) with
-                        | { Value = SqlExpr.ScalarSubquery select } -> Some (SqlExpr.Exists select)
+                        | SqlExpr.ScalarSubquery select -> Some (SqlExpr.Exists select)
                         | _ -> failwith "internal invariant violation: expected scalar subquery"
                     | _ -> None
                 match existsExpr, nodeType with

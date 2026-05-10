@@ -456,11 +456,14 @@ Fix: Project outer and inner members into an anonymous object or move the projec
         let jsonExtractValue = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
         let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, jsonExtractValue)
         addSelector queries (DuSelector (fun _tableName _vars ->
-            // In this case NULL is an invalid operation, therefore to emulate the .NET behavior
-            // of throwing an exception we return the Id = NULL, and Value = {exception message}
-            // And downstream the pipeline it will be checked and throwed.
+            // Top-level aggregate-over-empty raises CardinalityError via the unforgeable
+            // Id=NULL channel: when the aggregate result is NULL (empty source), the row
+            // emits Id=NULL and Value=typed-payload JSON object {"kind":"CardinalityError",
+            // "msg":errorMsg}. JsonFunctions.fromSQLite dispatches by kind to
+            // InvalidOperationException matching .NET LINQ Min/Max/Avg-on-empty contract.
+            let typedPayload = QueryableHelperBase.runtimeErrorPayload RuntimeErrorKind.CardinalityError errorMsg
             [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.Null)), [], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
-             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.String errorMsg)), [], Some(SqlExpr.Column(None, "Value"))) }]
+             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr((isNullCheck, typedPayload), [], Some(SqlExpr.Column(None, "Value"))) }]
         ))
 
     /// <summary>

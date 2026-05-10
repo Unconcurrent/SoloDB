@@ -280,8 +280,8 @@ module internal QueryableBuildQueryGroupByChained =
               Source = Some(DerivedTable(limitedSourceSel, countAlias))
               Joins = []; Where = None; GroupBy = []; Having = None; OrderBy = []; Limit = None; Offset = None }
         let countExpr = SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect countOuterCore }
-        let errorTagJson (message: string) =
-            SqlExpr.FunctionCall("json_quote", [SqlExpr.Literal(SqlLiteral.String (ErrorTag.Prefix + message))])
+        // Nested cardinality emit per SoloDB 1.2.2 contract: silent NULL → default(T).
+        let errorTagJson (_message: string) = SqlExpr.Literal SqlLiteral.Null
         let manyArm =
             (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)),
              errorTagJson "Sequence contains more than one element")
@@ -309,8 +309,19 @@ module internal QueryableBuildQueryGroupByChained =
                 let selDu = translateExprAgainst sourceCtx subAlias vars (proj :> Expression) |> normalizeScalarExpr proj.ReturnType
                 [{ Alias = Some "v"; Expr = selDu }]
             | None ->
+                // Stitch the rowid Id into the Value JSON via jsonb_set so the
+                // entity preserves its rowid through the GroupBy element pick.
+                // Outer materializer hydrates from Value JSON; the embedded "$.Id"
+                // becomes the entity's Id field. Without this, downstream consumers
+                // see entity.Id=0 (default) instead of the rowid.
                 [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some subAlias, "Id") }
-                 { Alias = Some "Value"; Expr = SqlExpr.Column(Some subAlias, "Value") }]
+                 { Alias = Some "Value"
+                   Expr =
+                     SqlExpr.FunctionCall("jsonb_set", [
+                         SqlExpr.Column(Some subAlias, "Value")
+                         SqlExpr.Literal(SqlLiteral.String "$.Id")
+                         SqlExpr.Column(Some subAlias, "Id")
+                     ]) }]
 
         let core = { baseCore with Projections = ProjectionSetOps.ofList projections }
 
