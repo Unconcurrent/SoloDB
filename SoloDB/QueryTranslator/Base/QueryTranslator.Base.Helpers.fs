@@ -230,15 +230,31 @@ module internal QueryTranslatorBaseHelpers =
 
             let rec compareJsonDu (path: string) (json: JsonSerializator.JsonValue) : SqlExpr list =
                 let extract = SqlExpr.FunctionCall("jsonb_extract", [targetExpr; SqlExpr.Literal(SqlLiteral.String path)])
+                // Path ending in $type carries the F# DU polymorphic-type
+                // discriminator. The captured side (Serialize<obj> via
+                // SerializeByTypeWithType) always writes it; the stored side
+                // (plain Serialize<T> for nested DU fields) doesn't. To make
+                // DU equality match both polymorphic and plain storage shapes,
+                // emit  (stored IS captured) OR (stored IS NULL)  for $type
+                // only — keep strict Eq for every other path so non-$type
+                // properties still discriminate correctly.
+                let isTypeDiscriminator = path.EndsWith ".$type"
+                let inline cmp value =
+                    let strictEq = SqlExpr.Binary(extract, BinaryOperator.Is, qb.AllocateParamExpr value)
+                    if isTypeDiscriminator then
+                        let storedIsNull = SqlExpr.Unary(UnaryOperator.IsNull, extract)
+                        SqlExpr.Binary(strictEq, BinaryOperator.Or, storedIsNull)
+                    else
+                        SqlExpr.Binary(extract, BinaryOperator.Eq, qb.AllocateParamExpr value)
                 match json with
                 | JsonSerializator.JsonValue.Null ->
                     [SqlExpr.Unary(UnaryOperator.IsNull, extract)]
                 | JsonSerializator.JsonValue.Boolean b ->
-                    [SqlExpr.Binary(extract, BinaryOperator.Eq, qb.AllocateParamExpr b)]
+                    [cmp b]
                 | JsonSerializator.JsonValue.Number n ->
-                    [SqlExpr.Binary(extract, BinaryOperator.Eq, qb.AllocateParamExpr n)]
+                    [cmp n]
                 | JsonSerializator.JsonValue.String s ->
-                    [SqlExpr.Binary(extract, BinaryOperator.Eq, qb.AllocateParamExpr s)]
+                    [cmp s]
                 | JsonSerializator.JsonValue.Object dict ->
                     [for KeyValue(k, v) in dict do
                         let newPath = appendObjectPathSegment path k
