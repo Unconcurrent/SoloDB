@@ -205,7 +205,7 @@ module internal QueryTranslatorBaseHelpers =
     /// Compares a database value with a known .NET object, returning an SqlExpr conjunction.
     let inline internal compareKnownJsonDu (qb: QueryBuilder) (targetExpr: SqlExpr) (targetType: Type) (knownObject: obj) : SqlExpr =
         if isPrimitiveSQLiteType targetType then
-            SqlExpr.Binary(targetExpr, BinaryOperator.Eq, qb.AllocateParamExpr knownObject)
+            SqlExpr.Binary(targetExpr, BinaryOperator.Is, qb.AllocateParamExpr knownObject)
         else
             let json =
                 match knownObject with
@@ -236,8 +236,9 @@ module internal QueryTranslatorBaseHelpers =
                 // (plain Serialize<T> for nested DU fields) doesn't. To make
                 // DU equality match both polymorphic and plain storage shapes,
                 // emit  (stored IS captured) OR (stored IS NULL)  for $type
-                // only — keep strict Eq for every other path so non-$type
-                // properties still discriminate correctly.
+                // only so missing discriminators still match; every other
+                // path uses a single IS comparison (CLR-equality semantics,
+                // index-usable per SQLite >= 3.21).
                 let isTypeDiscriminator = path.EndsWith ".$type"
                 let inline cmp value =
                     let strictEq = SqlExpr.Binary(extract, BinaryOperator.Is, qb.AllocateParamExpr value)
@@ -245,7 +246,7 @@ module internal QueryTranslatorBaseHelpers =
                         let storedIsNull = SqlExpr.Unary(UnaryOperator.IsNull, extract)
                         SqlExpr.Binary(strictEq, BinaryOperator.Or, storedIsNull)
                     else
-                        SqlExpr.Binary(extract, BinaryOperator.Eq, qb.AllocateParamExpr value)
+                        strictEq
                 match json with
                 | JsonSerializator.JsonValue.Null ->
                     [SqlExpr.Unary(UnaryOperator.IsNull, extract)]
@@ -263,7 +264,7 @@ module internal QueryTranslatorBaseHelpers =
                     let lengthCheck =
                         SqlExpr.Binary(
                             SqlExpr.FunctionCall("json_array_length", [SqlExpr.FunctionCall("jsonb_extract", [targetExpr; SqlExpr.Literal(SqlLiteral.String path)])]),
-                            BinaryOperator.Eq,
+                            BinaryOperator.Is,
                             qb.AllocateParamExpr items.Count)
                     [yield lengthCheck
                      for i in 0 .. items.Count - 1 do
