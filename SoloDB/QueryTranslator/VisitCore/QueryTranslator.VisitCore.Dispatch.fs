@@ -204,8 +204,46 @@ module internal QueryTranslatorVisitCore =
             | :? NewExpression as ne when isByRefLikeType ne.Type && ne.Type.Name = "ReadOnlySpan`1" && ne.Arguments.Count >= 1 ->
                 normalizeContainsSource ne.Arguments.[0]
             | other -> other
+        let tryIntegerLiteral (value: obj) =
+            match value with
+            | null -> None
+            | :? int8 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
+            | :? uint8 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
+            | :? int16 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
+            | :? uint16 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
+            | :? int32 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
+            | :? uint32 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
+            | :? int64 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer v))
+            | :? uint64 as v when v <= uint64 Int64.MaxValue -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
+            | :? nativeint as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
+            | _ -> None
+        let tryConstantIntegerInList (source: Expression) =
+            if isFullyConstant source && isRootParameter value && Utils.isIntegerBasedType value.Type then
+                let sourceValue = evaluateExpr<obj> source
+                match sourceValue with
+                | :? IEnumerable as items when not (sourceValue :? string) ->
+                    let literals =
+                        items
+                        |> Seq.cast<obj>
+                        |> Seq.map tryIntegerLiteral
+                        |> Seq.toList
+                    if literals |> List.forall Option.isSome then
+                        match literals |> List.choose id with
+                        | [] ->
+                            Some(SqlExpr.Binary(
+                                SqlExpr.Literal(SqlLiteral.Integer 1L),
+                                BinaryOperator.Eq,
+                                SqlExpr.Literal(SqlLiteral.Integer 0L)))
+                        | head :: tail -> Some(SqlExpr.InList(visitDu value qb, head, tail))
+                    else None
+                | _ -> None
+            else None
+        let normalizedArray = normalizeContainsSource array
+        match tryConstantIntegerInList normalizedArray with
+        | Some expr -> expr
+        | None ->
         let arrayQb = if qb.TableNameDot = "" then {qb with TableNameDot = "o."} else qb
-        let arrayExpr = visitDu (normalizeContainsSource array) arrayQb
+        let arrayExpr = visitDu normalizedArray arrayQb
         let whereExpr =
             if isPrimitiveSQLiteType value.Type then
                 SqlExpr.Binary(SqlExpr.Column(Some "json_each", "Value"), BinaryOperator.Eq, visitDu value qb)

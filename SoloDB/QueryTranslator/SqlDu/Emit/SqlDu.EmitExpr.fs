@@ -5,8 +5,8 @@ open SqlDu.Engine.C1.Spec
 /// Emit a binary operator as SQL text.
 let private emitBinaryOp (op: BinaryOperator) : string =
     match op with
-    | Eq -> "IS"
-    | Ne -> "IS NOT"
+    | Eq -> "="
+    | Ne -> "<>"
     | Lt -> "<"
     | Le -> "<="
     | Gt -> ">"
