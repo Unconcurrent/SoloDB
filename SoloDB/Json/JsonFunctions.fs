@@ -52,6 +52,21 @@ type internal HasTypeId<'t> =
 
 
 module internal JsonFunctions =
+    let internal jsonValueToSQLValue (element: JsonValue) =
+        match element with
+        | Boolean b -> (if b then 1L :> obj else 0L :> obj), false
+        | Null -> null, false
+        | Number n ->
+            if System.Decimal.IsInteger n then
+                if n >= decimal System.Int64.MinValue && n <= decimal System.Int64.MaxValue then
+                    int64 n :> obj, false
+                else
+                    float n :> obj, false
+            else
+                float n :> obj, false
+        | String s -> s :> obj, false
+        | other -> other.ToJsonString() :> obj, true
+
     let inline internal mustIncludeTypeInformationInSerializationFn (t: Type) = 
         t.IsAbstract || not (isNull (t.GetCustomAttribute<Attributes.PolymorphicAttribute>()))
 
@@ -127,19 +142,7 @@ module internal JsonFunctions =
         // Fallback: complex objects — serialize via JSON round-trip.
         // This path handles arrays, lists, custom objects, and any other structured types.
         | _other ->
-        let element = JsonValue.Serialize item
-        match element with
-        | Boolean b -> (if b then 1L :> obj else 0L :> obj), false
-        | Null -> null, false
-        | Number n ->
-            // Explicit numeric extraction — avoid lossy ToObject() round-trip.
-            if System.Decimal.IsInteger n then
-                if n >= decimal System.Int64.MinValue && n <= decimal System.Int64.MaxValue then int64 n :> obj, false
-                else float n :> obj, false
-            else float n :> obj, false
-        | String s -> s.ToString() :> obj, false
-        | other ->
-            other.ToJsonString(), true
+            JsonValue.Serialize item |> jsonValueToSQLValue
 
     
     let internal fromJson<'T> (json: JsonValue) =

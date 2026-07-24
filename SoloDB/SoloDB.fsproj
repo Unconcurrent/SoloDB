@@ -69,6 +69,7 @@
     <Compile Include="Core/CustomTypeId.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.Contract.Primitives.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.Contract.ExprTypes.fs" />
+    <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.StoredValueParameter.fs" />
     <Compile Include="Query/QueryContext.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.Contract.ExprCombinators.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.Contract.StatementTypes.fs" />

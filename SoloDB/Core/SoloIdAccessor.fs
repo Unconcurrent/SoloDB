@@ -11,7 +11,7 @@ open SoloDatabase.Attributes
 [<AbstractClass; Sealed>]
 type internal SoloIdAccessor =
     /// Cache resolves to the SoloId property AND a pre-compiled Expression-tree getter that boxes
-    /// the value via Func<obj,obj>. The getter is the hot path used by every relation/JSON/heal
+    /// the value via Func<obj,obj>. The getter is the hot path used by relation, cascade, and hydration
     /// site; PropertyInfo.GetValue reflection is restricted to the cache-miss attribute discovery
     /// step. Mirrors the compiled-delegate pattern in Relations.AccessorCache.fs.
     static let propCache = ConcurrentDictionary<Type, (PropertyInfo * Func<obj, obj>) voption>()
@@ -53,11 +53,11 @@ type internal SoloIdAccessor =
         | ValueSome (_, g) -> ValueSome g
         | ValueNone -> ValueNone
 
-    /// Low-level accessor; does NOT enforce the cascade-write or heal invariants. ValueNone
+    /// Low-level accessor; does NOT enforce cascade-write or hydration invariants. ValueNone
     /// when entity is null, the type has no [<SoloId>], the value is null, or the value is a
     /// string that is null/empty/whitespace. Value-type defaults (Guid.Empty, 0L, default-
     /// struct) pass through as ValueSome regardless of whether they are user-chosen or
-    /// bug-shape — this accessor cannot tell the difference. Callers requiring non-default
+    /// default value — this accessor cannot tell the difference. Callers requiring non-default
     /// value-type SoloIds (cascade post-stamp, hydration paths) must use
     /// `extractSoloIdOrFail` or the equivalent default-literal check; relying on this
     /// accessor's return alone leaves the read-side invariant unenforced.
@@ -77,7 +77,7 @@ type internal SoloIdAccessor =
 
     /// Reads the [<SoloId>] value from a boxed entity, returning a boxed obj. Used by relation paths
     /// where the typed parameter is not statically known (descriptor-driven hydration, JSON List-2
-    /// stamping, lazy-heal sweep). Same semantics as <see cref="TryGetValue"/>: only string null/
+    /// stamping, and cascade processing). Same semantics as <see cref="TryGetValue"/>: only string null/
     /// whitespace is filtered; value-type defaults pass through as ValueSome.
     static member TryGetBoxedValue (targetType: Type, entity: obj) : obj voption =
         if obj.ReferenceEquals(entity, null) then ValueNone

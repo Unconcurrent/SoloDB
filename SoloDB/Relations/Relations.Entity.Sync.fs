@@ -13,6 +13,7 @@ open RelationsTypes
 open RelationsSchemaBuilder
 open RelationsSchemaValidator
 open RelationsSchemaLinkTableDDL
+open SqlDu.Engine.C1.Spec
 
 let internal readMetadataByOwner (connection: SqliteConnection) (ownerTable: string) =
     connection.Query<RelationMetadataRow>(
@@ -232,11 +233,22 @@ let internal resolveTypedIdToTargetId (tx: RelationTxContext) (descriptor: Relat
             raise (InvalidOperationException(
                 $"Error: Typed id mismatch on relation '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}'.\nReason: Expected id type '{idType.FullName}', got '{typedId.GetType().FullName}'.\nFix: Use the exact target [SoloId] type."))
 
-        let jsonPath = "$." + soloIdProp.Name
+        let variables = Dictionary<string, obj>()
+        let typedIdParameter =
+            StoredValueParameter.allocateNamedForDeclaredType
+                variables "typedId" soloIdProp.PropertyType typedId
+        let predicate =
+            SqlExpr.Binary(
+                SqlExpr.JsonExtractExpr(None, "Value", JsonPathOps.ofList [soloIdProp.Name]),
+                BinaryOperator.Eq,
+                typedIdParameter)
+        let emitContext = EmitContext()
+        emitContext.InlineLiterals <- true
+        let predicateSql = (EmitSelect.emitExpr emitContext predicate).Sql
         let matches =
             tx.Connection.Query<int64>(
-                $"SELECT Id FROM {quoteIdentifier descriptor.TargetTable} WHERE jsonb_extract(Value, @path) = @typedId;",
-                {| path = jsonPath; typedId = typedId |})
+                $"SELECT Id FROM {quoteIdentifier descriptor.TargetTable} WHERE {predicateSql};",
+                variables)
             |> Seq.toArray
 
         match matches with
@@ -250,4 +262,3 @@ let internal resolveTypedIdToTargetId (tx: RelationTxContext) (descriptor: Relat
     | _ ->
         raise (InvalidOperationException(
             $"Error: Relation '{descriptor.OwnerType.FullName}.{descriptor.Property.Name}' is not configured for typed-id resolution.\nReason: Missing DBRef<'TTarget,'TId> metadata.\nFix: Use DBRef<T> with row id or configure typed-id relation correctly."))
-

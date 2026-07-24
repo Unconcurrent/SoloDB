@@ -115,13 +115,15 @@ type internal CollectionReadDeleteOps<'T>() =
                 // Build WHERE as SqlExpr DU (not raw string splice) to keep query in the DU tree.
                 // Custom-id filter is: jsonb_extract(Value, '$.PropName') = @param
                 let vars = Dictionary<string, obj>()
-                vars.["_cid0"] <- box id
+                let idParameter =
+                    QueryableHelperBase.allocateNamedStoredValueParam
+                        vars "_cid0" idProp.PropertyType (box id)
                 let whereExpr =
                     SqlExpr.Binary(
                         SqlExpr.FunctionCall("jsonb_extract",
                             [SqlExpr.Column(Some "o", "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + idProp.Name))]),
                         BinaryOperator.Eq,
-                        SqlExpr.Parameter "_cid0")
+                        idParameter)
                 let sql, singleHydrated, manyHydrated =
                     HydrationSqlBuilder.buildHydratedGetByIdSql connection name typeof<'T> whereExpr vars true
                 QueryCommandInstrumentation.Increment()
@@ -141,13 +143,15 @@ type internal CollectionReadDeleteOps<'T>() =
         else
             // DU-built SELECT for custom-id no-relations fallback.
             let vars = Dictionary<string, obj>()
-            vars.["_cid0"] <- box id
+            let idParameter =
+                QueryableHelperBase.allocateNamedStoredValueParam
+                    vars "_cid0" idProp.PropertyType (box id)
             let whereExpr =
                 SqlExpr.Binary(
                     SqlExpr.FunctionCall("jsonb_extract",
                         [SqlExpr.Column(Some "o", "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + idProp.Name))]),
                     BinaryOperator.Eq,
-                    SqlExpr.Parameter "_cid0")
+                    idParameter)
             let sql, _ =
                 HydrationSqlBuilder.buildManyOnlyHydratedSql connection name typeof<'T> whereExpr vars true
             QueryCommandInstrumentation.Increment()
@@ -171,8 +175,16 @@ type internal CollectionReadDeleteOps<'T>() =
             | Some c -> c.Property
             | None -> raise (InvalidOperationException("This collection has no custom [Id] property. Use the Int64 Id overload."))
 
-        // translateWhereExpr canonical predicate path for DeleteByCustomId.
-        let filterExpr, variables = QueryTranslator.translateWhereExpr name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<'IdType>(idProp) = id))
+        let variables = Dictionary<string, obj>()
+        let idParameter =
+            QueryableHelperBase.allocateNamedStoredValueParam
+                variables "_cid0" idProp.PropertyType (box id)
+        let filterExpr =
+            SqlExpr.Binary(
+                SqlExpr.FunctionCall("jsonb_extract",
+                    [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + idProp.Name))]),
+                BinaryOperator.Eq,
+                idParameter)
         let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
 
         withTransaction (fun conn ->
@@ -181,13 +193,15 @@ type internal CollectionReadDeleteOps<'T>() =
                 let tx = ensureRelationTx conn
                 // DU-built SELECT for DeleteByCustomId old-state read.
                 let vars = Dictionary<string, obj>()
-                vars.["_cid0"] <- box id
+                let idParameter =
+                    QueryableHelperBase.allocateNamedStoredValueParam
+                        vars "_cid0" idProp.PropertyType (box id)
                 let whereExpr =
                     SqlExpr.Binary(
                         SqlExpr.FunctionCall("jsonb_extract",
                             [SqlExpr.Column(Some "o", "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + idProp.Name))]),
                         BinaryOperator.Eq,
-                        SqlExpr.Parameter "_cid0")
+                        idParameter)
                 let sql, _ =
                     HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> whereExpr vars true
                 QueryCommandInstrumentation.Increment()

@@ -203,13 +203,15 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
                     let idValue = customId.GetId(item |> box)
                     let idProp = customId.Property
                     let vars = System.Collections.Generic.Dictionary<string, obj>()
-                    vars.["_cid0"] <- idValue
+                    let idParameter =
+                        QueryableHelperBase.allocateNamedStoredValueParam
+                            vars "_cid0" idProp.PropertyType idValue
                     let whereExpr =
                         SqlDu.Engine.C1.Spec.SqlExpr.Binary(
                             SqlDu.Engine.C1.Spec.SqlExpr.FunctionCall("jsonb_extract",
                                 [SqlDu.Engine.C1.Spec.SqlExpr.Column(Some "o", "Value"); SqlDu.Engine.C1.Spec.SqlExpr.Literal(SqlDu.Engine.C1.Spec.SqlLiteral.String ("$." + idProp.Name))]),
                             SqlDu.Engine.C1.Spec.BinaryOperator.Eq,
-                            SqlDu.Engine.C1.Spec.SqlExpr.Parameter "_cid0")
+                            idParameter)
                     let sql, _ =
                         HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> whereExpr vars true
                     QueryCommandInstrumentation.Increment()

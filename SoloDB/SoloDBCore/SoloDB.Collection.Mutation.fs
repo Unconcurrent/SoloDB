@@ -148,7 +148,6 @@ type internal CollectionMutationOps<'T>() =
 
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
 
-        // translateWhereExpr returns SqlExpr DU + variables (canonical predicate path).
         let filterExpr, variables =
             if HasTypeId<'T>.Value then
                 let id = HasTypeId<'T>.Read item
@@ -158,7 +157,17 @@ type internal CollectionMutationOps<'T>() =
                 | Some customId ->
                     let id = customId.GetId (item |> box)
                     let idProp = customId.Property
-                    QueryTranslator.translateWhereExpr name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<obj>(idProp) = id))
+                    let customVariables = Dictionary<string, obj>()
+                    let idParameter =
+                        QueryableHelperBase.allocateNamedStoredValueParam
+                            customVariables "_cid0" idProp.PropertyType id
+                    let predicate =
+                        SqlExpr.Binary(
+                            SqlExpr.FunctionCall("jsonb_extract",
+                                [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + idProp.Name))]),
+                            BinaryOperator.Eq,
+                            idParameter)
+                    predicate, customVariables
                 | None ->
                     let typeName = typeof<'T>.Name
                     let message =
@@ -183,12 +192,14 @@ type internal CollectionMutationOps<'T>() =
                         match CustomTypeId<'T>.Get() with
                         | Some customId ->
                             let id = customId.GetId(item |> box)
-                            manyVars.["_mid0"] <- id
+                            let idParameter =
+                                QueryableHelperBase.allocateNamedStoredValueParam
+                                    manyVars "_mid0" customId.Property.PropertyType id
                             SqlExpr.Binary(
                                 SqlExpr.FunctionCall("jsonb_extract",
                                     [SqlExpr.Column(Some "o", "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + customId.Property.Name))]),
                                 BinaryOperator.Eq,
-                                SqlExpr.Parameter "_mid0")
+                                idParameter)
                         | None -> raise (InvalidOperationException("Update requires int64 Id or custom Id."))
                 let sql, manyHydrated =
                     HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> whereExpr manyVars true

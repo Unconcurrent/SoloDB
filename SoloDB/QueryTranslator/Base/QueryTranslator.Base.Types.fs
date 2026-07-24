@@ -6,7 +6,6 @@ open System.Collections.ObjectModel
 open System.Linq.Expressions
 open System.Reflection
 open System.Text
-open JsonFunctions
 open Utils
 open SqlDu.Engine.C1.Spec
 
@@ -99,20 +98,11 @@ module internal QueryTranslatorBaseTypes =
     /// <param name="variables">The dictionary of query parameters to add the value to.</param>
     /// <param name="value">The object value to append.</param>
     let internal appendVariable (sb: StringBuilder) (variables: #IDictionary<string, obj>) (value: obj) =
-        let value =
-            match value with
-            | :? bool as b ->
-                box (if b then 1 else 0)
-            | _other ->
-                value
-
-        let jsonValue, shouldEncode = toSQLJson value
         let name = getVarName sb.Length
-        if shouldEncode then
-            sb.Append (sprintf "jsonb(@%s)" name) |> ignore
-        else
-            sb.Append (sprintf "@%s" name) |> ignore
-        variables.[name] <- jsonValue
+        let parameterExpr = StoredValueParameter.allocateNamed variables name value
+        let ctx = EmitContext()
+        ctx.InlineLiterals <- true
+        sb.Append((EmitSelect.emitExpr ctx parameterExpr).Sql) |> ignore
 
     /// <summary>
     /// Checks if a given .NET Type is considered a primitive type in the context of SQLite storage.
@@ -212,19 +202,7 @@ module internal QueryTranslatorBaseTypes =
         // Whitelisted internal accessors for cross-file visitor split boundary.
         /// Allocate a DU parameter: stores value in Variables dict, returns SqlExpr.Parameter or FunctionCall("jsonb", [Parameter]).
         member internal this.AllocateParamExpr(value: obj) : SqlExpr =
-            let value =
-                match value with
-                | :? bool as b -> box (if b then 1 else 0)
-                | _other -> value
-            let jsonValue, shouldEncode = toSQLJson value
-            // Use Variables.Count for unique naming: monotonically increasing even when
-            // multiple QueryBuilder instances share the same Variables dict (Queryable pipeline).
-            let name = sprintf "dp%d" this.Variables.Count
-            this.Variables.[name] <- jsonValue
-            if shouldEncode then
-                SqlExpr.FunctionCall("jsonb", [SqlExpr.Parameter name])
-            else
-                SqlExpr.Parameter name
+            StoredValueParameter.allocateNext this.Variables value
 
         member internal this.GetSourceContext() = this.SourceContext
         member internal this.GetIdParameterIndex() = this.IdParameterIndex

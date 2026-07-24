@@ -11,7 +11,6 @@ open System.Runtime.CompilerServices
 open Microsoft.Data.Sqlite
 open SQLiteTools
 open Utils
-open JsonFunctions
 open Connections
 open SoloDatabase
 open SoloDatabase.JsonSerializator
@@ -31,12 +30,24 @@ module internal QueryableHelperBase =
 
     /// Allocate a parameter in the shared Variables dict and return a SqlExpr referencing it.
     let internal allocateParam (variables: Dictionary<string, obj>) (value: obj) : SqlExpr =
-        let value = match value with :? bool as b -> box (if b then 1 else 0) | _ -> value
-        let jsonValue, shouldEncode = toSQLJson value
-        let name = sprintf "dp%d" variables.Count
-        variables.[name] <- jsonValue
-        if shouldEncode then SqlExpr.FunctionCall("jsonb", [SqlExpr.Parameter name])
-        else SqlExpr.Parameter name
+        StoredValueParameter.allocateNext variables value
+
+    /// Allocate a parameter with a caller-owned stable name.
+    let internal allocateNamedParam
+        (variables: Dictionary<string, obj>)
+        (name: string)
+        (value: obj)
+        : SqlExpr =
+        StoredValueParameter.allocateNamed variables name value
+
+    /// Allocate a parameter using the exact declared storage type of a document property.
+    let internal allocateNamedStoredValueParam
+        (variables: Dictionary<string, obj>)
+        (name: string)
+        (declaredType: Type)
+        (value: obj)
+        : SqlExpr =
+        StoredValueParameter.allocateNamedForDeclaredType variables name declaredType value
 
     /// Translate a LINQ expression to SqlExpr DU via the QueryTranslator DU path.
     let internal translateExprDu (sourceCtx: QueryContext) (tableName: string) (expr: Expression) (vars: Dictionary<string, obj>) : SqlExpr =

@@ -44,23 +44,6 @@ type internal CustomIdRunner =
                 sprintf "Error: Invalid Id generator type.\nReason: Type '%s' is not supported.\nFix: Use a supported Id generator or configure a custom Id strategy." (other.GetType().ToString())))
         | None -> ()
 
-    /// Heal entry. NO IsEmpty gate. GenerateId + SetId; the SQL probe already proved the row
-    /// is bug-shaped, so regeneration is unconditional.
-    static member ForceRegenerate<'T when 'T :> obj> (item: 'T, collection: ISoloDBCollection<'T>) : unit =
-        match CustomTypeId<'T>.Get() with
-        | Some x ->
-            let boxedItem = box item
-            match x.Generator with
-            | :? SoloDatabase.Attributes.IIdGenerator as generator ->
-                let id = generator.GenerateId (box collection) boxedItem
-                x.SetId id boxedItem
-            | :? SoloDatabase.Attributes.IIdGenerator<'T> as generator ->
-                let id = generator.GenerateId collection item
-                x.SetId id boxedItem
-            | other -> raise (System.InvalidOperationException(
-                sprintf "Error: Invalid Id generator type.\nReason: Type '%s' is not supported.\nFix: Use a supported Id generator or configure a custom Id strategy." (other.GetType().ToString())))
-        | None -> ()
-
     static let runMiCache = System.Collections.Concurrent.ConcurrentDictionary<System.Type, System.Reflection.MethodInfo>()
 
     static let runOpenMethod =
