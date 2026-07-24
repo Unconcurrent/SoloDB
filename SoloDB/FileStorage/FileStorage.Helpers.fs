@@ -112,27 +112,37 @@ module internal FileStorageHelpers =
         | Some dir ->
         getFilesWhere db "DirectoryId = @DirectoryId" {|DirectoryId = dir.Id|} |> ResizeArray :> SoloDBFileHeader seq
 
-    let internal getFileSortColumn (sortBy: SortField) =
-        match sortBy with
-        | SortField.Name -> "fh.Name COLLATE NOCASE"
-        | SortField.Size -> "fh.Length"
-        | SortField.Created -> "fh.Created"
-        | SortField.Modified -> "fh.Modified"
-        | _ -> "fh.Name COLLATE NOCASE"
-
-    let internal getDirSortColumn (sortBy: SortField) =
-        match sortBy with
-        | SortField.Name -> "dh.Name COLLATE NOCASE"
-        | SortField.Size -> "0"
-        | SortField.Created -> "dh.Created"
-        | SortField.Modified -> "dh.Modified"
-        | _ -> "dh.Name COLLATE NOCASE"
-
-    let internal getSortDirection (sortDir: SortDirection) =
+    let private getSortDirection (sortDir: SortDirection) =
         match sortDir with
         | SortDirection.Ascending -> "ASC"
         | SortDirection.Descending -> "DESC"
         | _ -> "ASC"
+
+    let private buildOrderBy alias primaryColumns sortDir =
+        let direction = getSortDirection sortDir
+        Array.append primaryColumns [| $"{alias}.Name COLLATE NOCASE"; $"{alias}.Id" |]
+        |> Array.map (fun column -> $"{column} {direction}")
+        |> String.concat ", "
+
+    let internal getFileOrderBy alias (sortBy: SortField) sortDir =
+        let primaryColumns =
+            match sortBy with
+            | SortField.Name -> Array.empty
+            | SortField.Size -> [| $"{alias}.Length" |]
+            | SortField.Created -> [| $"{alias}.Created" |]
+            | SortField.Modified -> [| $"{alias}.Modified" |]
+            | _ -> Array.empty
+        buildOrderBy alias primaryColumns sortDir
+
+    let internal getDirectoryOrderBy alias (sortBy: SortField) sortDir =
+        let primaryColumns =
+            match sortBy with
+            | SortField.Name
+            | SortField.Size -> Array.empty
+            | SortField.Created -> [| $"{alias}.Created" |]
+            | SortField.Modified -> [| $"{alias}.Modified" |]
+            | _ -> Array.empty
+        buildOrderBy alias primaryColumns sortDir
 
     let internal openFile (db: Connection) (file: SoloDBFileHeader) =
         new FileStorageCoreStream.DbFileStream(db, file.Id, file.DirectoryId, file.FullPath)

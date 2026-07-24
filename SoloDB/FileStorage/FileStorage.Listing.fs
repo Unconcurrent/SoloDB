@@ -14,10 +14,22 @@ module internal FileStorageListing =
         match tryGetDir db dirPath with
         | None -> (ResizeArray<SoloDBFileHeader>() :> IList<SoloDBFileHeader>, 0L)
         | Some dir ->
-        let sortCol = getFileSortColumn sortBy
-        let sortDirStr = getSortDirection sortDir
+        let orderBy = getFileOrderBy "fh" sortBy sortDir
         let count = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBFileHeader WHERE DirectoryId = @DirectoryId", {|DirectoryId = dir.Id|})
-        let query = sprintf "SELECT fh.*, fm.Key as MetaKey, fm.Value as MetaValue FROM SoloDBFileHeader fh LEFT JOIN SoloDBFileMetadata fm ON fh.Id = fm.FileId WHERE fh.DirectoryId = @DirectoryId ORDER BY %s %s LIMIT @Limit OFFSET @Offset" sortCol sortDirStr
+        let query =
+            $"""
+            WITH PagedFiles AS (
+                SELECT fh.*
+                FROM SoloDBFileHeader fh
+                WHERE fh.DirectoryId = @DirectoryId
+                ORDER BY {orderBy}
+                LIMIT @Limit OFFSET @Offset
+            )
+            SELECT fh.*, fm.Key as MetaKey, fm.Value as MetaValue
+            FROM PagedFiles fh
+            LEFT JOIN SoloDBFileMetadata fm ON fh.Id = fm.FileId
+            ORDER BY {orderBy}
+            """
         let files =
             db.Query<{|
                 Id: int64
@@ -57,11 +69,24 @@ module internal FileStorageListing =
         match tryGetDir db dirPath with
         | None -> (ResizeArray<SoloDBDirectoryHeader>() :> IList<SoloDBDirectoryHeader>, 0L)
         | Some dir ->
-        let sortCol = getDirSortColumn sortBy
-        let sortDirStr = getSortDirection sortDir
+        let orderBy = getDirectoryOrderBy "dh" sortBy sortDir
         let count = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBDirectoryHeader WHERE ParentId = @ParentId", {|ParentId = dir.Id|})
-        let query = sprintf "SELECT dh.*, dm.Key, dm.Value FROM SoloDBDirectoryHeader dh LEFT JOIN SoloDBDirectoryMetadata dm ON dh.Id = dm.DirectoryId WHERE dh.ParentId = @ParentId ORDER BY %s %s LIMIT @Limit OFFSET @Offset" sortCol sortDirStr
+        let query =
+            $"""
+            WITH PagedDirectories AS (
+                SELECT dh.*
+                FROM SoloDBDirectoryHeader dh
+                WHERE dh.ParentId = @ParentId
+                ORDER BY {orderBy}
+                LIMIT @Limit OFFSET @Offset
+            )
+            SELECT dh.*, dm.Key, dm.Value
+            FROM PagedDirectories dh
+            LEFT JOIN SoloDBDirectoryMetadata dm ON dh.Id = dm.DirectoryId
+            ORDER BY {orderBy}
+            """
         let directoryDictionary = new Dictionary<int64, SoloDBDirectoryHeader>()
+        let directories = ResizeArray<SoloDBDirectoryHeader>()
         let isNull x = Object.ReferenceEquals(x, null)
         db.Query<SoloDBDirectoryHeader, Metadata, unit>(
             query,
@@ -75,6 +100,7 @@ module internal FileStorageListing =
                                 {directory with Metadata = Dictionary()}
                             else directory
                         directoryDictionary.Add(dir.Id, dir)
+                        directories.Add(dir)
                         dir
                 if not (isNull metadata) then
                     (dir.Metadata :?> IDictionary<string, string>).Add(metadata.Key, metadata.Value)
@@ -83,7 +109,7 @@ module internal FileStorageListing =
             {|ParentId = dir.Id; Limit = limit; Offset = offset|},
             splitOn = "Key"
         ) |> Seq.iter ignore
-        (ResizeArray(directoryDictionary.Values) :> IList<SoloDBDirectoryHeader>, count)
+        (directories :> IList<SoloDBDirectoryHeader>, count)
 
     let internal listEntriesAtPaginated (db: SqliteConnection) (path: string) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
         let dirPath = formatPath path

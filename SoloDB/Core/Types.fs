@@ -132,7 +132,7 @@ type internal SoloDBConfiguration = {
 type SortField =
     /// <summary>Sort by name (case-insensitive).</summary>
     | Name = 0
-    /// <summary>Sort by file size (only applicable to files; directories treated as 0).</summary>
+    /// <summary>Sort files by size; directories use case-insensitive name order.</summary>
     | Size = 1
     /// <summary>Sort by creation date.</summary>
     | Created = 2
