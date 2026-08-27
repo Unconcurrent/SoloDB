@@ -57,6 +57,21 @@ module internal StoredValueParameter =
         : SqlExpr =
         allocateNamed variables (sprintf "dp%d" variables.Count) value
 
+    /// Allocate a decimal so that the digits written are the digits stored.
+    ///
+    /// The ordinary path renders a JSON number as a double, which is lossy for any decimal that
+    /// binary64 cannot represent: the row updates, the query returns, and the value quietly is not
+    /// the one the caller wrote. SoloDB keeps decimal precision as a public guarantee, so the
+    /// value is bound as its exact invariant text and parsed back into a JSON number by SQLite,
+    /// which preserves the digits and leaves the document a JSON number rather than a string.
+    let allocateExactDecimal
+        (variables: #IDictionary<string, obj>)
+        (value: decimal)
+        : SqlExpr =
+        let name = sprintf "dp%d" variables.Count
+        variables.[name] <- (value.ToString(System.Globalization.CultureInfo.InvariantCulture) :> obj)
+        SqlExpr.FunctionCall("jsonb", [ SqlExpr.Parameter name ])
+
     let allocateNamedForDeclaredType
         (variables: #IDictionary<string, obj>)
         (name: string)

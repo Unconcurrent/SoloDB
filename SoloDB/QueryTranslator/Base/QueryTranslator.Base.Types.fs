@@ -210,7 +210,14 @@ module internal QueryTranslatorBaseTypes =
         // Whitelisted internal accessors for cross-file visitor split boundary.
         /// Allocate a DU parameter: stores value in Variables dict, returns SqlExpr.Parameter or FunctionCall("jsonb", [Parameter]).
         member internal this.AllocateParamExpr(value: obj) : SqlExpr =
-            StoredValueParameter.allocateNext this.Variables value
+            // Update assignments carry values into storage, so a decimal here must keep the
+            // precision SoloDB guarantees. Predicate translation runs on a builder that is not in
+            // update mode and keeps its existing comparison encoding, which indexes depend on.
+            match value with
+            | :? decimal as d when this.UpdateMode ->
+                StoredValueParameter.allocateExactDecimal this.Variables d
+            | _ ->
+                StoredValueParameter.allocateNext this.Variables value
 
         member internal this.GetSourceContext() = this.SourceContext
         member internal this.GetIdParameterIndex() = this.IdParameterIndex
