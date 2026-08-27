@@ -95,3 +95,35 @@ module internal QueryTranslator =
         let duExpr = visitDu expression builder
         fullSQL.Length <- sbStart
         SqlDuMinimalEmit.emitExpr builder duExpr
+
+    /// Translate one update action expression into its ordered (path, value) assignments.
+    ///
+    /// This is the same visit the string corridor performs, stopping before emission so the
+    /// caller receives structure instead of text. Parameters are allocated into the supplied
+    /// dictionary in visit order, which is what keeps the numbering identical to the corridor
+    /// this replaces: assignments first, in source order, then whatever the caller translates
+    /// next.
+    let internal translateUpdateAssignments
+        (tableName: string) (expression: Expression) (variableDict: Dictionary<string, obj>)
+        : (SqlExpr * SqlExpr) list =
+        ensureDbRefHandlersInitialized()
+        match QueryTranslatorVisitPost.tryTranslateUpdateManyRelationTransform expression with
+        | ValueSome _ ->
+            raise (NotSupportedException updateManyRelationUnsupportedMessage)
+        | ValueNone -> ()
+
+        // The visit needs a builder, but nothing is emitted through it; the buffer is a sink that
+        // stays empty, so no caller's text can influence the result.
+        let sink = StringBuilder()
+        let builder = QueryBuilder.New sink variableDict true tableName expression -1 ValueNone
+        let duExpr = visitDu expression builder
+
+        let assignments = ResizeArray<SqlExpr * SqlExpr>()
+        let rec collect (node: SqlExpr) =
+            match node with
+            | SqlExpr.UpdateFragment(path, value) -> assignments.Add(path, value)
+            | other ->
+                raise (NotSupportedException(
+                    sprintf "Error: update expression did not translate to an assignment.\nReason: produced %A.\nFix: use a supported update operation such as Set, Append, Add, Insert, SetAt or RemoveAt." other))
+        collect duExpr
+        List.ofSeq assignments

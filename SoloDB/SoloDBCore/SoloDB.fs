@@ -12,6 +12,7 @@ open System.Text
 open SQLiteTools
 open JsonFunctions
 open FileStorage
+open SqlDu.Engine.C1.Spec
 open Connections
 open Utils
 open System.Reflection
@@ -67,32 +68,45 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         connection.Query<DbObjectRow>(query, variables) |> Seq.toArray
 
     member internal this.ExecuteJsonUpdateManyByRows(connection: SqliteConnection, rows: DbObjectRow array, expressions: ResizeArray<Expression<System.Action<'T>>>) =
+        // No expressions or no selected rows means there is nothing to update, and the corridor
+        // emits no statement at all rather than one with an empty id list.
         if expressions.Count = 0 || rows.Length = 0 then
             0
         else
+            // One dictionary for the whole statement, filled in the order the SQL reads: every
+            // assignment in source order, then the row ids. The names are observable, so the
+            // order they are allocated in is part of the contract rather than an implementation
+            // detail.
             let variables = Dictionary<string, obj>()
-            let fullSQL = StringBuilder()
-            let inline append (txt: string) = ignore (fullSQL.Append txt)
 
-            append "UPDATE \""
-            append name
-            append "\" SET Value = jsonb_set(Value, "
+            let assignments =
+                [ for expression in expressions do
+                    yield! QueryTranslator.translateUpdateAssignments name expression variables ]
 
-            for expression in expressions do
-                QueryTranslator.translateUpdateMode name expression fullSQL variables
+            let setValue =
+                SqlExpr.FunctionCall("jsonb_set",
+                    SqlExpr.Column(None, "Value")
+                    :: [ for (path, value) in assignments do yield path; yield value ])
 
-            fullSQL.Remove(fullSQL.Length - 1, 1) |> ignore
-            append ") WHERE Id IN ("
+            let idParameters =
+                [ for i in 0 .. rows.Length - 1 do
+                    let key = $"id{i}"
+                    variables.[key] <- rows.[i].Id.Value :> obj
+                    yield SqlExpr.Parameter key ]
 
-            for i in 0 .. rows.Length - 1 do
-                if i > 0 then append ","
-                let key = $"id{i}"
-                append "@"
-                append key
-                variables.[key] <- rows.[i].Id.Value :> obj
+            let where =
+                match idParameters with
+                | head :: tail -> SqlExpr.InList(SqlExpr.Column(None, "Id"), head, tail)
+                | [] -> SqlExpr.Literal(SqlLiteral.Boolean false)
 
-            append ")"
-            connection.Execute(fullSQL.ToString(), variables)
+            let statement =
+                UpdateStmt
+                    { TableName = name
+                      SetClauses = [ ("Value", setValue) ]
+                      Where = Some where }
+
+            StatementExecution.execute connection connection
+                (StatementExecution.policyFor statement) statement variables
 
     /// <summary>Gets the event registration API for this collection.</summary>
     member val internal Events: ISoloDBCollectionEvents<'T> =
