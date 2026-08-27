@@ -68,19 +68,6 @@ module internal QueryTranslator =
         visitDu expression builder
 
     /// <summary>
-    /// Translates an expression and appends the result to an existing StringBuilder.
-    /// Routes through DU construction (visitDu) and DU emission (SqlDuMinimalEmit).
-    /// </summary>
-    let internal translateQueryable (tableName: string) (expression: Expression) (sb: StringBuilder) (variables: Dictionary<string, obj>) =
-        ensureDbRefHandlersInitialized()
-        let sbStart = sb.Length
-        let builder = QueryBuilder.New sb variables false tableName expression -1 ValueNone
-        let duExpr = visitDu expression builder
-        sb.Length <- sbStart
-        SqlDuMinimalEmit.emitExpr builder duExpr
-        sb.Append " " |> ignore
-
-    /// <summary>
     /// Translates an expression in "update" mode, generating SQL fragments for jsonb_set arguments.
     /// Routes through DU construction (visitDu with UpdateMode) and DU emission (SqlDuMinimalEmit).
     /// </summary>
