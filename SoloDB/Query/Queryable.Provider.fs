@@ -52,9 +52,9 @@ module internal HydrationManyPopulator =
     let populateFromHydrationJson (ownerType: Type) (ownerEntities: (int64 * obj) array) (hydrationMap: Dictionary<int64, string>) =
         // Descriptor carries the accessors this loop needs, so materialization no longer
         // re-resolves a getter, setter, constructor and Id writer per owner per property.
-        let manyRelations = (HydrationSqlMetadata.getRelationDescriptor ownerType).ManyRelations
+        let descriptor = HydrationSqlMetadata.getRelationDescriptor ownerType
 
-        if manyRelations.Length = 0 then ()
+        if descriptor.ManyCount = 0 then ()
         else
 
         for (ownerId, ownerObj) in ownerEntities do
@@ -64,7 +64,8 @@ module internal HydrationManyPopulator =
                 let hydrationObj = JsonValue.Parse hydrationJsonStr
                 match hydrationObj with
                 | JsonValue.Object dict ->
-                    for relation in manyRelations do
+                    for manyIndex in 0 .. descriptor.ManyCount - 1 do
+                        let relation = descriptor.Many manyIndex
                         let prop = relation.Property
                         let targetType = relation.TargetType
                         match dict.TryGetValue(prop.Name) with

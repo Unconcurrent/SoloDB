@@ -33,19 +33,33 @@ module internal HydrationSqlMetadata =
     /// Order is the sequence returned by GetProperties(Public ||| Instance) for that type,
     /// filtered, with no sort and no regroup. Emitted hydration paths follow this sequence, so
     /// re-ordering here would change generated SQL.
-    type internal RelationDescriptor = {
-        SingleProperties: PropertyInfo array
-        ManyRelations: ManyRelationEntry array
-        Shape: RelationShapeInfo
-    }
+    ///
+    /// The backing arrays are private. One instance is shared by every translation for that type
+    /// for the life of the process, so handing callers the stored arrays would let a single
+    /// accidental element write poison every later translation. Access is by index and count,
+    /// which copies nothing per call.
+    type internal RelationDescriptor
+        internal (singles: PropertyInfo array, manyRelations: ManyRelationEntry array, shape: RelationShapeInfo) =
+        member _.SingleCount = singles.Length
+        member _.Single (i: int) : PropertyInfo = singles.[i]
+        member _.ManyCount = manyRelations.Length
+        member _.Many (i: int) : ManyRelationEntry = manyRelations.[i]
+        member _.Shape = shape
+        /// Copies out. For diagnostics and tests only; product paths index instead.
+        member _.SinglePropertyNames = singles |> Array.map (fun p -> p.Name)
+        member _.ManyPropertyNames = manyRelations |> Array.map (fun r -> r.Property.Name)
 
     /// Counts descriptor constructions. "Reflected once per type" is a standing contract, so the
     /// counter is maintained diagnostic infrastructure rather than a temporary test seam. It is
     /// allocation-free and costs one predictable branch when disabled.
     module internal DescriptorInstrumentation =
-        let mutable internal Enabled = false
+        let mutable private enabled = 0
+        let internal SetEnabled (value: bool) = System.Threading.Volatile.Write(&enabled, if value then 1 else 0)
+        let internal IsEnabled () = System.Threading.Volatile.Read(&enabled) = 1
         let mutable private constructions = 0
-        let internal Increment () = if Enabled then System.Threading.Interlocked.Increment(&constructions) |> ignore
+        let internal Increment () =
+            if System.Threading.Volatile.Read(&enabled) = 1 then
+                System.Threading.Interlocked.Increment(&constructions) |> ignore
         let internal Count () = System.Threading.Volatile.Read(&constructions)
         let internal Reset () = System.Threading.Volatile.Write(&constructions, 0)
 
@@ -56,18 +70,16 @@ module internal HydrationSqlMetadata =
         let singles = all |> Array.filter (fun p -> DBRefTypeHelpers.isDBRefType p.PropertyType)
         let manyProps = all |> Array.filter (fun p -> DBRefTypeHelpers.isDBRefManyType p.PropertyType)
 
-        // A derived type that hides a same-named relation property makes name-keyed hydration
-        // paths and include/exclude ambiguous. Fail closed rather than binding whichever
-        // reflected property happens to come first.
-        let assertNoAmbiguousNames (props: PropertyInfo array) (kindLabel: string) =
-            props
-            |> Array.groupBy (fun p -> p.Name)
-            |> Array.iter (fun (name, group) ->
-                if group.Length > 1 then
-                    raise (InvalidOperationException(
-                        sprintf "Error: Ambiguous %s relation property '%s.%s'.\nReason: More than one property with that name is visible on the type, so name-keyed hydration and Include/Exclude paths cannot select one.\nFix: Rename the hiding property, or remove the redeclaration." kindLabel t.FullName name)))
-        assertNoAmbiguousNames singles "single"
-        assertNoAmbiguousNames manyProps "many"
+        // A type that exposes two relation properties under one name makes name-keyed hydration
+        // paths and Include/Exclude ambiguous. Names are checked across ALL relation properties
+        // before they are split by kind, because a base DBRef and a derived DBRefMany sharing a
+        // name collide just as badly as two of the same kind.
+        Array.append singles manyProps
+        |> Array.groupBy (fun p -> p.Name)
+        |> Array.iter (fun (name, group) ->
+            if group.Length > 1 then
+                raise (InvalidOperationException(
+                    sprintf "Error: Ambiguous relation property '%s.%s'.\nReason: %d relation properties on this type share that name, so name-keyed hydration and Include/Exclude paths cannot select one.\nFix: Rename the hiding property, or remove the redeclaration." t.FullName name group.Length)))
 
         let manyEntries =
             manyProps
@@ -80,12 +92,12 @@ module internal HydrationSqlMetadata =
                   TrackerCtor = RelationsAccessorCache.compiledDefaultCtor p.PropertyType
                   TargetIdWriter = RelationsAccessorCache.compiledInt64IdWriter targetType })
 
-        { SingleProperties = singles
-          ManyRelations = manyEntries
-          Shape =
+        RelationDescriptor(
+            singles,
+            manyEntries,
             { HasAny = singles.Length > 0 || manyEntries.Length > 0
               HasSingle = singles.Length > 0
-              HasMany = manyEntries.Length > 0 } }
+              HasMany = manyEntries.Length > 0 })
 
     // Lazy with ExecutionAndPublication: GetOrAdd may run a factory more than once during a race,
     // so the Lazy, not the dictionary, is what guarantees a single construction and one shared

@@ -52,15 +52,17 @@ module internal HydrationSqlBuilder =
 
         // Reflected once per type; this function recurses over relation depth, so re-reflecting
         // here cost one full property scan per nesting level per translation.
-        let singleProps = (getRelationDescriptor ownerType : HydrationSqlMetadata.RelationDescriptor).SingleProperties
+        let descriptor = (getRelationDescriptor ownerType : HydrationSqlMetadata.RelationDescriptor)
 
-        if singleProps.Length = 0 then ownerValueExpr
+        if descriptor.SingleCount = 0 then ownerValueExpr
         else
 
         let args = ResizeArray<SqlExpr>()
         args.Add(ownerValueExpr)
 
-        for prop in singleProps do
+        // Indexed over the cached descriptor: no per-call array, list or enumerable is built.
+        for singleIndex in 0 .. descriptor.SingleCount - 1 do
+            let prop = descriptor.Single singleIndex
             let path = if prefix = "" then prop.Name else prefix + "." + prop.Name
 
             if shouldLoadRelationPath ctx path then
@@ -123,16 +125,15 @@ module internal HydrationSqlBuilder =
         (aliasCounter: byref<int>)
         : SqlExpr option =
 
-        let manyProps =
-            (getRelationDescriptor ownerType : HydrationSqlMetadata.RelationDescriptor).ManyRelations
-            |> Array.map (fun r -> r.Property)
+        let descriptor = (getRelationDescriptor ownerType : HydrationSqlMetadata.RelationDescriptor)
 
-        if manyProps.Length = 0 then None
+        if descriptor.ManyCount = 0 then None
         else
 
         let args = ResizeArray<SqlExpr>()
 
-        for prop in manyProps do
+        for manyIndex in 0 .. descriptor.ManyCount - 1 do
+            let prop = (descriptor.Many manyIndex).Property
             if shouldLoadRelationPath ctx prop.Name then
                 let targetType = (GenericTypeArgCache.Get prop.PropertyType).[0]
                 let linkTableOpt = ctx.TryResolveRelationLink(ownerTable, prop.Name)
