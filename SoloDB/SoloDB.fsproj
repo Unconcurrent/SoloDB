@@ -204,6 +204,7 @@
     <Compile Include="SoloDBCore/SoloDB.Bootstrap.fs" />
     <Compile Include="SoloDBCore/SoloDB.QueryUtils.fs" />
     <Compile Include="SoloDBCore/SoloDB.RuntimeIndexModelCache.fs" />
+    <Compile Include="SoloDBCore/SoloDB.StatementExecution.fs" />
     <Compile Include="SoloDBCore/SoloDB.EventDbCache.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.Core.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.Insert.fs" />

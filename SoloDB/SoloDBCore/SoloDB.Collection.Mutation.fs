@@ -583,71 +583,16 @@ type internal CollectionMutationOps<'T>() =
                     // The IndexModel is loaded for every base table referenced by the
                     // statement (chain link tables + leaf target/link table) so chain
                     // SELECT joins through link tables receive index-plan shaping.
+                    // Canonical statement execution lives in StatementExecution; the index model
+                    // is read from the relation transaction's connection, which is not the one the
+                    // statement executes on.
+                    // This corridor previously ran the pipeline for every statement it received,
+                    // so it keeps doing so. Policy selection applies to the corridors being newly
+                    // routed, where the emitted form is measured against a baseline first.
                     let executeSqlDu (stmt: SqlStatement) (vars: Dictionary<string, obj>) =
-                        let tables = HashSet<string>()
-                        let rec collectStmt (s: SqlStatement) =
-                            match s with
-                            | SelectStmt sel -> collectSelect sel
-                            | InsertStmt ins ->
-                                tables.Add(ins.TableName) |> ignore
-                                match ins.Source with
-                                | InsertSelect sel -> collectSelect sel
-                                | InsertValues _ -> ()
-                            | UpdateStmt upd ->
-                                tables.Add(upd.TableName) |> ignore
-                                upd.Where |> Option.iter collectExpr
-                                for (_, e) in upd.SetClauses do collectExpr e
-                            | DeleteStmt del ->
-                                tables.Add(del.TableName) |> ignore
-                                del.Where |> Option.iter collectExpr
-                            | DdlStmt _ -> ()
-                        and collectSelect (sel: SqlSelect) =
-                            for cte in sel.Ctes do collectSelect cte.Query
-                            match sel.Body with
-                            | SingleSelect core -> collectCore core
-                            | UnionAllSelect(h, t) ->
-                                collectCore h
-                                for c in t do collectCore c
-                        and collectCore (core: SelectCore) =
-                            match core.Source with
-                            | Some (BaseTable(t, _)) -> tables.Add(t) |> ignore
-                            | Some (DerivedTable(inner, _)) -> collectSelect inner
-                            | Some (FromJsonEach(e, _)) -> collectExpr e
-                            | None -> ()
-                            for j in core.Joins do
-                                match j with
-                                | CrossJoin (BaseTable(t, _)) -> tables.Add(t) |> ignore
-                                | CrossJoin (DerivedTable(inner, _)) -> collectSelect inner
-                                | CrossJoin (FromJsonEach(e, _)) -> collectExpr e
-                                | ConditionedJoin(_, BaseTable(t, _), onExpr) ->
-                                    tables.Add(t) |> ignore
-                                    collectExpr onExpr
-                                | ConditionedJoin(_, DerivedTable(inner, _), onExpr) ->
-                                    collectSelect inner
-                                    collectExpr onExpr
-                                | ConditionedJoin(_, FromJsonEach(e, _), onExpr) ->
-                                    collectExpr e
-                                    collectExpr onExpr
-                            core.Where |> Option.iter collectExpr
-                            core.Having |> Option.iter collectExpr
-                            for p in (ProjectionSetOps.toList core.Projections) do collectExpr p.Expr
-                            for ob in core.OrderBy do collectExpr ob.Expr
-                        and collectExpr (expr: SqlExpr) =
-                            SqlExpr.fold (fun () node ->
-                                match node with
-                                | InSubquery(_, sel) -> collectSelect sel
-                                | ScalarSubquery sel -> collectSelect sel
-                                | Exists sel -> collectSelect sel
-                                | _ -> ()) () expr
-                        collectStmt stmt
+                        StatementExecution.execute conn tx.Connection StatementExecution.IndexShapedPipeline stmt vars
+                        |> ignore
 
-                        let indexModel = SoloDatabase.IndexModel.loadModelForTables tx.Connection (tables :> seq<string>)
-                        let passes = PassPipeline.standardWithIndexModel indexModel
-                        let firstRound = PassRunner.runPipeline passes stmt
-                        let pipelineResult = PassRunner.runPipelineToFixedPoint passes firstRound
-                        let emitted = EmitStatement.emitStatement (EmitContext(InlineLiterals = true)) pipelineResult.Output
-                        SqlCapture.OnSqlEmitted |> Option.iter (fun cb -> cb emitted.Sql)
-                        conn.Execute(emitted.Sql, vars) |> ignore
 
                     let jsonbSetExpr (jsonPath: string) (paramName: string) =
                         FunctionCall("jsonb_set", [
