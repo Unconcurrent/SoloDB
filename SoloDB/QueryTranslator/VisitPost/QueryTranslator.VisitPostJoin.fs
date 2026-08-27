@@ -73,7 +73,7 @@ module internal QueryTranslatorVisitPostJoin =
         let defaultTable = formatName targetType.Name
         match ctx.TryResolveRelationTarget(ownerCollection, propertyName) with
         | Some mapped when not (String.IsNullOrWhiteSpace mapped) -> formatName mapped
-        | _ -> ctx.ResolveCollectionForType(Utils.typeIdentityKey targetType, defaultTable)
+        | _ -> ctx.ResolveCollectionForType(UtilsReflection.typeIdentityKey targetType, defaultTable)
 
     /// Ensure a LEFT JOIN exists for a DBRef<T>.Value access. Returns the alias.
     and internal ensureDBRefJoin (qb: QueryBuilder) (valueMemberExpr: MemberExpression) : string =

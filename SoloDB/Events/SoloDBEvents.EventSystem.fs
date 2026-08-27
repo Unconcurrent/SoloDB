@@ -15,7 +15,7 @@ open SoloDBEventsHelpers
 
 type internal EventSystem internal () =
     let mutable sessionIndex = 0L
-    member val internal GlobalLock = ReentrantSpinLock()
+    member val internal GlobalLock = UtilsReflection.ReentrantSpinLock()
     member val internal InsertingHandlerMapping = CowByteSpanMap<ResizeArray<InsertingHandlerSystem>>()
     member val internal DeletingHandlerMapping = CowByteSpanMap<ResizeArray<DeletingHandlerSystem>>()
     member val internal UpdatingHandlerMapping = CowByteSpanMap<ResizeArray<UpdatingHandlerSystem>>()

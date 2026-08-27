@@ -167,7 +167,7 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                     let defaultTable = formatName targetType.Name
                                     match sourceCtx.TryResolveRelationTarget(tableName, propName) with
                                     | Some mapped when not (System.String.IsNullOrWhiteSpace mapped) -> formatName mapped
-                                    | _ -> sourceCtx.ResolveCollectionForType(Utils.typeIdentityKey targetType, defaultTable)
+                                    | _ -> sourceCtx.ResolveCollectionForType(UtilsReflection.typeIdentityKey targetType, defaultTable)
 
                                 // JOIN: owner → link (on owner.Id = link.ownerCol) → target (on target.Id = link.targetCol)
                                 let linkJoinOn =
@@ -251,7 +251,7 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                             addComplexFinal statements (fun ctx ->
                                 match expressions.Length with
                                 | 1 ->
-                                    let generics = GenericMethodArgCache.Get originalMethod
+                                    let generics = UtilsReflection.GenericMethodArgCache.Get originalMethod
                                     if generics.[1] (*output*) = typeof<byte> then
                                         raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit the SQLite context with .AsEnumerable().")
                                     // Use a stable inner source alias based on the inner select structure

@@ -39,7 +39,7 @@ module internal QueryableBuildQuerySetAndTypeOps =
                     | 1 -> addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName (negatePredicateForAllExpression m.Expressions.[0]) AllPredicate)
                     | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
-                    addTake statements (ExpressionHelper.constant 1)
+                    addTake statements (UtilsReflection.ExpressionHelper.constant 1)
 
                     addComplexFinal statements (fun ctx ->
                         // SELECT -1 As Id, NOT EXISTS(SELECT 1 FROM (inner)) as Value
@@ -54,7 +54,7 @@ module internal QueryableBuildQuerySetAndTypeOps =
                     | 1 -> addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName m.Expressions.[0] AnyPredicate)
                     | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
-                    addTake statements (ExpressionHelper.constant 1)
+                    addTake statements (UtilsReflection.ExpressionHelper.constant 1)
 
                     addComplexFinal statements (fun ctx ->
                         let existsSubquery = wrapCore (mkCore [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] (Some (DerivedTable(ctx.Inner, "o"))))
@@ -69,9 +69,9 @@ module internal QueryableBuildQuerySetAndTypeOps =
                         | :? ConstantExpression as ce -> struct (ce.Type, ce.Value)
                         | other -> raise (NotSupportedException(sprintf "Invalid Contains(...) parameter: %A" other))
 
-                    let filter = (ExpressionHelper.eq t value)
+                    let filter = (UtilsReflection.ExpressionHelper.eq t value)
                     addFilter statements filter
-                    addTake statements (ExpressionHelper.constant 1)
+                    addTake statements (UtilsReflection.ExpressionHelper.constant 1)
 
                     addComplexFinal statements (fun ctx ->
                         let existsSubquery = wrapCore (mkCore [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] (Some (DerivedTable(ctx.Inner, "o"))))
@@ -82,8 +82,8 @@ module internal QueryableBuildQuerySetAndTypeOps =
                 // todo: Append works at root level but is not yet supported at DBRefMany level (see Extract.fs)
                 | SupportedLinqMethods.Append ->
                     addUnionAll statements (fun _tableName vars ->
-                        let appendingObj = QueryTranslator.evaluateExpr<'T> m.Expressions.[0]
-                        match QueryTranslator.isPrimitiveSQLiteType typeof<'T> with
+                        let appendingObj = QueryTranslatorBaseHelpers.evaluateExpr<'T> m.Expressions.[0]
+                        match QueryTranslatorBaseTypes.isPrimitiveSQLiteType typeof<'T> with
                         | false ->
                             let struct (jsonStringElement, hasId) = serializeForCollection appendingObj
                             let idExpr =
@@ -235,7 +235,7 @@ module internal QueryableBuildQuerySetAndTypeOps =
                 | SupportedLinqMethods.Cast ->
                     // Cast<TTarget>() with polymorphic guard & diagnostic messages.
                     if m.Expressions.Length <> 0 then raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
-                    match GenericMethodArgCache.Get m.OriginalMethod |> Array.tryHead with
+                    match UtilsReflection.GenericMethodArgCache.Get m.OriginalMethod |> Array.tryHead with
                     | None -> raise (NotSupportedException("Invalid type from Cast<T> method."))
                     | Some t when typeof<JsonSerializator.JsonValue>.IsAssignableFrom t ->
                         // No-op cast: just keep pipeline as-is (i.e., do nothing here).
@@ -268,7 +268,7 @@ module internal QueryableBuildQuerySetAndTypeOps =
 
                 | SupportedLinqMethods.OfType ->
                     if m.Expressions.Length <> 0 then raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
-                    match GenericMethodArgCache.Get m.OriginalMethod |> Array.tryHead with
+                    match UtilsReflection.GenericMethodArgCache.Get m.OriginalMethod |> Array.tryHead with
                     | None -> raise (NotSupportedException("Invalid type from OfType<T> method."))
                     | Some t when typeof<JsonSerializator.JsonValue>.IsAssignableFrom t ->
                         // No-op filter to JsonValue

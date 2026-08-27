@@ -142,7 +142,7 @@ module internal QueryableBuildQueryGroupJoinElements =
                     [ (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), nullLit) ],
                     Some baseValue)
         | ElementAtLike(indexExpr, orDefault) ->
-            let idx = Convert.ToInt64(QueryTranslator.evaluateExpr<obj> indexExpr)
+            let idx = Convert.ToInt64(QueryTranslatorBaseHelpers.evaluateExpr<obj> indexExpr)
             if idx < 0L then
                 wrapOrDefault nullLit orDefault
             else
@@ -202,7 +202,7 @@ module internal QueryableBuildQueryGroupJoinElements =
                     [ (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), nullLit) ],
                     Some baseValue)
         | ElementAtLike(indexExpr, _orDefault) ->
-            let idx = Convert.ToInt64(QueryTranslator.evaluateExpr<obj> indexExpr)
+            let idx = Convert.ToInt64(QueryTranslatorBaseHelpers.evaluateExpr<obj> indexExpr)
             if idx < 0L then
                 nullLit
             else

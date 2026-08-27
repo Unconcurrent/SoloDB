@@ -30,7 +30,7 @@ type internal CollectionReadDeleteOps<'T>() =
         (hydrateRelations: SqliteConnection -> int64 -> obj -> unit) =
 
         use connection = getConnection()
-        if hasRelations && HydrationSqlBuilder.hasRelationProperties typeof<'T> then
+        if hasRelations && HydrationSqlMetadata.hasRelationProperties typeof<'T> then
             RelationsCore.withRelationSqliteWrap "read" "TryGetById.hydrated" (fun () ->
                 // Single-SQL hydration for non-queryable path.
                 let vars = Dictionary<string, obj>()
@@ -109,7 +109,7 @@ type internal CollectionReadDeleteOps<'T>() =
             | None -> raise (InvalidOperationException("This collection has no custom [Id] property. Use the Int64 Id overload."))
 
         use connection = getConnection()
-        if hasRelations && HydrationSqlBuilder.hasRelationProperties typeof<'T> then
+        if hasRelations && HydrationSqlMetadata.hasRelationProperties typeof<'T> then
             RelationsCore.withRelationSqliteWrap "read" "TryGetByCustomId.hydrated" (fun () ->
                 // Single-SQL hydration for custom-id non-queryable path.
                 // Build WHERE as SqlExpr DU (not raw string splice) to keep query in the DU tree.

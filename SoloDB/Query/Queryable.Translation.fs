@@ -116,12 +116,6 @@ module internal QueryableTranslationCore =
             | _ -> false
         | _ -> false
 
-    let internal tableExists = HydrationSqlBuilder.tableExists
-
-    type internal RelationShapeInfo = HydrationSqlBuilder.RelationShapeInfo
-    let internal getRelationShape = HydrationSqlBuilder.getRelationShape
-    let internal hasRelationProperties = HydrationSqlBuilder.hasRelationProperties
-
     /// Context captured during query translation for post-query relation batch loading.
     [<Struct>]
     type internal BatchLoadContext = {
@@ -156,7 +150,7 @@ module internal QueryableTranslationCore =
 
         let valueDecodedType =
             if typedefof<IQueryable>.IsAssignableFrom expression.Type then
-                GenericTypeArgCache.Get expression.Type |> Array.head
+                UtilsReflection.GenericTypeArgCache.Get expression.Type |> Array.head
             else
                 expression.Type
 
@@ -169,7 +163,7 @@ module internal QueryableTranslationCore =
         // so nested cardinality emit sites can detect they are nested and emit bare
         // scalars (default(T) propagation) rather than typed exceptions.
         ctx.IsAtTopLevel <- true
-        let hasRelations = hasRelationProperties typeof<'T>
+        let hasRelations = HydrationSqlMetadata.hasRelationProperties typeof<'T>
         if hasRelations then
             let relationTx: RelationsTypes.RelationTxContext = {
                 Connection = metadataConnection
@@ -187,7 +181,7 @@ module internal QueryableTranslationCore =
         // Build the inner query as a SqlSelect DU.
         let innerSelect = translateQuery<'T> (ref 0) ctx variables expression
 
-        let shape = getRelationShape typeof<'T>
+        let shape = HydrationSqlMetadata.getRelationShape typeof<'T>
         let hasSingleRelations = hasRelations && shape.HasSingle
         let hasManyRelations = hasRelations && shape.HasMany
 
@@ -196,7 +190,7 @@ module internal QueryableTranslationCore =
         // eliminating N+1 batch-load queries for DBRef relations on the queryable path.
         let mutable hydrationAliasCounter = 0
         let singleRelationsHydrated =
-            hasSingleRelations && not (QueryTranslator.isPrimitiveSQLiteType valueDecodedType)
+            hasSingleRelations && not (QueryTranslatorBaseTypes.isPrimitiveSQLiteType valueDecodedType)
 
         let effectiveValueDecodedExpr =
             if singleRelationsHydrated then
@@ -220,7 +214,7 @@ module internal QueryableTranslationCore =
         let mutable manyAliasCounter = hydrationAliasCounter
         let manyRelationsHydrated =
             hasManyRelations
-            && not (QueryTranslator.isPrimitiveSQLiteType valueDecodedType)
+            && not (QueryTranslatorBaseTypes.isPrimitiveSQLiteType valueDecodedType)
             && valueDecodedType = typeof<'T>
             && isIdentityOwnerRowsetExpr expression
         let manyHydrationProjection =

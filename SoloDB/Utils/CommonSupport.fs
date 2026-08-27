@@ -368,12 +368,3 @@ module internal Utils =
         | _ -> 
             // Requirement #5: Raise an error for types other than TEXT, BLOB, or NULL
             failwith "The base64() function requires a TEXT, BLOB, or NULL argument"
-
-    let internal typeIdentityKey = UtilsReflection.typeIdentityKey
-    type internal GenericMethodArgCache = UtilsReflection.GenericMethodArgCache
-    type internal GenericTypeArgCache = UtilsReflection.GenericTypeArgCache
-    type internal ExpressionHelper = UtilsReflection.ExpressionHelper
-    module internal SeqExt =
-        let internal sequentialGroupBy keySelector sequence =
-            UtilsReflection.SeqExt.sequentialGroupBy keySelector sequence
-    type ReentrantSpinLock = UtilsReflection.ReentrantSpinLock

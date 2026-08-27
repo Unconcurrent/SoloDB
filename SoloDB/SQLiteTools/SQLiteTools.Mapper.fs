@@ -115,7 +115,7 @@ module internal SQLiteToolsMapper =
                                     jsonObj.[key] <- JsonSerializator.JsonValue.Serialize<obj> value
                             jsonObj :> obj :?> 'T
                 | t when isTuple t ->
-                    let elementTypes = GenericTypeArgCache.Get t
+                    let elementTypes = UtilsReflection.GenericTypeArgCache.Get t
                     let arity = elementTypes.Length
                     let readerParam = Expression.Parameter(typeof<IDataReader>, "reader")
                     let startIndexParam = Expression.Parameter(typeof<int>, "startIndex")

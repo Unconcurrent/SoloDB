@@ -40,7 +40,7 @@ module internal SoloDBEventsHelpers =
         | _ -> ValueNone
 
     let internal runHandlerBody<'THandler>
-        (globalLock: ReentrantSpinLock)
+        (globalLock: UtilsReflection.ReentrantSpinLock)
         (sessionIndex: int64 byref)
         (connection: SqliteConnection)
         (handlers: ResizeArray<'THandler>)
@@ -83,7 +83,7 @@ module internal SoloDBEventsHelpers =
 
         try
             // EVENT-PATH INVARIANT 1 of 3: GlobalLock serialization.
-            // All handler invocations are serialized under ReentrantSpinLock.
+            // All handler invocations are serialized under UtilsReflection.ReentrantSpinLock.
             // This prevents concurrent handler mutation and ensures handler-list
             // iteration is safe. The lock is reentrant so triggers that fire
             // during handler execution (via ISoloDB proxy writes) do not deadlock.
@@ -190,7 +190,7 @@ module internal SoloDBEventsHelpers =
         struct (handlerFailed, handlerFailureMessage)
 
     let internal unregisterHandler<'THandler, 'TSys when 'THandler : not struct and 'TSys : not struct>
-        (globalLock: ReentrantSpinLock)
+        (globalLock: UtilsReflection.ReentrantSpinLock)
         (collectionName: string)
         (globalMapping: CowByteSpanMap<ResizeArray<'TSys>>)
         (localMap: Dictionary<'THandler, ResizeArray<'TSys>>)

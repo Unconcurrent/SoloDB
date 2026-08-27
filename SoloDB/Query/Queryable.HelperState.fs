@@ -106,7 +106,7 @@ module internal QueryableHelperState =
     let addTake (statements: ResizeArray<SQLSubquery>) (e: Expression) =
         let current = simpleCurrent statements
         match current.Take with
-        | Some e2 -> current.Take <- Some (ExpressionHelper.min e2 e)
+        | Some e2 -> current.Take <- Some (UtilsReflection.ExpressionHelper.min e2 e)
         | None   -> current.Take <- Some e
 
     /// The ComplexDu subquery will be the last subquery processed. It receives the inner SqlSelect and returns a new SqlSelect.
@@ -123,7 +123,7 @@ module internal QueryableHelperState =
         addSelector queries (DuSelector (fun tableName vars ->
             let innerExpr =
                 match args.Length with
-                | 0 -> translateExprDu sourceCtx tableName (method.ReturnType |> ExpressionHelper.id) vars
+                | 0 -> translateExprDu sourceCtx tableName (method.ReturnType |> UtilsReflection.ExpressionHelper.id) vars
                 | 1 -> translateExprDu sourceCtx tableName args.[0] vars
                 | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" method.Name other))
             [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
@@ -134,7 +134,7 @@ module internal QueryableHelperState =
         addSelector queries (DuSelector (fun tableName vars ->
             let innerExpr =
                 match args.Length with
-                | 0 -> translateExprDu sourceCtx tableName (method.ReturnType |> ExpressionHelper.id) vars
+                | 0 -> translateExprDu sourceCtx tableName (method.ReturnType |> UtilsReflection.ExpressionHelper.id) vars
                 | 1 -> translateExprDu sourceCtx tableName args.[0] vars
                 | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" method.Name other))
             [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }

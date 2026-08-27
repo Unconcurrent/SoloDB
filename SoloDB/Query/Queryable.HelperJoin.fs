@@ -27,7 +27,7 @@ module internal QueryableHelperJoin =
         let unsupportedConcatMessage = "Cannot concat with an IEnumerable other than another SoloDB IQueryable on the same connection. To do this anyway, use AsEnumerable()."
         match methodArg with
         | :? ConstantExpression as ce -> 
-            match QueryTranslator.evaluateExpr<IEnumerable> ce with
+            match QueryTranslatorBaseHelpers.evaluateExpr<IEnumerable> ce with
             | :? IQueryable<'T> as appendingQuery when (match appendingQuery.Provider with :? SoloDBQueryProvider -> true | _other -> false) ->
                 appendingQuery.Expression
             | :? IRootQueryable as rq ->

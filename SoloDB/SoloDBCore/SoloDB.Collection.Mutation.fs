@@ -151,7 +151,7 @@ type internal CollectionMutationOps<'T>() =
         let filterExpr, variables =
             if HasTypeId<'T>.Value then
                 let id = HasTypeId<'T>.Read item
-                QueryTranslator.translateWhereExpr name (ExpressionHelper.get(fun (x: 'T) -> x.Dyn<int64>("Id") = id))
+                QueryTranslator.translateWhereExpr name (UtilsReflection.ExpressionHelper.get(fun (x: 'T) -> x.Dyn<int64>("Id") = id))
             else
                 match CustomTypeId<'T>.Get() with
                 | Some customId ->

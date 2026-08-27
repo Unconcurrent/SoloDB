@@ -63,7 +63,7 @@ module internal FileStorageHelpers =
             query,
             parameters
         )
-        |> Utils.SeqExt.sequentialGroupBy(fun e -> e.Id)
+        |> UtilsReflection.SeqExt.sequentialGroupBy(fun e -> e.Id)
         |> Seq.map(fun fileAndDatas ->
             let allMetadata =
                 fileAndDatas

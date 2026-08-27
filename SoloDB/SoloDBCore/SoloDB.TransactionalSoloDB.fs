@@ -204,7 +204,7 @@ type TransactionalSoloDB internal (connection: CachingDbConnection, parentData: 
     /// <returns>The result of the function.</returns>
     member this.WithTransaction<'R>(func: Func<ISoloDB, 'R>) : 'R =
         checkScope ()
-        withSavepoint connection (fun _conn -> func.Invoke(this :> ISoloDB))
+        ConnectionsTransactionHelpers.withSavepoint connection (fun _conn -> func.Invoke(this :> ISoloDB))
 
     /// <summary>
     /// Executes a series of database operations within a nested savepoint.
@@ -223,7 +223,7 @@ type TransactionalSoloDB internal (connection: CachingDbConnection, parentData: 
     /// <returns>A task representing the asynchronous operation.</returns>
     member this.WithTransactionAsync<'R>(func: Func<ISoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> =
         checkScope ()
-        withSavepointAsync connection (fun _conn -> func.Invoke(this :> ISoloDB))
+        ConnectionsTransactionHelpers.withSavepointAsync connection (fun _conn -> func.Invoke(this :> ISoloDB))
 
     /// <summary>
     /// Executes an asynchronous series of database operations within a nested savepoint.
@@ -232,7 +232,7 @@ type TransactionalSoloDB internal (connection: CachingDbConnection, parentData: 
     /// <param name="func">An async function that takes a transactional <c>ISoloDB</c> context.</param>
     /// <returns>A task representing the asynchronous operation.</returns>
     member this.WithTransactionAsync(func: Func<ISoloDB, Threading.Tasks.Task>) : Threading.Tasks.Task =
-        withSavepointAsync connection (fun _conn -> task { do! func.Invoke(this :> ISoloDB) }) :> Threading.Tasks.Task
+        ConnectionsTransactionHelpers.withSavepointAsync connection (fun _conn -> task { do! func.Invoke(this :> ISoloDB) }) :> Threading.Tasks.Task
 
     interface ISoloDB with
         member this.ConnectionString = this.ConnectionString

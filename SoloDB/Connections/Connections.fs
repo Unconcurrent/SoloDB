@@ -16,19 +16,17 @@ module Connections =
     open Utils
     open System.IO
 
-    let internal ThrowOutsideEventContextUsage = ConnectionsTransactionHelpers.ThrowOutsideEventContextUsage
+    let private ThrowOutsideEventContextUsage = ConnectionsTransactionHelpers.ThrowOutsideEventContextUsage
     let private eventHandlerScopeUnderflowMessage = ConnectionsTransactionHelpers.eventHandlerScopeUnderflowMessage
-    let internal takeHandlerFaultCommitException = ConnectionsTransactionHelpers.takeHandlerFaultCommitException
+    let private takeHandlerFaultCommitException = ConnectionsTransactionHelpers.takeHandlerFaultCommitException
     let private rollbackBorrowedTransaction = ConnectionsTransactionHelpers.rollbackBorrowedTransaction
     let private commitOrRollbackBorrowedTransaction = ConnectionsTransactionHelpers.commitOrRollbackBorrowedTransaction
     let private cleanupBorrowedTransaction = ConnectionsTransactionHelpers.cleanupBorrowedTransaction
     let private cleanupDedicatedTransaction = ConnectionsTransactionHelpers.cleanupDedicatedTransaction
     let private withPooledTransactionCore = ConnectionsTransactionHelpers.withPooledTransactionCore
-    let internal withSavepoint = ConnectionsTransactionHelpers.withSavepoint
-    let internal withSavepointAsync = ConnectionsTransactionHelpers.withSavepointAsync
     let private shouldSuppressSavepointInHandler = ConnectionsTransactionHelpers.shouldSuppressSavepointInHandler
-    let internal beginImmediateWithRetry = ConnectionsTransactionHelpers.beginImmediateWithRetry
-    let internal resolveTxOutcome = ConnectionsTransactionHelpers.resolveTxOutcome
+    let private beginImmediateWithRetry = ConnectionsTransactionHelpers.beginImmediateWithRetry
+    let private resolveTxOutcome = ConnectionsTransactionHelpers.resolveTxOutcome
 
     /// <summary>
     /// Manages a pool of reusable <see cref="CachingDbConnection"/> objects to reduce the overhead
@@ -322,7 +320,7 @@ module Connections =
             match this with
             | Pooled pool -> withPooledTransactionCore (fun () -> pool.IsCurrentThreadInEventHandlerScope) pool.WithTransaction f
             | Transactional conn when shouldSuppressSavepointInHandler conn -> f conn
-            | Transactional conn -> withSavepoint conn f
+            | Transactional conn -> ConnectionsTransactionHelpers.withSavepoint conn f
             | Guarded (guard, inner) ->
                 guard()
                 inner.WithTransaction f
@@ -337,7 +335,7 @@ module Connections =
             match this with
             | Pooled pool -> withPooledTransactionCore (fun () -> pool.IsCurrentThreadInEventHandlerScope) pool.WithAsyncTransaction f
             | Transactional conn when shouldSuppressSavepointInHandler conn -> f conn
-            | Transactional conn -> withSavepointAsync conn f
+            | Transactional conn -> ConnectionsTransactionHelpers.withSavepointAsync conn f
             | Guarded (guard, inner) ->
                 guard()
                 inner.WithAsyncTransaction f

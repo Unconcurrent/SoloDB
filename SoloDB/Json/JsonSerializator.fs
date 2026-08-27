@@ -1407,7 +1407,7 @@ and private JsonDeserializerImpl<'A> =
             failwithf "FSharp option is not supported yet, use Nullable<>"
 
         | t when t.Name = "Nullable`1" ->
-            let genericType = GenericTypeArgCache.Get t |> Array.head
+            let genericType = UtilsReflection.GenericTypeArgCache.Get t |> Array.head
 
             let nullValue = Activator.CreateInstance(t) :?> 'A
 
@@ -1459,7 +1459,7 @@ and private JsonDeserializerImpl<'A> =
 
         | t when isTuple t ->
             let isValueTuple = typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "ValueTuple`"
-            let tupleItemTypes = GenericTypeArgCache.Get t
+            let tupleItemTypes = UtilsReflection.GenericTypeArgCache.Get t
             let jsonParam = Expression.Parameter(typeof<JsonValue>)
             
 
@@ -1497,7 +1497,7 @@ and private JsonDeserializerImpl<'A> =
                                 typeof<Tuple>.GetMethods()
                                 |> Array.find (fun m -> 
                                     m.Name = "Create" && 
-                                    (GenericMethodArgCache.Get m).Length = tupleItemTypes.Length)
+                                    (UtilsReflection.GenericMethodArgCache.Get m).Length = tupleItemTypes.Length)
                                 |> fun m -> m.MakeGenericMethod(tupleItemTypes)
                             | _ -> 
                                 // Handle TupleRest for tuples with more than 8 items
@@ -1548,7 +1548,7 @@ and private JsonDeserializerImpl<'A> =
                                 typeof<Tuple>.GetMethods()
                                 |> Array.find (fun m -> 
                                     m.Name = "Create" && 
-                                    (GenericMethodArgCache.Get m).Length = tupleItemTypes.Length)
+                                    (UtilsReflection.GenericMethodArgCache.Get m).Length = tupleItemTypes.Length)
                                 |> fun m -> m.MakeGenericMethod(tupleItemTypes)
                             | _ -> 
                                 // Handle TupleRest for tuples with more than 8 items
@@ -1577,7 +1577,7 @@ and private JsonDeserializerImpl<'A> =
         | t when (JsonHelper.implementsGeneric typedefof<IDictionary<_,_>> t) && (t.IsInterface || t.IsAbstract) ->
             let iface = t.GetInterface("IDictionary`2") |> Option.ofObj |> Option.defaultValue t
             let keyType, valueType = 
-                let args = GenericTypeArgCache.Get iface
+                let args = UtilsReflection.GenericTypeArgCache.Get iface
                 args.[0], args.[1]
                 
             let jsonParam = Expression.Parameter(typeof<JsonValue>)
@@ -1605,7 +1605,7 @@ and private JsonDeserializerImpl<'A> =
         | t when JsonHelper.implementsGeneric typedefof<IReadOnlyDictionary<_,_>> t && not (JsonHelper.implementsGeneric typedefof<IDictionary<_,_>> t) ->
             let iface = t.GetInterface("IReadOnlyDictionary`2") |> Option.ofObj |> Option.defaultValue t
             let keyType, valueType = 
-                let args = GenericTypeArgCache.Get iface
+                let args = UtilsReflection.GenericTypeArgCache.Get iface
                 args.[0], args.[1]
                 
             let jsonParam = Expression.Parameter(typeof<JsonValue>)
@@ -1633,7 +1633,7 @@ and private JsonDeserializerImpl<'A> =
         | t when JsonHelper.implementsGeneric typedefof<IDictionary<_,_>> t ->
             let iface = t.GetInterface("IDictionary`2") |> Option.ofObj |> Option.defaultValue t
             let keyType, valueType = 
-                let args = GenericTypeArgCache.Get iface
+                let args = UtilsReflection.GenericTypeArgCache.Get iface
                 args.[0], args.[1]
                 
             let jsonParam = Expression.Parameter(typeof<JsonValue>)
@@ -1709,7 +1709,7 @@ and private JsonDeserializerImpl<'A> =
 
         // KeyValuePair<TKey, TValue> deserialization from {"Key": k, "Value": v}
         | t when t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<KeyValuePair<_,_>> ->
-            let args = GenericTypeArgCache.Get t
+            let args = UtilsReflection.GenericTypeArgCache.Get t
             let keyType, valueType = args.[0], args.[1]
 
             let jsonParam = Expression.Parameter(typeof<JsonValue>)
@@ -1760,7 +1760,7 @@ and private JsonDeserializerImpl<'A> =
         | t when JsonHelper.implementsGeneric typedefof<IGrouping<_,_>> t ->
             let iface = t.GetInterface("IGrouping`2") |> Option.ofObj |> Option.defaultValue t
             let keyType, elemType = 
-                let args = GenericTypeArgCache.Get iface
+                let args = UtilsReflection.GenericTypeArgCache.Get iface
                 args.[0], args.[1]
             
             let jsonParam = Expression.Parameter(typeof<JsonValue>)
@@ -1885,7 +1885,7 @@ and private JsonDeserializerImpl<'A> =
         | t when JsonHelper.implementsGeneric typedefof<IEnumerable<_>> t && t <> typeof<string> ->
 
             let standardStyleJsonFn =
-                let elemType = GenericTypeArgCache.Get (t.GetInterface("IEnumerable`1") |> Option.ofObj |> Option.defaultValue t) |> Array.head
+                let elemType = UtilsReflection.GenericTypeArgCache.Get (t.GetInterface("IEnumerable`1") |> Option.ofObj |> Option.defaultValue t) |> Array.head
                 let jsonParam = Expression.Parameter(typeof<JsonValue>)
             
                 // Choose appropriate method based on type
@@ -1945,7 +1945,7 @@ and private JsonDeserializerImpl<'A> =
                                 && m.GetParameters().Length = 2)
                             |> fun m -> m.MakeGenericMethod([| elemType; typeof<int> |])
                         Expression.Call(orderByMethod, [| sourceExpr; keySelector :> Expression |])
-                    elif typeof<IList>.IsAssignableFrom(t) && t.IsGenericType && (GenericTypeArgCache.Get t).Length = 1 then
+                    elif typeof<IList>.IsAssignableFrom(t) && t.IsGenericType && (UtilsReflection.GenericTypeArgCache.Get t).Length = 1 then
                         // For IList types that need an instance (like List<T>)
                         if t.GetConstructor([||]) <> null then
                             // If type has parameterless constructor, create instance for IListDeserialize
@@ -2188,7 +2188,7 @@ and private JsonDeserializerImpl<'A> =
             )
 
         | t when DBRefTypeHelpers.isDBRefType t ->
-            let targetType = (GenericTypeArgCache.Get t).[0]
+            let targetType = (UtilsReflection.GenericTypeArgCache.Get t).[0]
             let unloadedMethod = t.GetMethod("Unloaded", BindingFlags.NonPublic ||| BindingFlags.Static, null, [| typeof<int64> |], null)
             // Explicit 2-arg signature: pinning (int64, 'TTarget) keeps JsonSerializator's bare deserialize
             // path bound to the original overload even after the typed-aware Loaded(int64, 'TId, 'TTarget)
@@ -2200,7 +2200,7 @@ and private JsonDeserializerImpl<'A> =
             let isDbRef2 = DBRefTypeHelpers.isDBRefTypedType t
             let loadedTypedFn =
                 if isDbRef2 then
-                    let tidType = (GenericTypeArgCache.Get t).[1]
+                    let tidType = (UtilsReflection.GenericTypeArgCache.Get t).[1]
                     let lt = t.GetMethod("Loaded", BindingFlags.NonPublic ||| BindingFlags.Static, null, [| typeof<int64>; tidType; targetType |], null)
                     if isNull lt then Unchecked.defaultof<Func<int64, obj, obj, obj>>
                     else
@@ -2247,7 +2247,7 @@ and private JsonDeserializerImpl<'A> =
             let isDbRef2 = DBRefTypeHelpers.isDBRefTypedType t
             let typedIdToFn =
                 if isDbRef2 then
-                    let tidType = (GenericTypeArgCache.Get t).[1]
+                    let tidType = (UtilsReflection.GenericTypeArgCache.Get t).[1]
                     let toMethod = t.GetMethod("To", BindingFlags.Public ||| BindingFlags.Static, null, [| tidType |], null)
                     let tidDeserializeMeth =
                         typedefof<JsonDeserializerImpl<_>>
@@ -2548,7 +2548,7 @@ and private JsonSerializerImpl<'A> =
                 if isDbRef2 then t.GetProperty("TypedId", BindingFlags.Public ||| BindingFlags.Instance) else null
             let typedIdSerializeFn =
                 if isDbRef2 && not (isNull typedIdProp) then
-                    let tidType = (GenericTypeArgCache.Get t).[1]
+                    let tidType = (UtilsReflection.GenericTypeArgCache.Get t).[1]
                     let meth =
                         typedefof<JsonSerializerImpl<_>>
                             .MakeGenericType(tidType)
@@ -2731,7 +2731,7 @@ and private JsonSerializerImpl<'A> =
 
         // KeyValuePair<TKey, TValue> → {"Key": k, "Value": v} — explicit for contract stability
         | t when t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<KeyValuePair<_,_>> ->
-            let args = GenericTypeArgCache.Get t
+            let args = UtilsReflection.GenericTypeArgCache.Get t
             let keyType, valueType = args.[0], args.[1]
             let keyProp = t.GetProperty("Key")
             let valueProp = t.GetProperty("Value")
@@ -2779,7 +2779,7 @@ and private JsonSerializerImpl<'A> =
 
         | t when t.Name = "Nullable`1" ->
 
-            let underlyingType = (GenericTypeArgCache.Get t).[0]
+            let underlyingType = (UtilsReflection.GenericTypeArgCache.Get t).[0]
             let serializerType = typedefof<JsonSerializerImpl<_>>.MakeGenericType(underlyingType)
             let serializeMethod = serializerType.GetMethod(nameof JsonSerializerImpl<_>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
     
@@ -2829,7 +2829,7 @@ and private JsonSerializerImpl<'A> =
                 |> Option.orElseWith(fun () -> t.GetInterface("IDictionary`2") |> Option.ofObj) 
                 |> Option.defaultValue t // If not then it is an interface
     
-            let genericArgs = GenericTypeArgCache.Get iface
+            let genericArgs = UtilsReflection.GenericTypeArgCache.Get iface
 
             let param = Expression.Parameter(t)
 
@@ -2867,7 +2867,7 @@ and private JsonSerializerImpl<'A> =
             :> obj :?> ('A -> JsonValue)
 
         | t when JsonHelper.implementsGeneric typedefof<IEnumerable<_>> t && t <> typeof<string> ->
-            let elemType = GenericTypeArgCache.Get (t.GetInterface("IEnumerable`1")) |> Array.head
+            let elemType = UtilsReflection.GenericTypeArgCache.Get (t.GetInterface("IEnumerable`1")) |> Array.head
 
             let meth = typeof<JsonImpl>
                             .GetMethod((nameof JsonImpl.IEnumerableSerialize), BindingFlags.NonPublic ||| BindingFlags.Static)
@@ -2901,7 +2901,7 @@ and private JsonSerializerImpl<'A> =
             :> obj :?> ('A -> JsonValue)
 
         | t when isTuple t ->
-            let tupleItemTypes = GenericTypeArgCache.Get t
+            let tupleItemTypes = UtilsReflection.GenericTypeArgCache.Get t
             let param = Expression.Parameter(t)
             let outList = Expression.Variable(typeof<List<JsonValue>>)
             

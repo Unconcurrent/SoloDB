@@ -89,7 +89,7 @@ module internal QueryableBuildQueryMain =
                     current.Orders.Clear()
                     current.Orders.Add({ OrderingRule = ordering; Descending = descending; RawExpr = rawExpr })
                     if List.isEmpty existingOrders then
-                        current.Orders.Add({ OrderingRule = ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id")); Descending = false; RawExpr = None })
+                        current.Orders.Add({ OrderingRule = UtilsReflection.ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id")); Descending = false; RawExpr = None })
                     else
                         for order in existingOrders do
                             current.Orders.Add(order)

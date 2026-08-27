@@ -11,7 +11,7 @@ module internal SQLiteToolsMapperQuery =
     let internal defaultOf<'T> () : 'T =
         let t = typeof<'T>
         if isTuple t then
-            let elementTypes = GenericTypeArgCache.Get t
+            let elementTypes = UtilsReflection.GenericTypeArgCache.Get t
             let defaults = elementTypes |> Array.map (fun et ->
                 if et.IsValueType then Activator.CreateInstance(et)
                 else null)

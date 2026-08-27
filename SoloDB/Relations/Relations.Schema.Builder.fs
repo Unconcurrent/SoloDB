@@ -81,7 +81,7 @@ LIMIT 1;
 let private readMappedCollectionsForType (connection: SqliteConnection) (targetType: Type) =
     connection.Query<string>(
         "SELECT CollectionName FROM SoloDBTypeCollectionMap WHERE TypeKey = @typeKey;",
-        {| typeKey = Utils.typeIdentityKey targetType |})
+        {| typeKey = UtilsReflection.typeIdentityKey targetType |})
     |> Seq.map formatName
     |> Seq.distinct
     |> Seq.toArray

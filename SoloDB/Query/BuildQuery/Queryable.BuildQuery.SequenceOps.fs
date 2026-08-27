@@ -74,7 +74,7 @@ module internal QueryableBuildQuerySequenceOps =
                         addSelector statements (Expression m.Expressions.[0])
                         pendingDistinctByScalarReuse <- None
                 | SupportedLinqMethods.Order | SupportedLinqMethods.OrderDescending ->
-                    addOrder statements (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) (m.Value = SupportedLinqMethods.OrderDescending)
+                    addOrder statements (UtilsReflection.GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> UtilsReflection.ExpressionHelper.id) (m.Value = SupportedLinqMethods.OrderDescending)
                 | SupportedLinqMethods.OrderBy | SupportedLinqMethods.OrderByDescending  ->
                     let descending = (m.Value = SupportedLinqMethods.OrderByDescending)
                     let orderFingerprint = expressionFingerprint m.Expressions.[0]
@@ -172,7 +172,7 @@ module internal QueryableBuildQuerySequenceOps =
                             | _ ->
                                 None
                         installTerminalOrdering m.Expressions.[0] descending rawExpr
-                        addTake statements (ExpressionHelper.constant 1)
+                        addTake statements (UtilsReflection.ExpressionHelper.constant 1)
                     | 2 ->
                         raise (NotSupportedException("MinBy/MaxBy comparer overloads are not supported."))
                     | other ->
@@ -192,7 +192,7 @@ module internal QueryableBuildQuerySequenceOps =
                                         | :? LambdaExpression as le -> le.Body.Type
                                         | other -> other.Type
                                     latestSelectorInfo <-
-                                        Some (expressionFingerprint selector, QueryTranslator.isPrimitiveSQLiteType selectorType)
+                                        Some (expressionFingerprint selector, QueryTranslatorBaseTypes.isPrimitiveSQLiteType selectorType)
                                 | _ -> ()
                             | _ -> ()
                         if carriedOrders.Length = 0 then
@@ -208,7 +208,7 @@ module internal QueryableBuildQuerySequenceOps =
                             | _ -> ()
                     addComplexFinal statements (fun ctx ->
                         // SELECT -1 AS Id, Value FROM (inner) o GROUP BY {identity expr}
-                        let groupByExpr = translateExprDu sourceCtx ctx.TableName (GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> ExpressionHelper.id) ctx.Vars
+                        let groupByExpr = translateExprDu sourceCtx ctx.TableName (UtilsReflection.GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> UtilsReflection.ExpressionHelper.id) ctx.Vars
                         let core =
                             { mkCore
                                 [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
@@ -286,9 +286,9 @@ module internal QueryableBuildQuerySequenceOps =
 
                     match comparerExprOpt with
                     | Some comparerExpr ->
-                        let keyType = (GenericMethodArgCache.Get m.OriginalMethod).[1]
+                        let keyType = (UtilsReflection.GenericMethodArgCache.Get m.OriginalMethod).[1]
                         let comparerValue =
-                            try QueryTranslator.evaluateExpr<obj> comparerExpr
+                            try QueryTranslatorBaseHelpers.evaluateExpr<obj> comparerExpr
                             with _ ->
                                 raise (NotSupportedException(
                                     "Error: CountBy comparer overload is not supported.\n" +

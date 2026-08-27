@@ -228,7 +228,7 @@ module internal QueryTranslatorVisitDbRefPeelers =
                     if StringComparer.Ordinal.Equals(sourceAlias, rootAlias) then
                         qb.SourceContext.RootTable
                     else
-                        qb.SourceContext.ResolveCollectionForType(Utils.typeIdentityKey pe.Type, formatName pe.Type.Name)
+                        qb.SourceContext.ResolveCollectionForType(UtilsReflection.typeIdentityKey pe.Type, formatName pe.Type.Name)
                 ValueSome {
                     OwnerCollection = ownerCollection
                     OwnerAliasSql = sourceAlias
@@ -260,7 +260,7 @@ module internal QueryTranslatorVisitDbRefPeelers =
                 | ValueNone -> ValueNone
             | :? MethodCallExpression as ownerCall ->
                 let ownerCollection =
-                    qb.SourceContext.ResolveCollectionForType(Utils.typeIdentityKey ownerCall.Type, formatName ownerCall.Type.Name)
+                    qb.SourceContext.ResolveCollectionForType(UtilsReflection.typeIdentityKey ownerCall.Type, formatName ownerCall.Type.Name)
                 let ownerExprDu = visitDu ownerCall qb
                 let ownerIdExprDu =
                     SqlExpr.FunctionCall("jsonb_extract", [

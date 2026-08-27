@@ -91,7 +91,7 @@ module internal Helper =
         if not (typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T>) then
             connection.Execute(
                 "INSERT INTO SoloDBTypeCollectionMap(TypeKey, CollectionName) VALUES(@typeKey, @collectionName) ON CONFLICT(TypeKey, CollectionName) DO NOTHING;",
-                {| typeKey = Utils.typeIdentityKey typeof<'T>; collectionName = collectionName |}) |> ignore
+                {| typeKey = UtilsReflection.typeIdentityKey typeof<'T>; collectionName = collectionName |}) |> ignore
 
     /// <summary>
     /// Drops all event triggers associated with a collection table, if they exist.
@@ -324,7 +324,7 @@ module internal Helper =
                 conn.Execute(indexSQL) |> ignore
             else
                 let ensureIndexesFn = if indexed.Unique then ensureUniqueAndIndex else ensureIndex
-                let _code = ensureIndexesFn name conn (ExpressionHelper.get<obj, obj>(fun row -> row.Dyn<obj>(pi.Name)))
+                let _code = ensureIndexesFn name conn (UtilsReflection.ExpressionHelper.get<obj, obj>(fun row -> row.Dyn<obj>(pi.Name)))
                 ()
 
     let internal getSQLForTriggersForTable (name: string) =

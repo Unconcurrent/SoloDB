@@ -84,7 +84,7 @@ module internal HydrationSqlMetadata =
         let manyEntries =
             manyProps
             |> Array.map (fun p ->
-                let targetType = (Utils.GenericTypeArgCache.Get p.PropertyType).[0]
+                let targetType = (UtilsReflection.GenericTypeArgCache.Get p.PropertyType).[0]
                 { Property = p
                   TargetType = targetType
                   TrackerGetter = RelationsAccessorCache.compiledPropGetter p

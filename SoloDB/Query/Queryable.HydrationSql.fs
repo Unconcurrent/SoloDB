@@ -25,11 +25,6 @@ module internal HydrationSqlBuilder =
     /// Maximum nesting depth for hydration correlated subqueries (matches batch load maxRecursiveDepth).
     let maxHydrationDepth = Utils.maxRelationDepth
 
-    type internal RelationShapeInfo = HydrationSqlMetadata.RelationShapeInfo
-    let internal getRelationShape = HydrationSqlMetadata.getRelationShape
-    let internal getRelationDescriptor = HydrationSqlMetadata.getRelationDescriptor
-    let internal hasRelationProperties = HydrationSqlMetadata.hasRelationProperties
-    let internal tableExists = HydrationSqlMetadata.tableExists
 
     /// Build a hydrated Value expression by embedding correlated subqueries for DBRef properties.
     /// Each DBRef property that should be loaded gets a ScalarSubquery that returns
@@ -52,7 +47,7 @@ module internal HydrationSqlBuilder =
 
         // Reflected once per type; this function recurses over relation depth, so re-reflecting
         // here cost one full property scan per nesting level per translation.
-        let descriptor = (getRelationDescriptor ownerType : HydrationSqlMetadata.RelationDescriptor)
+        let descriptor = HydrationSqlMetadata.getRelationDescriptor ownerType
 
         if descriptor.SingleCount = 0 then ownerValueExpr
         else
@@ -66,7 +61,7 @@ module internal HydrationSqlBuilder =
             let path = if prefix = "" then prop.Name else prefix + "." + prop.Name
 
             if shouldLoadRelationPath ctx path then
-                let targetType = (GenericTypeArgCache.Get prop.PropertyType).[0]
+                let targetType = (UtilsReflection.GenericTypeArgCache.Get prop.PropertyType).[0]
                 match ctx.TryResolveRelationTarget(ownerTable, prop.Name) with
                 | None ->
                     // Read-path hydration must not explode when downstream metadata
@@ -125,7 +120,7 @@ module internal HydrationSqlBuilder =
         (aliasCounter: byref<int>)
         : SqlExpr option =
 
-        let descriptor = (getRelationDescriptor ownerType : HydrationSqlMetadata.RelationDescriptor)
+        let descriptor = HydrationSqlMetadata.getRelationDescriptor ownerType
 
         if descriptor.ManyCount = 0 then None
         else
@@ -135,7 +130,7 @@ module internal HydrationSqlBuilder =
         for manyIndex in 0 .. descriptor.ManyCount - 1 do
             let prop = (descriptor.Many manyIndex).Property
             if shouldLoadRelationPath ctx prop.Name then
-                let targetType = (GenericTypeArgCache.Get prop.PropertyType).[0]
+                let targetType = (UtilsReflection.GenericTypeArgCache.Get prop.PropertyType).[0]
                 let linkTableOpt = ctx.TryResolveRelationLink(ownerTable, prop.Name)
                 let targetTableOpt = ctx.TryResolveRelationTarget(ownerTable, prop.Name)
                 match linkTableOpt, targetTableOpt with
@@ -211,7 +206,7 @@ module internal HydrationSqlBuilder =
 
         // Shape is computed first so a type that cannot hydrate any relation never allocates a
         // metadata source and never reaches the catalogs.
-        let shape : RelationShapeInfo = getRelationShape ownerType
+        let shape : HydrationSqlMetadata.RelationShapeInfo = HydrationSqlMetadata.getRelationShape ownerType
         let ctx =
             if shape.HasAny then
                 { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }
@@ -285,7 +280,7 @@ module internal HydrationSqlBuilder =
 
         // Many-only builder: a type with no DBRefMany property cannot hydrate here, so it
         // neither allocates a metadata source nor reaches the catalogs.
-        let shape : RelationShapeInfo = getRelationShape ownerType
+        let shape : HydrationSqlMetadata.RelationShapeInfo = HydrationSqlMetadata.getRelationShape ownerType
         let ctx =
             if shape.HasMany then
                 { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }
@@ -350,7 +345,7 @@ module internal HydrationSqlBuilder =
 
         // Many-only builder: a type with no DBRefMany property cannot hydrate here, so it
         // neither allocates a metadata source nor reaches the catalogs.
-        let shape : RelationShapeInfo = getRelationShape ownerType
+        let shape : HydrationSqlMetadata.RelationShapeInfo = HydrationSqlMetadata.getRelationShape ownerType
         let ctx =
             if shape.HasMany then
                 { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }

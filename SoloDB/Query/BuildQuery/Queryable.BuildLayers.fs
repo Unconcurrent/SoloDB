@@ -93,7 +93,7 @@ module internal QueryableLayerBuild =
             match layer with
             // Edge case 1: Empty query (root table only)
             | Simple layer when layer.IsEmptyWithTableName ->
-                let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
+                let isTypePrimitive = QueryTranslatorBaseTypes.isPrimitiveSQLiteType typeof<'T>
                 if isTypePrimitive then
                     // Edge case 2: Primitive type extraction — jsonb_extract(Value, '$')
                     wrapCore (mkCore
@@ -137,7 +137,7 @@ module internal QueryableLayerBuild =
                         [{ Alias = None; Expr = idColumnExpr }
                          { Alias = Some "Value"; Expr = selectorExpr }]
                     | Some (KeyProjection selector) ->
-                        let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
+                        let isTypePrimitive = QueryTranslatorBaseTypes.isPrimitiveSQLiteType typeof<'T>
                         let keyExpr = translateExprDu currentCtx effectiveTableName selector vars
                         if isTypePrimitive then
                             [{ Alias = None; Expr = idColumnExpr }
@@ -151,7 +151,7 @@ module internal QueryableLayerBuild =
                     | Some (DuSelector buildProjections) ->
                         buildProjections layer.TableName vars
                     | None ->
-                        let isTypePrimitive = QueryTranslator.isPrimitiveSQLiteType typeof<'T>
+                        let isTypePrimitive = QueryTranslatorBaseTypes.isPrimitiveSQLiteType typeof<'T>
                         if isTypePrimitive then
                             [{ Alias = None; Expr = idColumnExpr }
                              { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("jsonb_extract", [valueColumnExpr; SqlExpr.Literal(SqlLiteral.String "$")]) }]

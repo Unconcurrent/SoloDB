@@ -28,7 +28,7 @@ module internal DBRefManyBuilderCore =
         let defaultTable = formatName targetType.Name
         match ctx.TryResolveRelationTarget(ownerCollection, propName) with
         | Some mapped when not (String.IsNullOrWhiteSpace mapped) -> formatName mapped
-        | _ -> ctx.ResolveCollectionForType(typeIdentityKey targetType, defaultTable)
+        | _ -> ctx.ResolveCollectionForType(UtilsReflection.typeIdentityKey targetType, defaultTable)
 
     let tryGetRelationOrderByForTakeWhile
         (ownerRef: DBRefManyDescriptor.DBRefManyOwnerRef)
@@ -229,7 +229,7 @@ module internal DBRefManyBuilderCore =
                     let hop1TargetTable = targetTable
                     let hop1TargetType = targetType
                     let hop1TargetCollection =
-                        ctx.ResolveCollectionForType(typeIdentityKey hop1TargetType, hop1TargetTable.Trim('"'))
+                        ctx.ResolveCollectionForType(UtilsReflection.typeIdentityKey hop1TargetType, hop1TargetTable.Trim('"'))
                     let link2Table = dbRefManyLinkTable ctx hop1TargetCollection innerPropName
                     let owner2UsesSource = dbRefManyOwnerUsesSource ctx hop1TargetCollection innerPropName
                     let owner2Column = if owner2UsesSource then "SourceId" else "TargetId"

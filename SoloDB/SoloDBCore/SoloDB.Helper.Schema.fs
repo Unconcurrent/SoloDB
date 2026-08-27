@@ -143,7 +143,7 @@ module internal HelperSchema =
             raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
         let expressionBody = expression.Body
 
-        if QueryTranslator.isAnyConstant expressionBody then
+        if QueryTranslatorBaseHelpers.isAnyConstant expressionBody then
             raise (InvalidOperationException
                 "Error: Cannot index an outside or constant expression.\nReason: Index expressions must reference the entity parameter.\nFix: Use a member access on the entity parameter.")
 
@@ -255,7 +255,7 @@ module internal HelperSchema =
                 conn.Execute(createSql) |> ignore
             else
                 let ensureIndexesFn = if indexed.Unique then ensureUniqueAndIndexLocal else ensureIndexLocal
-                let _code = ensureIndexesFn name conn (ExpressionHelper.get<obj, obj>(fun row -> row.Dyn<obj>(pi.Name)))
+                let _code = ensureIndexesFn name conn (UtilsReflection.ExpressionHelper.get<obj, obj>(fun row -> row.Dyn<obj>(pi.Name)))
                 ()
 
     /// <summary>

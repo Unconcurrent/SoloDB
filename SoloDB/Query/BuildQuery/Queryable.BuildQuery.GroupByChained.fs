@@ -142,7 +142,7 @@ module internal QueryableBuildQueryGroupByChained =
             translateJoinSingleSourceExpression sourceCtx subAlias vars (tryFindSingleParameter expr) expr
 
     let private normalizeScalarExpr (exprType: Type) (expr: SqlExpr) =
-        if QueryTranslator.isPrimitiveSQLiteType exprType then
+        if QueryTranslatorBaseTypes.isPrimitiveSQLiteType exprType then
             SqlExpr.CaseExpr(
                 (SqlExpr.Binary(
                     SqlExpr.FunctionCall("typeof", [expr]),
@@ -481,7 +481,7 @@ module internal QueryableBuildQueryGroupByChained =
                 raise (NotSupportedException(
                     "Error: GroupBy set operator right side must be a correlated group chain or a constant sequence.\n" +
                     "Fix: Project the right operand from the same group, or use a constant array/list, or move the operator after AsEnumerable()."))
-            match QueryTranslator.evaluateExpr<IEnumerable> expr with
+            match QueryTranslatorBaseHelpers.evaluateExpr<IEnumerable> expr with
             | null -> []
             | values -> [ for value in values -> value ]
 

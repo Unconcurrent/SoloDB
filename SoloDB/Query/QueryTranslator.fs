@@ -22,12 +22,6 @@ module internal QueryTranslator =
             raise (InvalidOperationException(
                 $"DBRef handler registration incomplete: count={count}, expected=3"))
 
-    // Re-export symbols from split modules used by Helper.Schema.fs and other product code.
-    let internal escapeSQLiteString input = QueryTranslatorBase.escapeSQLiteString input
-    let inline internal evaluateExpr<'O> (e: Expression) = QueryTranslatorBase.evaluateExpr<'O> e
-    let internal isAnyConstant expr = QueryTranslatorBase.isAnyConstant expr
-    let internal isPrimitiveSQLiteType x = QueryTranslatorBase.isPrimitiveSQLiteType x
-    let internal tryTranslateUpdateManyRelationTransform expr = QueryTranslatorVisitPost.tryTranslateUpdateManyRelationTransform expr
 
     /// <summary>
     /// Translates a LINQ expression into a SQL string and a dictionary of parameters.
@@ -91,7 +85,7 @@ module internal QueryTranslator =
     /// </summary>
     let internal translateUpdateMode (tableName: string) (expression: Expression) (fullSQL: StringBuilder) (variableDict: Dictionary<string, obj>) =
         ensureDbRefHandlersInitialized()
-        match tryTranslateUpdateManyRelationTransform expression with
+        match QueryTranslatorVisitPost.tryTranslateUpdateManyRelationTransform expression with
         | ValueSome _ ->
             raise (NotSupportedException updateManyRelationUnsupportedMessage)
         | ValueNone -> ()

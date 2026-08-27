@@ -39,7 +39,7 @@ module internal FileStorageCoreChunks =
 
         let entries =
             db.Query<SQLEntry> (queryCommand, {|FullPath = directoryFullPath|})
-            |> Utils.SeqExt.sequentialGroupBy(fun e -> e.Path)
+            |> UtilsReflection.SeqExt.sequentialGroupBy(fun e -> e.Path)
             |> Seq.map(fun entry ->
                 let metadata = entry |> Seq.filter(fun x -> x.MetadataKey <> null) |> Seq.map(fun x -> (x.MetadataKey, x.MetadataValue)) |> readOnlyDict
                 let entryData = entry.[0]

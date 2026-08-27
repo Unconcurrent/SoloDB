@@ -239,7 +239,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                     let result = this.ExecuteEnumetable<'T> query variables (box batchCtx)
                     result :> obj :?> 'TResult
                 | t when t.IsGenericType && typedefof<IEnumerable<_>>.Equals typedefof<'TResult> ->
-                    let elemType = (GenericTypeArgCache.Get t).[0]
+                    let elemType = (UtilsReflection.GenericTypeArgCache.Get t).[0]
                     let m : MethodInfo =
                         enumerableDispatchCache.GetOrAdd(elemType, Func<Type, MethodInfo>(fun et ->
                             typeof<SoloDBCollectionQueryProvider<'T>>
@@ -274,7 +274,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                             | _ ->
                                 None
                         match defaultExprOpt with
-                        | Some defaultExpr -> QueryTranslator.evaluateExpr<'TResult> defaultExpr
+                        | Some defaultExpr -> QueryTranslatorBaseHelpers.evaluateExpr<'TResult> defaultExpr
                         | None -> Unchecked.defaultof<'TResult>
 
                     // Add Single, First, and the OrDefault Variant here.

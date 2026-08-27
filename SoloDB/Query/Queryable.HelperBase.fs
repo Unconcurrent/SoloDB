@@ -60,7 +60,7 @@ module internal QueryableHelperBase =
 
     /// Return the DU expression for extracting Value as JSON if the type is not a primitive SQLite type.
     let internal extractValueAsJsonDu (x: Type) : SqlExpr =
-        let isPrimitive = QueryTranslator.isPrimitiveSQLiteType x
+        let isPrimitive = QueryTranslatorBaseTypes.isPrimitiveSQLiteType x
         if isPrimitive then
             let value = SqlExpr.Column(None, "Value")
             if x = typeof<double> || x = typeof<float32> then
@@ -321,7 +321,7 @@ module internal QueryableHelperBase =
     /// <param name="x">The .NET type of the value being selected.</param>
     /// <returns>An SQL string snippet for selecting the value.</returns>
     let internal extractValueAsJsonIfNecesary (x: Type) =
-        let isPrimitive = QueryTranslator.isPrimitiveSQLiteType x
+        let isPrimitive = QueryTranslatorBaseTypes.isPrimitiveSQLiteType x
 
         if isPrimitive then
             "Value "

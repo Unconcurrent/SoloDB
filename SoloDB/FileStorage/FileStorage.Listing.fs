@@ -40,7 +40,7 @@ module internal FileStorageListing =
                 MetaKey: string
                 MetaValue: string
             |}>(query, {|DirectoryId = dir.Id; Limit = limit; Offset = offset|})
-            |> Utils.SeqExt.sequentialGroupBy(fun e -> e.Id)
+            |> UtilsReflection.SeqExt.sequentialGroupBy(fun e -> e.Id)
             |> Seq.map(fun fileAndDatas ->
                 let allMetadata =
                     fileAndDatas

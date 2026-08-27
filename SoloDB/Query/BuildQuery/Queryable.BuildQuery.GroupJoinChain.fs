@@ -463,7 +463,7 @@ module internal QueryableBuildQueryGroupJoinChain =
                         "Error: GroupJoin By-set operator requires a constant second sequence.\n" +
                         "Reason: The second sequence cannot be translated on the correlated SQL route.\n" +
                         "Fix: Use a constant array/list, or move the operator after AsEnumerable()."))
-                match QueryTranslator.evaluateExpr<IEnumerable> expr with
+                match QueryTranslatorBaseHelpers.evaluateExpr<IEnumerable> expr with
                 | null -> []
                 | values -> [ for value in values -> value ]
 

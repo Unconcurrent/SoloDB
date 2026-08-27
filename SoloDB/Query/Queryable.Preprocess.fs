@@ -209,7 +209,7 @@ module internal QueryableHelperPreprocess =
 
         let limit =
             match statement.Take with
-            | Some take -> Some (allocateParam vars (QueryTranslator.evaluateExpr<obj> take))
+            | Some take -> Some (allocateParam vars (QueryTranslatorBaseHelpers.evaluateExpr<obj> take))
             | None ->
                 match statement.Skip with
                 | Some _ -> Some (SqlExpr.Literal(SqlLiteral.Integer -1L))
@@ -217,7 +217,7 @@ module internal QueryableHelperPreprocess =
 
         let offset =
             match statement.Skip with
-            | Some skip -> Some (allocateParam vars (QueryTranslator.evaluateExpr<obj> skip))
+            | Some skip -> Some (allocateParam vars (QueryTranslatorBaseHelpers.evaluateExpr<obj> skip))
             | None -> None
 
         struct (where, orderBy, limit, offset, unionAlls)

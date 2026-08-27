@@ -201,7 +201,7 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                         when isExpressionLikeArgument predicate ->
                         addFilter statements predicate
                     | (SupportedLinqMethods.ElementAt | SupportedLinqMethods.ElementAtOrDefault), [| index |] ->
-                        statements.Add(Simple { emptySQLStatement () with Skip = Some index; Take = Some (ExpressionHelper.constant 1) })
+                        statements.Add(Simple { emptySQLStatement () with Skip = Some index; Take = Some (UtilsReflection.ExpressionHelper.constant 1) })
                     | _ ->
                         raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
 
@@ -219,7 +219,7 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                     | SupportedLinqMethods.ElementAtOrDefault ->
                         ()
                     | _ ->
-                        addTake statements (ExpressionHelper.constant limit)
+                        addTake statements (UtilsReflection.ExpressionHelper.constant limit)
 
                 | SupportedLinqMethods.DefaultIfEmpty ->
                     // Edge case 11: SupportedLinqMethods.DefaultIfEmpty with UNION ALL — synthetic row when result set empty
@@ -227,7 +227,7 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                         let defaultValueExpr =
                             match m.Expressions.Length with
                             | 0 ->
-                                let genericArg = (GenericMethodArgCache.Get m.OriginalMethod).[0]
+                                let genericArg = (UtilsReflection.GenericMethodArgCache.Get m.OriginalMethod).[0]
                                 if genericArg.IsValueType then
                                     let defaultValueType = Activator.CreateInstance(genericArg)
                                     let jsonObj = JsonSerializator.JsonValue.Serialize defaultValueType
@@ -236,7 +236,7 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                                 else
                                     SqlExpr.Literal(SqlLiteral.Null)
                             | 1 ->
-                                let o = QueryTranslator.evaluateExpr<obj> m.Expressions.[0]
+                                let o = QueryTranslatorBaseHelpers.evaluateExpr<obj> m.Expressions.[0]
                                 let jsonObj = JsonSerializator.JsonValue.Serialize o
                                 let jsonText = jsonObj.ToJsonString()
                                 SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.FunctionCall("jsonb", [SqlExpr.Literal(SqlLiteral.String jsonText)]); SqlExpr.Literal(SqlLiteral.String "$")])
@@ -266,7 +266,7 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                         for order in x.Orders do
                             order.Descending <- not order.Descending
                     | _ ->
-                        addOrder statements (ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id"))) true
-                    addTake statements (ExpressionHelper.constant 1)
+                        addOrder statements (UtilsReflection.ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id"))) true
+                    addTake statements (UtilsReflection.ExpressionHelper.constant 1)
 
                 | _ -> ()
