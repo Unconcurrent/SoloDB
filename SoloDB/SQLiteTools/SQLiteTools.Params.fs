@@ -56,6 +56,14 @@ module internal SQLiteToolsParams =
     /// Set by test harnesses to intercept all SQL at the execution boundary.
     let mutable internal sqlTraceCallback: Action<string> voption = ValueNone
 
+    /// Optional callback reporting a statement together with the parameters actually bound to it.
+    ///
+    /// The trace above reports SQL text only, which cannot show what a statement was bound to, so
+    /// it cannot distinguish a value carried as a parameter from one written into the text, nor
+    /// establish the names and order a statement allocates. This fires after binding and reports
+    /// both.
+    let mutable internal sqlBoundTraceCallback: Action<string, IReadOnlyList<KeyValuePair<string, obj>>> voption = ValueNone
+
     /// <summary>
     /// Caches PropertyInfo for Nullable types' 'HasValue' and 'Value' properties for performance.
     /// </summary>
@@ -203,6 +211,15 @@ module internal SQLiteToolsParams =
         let command = this.CreateCommand()
         command.CommandText <- sql
         processParameters addParameter command parameters
+
+        match sqlBoundTraceCallback with
+        | ValueSome cb ->
+            let bound = ResizeArray<KeyValuePair<string, obj>>(command.Parameters.Count)
+            for i in 0 .. command.Parameters.Count - 1 do
+                let p = command.Parameters.[i]
+                bound.Add(KeyValuePair(p.ParameterName, p.Value))
+            cb.Invoke(sql, bound :> IReadOnlyList<KeyValuePair<string, obj>>)
+        | ValueNone -> ()
 
         command
 

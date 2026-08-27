@@ -101,6 +101,15 @@ module SQLiteTools =
 
             processParameters setOrAddParameter item.Command parameters
             match sqlTraceCallback with ValueSome cb -> cb.Invoke(sql) | ValueNone -> ()
+            // Reported after binding, so a caller can see what a cached statement actually ran with.
+            match sqlBoundTraceCallback with
+            | ValueSome cb ->
+                let bound = ResizeArray<KeyValuePair<string, obj>>(item.Command.Parameters.Count)
+                for i in 0 .. item.Command.Parameters.Count - 1 do
+                    let p = item.Command.Parameters.[i]
+                    bound.Add(KeyValuePair(p.ParameterName, p.Value))
+                cb.Invoke(sql, bound :> IReadOnlyList<KeyValuePair<string, obj>>)
+            | ValueNone -> ()
             struct (item.Command, item.ColumnDict, item.InUse) |> ValueSome)
 
         // Uncached command lifecycle helpers. The SqliteConnection internal command list is
