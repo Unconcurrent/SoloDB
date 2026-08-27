@@ -1,11 +1,4 @@
 namespace SqlDu.Engine.C1.Spec
-/// Classification of a captured SQL statement's composition, used by the corpus classifier to
-/// label shapes. It is not part of the query tree: SelectBody below represents composition
-/// structurally, and this labels already-emitted text. The two share a case name and nothing else.
-type internal SelectComposition =
-    | SingleSelect
-    | UnionAll
-
 type internal SqlExpr =
     | Column of sourceAlias: string option * column: string
     | Literal of SqlLiteral
