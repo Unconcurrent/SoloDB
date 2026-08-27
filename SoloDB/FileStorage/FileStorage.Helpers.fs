@@ -24,12 +24,13 @@ module internal FileStorageHelpers =
 
     let internal createFileAt (db: SqliteConnection) (path: string) =
         let struct (dirPath, name) = getPathAndName path
-        let directory = getOrCreateDir db dirPath
+        // The parent is needed only for its id; its header and metadata would be discarded.
+        let directoryId = getOrCreateDirId db dirPath
         let fullPath = combinePath dirPath name
         let now = DateTimeOffset.Now
         db.Execute(
             "INSERT INTO SoloDBFileHeader(Name, FullPath, DirectoryId, Length, Created, Modified) VALUES (@Name, @FullPath, @DirectoryId, 0, @Created, @Modified) ON CONFLICT(FullPath) DO NOTHING",
-            {| Name = name; FullPath = fullPath; DirectoryId = directory.Id; Created = now; Modified = now |}) |> ignore
+            {| Name = name; FullPath = fullPath; DirectoryId = directoryId; Created = now; Modified = now |}) |> ignore
         let result = db.QueryFirst<SoloDBFileHeader>("SELECT * FROM SoloDBFileHeader WHERE FullPath = @FullPath", {| FullPath = fullPath |})
         {result with Metadata = readOnlyDict []}
 
@@ -174,6 +175,23 @@ module internal FileStorageHelpers =
     let internal openFile (db: Connection) (file: SoloDBFileHeader) =
         new FileStorageCoreStream.DbFileStream(db, file.Id, file.DirectoryId, file.FullPath)
 
+    /// Stream identity for an existing file, creating it when absent. Used by the write paths,
+    /// which need a stream and never the header.
+    let internal getOrCreateFileStreamIdentity (db: SqliteConnection) (path: string) =
+        match tryGetFileStreamIdentityAt db path with
+        | ValueSome x -> x
+        | ValueNone ->
+            let created = createFileAt db path
+            { Id = created.Id; DirectoryId = created.DirectoryId; FullPath = created.FullPath }
+
+    let internal openFileByIdentity (db: Connection) (identity: FileStreamIdentity) =
+        new FileStorageCoreStream.DbFileStream(db, identity.Id, identity.DirectoryId, identity.FullPath)
+
+    let internal requireFileStreamIdentityAt (db: SqliteConnection) (path: string) =
+        match tryGetFileStreamIdentityAt db path with
+        | ValueSome x -> x
+        | ValueNone -> raise (FileNotFoundException("File not found.", path))
+
     let internal openOrCreateFile (db: Connection) (path: string) =
         // Stream construction needs three columns; loading metadata here would be discarded.
         let identity =
@@ -200,11 +218,17 @@ module internal FileStorageHelpers =
     let internal deleteSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) =
         deleteSoloDBFileMetadataById db file.Id key
 
+    let internal setDirMetadataById (db: SqliteConnection) (dirId: int64) (key: string) (value: string) =
+        db.Execute("INSERT OR REPLACE INTO SoloDBDirectoryMetadata(DirectoryId, Key, Value) VALUES(@DirectoryId, @Key, @Value)", {|DirectoryId = dirId; Key = key; Value = value|}) |> ignore
+
     let internal setDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) (value: string) =
-        db.Execute("INSERT OR REPLACE INTO SoloDBDirectoryMetadata(DirectoryId, Key, Value) VALUES(@DirectoryId, @Key, @Value)", {|DirectoryId = dir.Id; Key = key; Value = value|}) |> ignore
+        setDirMetadataById db dir.Id key value
+
+    let internal deleteDirMetadataById (db: SqliteConnection) (dirId: int64) (key: string) =
+        db.Execute("DELETE FROM SoloDBDirectoryMetadata WHERE DirectoryId = @DirectoryId AND Key = @Key", {|DirectoryId = dirId; Key = key|}) |> ignore
 
     let internal deleteDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) =
-        db.Execute("DELETE FROM SoloDBDirectoryMetadata WHERE DirectoryId = @DirectoryId AND Key = @Key", {|DirectoryId = dir.Id; Key = key|}) |> ignore
+        deleteDirMetadataById db dir.Id key
 
     /// SQLITE_CONSTRAINT_UNIQUE. Identifies a uniqueness violation without inspecting message text,
     /// so an unrelated constraint failure is never relabelled as a path collision.
@@ -218,6 +242,34 @@ module internal FileStorageHelpers =
                 SELECT 1 FROM SoloDBDirectoryHeader WHERE FullPath = @FullPath
              )",
             {| FullPath = fullPath |})
+
+    /// Identity a file move needs: which row, and its current path for the self-move check.
+    [<Struct>]
+    type internal FileMoveIdentity =
+        { Id: int64; FullPath: string }
+
+    let internal tryGetFileMoveIdentityAt (db: SqliteConnection) (path: string) =
+        let struct (dirPath, name) = getPathAndName path
+        match db.Query<FileMoveIdentity>(
+                "SELECT Id, FullPath FROM SoloDBFileHeader WHERE FullPath = @FullPath LIMIT 1",
+                {| FullPath = combinePath dirPath name |}) |> Seq.tryHead with
+        | Some x -> ValueSome x
+        | None -> ValueNone
+
+    let internal moveFileByIdentity (db: SqliteConnection) (file: FileMoveIdentity) (toDirId: int64) (toDirFullPath: string) (newName: string) =
+        let newFileFullPath = combinePath toDirFullPath newName
+        if newFileFullPath <> file.FullPath && pathExists db newFileFullPath then
+            raise (IOException "File already exists.")
+        try
+            db.Execute("UPDATE SoloDBFileHeader
+            SET FullPath = @NewFullPath,
+            DirectoryId = @DestDirId,
+            Name = @NewName
+            WHERE Id = @FileId", {|NewFullPath = newFileFullPath; DestDirId = toDirId; FileId = file.Id; NewName = newName|})
+            |> ignore
+        with
+        | :? SqliteException as ex when ex.SqliteExtendedErrorCode = SqliteConstraintUnique ->
+            raise (IOException("File already exists.", ex))
 
     let internal moveFile (db: SqliteConnection) (file: SoloDBFileHeader) (toDir: SoloDBDirectoryHeader) (newName: string) =
         let newFileFullPath = combinePath toDir.FullPath newName
@@ -293,6 +345,45 @@ module internal FileStorageHelpers =
 
     // ── Copy helpers ──────────────────────────────────────────────────────
 
+    /// Immutable identity fields a file copy needs. Metadata is never loaded here; when metadata
+    /// is copied it moves at SQL level, and is read back only for the header actually returned.
+    [<Struct>]
+    type internal FileCopyIdentity =
+        { Id: int64; Name: string; Length: int64 }
+
+    /// Immutable identity fields a directory copy traversal needs.
+    [<Struct>]
+    type internal DirectoryCopyIdentity =
+        { Id: int64; Name: string; FullPath: string }
+
+    let internal tryGetFileCopyIdentityAt (db: SqliteConnection) (fullPath: string) =
+        match db.Query<FileCopyIdentity>(
+                "SELECT Id, Name, Length FROM SoloDBFileHeader WHERE FullPath = @FullPath LIMIT 1",
+                {| FullPath = fullPath |}) |> Seq.tryHead with
+        | Some x -> ValueSome x
+        | None -> ValueNone
+
+    /// Children of one source directory, captured before any destination row is inserted.
+    /// The query is keyed on the source parent id, so rows created under the destination during
+    /// the copy can never re-enter this traversal.
+    let internal getFileCopyIdentitiesInDir (db: SqliteConnection) (sourceDirId: int64) =
+        db.Query<FileCopyIdentity>(
+            "SELECT Id, Name, Length FROM SoloDBFileHeader WHERE DirectoryId = @DirectoryId",
+            {| DirectoryId = sourceDirId |})
+        |> Seq.toArray
+
+    let internal getSubdirectoryCopyIdentities (db: SqliteConnection) (sourceParentId: int64) =
+        db.Query<DirectoryCopyIdentity>(
+            "SELECT Id, Name, FullPath FROM SoloDBDirectoryHeader WHERE ParentId = @ParentId",
+            {| ParentId = sourceParentId |})
+        |> Seq.toArray
+
+    let internal getFileMetadataMap (db: SqliteConnection) (fileId: int64) =
+        db.Query<{| Key: string; Value: string |}>(
+            "SELECT Key, Value FROM SoloDBFileMetadata WHERE FileId = @FileId", {| FileId = fileId |})
+        |> Seq.map (fun r -> r.Key, r.Value)
+        |> readOnlyDict
+
     /// Bulk-copies all chunk rows from source file to destination file via SQL-level INSERT...SELECT.
     /// No Snappy decompression/recompression — compressed blobs are copied as-is.
     let internal copyFileChunks (db: SqliteConnection) (srcFileId: int64) (dstFileId: int64) =
@@ -317,11 +408,11 @@ module internal FileStorageHelpers =
 
     /// Creates a copy of a file header at the destination path with NOW timestamps and source's Length.
     /// Returns the new SoloDBFileHeader.
-    let internal createFileCopyAt (db: SqliteConnection) (src: SoloDBFileHeader) (dstDirId: int64) (dstFullPath: string) (dstName: string) =
+    let internal createFileCopyAt (db: SqliteConnection) (srcLength: int64) (dstDirId: int64) (dstFullPath: string) (dstName: string) =
         let now = DateTimeOffset.Now
         db.QueryFirst<SoloDBFileHeader>(
             "INSERT INTO SoloDBFileHeader(Name, FullPath, DirectoryId, Length, Created, Modified) VALUES (@Name, @FullPath, @DirectoryId, @Length, @Created, @Modified) RETURNING *",
-            {| Name = dstName; FullPath = dstFullPath; DirectoryId = dstDirId; Length = src.Length; Created = now; Modified = now |})
+            {| Name = dstName; FullPath = dstFullPath; DirectoryId = dstDirId; Length = srcLength; Created = now; Modified = now |})
 
     /// Core file-copy logic. Must be called within a transaction.
     /// If replace=true, deletes existing destination before copy. If replace=false, fails on collision.
@@ -331,27 +422,29 @@ module internal FileStorageHelpers =
         let toNorm = formatPath toPath
         if fromNorm = toNorm then raise (ArgumentException("Cannot copy a file to itself.", "toPath"))
         // Resolve source
-        let src = match tryGetFileAt db fromNorm with | Some f -> f | None -> raise (FileNotFoundException("File not found.", fromPath))
-        // Resolve destination directory and name
+        // Identity only: the source header and its metadata would be discarded when
+        // copyMetadata is false, and metadata is copied at SQL level when it is true.
+        let src =
+            match tryGetFileCopyIdentityAt db fromNorm with
+            | ValueSome f -> f
+            | ValueNone -> raise (FileNotFoundException("File not found.", fromPath))
         let struct (toDirPath, toName) = getPathAndName toPath
-        // File copy auto-creates destination parent.
-        let dstDir = getOrCreateDirectoryAt db toDirPath
-        let dstFullPath = combinePath dstDir.FullPath toName
-        // Collision check
-        match tryGetFileAt db dstFullPath with
-        | Some existing when replace ->
-            deleteFile db existing |> ignore // CASCADE deletes chunks + metadata
-        | Some _ ->
+        // File copy auto-creates destination parent; only its id is needed.
+        let dstDirId = getOrCreateDirId db (formatPath toDirPath)
+        let dstFullPath = combinePath (formatPath toDirPath) toName
+        // Collision check needs existence, not a header.
+        match tryGetFileIdAt db dstFullPath with
+        | ValueSome existingId when replace ->
+            deleteFileById db existingId |> ignore // CASCADE deletes chunks + metadata
+        | ValueSome _ ->
             raise (IOException("File already exists."))
-        | None -> ()
-        // Create destination header with NOW timestamps and source Length
-        let dstHeader = createFileCopyAt db src dstDir.Id dstFullPath toName
-        // Clone chunks (SQL-level, zero Snappy work)
+        | ValueNone -> ()
+        let dstHeader = createFileCopyAt db src.Length dstDirId dstFullPath toName
         copyFileChunks db src.Id dstHeader.Id
-        // Clone metadata if requested
         if copyMetadata then
             copyFileMetadata db src.Id dstHeader.Id
-        {dstHeader with Metadata = if copyMetadata then src.Metadata else readOnlyDict []}
+        // Metadata is read back only for the header this call returns.
+        {dstHeader with Metadata = if copyMetadata then getFileMetadataMap db dstHeader.Id else readOnlyDict []}
 
     /// Recursive directory copy. Must be called within a transaction.
     /// If replace=true, deletes existing destination tree before copy. If replace=false, fails on collision.
@@ -395,17 +488,21 @@ module internal FileStorageHelpers =
         if copyMetadata then
             copyDirectoryMetadata db srcDir.Id dstDir.Id
         // Copy files in this directory
-        let files = getFilesWhere db "DirectoryId = @DirectoryId" {| DirectoryId = srcDir.Id |} |> Seq.toList
+        // Snapshot the source children by source parent id before inserting any destination row,
+        // holding only narrow immutable identity fields.
+        let files = getFileCopyIdentitiesInDir db srcDir.Id
         for file in files do
             let fileDstPath = combinePath dstFullPath file.Name
-            let dstFileHeader = createFileCopyAt db file dstDir.Id fileDstPath file.Name
+            let dstFileHeader = createFileCopyAt db file.Length dstDir.Id fileDstPath file.Name
             copyFileChunks db file.Id dstFileHeader.Id
             if copyMetadata then
                 copyFileMetadata db file.Id dstFileHeader.Id
         // Recurse into subdirectories
         if recursive then
-            let subDirs = db.Query<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE ParentId = @ParentId", {| ParentId = srcDir.Id |}) |> Seq.toList
+            let subDirs = getSubdirectoryCopyIdentities db srcDir.Id
             for subDir in subDirs do
                 let subDstPath = combinePath dstFullPath subDir.Name
-                copyDirectoryMustBeWithinTransaction db subDir.FullPath subDstPath replace false copyMetadata |> ignore
+                // Propagate the caller's recursive flag: a nested directory that itself has
+                // children must still be copied, not rejected as non-empty.
+                copyDirectoryMustBeWithinTransaction db subDir.FullPath subDstPath replace recursive copyMetadata |> ignore
         dstDir

@@ -104,32 +104,47 @@ module FileStorageCore =
         tryGetDirectoriesWhere db "dh.FullPath = @Path" {|Path = path|} |> Seq.tryHead
 
     /// <summary>
-    /// Recursively retrieves or creates a directory in the database.
+    /// Recursively retrieves or creates a directory, resolving ancestors by id only.
+    /// Ancestors are walked purely to obtain a ParentId, so loading their headers and metadata
+    /// at every level would be discarded work that grows with path depth.
     /// </summary>
-    let rec internal getOrCreateDir (db: SqliteConnection) (path: string) =
-        match tryGetDir db path with
-        | Some d -> d
-        | None ->
+    let rec internal getOrCreateDirId (db: SqliteConnection) (path: string) : int64 =
+        match tryGetDirIdAt db path with
+        | ValueSome id -> id
+        | ValueNone ->
         match path with
-        | "/" -> db.QueryFirst<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE Name = @RootName", {|RootName = ""|}) |> fillDirectoryMetadata db
+        | "/" -> db.QueryFirst<int64>("SELECT Id FROM SoloDBDirectoryHeader WHERE Name = @RootName", {|RootName = ""|})
         | path ->
 
         let names = path.Split ([|'/'|], StringSplitOptions.RemoveEmptyEntries)
         let previousNames = names |> Array.take (names.Length - 1)
         let currentName = names |> Array.last
         let previousPath = "/" + (previousNames |> String.concat "/")
-        let previousDir = getOrCreateDir db previousPath
+        let previousDirId = getOrCreateDirId db previousPath
         let fullPath = combinePath previousPath currentName
         if fullPath <> path then failwithf "Inconsistent paths!"
 
         let newDir = {|
             Name = currentName
-            ParentId = previousDir.Id
+            ParentId = previousDirId
             FullPath = path
         |}
 
         db.Execute("INSERT INTO SoloDBDirectoryHeader(Name, ParentId, FullPath) VALUES(@Name, @ParentId, @FullPath) ON CONFLICT(FullPath) DO NOTHING", newDir) |> ignore
 
+        match tryGetDirIdAt db path with
+        | ValueSome id -> id
+        | ValueNone -> failwithf "Normally you cannot end up here, cannot find a directory that has just created: %s" path
+
+    /// <summary>
+    /// Retrieves or creates a directory and returns its full public header, metadata included.
+    /// Only the returned leaf is materialized as a header; ancestors are resolved by id.
+    /// </summary>
+    let internal getOrCreateDir (db: SqliteConnection) (path: string) =
+        match tryGetDir db path with
+        | Some d -> d
+        | None ->
+        getOrCreateDirId db path |> ignore
         match db.QueryFirstOrDefault<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE FullPath = @FullPath", {|FullPath = path|}) with
         | dir when Utils.isNull dir -> failwithf "Normally you cannot end up here, cannot find a directory that has just created: %s" path
         | dir -> dir |> fillDirectoryMetadata db
@@ -162,14 +177,20 @@ module FileStorageCore =
     /// <summary>
     /// Deletes a file from the database based on its header information.
     /// </summary>
-    let internal deleteFile (db: SqliteConnection) (file: SoloDBFileHeader) =
+    let internal deleteFileById (db: SqliteConnection) (fileId: int64) =
         let result = db.Execute(@"DELETE FROM SoloDBFileHeader WHERE Id = @FileId",
-                    {| FileId = file.Id; |})
+                    {| FileId = fileId |})
         result > 0
+
+    let internal deleteFile (db: SqliteConnection) (file: SoloDBFileHeader) =
+        deleteFileById db file.Id
 
     /// <summary>
     /// Deletes a directory from the database based on its header information.
     /// </summary>
+    let internal deleteDirectoryById (db: SqliteConnection) (dirId: int64) =
+        db.Execute(@"DELETE FROM SoloDBDirectoryHeader WHERE Id = @DirId", {| DirId = dirId |}) |> ignore
+
     let internal deleteDirectory (db: SqliteConnection) (dir: SoloDBDirectoryHeader) =
         let _result = db.Execute(@"DELETE FROM SoloDBDirectoryHeader WHERE Id = @DirId",
                         {| DirId = dir.Id; |})

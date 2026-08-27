@@ -71,17 +71,17 @@ module FileStorage =
         }
 
         member this.Download(path, stream: Stream) =
-            let fileHeader =
+            let identity =
                 use db = connection.Get()
-                match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
-            use fileStream = openFile connection fileHeader
+                requireFileStreamIdentityAt db path
+            use fileStream = openFileByIdentity connection identity
             fileStream.CopyTo(stream, int chunkSize * 10)
 
         member this.DownloadAsync(path, stream: Stream) = task {
-            let fileHeader =
+            let identity =
                 use db = connection.Get()
-                match tryGetFileAt db path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
-            use fileStream = openFile connection fileHeader
+                requireFileStreamIdentityAt db path
+            use fileStream = openFileByIdentity connection identity
             do! fileStream.CopyToAsync(stream, int chunkSize * 10)
         }
 
@@ -146,9 +146,9 @@ module FileStorage =
 
         member this.WriteAt(path: string, offset: int64, data: byte[], [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool) =
              connection.WithTransaction(fun tx ->
-                let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
+                let identity = if createIfInexistent then getOrCreateFileStreamIdentity tx path else requireFileStreamIdentityAt tx path
                 let innerConnection = Transactional tx
-                use fileStream = openFile innerConnection file
+                use fileStream = openFileByIdentity innerConnection identity
                 fileStream.Position <- offset
                 fileStream.Write(data, 0, data.Length)
                 ()
@@ -156,16 +156,18 @@ module FileStorage =
 
         member this.WriteAt(path: string, offset: int64, data: Stream, [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool) =
             connection.WithTransaction(fun tx ->
-                let file = if createIfInexistent then getOrCreateFileAt tx path else match tryGetFileAt tx path with | Some f -> f | None -> raise (FileNotFoundException("File not found.", path))
+                let identity = if createIfInexistent then getOrCreateFileStreamIdentity tx path else requireFileStreamIdentityAt tx path
                 let innerConnection = Transactional tx
-                use fileStream = openFile innerConnection file
+                use fileStream = openFileByIdentity innerConnection identity
                 fileStream.Position <- offset
                 data.CopyTo (fileStream, int chunkSize * 10)
             )
 
         member this.ReadAt(path: string, offset: int64, len) =
-            let file = this.GetAt path
-            use fileStream = new BinaryReader(openFile connection file)
+            let identity =
+                use db = connection.Get()
+                requireFileStreamIdentityAt db path
+            use fileStream = new BinaryReader(openFileByIdentity connection identity)
             fileStream.BaseStream.Position <- offset
             fileStream.ReadBytes len
 
@@ -182,6 +184,14 @@ module FileStorage =
                 match tryGetFileIdAt tx path with
                 | ValueSome fileId -> f tx fileId
                 | ValueNone -> raise (FileNotFoundException("File not found.", path))
+            )
+
+        /// Id-only counterpart of WithDirectoryAt.
+        member private _.WithDirectoryIdAt(path: string, f: SqliteConnection -> int64 -> 'T) =
+            connection.WithTransaction(fun tx ->
+                match tryGetDirIdAt tx (formatPath path) with
+                | ValueSome dirId -> f tx dirId
+                | ValueNone -> raise (DirectoryNotFoundException("Directory not found at: " + path))
             )
 
         member private _.WithDirectoryAt(path: string, f: SqliteConnection -> SoloDBDirectoryHeader -> 'T) =
@@ -226,8 +236,8 @@ module FileStorage =
             )
 
         member this.SetDirectoryMetadata(path: string, key, value) =
-            this.WithDirectoryAt(path, fun tx dir ->
-                setDirMetadata tx dir key value
+            this.WithDirectoryIdAt(path, fun tx dirId ->
+                setDirMetadataById tx dirId key value
             )
 
         member this.DeleteDirectoryMetadata(dir: SoloDBDirectoryHeader, key) =
@@ -236,8 +246,8 @@ module FileStorage =
             )
 
         member this.DeleteDirectoryMetadata(path: string, key) =
-            this.WithDirectoryAt(path, fun tx dir ->
-                deleteDirMetadata tx dir key
+            this.WithDirectoryIdAt(path, fun tx dirId ->
+                deleteDirMetadataById tx dirId key
             )
 
         member this.Delete(file: SoloDBFileHeader) =
@@ -252,9 +262,9 @@ module FileStorage =
 
         member this.DeleteFileAt(path) =
             connection.WithTransaction(fun tx ->
-                match tryGetFileAt tx path with
-                | None -> false
-                | Some file -> deleteFile tx file
+                match tryGetFileIdAt tx path with
+                | ValueNone -> false
+                | ValueSome fileId -> deleteFileById tx fileId
             )
 
         member this.DeleteDirAt(path) =
@@ -296,22 +306,24 @@ module FileStorage =
         member this.MoveFile(from, toPath) =
             let struct (toDirPath, fileName) = getPathAndName toPath
             connection.WithTransaction(fun db ->
-                let file = match tryGetFileAt db from with | Some f -> f | None -> raise (FileNotFoundException("File not found.", from))
-                let dir = getOrCreateDirectoryAt db toDirPath
-                moveFile db file dir fileName
+                let file = match tryGetFileMoveIdentityAt db from with | ValueSome f -> f | ValueNone -> raise (FileNotFoundException("File not found.", from))
+                let toDirNorm = formatPath toDirPath
+                let dirId = getOrCreateDirId db toDirNorm
+                moveFileByIdentity db file dirId toDirNorm fileName
             )
 
         member this.MoveReplaceFile(from, toPath) =
             let struct (toDirPath, fileName) = getPathAndName toPath
             connection.WithTransaction(fun db ->
-                let file = match tryGetFileAt db from with | Some f -> f | None -> raise (FileNotFoundException("File not found.", from))
-                let dir = getOrCreateDirectoryAt db toDirPath
-                match tryGetFileAt db toPath with
-                | Some replacedFile ->
-                    if replacedFile.FullPath <> file.FullPath then
-                        deleteFile db replacedFile |> ignore
-                | None -> ()
-                moveFile db file dir fileName
+                let file = match tryGetFileMoveIdentityAt db from with | ValueSome f -> f | ValueNone -> raise (FileNotFoundException("File not found.", from))
+                let toDirNorm = formatPath toDirPath
+                let dirId = getOrCreateDirId db toDirNorm
+                match tryGetFileMoveIdentityAt db toPath with
+                | ValueSome replaced ->
+                    if replaced.FullPath <> file.FullPath then
+                        deleteFileById db replaced.Id |> ignore
+                | ValueNone -> ()
+                moveFileByIdentity db file dirId toDirNorm fileName
             )
 
         member this.MoveDirectory(from, toPath) =
