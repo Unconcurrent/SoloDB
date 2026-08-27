@@ -50,11 +50,11 @@ module internal HydrationManyPopulator =
     open SoloDatabase.RelationsTypes
 
     let populateFromHydrationJson (ownerType: Type) (ownerEntities: (int64 * obj) array) (hydrationMap: Dictionary<int64, string>) =
-        let manyProps =
-            ownerType.GetProperties(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Instance)
-            |> Array.filter (fun p -> DBRefTypeHelpers.isDBRefManyType p.PropertyType)
+        // Descriptor carries the accessors this loop needs, so materialization no longer
+        // re-resolves a getter, setter, constructor and Id writer per owner per property.
+        let manyRelations = (HydrationSqlMetadata.getRelationDescriptor ownerType).ManyRelations
 
-        if manyProps.Length = 0 then ()
+        if manyRelations.Length = 0 then ()
         else
 
         for (ownerId, ownerObj) in ownerEntities do
@@ -64,8 +64,9 @@ module internal HydrationManyPopulator =
                 let hydrationObj = JsonValue.Parse hydrationJsonStr
                 match hydrationObj with
                 | JsonValue.Object dict ->
-                    for prop in manyProps do
-                        let targetType = (Utils.GenericTypeArgCache.Get prop.PropertyType).[0]
+                    for relation in manyRelations do
+                        let prop = relation.Property
+                        let targetType = relation.TargetType
                         match dict.TryGetValue(prop.Name) with
                         | false, _ -> ()
                         | true, jsonArray ->
@@ -79,24 +80,20 @@ module internal HydrationManyPopulator =
                                         | (true, idJson), (true, valueJson) ->
                                             let id = int64 (idJson.ToObject<decimal>())
                                             let targetObj = valueJson.ToObject(targetType)
-                                            let idWriter = RelationsAccessorCache.compiledInt64IdWriter targetType
-                                            idWriter.Invoke(targetObj, id)
+                                            relation.TargetIdWriter.Invoke(targetObj, id)
                                             items.Add(id, targetObj)
                                         | _ -> ()
                                     | _ -> ()
                             | _ -> ()
 
                             // Populate the DBRefMany tracker via SetLoadedBoxed.
-                            let trackerGetter = RelationsAccessorCache.compiledPropGetter prop
-                            let trackerSetter = RelationsAccessorCache.compiledPropSetter prop
-                            let trackerCtor = RelationsAccessorCache.compiledDefaultCtor prop.PropertyType
-                            let tracker = trackerGetter.Invoke(ownerObj)
+                            let tracker = relation.TrackerGetter.Invoke(ownerObj)
                             match tracker with
                             | :? IDBRefManyInternal as internal' ->
                                 internal'.SetLoadedBoxed (items |> Seq.map snd) (items |> Seq.map fst)
                             | null ->
-                                let instance = trackerCtor.Invoke()
-                                trackerSetter.Invoke(ownerObj, instance)
+                                let instance = relation.TrackerCtor.Invoke()
+                                relation.TrackerSetter.Invoke(ownerObj, instance)
                                 let internal' = instance :?> IDBRefManyInternal
                                 internal'.SetLoadedBoxed (items |> Seq.map snd) (items |> Seq.map fst)
                             | _ -> ()

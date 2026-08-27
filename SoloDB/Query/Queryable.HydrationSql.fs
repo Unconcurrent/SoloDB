@@ -27,6 +27,7 @@ module internal HydrationSqlBuilder =
 
     type internal RelationShapeInfo = HydrationSqlMetadata.RelationShapeInfo
     let internal getRelationShape = HydrationSqlMetadata.getRelationShape
+    let internal getRelationDescriptor = HydrationSqlMetadata.getRelationDescriptor
     let internal hasRelationProperties = HydrationSqlMetadata.hasRelationProperties
     let internal tableExists = HydrationSqlMetadata.tableExists
 
@@ -49,9 +50,9 @@ module internal HydrationSqlBuilder =
         if depth >= maxHydrationDepth then ownerValueExpr
         else
 
-        let singleProps =
-            ownerType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-            |> Array.filter (fun p -> DBRefTypeHelpers.isDBRefType p.PropertyType)
+        // Reflected once per type; this function recurses over relation depth, so re-reflecting
+        // here cost one full property scan per nesting level per translation.
+        let singleProps = (getRelationDescriptor ownerType : HydrationSqlMetadata.RelationDescriptor).SingleProperties
 
         if singleProps.Length = 0 then ownerValueExpr
         else
@@ -123,8 +124,8 @@ module internal HydrationSqlBuilder =
         : SqlExpr option =
 
         let manyProps =
-            ownerType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-            |> Array.filter (fun p -> DBRefTypeHelpers.isDBRefManyType p.PropertyType)
+            (getRelationDescriptor ownerType : HydrationSqlMetadata.RelationDescriptor).ManyRelations
+            |> Array.map (fun r -> r.Property)
 
         if manyProps.Length = 0 then None
         else
