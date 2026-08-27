@@ -161,7 +161,11 @@ module internal QueryableTranslationCore =
             else
                 expression.Type
 
-        let ctx = QueryContext.SingleSource(source.Name)
+        // No static gate here: translation discovers additional roots (Join, GroupJoin,
+        // SelectMany, nested builders) while running and resolves them against this context,
+        // so the root type does not bound which collections will be consulted. The resolver
+        // costs nothing until something is actually asked for.
+        let ctx = { QueryContext.SingleSource(source.Name) with MetadataSource = ValueSome (RelationMetadataSource metadataConnection) }
         // Mark this as the OUTERMOST translation context. Cleared in CloneForSubquery
         // so nested cardinality emit sites can detect they are nested and emit bare
         // scalars (default(T) propagation) rather than typed exceptions.
@@ -180,8 +184,6 @@ module internal QueryableTranslationCore =
             RelationsCore.withRelationSqliteWrap "build" "startTranslation.ensureSchemaForOwnerType" (fun () ->
                 RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
             )
-
-        preloadQueryContextMetadata ctx metadataConnection
 
         // Build the inner query as a SqlSelect DU.
         let innerSelect = translateQuery<'T> (ref 0) ctx variables expression

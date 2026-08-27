@@ -147,6 +147,8 @@ module internal QueryableHelperPreprocess =
             typeCollections.[kv.Key] <- HashSet<string>(kv.Value, System.StringComparer.Ordinal)
         {
             RootTable = sourceCtx.RootTable
+            // Shared so a lookup made in the cloned layer is cached for the whole translation.
+            MetadataSource = sourceCtx.MetadataSource
             LayerPosition = OuterLayer
             RootGraph =
                 {

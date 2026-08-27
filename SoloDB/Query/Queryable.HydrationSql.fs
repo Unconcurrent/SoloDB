@@ -208,8 +208,7 @@ module internal HydrationSqlBuilder =
         (addLimit: bool)
         : string * bool * bool =
 
-        let ctx = QueryContext.SingleSource(tableName)
-        preloadQueryContextMetadata ctx connection
+        let ctx = { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }
 
         let shape : RelationShapeInfo = getRelationShape ownerType
         let hasSingle = shape.HasSingle
@@ -279,8 +278,7 @@ module internal HydrationSqlBuilder =
         (addLimit: bool)
         : string * bool =
 
-        let ctx = QueryContext.SingleSource(tableName)
-        preloadQueryContextMetadata ctx connection
+        let ctx = { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }
 
         let shape : RelationShapeInfo = getRelationShape ownerType
         let hasMany = shape.HasMany
@@ -341,8 +339,7 @@ module internal HydrationSqlBuilder =
         (addLimit: bool)
         : string * bool =
 
-        let ctx = QueryContext.SingleSource(tableName)
-        preloadQueryContextMetadata ctx connection
+        let ctx = { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }
 
         let shape : RelationShapeInfo = getRelationShape ownerType
         let limitClause = if addLimit then " LIMIT 1" else ""

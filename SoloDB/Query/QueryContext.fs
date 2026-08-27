@@ -1,7 +1,57 @@
 namespace SoloDatabase
 
 open System.Collections.Generic
+open SQLiteTools
 open SqlDu.Engine.C1.Spec
+
+/// Loads relation metadata for exactly what a translation asks for, at the moment it asks.
+///
+/// The catalogs are read through their existing unique indexes -- SoloDBRelation has
+/// UNIQUE(OwnerCollection, PropertyName) and SoloDBTypeCollectionMap has UNIQUE(TypeKey,
+/// CollectionName) -- so a lookup is a single indexed statement rather than a scan of every
+/// relation in the database.
+///
+/// Resolution is deliberately lazy rather than preloaded: translation discovers additional query
+/// roots (Join, GroupJoin, SelectMany, nested builders) only while running, and resolves them
+/// against the outer context. Anything decided before translation therefore cannot know which
+/// collections will be consulted.
+///
+/// The instance lives for one translation. It is shared by reference into nested contexts, so a
+/// repeated lookup costs nothing, and it dies with the translation, so the next query observes
+/// current catalog state.
+type internal RelationMetadataSource(connection: Microsoft.Data.Sqlite.SqliteConnection) =
+    let mutable relationCatalogChecked = false
+    let mutable relationCatalogExists = false
+    let mutable typeMapChecked = false
+    let mutable typeMapExists = false
+    // Owner|Property keys already looked up, including those that resolved to nothing, so a
+    // missing relation is not re-queried on every access.
+    let resolvedRelationKeys = HashSet<string>(System.StringComparer.Ordinal)
+    let resolvedTypeKeys = HashSet<string>(System.StringComparer.Ordinal)
+
+    let tableExists (name: string) =
+        connection.QueryFirst<int64>(
+            "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @name) THEN 1 ELSE 0 END",
+            {| name = name |}) = 1L
+
+    member _.Connection = connection
+
+    member _.RelationCatalogExists =
+        if not relationCatalogChecked then
+            relationCatalogExists <- tableExists "SoloDBRelation"
+            relationCatalogChecked <- true
+        relationCatalogExists
+
+    member _.TypeMapExists =
+        if not typeMapChecked then
+            typeMapExists <- tableExists "SoloDBTypeCollectionMap"
+            typeMapChecked <- true
+        typeMapExists
+
+    member _.MarkRelationResolved(key: string) = resolvedRelationKeys.Add key |> ignore
+    member _.IsRelationResolved(key: string) = resolvedRelationKeys.Contains key
+    member _.MarkTypeKeyResolved(typeKey: string) = resolvedTypeKeys.Add typeKey |> ignore
+    member _.IsTypeKeyResolved(typeKey: string) = resolvedTypeKeys.Contains typeKey
 
 type internal LayerPosition =
 | BaseLayer
@@ -109,6 +159,10 @@ type internal QueryContext = {
     RelationOwnerUsesSource: Dictionary<string, bool>
     /// Type -> known collection names mapping (used to resolve custom collection names)
     TypeCollections: Dictionary<string, HashSet<string>>
+    /// Loads relation/type metadata on demand. Shared by reference with nested contexts, so a
+    /// lookup made anywhere in a translation is cached for the whole translation.
+    /// ValueNone for contexts that never resolve relation metadata.
+    MetadataSource: RelationMetadataSource voption
     /// True ONLY at the OUTERMOST translation context (top-level user query
     /// terminator). Cleared in CloneForSubquery (any nested subquery loses the flag)
     /// so cardinality emit sites can detect they are nested and emit bare scalars
@@ -133,6 +187,7 @@ type internal QueryContext = {
           RelationLinks = Dictionary(System.StringComparer.Ordinal)
           RelationOwnerUsesSource = Dictionary(System.StringComparer.Ordinal)
           TypeCollections = Dictionary(System.StringComparer.Ordinal)
+          MetadataSource = ValueNone
           IsAtTopLevel = false }
 
     /// Create a multi-source context while preserving the first root as the primary table.
@@ -154,6 +209,7 @@ type internal QueryContext = {
           RelationLinks = Dictionary(System.StringComparer.Ordinal)
           RelationOwnerUsesSource = Dictionary(System.StringComparer.Ordinal)
           TypeCollections = Dictionary(System.StringComparer.Ordinal)
+          MetadataSource = ValueNone
           IsAtTopLevel = false }
 
     /// Generate a unique alias (_ref0, _ref1, ...).
@@ -202,19 +258,73 @@ type internal QueryContext = {
         this.RelationLinks.[key] <- linkTable
         this.RelationOwnerUsesSource.[key] <- ownerUsesSource
 
+    /// Loads one owner/property relation from the catalog if it has not been looked up yet.
+    /// A lookup that finds nothing is still recorded, so a missing relation is queried once
+    /// rather than on every access.
+    member private this.EnsureRelationLoaded(ownerCollection: string, propertyName: string) =
+        match this.MetadataSource with
+        | ValueNone -> ()
+        | ValueSome source ->
+            let key = this.RelationKey(ownerCollection, propertyName)
+            if not (source.IsRelationResolved key) then
+                source.MarkRelationResolved key
+                if source.RelationCatalogExists then
+                    // The owner/property predicate is served by UNIQUE(OwnerCollection, PropertyName).
+                    // Link-table existence is decided in the same statement rather than by follow-up
+                    // probes, preserving the rule that the default table wins when both exist.
+                    let rows =
+                        source.Connection.Query<{|
+                            PropertyName: string
+                            TargetCollection: string
+                            RefKind: string
+                            DefaultLink: string
+                            CanonicalLink: string
+                            DefaultExists: int64
+                            CanonicalExists: int64
+                        |}>(
+                            "SELECT r.PropertyName AS PropertyName,
+                                    r.TargetCollection AS TargetCollection,
+                                    r.RefKind AS RefKind,
+                                    'SoloDBRelLink_' || r.Name AS DefaultLink,
+                                    'SoloDBRelLink_' || CASE WHEN r.OwnerCollection <= r.TargetCollection
+                                        THEN r.OwnerCollection || '_' || r.TargetCollection
+                                        ELSE r.TargetCollection || '_' || r.OwnerCollection END AS CanonicalLink,
+                                    (SELECT COUNT(*) FROM sqlite_master m
+                                     WHERE m.type = 'table' AND m.name = 'SoloDBRelLink_' || r.Name) AS DefaultExists,
+                                    (SELECT COUNT(*) FROM sqlite_master m
+                                     WHERE m.type = 'table' AND m.name = 'SoloDBRelLink_' || CASE WHEN r.OwnerCollection <= r.TargetCollection
+                                        THEN r.OwnerCollection || '_' || r.TargetCollection
+                                        ELSE r.TargetCollection || '_' || r.OwnerCollection END) AS CanonicalExists
+                             FROM SoloDBRelation r
+                             WHERE r.OwnerCollection = @owner AND r.PropertyName = @property
+                             AND r.Name IS NOT NULL AND r.TargetCollection IS NOT NULL AND r.RefKind IS NOT NULL",
+                            {| owner = ownerCollection; property = propertyName |})
+                    for row in rows do
+                        // Shared canonical table only when it exists and the default does not.
+                        let useSharedMany =
+                            row.RefKind = "Many" && row.CanonicalExists > 0L && row.DefaultExists = 0L
+                        let ownerUsesSource =
+                            if useSharedMany then System.StringComparer.Ordinal.Compare(ownerCollection, row.TargetCollection) <= 0
+                            else true
+                        let linkTable = if useSharedMany then row.CanonicalLink else row.DefaultLink
+                        this.RegisterRelation(ownerCollection, row.PropertyName, row.TargetCollection, linkTable, ownerUsesSource)
+
     member this.TryResolveRelationTarget(ownerCollection: string, propertyName: string) =
+        this.EnsureRelationLoaded(ownerCollection, propertyName)
         let key = this.RelationKey(ownerCollection, propertyName)
         match this.RelationTargets.TryGetValue key with
         | true, value -> Some value
         | _ -> None
 
     member this.TryResolveRelationLink(ownerCollection: string, propertyName: string) =
+        this.EnsureRelationLoaded(ownerCollection, propertyName)
         let key = this.RelationKey(ownerCollection, propertyName)
         match this.RelationLinks.TryGetValue key with
         | true, value -> Some value
         | _ -> None
 
     member this.TryResolveRelationOwnerUsesSource(ownerCollection: string, propertyName: string) =
+        this.EnsureRelationLoaded(ownerCollection, propertyName)
         let key = this.RelationKey(ownerCollection, propertyName)
         match this.RelationOwnerUsesSource.TryGetValue key with
         | true, value -> Some value
@@ -231,7 +341,24 @@ type internal QueryContext = {
                     created
             set.Add(collectionName) |> ignore
 
+    /// Loads every collection registered for one type key. Keyed on the requested type key and
+    /// never narrowed by owner, so the ambiguity branches below observe exactly the same set they
+    /// would have observed under a full catalog load.
+    member private this.EnsureTypeKeyLoaded(typeKey: string) =
+        match this.MetadataSource with
+        | ValueNone -> ()
+        | ValueSome source ->
+            if not (System.String.IsNullOrWhiteSpace typeKey) && not (source.IsTypeKeyResolved typeKey) then
+                source.MarkTypeKeyResolved typeKey
+                if source.TypeMapExists then
+                    // Served by UNIQUE(TypeKey, CollectionName).
+                    for mapping in source.Connection.Query<{| CollectionName: string |}>(
+                                        "SELECT CollectionName FROM SoloDBTypeCollectionMap WHERE TypeKey = @typeKey AND CollectionName IS NOT NULL",
+                                        {| typeKey = typeKey |}) do
+                        this.RegisterTypeCollection(typeKey, mapping.CollectionName)
+
     member this.ResolveCollectionForType(typeKey: string, defaultCollection: string) =
+        this.EnsureTypeKeyLoaded typeKey
         match this.TypeCollections.TryGetValue(typeKey) with
         | false, _ -> defaultCollection
         | true, names when names.Count = 0 -> defaultCollection
