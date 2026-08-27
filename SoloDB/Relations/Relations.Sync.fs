@@ -21,12 +21,6 @@ open RelationsDelete
 open RelationsBatchLoad
 open RelationsCore
 open RelationsPlan
-
-type RelationTxContext = RelationsTypes.RelationTxContext
-type RelationWritePlan = RelationsTypes.RelationWritePlan
-type RelationDeletePlan = RelationsTypes.RelationDeletePlan
-type RelationUpdateManyOp = RelationsTypes.RelationUpdateManyOp
-
 let private runSyncWithOwnerIdGuard (opName: string) (tx: RelationTxContext) (ownerId: int64) (plan: RelationWritePlan) (updateOwnerJson: bool) =
     ensureTxContext tx
     ensureTransaction tx

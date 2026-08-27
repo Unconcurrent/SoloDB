@@ -19,12 +19,6 @@ open RelationsEntityCascade
 open RelationsEntityApplyOps
 open RelationsDelete
 open RelationsBatchLoad
-
-type RelationTxContext = RelationsTypes.RelationTxContext
-type RelationWritePlan = RelationsTypes.RelationWritePlan
-type RelationDeletePlan = RelationsTypes.RelationDeletePlan
-type RelationUpdateManyOp = RelationsTypes.RelationUpdateManyOp
-
 let private relationSqlWrapKey = "relation-sql-boundary-operation-failed"
 
 let private isWrappedRelationSqlBoundaryError (ex: InvalidOperationException) =

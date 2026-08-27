@@ -458,7 +458,7 @@ module internal QueryableBuildQueryGroupJoinChain =
 
         let setOpSel =
             let evaluateConstantEnumerable (expr: Expression) : obj list =
-                if not (QueryTranslatorBase.isFullyConstant expr) then
+                if not (QueryTranslatorBaseHelpers.isFullyConstant expr) then
                     raise (NotSupportedException(
                         "Error: GroupJoin By-set operator requires a constant second sequence.\n" +
                         "Reason: The second sequence cannot be translated on the correlated SQL route.\n" +
@@ -472,7 +472,7 @@ module internal QueryableBuildQueryGroupJoinChain =
                 | ValueSome selectorLambda ->
                     let argObj = Expression.Parameter(typeof<obj>, "o")
                     let inlinedBody : Expression =
-                        QueryTranslatorBase.inlineLambdaInvocation selectorLambda [| Expression.Convert(argObj, selectorLambda.Parameters.[0].Type) :> Expression |]
+                        QueryTranslatorBaseHelpers.inlineLambdaInvocation selectorLambda [| Expression.Convert(argObj, selectorLambda.Parameters.[0].Type) :> Expression |]
                     let boxedBody =
                         if inlinedBody.Type = typeof<obj> then inlinedBody
                         else Expression.Convert(inlinedBody, typeof<obj>) :> Expression

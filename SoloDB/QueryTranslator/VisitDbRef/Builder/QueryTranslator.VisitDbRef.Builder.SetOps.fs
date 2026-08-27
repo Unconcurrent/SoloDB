@@ -7,6 +7,7 @@ open System.Collections.Generic
 open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.QueryTranslatorBaseTypes
+open SoloDatabase.QueryTranslatorBaseHelpers
 open SqlDu.Engine.C1.Spec
 
 module internal DBRefManyBuilderSetOps =

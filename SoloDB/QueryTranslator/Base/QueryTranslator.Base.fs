@@ -14,20 +14,6 @@ open QueryTranslatorBaseHelpers
 open SqlDu.Engine.C1.Spec
 
 module internal QueryTranslatorBase =
-    type MemberAccess = QueryTranslatorBaseTypes.MemberAccess
-    type UpdateManyRelationTransform = QueryTranslatorBaseTypes.UpdateManyRelationTransform
-    type QueryBuilder = QueryTranslatorBaseTypes.QueryBuilder
-
-    let appendVariable = QueryTranslatorBaseTypes.appendVariable
-    let isPrimitiveSQLiteType = QueryTranslatorBaseTypes.isPrimitiveSQLiteType
-    let escapeSQLiteString = QueryTranslatorBaseTypes.escapeSQLiteString
-
-    let mathFunctionTransformation = QueryTranslatorBaseHelpers.mathFunctionTransformation
-    let evaluateExpr<'O> = QueryTranslatorBaseHelpers.evaluateExpr<'O>
-    let isRootParameter = QueryTranslatorBaseHelpers.isRootParameter
-    let isFullyConstant = QueryTranslatorBaseHelpers.isFullyConstant
-    let isAnyConstant = QueryTranslatorBaseHelpers.isAnyConstant
-    let inlineLambdaInvocation = QueryTranslatorBaseHelpers.inlineLambdaInvocation
     let inline compareKnownJsonDu (qb: QueryBuilder) (targetExpr: SqlExpr) (targetType: Type) (knownObject: obj) : SqlExpr =
         QueryTranslatorBaseHelpers.compareKnownJsonDu qb targetExpr targetType knownObject
 

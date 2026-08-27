@@ -20,12 +20,6 @@ open RelationsEntityApplyOps
 open RelationsDelete
 open RelationsBatchLoad
 open RelationsCore
-
-type RelationTxContext = RelationsTypes.RelationTxContext
-type RelationWritePlan = RelationsTypes.RelationWritePlan
-type RelationDeletePlan = RelationsTypes.RelationDeletePlan
-type RelationUpdateManyOp = RelationsTypes.RelationUpdateManyOp
-
 let private emitSingleRelationAssignment (ops: ResizeArray<RelationUpdateManyOp>) (descriptor: RelationDescriptor) (newId: int64) =
     if newId > 0L then
         ops.Add(SetDBRefToId(descriptor.PropertyPath, descriptor.TargetType, newId))

@@ -445,7 +445,7 @@ type internal CollectionMutationOps<'T>() =
                     | _ -> yield expr
             |]
 
-        let relationTransforms = ResizeArray<QueryTranslatorBase.UpdateManyRelationTransform>()
+        let relationTransforms = ResizeArray<QueryTranslatorBaseTypes.UpdateManyRelationTransform>()
         let jsonTransforms = ResizeArray<Expression<System.Action<'T>>>()
 
         for expression in expandedTransforms do
@@ -476,8 +476,8 @@ type internal CollectionMutationOps<'T>() =
                 let mutable affected = executeJsonUpdateManyByRows conn selectedRows jsonTransforms
 
                 // Partition: B4 chain ops (depth >= 1) vs link-touching apply ops.
-                let chainOps = ResizeArray<QueryTranslatorBase.UpdateManyRelationTransform>()
-                let applyOpsRaw = ResizeArray<QueryTranslatorBase.UpdateManyRelationTransform>()
+                let chainOps = ResizeArray<QueryTranslatorBaseTypes.UpdateManyRelationTransform>()
+                let applyOpsRaw = ResizeArray<QueryTranslatorBaseTypes.UpdateManyRelationTransform>()
                 for op in relationTransforms do
                     match op with
                     | QueryTranslatorBaseTypes.MutateRefChainProperty _

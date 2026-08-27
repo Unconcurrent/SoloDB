@@ -477,7 +477,7 @@ module internal QueryableBuildQueryGroupByChained =
         let projectedSel = { Ctes = []; Body = SingleSelect projectedCore }
 
         let evaluateConstantEnumerable (expr: Expression) : obj list =
-            if not (QueryTranslatorBase.isFullyConstant expr) then
+            if not (QueryTranslatorBaseHelpers.isFullyConstant expr) then
                 raise (NotSupportedException(
                     "Error: GroupBy set operator right side must be a correlated group chain or a constant sequence.\n" +
                     "Fix: Project the right operand from the same group, or use a constant array/list, or move the operator after AsEnumerable()."))
