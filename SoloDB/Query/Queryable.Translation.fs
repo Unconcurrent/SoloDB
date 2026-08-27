@@ -174,7 +174,6 @@ module internal QueryableTranslationCore =
                 OwnerType = typeof<'T>
                 InTransaction =
                     match metadataConnection with
-                    | :? TransactionalConnection -> true
                     | :? CachingDbConnection as cc -> cc.InsideTransaction
                     | _ -> false
             }

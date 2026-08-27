@@ -69,70 +69,33 @@ module internal SoloDBRootOps =
         collection.RefreshIndexModelSnapshot(snapshotConnection)
         collection :> ISoloDBCollection<'T>
 
+    /// Runs a user transaction on a pooled caching connection. The BEGIN IMMEDIATE, handler-fault
+    /// interception, commit/rollback, exception resolution and return-to-pool sequence is owned by
+    /// ConnectionManager.WithTransaction; this function only builds the transactional context.
     let withTransaction<'R>
         (checkDisposed: unit -> unit)
         (connectionManager: ConnectionManager)
         (events: EventSystem)
         (func: Func<TransactionalSoloDB, 'R>) =
         checkDisposed()
-        use connectionForTransaction = connectionManager.CreateForTransaction()
-        let mutable primaryEx: exn option = None
-        let mutable cleanupEx: exn option = None
-        let mutable result = Unchecked.defaultof<'R>
-        try
-            Connections.beginImmediateWithRetry connectionForTransaction
+        connectionManager.WithDedicatedTransaction(fun connectionForTransaction ->
             let transactionalDb = new TransactionalSoloDB(connectionForTransaction, { ClearCacheFunction = ignore; EventSystem = events })
+            // The connection returns to the pool after this scope, so a context leaked out of the
+            // callback must fail closed instead of writing through a connection it no longer owns.
+            try func.Invoke transactionalDb
+            finally transactionalDb.ExitScope())
 
-            try
-                result <- func.Invoke transactionalDb
-                match Connections.takeHandlerFaultCommitException connectionForTransaction with
-                | Some ex ->
-                    primaryEx <- Some ex
-                    try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
-                | None ->
-                    connectionForTransaction.Execute "COMMIT;" |> ignore
-            with ex ->
-                primaryEx <- Some ex
-                try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
-        finally
-            clearHandlerFault connectionForTransaction
-            connectionForTransaction.DisposeReal(true)
-
-        match Connections.resolveTxOutcome primaryEx cleanupEx with
-        | Some ex -> raise ex
-        | None -> result
-
+    /// Async counterpart of withTransaction. Delegates the transaction lifecycle to
+    /// ConnectionManager.WithAsyncTransaction so both paths share one corridor.
     let withTransactionAsync<'R>
         (checkDisposed: unit -> unit)
         (connectionManager: ConnectionManager)
         (events: EventSystem)
-        (func: Func<TransactionalSoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> = task {
+        (func: Func<TransactionalSoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> =
         checkDisposed()
-        use connectionForTransaction = connectionManager.CreateForTransaction()
-        let mutable primaryEx: exn option = None
-        let mutable cleanupEx: exn option = None
-        let mutable result = Unchecked.defaultof<'R>
-        try
-            Connections.beginImmediateWithRetry connectionForTransaction
+        connectionManager.WithDedicatedAsyncTransaction(fun connectionForTransaction ->
             let transactionalDb = new TransactionalSoloDB(connectionForTransaction, { ClearCacheFunction = ignore; EventSystem = events })
-
-            try
-                let! ret = func.Invoke transactionalDb
-                result <- ret
-                match Connections.takeHandlerFaultCommitException connectionForTransaction with
-                | Some ex ->
-                    primaryEx <- Some ex
-                    try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
-                | None ->
-                    connectionForTransaction.Execute "COMMIT;" |> ignore
-            with ex ->
-                primaryEx <- Some ex
-                try connectionForTransaction.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx <- Some rb
-        finally
-            clearHandlerFault connectionForTransaction
-            connectionForTransaction.DisposeReal(true)
-
-        match Connections.resolveTxOutcome primaryEx cleanupEx with
-        | Some ex -> return reraiseAnywhere ex
-        | None -> return result
-    }
+            task {
+                try return! func.Invoke transactionalDb
+                finally transactionalDb.ExitScope()
+            })

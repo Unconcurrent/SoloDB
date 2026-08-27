@@ -22,6 +22,7 @@ module Connections =
     let private rollbackBorrowedTransaction = ConnectionsTransactionHelpers.rollbackBorrowedTransaction
     let private commitOrRollbackBorrowedTransaction = ConnectionsTransactionHelpers.commitOrRollbackBorrowedTransaction
     let private cleanupBorrowedTransaction = ConnectionsTransactionHelpers.cleanupBorrowedTransaction
+    let private cleanupDedicatedTransaction = ConnectionsTransactionHelpers.cleanupDedicatedTransaction
     let private withPooledTransactionCore = ConnectionsTransactionHelpers.withPooledTransactionCore
     let internal withSavepoint = ConnectionsTransactionHelpers.withSavepoint
     let internal withSavepointAsync = ConnectionsTransactionHelpers.withSavepointAsync
@@ -30,39 +31,13 @@ module Connections =
     let internal resolveTxOutcome = ConnectionsTransactionHelpers.resolveTxOutcome
 
     /// <summary>
-    /// Represents a specialized <see cref="SqliteConnection"/> whose <c>Dispose</c> method is a no-op.
-    /// This is used to pass a connection to a user-defined transaction block without it being closed prematurely.
-    /// The actual disposal is handled by the <see cref="ConnectionManager"/>.
-    /// </summary>
-    /// <param name="connectionStr">The connection string for the database.</param>
-    type TransactionalConnection internal (connectionStr: string) =
-        inherit SqliteConnection(connectionStr)
-
-        /// <summary>
-        /// Performs the actual disposal of the base <see cref="SqliteConnection"/>.
-        /// This should only be called by the owning <see cref="ConnectionManager"/>.
-        /// </summary>
-        /// <param name="disposing">If true, disposes managed resources.</param>
-        member internal this.DisposeReal(disposing) =
-            base.Dispose disposing
-
-        /// <summary>
-        /// Overrides the default Dispose behavior to do nothing. This prevents the connection
-        /// from being closed inside a 'use' binding within a transaction.
-        /// </summary>
-        /// <param name="disposing">Disposal flag.</param>
-        override this.Dispose(disposing) =
-            // This is intentionally a no-op.
-            ()
-
-    /// <summary>
     /// Manages a pool of reusable <see cref="CachingDbConnection"/> objects to reduce the overhead
     /// of opening and closing database connections. It also provides transaction management.
     /// </summary>
     /// <param name="connectionStr">The database connection string.</param>
     /// <param name="setup">An action to perform initial setup on a newly created connection.</param>
     /// <param name="config">The database configuration settings.</param>
-    and ConnectionManager internal (connectionStr: string, setup: SqliteConnection -> unit, config: Types.SoloDBConfiguration) =
+    type ConnectionManager internal (connectionStr: string, setup: SqliteConnection -> unit, config: Types.SoloDBConfiguration) =
         /// <summary>A collection of all connections ever created by this manager, for disposal purposes.</summary>
         let all = ConcurrentStack<CachingDbConnection>()
         /// <summary>The pool of available, ready-to-use connections.</summary>
@@ -161,26 +136,27 @@ module Connections =
         member internal this.All = all
 
         /// <summary>
-        /// Creates a new <see cref="TransactionalConnection"/> that will not be closed prematurely.
+        /// Creates a caching connection dedicated to a single explicit transaction. It is never
+        /// pooled and never tracked for reuse, so the object cannot outlive its transaction and
+        /// cannot be handed to an unrelated borrower. Disposal is suppressed so a user
+        /// <c>use</c> binding inside the callback cannot close a live transaction; the owning
+        /// runner destroys it at scope exit.
         /// </summary>
-        /// <returns>A new, open <see cref="TransactionalConnection"/>.</returns>
-        member internal this.CreateForTransaction() =
+        member internal this.CreateDedicatedTransactionConnection() =
             checkDisposed()
-            let c = new TransactionalConnection(connectionStr)
+            let c = new CachingDbConnection(connectionStr, ignore, config, this.EnterEventHandlerScope, this.ExitEventHandlerScope)
             let mutable primaryEx: exn option = None
             let mutable cleanupEx: exn option = None
             try
-                c.Open()
-                setup c
+                c.Inner.Open()
+                setup c.Inner
                 c
             with ex ->
                 primaryEx <- Some ex
-                try c.DisposeReal(true) with d -> cleanupEx <- Some d
-                match primaryEx, cleanupEx with
-                | Some p, Some d -> p.Data["SoloDB.CleanupException"] <- d; raise p
-                | Some p, None -> raise p
-                | None, Some d -> raise d
-                | None, None -> raise (InvalidOperationException("Transactional connection setup failed."))
+                try c.DisposeReal() with d -> cleanupEx <- Some d
+                match resolveTxOutcome primaryEx cleanupEx with
+                | Some resolved -> reraiseAnywhere resolved
+                | None -> raise (InvalidOperationException("Transactional connection setup failed."))
 
         /// <summary>
         /// The core implementation for executing a synchronous function within a database transaction.
@@ -188,8 +164,8 @@ module Connections =
         /// </summary>
         /// <param name="f">The function to execute within the transaction.</param>
         /// <returns>The result of the function <paramref name="f"/>.</returns>
-        member private this.WithTransactionBorrowed(f: CachingDbConnection -> 'T) =
-            let conn = this.Borrow()
+        member private this.RunTransaction(acquire: unit -> CachingDbConnection, release: CachingDbConnection -> exn option ref -> unit, f: CachingDbConnection -> 'T) =
+            let conn = acquire ()
             let primaryEx = ref None
             let cleanupEx = ref None
             let mutable result = Unchecked.defaultof<'T>
@@ -202,19 +178,22 @@ module Connections =
                 with ex ->
                     rollbackBorrowedTransaction conn primaryEx cleanupEx ex
             finally
-                cleanupBorrowedTransaction conn cleanupEx
+                release conn cleanupEx
 
             match resolveTxOutcome !primaryEx !cleanupEx with
             | Some ex -> raise ex
             | None -> result
+
+        member private this.WithTransactionBorrowed(f: CachingDbConnection -> 'T) =
+            this.RunTransaction(this.Borrow, cleanupBorrowedTransaction, f)
 
         /// <summary>
         /// The core implementation for executing an asynchronous function within a database transaction.
         /// </summary>
         /// <param name="f">The asynchronous function to execute within the transaction.</param>
         /// <returns>A task that represents the asynchronous operation, containing the result of the function <paramref name="f"/>.</returns>
-        member private this.WithTransactionBorrowedAsync(f: CachingDbConnection -> Task<'T>) = task {
-            let conn = this.Borrow()
+        member private this.RunTransactionAsync(acquire: unit -> CachingDbConnection, release: CachingDbConnection -> exn option ref -> unit, f: CachingDbConnection -> Task<'T>) = task {
+            let conn = acquire ()
             let primaryEx = ref None
             let cleanupEx = ref None
             let mutable result = Unchecked.defaultof<'T>
@@ -228,12 +207,15 @@ module Connections =
                 with ex ->
                     rollbackBorrowedTransaction conn primaryEx cleanupEx ex
             finally
-                cleanupBorrowedTransaction conn cleanupEx
+                release conn cleanupEx
 
             match resolveTxOutcome !primaryEx !cleanupEx with
             | Some ex -> return reraiseAnywhere ex
             | None -> return result
         }
+
+        member private this.WithTransactionBorrowedAsync(f: CachingDbConnection -> Task<'T>) =
+            this.RunTransactionAsync(this.Borrow, cleanupBorrowedTransaction, f)
 
         /// <summary>
         /// Executes a synchronous function within a database transaction using a pooled connection.
@@ -242,6 +224,19 @@ module Connections =
         /// <returns>The result of the function.</returns>
         member internal this.WithTransaction(f: CachingDbConnection -> 'T) =
             this.WithTransactionBorrowed f
+
+        /// <summary>
+        /// Runs an explicit user transaction on a dedicated caching connection that is destroyed
+        /// when the scope ends, so no reference captured during the callback stays usable.
+        /// </summary>
+        member internal this.WithDedicatedTransaction(f: CachingDbConnection -> 'T) =
+            this.RunTransaction(this.CreateDedicatedTransactionConnection, cleanupDedicatedTransaction, f)
+
+        /// <summary>
+        /// Asynchronous counterpart of <see cref="WithDedicatedTransaction"/>.
+        /// </summary>
+        member internal this.WithDedicatedAsyncTransaction(f: CachingDbConnection -> Task<'T>) =
+            this.RunTransactionAsync(this.CreateDedicatedTransactionConnection, cleanupDedicatedTransaction, f)
 
         /// <summary>
         /// Executes an asynchronous function within a database transaction using a pooled connection.

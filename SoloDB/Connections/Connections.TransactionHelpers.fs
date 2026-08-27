@@ -72,6 +72,17 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
             | None -> cleanupEx := Some ex
             | Some _ -> ()
 
+    /// Ends a dedicated (non-pooled) transaction connection. The connection is destroyed rather
+    /// than returned to any pool, so any reference captured during the callback becomes unusable
+    /// the moment the scope ends and can never serve unrelated work.
+    let cleanupDedicatedTransaction (conn: CachingDbConnection) (cleanupEx: exn option ref) =
+        conn.InsideTransaction <- false
+        clearHandlerFault conn
+        try conn.DisposeReal() with ex ->
+            match !cleanupEx with
+            | None -> cleanupEx := Some ex
+            | Some _ -> ()
+
     let withPooledTransactionCore isInHandlerScope runner f =
         if isInHandlerScope() then
             ThrowOutsideEventContextUsage()
