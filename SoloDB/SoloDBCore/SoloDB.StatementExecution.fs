@@ -26,29 +26,34 @@ module internal StatementExecution =
         /// Load the index model for the discovered tables and run the standard pipeline.
         | IndexShapedPipeline
 
-    /// Every table the statement can reach, including those reachable only through a subquery
-    /// nested in a predicate or in an assignment value.
+    /// Every table reference the statement reaches, in encounter order and with repeats kept.
     ///
-    /// This drives both the index model and the policy decision, so an omission here is a
-    /// correctness fault that leaves no trace in the emitted SQL of simple statements. The
-    /// recursion into expressions is delegated to SqlExpr.fold, which descends into json-set
-    /// assignment values; any expression case added to the tree must be reflected there.
-    let discoverTables (stmt: SqlStatement) : HashSet<string> =
-        let tables = HashSet<string>()
+    /// The set of tables is what the index model needs, but a set hides how it was produced: a
+    /// traversal that runs twice yields an identical set, so set equality cannot detect it. The
+    /// ordered references are therefore the primary result and the set is derived from them,
+    /// which makes the traversal's shape and multiplicity observable to a test.
+    ///
+    /// A table is reachable only through a subquery nested in a predicate or in an assignment
+    /// value in real statements, so an omission here loads the wrong index model and leaves no
+    /// trace in the emitted SQL of simple statements. The recursion into expressions is delegated
+    /// to SqlExpr.fold, which descends into json-set assignment values; any expression case added
+    /// to the tree must be reflected there.
+    let collectTableReferences (stmt: SqlStatement) : ResizeArray<string> =
+        let tables = ResizeArray<string>()
         let rec collectStmt (s: SqlStatement) =
             match s with
             | SelectStmt sel -> collectSelect sel
             | InsertStmt ins ->
-                tables.Add(ins.TableName) |> ignore
+                tables.Add(ins.TableName)
                 match ins.Source with
                 | InsertSelect sel -> collectSelect sel
                 | InsertValues _ -> ()
             | UpdateStmt upd ->
-                tables.Add(upd.TableName) |> ignore
+                tables.Add(upd.TableName)
                 upd.Where |> Option.iter collectExpr
                 for (_, e) in upd.SetClauses do collectExpr e
             | DeleteStmt del ->
-                tables.Add(del.TableName) |> ignore
+                tables.Add(del.TableName)
                 del.Where |> Option.iter collectExpr
             | DdlStmt _ -> ()
         and collectSelect (sel: SqlSelect) =
@@ -60,17 +65,17 @@ module internal StatementExecution =
                 for c in t do collectCore c
         and collectCore (core: SelectCore) =
             match core.Source with
-            | Some (BaseTable(t, _)) -> tables.Add(t) |> ignore
+            | Some (BaseTable(t, _)) -> tables.Add(t)
             | Some (DerivedTable(inner, _)) -> collectSelect inner
             | Some (FromJsonEach(e, _)) -> collectExpr e
             | None -> ()
             for j in core.Joins do
                 match j with
-                | CrossJoin (BaseTable(t, _)) -> tables.Add(t) |> ignore
+                | CrossJoin (BaseTable(t, _)) -> tables.Add(t)
                 | CrossJoin (DerivedTable(inner, _)) -> collectSelect inner
                 | CrossJoin (FromJsonEach(e, _)) -> collectExpr e
                 | ConditionedJoin(_, BaseTable(t, _), onExpr) ->
-                    tables.Add(t) |> ignore
+                    tables.Add(t)
                     collectExpr onExpr
                 | ConditionedJoin(_, DerivedTable(inner, _), onExpr) ->
                     collectSelect inner
@@ -90,12 +95,19 @@ module internal StatementExecution =
                 | Exists sel -> collectSelect sel
                 | _ -> ()) () expr
         collectStmt stmt
-        collectStmt stmt
         tables
+
+    /// The distinct tables the statement reaches. Derived from the ordered references so the two
+    /// cannot disagree.
+    let discoverTables (stmt: SqlStatement) : HashSet<string> =
+        HashSet<string>(collectTableReferences stmt)
 
     /// True when the statement carries a subquery anywhere: in a source, a join, a predicate, a
     /// projection, or nested inside an assignment value. A statement that does is shaped by the
     /// index model; one that does not is emitted as built.
+    ///
+    /// This performs its own traversal and does not consult table discovery; discovery exists to
+    /// tell the index model which tables to load, nothing more.
     let requiresIndexShaping (stmt: SqlStatement) : bool =
         let mutable found = false
         let inspect (expr: SqlExpr) =
