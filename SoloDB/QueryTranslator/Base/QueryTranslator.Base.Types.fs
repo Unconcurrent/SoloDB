@@ -243,7 +243,12 @@ module internal QueryTranslatorBaseTypes =
                         if expression.NodeType = ExpressionType.Quote
                         then (expression :?> UnaryExpression).Operand
                         else expression
-                    in (expression :?> LambdaExpression).Parameters
+                    // Not every translated operand is a lambda: a value compared by Contains
+                    // arrives as a constant, for one. Such an operand binds no lambda
+                    // parameters, which is an empty set rather than a translation failure.
+                    match expression with
+                    | :? LambdaExpression as lambda -> lambda.Parameters
+                    | _ -> System.Collections.ObjectModel.ReadOnlyCollection(Array.empty<ParameterExpression>)
                 IdParameterIndex = idIndex
                 SourceContext = sourceCtx
                 ParamCounter = ref 0

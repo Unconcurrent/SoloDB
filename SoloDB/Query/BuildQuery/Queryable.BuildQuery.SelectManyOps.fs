@@ -5,6 +5,7 @@ open System.Collections
 open System.Collections.Generic
 open System.Linq
 open System.Linq.Expressions
+open System.Threading
 open System.Reflection
 open System.Text
 open System.Runtime.CompilerServices
@@ -144,7 +145,7 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                             let propName = memberExpr.Member.Name
                             let targetType = memberExpr.Type.GetGenericArguments().[0]
                             addComplexFinal statements (fun ctx ->
-                                let innerSourceName = Utils.getVarName (hash ctx.Inner.Body % 10000 |> abs)
+                                let innerSourceName = Utils.getVarName (Interlocked.Increment(sourceCtx.AliasCounter))
                                 let lnkAlias = "_lnk"
                                 let tgtAlias = "_tgt"
 
@@ -188,7 +189,7 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                         [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some ownerAlias, "Id") }]
                                         (Some (DerivedTable(ctx.Inner, ownerAlias)))
                                 let ownerIdSel = wrapCore ownerIdCore
-                                let ownerIdName = Utils.getVarName (hash ownerIdSel.Body % 10000 |> abs)
+                                let ownerIdName = Utils.getVarName (Interlocked.Increment(sourceCtx.AliasCounter))
 
                                 // Re-bind link JOIN to use the Id-only owner source.
                                 let linkJoinOnIdOnly =
@@ -255,7 +256,7 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                     if generics.[1] (*output*) = typeof<byte> then
                                         raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit the SQLite context with .AsEnumerable().")
                                     // Use a stable inner source alias based on the inner select structure
-                                    let innerSourceName = Utils.getVarName (hash ctx.Inner.Body % 10000 |> abs)
+                                    let innerSourceName = Utils.getVarName (Interlocked.Increment(sourceCtx.AliasCounter))
                                     // Build the json_each join source expression
                                     let jsonEachExpr =
                                         match expressions.[0] with
