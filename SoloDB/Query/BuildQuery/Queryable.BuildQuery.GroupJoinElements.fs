@@ -6,6 +6,9 @@ open System.Threading
 open Utils
 open SoloDatabase
 open SqlDu.Engine.C1.Spec
+open SoloDatabase.GroupJoinRuntimeTypes
+open SoloDatabase.GroupJoinChainParts
+open SoloDatabase.GroupJoinExtract
 open SoloDatabase.QueryableBuildQueryGroupJoinChain
 open SoloDatabase.DBRefManyDescriptor
 

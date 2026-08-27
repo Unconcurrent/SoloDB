@@ -33,3 +33,16 @@ module internal QueryUtils =
         | :? ISoloDBCollectionQueryProvider as p ->
             p.TranslateToSQL(query.Expression)
         | _ -> "Query provider is not a SoloDB provider — cannot translate to SQL."
+
+    /// <summary>
+    /// Describes the query structure the translator built for <paramref name="query"/>,
+    /// before the optimizer pass pipeline runs. Structural drift that the optimizer would
+    /// normalize away is visible here and invisible in <see cref="getSQL"/>.
+    /// </summary>
+    /// <param name="query">The LINQ query to describe.</param>
+    /// <returns>A structural rendering of the pre-optimizer query.</returns>
+    let describeUnoptimizedSelect (query: IQueryable<'T>) =
+        match query.Provider with
+        | :? ISoloDBCollectionQueryProvider as p ->
+            p.DescribeUnoptimizedSelect(query.Expression)
+        | _ -> "Query provider is not a SoloDB provider — cannot describe the query structure."

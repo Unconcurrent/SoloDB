@@ -6,7 +6,12 @@ open SqlDu.Engine.C1.Spec
 open DBRefTypeHelpers
 open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.QueryTranslatorBaseHelpers
-open SoloDatabase.SharedDescriptorExtract
+open SoloDatabase.ChainExpr
+open SoloDatabase.ChainPolicy
+open SoloDatabase.ChainState
+open SoloDatabase.ChainBounds
+open SoloDatabase.ChainDescriptorBuild
+open SoloDatabase.ChainWalk
 
 module internal DBRefManyExtractorHelpers =
     let mkIdentityLambdaForDbRefMany (expr: Expression) =

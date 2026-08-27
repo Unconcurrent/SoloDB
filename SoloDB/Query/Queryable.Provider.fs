@@ -32,10 +32,17 @@ type internal ISoloDBCollectionQueryProvider =
     abstract member TranslateToSQL: expression: Expression -> string
     /// <summary>Translates and executes EXPLAIN QUERY PLAN for a LINQ expression.</summary>
     abstract member GetExplainQueryPlan: expression: Expression -> string
+    /// <summary>
+    /// Returns a structural rendering of the SqlSelect the translator produced for this
+    /// expression, before the optimizer pass pipeline rewrites it. Two translators that
+    /// agree on emitted SQL can still disagree here, so this is the structure-level
+    /// counterpart to <see cref="TranslateToSQL"/>.
+    /// </summary>
+    abstract member DescribeUnoptimizedSelect: expression: Expression -> string
 
 module internal QueryableTranslation =
     let startFilterTranslationWithConnection (metadataConnection: SqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
-        let query, variables, _ = QueryableTranslationCore.startTranslationWithConnection metadataConnection source expression
+        let query, variables, _, _ = QueryableTranslationCore.startTranslationWithConnection metadataConnection source expression
         query, variables
 
 /// <summary>
@@ -116,10 +123,13 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
         override this.Source = source
         override this.AdditionalData = data
         override this.TranslateToSQL(expression: Expression) =
-            let query, _, _ = QueryableTranslationCore.startTranslation source expression
+            let query, _, _, _ = QueryableTranslationCore.startTranslation source expression
             query
+        override this.DescribeUnoptimizedSelect(expression: Expression) =
+            let _, _, _, select = QueryableTranslationCore.startTranslation source expression
+            sprintf "%A" select
         override this.GetExplainQueryPlan(expression: Expression) =
-            let query, variables, _ = QueryableTranslationCore.startTranslation source expression
+            let query, variables, _, _ = QueryableTranslationCore.startTranslation source expression
             let explainQuery = "EXPLAIN QUERY PLAN " + query
             use connection = source.GetInternalConnection()
             let result = connection.Query<{|detail: string|}>(explainQuery, variables) |> Seq.toList
@@ -203,7 +213,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
             (this :> IQueryProvider).Execute<IEnumerable<'T>>(expression)
 
         member this.Execute<'TResult>(expression: Expression) : 'TResult =
-            let query, variables, batchCtx = QueryableTranslationCore.startTranslation source expression
+            let query, variables, batchCtx, _ = QueryableTranslationCore.startTranslation source expression
 
             #if DEBUG
             if System.Diagnostics.Debugger.IsAttached then

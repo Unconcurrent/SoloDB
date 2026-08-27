@@ -7,7 +7,12 @@ open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.DBRefManyExtractorHelpers
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorVisitPost
-open SoloDatabase.SharedDescriptorExtract
+open SoloDatabase.ChainExpr
+open SoloDatabase.ChainPolicy
+open SoloDatabase.ChainState
+open SoloDatabase.ChainBounds
+open SoloDatabase.ChainDescriptorBuild
+open SoloDatabase.ChainWalk
 
 module internal DBRefManyExtractor =
     let private extractorConfig =
@@ -30,7 +35,7 @@ module internal DBRefManyExtractor =
             | Some recognized ->
                 if not (isDBRefManyChain unwrapConvert isDBRefManyType recognized.Source) then ValueNone
                 else
-                    let state : SharedDescriptorExtract.ExtractionState = createState ()
+                    let state : ChainState.ExtractionState = createState ()
                     let source = normalizeCountBySource recognized.Terminal recognized.Source state
                     let innerSource = walkChain extractorConfig state source
                     finalizeState state

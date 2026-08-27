@@ -11,6 +11,10 @@ open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryableGroupByAliases
 open SqlDu.Engine.C1.Spec
+open SoloDatabase.GroupJoinRuntimeTypes
+open SoloDatabase.GroupJoinChainParts
+open SoloDatabase.GroupJoinExtract
+open SoloDatabase.GroupJoinTerminals
 open SoloDatabase.QueryableBuildQueryGroupJoinChain
 open SoloDatabase.QueryableBuildQueryGroupJoinElements
 open SoloDatabase.DBRefManyDescriptor

@@ -282,7 +282,9 @@ module internal QueryableTranslationCore =
             else
                 ValueNone
 
-        sb.ToString(), variables, batchLoadContext
+        // The pre-optimizer SqlSelect is returned alongside the emitted text so callers can
+        // inspect the structure the translator actually produced, before any pass rewrites it.
+        sb.ToString(), variables, batchLoadContext, outerSelect
 
     let internal startTranslation (source: ISoloDBCollection<'T>) (expression: Expression) =
         use metadataConnection = source.GetInternalConnection()
