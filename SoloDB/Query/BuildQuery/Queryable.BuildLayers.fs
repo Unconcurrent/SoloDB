@@ -39,6 +39,55 @@ module internal QueryableLayerBuild =
             else
                 ""
 
+        /// Binds unqualified references to the derived source of a layer that also carries a
+        /// relation join. Without this, a bare Value or Id is ambiguous between the derived
+        /// source and the joined table. Every case is listed so a new SqlExpr case cannot be
+        /// silently skipped here.
+        let rec bindToDerivedSource (alias: string) (expr: SqlExpr) : SqlExpr =
+            let recur = bindToDerivedSource alias
+            match expr with
+            | SqlExpr.Column(None, col) -> SqlExpr.Column(Some alias, col)
+            | SqlExpr.JsonExtractExpr(None, col, path) -> SqlExpr.JsonExtractExpr(Some ("\"" + alias + "\""), col, path)
+            | SqlExpr.JsonRootExtract(None, col) -> SqlExpr.JsonRootExtract(Some ("\"" + alias + "\""), col)
+            | SqlExpr.Column(Some _, _)
+            | SqlExpr.JsonExtractExpr(Some _, _, _)
+            | SqlExpr.JsonRootExtract(Some _, _)
+            | SqlExpr.Literal _
+            | SqlExpr.Parameter _ -> expr
+            | SqlExpr.JsonSetExpr(target, assignments) ->
+                SqlExpr.JsonSetExpr(recur target, assignments |> List.map (fun (p, v) -> p, recur v))
+            | SqlExpr.JsonArrayExpr elements -> SqlExpr.JsonArrayExpr(elements |> List.map recur)
+            | SqlExpr.JsonObjectExpr properties -> SqlExpr.JsonObjectExpr(properties |> List.map (fun (n, v) -> n, recur v))
+            | SqlExpr.FunctionCall(name, args) -> SqlExpr.FunctionCall(name, args |> List.map recur)
+            | SqlExpr.AggregateCall(kind, arg, distinct, sep) ->
+                SqlExpr.AggregateCall(kind, arg |> Option.map recur, distinct, sep |> Option.map recur)
+            | SqlExpr.WindowCall spec ->
+                SqlExpr.WindowCall
+                    { spec with
+                        Arguments = spec.Arguments |> List.map recur
+                        PartitionBy = spec.PartitionBy |> List.map recur
+                        OrderBy = spec.OrderBy |> List.map (fun (e, d) -> recur e, d) }
+            | SqlExpr.Unary(op, e) -> SqlExpr.Unary(op, recur e)
+            | SqlExpr.Binary(l, op, r) -> SqlExpr.Binary(recur l, op, recur r)
+            | SqlExpr.Between(e, lo, hi) -> SqlExpr.Between(recur e, recur lo, recur hi)
+            | SqlExpr.InList(e, head, tail) -> SqlExpr.InList(recur e, recur head, tail |> List.map recur)
+            // Subqueries carry their own source scope; their internal references are not
+            // ambiguous against this layer and must not be rebound.
+            | SqlExpr.InSubquery(e, sel) -> SqlExpr.InSubquery(recur e, sel)
+            | SqlExpr.Exists _
+            | SqlExpr.ScalarSubquery _ -> expr
+            | SqlExpr.Cast(e, t) -> SqlExpr.Cast(recur e, t)
+            | SqlExpr.Coalesce(head, tail) -> SqlExpr.Coalesce(recur head, tail |> List.map recur)
+            | SqlExpr.CaseExpr((c, r), rest, elseExpr) ->
+                SqlExpr.CaseExpr((recur c, recur r), rest |> List.map (fun (a, b) -> recur a, recur b), elseExpr |> Option.map recur)
+            | SqlExpr.UpdateFragment(path, value) -> SqlExpr.UpdateFragment(recur path, recur value)
+
+        // A DBRef join edge is discovered while translating whichever layer references it, which
+        // is not always the base layer: a projection over a derived source (for example the
+        // Select that follows a Join) discovers its own edges. Every layer therefore emits the
+        // edges that are still unemitted, and records them here so a shared edge is emitted once.
+        let materializedJoinAliases = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
+
         let rec buildLayer (i: int) : SqlSelect =
             let layer = layers.[i]
             match layer with
@@ -75,6 +124,11 @@ module internal QueryableLayerBuild =
                 // Track whether the Value projection can be rewritten for JOIN materialization.
                 let mutable needsValueMaterialization = false
 
+                // Edges discovered while translating THIS layer belong to THIS layer. Layers are
+                // built outer-projection first, then inner layers by recursion, then outer
+                // clauses, so a shared counter would attach an outer edge to an inner layer.
+                let joinsBeforeProjections = currentCtx.Joins.Count
+
                 // Build projections based on selector.
                 let projections =
                     match layer.Selector with
@@ -106,6 +160,11 @@ module internal QueryableLayerBuild =
                             [{ Alias = None; Expr = idColumnExpr }
                              { Alias = None; Expr = valueColumnExpr }]
 
+                let projectionDiscoveredJoins =
+                    if currentCtx.Joins.Count > joinsBeforeProjections then
+                        currentCtx.Joins |> Seq.skip joinsBeforeProjections |> Seq.toList
+                    else []
+
                 // Build source.
                 let isBaseTable = (i = 0)
                 let source =
@@ -119,29 +178,57 @@ module internal QueryableLayerBuild =
                 // Side effect: expression translation discovers JOINs via QueryContext.
                 let clauseCtx = if isLocalKeyProjection then currentCtx else sourceCtx
                 let clauseTable = if isLocalKeyProjection then effectiveTableName else layer.TableName
+                let joinsBeforeClauses = currentCtx.Joins.Count
                 let struct (where, orderBy, limit, offset, unionAlls) =
                     buildClausesDu clauseCtx vars layer clauseTable
+                let clauseDiscoveredJoins =
+                    if currentCtx.Joins.Count > joinsBeforeClauses then
+                        currentCtx.Joins |> Seq.skip joinsBeforeClauses |> Seq.toList
+                    else []
 
                 // Edge case 8: JOIN materialization (DBRef) — discovered during clause translation.
                 let mutable finalProjections = projections
                 let mutable joins = []
+                let mutable boundWhere = where
+                let mutable boundOrderBy = orderBy
 
-                if isBaseTable && currentCtx.Joins.Count > 0 then
+                let pendingJoins =
+                    projectionDiscoveredJoins @ clauseDiscoveredJoins
+                    |> List.filter (fun j -> not (materializedJoinAliases.Contains j.TargetAlias))
+
+                if not pendingJoins.IsEmpty then
+                    for j in pendingJoins do materializedJoinAliases.Add j.TargetAlias |> ignore
                     // Build JoinShape list from discovered JoinEdges.
                     joins <-
-                        currentCtx.Joins
+                        pendingJoins
                         |> Seq.map (fun j ->
+                            // At a non-base layer the owner row comes from the derived source, so an
+                            // edge discovered without a source alias is bound to it; leaving it
+                            // unqualified would be ambiguous against the joined table's own Value.
+                            let onSourceAlias =
+                                match j.OnSourceAlias with
+                                | None when not isBaseTable -> Some "\"o\""
+                                | existing -> existing
                             ConditionedJoin(
                                 parseJoinKind j.JoinKind,
                                 BaseTable(j.TargetTable, Some j.TargetAlias),
                                 SqlExpr.Binary(
                                     SqlExpr.Column(Some j.TargetAlias, "Id"),
                                     BinaryOperator.Eq,
-                                    SqlExpr.JsonExtractExpr(j.OnSourceAlias, "Value", JsonPath(j.OnPropertyName, [])))))
+                                    SqlExpr.JsonExtractExpr(onSourceAlias, "Value", JsonPath(j.OnPropertyName, [])))))
                         |> Seq.toList
 
-                    // Rewrite Value projection for materialization (jsonb_set).
-                    if needsValueMaterialization then
+                    // A non-base layer selects from a derived source aliased "o" and now also has a
+                    // joined relation table. Unqualified Id/Value would be ambiguous between them,
+                    // so bind them to the derived source they were always meant to come from.
+                    if not isBaseTable then
+                        finalProjections <- finalProjections |> List.map (fun p -> { p with Expr = bindToDerivedSource "o" p.Expr })
+                        boundWhere <- where |> Option.map (bindToDerivedSource "o")
+                        boundOrderBy <- orderBy |> List.map (fun o -> { o with Expr = bindToDerivedSource "o" o.Expr })
+
+                    // Rewrite Value projection for materialization (jsonb_set). Only meaningful at
+                    // the base layer, where the projection is still a bare Value column.
+                    if isBaseTable && needsValueMaterialization then
                         let materializedValueExpr = buildMaterializedValueExpr currentCtx quotedTableName valueColumnExpr
                         finalProjections <-
                             finalProjections |> List.map (fun p ->
@@ -160,8 +247,8 @@ module internal QueryableLayerBuild =
                         let core =
                             { mkCore finalProjections source with
                                 Joins = joins
-                                Where = where
-                                OrderBy = orderBy
+                                Where = boundWhere
+                                OrderBy = boundOrderBy
                                 Limit = limit
                                 Offset = offset }
                         SingleSelect core
@@ -170,7 +257,7 @@ module internal QueryableLayerBuild =
                         let headCore =
                             { mkCore finalProjections source with
                                 Joins = joins
-                                Where = where }
+                                Where = boundWhere }
                         UnionAllSelect(headCore, unionAlls)
 
                 wrapCoreBody body orderBy limit offset
