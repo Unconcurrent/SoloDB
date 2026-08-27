@@ -10,27 +10,13 @@ module internal SqlDuMinimalEmit =
 
     /// Emit a SqlExpr DU node into a QueryBuilder's StringBuilder and Variables dict.
     /// Uses the canonical emitter with InlineLiterals=true (product behavior).
-    /// Handles one product-specific presentation concern: top-level root JSON extraction
-    /// uses json_extract(json(...), '$') for readable output instead of jsonb_extract.
+    /// One expression has one meaning, whatever the destination already contains.
     let rec emitExpr (qb: QueryBuilder) (expr: SqlExpr) : unit =
-        let isTopLevel = qb.StringBuilder.Length = 0
-
-        // Special case: top-level root extraction for readable JSON output.
-        // When the emitter is called at SB position 0 with a JsonRootExtract,
-        // use json_extract(json(source), '$') instead of the canonical jsonb_extract.
-        match expr with
-        | SqlExpr.JsonRootExtract(alias, col) when isTopLevel ->
-            let prefix =
-                match alias with
-                | Some a -> a + "."
-                | None -> ""
-            qb.StringBuilder.Append(sprintf "json_extract(json(%s%s), '$')" prefix col) |> ignore
-        | _ ->
-            let ctx = EmitContext(InlineLiterals = true)
-            let result = EmitSelect.emitExpr ctx expr
-            qb.StringBuilder.Append(result.Sql) |> ignore
-            for (name, value) in result.Parameters do
-                qb.Variables.[name] <- value
+        let ctx = EmitContext(InlineLiterals = true)
+        let result = EmitSelect.emitExpr ctx expr
+        qb.StringBuilder.Append(result.Sql) |> ignore
+        for (name, value) in result.Parameters do
+            qb.Variables.[name] <- value
 
     and emitSelect (qb: QueryBuilder) (sel: SqlSelect) : unit =
         let ctx = EmitContext(InlineLiterals = true)
