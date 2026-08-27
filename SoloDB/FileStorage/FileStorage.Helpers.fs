@@ -82,6 +82,33 @@ module internal FileStorageHelpers =
             }
         )
 
+    // ── Narrow path lookups ───────────────────────────────────────────────
+    // getFilesWhere joins metadata and builds a full public header. Callers that only need an
+    // identifier, or the three fields a stream is built from, use these instead so the cost does
+    // not scale with a file's unrelated metadata rows. The full-header owner is unchanged and
+    // still serves every API that returns metadata to the caller.
+
+    /// Id, DirectoryId and FullPath: exactly what DbFileStream is constructed from.
+    [<Struct>]
+    type internal FileStreamIdentity =
+        { Id: int64; DirectoryId: int64; FullPath: string }
+
+    let internal tryGetFileIdAt (db: SqliteConnection) (path: string) : int64 voption =
+        let struct (dirPath, name) = getPathAndName path
+        match db.Query<int64>(
+                "SELECT Id FROM SoloDBFileHeader WHERE FullPath = @FullPath LIMIT 1",
+                {| FullPath = combinePath dirPath name |}) |> Seq.tryHead with
+        | Some id -> ValueSome id
+        | None -> ValueNone
+
+    let internal tryGetFileStreamIdentityAt (db: SqliteConnection) (path: string) =
+        let struct (dirPath, name) = getPathAndName path
+        match db.Query<FileStreamIdentity>(
+                "SELECT Id, DirectoryId, FullPath FROM SoloDBFileHeader WHERE FullPath = @FullPath LIMIT 1",
+                {| FullPath = combinePath dirPath name |}) |> Seq.tryHead with
+        | Some identity -> ValueSome identity
+        | None -> ValueNone
+
     let internal tryGetFileAt (db: SqliteConnection) (path: string) =
         let struct (dirPath, name) = getPathAndName path
         let fullPath = combinePath dirPath name
@@ -148,20 +175,30 @@ module internal FileStorageHelpers =
         new FileStorageCoreStream.DbFileStream(db, file.Id, file.DirectoryId, file.FullPath)
 
     let internal openOrCreateFile (db: Connection) (path: string) =
-        let file =
+        // Stream construction needs three columns; loading metadata here would be discarded.
+        let identity =
             let existing =
                 use conn = db.Get()
-                tryGetFileAt conn path
+                tryGetFileStreamIdentityAt conn path
             match existing with
-            | Some x -> x
-            | None -> db.WithTransaction(fun conn -> createFileAt conn path)
-        new FileStorageCoreStream.DbFileStream(db, file.Id, file.DirectoryId, file.FullPath)
+            | ValueSome x -> x
+            | ValueNone ->
+                db.WithTransaction(fun conn ->
+                    let created = createFileAt conn path
+                    { Id = created.Id; DirectoryId = created.DirectoryId; FullPath = created.FullPath })
+        new FileStorageCoreStream.DbFileStream(db, identity.Id, identity.DirectoryId, identity.FullPath)
+
+    let internal setSoloDBFileMetadataById (db: SqliteConnection) (fileId: int64) (key: string) (value: string) =
+        db.Execute("INSERT OR REPLACE INTO SoloDBFileMetadata(FileId, Key, Value) VALUES(@FileId, @Key, @Value)", {|FileId = fileId; Key = key; Value = value|}) |> ignore
 
     let internal setSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) (value: string) =
-        db.Execute("INSERT OR REPLACE INTO SoloDBFileMetadata(FileId, Key, Value) VALUES(@FileId, @Key, @Value)", {|FileId = file.Id; Key = key; Value = value|}) |> ignore
+        setSoloDBFileMetadataById db file.Id key value
+
+    let internal deleteSoloDBFileMetadataById (db: SqliteConnection) (fileId: int64) (key: string) =
+        db.Execute("DELETE FROM SoloDBFileMetadata WHERE FileId = @FileId AND Key = @Key", {|FileId = fileId; Key = key|}) |> ignore
 
     let internal deleteSoloDBFileMetadata (db: SqliteConnection) (file: SoloDBFileHeader) (key: string) =
-        db.Execute("DELETE FROM SoloDBFileMetadata WHERE FileId = @FileId AND Key = @Key", {|FileId = file.Id; Key = key|}) |> ignore
+        deleteSoloDBFileMetadataById db file.Id key
 
     let internal setDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) (value: string) =
         db.Execute("INSERT OR REPLACE INTO SoloDBDirectoryMetadata(DirectoryId, Key, Value) VALUES(@DirectoryId, @Key, @Value)", {|DirectoryId = dir.Id; Key = key; Value = value|}) |> ignore
@@ -169,8 +206,23 @@ module internal FileStorageHelpers =
     let internal deleteDirMetadata (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (key: string) =
         db.Execute("DELETE FROM SoloDBDirectoryMetadata WHERE DirectoryId = @DirectoryId AND Key = @Key", {|DirectoryId = dir.Id; Key = key|}) |> ignore
 
+    /// SQLITE_CONSTRAINT_UNIQUE. Identifies a uniqueness violation without inspecting message text,
+    /// so an unrelated constraint failure is never relabelled as a path collision.
+    let [<Literal>] private SqliteConstraintUnique = 2067
+
+    let internal pathExists (db: SqliteConnection) (fullPath: string) =
+        db.QueryFirst<bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM SoloDBFileHeader WHERE FullPath = @FullPath
+                UNION ALL
+                SELECT 1 FROM SoloDBDirectoryHeader WHERE FullPath = @FullPath
+             )",
+            {| FullPath = fullPath |})
+
     let internal moveFile (db: SqliteConnection) (file: SoloDBFileHeader) (toDir: SoloDBDirectoryHeader) (newName: string) =
         let newFileFullPath = combinePath toDir.FullPath newName
+        if newFileFullPath <> file.FullPath && pathExists db newFileFullPath then
+            raise (IOException "File already exists.")
         try
             db.Execute("UPDATE SoloDBFileHeader
             SET FullPath = @NewFullPath,
@@ -179,12 +231,55 @@ module internal FileStorageHelpers =
             WHERE Id = @FileId", {|NewFullPath = newFileFullPath; DestDirId = toDir.Id; FileId = file.Id; NewName = newName|})
             |> ignore
         with
-        | :? SqliteException as ex when ex.SqliteErrorCode = 19 && ex.Message.Contains "SoloDBFileHeader.FullPath" ->
+        | :? SqliteException as ex when ex.SqliteExtendedErrorCode = SqliteConstraintUnique ->
             raise (IOException("File already exists.", ex))
 
-    let rec internal moveDirectoryMustBeWithinTransaction (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (newParentDir: SoloDBDirectoryHeader) (newName: string) =
+    /// Rewrites a moved subtree in a bounded number of statements.
+    ///
+    /// Descendant paths are rebuilt by position: the segment of FullPath after the old root's
+    /// length is appended to the new root. A textual REPLACE cannot be used here because it
+    /// rewrites every occurrence rather than the leading prefix, which corrupts any path where
+    /// the old root also appears later in the string.
+    let internal moveDirectoryMustBeWithinTransaction (db: SqliteConnection) (dir: SoloDBDirectoryHeader) (newParentDir: SoloDBDirectoryHeader) (newName: string) =
+        let oldDirPath = dir.FullPath
         let newDirFullPath = combinePath newParentDir.FullPath newName
+
+        if newDirFullPath <> oldDirPath then
+            // A directory cannot be moved inside itself. Compared as a path prefix, never as a
+            // substring, so a sibling like /ab is not mistaken for a child of /a.
+            if newDirFullPath.StartsWith(oldDirPath + "/", StringComparison.Ordinal) then
+                raise (IOException "Cannot move a directory into itself.")
+            if pathExists db newDirFullPath then
+                raise (IOException "Directory or file already exists in the destination.")
+
         try
+            // Subtree of the moved directory, including itself, by ParentId.
+            let subtreeCte = """
+                WITH RECURSIVE Subtree(Id) AS (
+                    SELECT @DirId
+                    UNION ALL
+                    SELECT d.Id FROM SoloDBDirectoryHeader d JOIN Subtree s ON d.ParentId = s.Id
+                )
+                """
+
+            // Descendants first: while the root still carries its old path, every descendant path
+            // still shares the old prefix.
+            db.Execute(subtreeCte + """
+                UPDATE SoloDBDirectoryHeader
+                SET FullPath = @NewFullPath || substr(FullPath, @OldPathLength + 1)
+                WHERE Id IN (SELECT Id FROM Subtree) AND Id <> @DirId
+                """,
+                {| DirId = dir.Id; NewFullPath = newDirFullPath; OldPathLength = oldDirPath.Length |})
+            |> ignore
+
+            db.Execute(subtreeCte + """
+                UPDATE SoloDBFileHeader
+                SET FullPath = @NewFullPath || substr(FullPath, @OldPathLength + 1)
+                WHERE DirectoryId IN (SELECT Id FROM Subtree)
+                """,
+                {| DirId = dir.Id; NewFullPath = newDirFullPath; OldPathLength = oldDirPath.Length |})
+            |> ignore
+
             db.Execute("UPDATE SoloDBDirectoryHeader
                          SET FullPath = @NewFullPath,
                              ParentId = @NewParentId,
@@ -192,18 +287,8 @@ module internal FileStorageHelpers =
                          WHERE Id = @DirId",
                          {| NewFullPath = newDirFullPath; NewParentId = newParentDir.Id; DirId = dir.Id; NewName = newName |})
             |> ignore
-            let oldDirPath = dir.FullPath
-            let dir = {dir with FullPath = newDirFullPath; ParentId = Nullable newParentDir.Id; Name = newName}
-            let subDirs = db.Query<SoloDBDirectoryHeader>("SELECT * FROM SoloDBDirectoryHeader WHERE ParentId = @DirId", {| DirId = dir.Id |}) |> Seq.toList
-            for subDir in subDirs do
-                moveDirectoryMustBeWithinTransaction db subDir dir subDir.Name
-            db.Execute("UPDATE SoloDBFileHeader
-                         SET FullPath = REPLACE(FullPath, @OldFullPath, @NewFullPath)
-                         WHERE DirectoryId = @DirId",
-                         {| OldFullPath = oldDirPath; NewFullPath = newDirFullPath; DirId = dir.Id |})
-            |> ignore
         with
-        | :? SqliteException as ex when ex.SqliteErrorCode = 19 && ex.Message.Contains "FullPath" ->
+        | :? SqliteException as ex when ex.SqliteExtendedErrorCode = SqliteConstraintUnique ->
             raise (IOException("Directory or file already exists in the destination.", ex))
 
     // ── Copy helpers ──────────────────────────────────────────────────────

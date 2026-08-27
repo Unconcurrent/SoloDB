@@ -91,6 +91,15 @@ module FileStorageCore =
     /// <summary>
     /// Attempts to retrieve a directory from the database based on its full path.
     /// </summary>
+    /// Id-only directory lookup, for callers that resolve a directory in order to key further
+    /// work on it rather than to return it.
+    let internal tryGetDirIdAt (db: SqliteConnection) (path: string) : int64 voption =
+        match db.Query<int64>(
+                "SELECT Id FROM SoloDBDirectoryHeader WHERE FullPath = @Path LIMIT 1",
+                {| Path = path |}) |> Seq.tryHead with
+        | Some id -> ValueSome id
+        | None -> ValueNone
+
     let internal tryGetDir (db: SqliteConnection) (path: string) =
         tryGetDirectoriesWhere db "dh.FullPath = @Path" {|Path = path|} |> Seq.tryHead
 

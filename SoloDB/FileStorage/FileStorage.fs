@@ -130,13 +130,17 @@ module FileStorage =
 
         member this.Open file = openFile connection file
         member this.OpenAt path =
-            let file = this.GetAt path
-            openFile connection file
+            // Stream identity only: a metadata join here would be built and discarded.
+            use db = connection.Get()
+            match tryGetFileStreamIdentityAt db path with
+            | ValueSome f -> new FileStorageCoreStream.DbFileStream(connection, f.Id, f.DirectoryId, f.FullPath)
+            | ValueNone -> raise (FileNotFoundException("File not found.", path))
 
         member this.TryOpenAt path =
-            match this.TryGetAt path with
-            | None -> None
-            | Some file -> openFile connection file |> Some
+            use db = connection.Get()
+            match tryGetFileStreamIdentityAt db path with
+            | ValueSome f -> new FileStorageCoreStream.DbFileStream(connection, f.Id, f.DirectoryId, f.FullPath) |> Some
+            | ValueNone -> None
 
         member this.OpenOrCreateAt path = openOrCreateFile connection path
 
@@ -171,6 +175,15 @@ module FileStorage =
                 f tx file
             )
 
+        /// Id-only counterpart of WithFileAt, for operations keyed on the file id that would
+        /// otherwise pay for a metadata join and a discarded header.
+        member private _.WithFileIdAt(path: string, f: SqliteConnection -> int64 -> 'T) =
+            connection.WithTransaction(fun tx ->
+                match tryGetFileIdAt tx path with
+                | ValueSome fileId -> f tx fileId
+                | ValueNone -> raise (FileNotFoundException("File not found.", path))
+            )
+
         member private _.WithDirectoryAt(path: string, f: SqliteConnection -> SoloDBDirectoryHeader -> 'T) =
             connection.WithTransaction(fun tx ->
                 let dir = match tryGetDir tx path with | Some x -> x | None -> raise (DirectoryNotFoundException("Directory not found at: " + path))
@@ -178,13 +191,13 @@ module FileStorage =
             )
 
         member this.SetFileModificationDate(path, date) =
-            this.WithFileAt(path, fun tx file ->
-                setFileModifiedById tx file.Id date
+            this.WithFileIdAt(path, fun tx fileId ->
+                setFileModifiedById tx fileId date
             )
 
         member this.SetFileCreationDate(path, date) =
-            this.WithFileAt(path, fun tx file ->
-                setFileCreatedById tx file.Id date
+            this.WithFileIdAt(path, fun tx fileId ->
+                setFileCreatedById tx fileId date
             )
 
         member this.SetMetadata(file: SoloDBFileHeader, key, value) =
@@ -193,8 +206,8 @@ module FileStorage =
             )
 
         member this.SetMetadata(path: string, key, value) =
-            this.WithFileAt(path, fun tx file ->
-                setSoloDBFileMetadata tx file key value
+            this.WithFileIdAt(path, fun tx fileId ->
+                setSoloDBFileMetadataById tx fileId key value
             )
 
         member this.DeleteMetadata(file: SoloDBFileHeader, key) =
@@ -203,8 +216,8 @@ module FileStorage =
             )
 
         member this.DeleteMetadata(path: string, key) =
-            this.WithFileAt(path, fun tx file ->
-                deleteSoloDBFileMetadata tx file key
+            this.WithFileIdAt(path, fun tx fileId ->
+                deleteSoloDBFileMetadataById tx fileId key
             )
 
         member this.SetDirectoryMetadata(dir: SoloDBDirectoryHeader, key, value) =

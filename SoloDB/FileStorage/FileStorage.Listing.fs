@@ -9,13 +9,11 @@ open FileStorageCore
 open FileStorageHelpers
 
 module internal FileStorageListing =
-    let internal listFilesAtPaginated (db: SqliteConnection) (path: string) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
-        let dirPath = formatPath path
-        match tryGetDir db dirPath with
-        | None -> (ResizeArray<SoloDBFileHeader>() :> IList<SoloDBFileHeader>, 0L)
-        | Some dir ->
+    /// Fetches one page of files for an already-resolved directory id. Split out so a caller that
+    /// has already resolved the directory and counted its children does not repeat either.
+    let internal listFilesPageByDirId (db: SqliteConnection) (directoryId: int64) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
+        let dir = {| Id = directoryId |}
         let orderBy = getFileOrderBy "fh" sortBy sortDir
-        let count = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBFileHeader WHERE DirectoryId = @DirectoryId", {|DirectoryId = dir.Id|})
         let query =
             $"""
             WITH PagedFiles AS (
@@ -62,15 +60,20 @@ module internal FileStorageListing =
                 }
             )
             |> ResizeArray
-        (files :> IList<SoloDBFileHeader>, count)
+        files :> IList<SoloDBFileHeader>
 
-    let internal listDirectoriesAtPaginated (db: SqliteConnection) (path: string) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
-        let dirPath = formatPath path
-        match tryGetDir db dirPath with
-        | None -> (ResizeArray<SoloDBDirectoryHeader>() :> IList<SoloDBDirectoryHeader>, 0L)
-        | Some dir ->
+    /// Public paginated file listing: resolves the directory, counts, then pages.
+    let internal listFilesAtPaginated (db: SqliteConnection) (path: string) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
+        match tryGetDirIdAt db (formatPath path) with
+        | ValueNone -> (ResizeArray<SoloDBFileHeader>() :> IList<SoloDBFileHeader>, 0L)
+        | ValueSome dirId ->
+        let count = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBFileHeader WHERE DirectoryId = @DirectoryId", {|DirectoryId = dirId|})
+        (listFilesPageByDirId db dirId sortBy sortDir limit offset, count)
+
+    /// Fetches one page of directories for an already-resolved parent id.
+    let internal listDirectoriesPageByDirId (db: SqliteConnection) (directoryId: int64) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
+        let dir = {| Id = directoryId |}
         let orderBy = getDirectoryOrderBy "dh" sortBy sortDir
-        let count = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBDirectoryHeader WHERE ParentId = @ParentId", {|ParentId = dir.Id|})
         let query =
             $"""
             WITH PagedDirectories AS (
@@ -109,29 +112,35 @@ module internal FileStorageListing =
             {|ParentId = dir.Id; Limit = limit; Offset = offset|},
             splitOn = "Key"
         ) |> Seq.iter ignore
-        (directories :> IList<SoloDBDirectoryHeader>, count)
+        directories :> IList<SoloDBDirectoryHeader>
+
+    /// Public paginated directory listing: resolves the directory, counts, then pages.
+    let internal listDirectoriesAtPaginated (db: SqliteConnection) (path: string) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
+        match tryGetDirIdAt db (formatPath path) with
+        | ValueNone -> (ResizeArray<SoloDBDirectoryHeader>() :> IList<SoloDBDirectoryHeader>, 0L)
+        | ValueSome dirId ->
+        let count = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBDirectoryHeader WHERE ParentId = @ParentId", {|ParentId = dirId|})
+        (listDirectoriesPageByDirId db dirId sortBy sortDir limit offset, count)
 
     let internal listEntriesAtPaginated (db: SqliteConnection) (path: string) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
-        let dirPath = formatPath path
-        match tryGetDir db dirPath with
-        | None -> (ResizeArray<SoloDBEntryHeader>() :> IList<SoloDBEntryHeader>, 0L, 0L)
-        | Some dir ->
-        let dirCount = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBDirectoryHeader WHERE ParentId = @ParentId", {|ParentId = dir.Id|})
-        let fileCount = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBFileHeader WHERE DirectoryId = @DirectoryId", {|DirectoryId = dir.Id|})
+        // Resolve the directory once and count each side once. The page primitives take the
+        // resolved id, so a boundary-crossing page no longer repeats the lookup or the counts.
+        match tryGetDirIdAt db (formatPath path) with
+        | ValueNone -> (ResizeArray<SoloDBEntryHeader>() :> IList<SoloDBEntryHeader>, 0L, 0L)
+        | ValueSome dirId ->
+        let dirCount = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBDirectoryHeader WHERE ParentId = @ParentId", {|ParentId = dirId|})
+        let fileCount = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBFileHeader WHERE DirectoryId = @DirectoryId", {|DirectoryId = dirId|})
         let result = ResizeArray<SoloDBEntryHeader>(min limit (int (dirCount + fileCount)))
         if int64 offset < dirCount then
             let dirsToFetch = min limit (int dirCount - offset)
-            let dirs, _ = listDirectoriesAtPaginated db path sortBy sortDir dirsToFetch offset
-            for d in dirs do
+            for d in listDirectoriesPageByDirId db dirId sortBy sortDir dirsToFetch offset do
                 result.Add(SoloDBEntryHeader.Directory d)
             let remaining = limit - dirsToFetch
             if remaining > 0 then
-                let files, _ = listFilesAtPaginated db path sortBy sortDir remaining 0
-                for f in files do
+                for f in listFilesPageByDirId db dirId sortBy sortDir remaining 0 do
                     result.Add(SoloDBEntryHeader.File f)
         else
             let fileOffset = offset - int dirCount
-            let files, _ = listFilesAtPaginated db path sortBy sortDir limit fileOffset
-            for f in files do
+            for f in listFilesPageByDirId db dirId sortBy sortDir limit fileOffset do
                 result.Add(SoloDBEntryHeader.File f)
         (result :> IList<SoloDBEntryHeader>, dirCount, fileCount)
