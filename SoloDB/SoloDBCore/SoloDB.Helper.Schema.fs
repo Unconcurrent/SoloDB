@@ -59,7 +59,6 @@ module internal HelperSchema =
         | SqlExpr.CaseExpr(firstBranch, restBranches, elseExpr) ->
             let mapBranch (w, t) = stripAlias w, stripAlias t
             SqlExpr.CaseExpr(mapBranch firstBranch, restBranches |> List.map mapBranch, elseExpr |> Option.map stripAlias)
-        | SqlExpr.UpdateFragment(path, value) -> SqlExpr.UpdateFragment(stripAlias path, stripAlias value)
 
     let private tryGetTupleExprArgs (expr: SqlExpr) : SqlExpr list option =
         match expr with

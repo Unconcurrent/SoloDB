@@ -80,7 +80,6 @@ module internal QueryableLayerBuild =
             | SqlExpr.Coalesce(head, tail) -> SqlExpr.Coalesce(recur head, tail |> List.map recur)
             | SqlExpr.CaseExpr((c, r), rest, elseExpr) ->
                 SqlExpr.CaseExpr((recur c, recur r), rest |> List.map (fun (a, b) -> recur a, recur b), elseExpr |> Option.map recur)
-            | SqlExpr.UpdateFragment(path, value) -> SqlExpr.UpdateFragment(recur path, recur value)
 
         // A DBRef join edge is discovered while translating whichever layer references it, which
         // is not always the base layer: a projection over a derived source (for example the

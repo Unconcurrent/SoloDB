@@ -32,12 +32,21 @@ module internal QueryTranslator =
     /// Canonical predicate path: translates a filter expression to SqlExpr DU + variables.
     /// Used by write-path call sites that compose UPDATE/DELETE templates with DU-emitted WHERE.
     /// This is the canonical predicate producer; `translate` is a thin wrapper over this.
-    let translateWhereExpr (tableName: string) (expression: Expression) : SqlExpr * Dictionary<string, obj> =
+    /// Translate a predicate into the supplied parameter dictionary.
+    ///
+    /// A statement owns one dictionary, and parameter names are allocated in the order the SQL
+    /// reads. A predicate translated into a dictionary of its own would start numbering from the
+    /// beginning and could not then be merged without either colliding with the assignments or
+    /// renaming them, so the caller's dictionary is threaded through rather than combined after.
+    let translateWhereExprInto (tableName: string) (expression: Expression) (variables: Dictionary<string, obj>) : SqlExpr =
         ensureDbRefHandlersInitialized()
         let sb = StringBuilder()
-        let variables = Dictionary<string, obj>()
         let builder = QueryBuilder.New sb variables false tableName expression -1 ValueNone
-        let duExpr = visitDu expression builder
+        visitDu expression builder
+
+    let translateWhereExpr (tableName: string) (expression: Expression) : SqlExpr * Dictionary<string, obj> =
+        let variables = Dictionary<string, obj>()
+        let duExpr = translateWhereExprInto tableName expression variables
         duExpr, variables
 
     /// <returns>A tuple containing the generated SQL string and a dictionary of parameters.</returns>
@@ -75,19 +84,6 @@ module internal QueryTranslator =
     /// Translates an expression in "update" mode, generating SQL fragments for jsonb_set arguments.
     /// Routes through DU construction (visitDu with UpdateMode) and DU emission (SqlDuMinimalEmit).
     /// </summary>
-    let internal translateUpdateMode (tableName: string) (expression: Expression) (fullSQL: StringBuilder) (variableDict: Dictionary<string, obj>) =
-        ensureDbRefHandlersInitialized()
-        match QueryTranslatorVisitPost.tryTranslateUpdateManyRelationTransform expression with
-        | ValueSome _ ->
-            raise (NotSupportedException updateManyRelationUnsupportedMessage)
-        | ValueNone -> ()
-
-        let sbStart = fullSQL.Length
-        let builder = QueryBuilder.New fullSQL variableDict true tableName expression -1 ValueNone
-        let duExpr = visitDu expression builder
-        fullSQL.Length <- sbStart
-        SqlDuMinimalEmit.emitExpr builder duExpr
-
     /// Translate one update action expression into its ordered (path, value) assignments.
     ///
     /// This is the same visit the string corridor performs, stopping before emission so the
@@ -108,14 +104,12 @@ module internal QueryTranslator =
         // stays empty, so no caller's text can influence the result.
         let sink = StringBuilder()
         let builder = QueryBuilder.New sink variableDict true tableName expression -1 ValueNone
-        let duExpr = visitDu expression builder
+        visitDu expression builder |> ignore
 
-        let assignments = ResizeArray<SqlExpr * SqlExpr>()
-        let rec collect (node: SqlExpr) =
-            match node with
-            | SqlExpr.UpdateFragment(path, value) -> assignments.Add(path, value)
-            | other ->
-                raise (NotSupportedException(
-                    sprintf "Error: update expression did not translate to an assignment.\nReason: produced %A.\nFix: use a supported update operation such as Set, Append, Add, Insert, SetAt or RemoveAt." other))
-        collect duExpr
-        List.ofSeq assignments
+        if builder.UpdateAssignments.Count = 0 then
+            raise (NotSupportedException(
+                "Error: update expression produced no assignment.\n" +
+                "Reason: the expression is not a supported update operation.\n" +
+                "Fix: use Set, direct assignment, Append, Add, Insert, SetAt or RemoveAt."))
+
+        List.ofSeq builder.UpdateAssignments

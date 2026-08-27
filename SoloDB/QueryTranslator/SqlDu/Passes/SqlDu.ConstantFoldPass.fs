@@ -162,8 +162,6 @@ let rec private foldExpr (changed: bool ref) (expr: SqlExpr) : SqlExpr =
                     mapBranch firstBranch,
                     restBranches |> List.map mapBranch,
                     loopChildOpt elseExpr)
-            | UpdateFragment(pathExpr, valueExpr) ->
-                UpdateFragment(loopChild pathExpr, loopChild valueExpr)
         let folded = foldNode mappedNode
         let foldChanged = not (obj.ReferenceEquals(folded, mappedNode))
         if anyChildChanged || foldChanged then

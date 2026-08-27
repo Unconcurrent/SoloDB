@@ -66,9 +66,6 @@ module internal SqlExprCombinators =
                 match elseExpr with
                 | Some elseNode -> loop acc elseNode
                 | None -> acc
-            | UpdateFragment(pathExpr, valueExpr) ->
-                let acc = loop acc pathExpr
-                loop acc valueExpr
         loop state expr
     static member map (mapper: SqlExpr -> SqlExpr) (expr: SqlExpr) : SqlExpr =
         let rec loop (node: SqlExpr) : SqlExpr =
@@ -126,8 +123,6 @@ module internal SqlExprCombinators =
                         mapBranch firstBranch,
                         restBranches |> List.map mapBranch,
                         elseExpr |> Option.map loop)
-                | UpdateFragment(pathExpr, valueExpr) ->
-                    UpdateFragment(loop pathExpr, loop valueExpr)
             mapper mappedNode
         loop expr
     static member exists (predicate: SqlExpr -> bool) (expr: SqlExpr) : bool =
@@ -176,8 +171,6 @@ module internal SqlExprCombinators =
                 | CaseExpr(firstBranch, restBranches, elseExpr) ->
                     ((firstBranch :: restBranches) |> List.exists (fun (condExpr, resultExpr) -> loop condExpr || loop resultExpr))
                     || (elseExpr |> Option.map loop |> Option.defaultValue false)
-                | UpdateFragment(pathExpr, valueExpr) ->
-                    loop pathExpr || loop valueExpr
         loop expr
     static member tryMap (mapper: SqlExpr -> SqlExpr option) (expr: SqlExpr) : SqlExpr option =
         let rec loop (node: SqlExpr) : SqlExpr option =
@@ -335,10 +328,6 @@ module internal SqlExprCombinators =
                         (firstCond, firstResult),
                         newRest,
                         match newElseOpt, elseExpr with | Some e, _ -> Some e | None, original -> original), changed
-                | UpdateFragment(pathExpr, valueExpr) ->
-                    let pathOpt = loop pathExpr
-                    let valueOpt = loop valueExpr
-                    UpdateFragment(pathOpt |> Option.defaultValue pathExpr, valueOpt |> Option.defaultValue valueExpr), (pathOpt.IsSome || valueOpt.IsSome)
             match mapper rebuiltNode with
             | Some rewritten -> Some rewritten
             | None when childChanged -> Some rebuiltNode

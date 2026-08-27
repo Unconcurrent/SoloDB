@@ -65,7 +65,7 @@ let private emitAggregateKind (kind: AggregateKind) : string =
     | JsonGroupArray -> "jsonb_group_array"
 
 /// Emit a SqlExpr to SQL text with parameters.
-/// Exhaustive pattern match over all 21 SqlExpr cases (including typed UpdateFragment).
+/// Exhaustive pattern match over every SqlExpr case.
 /// The emitSubSelect parameter resolves the circular dependency between
 /// expression and select emission — EmitSelect passes itself here.
 let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: EmitContext) (expr: SqlExpr) : Emitted =
@@ -255,10 +255,3 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
             { Sql = sprintf "CASE %s END" branchSql
               Parameters = branchParams }
 
-    // Case 21: Update fragment — typed path/value pair for jsonb_set arguments
-    // Emits "path,value," format consumed by SoloDB.fs jsonb_set wrapper
-    | UpdateFragment(path, value) ->
-        let pathE = emitE ctx path
-        let valueE = emitE ctx value
-        { Sql = sprintf "%s,%s," pathE.Sql valueE.Sql
-          Parameters = Emitted.concatParameterSets [ pathE.Parameters; valueE.Parameters ] }

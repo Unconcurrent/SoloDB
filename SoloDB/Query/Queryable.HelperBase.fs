@@ -99,6 +99,7 @@ module internal QueryableHelperBase =
             // resolves no relation metadata, so it carries no metadata source.
             SourceContext = QueryContext.SingleSource("")
             ParamCounter = ref 0
+            UpdateAssignments = ResizeArray()
             DuHandlerResult = ref ValueNone
             OuterParameterAliases = Dictionary<ParameterExpression, string>()
             TranslationStepCounter = ref 0

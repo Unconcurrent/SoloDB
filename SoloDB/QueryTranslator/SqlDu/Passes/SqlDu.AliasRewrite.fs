@@ -59,8 +59,7 @@ let rec private rewriteJsonExtractAliasTarget (path: JsonPath) (innerExpr: SqlEx
     | Coalesce _
     | Exists _
     | ScalarSubquery _
-    | CaseExpr _
-    | UpdateFragment _ ->
+    | CaseExpr _ ->
         failwithf "Alias rewrite cannot compose JsonExtract path %A onto inner expression %A" path innerExpr
 
 let rewriteDerivedAliasExpr (policy: AliasRewritePolicy) (aliasMap: Map<string, SqlExpr>) (derivedAlias: string) (expr: SqlExpr) : SqlExpr =
@@ -106,7 +105,6 @@ let rewriteDerivedAliasExpr (policy: AliasRewritePolicy) (aliasMap: Map<string, 
             | InList _
             | Cast _
             | Coalesce _
-            | CaseExpr _
-            | UpdateFragment _ ->
+            | CaseExpr _ ->
                 node)
         expr

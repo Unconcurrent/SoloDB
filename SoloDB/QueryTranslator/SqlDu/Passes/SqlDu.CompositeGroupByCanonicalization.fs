@@ -165,9 +165,6 @@ let rec private isPureScalarComponent (scope: RowScope) (expr: SqlExpr) : bool =
         && (match elseOpt with
             | Some e -> isPureScalarComponent scope e
             | None -> true)
-    | UpdateFragment(path, value) ->
-        isPureScalarComponent scope path
-        && isPureScalarComponent scope value
 
 /// Decompose a `FunctionCall("json_object"|"jsonb_object", args)` argument list
 /// into (keys, values). P4: even arity >= 4; every even-indexed position is a

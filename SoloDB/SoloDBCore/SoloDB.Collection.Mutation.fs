@@ -705,20 +705,28 @@ type internal CollectionMutationOps<'T>() =
             )
         else
             use conn = getConnection()
+
+            // One dictionary for the statement, filled in the order the SQL reads it: every
+            // assignment in source order, then the predicate. The names are observable, so this
+            // order is part of the contract rather than an artefact of how the text was built.
             let variables = Dictionary<string, obj>()
-            let fullSQL = StringBuilder()
-            let inline append (txt: string) = ignore (fullSQL.Append txt)
 
-            append "UPDATE \""
-            append name
-            append "\" SET Value = jsonb_set(Value, "
+            let assignments =
+                [ for expression in jsonTransforms do
+                    yield! QueryTranslator.translateUpdateAssignments name expression variables ]
 
-            for expression in jsonTransforms do
-                QueryTranslator.translateUpdateMode name expression fullSQL variables
+            let setValue =
+                SqlExpr.FunctionCall("jsonb_set",
+                    SqlExpr.Column(None, "Value")
+                    :: [ for (path, value) in assignments do yield path; yield value ])
 
-            fullSQL.Remove(fullSQL.Length - 1, 1) |> ignore
+            let where = QueryTranslator.translateWhereExprInto name filter variables
 
-            append ")  WHERE "
-            QueryTranslator.translateQueryable name filter fullSQL variables
+            let statement =
+                UpdateStmt
+                    { TableName = name
+                      SetClauses = [ ("Value", setValue) ]
+                      Where = Some where }
 
-            conn.Execute(fullSQL.ToString(), variables)
+            StatementExecution.execute conn conn
+                (StatementExecution.policyFor statement) statement variables

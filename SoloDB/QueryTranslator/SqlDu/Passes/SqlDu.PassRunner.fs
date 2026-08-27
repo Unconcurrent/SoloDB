@@ -84,8 +84,6 @@ let rec private exprMetric (expr: SqlExpr) =
             match elseExpr with
             | Some elseNode -> addMetric acc (exprMetric elseNode)
             | None -> acc
-        | UpdateFragment(pathExpr, valueExpr) ->
-            addMetric (exprMetric pathExpr) (exprMetric valueExpr)
         | Column _
         | Literal _
         | Parameter _

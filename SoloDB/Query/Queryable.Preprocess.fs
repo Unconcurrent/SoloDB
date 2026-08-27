@@ -305,7 +305,6 @@ module internal QueryableHelperPreprocess =
                 mapBranch firstBranch,
                 restBranches |> List.map mapBranch,
                 elseExpr |> Option.map stripSourceAlias)
-        | SqlExpr.UpdateFragment(path, value) -> SqlExpr.UpdateFragment(stripSourceAlias path, stripSourceAlias value)
 
     and internal stripSourceAliasInTableSource (source: TableSource) : TableSource =
         match source with

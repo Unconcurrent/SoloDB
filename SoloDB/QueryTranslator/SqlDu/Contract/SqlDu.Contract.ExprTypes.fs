@@ -28,7 +28,6 @@ type internal SqlExpr =
     | Exists of SqlSelect
     | ScalarSubquery of SqlSelect
     | CaseExpr of firstBranch: (SqlExpr * SqlExpr) * restBranches: (SqlExpr * SqlExpr) list * elseExpr: SqlExpr option
-    | UpdateFragment of path: SqlExpr * value: SqlExpr
 and internal WindowSpec = {
     Kind: WindowFunctionKind
     Arguments: SqlExpr list

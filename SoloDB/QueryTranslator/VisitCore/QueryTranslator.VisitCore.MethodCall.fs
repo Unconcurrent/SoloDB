@@ -41,7 +41,8 @@ module internal QueryTranslatorVisitCoreMethodCall =
         | OfShape1 null null "Set" null (oldValue, newValue) when qb.UpdateMode ->
             let pathExpr = visitDu oldValue qb
             let valueExpr = visitDu newValue qb
-            SqlExpr.UpdateFragment(pathExpr, valueExpr)
+            qb.UpdateAssignments.Add(pathExpr, valueExpr)
+            SqlExpr.Literal(SqlLiteral.Null)
 
         | OfShape1 null null "Append" null (array, newValue)
         | OfShape1 null null "Add" null (array, newValue) when qb.UpdateMode ->
@@ -51,7 +52,8 @@ module internal QueryTranslatorVisitCoreMethodCall =
                 | SqlExpr.Literal(SqlLiteral.String path) -> SqlExpr.Literal(SqlLiteral.String $"{path}[#]")
                 | other -> other
             let valueExpr = visitDu newValue qb
-            SqlExpr.UpdateFragment(modifiedPath, valueExpr)
+            qb.UpdateAssignments.Add(modifiedPath, valueExpr)
+            SqlExpr.Literal(SqlLiteral.Null)
 
         | OfShape2 null null "SetAt" null null (array, indexExpr, newValue) when qb.UpdateMode ->
             let arrayPathExpr = visitDu array qb
@@ -61,7 +63,8 @@ module internal QueryTranslatorVisitCoreMethodCall =
                 | SqlExpr.Literal(SqlLiteral.String path) -> SqlExpr.Literal(SqlLiteral.String $"{path}[{indexVal}]")
                 | other -> other
             let valueExpr = visitDu newValue qb
-            SqlExpr.UpdateFragment(modifiedPath, valueExpr)
+            qb.UpdateAssignments.Add(modifiedPath, valueExpr)
+            SqlExpr.Literal(SqlLiteral.Null)
 
         | OfShape1 null null "RemoveAt" null (array, indexExpr) when qb.UpdateMode ->
             let arrayPathExpr = visitDu array qb
@@ -73,7 +76,8 @@ module internal QueryTranslatorVisitCoreMethodCall =
                     SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(alias, "Value"); arrayPathExpr])
                     SqlExpr.Literal(SqlLiteral.String $"$[{indexVal}]")
                 ])
-            SqlExpr.UpdateFragment(arrayPathExpr, valueExpr)
+            qb.UpdateAssignments.Add(arrayPathExpr, valueExpr)
+            SqlExpr.Literal(SqlLiteral.Null)
 
         | OfShape2 null null "Insert" null null (array, indexExpr, newValue) when qb.UpdateMode ->
             // Shift-insert into a JSON array via json_each rebuild. SQLite 3.49.1
@@ -167,7 +171,8 @@ module internal QueryTranslatorVisitCoreMethodCall =
                   Limit = None
                   Offset = None }
             let outerSel = { Ctes = []; Body = SingleSelect outerCore }
-            SqlExpr.UpdateFragment(arrayPathExpr, SqlExpr.ScalarSubquery outerSel)
+            qb.UpdateAssignments.Add(arrayPathExpr, SqlExpr.ScalarSubquery outerSel)
+            SqlExpr.Literal(SqlLiteral.Null)
         | OfShape1 null null "op_Dynamic" null (o, propExpr) ->
             visitPropertyDu o (propExpr |> unbox<ConstantExpression>).Value m qb
         | OfShape1 null null "Any" null (array, whereFuncExpr) ->
