@@ -106,7 +106,7 @@ module internal QueryableBuildQueryGroupJoinElements =
             match findElementCall projectionBody with
             | Some elementCall when not (Object.ReferenceEquals(projectionBody, elementCall :> Expression)) && not isProjected ->
                 // Member access on element result — rewrite projection against inner parameter
-                let projCtx = QueryContext.SingleSource(rt.InnerRootTable)
+                let projCtx = QueryContext.ChildOf(rt.InnerCtx, rt.InnerRootTable)
                 let projCtx = { projCtx with Joins = ResizeArray() }
                 let innerParam = rt.InnerKeySelector.Parameters.[0]
                 let rewrittenProjection = rt.ReplaceExpression (elementCall :> Expression) (innerParam :> Expression) projectionBody

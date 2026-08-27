@@ -76,7 +76,7 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                         addComplexFinal statements (fun ctx ->
                             let outerAlias = "o"
                             let innerAlias = "j"
-                            let innerCtx = QueryContext.SingleSource(innerRootTable)
+                            let innerCtx = QueryContext.ChildOf(sourceCtx, innerRootTable)
                             let outerKeyExpr =
                                 translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars (Some composite.OuterKeySelector.Parameters.[0]) composite.OuterKeySelector.Body
                             let innerKeyExpr =
@@ -220,7 +220,7 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                                 "Error: SelectMany result selector must have exactly 2 parameters (owner, target).\nFix: Use (o, t) => new { ... } pattern."))
                                         let outerParam = resultLambda.Parameters.[0]
                                         let innerParam = resultLambda.Parameters.[1]
-                                        let innerCtx = QueryContext.SingleSource(targetTable)
+                                        let innerCtx = QueryContext.ChildOf(sourceCtx, targetTable)
                                         let resultExpr =
                                             translateJoinResultSelectorExpression
                                                 sourceCtx

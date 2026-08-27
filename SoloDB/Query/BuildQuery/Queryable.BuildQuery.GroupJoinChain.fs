@@ -359,7 +359,7 @@ module internal QueryableBuildQueryGroupJoinChain =
                 | None -> rowsetSel
                 | Some (predLambda, isTakeWhile) ->
                     let whileAlias = nextAlias "gjtw"
-                    let whileCtx = QueryContext.SingleSource(rt.InnerRootTable)
+                    let whileCtx = QueryContext.ChildOf(rt.InnerCtx, rt.InnerRootTable)
                     let whileCtx = { whileCtx with Joins = ResizeArray() }
                     let predDu = translateExpr whileCtx whileAlias predLambda.Parameters.[0] predLambda.Body
                     let innerCore =
@@ -416,7 +416,7 @@ module internal QueryableBuildQueryGroupJoinChain =
             match desc.GroupByKey, desc.SelectProjection with
             | Some groupKeyLambda, _ ->
                 let gbAlias = nextAlias "gjgb"
-                let gbCtx = QueryContext.SingleSource(rt.InnerRootTable)
+                let gbCtx = QueryContext.ChildOf(rt.InnerCtx, rt.InnerRootTable)
                 let gbCtx = { gbCtx with Joins = ResizeArray() }
                 let keyExpr = translateExpr gbCtx gbAlias groupKeyLambda.Parameters.[0] groupKeyLambda.Body
                 let gbCore =
@@ -436,7 +436,7 @@ module internal QueryableBuildQueryGroupJoinChain =
                 { Ctes = []; Body = SingleSelect gbCore }
             | None, Some projLambda ->
                 let projAlias = nextAlias "gjp"
-                let projCtx = QueryContext.SingleSource(rt.InnerRootTable)
+                let projCtx = QueryContext.ChildOf(rt.InnerCtx, rt.InnerRootTable)
                 let projCtx = { projCtx with Joins = ResizeArray() }
                 let projExpr = translateExpr projCtx projAlias projLambda.Parameters.[0] projLambda.Body
                 let projCore =
@@ -502,7 +502,7 @@ module internal QueryableBuildQueryGroupJoinChain =
             let buildProjectedKeyedSel (rowsetSel: SqlSelect) (keyLambda: LambdaExpression) =
                 let valueSel = buildProjectedValueSel rowsetSel
                 let keyAlias = nextAlias "gjsk"
-                let keyCtx = QueryContext.SingleSource(rt.InnerRootTable)
+                let keyCtx = QueryContext.ChildOf(rt.InnerCtx, rt.InnerRootTable)
                 let keyCtx = { keyCtx with Joins = ResizeArray() }
                 let keyExpr =
                     if isIdentityLambda (keyLambda :> Expression) then
@@ -837,7 +837,7 @@ module internal QueryableBuildQueryGroupJoinChain =
                     |> List.choose (fun predExpr ->
                         match tryExtractLambdaExpression predExpr with
                         | ValueSome predLambda ->
-                            let predCtx = QueryContext.SingleSource(rt.InnerRootTable)
+                            let predCtx = QueryContext.ChildOf(rt.InnerCtx, rt.InnerRootTable)
                             let predCtx = { predCtx with Joins = ResizeArray() }
                             Some (rt.TranslateJoinExpr predCtx pbAlias rt.Vars (Some predLambda.Parameters.[0]) predLambda.Body)
                         | ValueNone -> None)
@@ -846,7 +846,7 @@ module internal QueryableBuildQueryGroupJoinChain =
                     |> List.choose (fun (keyExpr, dir) ->
                         match tryExtractLambdaExpression keyExpr with
                         | ValueSome keyLambda ->
-                            let keyCtx = QueryContext.SingleSource(rt.InnerRootTable)
+                            let keyCtx = QueryContext.ChildOf(rt.InnerCtx, rt.InnerRootTable)
                             let keyCtx = { keyCtx with Joins = ResizeArray() }
                             let keyDu = rt.TranslateJoinExpr keyCtx pbAlias rt.Vars (Some keyLambda.Parameters.[0]) keyLambda.Body
                             Some { Expr = keyDu; Direction = dir }
@@ -960,7 +960,7 @@ module internal QueryableBuildQueryGroupJoinChain =
     let buildAggregateOverChainQ (rt: GroupJoinRuntime) (desc: QueryDescriptor) (aggKind: AggregateKind) (selectorOpt: LambdaExpression option) (coalesceZero: bool) =
         let rowsetSel, isProjected = buildGroupChainRowsetQ rt desc
         let rowsetAlias = sprintf "gjg%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1)
-        let aggCtx = QueryContext.SingleSource(rt.InnerRootTable)
+        let aggCtx = QueryContext.ChildOf(rt.InnerCtx, rt.InnerRootTable)
         let aggregateType =
             match selectorOpt, desc.SelectProjection with
             | Some sel, _ -> Some sel.Body.Type
@@ -1028,7 +1028,7 @@ module internal QueryableBuildQueryGroupJoinChain =
                     "Error: GroupJoin chained predicate after Select is not supported.\n" +
                     "Fix: Move the predicate before Select, or remove the inner Select."))
             | Some pred ->
-                let predCtx = QueryContext.SingleSource(rt.InnerRootTable)
+                let predCtx = QueryContext.ChildOf(rt.InnerCtx, rt.InnerRootTable)
                 let predCtx = { predCtx with Joins = ResizeArray() }
                 let predExpr = rt.TranslateJoinExpr predCtx rowsetAlias rt.Vars (Some pred.Parameters.[0]) pred.Body
                 Some predExpr, materializeInnerRowJoins rt rowsetAlias predCtx.Joins

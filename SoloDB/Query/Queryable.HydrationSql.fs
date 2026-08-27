@@ -29,7 +29,6 @@ module internal HydrationSqlBuilder =
     let internal getRelationShape = HydrationSqlMetadata.getRelationShape
     let internal hasRelationProperties = HydrationSqlMetadata.hasRelationProperties
     let internal tableExists = HydrationSqlMetadata.tableExists
-    let internal preloadQueryContextMetadata = HydrationSqlMetadata.preloadQueryContextMetadata
 
     /// Build a hydrated Value expression by embedding correlated subqueries for DBRef properties.
     /// Each DBRef property that should be loaded gets a ScalarSubquery that returns
@@ -208,9 +207,13 @@ module internal HydrationSqlBuilder =
         (addLimit: bool)
         : string * bool * bool =
 
-        let ctx = { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }
-
+        // Shape is computed first so a type that cannot hydrate any relation never allocates a
+        // metadata source and never reaches the catalogs.
         let shape : RelationShapeInfo = getRelationShape ownerType
+        let ctx =
+            if shape.HasAny then
+                { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }
+            else QueryContext.SingleSource(tableName)
         let hasSingle = shape.HasSingle
         let hasMany = shape.HasMany
 
@@ -278,9 +281,13 @@ module internal HydrationSqlBuilder =
         (addLimit: bool)
         : string * bool =
 
-        let ctx = { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }
-
+        // Many-only builder: a type with no DBRefMany property cannot hydrate here, so it
+        // neither allocates a metadata source nor reaches the catalogs.
         let shape : RelationShapeInfo = getRelationShape ownerType
+        let ctx =
+            if shape.HasMany then
+                { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }
+            else QueryContext.SingleSource(tableName)
         let hasMany = shape.HasMany
 
         let mutable aliasCounter = 0
@@ -339,9 +346,13 @@ module internal HydrationSqlBuilder =
         (addLimit: bool)
         : string * bool =
 
-        let ctx = { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }
-
+        // Many-only builder: a type with no DBRefMany property cannot hydrate here, so it
+        // neither allocates a metadata source nor reaches the catalogs.
         let shape : RelationShapeInfo = getRelationShape ownerType
+        let ctx =
+            if shape.HasMany then
+                { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }
+            else QueryContext.SingleSource(tableName)
         let limitClause = if addLimit then " LIMIT 1" else ""
         let qTable = "\"" + tableName + "\""
 

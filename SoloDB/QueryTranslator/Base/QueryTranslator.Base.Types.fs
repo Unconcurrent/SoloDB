@@ -225,6 +225,9 @@ module internal QueryTranslatorBaseTypes =
             let sourceCtx =
                 match sourceContext with
                 | ValueSome ctx -> ctx
+                // No metadata source: this fallback is only reached when the caller supplies no
+                // source context at all. Every database-backed translation passes ValueSome,
+                // whose context already carries the translation's metadata authority.
                 | ValueNone -> QueryContext.SingleSource(tableName)
             {
                 StringBuilder = sb

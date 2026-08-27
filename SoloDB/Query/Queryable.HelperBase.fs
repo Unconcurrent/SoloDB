@@ -95,6 +95,8 @@ module internal QueryableHelperBase =
             InsideJsonObjectProjection = false
             Parameters = System.Collections.ObjectModel.ReadOnlyCollection(Array.empty)
             IdParameterIndex = -1
+            // Empty placeholder for a builder that is not translating against a table; it
+            // resolves no relation metadata, so it carries no metadata source.
             SourceContext = QueryContext.SingleSource("")
             ParamCounter = ref 0
             DuHandlerResult = ref ValueNone

@@ -141,7 +141,6 @@ module internal QueryableTranslationCore =
     }
 
     // Shared hydration SQL builders and metadata preloader are in HydrationSqlBuilder module.
-    let internal preloadQueryContextMetadata = HydrationSqlBuilder.preloadQueryContextMetadata
 
     // Shared hydration builders are in HydrationSqlBuilder module.
     // Inline wrappers needed because byref parameters can't be aliased as first-class values.
