@@ -67,10 +67,6 @@ module internal QueryTranslator =
         let builder = { QueryBuilder.New sb variables false tableName expression -1 (ValueSome sourceContext) with InPredicateContext = true }
         visitDu expression builder
 
-    /// <summary>
-    /// Translates an expression in "update" mode, generating SQL fragments for jsonb_set arguments.
-    /// Routes through DU construction (visitDu with UpdateMode) and DU emission (SqlDuMinimalEmit).
-    /// </summary>
     let private updateActionUnsupportedReason = "Error: unsupported update expression."
 
     let private updateActionUnsupportedFix =
@@ -130,7 +126,8 @@ module internal QueryTranslator =
                 sprintf "%s\nReason: the expression is %A, not an assignment.\n%s"
                     updateActionUnsupportedReason core.NodeType updateActionUnsupportedFix))
 
-    /// Translate one update action expression into its ordered (path, value) assignments.
+    /// Translate one update action expression in update mode into its ordered (path, value)
+    /// assignments. The result is structure, not SQL text.
     ///
     /// This is the same visit the string corridor performs, stopping before emission so the
     /// caller receives structure instead of text. Parameters are allocated into the supplied
