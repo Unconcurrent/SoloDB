@@ -209,8 +209,6 @@ let private statementMetric (stmt: SqlStatement) =
         match delete.Where with
         | Some whereExpr -> exprMetric whereExpr
         | None -> (0, 0, 0, 0)
-    | DdlStmt _ ->
-        (0, 0, 0, 0)
 
 /// Compute a structural fingerprint of a SqlStatement by emitting SQL and hashing.
 /// Uses the canonical product emitter for deterministic emission, then FNV-1a 64-bit hash.

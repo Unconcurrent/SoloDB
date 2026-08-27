@@ -41,14 +41,6 @@ module internal QueryTranslator =
         duExpr, variables
 
     /// <returns>A tuple containing the generated SQL string and a dictionary of parameters.</returns>
-    let translate (tableName: string) (expression: Expression) =
-        // Thin wrapper over translateWhereExpr: get DU, emit via MinimalEmit (product path).
-        let duExpr, variables = translateWhereExpr tableName expression
-        let sb = StringBuilder()
-        let builder = QueryBuilder.New sb variables false tableName expression -1 ValueNone
-        SqlDuMinimalEmit.emitExpr builder duExpr
-        sb.ToString(), variables
-
     /// Returns a SqlExpr DU node for an expression without emitting to any StringBuilder.
     /// Used by the Queryable DU construction path to build SqlSelect trees.
     /// Side effects: allocates parameters in the provided Variables dict; may populate sourceContext.Joins.

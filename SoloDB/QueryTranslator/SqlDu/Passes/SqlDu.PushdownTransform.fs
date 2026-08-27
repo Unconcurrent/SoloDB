@@ -220,4 +220,4 @@ let pushdownStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
             let changed = ref false
             let pushed = pushdownSelect changed sel
             struct(InsertStmt { ins with Source = InsertSelect pushed }, changed.Value)
-    | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)
+    | UpdateStmt _ | DeleteStmt _ -> struct(stmt, false)

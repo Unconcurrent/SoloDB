@@ -243,7 +243,6 @@ let private foldStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
     | DeleteStmt del ->
         let result = DeleteStmt { del with Where = del.Where |> Option.map (foldExpr changed) }
         struct(result, changed.Value)
-    | DdlStmt _ -> struct(stmt, false)
 
 /// The constant folding pass.
 let constantFold : Pass = {

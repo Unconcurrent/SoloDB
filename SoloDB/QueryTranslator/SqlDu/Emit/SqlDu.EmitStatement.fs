@@ -91,10 +91,6 @@ let emitDelete (ctx: EmitContext) (del: DeleteStatement) : Emitted =
 
     { Sql = sql; Parameters = allParams }
 
-/// Emit a DdlStatement to SQL.
-let emitDdl (_ctx: EmitContext) (ddl: DdlStatement) : Emitted =
-    { Sql = ddl.Sql; Parameters = Emitted.emptyParameters () }
-
 /// Emit any SqlStatement to SQL + parameters.
 let emitStatement (ctx: EmitContext) (stmt: SqlStatement) : Emitted =
     match stmt with
@@ -102,4 +98,3 @@ let emitStatement (ctx: EmitContext) (stmt: SqlStatement) : Emitted =
     | InsertStmt insert -> emitInsert ctx insert
     | UpdateStmt update -> emitUpdate ctx update
     | DeleteStmt delete -> emitDelete ctx delete
-    | DdlStmt ddl -> emitDdl ctx ddl

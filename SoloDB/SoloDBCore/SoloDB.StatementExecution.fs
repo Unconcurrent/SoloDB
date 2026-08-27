@@ -55,7 +55,6 @@ module internal StatementExecution =
             | DeleteStmt del ->
                 tables.Add(del.TableName)
                 del.Where |> Option.iter collectExpr
-            | DdlStmt _ -> ()
         and collectSelect (sel: SqlSelect) =
             for cte in sel.Ctes do collectSelect cte.Query
             match sel.Body with
@@ -130,7 +129,6 @@ module internal StatementExecution =
         | DeleteStmt del ->
             del.Where |> Option.iter inspect
             found
-        | DdlStmt _ -> false
 
     /// Choose the policy from the statement's own shape.
     let policyFor (stmt: SqlStatement) : OptimizationPolicy =

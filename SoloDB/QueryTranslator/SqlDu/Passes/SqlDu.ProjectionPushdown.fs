@@ -163,4 +163,4 @@ let pushdownProjectionStatement (stmt: SqlStatement) : struct(SqlStatement * boo
             let changed = ref false
             let pushed = pushdownProjectionSelect changed sel
             struct(InsertStmt { ins with Source = InsertSelect pushed }, changed.Value)
-    | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)
+    | UpdateStmt _ | DeleteStmt _ -> struct(stmt, false)

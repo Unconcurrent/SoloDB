@@ -382,6 +382,5 @@ let transform (stmt: SqlStatement) : struct(SqlStatement * bool) =
         struct(SelectStmt rewritten, changed.Value)
     | InsertStmt _
     | UpdateStmt _
-    | DeleteStmt _
-    | DdlStmt _ ->
+    | DeleteStmt _ ->
         struct(stmt, false)

@@ -211,7 +211,7 @@ let rewriteStatementWithModel (model: IndexModel) (stmt: SqlStatement) : struct(
             let changed = ref false
             let rewritten = rewriteSelectWithModel model changed sel
             struct(InsertStmt { ins with Source = InsertSelect rewritten }, changed.Value)
-    | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)
+    | UpdateStmt _ | DeleteStmt _ -> struct(stmt, false)
 
 /// Apply the JSONB rewrite policy to a SqlStatement (no index model — empty).
 let rewriteStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =

@@ -28,13 +28,8 @@ type internal DeleteStatement = {
     Where: SqlExpr option
 }
 
-type internal DdlStatement = {
-    Sql: string
-}
-
 type internal SqlStatement =
     | SelectStmt of SqlSelect
     | InsertStmt of InsertStatement
     | UpdateStmt of UpdateStatement
     | DeleteStmt of DeleteStatement
-    | DdlStmt of DdlStatement

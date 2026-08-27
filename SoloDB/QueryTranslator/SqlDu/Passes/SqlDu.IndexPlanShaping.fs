@@ -259,4 +259,4 @@ let shapeIndexStatement (model: IndexModel) (stmt: SqlStatement) : struct(SqlSta
             let changed = ref false
             let shaped = shapeIndexSelect model changed sel
             struct(InsertStmt { ins with Source = InsertSelect shaped }, changed.Value)
-    | UpdateStmt _ | DeleteStmt _ | DdlStmt _ -> struct(stmt, false)
+    | UpdateStmt _ | DeleteStmt _ -> struct(stmt, false)

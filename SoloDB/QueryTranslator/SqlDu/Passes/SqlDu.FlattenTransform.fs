@@ -202,4 +202,3 @@ let flattenStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
     | DeleteStmt del ->
         let flatWhere = del.Where |> Option.map (flattenExprDeep changed)
         struct(DeleteStmt { del with Where = flatWhere }, changed.Value)
-    | DdlStmt _ -> struct(stmt, false)
