@@ -105,8 +105,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
                       SetClauses = [ ("Value", setValue) ]
                       Where = Some where }
 
-            StatementExecution.execute connection connection
-                (StatementExecution.policyFor statement) statement variables
+            StatementExecution.execute connection statement variables
 
     /// <summary>Gets the event registration API for this collection.</summary>
     member val internal Events: ISoloDBCollectionEvents<'T> =

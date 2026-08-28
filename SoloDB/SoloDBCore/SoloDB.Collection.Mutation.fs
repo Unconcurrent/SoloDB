@@ -590,7 +590,7 @@ type internal CollectionMutationOps<'T>() =
                     // so it keeps doing so. Policy selection applies to the corridors being newly
                     // routed, where the emitted form is measured against a baseline first.
                     let executeSqlDu (stmt: SqlStatement) (vars: Dictionary<string, obj>) =
-                        StatementExecution.execute conn tx.Connection StatementExecution.IndexShapedPipeline stmt vars
+                        StatementExecution.execute conn stmt vars
                         |> ignore
 
 
@@ -728,5 +728,4 @@ type internal CollectionMutationOps<'T>() =
                       SetClauses = [ ("Value", setValue) ]
                       Where = Some where }
 
-            StatementExecution.execute conn conn
-                (StatementExecution.policyFor statement) statement variables
+            StatementExecution.execute conn statement variables

@@ -24,12 +24,10 @@ open SqlDu.Engine.C1.Spec
 
 /// Execute a relation mutation statement, returning the affected row count.
 ///
-/// The transaction's connection is passed as both executor authorities. These statements carry no
-/// subquery, so they select canonical emission and should read no index model at all; passing one
-/// connection for execution and a different one for inspection would encode a second connection
-/// assumption into a transactional relation write, which this path must not carry.
+/// One connection: the transaction's. The executor no longer takes a second connection for index-model
+/// inspection, so a transactional relation write cannot acquire a connection assumption it never wanted.
 let internal execute (connection: SqliteConnection) (stmt: SqlStatement) (variables: Dictionary<string, obj>) : int =
-    StatementExecution.execute connection connection (StatementExecution.policyFor stmt) stmt variables
+    StatementExecution.execute connection stmt variables
 
 /// A link row insert. The conflict resolution is the caller's, because plain, ignore and replace
 /// are three different persistence semantics on this path and collapsing them would silently change
