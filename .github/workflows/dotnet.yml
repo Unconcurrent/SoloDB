@@ -1,4 +1,4 @@
-name: Build and Upload
+name: Build
 
 on:
   push:
@@ -12,31 +12,38 @@ on:
       - '**.md'
       - '.gitignore'
 
+permissions:
+  contents: read
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+
 jobs:
   build:
     if: github.actor == 'Unconcurrent' || github.actor == 'sologub'
-    runs-on: ubuntu-latest # or self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
-    - uses: actions/checkout@v4
-    
+    - name: Checkout
+      uses: actions/checkout@main
+
     - name: Setup .NET
-      uses: actions/setup-dotnet@v4
+      uses: actions/setup-dotnet@main
       with:
-        dotnet-version: '9.0.x'
-        
-    - name: Cache NuGet packages
-      uses: actions/cache@v4
+        dotnet-version: latest
+        dotnet-quality: ga
+
+    - name: Restore
+      run: dotnet restore SoloDB/SoloDB.fsproj
+
+    - name: Build
+      run: dotnet build SoloDB/SoloDB.fsproj --configuration Release --no-restore
+
+    - name: Upload NuGet package
+      uses: actions/upload-artifact@main
       with:
-        path: ~/.nuget/packages
-        key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json', '**/*.fsproj') }}
-        restore-keys: |
-          ${{ runner.os }}-nuget-
-          
-    - name: Build and Restore
-      run: dotnet build SoloDB -c Release
-      
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-artifacts-${{ github.sha }}
-        path: ./SoloDB/bin/Release/*
+        name: solodb-nuget-package
+        path: SoloDB/bin/Release/*.nupkg
+        if-no-files-found: error
