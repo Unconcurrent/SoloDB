@@ -4,6 +4,7 @@ open System
 open System.Runtime.ExceptionServices
 open Microsoft.Data.Sqlite
 open SQLitePCL
+open SoloDatabase.SQLiteTools
 
 /// <summary>
 /// The single owner of transactional schema migration execution.
@@ -144,20 +145,6 @@ module internal SchemaMigration =
                     offset <- offset + consumed
 
     /// <summary>
-    /// Declares a connection unfit for reuse. In production this is a field set on the pooled
-    /// wrapper, which does not throw; the type says so rather than dressing a throwable callback up
-    /// as an abstraction.
-    ///
-    /// Marking alone is not enough to be safe, because if it does not take effect the wrapper still
-    /// looks reusable and the pool will probe it — raising a second exception over the failure that
-    /// made it unfit. So a marking that fails is followed by closing the underlying connection,
-    /// which makes reuse physically impossible and routes the pool to its dispose path instead of
-    /// its raising one.
-    /// </summary>
-    type internal Quarantine =
-        { MarkUnusable: unit -> unit }
-
-    /// <summary>
     /// Combines the step's own failure with every cleanup failure into one outcome.
     ///
     /// The rule this exists to keep: a cleanup failure never replaces the failure that caused it.
@@ -191,7 +178,12 @@ module internal SchemaMigration =
     /// Version verification is not performed here. The caller re-reads the version after this
     /// returns, so a verification failure is outside this scope entirely.
     /// </summary>
-    let internal run (connection: SqliteConnection) (quarantine: Quarantine) (plan: Plan) =
+    /// <remarks>
+    /// Takes the pooled connection itself rather than a callback. Declaring it unfit is a field set,
+    /// which cannot fail, so there is no recovery path to model and none is pretended.
+    /// </remarks>
+    let internal run (pooled: CachingDbConnection) (plan: Plan) =
+        let connection = pooled.Inner
         let handle =
             match connection.Handle with
             | null -> raise (InvalidOperationException $"Error: the connection for migration {plan.Label} exposes no handle.\nReason: schema migration requires a live connection.\nFix: open the connection before migrating.")
@@ -199,18 +191,9 @@ module internal SchemaMigration =
 
         // Quarantining is itself capable of failing, and swallowing that would put a connection the
         // owner could not mark back into service — recreating the masking defect from the other side.
-        let mutable quarantineFailure : string voption = ValueNone
-        let quarantineConnection () =
-            try quarantine.MarkUnusable ()
-            with quarantineError ->
-                // Marking did not take effect, so the wrapper still looks reusable. Close the
-                // underlying connection: reuse becomes impossible and the pool disposes it rather
-                // than probing it and raising over the report we are about to make.
-                let closed =
-                    try connection.Close(); "the connection was closed so it cannot be reused"
-                    with closeError -> $"and closing it also failed: {closeError.Message}"
-                quarantineFailure <-
-                    ValueSome $"the connection could not be quarantined: {quarantineError.Message}; {closed}"
+        // Declaring the connection unfit is a field set on the pooled wrapper. It cannot fail, so it
+        // is not modelled as something that might.
+        let quarantineConnection () = pooled.Unusable <- true
 
         // Setup and acquisition run before there is anything to restore, and either can fail. They
         // are classified here rather than escaping as an unclassified constructor failure that leaves
@@ -271,6 +254,6 @@ module internal SchemaMigration =
         let cleanupFailed = [ transactionCleanup; restorationCleanup ] |> List.exists (fun c -> c.IsSome)
         if cleanupFailed then quarantineConnection ()
 
-        match composeOutcome plan.Label primary [ transactionCleanup; restorationCleanup; quarantineFailure ] with
+        match composeOutcome plan.Label primary [ transactionCleanup; restorationCleanup ] with
         | ValueNone -> ()
         | ValueSome report -> report.Throw()
