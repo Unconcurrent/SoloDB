@@ -56,6 +56,10 @@ module internal SchemaMigration =
             Setup: string
             /// The body of the migration. May be empty when a step has nothing to do.
             Body: string
+            /// The schema version this step expects to find. Re-checked inside the exclusive
+            /// transaction, because another process may have applied this step between the caller's
+            /// read and this one taking the lock.
+            FromVersion: int
             /// The schema version this step establishes on success.
             TargetVersion: int
             /// Whether this step may re-parse historical double-quoted schema text.
@@ -189,8 +193,6 @@ module internal SchemaMigration =
             | null -> raise (InvalidOperationException $"Error: the connection for migration {plan.Label} exposes no handle.\nReason: schema migration requires a live connection.\nFix: open the connection before migrating.")
             | h -> h
 
-        // Quarantining is itself capable of failing, and swallowing that would put a connection the
-        // owner could not mark back into service — recreating the masking defect from the other side.
         // Declaring the connection unfit is a field set on the pooled wrapper. It cannot fail, so it
         // is not modelled as something that might.
         let quarantineConnection () = pooled.Unusable <- true
@@ -217,8 +219,19 @@ module internal SchemaMigration =
         if primary.IsNone then
          try
             executeStatements connection plan.Label "BEGIN EXCLUSIVE;"
-            executeStatements connection plan.Label plan.Body
-            executeStatements connection plan.Label $"PRAGMA user_version = {plan.TargetVersion};"
+
+            // The caller read the version before taking this lock, so another process may have
+            // applied this very step in between. Re-reading under the lock is what makes the step
+            // idempotent; without it the second process runs the step's statements against a schema
+            // that has already moved and fails on the first one.
+            let versionUnderLock =
+                use command = new SqliteCommand("PRAGMA user_version;", connection)
+                Convert.ToInt32(command.ExecuteScalar())
+
+            if versionUnderLock = plan.FromVersion then
+                executeStatements connection plan.Label plan.Body
+                executeStatements connection plan.Label $"PRAGMA user_version = {plan.TargetVersion};"
+
             executeStatements connection plan.Label "COMMIT TRANSACTION;"
          with ex ->
             primary <- ValueSome ex
