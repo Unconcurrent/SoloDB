@@ -578,17 +578,15 @@ type internal CollectionMutationOps<'T>() =
 
                         { Ctes = []; Body = SingleSelect core }, leafProj
 
-                    // Run a SqlDu statement through the canonical SqlDu pass pipeline
-                    // (PassPipeline.standardWithIndexModel) and execute the result.
-                    // The IndexModel is loaded for every base table referenced by the
-                    // statement (chain link tables + leaf target/link table) so chain
-                    // SELECT joins through link tables receive index-plan shaping.
-                    // Canonical statement execution lives in StatementExecution; the index model
-                    // is read from the relation transaction's connection, which is not the one the
-                    // statement executes on.
-                    // This corridor previously ran the pipeline for every statement it received,
-                    // so it keeps doing so. Policy selection applies to the corridors being newly
-                    // routed, where the emitted form is measured against a baseline first.
+                    // Emit and execute a SqlDu statement through the canonical executor.
+                    //
+                    // This corridor used to run the optimizer pipeline here, loading an index model
+                    // for every base table the statement referenced and reading it from the relation
+                    // transaction's connection rather than the executing one. That is all gone:
+                    // measured across the whole Release suite, the pipeline changed no statement
+                    // that reached this path, so it was machinery and a second connection with no
+                    // observable effect. See StatementExecution for the measurement and for what
+                    // reintroducing it would require.
                     let executeSqlDu (stmt: SqlStatement) (vars: Dictionary<string, obj>) =
                         StatementExecution.execute conn stmt vars
                         |> ignore
