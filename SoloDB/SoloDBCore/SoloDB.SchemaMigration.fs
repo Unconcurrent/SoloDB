@@ -41,6 +41,28 @@ module internal SchemaMigration =
             TargetVersion: int
         }
 
+    /// <summary>
+    /// Historical schema text used double-quoted string literals in CHECK constraints, which older
+    /// engines accepted through a long-standing fallback. Newer builds disable that fallback, and a
+    /// step that alters a table makes SQLite re-render the whole stored schema, re-parsing those
+    /// constraints. A database written years ago therefore cannot be migrated on a current engine
+    /// even though the migration itself is well formed.
+    ///
+    /// The bridge is connection-local and lasts exactly as long as one migration step: the DDL
+    /// tolerance is switched on to let historical text re-parse, and the previous value is restored
+    /// afterwards on every path. It is not switched on for data, and it is never left on, so newly
+    /// submitted DDL is judged by the engine's own rules the moment the step ends.
+    /// </summary>
+    let private configureDqsForDdl (handle: sqlite3) (value: int) =
+        let mutable current = 0
+        let resultCode = raw.sqlite3_db_config (handle, raw.SQLITE_DBCONFIG_DQS_DDL, value, &current)
+        if resultCode <> raw.SQLITE_OK then
+            raise (InvalidOperationException $"Error: the schema migration compatibility setting could not be applied.\nReason: sqlite3_db_config returned {resultCode}.\nFix: use a SQLite build that supports the DQS_DDL configuration.")
+        current
+
+    /// <summary>Reads the current DDL tolerance without changing it.</summary>
+    let private readDqsForDdl (handle: sqlite3) = configureDqsForDdl handle -1
+
     /// <summary>Is the connection free of an open transaction?</summary>
     let private inAutocommit (connection: SqliteConnection) =
         match connection.Handle with
@@ -71,8 +93,13 @@ module internal SchemaMigration =
                 let prepareResult = raw.sqlite3_prepare_v2 (handle, remaining, &statement, &tail)
 
                 if prepareResult <> raw.SQLITE_OK then
+                    // A statement that will not parse has no parser-defined end, so the excerpt is
+                    // bounded text from the point of failure. Without it the report would name the
+                    // step but not the SQL, which is the gap this owner exists to close.
+                    let excerptLength = min 200 (bytes.Length - offset)
+                    let excerpt = Text.Encoding.UTF8.GetString(bytes, offset, excerptLength).Trim()
                     let message = raw.sqlite3_errmsg(handle).utf8_to_string ()
-                    raise (SqliteException($"Error: migration {label} could not prepare a statement.\nReason: {message}\nFix: correct the migration SQL for this schema step.", prepareResult))
+                    raise (SqliteException($"Error: migration {label} could not prepare a statement.\nReason: {message}\nStatement: {excerpt}\nFix: correct the migration SQL for this schema step.", prepareResult))
 
                 let consumed = remaining.Length - tail.Length
                 if consumed <= 0 then
@@ -106,6 +133,16 @@ module internal SchemaMigration =
     let internal run (connection: SqliteConnection) (plan: Plan) =
         executeStatements connection plan.Label plan.Setup
 
+        let handle =
+            match connection.Handle with
+            | null -> raise (InvalidOperationException $"Error: the connection for migration {plan.Label} exposes no handle.\nReason: schema migration requires a live connection.\nFix: open the connection before migrating.")
+            | h -> h
+
+        // Preserved exactly, and restored below whatever happens: success, a failing statement, a
+        // failed rollback, or a failed verification afterwards.
+        let previousDqsForDdl = readDqsForDdl handle
+        configureDqsForDdl handle 1 |> ignore
+
         let mutable committed = false
         try
             try
@@ -124,3 +161,4 @@ module internal SchemaMigration =
         finally
             if not committed && not (inAutocommit connection) then
                 try executeStatements connection plan.Label "ROLLBACK;" with _ -> ()
+            configureDqsForDdl handle previousDqsForDdl |> ignore
