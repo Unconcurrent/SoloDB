@@ -54,14 +54,7 @@ module internal SQLiteToolsParams =
 
     /// Optional SQL trace callback for corpus capture and diagnostics.
     /// Set by test harnesses to intercept all SQL at the execution boundary.
-    /// Optional callback reporting a statement together with the connection that is executing it.
-    ///
-    /// The connection is part of the payload so an observer can tell whose SQL it is seeing. Without
-    /// it, a process-global callback can only be attributed to a logical scope through ambient
-    /// context, which is not something this codebase carries. Both call sites already hold the
-    /// connection, so this costs nothing to supply, and when nothing is installed the cost is the
-    /// same single option match it always was.
-    let mutable internal sqlTraceCallback: Action<SqliteConnection, string> voption = ValueNone
+    let mutable internal sqlTraceCallback: Action<string> voption = ValueNone
 
     /// Optional callback reporting a statement together with the parameters actually bound to it.
     ///
@@ -214,7 +207,7 @@ module internal SQLiteToolsParams =
     /// <param name="parameters">The parameters for the command.</param>
     /// <returns>A new IDbCommand.</returns>
     let internal createCommand (this: SqliteConnection) (sql: string) (parameters: obj) =
-        match sqlTraceCallback with ValueSome cb -> cb.Invoke(this, sql) | ValueNone -> ()
+        match sqlTraceCallback with ValueSome cb -> cb.Invoke(sql) | ValueNone -> ()
         let command = this.CreateCommand()
         command.CommandText <- sql
         processParameters addParameter command parameters
