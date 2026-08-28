@@ -65,22 +65,22 @@ module Connections =
                 try pooledConn.DisposeReal() with _ -> ()
             else
 
-            // Verify no stray transaction is active before returning to pool.
-            let probeOk =
-                try pooledConn.Execute("BEGIN; ROLLBACK;") |> ignore; true
-                with
-                | :? SqliteException as se when se.SqliteErrorCode = 1 && se.SqliteExtendedErrorCode = 1 ->
-                    ("Error: Connection returned to pool while a transaction is still active.\nReason: The transaction must be finished before returning the connection.\nFix: Commit or rollback the transaction before returning the connection.", se)
-                    |> InvalidOperationException |> raise
-                | _ ->
-                    // Connection is in unknown state (concurrent DDL schema churn, driver error, etc.).
-                    // Fail-safe: dispose instead of returning to pool.
-                    try pooledConn.DisposeReal() with _ -> ()
-                    false
+                // Verify no stray transaction is active before returning to pool.
+                let probeOk =
+                    try pooledConn.Execute("BEGIN; ROLLBACK;") |> ignore; true
+                    with
+                    | :? SqliteException as se when se.SqliteErrorCode = 1 && se.SqliteExtendedErrorCode = 1 ->
+                        ("Error: Connection returned to pool while a transaction is still active.\nReason: The transaction must be finished before returning the connection.\nFix: Commit or rollback the transaction before returning the connection.", se)
+                        |> InvalidOperationException |> raise
+                    | _ ->
+                        // Connection is in unknown state (concurrent DDL schema churn, driver error, etc.).
+                        // Fail-safe: dispose instead of returning to pool.
+                        try pooledConn.DisposeReal() with _ -> ()
+                        false
 
-            if probeOk then
-                pooledConn.ResetEventDispatchState()
-                pool.Push pooledConn
+                if probeOk then
+                    pooledConn.ResetEventDispatchState()
+                    pool.Push pooledConn
 
         /// <summary>
         /// Borrows a connection from the pool. If the pool is empty, a new connection is created.

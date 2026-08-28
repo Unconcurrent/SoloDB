@@ -144,6 +144,14 @@ module internal SchemaMigration =
                     offset <- offset + consumed
 
     /// <summary>
+    /// The owner able to declare a connection unfit for reuse. It is a concrete value rather than an
+    /// optional callback because every caller must have one: a migration that cannot clean up after
+    /// itself has to be able to say so, and there is no correct behaviour for "no owner".
+    /// </summary>
+    type internal Quarantine =
+        { MarkUnusable: unit -> unit }
+
+    /// <summary>
     /// Combines the step's own failure with every cleanup failure into one outcome.
     ///
     /// The rule this exists to keep: a cleanup failure never replaces the failure that caused it.
@@ -177,31 +185,46 @@ module internal SchemaMigration =
     /// Version verification is not performed here. The caller re-reads the version after this
     /// returns, so a verification failure is outside this scope entirely.
     /// </summary>
-    let internal run (connection: SqliteConnection) (quarantine: unit -> unit) (plan: Plan) =
-        executeStatements connection plan.Label plan.Setup
-
+    let internal run (connection: SqliteConnection) (quarantine: Quarantine) (plan: Plan) =
         let handle =
             match connection.Handle with
             | null -> raise (InvalidOperationException $"Error: the connection for migration {plan.Label} exposes no handle.\nReason: schema migration requires a live connection.\nFix: open the connection before migrating.")
             | h -> h
 
-        // Preserved exactly, and restored below whether the step succeeds or fails. A strict step
-        // never touches the setting at all, so it cannot silently widen what the engine accepts.
-        let previousDqsForDdl =
-            match plan.LegacyTextPolicy with
-            | Strict -> ValueNone
-            | TolerateHistoricalText ->
-                let previous = readDqsForDdl handle
-                configureDqsForDdl handle 1 |> ignore
-                ValueSome previous
+        // Quarantining is itself capable of failing, and swallowing that would put a connection the
+        // owner could not mark back into service — recreating the masking defect from the other side.
+        let mutable quarantineFailure : string voption = ValueNone
+        let quarantineConnection () =
+            try quarantine.MarkUnusable ()
+            with quarantineError ->
+                quarantineFailure <- ValueSome $"the connection could not be quarantined: {quarantineError.Message}"
 
+        // Setup and acquisition run before there is anything to restore, and either can fail. They
+        // are classified here rather than escaping as an unclassified constructor failure that leaves
+        // a borrowed connection nobody has judged.
+        let mutable previousDqsForDdl = ValueNone
         let mutable primary : exn voption = ValueNone
         try
+            executeStatements connection plan.Label plan.Setup
+            match plan.LegacyTextPolicy with
+            | Strict -> ()
+            | TolerateHistoricalText ->
+                // Read first, then enable: the read establishes what restoration must put back, so a
+                // failure to enable still has a known prior value.
+                let previous = readDqsForDdl handle
+                previousDqsForDdl <- ValueSome previous
+                configureDqsForDdl handle 1 |> ignore
+        with acquisitionError ->
+            primary <- ValueSome acquisitionError
+            quarantineConnection ()
+
+        if primary.IsNone then
+         try
             executeStatements connection plan.Label "BEGIN EXCLUSIVE;"
             executeStatements connection plan.Label plan.Body
             executeStatements connection plan.Label $"PRAGMA user_version = {plan.TargetVersion};"
             executeStatements connection plan.Label "COMMIT TRANSACTION;"
-        with ex ->
+         with ex ->
             primary <- ValueSome ex
 
         // Cleanup is part of the contract, so each cleanup failure is a result rather than something
@@ -233,9 +256,8 @@ module internal SchemaMigration =
         // about, so it is quarantined before this scope exits. A step that failed but rolled back
         // cleanly leaves a usable connection and is not quarantined.
         let cleanupFailed = [ transactionCleanup; restorationCleanup ] |> List.exists (fun c -> c.IsSome)
-        if cleanupFailed then
-            try quarantine () with _ -> ()
+        if cleanupFailed then quarantineConnection ()
 
-        match composeOutcome plan.Label primary [ transactionCleanup; restorationCleanup ] with
+        match composeOutcome plan.Label primary [ transactionCleanup; restorationCleanup; quarantineFailure ] with
         | ValueNone -> ()
         | ValueSome report -> report.Throw()
