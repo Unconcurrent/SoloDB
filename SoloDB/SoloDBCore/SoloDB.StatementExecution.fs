@@ -136,9 +136,11 @@ module internal StatementExecution =
 
     /// Emit a statement to SQL under the given policy, reporting it to the capture boundary.
     ///
-    /// <param name="indexModelConnection">Connection the index model is read from. On the
-    /// relation path this is the transaction's connection, which is not the one the statement
-    /// executes on, so the two are separate parameters rather than one assumption.</param>
+    /// <param name="indexModelConnection">Connection the index model is read from. It is a separate
+    /// parameter because the chain-executor corridor reads the model on a connection other than the
+    /// one it executes on. Callers for which the two are the same — relation mutations pass the
+    /// transaction's connection for both — simply supply it twice rather than inheriting an
+    /// assumption about which connection is which.</param>
     let emit (indexModelConnection: SqliteConnection) (policy: OptimizationPolicy) (stmt: SqlStatement) : string =
         let output =
             match policy with

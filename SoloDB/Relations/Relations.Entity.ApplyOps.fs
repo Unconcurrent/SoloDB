@@ -32,14 +32,14 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
                     $"Error: Unknown relation property path '{propertyPath}' for owner type '{tx.OwnerType.FullName}'.\nReason: The path does not match any relation on the type.\nFix: Use a valid relation property path."))
 
     let deleteSingleLink (descriptor: RelationDescriptor) =
-        tx.Connection.Execute(
-            $"DELETE FROM {quoteIdentifier descriptor.LinkTable} WHERE SourceId = @sourceId;",
-            {| sourceId = ownerId |}) |> ignore
+        let stmt, variables =
+            RelationMutationStatements.linkDeleteByOwner descriptor.LinkTable "SourceId" ownerId
+        RelationMutationStatements.execute tx.Connection stmt variables |> ignore
 
     let insertSingleLink (descriptor: RelationDescriptor) (targetId: int64) =
-        tx.Connection.Execute(
-            $"INSERT INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
-            {| sourceId = ownerId; targetId = targetId |}) |> ignore
+        let stmt, variables =
+            RelationMutationStatements.linkInsertPlain descriptor.LinkTable ownerId targetId
+        RelationMutationStatements.execute tx.Connection stmt variables |> ignore
 
     let applySingleSetAndSync (descriptor: RelationDescriptor) (targetId: int64) =
         deleteSingleLink descriptor
@@ -108,9 +108,9 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
                 if descriptor.OwnerUsesSourceColumn then ownerId, targetId
                 else targetId, ownerId
             let rowsAffected =
-                tx.Connection.Execute(
-                    $"INSERT OR IGNORE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
-                    {| sourceId = sourceId; targetId = targetIdValue |})
+                let stmt, variables =
+                    RelationMutationStatements.linkInsertIgnoringConflict descriptor.LinkTable sourceId targetIdValue
+                RelationMutationStatements.execute tx.Connection stmt variables
             ensureLinkWriteApplied tx descriptor.LinkTable sourceId targetIdValue "INSERT OR IGNORE" rowsAffected
 
         | RemoveDBRefMany(propertyPath, targetType, targetId) ->
@@ -122,10 +122,10 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
                 raise (InvalidOperationException(
                     $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             let ownerColumn, targetColumn = manyColumns descriptor
-            let sql = $"DELETE FROM {quoteIdentifier descriptor.LinkTable} WHERE {ownerColumn} = @ownerId AND {targetColumn} = @targetId;"
-            tx.Connection.Execute(
-                sql,
-                {| ownerId = ownerId; targetId = targetId |}) |> ignore
+            let stmt, variables =
+                RelationMutationStatements.linkDeleteByOwnerAndTarget
+                    descriptor.LinkTable ownerColumn ownerId targetColumn targetId
+            RelationMutationStatements.execute tx.Connection stmt variables |> ignore
 
         | ClearDBRefMany(propertyPath, targetType) ->
             let descriptor = resolveDescriptor propertyPath
@@ -136,7 +136,6 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
                 raise (InvalidOperationException(
                     $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             let ownerColumn, _ = manyColumns descriptor
-            let sql = $"DELETE FROM {quoteIdentifier descriptor.LinkTable} WHERE {ownerColumn} = @ownerId;"
-            tx.Connection.Execute(
-                sql,
-                {| ownerId = ownerId |}) |> ignore
+            let stmt, variables =
+                RelationMutationStatements.linkDeleteByOwner descriptor.LinkTable ownerColumn ownerId
+            RelationMutationStatements.execute tx.Connection stmt variables |> ignore

@@ -61,9 +61,9 @@ let rec internal cascadeInsertDeep
                 // Already-resolved reference — create link row, validate target exists.
                 ensureRelationSchema childTx descriptor
                 ensureTargetExists childTx descriptor.TargetTable refId
-                childTx.Connection.Execute(
-                    $"INSERT INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
-                    {| sourceId = insertedId; targetId = refId |}) |> ignore
+                let stmt, variables =
+                    RelationMutationStatements.linkInsertPlain descriptor.LinkTable insertedId refId
+                RelationMutationStatements.execute childTx.Connection stmt variables |> ignore
                 if shouldSyncDbRefJson descriptor then
                     updateDbRefJson childTx targetTable insertedId descriptor.PropertyPath refId
             else
@@ -76,9 +76,9 @@ let rec internal cascadeInsertDeep
                         (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(entity, dbRef)
                         ensureRelationSchema childTx descriptor
                         ensureTargetExists childTx descriptor.TargetTable entityId
-                        childTx.Connection.Execute(
-                            $"INSERT INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
-                            {| sourceId = insertedId; targetId = entityId |}) |> ignore
+                        let stmt, variables =
+                            RelationMutationStatements.linkInsertPlain descriptor.LinkTable insertedId entityId
+                        RelationMutationStatements.execute childTx.Connection stmt variables |> ignore
                         if shouldSyncDbRefJson descriptor then
                             updateDbRefJson childTx targetTable insertedId descriptor.PropertyPath entityId
                     else
@@ -95,9 +95,9 @@ let rec internal cascadeInsertDeep
                         let dbRef = createDbRefTo descriptor.Property.PropertyType childId
                         (RelationsAccessorCache.compiledPropSetter descriptor.Property).Invoke(entity, dbRef)
                         let rowsAffected =
-                            childTx.Connection.Execute(
-                                $"INSERT OR REPLACE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
-                                {| sourceId = insertedId; targetId = childId |})
+                            let stmt, variables =
+                                RelationMutationStatements.linkInsertReplacingConflict descriptor.LinkTable insertedId childId
+                            RelationMutationStatements.execute childTx.Connection stmt variables
                         ensureLinkWriteApplied childTx descriptor.LinkTable insertedId childId "INSERT OR REPLACE" rowsAffected
                         if shouldSyncDbRefJson descriptor then
                             updateDbRefJson childTx targetTable insertedId descriptor.PropertyPath childId
@@ -136,9 +136,9 @@ let rec internal cascadeInsertDeep
                                 if descriptor.OwnerUsesSourceColumn then insertedId, itemId
                                 else itemId, insertedId
                             let rowsAffected =
-                                childTx.Connection.Execute(
-                                    $"INSERT OR IGNORE INTO {quoteIdentifier descriptor.LinkTable}(SourceId, TargetId) VALUES(@sourceId, @targetId);",
-                                    {| sourceId = sourceId; targetId = targetId |})
+                                let stmt, variables =
+                                    RelationMutationStatements.linkInsertIgnoringConflict descriptor.LinkTable sourceId targetId
+                                RelationMutationStatements.execute childTx.Connection stmt variables
                             ensureLinkWriteApplied childTx descriptor.LinkTable sourceId targetId "INSERT OR IGNORE" rowsAffected
             | _ -> ()
 

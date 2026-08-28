@@ -110,6 +110,7 @@
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.PassPipeline.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Types.fs" />
     <Compile Include="QueryTranslator/SqlDu/Emit/SqlDu.MinimalEmit.fs" />
+    <Compile Include="SoloDBCore/SoloDB.StatementExecution.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Helpers.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.CastAggregate.fs" />
@@ -151,6 +152,7 @@
     <Compile Include="Events\SoloDBEvents.Context.fs" />
     <Compile Include="Events\SoloDBEvents.fs" />
 		    <Compile Include="Relations/Relations.AccessorCache.fs" />
+		    <Compile Include="Relations/Relations.MutationStatements.fs" />
 		    <Compile Include="Relations/Relations.Types.fs" />
 		    <Compile Include="Relations/Relations.SharedSql.fs" />
 		    <Compile Include="SoloDBCore/SoloDB.Helper.Schema.fs" />
@@ -205,7 +207,6 @@
     <Compile Include="SoloDBCore/SoloDB.Bootstrap.fs" />
     <Compile Include="SoloDBCore/SoloDB.QueryUtils.fs" />
     <Compile Include="SoloDBCore/SoloDB.RuntimeIndexModelCache.fs" />
-    <Compile Include="SoloDBCore/SoloDB.StatementExecution.fs" />
     <Compile Include="SoloDBCore/SoloDB.EventDbCache.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.Core.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.Insert.fs" />

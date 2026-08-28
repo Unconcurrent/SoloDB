@@ -15,6 +15,19 @@ open RelationsSchemaValidator
 open RelationsSchemaLinkTableDDL
 open SqlDu.Engine.C1.Spec
 
+/// Canonical collection names for a catalogue row.
+///
+/// The catalogue stores collection names as they were registered. Consumers quote them into
+/// statements and compare them against context names, so every consumer used to normalise for
+/// itself — and they did not agree: one delete branch normalised before quoting while its sibling
+/// branch passed the stored name straight through. Normalising once here makes the read boundary
+/// the single owner, so a row handed to any consumer already carries canonical names.
+let private canonicalizeMetadataRow (row: RelationMetadataRow) =
+    { row with
+        SourceCollection = formatName row.SourceCollection
+        TargetCollection = formatName row.TargetCollection
+        OwnerCollection = formatName row.OwnerCollection }
+
 let internal readMetadataByOwner (connection: SqliteConnection) (ownerTable: string) =
     connection.Query<RelationMetadataRow>(
         """
@@ -31,6 +44,7 @@ let internal readMetadataByOwner (connection: SqliteConnection) (ownerTable: str
 	WHERE OwnerCollection = @ownerCollection;
 	""",
         {| ownerCollection = ownerTable |})
+    |> Seq.map canonicalizeMetadataRow
     |> Seq.toArray
 
 let internal readMetadataByTarget (connection: SqliteConnection) (targetTable: string) =
@@ -49,6 +63,7 @@ let internal readMetadataByTarget (connection: SqliteConnection) (targetTable: s
 	WHERE TargetCollection = @targetCollection;
 	""",
         {| targetCollection = targetTable |})
+    |> Seq.map canonicalizeMetadataRow
     |> Seq.toArray
 
 let internal relationDescriptorByPath (tx: RelationTxContext) (ownerType: Type) =
@@ -203,11 +218,10 @@ let internal extractSoloIdOrFail (targetType: Type) (entity: obj) : obj =
         | _ -> v
 
 let internal updateDbRefJson (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) (propertyPath: string) (targetId: int64) =
-    let path = "$." + propertyPath
     let jsonText = if targetId = 0L then "null" else string targetId
-    tx.Connection.Execute(
-        $"UPDATE {quoteIdentifier ownerTable} SET Value = jsonb_set(Value, @path, jsonb(@jsonText)) WHERE Id = @ownerId;",
-        {| path = path; jsonText = jsonText; ownerId = ownerId |}) |> ignore
+    let stmt, variables =
+        RelationMutationStatements.ownerValueJsonSet ownerTable propertyPath jsonText ownerId
+    RelationMutationStatements.execute tx.Connection stmt variables |> ignore
 
 let internal shouldSyncDbRefJson (descriptor: RelationDescriptor) =
     isNull (descriptor.Property.GetCustomAttribute<IgnoreDataMemberAttribute>(true))

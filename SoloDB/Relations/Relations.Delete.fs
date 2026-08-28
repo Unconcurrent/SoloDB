@@ -64,7 +64,7 @@ let internal hasOutgoingRestrictLinkToGuardedEntity (deleteCtx: DeleteTraversalC
             let qLink = quoteIdentifier linkTable
             tx.Connection.Query<int64>($"SELECT {targetColumn} FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = entityId |})
             |> Seq.exists (fun targetId ->
-                let key = $"{formatName row.TargetCollection}|{targetId}"
+                let key = $"{row.TargetCollection}|{targetId}"
                 guard.Contains(key)))
 
 let rec internal applyOwnerDeletePoliciesCore (deleteCtx: DeleteTraversalContext) (tx: RelationTxContext) (ownerTable: string) (ownerId: int64) (deleteTargets: bool) (skipRestrict: bool) =
@@ -93,24 +93,27 @@ let rec internal applyOwnerDeletePoliciesCore (deleteCtx: DeleteTraversalContext
             | DeletePolicy.Restrict ->
                 if hasLinks then
                     if skipRestrict then
-                        tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
+                        let stmt, variables = RelationMutationStatements.linkDeleteByOwner linkTable ownerColumn ownerId
+                        RelationMutationStatements.execute tx.Connection stmt variables |> ignore
                         incrementRelationVersionForTable tx.Connection ownerTable ownerId
                     else
                         raise (InvalidOperationException(
                             $"Error: Cannot delete owner '{ownerTable}' Id={ownerId}.\nReason: Relation '{row.PropertyName}' uses OnOwnerDelete=Restrict and still has links.\nFix: Remove related links or change the delete policy before deleting."))
             | DeletePolicy.Unlink ->
                 if hasLinks then
-                    tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
+                    let stmt, variables = RelationMutationStatements.linkDeleteByOwner linkTable ownerColumn ownerId
+                    RelationMutationStatements.execute tx.Connection stmt variables |> ignore
                     incrementRelationVersionForTable tx.Connection ownerTable ownerId
             | DeletePolicy.Deletion ->
                 if hasLinks then
-                    tx.Connection.Execute($"DELETE FROM {qLink} WHERE {ownerColumn} = @ownerId;", {| ownerId = ownerId |}) |> ignore
+                    let stmt, variables = RelationMutationStatements.linkDeleteByOwner linkTable ownerColumn ownerId
+                    RelationMutationStatements.execute tx.Connection stmt variables |> ignore
                     incrementRelationVersionForTable tx.Connection ownerTable ownerId
                     if deleteTargets then
                         let distinctTargetIds = targetIds |> Seq.distinct |> Seq.toArray
                         for targetId in distinctTargetIds do
                             if globalRefCountCore tx row.TargetCollection targetId = 0L then
-                                let targetTable = formatName row.TargetCollection
+                                let targetTable = row.TargetCollection
                                 let targetKey = $"{targetTable}|{targetId}"
                                 if not (deleteCtx.GuardSet.Contains(targetKey)) &&
                                    not (hasOutgoingRestrictLinkToGuardedEntity deleteCtx tx targetTable targetId) then
@@ -155,7 +158,8 @@ and internal applyTargetDeletePoliciesCore (deleteCtx: DeleteTraversalContext) (
                         $"Error: Cannot delete '{targetTable}' Id={targetId}.\nReason: Relation '{row.OwnerCollection}.{row.PropertyName}' uses OnDelete=Restrict.\nFix: Remove related links or change the delete policy before deleting."))
 
                 | DeletePolicy.Unlink ->
-                    tx.Connection.Execute($"DELETE FROM {qLink} WHERE {targetColumn} = @targetId;", {| targetId = targetId |}) |> ignore
+                    let stmt, variables = RelationMutationStatements.linkDeleteByTarget linkTable targetColumn targetId
+                    RelationMutationStatements.execute tx.Connection stmt variables |> ignore
                     if relationKind = Single then
                         for ownerId in ownerIds do
                             updateDbRefJson tx row.OwnerCollection ownerId row.PropertyName 0L
@@ -163,7 +167,7 @@ and internal applyTargetDeletePoliciesCore (deleteCtx: DeleteTraversalContext) (
                         incrementRelationVersionForTable tx.Connection row.OwnerCollection ownerId
 
                 | DeletePolicy.Cascade ->
-                    let ownerTable = formatName row.OwnerCollection
+                    let ownerTable = row.OwnerCollection
                     let qOwner = quoteIdentifier ownerTable
                     for ownerId in ownerIds do
                         let ownerKey = $"{ownerTable}|{ownerId}"
