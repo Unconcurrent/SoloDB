@@ -129,13 +129,17 @@ module internal Bootstrap =
     /// <summary>
     /// The initial database schema SQL, applied when user_version = 0.
     /// </summary>
-    let [<Literal>] initialSchema = "
+    /// Connection settings that cannot be changed inside a transaction, so they are applied before
+    /// the schema transaction opens.
+    let [<Literal>] initialSchemaSetup = "
                 PRAGMA journal_mode=wal;
-                PRAGMA page_size=16384;
                 PRAGMA recursive_triggers = ON;
                 PRAGMA foreign_keys = on;
+                "
 
-                BEGIN EXCLUSIVE;
+    /// The schema body. Transaction control and the version assignment belong to the migration
+    /// owner, so they are not repeated here.
+    let [<Literal>] initialSchema = "
 
                 CREATE TABLE SoloDBCollections (Name TEXT NOT NULL) STRICT;
 
@@ -144,15 +148,15 @@ module internal Bootstrap =
                     Id INTEGER PRIMARY KEY,
                     Name TEXT NOT NULL
                         CHECK ((length(Name) != 0 OR ParentId IS NULL)
-                                AND (Name != \".\")
-                                AND (Name != \"..\")
-                                AND NOT Name GLOB \"*\\*\"
-                                AND NOT Name GLOB \"*/*\"),
+                                AND (Name != '.')
+                                AND (Name != '..')
+                                AND NOT Name GLOB '*\\*'
+                                AND NOT Name GLOB '*/*'),
                     FullPath TEXT NOT NULL
-                        CHECK (FullPath != \"\"
-                                AND NOT FullPath GLOB \"*/./*\"
-                                AND NOT FullPath GLOB \"*/../*\"
-                                AND NOT FullPath GLOB \"*\\*\"
+                        CHECK (FullPath != ''
+                                AND NOT FullPath GLOB '*/./*'
+                                AND NOT FullPath GLOB '*/../*'
+                                AND NOT FullPath GLOB '*\\*'
                                 -- Recursion limit check, see https://www.sqlite.org/limits.html
                                 AND (LENGTH(FullPath) - LENGTH(REPLACE(FullPath, '/', '')) <= 900)),
                     ParentId INTEGER,
@@ -167,16 +171,16 @@ module internal Bootstrap =
                     Id INTEGER PRIMARY KEY,
                     Name TEXT NOT NULL
                         CHECK (length(Name) != 0
-                                AND Name != \".\"
-                                AND Name != \"..\"
-                                AND NOT Name GLOB \"*\\*\"
-                                AND NOT Name GLOB \"*/*\"
+                                AND Name != '.'
+                                AND Name != '..'
+                                AND NOT Name GLOB '*\\*'
+                                AND NOT Name GLOB '*/*'
                                 ),
                     FullPath TEXT NOT NULL
-                        CHECK (FullPath != \"\"
-                                AND NOT FullPath GLOB \"*/./*\"
-                                AND NOT FullPath GLOB \"*/../*\"
-                                AND NOT FullPath GLOB \"*\\*\"),
+                        CHECK (FullPath != ''
+                                AND NOT FullPath GLOB '*/./*'
+                                AND NOT FullPath GLOB '*/../*'
+                                AND NOT FullPath GLOB '*\\*'),
                     DirectoryId INTEGER NOT NULL,
                     Created INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
                     Modified INTEGER NOT NULL DEFAULT (UNIXTIMESTAMP()),
@@ -282,8 +286,7 @@ module internal Bootstrap =
                     WHERE ParentId IS NULL AND Name = ''
                 );
 
-                PRAGMA user_version = 1;
-                COMMIT TRANSACTION;
+
                 "
 
     /// <summary>
@@ -320,31 +323,25 @@ module internal Bootstrap =
 
         // Schema creation: version 0 -> 1
         if dbSchemaVersion = 0 then
-            use command = new SqliteCommand(initialSchema, dbConnection.Inner)
-            // command.Prepare() // It does not work if the referenced tables are not created yet.
-            ignore (command.ExecuteNonQuery())
+            SchemaMigration.run dbConnection.Inner
+                { Label = "v0->v1"; Setup = initialSchemaSetup; Body = initialSchema; TargetVersion = 1 }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
             if dbSchemaVersion <> 1 then
                 raise (migrationVerificationError "v0->v1" 1 dbSchemaVersion)
 
         // Migration: version 1 -> 2
         if dbSchemaVersion = 1 then
-            use command = new SqliteCommand("
-                    BEGIN EXCLUSIVE;
-
+            SchemaMigration.run dbConnection.Inner
+                { Label = "v1->v2"
+                  Setup = ""
+                  Body = "
                     DROP INDEX SoloDBFileHashIndex;
 
                     -- The update will be handled inside filestream's code.
                     DROP TRIGGER Update_SoloDBFileHeader;
                     ALTER TABLE SoloDBFileHeader DROP COLUMN \"Hash\";
-
-                    PRAGMA user_version = 2;
-                    PRAGMA foreign_keys = on;
-
-                    COMMIT TRANSACTION;
-                ", dbConnection.Inner)
-            command.Prepare()
-            ignore (command.ExecuteNonQuery())
+                  "
+                  TargetVersion = 2 }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
             if dbSchemaVersion <> 2 then
                 raise (migrationVerificationError "v1->v2" 2 dbSchemaVersion)
@@ -357,17 +354,8 @@ module internal Bootstrap =
                     $"DROP TRIGGER IF EXISTS \"SoloDB_Update_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Insert_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Delete_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Updated_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Inserted_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Deleted_{name}\";\n{Helper.getSQLForTriggersForTable name}")
                 |> String.concat "\n"
 
-            use command = new SqliteCommand($"
-                    BEGIN EXCLUSIVE;
-
-                    {triggerSql}
-
-                    PRAGMA user_version = 3;
-
-                    COMMIT TRANSACTION;
-                ", dbConnection.Inner)
-            command.Prepare()
-            ignore (command.ExecuteNonQuery())
+            SchemaMigration.run dbConnection.Inner
+                { Label = "v2->v3"; Setup = ""; Body = triggerSql; TargetVersion = 3 }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
             if dbSchemaVersion <> 3 then
                 raise (migrationVerificationError "v2->v3" 3 dbSchemaVersion)
@@ -392,18 +380,15 @@ module internal Bootstrap =
                     else Some ($"ALTER TABLE \"{normalized}\" ADD COLUMN Metadata JSONB NOT NULL DEFAULT '{{}}';"))
                 |> String.concat "\n"
 
-            use command = new SqliteCommand($"
-                    BEGIN EXCLUSIVE;
-
+            SchemaMigration.run dbConnection.Inner
+                { Label = "v3->v4"
+                  Setup = ""
+                  Body = $"
                     {RelationsSharedSql.createTypeCollectionMapTableSql}
 
                     {addMetadataColumnSql}
-
-                    PRAGMA user_version = 4;
-                    COMMIT TRANSACTION;
-                ", dbConnection.Inner)
-            // command.Prepare() // Cannot Prepare when tables are created in the same command batch.
-            ignore (command.ExecuteNonQuery())
+                  "
+                  TargetVersion = 4 }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
             if dbSchemaVersion <> 4 then
                 raise (migrationVerificationError "v3->v4" 4 dbSchemaVersion)
@@ -411,9 +396,10 @@ module internal Bootstrap =
         // Migration: version 4 -> 5
         // v5 enforces unique SoloDBCollections.Name for deterministic metadata behavior.
         if dbSchemaVersion = 4 then
-            use command = new SqliteCommand("
-                    BEGIN EXCLUSIVE;
-
+            SchemaMigration.run dbConnection.Inner
+                { Label = "v4->v5"
+                  Setup = ""
+                  Body = "
                     DELETE FROM SoloDBCollections
                     WHERE rowid NOT IN (
                         SELECT MIN(rowid) FROM SoloDBCollections GROUP BY Name
@@ -421,12 +407,8 @@ module internal Bootstrap =
 
                     DROP INDEX IF EXISTS SoloDBCollectionsNameIndex;
                     CREATE UNIQUE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
-
-                    PRAGMA user_version = 5;
-                    COMMIT TRANSACTION;
-                ", dbConnection.Inner)
-            command.Prepare()
-            ignore (command.ExecuteNonQuery())
+                  "
+                  TargetVersion = 5 }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
             if dbSchemaVersion <> 5 then
                 raise (migrationVerificationError "v4->v5" 5 dbSchemaVersion)

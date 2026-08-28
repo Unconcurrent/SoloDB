@@ -201,6 +201,7 @@
 		    <Compile Include="Query/Queryable.Provider.fs" />
 	    <Compile Include="SoloDBCore/SoloDB.Location.fs" />
     <Compile Include="SoloDBCore/SoloDB.ToCollectionData.fs" />
+    <Compile Include="SoloDBCore/SoloDB.SchemaMigration.fs" />
     <Compile Include="SoloDBCore/SoloDB.Bootstrap.fs" />
     <Compile Include="SoloDBCore/SoloDB.QueryUtils.fs" />
     <Compile Include="SoloDBCore/SoloDB.RuntimeIndexModelCache.fs" />
@@ -243,6 +244,11 @@
     <PackageReference Include="Portable.System.DateTimeOnly" Version="8.0.1" />
     <PackageReference Include="Snappier" Version="1.3.1" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.11" />
+    <!-- The native library carries the engine, and 2.1.11 ships SQLite 3.49.1, which predates the
+         3.50.2 fix for CVE-2025-6965. Only the native package is advanced; the managed components
+         stay on 2.1.11 because measurement showed the incompatibility was entirely in the engine and
+         nothing required moving them. -->
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" />
   </ItemGroup>
 
   <ItemGroup>
