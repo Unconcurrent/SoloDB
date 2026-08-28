@@ -1,6 +1,7 @@
 namespace SoloDatabase
 
 open System
+open System.Runtime.ExceptionServices
 open Microsoft.Data.Sqlite
 open SQLitePCL
 
@@ -145,9 +146,15 @@ module internal SchemaMigration =
     /// <summary>
     /// Runs one migration step inside an exclusive transaction and establishes its version.
     ///
-    /// On any failure the transaction is rolled back and the original error is raised. The
-    /// connection never leaves this function with a transaction still open, on any path, so a
-    /// failed migration cannot be mistaken later for an unrelated pooling fault.
+    /// On failure the transaction is rolled back and the original error is raised. Cleanup is fail
+    /// closed: if the rollback itself fails, or the connection is still inside a transaction
+    /// afterwards, that is reported rather than swallowed, with the original failure carried as the
+    /// inner cause. A connection must never return to the pool holding a transaction, and this
+    /// function will not let one leave quietly.
+    ///
+    /// Version verification is not performed here. The caller re-reads the version after this
+    /// returns, so a verification failure happens outside this scope and cannot be part of what this
+    /// restores.
     /// </summary>
     let internal run (connection: SqliteConnection) (plan: Plan) =
         executeStatements connection plan.Label plan.Setup
@@ -168,24 +175,37 @@ module internal SchemaMigration =
                 configureDqsForDdl handle 1 |> ignore
                 ValueSome previous
 
-        let mutable committed = false
+        let mutable primary : exn voption = ValueNone
         try
-            try
-                executeStatements connection plan.Label "BEGIN EXCLUSIVE;"
-                executeStatements connection plan.Label plan.Body
-                executeStatements connection plan.Label $"PRAGMA user_version = {plan.TargetVersion};"
-                executeStatements connection plan.Label "COMMIT TRANSACTION;"
-                committed <- true
-            with _ ->
-                // Roll back before the exception leaves, so the failure is observed as a failed
-                // migration rather than as a later symptom on a connection nobody expected to be
-                // inside a transaction.
-                if not (inAutocommit connection) then
-                    try executeStatements connection plan.Label "ROLLBACK;" with _ -> ()
-                reraise ()
-        finally
-            if not committed && not (inAutocommit connection) then
-                try executeStatements connection plan.Label "ROLLBACK;" with _ -> ()
-            match previousDqsForDdl with
-            | ValueSome previous -> configureDqsForDdl handle previous |> ignore
-            | ValueNone -> ()
+            executeStatements connection plan.Label "BEGIN EXCLUSIVE;"
+            executeStatements connection plan.Label plan.Body
+            executeStatements connection plan.Label $"PRAGMA user_version = {plan.TargetVersion};"
+            executeStatements connection plan.Label "COMMIT TRANSACTION;"
+        with ex ->
+            primary <- ValueSome ex
+
+        // Cleanup is part of the contract, so its own failure is a result, not something to discard.
+        let cleanupFailure =
+            if inAutocommit connection then ValueNone
+            else
+                try
+                    executeStatements connection plan.Label "ROLLBACK;"
+                    if inAutocommit connection then ValueNone
+                    else ValueSome "the connection is still inside a transaction after rolling back"
+                with rollbackError ->
+                    ValueSome $"the rollback itself failed: {rollbackError.Message}"
+
+        match previousDqsForDdl with
+        | ValueSome previous -> configureDqsForDdl handle previous |> ignore
+        | ValueNone -> ()
+
+        match primary, cleanupFailure with
+        | ValueNone, ValueNone -> ()
+        | ValueSome failure, ValueNone -> ExceptionDispatchInfo.Capture(failure).Throw()
+        | ValueNone, ValueSome cleanup ->
+            raise (InvalidOperationException
+                $"Error: migration {plan.Label} left the connection unusable.\nReason: {cleanup}.\nFix: do not return this connection to the pool; investigate the migration step.")
+        | ValueSome failure, ValueSome cleanup ->
+            raise (InvalidOperationException(
+                $"Error: migration {plan.Label} failed and could not be cleaned up.\nReason: {failure.Message}\nCleanup: {cleanup}.\nFix: do not return this connection to the pool; investigate the migration step.",
+                failure))
