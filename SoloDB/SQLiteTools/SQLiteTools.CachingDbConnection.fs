@@ -100,7 +100,7 @@ module SQLiteTools =
             item.InUse := true
 
             processParameters setOrAddParameter item.Command parameters
-            match sqlTraceCallback with ValueSome cb -> cb.Invoke(sql) | ValueNone -> ()
+            match sqlTraceCallback with ValueSome cb -> cb.Invoke(this, sql) | ValueNone -> ()
             // Reported after binding, so a caller can see what a cached statement actually ran with.
             match sqlBoundTraceCallback with
             | ValueSome cb ->
