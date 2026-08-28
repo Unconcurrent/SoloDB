@@ -106,9 +106,7 @@ module internal QueryableHelperBase =
             InPredicateContext = false
         }
         let passes = PassPipeline.standardWithIndexModel indexModel
-        let firstRound = PassRunner.runPipeline passes (SelectStmt sel)
-        let pipelineResult = PassRunner.runPipelineToFixedPoint passes firstRound
-        match pipelineResult.Output with
+        match PassRunner.optimize passes (SelectStmt sel) with
         | SelectStmt outSel -> SqlDuMinimalEmit.emitSelect qb outSel
         | _ -> failwith "internal invariant violation: expected SelectStmt from optimizer pipeline"
 

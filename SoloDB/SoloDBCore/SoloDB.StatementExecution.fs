@@ -149,8 +149,7 @@ module internal StatementExecution =
                 let tables = discoverTables stmt
                 let indexModel = SoloDatabase.IndexModel.loadModelForTables indexModelConnection (tables :> seq<string>)
                 let passes = PassPipeline.standardWithIndexModel indexModel
-                let firstRound = PassRunner.runPipeline passes stmt
-                (PassRunner.runPipelineToFixedPoint passes firstRound).Output
+                PassRunner.optimize passes stmt
         let emitted = EmitStatement.emitStatement (EmitContext(InlineLiterals = true)) output
         SqlCapture.OnSqlEmitted |> Option.iter (fun cb -> cb emitted.Sql)
         emitted.Sql

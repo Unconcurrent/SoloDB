@@ -208,43 +208,31 @@ let private statementMetric (stmt: SqlStatement) =
         | Some whereExpr -> exprMetric whereExpr
         | None -> (0, 0, 0, 0)
 
-/// Compute a structural fingerprint of a SqlStatement by emitting SQL and hashing.
-/// Uses the canonical product emitter for deterministic emission, then FNV-1a 64-bit hash.
-let fingerprint (stmt: SqlStatement) : string =
-    let emitted = EmitStatement.emitStatement (EmitContext(InlineLiterals = true)) stmt
-    let mutable h = 14695981039346656037UL
-    for c in emitted.Sql do
-        h <- (h ^^^ uint64 c) * 1099511628211UL
-    sprintf "%016X" h
-
-/// Run a single pass, producing an audit row and the output statement.
-/// Uses explicit changed flag from the pass — no SQL emission for change detection.
-let runPass (pass: Pass) (input: SqlStatement) : PassAuditRow * SqlStatement =
-    let struct(output, changed) = pass.Transform input
-    let audit = {
-        PassName = pass.Name
-        InputFingerprint = ""
-        OutputFingerprint = ""
-        Changed = changed
-    }
-    (audit, output)
-
-/// Run an ordered list of passes, returning the pipeline result with full audit trail.
-let runPipeline (passes: Pass list) (input: SqlStatement) : PipelineResult =
+/// Apply every pass once, reporting the resulting statement and whether any pass changed it.
+///
+/// This is the production round. It carries no collector: no audit row, no list, no observer, no
+/// callback and no diagnostic branch is created or consulted per pass, and nothing here emits SQL.
+/// The only state is the current statement and one boolean, so the cost of a round is the passes
+/// themselves.
+let private applyPassesOnce (passes: Pass list) (input: SqlStatement) : struct(SqlStatement * bool) =
     let mutable current = input
-    let mutable trail = []
+    let mutable anyChanged = false
     for pass in passes do
-        let (audit, output) = runPass pass current
-        trail <- trail @ [audit]
+        let struct(output, changed) = pass.Transform current
+        if changed then anyChanged <- true
         current <- output
-    { Input = input; Output = current; AuditTrail = trail }
+    struct(current, anyChanged)
 
-/// Continue optimization rounds to a deterministic fixed point.
-/// A round is accepted only if at least one pass made a change,
-/// the metric is strictly lower, and the output verifies.
-let runPipelineToFixedPoint (passes: Pass list) (seed: PipelineResult) : PipelineResult =
-    let mutable current = seed.Output
-    let mutable trail = seed.AuditTrail
+/// Optimize a statement: one unconditional round, then accepted rounds to a fixed point.
+///
+/// The first round is applied without the acceptance test, which is what the pipeline has always
+/// done — the seed round was produced by a plain pipeline run and adopted as the starting point.
+/// Every later round is accepted only when some pass changed something, the metric is strictly
+/// lower, and the result verifies; the first round that fails any of those stops the loop, and the
+/// iteration ceiling is unchanged.
+let optimize (passes: Pass list) (input: SqlStatement) : SqlStatement =
+    let struct(seeded, _) = applyPassesOnce passes input
+    let mutable current = seeded
     let mutable continueRounds = true
     let mutable iterationCount = 0
     let maxIterations = 10
@@ -252,22 +240,34 @@ let runPipelineToFixedPoint (passes: Pass list) (seed: PipelineResult) : Pipelin
     while continueRounds && iterationCount < maxIterations do
         iterationCount <- iterationCount + 1
         let currentMetric = statementMetric current
-
-        let round = runPipeline passes current
-        let candidate = round.Output
-        let anyChanged = round.AuditTrail |> List.exists (fun a -> a.Changed)
+        let struct(candidate, anyChanged) = applyPassesOnce passes current
 
         if anyChanged then
             let candidateMetric = statementMetric candidate
-            let acceptCandidate =
-                metricIsLower candidateMetric currentMetric
-                && verifyStatement candidate
-            if acceptCandidate then
+            if metricIsLower candidateMetric currentMetric && verifyStatement candidate then
                 current <- candidate
-                trail <- trail @ round.AuditTrail
             else
                 continueRounds <- false
         else
             continueRounds <- false
 
-    { Input = seed.Input; Output = current; AuditTrail = trail }
+    current
+
+/// Run a single pass, producing an audit row and the output statement. Diagnostics only.
+let runPass (pass: Pass) (input: SqlStatement) : PassAuditRow * SqlStatement =
+    let struct(output, changed) = pass.Transform input
+    ({ PassName = pass.Name; Changed = changed }, output)
+
+/// Run an ordered list of passes once, recording an audit row per pass. Diagnostics only.
+///
+/// Rows are collected into a growable buffer and converted once, so collection is linear rather
+/// than the quadratic list append this replaced. This entry is never reached from a product
+/// translation.
+let runPipeline (passes: Pass list) (input: SqlStatement) : PipelineResult =
+    let rows = ResizeArray<PassAuditRow>(List.length passes)
+    let mutable current = input
+    for pass in passes do
+        let struct(output, changed) = pass.Transform current
+        rows.Add { PassName = pass.Name; Changed = changed }
+        current <- output
+    { Output = current; AuditTrail = List.ofSeq rows }
