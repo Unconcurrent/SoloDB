@@ -20,8 +20,10 @@ SQL of its own through the exposed connection: `WHERE Name = "Ion"` was previous
 now an error, because `"Ion"` names a column. Such SQL needs single quotes for string literals —
 `WHERE Name = 'Ion'` — which is what standard SQL requires in any case.
 
-Existing databases are unaffected by this on their own: stored schema written under the old
-behaviour continues to load, and a database created by an earlier release migrates normally.
+This is about database files, not about applications. A database file written by an earlier release
+is unaffected: stored schema written under the old behaviour continues to load, and such a database
+migrates normally. An existing *application* can still be affected, by its own SQL, exactly as
+described above.
 
 ### Fixes
 
@@ -30,8 +32,10 @@ behaviour continues to load, and a database created by an earlier release migrat
   identical to one created before it.
 - Migration steps are executed statement by statement rather than as one batch. A statement rejected
   inside a batch could return normally, leaving the work half done and the schema version unchanged
-  with nothing raised where it failed; failures are now reported with the statement that caused them
-  and the transaction is rolled back.
+  with nothing raised where it failed. A failure is now reported with the statement that caused it,
+  and a rollback is attempted; if the rollback or the restoration of connection state also fails,
+  that is reported alongside the original failure rather than replacing it, and the connection is
+  withdrawn from the pool instead of being handed out again.
 - A migration is now idempotent under concurrent open. Two processes opening a database that needs
   migrating both read the version before either takes the lock; the version is re-checked under the
   lock so the second does not apply work the first has already done.
