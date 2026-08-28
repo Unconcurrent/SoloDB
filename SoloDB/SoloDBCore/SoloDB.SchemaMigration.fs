@@ -27,6 +27,23 @@ open SQLitePCL
 /// </summary>
 module internal SchemaMigration =
 
+    /// <summary>
+    /// Whether a step may re-parse schema text written under the historical double-quoted-string
+    /// spelling.
+    ///
+    /// This is declared per step rather than inferred from whether a step happens to run. Only one
+    /// step can encounter that spelling: the first altering step, which re-renders the stored schema
+    /// of a database created before the spelling was corrected. Every other step either writes the
+    /// schema itself or operates on text already normalised by that step. Leaving the tolerance on
+    /// elsewhere would quietly accept newly authored double-quoted literals, which is the very check
+    /// this work exists to keep.
+    /// </summary>
+    type internal LegacySchemaTextPolicy =
+        /// The engine's own rules apply. Newly authored DDL is judged exactly as it will be in production.
+        | Strict
+        /// Historical stored schema text may re-parse for the duration of this step only.
+        | TolerateHistoricalText
+
     /// <summary>One migration step: what it is called, what it does, and the version it establishes.</summary>
     type internal Plan =
         {
@@ -39,6 +56,8 @@ module internal SchemaMigration =
             Body: string
             /// The schema version this step establishes on success.
             TargetVersion: int
+            /// Whether this step may re-parse historical double-quoted schema text.
+            LegacyTextPolicy: LegacySchemaTextPolicy
         }
 
     /// <summary>
@@ -139,9 +158,15 @@ module internal SchemaMigration =
             | h -> h
 
         // Preserved exactly, and restored below whatever happens: success, a failing statement, a
-        // failed rollback, or a failed verification afterwards.
-        let previousDqsForDdl = readDqsForDdl handle
-        configureDqsForDdl handle 1 |> ignore
+        // failed rollback, or a failed verification afterwards. A strict step never touches the
+        // setting at all, so it cannot silently widen what the engine accepts.
+        let previousDqsForDdl =
+            match plan.LegacyTextPolicy with
+            | Strict -> ValueNone
+            | TolerateHistoricalText ->
+                let previous = readDqsForDdl handle
+                configureDqsForDdl handle 1 |> ignore
+                ValueSome previous
 
         let mutable committed = false
         try
@@ -161,4 +186,6 @@ module internal SchemaMigration =
         finally
             if not committed && not (inAutocommit connection) then
                 try executeStatements connection plan.Label "ROLLBACK;" with _ -> ()
-            configureDqsForDdl handle previousDqsForDdl |> ignore
+            match previousDqsForDdl with
+            | ValueSome previous -> configureDqsForDdl handle previous |> ignore
+            | ValueNone -> ()

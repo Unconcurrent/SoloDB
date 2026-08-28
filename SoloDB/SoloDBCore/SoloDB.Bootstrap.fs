@@ -324,7 +324,8 @@ module internal Bootstrap =
         // Schema creation: version 0 -> 1
         if dbSchemaVersion = 0 then
             SchemaMigration.run dbConnection.Inner
-                { Label = "v0->v1"; Setup = initialSchemaSetup; Body = initialSchema; TargetVersion = 1 }
+                { Label = "v0->v1"; Setup = initialSchemaSetup; Body = initialSchema; TargetVersion = 1
+                  LegacyTextPolicy = SchemaMigration.Strict }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
             if dbSchemaVersion <> 1 then
                 raise (migrationVerificationError "v0->v1" 1 dbSchemaVersion)
@@ -341,7 +342,10 @@ module internal Bootstrap =
                     DROP TRIGGER Update_SoloDBFileHeader;
                     ALTER TABLE SoloDBFileHeader DROP COLUMN \"Hash\";
                   "
-                  TargetVersion = 2 }
+                  TargetVersion = 2
+                  // The only step that re-renders schema a previous release wrote, so the only one
+                  // that can meet the historical double-quoted spelling.
+                  LegacyTextPolicy = SchemaMigration.TolerateHistoricalText }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
             if dbSchemaVersion <> 2 then
                 raise (migrationVerificationError "v1->v2" 2 dbSchemaVersion)
@@ -355,7 +359,8 @@ module internal Bootstrap =
                 |> String.concat "\n"
 
             SchemaMigration.run dbConnection.Inner
-                { Label = "v2->v3"; Setup = ""; Body = triggerSql; TargetVersion = 3 }
+                { Label = "v2->v3"; Setup = ""; Body = triggerSql; TargetVersion = 3
+                  LegacyTextPolicy = SchemaMigration.Strict }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
             if dbSchemaVersion <> 3 then
                 raise (migrationVerificationError "v2->v3" 3 dbSchemaVersion)
@@ -388,7 +393,8 @@ module internal Bootstrap =
 
                     {addMetadataColumnSql}
                   "
-                  TargetVersion = 4 }
+                  TargetVersion = 4
+                  LegacyTextPolicy = SchemaMigration.Strict }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
             if dbSchemaVersion <> 4 then
                 raise (migrationVerificationError "v3->v4" 4 dbSchemaVersion)
@@ -408,7 +414,8 @@ module internal Bootstrap =
                     DROP INDEX IF EXISTS SoloDBCollectionsNameIndex;
                     CREATE UNIQUE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
                   "
-                  TargetVersion = 5 }
+                  TargetVersion = 5
+                  LegacyTextPolicy = SchemaMigration.Strict }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
             if dbSchemaVersion <> 5 then
                 raise (migrationVerificationError "v4->v5" 5 dbSchemaVersion)
