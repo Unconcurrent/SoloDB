@@ -42,7 +42,6 @@ type internal CollectionReadDeleteOps<'T>() =
                         SqlExpr.Parameter "id")
                 let sql, singleHydrated, manyHydrated =
                     HydrationSqlBuilder.buildHydratedGetByIdSql connection name typeof<'T> whereExpr vars true
-                QueryCommandInstrumentation.Increment()
                 match connection.QueryFirstOrDefault<DbObjectRow>(sql, vars) with
                 | json when Object.ReferenceEquals(json, null) -> None
                 | json ->
@@ -58,7 +57,6 @@ type internal CollectionReadDeleteOps<'T>() =
                     RelationsSync.captureRelationVersionForEntities connection name [| (json.Id.Value, box entity) |]
                     Some entity)
         else
-            QueryCommandInstrumentation.Increment()
             match connection.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {|id = id|}) with
             | json when Object.ReferenceEquals(json, null) -> None
             | json ->
@@ -126,7 +124,6 @@ type internal CollectionReadDeleteOps<'T>() =
                         idParameter)
                 let sql, singleHydrated, manyHydrated =
                     HydrationSqlBuilder.buildHydratedGetByIdSql connection name typeof<'T> whereExpr vars true
-                QueryCommandInstrumentation.Increment()
                 match connection.QueryFirstOrDefault<DbObjectRow>(sql, vars) with
                 | json when Object.ReferenceEquals(json, null) -> None
                 | json ->
@@ -154,7 +151,6 @@ type internal CollectionReadDeleteOps<'T>() =
                     idParameter)
             let sql, _ =
                 HydrationSqlBuilder.buildManyOnlyHydratedSql connection name typeof<'T> whereExpr vars true
-            QueryCommandInstrumentation.Increment()
             match connection.QueryFirstOrDefault<DbObjectRow>(sql, vars) with
             | json when Object.ReferenceEquals(json, null) -> None
             | json ->
@@ -204,7 +200,6 @@ type internal CollectionReadDeleteOps<'T>() =
                         idParameter)
                 let sql, _ =
                     HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> whereExpr vars true
-                QueryCommandInstrumentation.Increment()
                 let oldRow = conn.QueryFirstOrDefault<DbObjectRow>(sql, vars)
                 if isNull oldRow then
                     0

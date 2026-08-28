@@ -107,15 +107,6 @@ module internal HydrationManyPopulator =
                             | _ -> ()
                 | _ -> ()
 
-/// Instrumentation counter for one-statement proof.
-/// Tracks the number of SQL commands executed during queryable execution.
-/// Reset before each query via ResetQueryCommandCounter(); read via QueryCommandCounter.
-module internal QueryCommandInstrumentation =
-    let mutable private counter = 0
-    let Increment() = System.Threading.Interlocked.Increment(&counter) |> ignore
-    let Reset() = counter <- 0
-    let Count() = counter
-
 type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, data: obj) =
     static let enumerableDispatchCache = System.Collections.Concurrent.ConcurrentDictionary<Type, MethodInfo>()
 
@@ -148,7 +139,6 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                 // Map: ownerId → HydrationJSON string for post-deserialization tracker population.
                 let hydrationMap =
                     if ctx.ManyRelationsHydrated then Dictionary<int64, string>() else null
-                QueryCommandInstrumentation.Increment()
                 for row in connection.Query<Types.DbObjectRow>(query, par) do
                     let entity = JsonFunctions.fromSQLite<'Elem> row
                     buffer.Add(row.Id.Value, entity)
@@ -195,7 +185,6 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                 for (_id, entity) in buffer do
                     yield entity
             | _ ->
-                QueryCommandInstrumentation.Increment()
                 for row in connection.Query<Types.DbObjectRow>(query, par) do
                     yield JsonFunctions.fromSQLite<'Elem> row
         }
@@ -288,7 +277,6 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         | None -> Unchecked.defaultof<'TResult>
 
                     // Add Single, First, and the OrDefault Variant here.
-                    QueryCommandInstrumentation.Increment()
                     let query = connection.Query<Types.DbObjectRow>(query, variables)
 
                     match methodName with

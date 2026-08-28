@@ -203,7 +203,6 @@ type internal CollectionMutationOps<'T>() =
                         | None -> raise (InvalidOperationException("Update requires int64 Id or custom Id."))
                 let sql, manyHydrated =
                     HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> whereExpr manyVars true
-                QueryCommandInstrumentation.Increment()
                 let oldRow = conn.QueryFirstOrDefault<DbObjectRow>(sql, manyVars)
                 if isNull oldRow then
                     raise (KeyNotFoundException "Could not Update any entities with specified Id.")
@@ -330,7 +329,6 @@ type internal CollectionMutationOps<'T>() =
                 // mutation-prep old-state read with DBRefMany-only hydration.
                 let sql, manyHydrated =
                     HydrationSqlBuilder.buildManyOnlyHydratedSqlWithRawWhere conn name typeof<'T> filterSql false
-                QueryCommandInstrumentation.Increment()
                 let oldRows = conn.Query<DbObjectRow>(sql, variables) |> Seq.toArray
                 if oldRows.Length = 0 then
                     0
@@ -386,7 +384,6 @@ type internal CollectionMutationOps<'T>() =
 
                 let sql, manyHydrated =
                     HydrationSqlBuilder.buildManyOnlyHydratedSqlWithRawWhere conn name typeof<'T> $"({filterSql})" true
-                QueryCommandInstrumentation.Increment()
                 let oldRow = conn.QueryFirstOrDefault<DbObjectRow>(sql, variables)
                 if isNull oldRow then
                     0

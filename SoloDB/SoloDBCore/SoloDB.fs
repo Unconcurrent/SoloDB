@@ -227,7 +227,6 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
                             idParameter)
                     let sql, _ =
                         HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> whereExpr vars true
-                    QueryCommandInstrumentation.Increment()
                     match conn.QueryFirstOrDefault<DbObjectRow>(sql, vars) with
                     | row when Object.ReferenceEquals(row, null) -> ValueNone
                     | row -> ValueSome row
