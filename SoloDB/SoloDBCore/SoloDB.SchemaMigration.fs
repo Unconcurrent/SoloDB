@@ -144,9 +144,15 @@ module internal SchemaMigration =
                     offset <- offset + consumed
 
     /// <summary>
-    /// The owner able to declare a connection unfit for reuse. It is a concrete value rather than an
-    /// optional callback because every caller must have one: a migration that cannot clean up after
-    /// itself has to be able to say so, and there is no correct behaviour for "no owner".
+    /// Declares a connection unfit for reuse. In production this is a field set on the pooled
+    /// wrapper, which does not throw; the type says so rather than dressing a throwable callback up
+    /// as an abstraction.
+    ///
+    /// Marking alone is not enough to be safe, because if it does not take effect the wrapper still
+    /// looks reusable and the pool will probe it — raising a second exception over the failure that
+    /// made it unfit. So a marking that fails is followed by closing the underlying connection,
+    /// which makes reuse physically impossible and routes the pool to its dispose path instead of
+    /// its raising one.
     /// </summary>
     type internal Quarantine =
         { MarkUnusable: unit -> unit }
@@ -197,7 +203,14 @@ module internal SchemaMigration =
         let quarantineConnection () =
             try quarantine.MarkUnusable ()
             with quarantineError ->
-                quarantineFailure <- ValueSome $"the connection could not be quarantined: {quarantineError.Message}"
+                // Marking did not take effect, so the wrapper still looks reusable. Close the
+                // underlying connection: reuse becomes impossible and the pool disposes it rather
+                // than probing it and raising over the report we are about to make.
+                let closed =
+                    try connection.Close(); "the connection was closed so it cannot be reused"
+                    with closeError -> $"and closing it also failed: {closeError.Message}"
+                quarantineFailure <-
+                    ValueSome $"the connection could not be quarantined: {quarantineError.Message}; {closed}"
 
         // Setup and acquisition run before there is anything to restore, and either can fail. They
         // are classified here rather than escaping as an unclassified constructor failure that leaves
