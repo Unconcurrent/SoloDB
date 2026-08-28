@@ -39,7 +39,7 @@ jobs:
       run: dotnet restore SoloDB/SoloDB.fsproj
 
     - name: Build
-      run: dotnet build SoloDB/SoloDB.fsproj --configuration Release --no-restore
+      run: dotnet build SoloDB/SoloDB.fsproj --configuration Release --no-restore '-p:ParallelCompilation='
 
     - name: Upload NuGet package
       uses: actions/upload-artifact@main

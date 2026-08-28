@@ -243,13 +243,13 @@ module internal Helper =
     /// <summary>
     /// Inserts an item into a collection.
     /// </summary>
-    let inline internal insertInner (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) (collection: ISoloDBCollection<'T>) =
+    let internal insertInner (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) (collection: ISoloDBCollection<'T>) =
         insertImpl typed item connection name false collection
 
     /// <summary>
     /// Inserts or replaces an item in a collection.
     /// </summary>
-    let inline internal insertOrReplaceInner (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) (collection: ISoloDBCollection<'T>) =
+    let internal insertOrReplaceInner (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) (collection: ISoloDBCollection<'T>) =
         insertImpl typed item connection name true collection
 
     /// <summary>

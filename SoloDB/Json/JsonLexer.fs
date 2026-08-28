@@ -1114,7 +1114,7 @@ module internal JsonParser =
         else
             EndOfInput
 
-    let inline peek<'T, 'R when 'R : struct and 'R :> IJsonReader>
+    let peek<'T, 'R when 'R : struct and 'R :> IJsonReader>
         (ctx: byref<ParserContext<'T, 'R>>) : Token =
         let savedIndex = ctx.codeUnitIndex
         try readNext &ctx
