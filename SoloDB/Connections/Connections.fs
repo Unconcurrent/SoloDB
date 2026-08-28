@@ -58,6 +58,13 @@ module Connections =
         /// <param name="pooledConn">The connection to return to the pool.</param>
         /// <exception cref="InvalidOperationException">Thrown if the connection is still inside a transaction.</exception>
         member internal this.TakeBack(pooledConn: CachingDbConnection) =
+            // A connection already known to be unfit is disposed without being probed. Probing it
+            // would raise, and this runs from Dispose, so that exception would replace whatever
+            // failure made the connection unusable in the first place.
+            if pooledConn.Unusable then
+                try pooledConn.DisposeReal() with _ -> ()
+            else
+
             // Verify no stray transaction is active before returning to pool.
             let probeOk =
                 try pooledConn.Execute("BEGIN; ROLLBACK;") |> ignore; true

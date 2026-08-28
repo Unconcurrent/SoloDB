@@ -323,7 +323,7 @@ module internal Bootstrap =
 
         // Schema creation: version 0 -> 1
         if dbSchemaVersion = 0 then
-            SchemaMigration.run dbConnection.Inner
+            SchemaMigration.run dbConnection.Inner (fun () -> dbConnection.Unusable <- true)
                 { Label = "v0->v1"; Setup = initialSchemaSetup; Body = initialSchema; TargetVersion = 1
                   LegacyTextPolicy = SchemaMigration.Strict }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
@@ -332,7 +332,7 @@ module internal Bootstrap =
 
         // Migration: version 1 -> 2
         if dbSchemaVersion = 1 then
-            SchemaMigration.run dbConnection.Inner
+            SchemaMigration.run dbConnection.Inner (fun () -> dbConnection.Unusable <- true)
                 { Label = "v1->v2"
                   Setup = ""
                   Body = "
@@ -358,7 +358,7 @@ module internal Bootstrap =
                     $"DROP TRIGGER IF EXISTS \"SoloDB_Update_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Insert_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Delete_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Updated_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Inserted_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Deleted_{name}\";\n{Helper.getSQLForTriggersForTable name}")
                 |> String.concat "\n"
 
-            SchemaMigration.run dbConnection.Inner
+            SchemaMigration.run dbConnection.Inner (fun () -> dbConnection.Unusable <- true)
                 { Label = "v2->v3"; Setup = ""; Body = triggerSql; TargetVersion = 3
                   LegacyTextPolicy = SchemaMigration.Strict }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
@@ -385,7 +385,7 @@ module internal Bootstrap =
                     else Some ($"ALTER TABLE \"{normalized}\" ADD COLUMN Metadata JSONB NOT NULL DEFAULT '{{}}';"))
                 |> String.concat "\n"
 
-            SchemaMigration.run dbConnection.Inner
+            SchemaMigration.run dbConnection.Inner (fun () -> dbConnection.Unusable <- true)
                 { Label = "v3->v4"
                   Setup = ""
                   Body = $"
@@ -402,7 +402,7 @@ module internal Bootstrap =
         // Migration: version 4 -> 5
         // v5 enforces unique SoloDBCollections.Name for deterministic metadata behavior.
         if dbSchemaVersion = 4 then
-            SchemaMigration.run dbConnection.Inner
+            SchemaMigration.run dbConnection.Inner (fun () -> dbConnection.Unusable <- true)
                 { Label = "v4->v5"
                   Setup = ""
                   Body = "

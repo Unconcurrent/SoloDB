@@ -144,6 +144,28 @@ module internal SchemaMigration =
                     offset <- offset + consumed
 
     /// <summary>
+    /// Combines the step's own failure with every cleanup failure into one outcome.
+    ///
+    /// The rule this exists to keep: a cleanup failure never replaces the failure that caused it.
+    /// The original is always the inner cause, and cleanup failures are reported alongside it. It is
+    /// separate from the statement execution so that every combination can be exercised directly,
+    /// since an ordinary SQLite success is no evidence at all about the error branches.
+    /// </summary>
+    let internal composeOutcome (label: string) (primary: exn voption) (cleanups: string voption list) =
+        let cleanupMessages = cleanups |> List.choose (function ValueSome m -> Some m | ValueNone -> None)
+        let joined = String.Join("; ", cleanupMessages)
+        match primary, cleanupMessages with
+        | ValueNone, [] -> ValueNone
+        | ValueSome failure, [] -> ValueSome(ExceptionDispatchInfo.Capture failure)
+        | ValueNone, messages ->
+            ValueSome(ExceptionDispatchInfo.Capture(InvalidOperationException
+                $"Error: migration {label} left the connection unusable.\nReason: {joined}.\nFix: do not reuse this connection; investigate the migration step."))
+        | ValueSome failure, messages ->
+            ValueSome(ExceptionDispatchInfo.Capture(InvalidOperationException(
+                $"Error: migration {label} failed and could not be cleaned up.\nReason: {failure.Message}\nCleanup: {joined}.\nFix: do not reuse this connection; investigate the migration step.",
+                failure)))
+
+    /// <summary>
     /// Runs one migration step inside an exclusive transaction and establishes its version.
     ///
     /// On failure the transaction is rolled back and the original error is raised. Cleanup is fail
@@ -153,10 +175,9 @@ module internal SchemaMigration =
     /// function will not let one leave quietly.
     ///
     /// Version verification is not performed here. The caller re-reads the version after this
-    /// returns, so a verification failure happens outside this scope and cannot be part of what this
-    /// restores.
+    /// returns, so a verification failure is outside this scope entirely.
     /// </summary>
-    let internal run (connection: SqliteConnection) (plan: Plan) =
+    let internal run (connection: SqliteConnection) (quarantine: unit -> unit) (plan: Plan) =
         executeStatements connection plan.Label plan.Setup
 
         let handle =
@@ -164,9 +185,8 @@ module internal SchemaMigration =
             | null -> raise (InvalidOperationException $"Error: the connection for migration {plan.Label} exposes no handle.\nReason: schema migration requires a live connection.\nFix: open the connection before migrating.")
             | h -> h
 
-        // Preserved exactly, and restored below whatever happens: success, a failing statement, a
-        // failed rollback, or a failed verification afterwards. A strict step never touches the
-        // setting at all, so it cannot silently widen what the engine accepts.
+        // Preserved exactly, and restored below whether the step succeeds or fails. A strict step
+        // never touches the setting at all, so it cannot silently widen what the engine accepts.
         let previousDqsForDdl =
             match plan.LegacyTextPolicy with
             | Strict -> ValueNone
@@ -184,8 +204,12 @@ module internal SchemaMigration =
         with ex ->
             primary <- ValueSome ex
 
-        // Cleanup is part of the contract, so its own failure is a result, not something to discard.
-        let cleanupFailure =
+        // Cleanup is part of the contract, so each cleanup failure is a result rather than something
+        // to discard — and, just as importantly, none of them may replace the failure that started
+        // it. Restoring the compatibility setting is a cleanup step like the rollback: it is
+        // capable of failing, so it is captured rather than executed as a bare statement between
+        // collecting the outcome and reporting it.
+        let transactionCleanup =
             if inAutocommit connection then ValueNone
             else
                 try
@@ -195,17 +219,23 @@ module internal SchemaMigration =
                 with rollbackError ->
                     ValueSome $"the rollback itself failed: {rollbackError.Message}"
 
-        match previousDqsForDdl with
-        | ValueSome previous -> configureDqsForDdl handle previous |> ignore
-        | ValueNone -> ()
+        let restorationCleanup =
+            match previousDqsForDdl with
+            | ValueNone -> ValueNone
+            | ValueSome previous ->
+                try
+                    configureDqsForDdl handle previous |> ignore
+                    ValueNone
+                with restoreError ->
+                    ValueSome $"the compatibility setting could not be restored: {restoreError.Message}"
 
-        match primary, cleanupFailure with
-        | ValueNone, ValueNone -> ()
-        | ValueSome failure, ValueNone -> ExceptionDispatchInfo.Capture(failure).Throw()
-        | ValueNone, ValueSome cleanup ->
-            raise (InvalidOperationException
-                $"Error: migration {plan.Label} left the connection unusable.\nReason: {cleanup}.\nFix: do not return this connection to the pool; investigate the migration step.")
-        | ValueSome failure, ValueSome cleanup ->
-            raise (InvalidOperationException(
-                $"Error: migration {plan.Label} failed and could not be cleaned up.\nReason: {failure.Message}\nCleanup: {cleanup}.\nFix: do not return this connection to the pool; investigate the migration step.",
-                failure))
+        // A cleanup failure means the connection's state is no longer something the pool can reason
+        // about, so it is quarantined before this scope exits. A step that failed but rolled back
+        // cleanly leaves a usable connection and is not quarantined.
+        let cleanupFailed = [ transactionCleanup; restorationCleanup ] |> List.exists (fun c -> c.IsSome)
+        if cleanupFailed then
+            try quarantine () with _ -> ()
+
+        match composeOutcome plan.Label primary [ transactionCleanup; restorationCleanup ] with
+        | ValueNone -> ()
+        | ValueSome report -> report.Throw()

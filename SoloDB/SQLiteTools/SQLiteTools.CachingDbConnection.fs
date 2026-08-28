@@ -137,6 +137,14 @@ module SQLiteTools =
         member internal this.Inner = this :> SqliteConnection
         /// <summary>Indicates if the connection is currently part of a transaction.</summary>
         member val InsideTransaction = false with get, set
+
+        /// <summary>
+        /// Set when this connection is known to be unfit for reuse — for example a schema migration
+        /// whose cleanup failed, leaving state the pool cannot reason about. The pool disposes such a
+        /// connection instead of probing it, so returning it cannot raise a second, unrelated failure
+        /// over the one that made it unusable.
+        /// </summary>
+        member val Unusable = false with get, set
     
         member internal this.EnterEventHandlerScope() =
             Threading.Interlocked.Increment(&eventHandlerDepth) |> ignore
