@@ -324,11 +324,15 @@ module internal Bootstrap =
         // Schema creation: version 0 -> 1
         if dbSchemaVersion = 0 then
             SchemaMigration.run dbConnection
-                { Label = "v0->v1"; Setup = initialSchemaSetup; Body = initialSchema; FromVersion = 0; TargetVersion = 1
+                { Label = "v0->v1"; Setup = initialSchemaSetup; Body = initialSchema; FromVersion = 0; TargetVersion = 1; SupportedCeiling = currentSupportedSchemaVersion
                   LegacyTextPolicy = SchemaMigration.Strict }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
-            if dbSchemaVersion < 1 then
-                raise (migrationVerificationError "v0->v1" 1 dbSchemaVersion)
+            match SchemaMigration.classifyVersion dbSchemaVersion 1 currentSupportedSchemaVersion with
+                | SchemaMigration.Established -> ()
+                | SchemaMigration.NotApplied -> raise (migrationVerificationError "v0->v1" 1 dbSchemaVersion)
+                | SchemaMigration.BeyondSupported ->
+                    raise (NotSupportedException
+                        $"Error: Schema version {dbSchemaVersion} is not supported.\nReason: Current supported version is {currentSupportedSchemaVersion}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
 
         // Migration: version 1 -> 2
         if dbSchemaVersion = 1 then
@@ -342,13 +346,17 @@ module internal Bootstrap =
                     DROP TRIGGER Update_SoloDBFileHeader;
                     ALTER TABLE SoloDBFileHeader DROP COLUMN \"Hash\";
                   "
-                  FromVersion = 1; TargetVersion = 2
+                  FromVersion = 1; TargetVersion = 2; SupportedCeiling = currentSupportedSchemaVersion
                   // The only step that re-renders schema a previous release wrote, so the only one
                   // that can meet the historical double-quoted spelling.
                   LegacyTextPolicy = SchemaMigration.TolerateHistoricalText }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
-            if dbSchemaVersion < 2 then
-                raise (migrationVerificationError "v1->v2" 2 dbSchemaVersion)
+            match SchemaMigration.classifyVersion dbSchemaVersion 2 currentSupportedSchemaVersion with
+                | SchemaMigration.Established -> ()
+                | SchemaMigration.NotApplied -> raise (migrationVerificationError "v1->v2" 2 dbSchemaVersion)
+                | SchemaMigration.BeyondSupported ->
+                    raise (NotSupportedException
+                        $"Error: Schema version {dbSchemaVersion} is not supported.\nReason: Current supported version is {currentSupportedSchemaVersion}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
 
         // Migration: version 2 -> 3
         if dbSchemaVersion = 2 then
@@ -359,11 +367,15 @@ module internal Bootstrap =
                 |> String.concat "\n"
 
             SchemaMigration.run dbConnection
-                { Label = "v2->v3"; Setup = ""; Body = triggerSql; FromVersion = 2; TargetVersion = 3
+                { Label = "v2->v3"; Setup = ""; Body = triggerSql; FromVersion = 2; TargetVersion = 3; SupportedCeiling = currentSupportedSchemaVersion
                   LegacyTextPolicy = SchemaMigration.Strict }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
-            if dbSchemaVersion < 3 then
-                raise (migrationVerificationError "v2->v3" 3 dbSchemaVersion)
+            match SchemaMigration.classifyVersion dbSchemaVersion 3 currentSupportedSchemaVersion with
+                | SchemaMigration.Established -> ()
+                | SchemaMigration.NotApplied -> raise (migrationVerificationError "v2->v3" 3 dbSchemaVersion)
+                | SchemaMigration.BeyondSupported ->
+                    raise (NotSupportedException
+                        $"Error: Schema version {dbSchemaVersion} is not supported.\nReason: Current supported version is {currentSupportedSchemaVersion}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
 
         // Migration: version 3 -> 4
         // v3 = triggers/Event API. v4 = Relational API.
@@ -393,11 +405,15 @@ module internal Bootstrap =
 
                     {addMetadataColumnSql}
                   "
-                  FromVersion = 3; TargetVersion = 4
+                  FromVersion = 3; TargetVersion = 4; SupportedCeiling = currentSupportedSchemaVersion
                   LegacyTextPolicy = SchemaMigration.Strict }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
-            if dbSchemaVersion < 4 then
-                raise (migrationVerificationError "v3->v4" 4 dbSchemaVersion)
+            match SchemaMigration.classifyVersion dbSchemaVersion 4 currentSupportedSchemaVersion with
+                | SchemaMigration.Established -> ()
+                | SchemaMigration.NotApplied -> raise (migrationVerificationError "v3->v4" 4 dbSchemaVersion)
+                | SchemaMigration.BeyondSupported ->
+                    raise (NotSupportedException
+                        $"Error: Schema version {dbSchemaVersion} is not supported.\nReason: Current supported version is {currentSupportedSchemaVersion}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
 
         // Migration: version 4 -> 5
         // v5 enforces unique SoloDBCollections.Name for deterministic metadata behavior.
@@ -414,11 +430,15 @@ module internal Bootstrap =
                     DROP INDEX IF EXISTS SoloDBCollectionsNameIndex;
                     CREATE UNIQUE INDEX IF NOT EXISTS SoloDBCollectionsNameIndex ON SoloDBCollections(Name);
                   "
-                  FromVersion = 4; TargetVersion = 5
+                  FromVersion = 4; TargetVersion = 5; SupportedCeiling = currentSupportedSchemaVersion
                   LegacyTextPolicy = SchemaMigration.Strict }
             dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
-            if dbSchemaVersion < 5 then
-                raise (migrationVerificationError "v4->v5" 5 dbSchemaVersion)
+            match SchemaMigration.classifyVersion dbSchemaVersion 5 currentSupportedSchemaVersion with
+                | SchemaMigration.Established -> ()
+                | SchemaMigration.NotApplied -> raise (migrationVerificationError "v4->v5" 5 dbSchemaVersion)
+                | SchemaMigration.BeyondSupported ->
+                    raise (NotSupportedException
+                        $"Error: Schema version {dbSchemaVersion} is not supported.\nReason: Current supported version is {currentSupportedSchemaVersion}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
 
         // https://www.sqlite.org/pragma.html#pragma_optimize
         let _rez = dbConnection.Execute("PRAGMA optimize=0x10002;")

@@ -62,6 +62,9 @@ module internal SchemaMigration =
             FromVersion: int
             /// The schema version this step establishes on success.
             TargetVersion: int
+            /// The highest version this build understands. A version above it is not a concurrent
+            /// advance by a peer, it is a database written by something newer.
+            SupportedCeiling: int
             /// Whether this step may re-parse historical double-quoted schema text.
             LegacyTextPolicy: LegacySchemaTextPolicy
         }
@@ -149,6 +152,22 @@ module internal SchemaMigration =
                     offset <- offset + consumed
 
     /// <summary>
+    /// What an observed schema version means, relative to a step. There are three answers and the
+    /// difference matters: below the target the step did not happen, between the target and the
+    /// ceiling another process legitimately got there first, and above the ceiling the database was
+    /// written by a newer build and must be refused rather than accepted as progress.
+    /// </summary>
+    type internal VersionOutcome =
+        | NotApplied
+        | Established
+        | BeyondSupported
+
+    let internal classifyVersion (observed: int) (target: int) (supportedCeiling: int) =
+        if observed > supportedCeiling then BeyondSupported
+        elif observed < target then NotApplied
+        else Established
+
+    /// <summary>
     /// Combines the step's own failure with every cleanup failure into one outcome.
     ///
     /// The rule this exists to keep: a cleanup failure never replaces the failure that caused it.
@@ -231,6 +250,16 @@ module internal SchemaMigration =
             if versionUnderLock = plan.FromVersion then
                 executeStatements connection plan.Label plan.Body
                 executeStatements connection plan.Label $"PRAGMA user_version = {plan.TargetVersion};"
+            else
+                // Not our starting version. Only an advance a peer could legitimately have made is
+                // acceptable; anything else is state this build cannot explain and must not commit
+                // over.
+                match classifyVersion versionUnderLock plan.TargetVersion plan.SupportedCeiling with
+                | Established -> ()
+                | NotApplied ->
+                    raise (InvalidOperationException $"Error: migration {plan.Label} found schema version {versionUnderLock} under the lock.\nReason: it is neither the expected {plan.FromVersion} nor an advance to {plan.TargetVersion} or beyond.\nFix: investigate what wrote this version.")
+                | BeyondSupported ->
+                    raise (NotSupportedException $"Error: Schema version {versionUnderLock} is not supported.\nReason: Current supported version is {plan.SupportedCeiling}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
 
             executeStatements connection plan.Label "COMMIT TRANSACTION;"
          with ex ->
