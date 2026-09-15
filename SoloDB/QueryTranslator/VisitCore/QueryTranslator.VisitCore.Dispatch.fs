@@ -16,6 +16,7 @@ open SoloDatabase.QueryTranslatorBase
 open SqlDu.Engine.C1.Spec
 
 module internal QueryTranslatorVisitCore =
+    type private ValueUse = Value | Comparison | Stored
     // ─── DU-constructing visitor (legacy visit path removed) ─────────
     // All expression families produce SqlExpr DU nodes via visitDu.
     // Pre-expression and unknown-expression handlers now return DU via DuHandlerResult.
@@ -37,30 +38,6 @@ module internal QueryTranslatorVisitCore =
     let rec private emitStringOperandDu (qb: QueryBuilder) (ignoreCase: bool) (expr: Expression) : SqlExpr =
         if ignoreCase then SqlExpr.FunctionCall("TO_LOWER", [visitDu expr qb])
         else visitDu expr qb
-
-    and private stripTypeDiscriminatorDu (json: JsonSerializator.JsonValue) : JsonSerializator.JsonValue =
-        match json with
-        | JsonSerializator.JsonValue.Object dict ->
-            let normalized = Dictionary<string, JsonSerializator.JsonValue>()
-            for KeyValue(k, v) in dict do
-                if not (StringComparer.Ordinal.Equals(k, "$type")) then
-                    normalized.[k] <- stripTypeDiscriminatorDu v
-            JsonSerializator.JsonValue.Object normalized
-        | JsonSerializator.JsonValue.List items ->
-            let normalized = ResizeArray<JsonSerializator.JsonValue>(items.Count)
-            for item in items do
-                normalized.Add(stripTypeDiscriminatorDu item)
-            JsonSerializator.JsonValue.List normalized
-        | _ -> json
-
-    and private normalizeKnownJsonForJsonEachValueDu (targetExpr: SqlExpr) (knownObject: obj) : obj =
-        match targetExpr with
-        | SqlExpr.Column(Some sourceAlias, "Value") when StringComparer.Ordinal.Equals(sourceAlias, "json_each") ->
-            knownObject
-            |> JsonSerializator.JsonValue.Serialize
-            |> stripTypeDiscriminatorDu
-            :> obj
-        | _ -> knownObject
 
     and private castToDu (qb: QueryBuilder) (castToType: Type) (o: Expression) : SqlExpr =
         QueryTranslatorVisitCoreCastAggregate.castToDu visitDu qb castToType o
@@ -234,7 +211,7 @@ module internal QueryTranslatorVisitCore =
                                 SqlExpr.Literal(SqlLiteral.Integer 1L),
                                 BinaryOperator.Eq,
                                 SqlExpr.Literal(SqlLiteral.Integer 0L)))
-                        | head :: tail -> Some(SqlExpr.InList(visitDu value qb, head, tail))
+                        | head :: tail -> Some(SqlExpr.InList(visitComparisonDu value qb, head, tail))
                     else None
                 | _ -> None
             else None
@@ -246,14 +223,15 @@ module internal QueryTranslatorVisitCore =
         let arrayExpr = visitDu normalizedArray arrayQb
         let whereExpr =
             if isPrimitiveSQLiteType value.Type then
-                SqlExpr.Binary(SqlExpr.Column(Some "json_each", "Value"), BinaryOperator.Eq, visitDu value qb)
+                SqlExpr.Binary(SqlExpr.Column(Some "json_each", "Value"), BinaryOperator.Eq, visitComparisonDu value qb)
             else
-                if not (isFullyConstant value) then
-                    raise (ArgumentException $"Cannot translate contains with this type of expression: {value.Type}")
-                let normalizedKnownJson =
-                    evaluateExpr<obj> value
-                    |> normalizeKnownJsonForJsonEachValueDu (SqlExpr.Column(Some "json_each", "Value"))
-                compareKnownJsonDu qb (SqlExpr.Column(Some "json_each", "Value")) value.Type normalizedKnownJson
+                let target = SqlExpr.Column(Some "json_each", "Value")
+                match qb.SourceContext.BindQueryValue with
+                | ValueSome binder when binder.IsValue value -> EqualityComparison.bound qb binder target value
+                | _ ->
+                    if not (isFullyConstant value) then
+                        raise (ArgumentException $"Cannot translate contains with this type of expression: {value.Type}")
+                    EqualityComparison.known qb target value.Type (evaluateExpr<obj> value)
         SqlExpr.Exists({ Ctes = []; Body = SelectBody.SingleSelect {
             Distinct = false; Projections = Explicit({ Expr = SqlExpr.Literal(SqlLiteral.Integer 1L); Alias = None }, [])
             Source = Some(TableSource.FromJsonEach(arrayExpr, None)); Joins = []
@@ -277,16 +255,32 @@ module internal QueryTranslatorVisitCore =
         if isAll then SqlExpr.Unary(UnaryOperator.Not, existsExpr) else existsExpr
 
     and private visitBinaryDu (b: BinaryExpression) (qb: QueryBuilder) : SqlExpr =
-        QueryTranslatorVisitCoreBinary.visitBinaryDu visitDu normalizeKnownJsonForJsonEachValueDu b qb
+        QueryTranslatorVisitCoreBinary.visitBinaryDu visitDu visitComparisonDu visitStoredValueDu b qb
 
     and private visitMethodCallDu (m: MethodCallExpression) (qb: QueryBuilder) : SqlExpr =
-        QueryTranslatorVisitCoreMethodCall.visitMethodCallDu visitDu visitMathMethodDu arrayIndexDu visitPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu newObjectDu emitStringOperandDu m qb
+        QueryTranslatorVisitCoreMethodCall.visitMethodCallDu visitDu visitStoredValueDu visitMathMethodDu arrayIndexDu visitPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu newObjectDu emitStringOperandDu m qb
 
     /// DU-constructing visitor: builds SqlExpr tree from expression tree.
     /// ALL expression families return proper SqlExpr DU nodes.
     /// Pre-expression handlers return DU via qb.DuHandlerResult.
     and internal visitDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
+        visitValueDu Value exp qb
+
+    and private visitComparisonDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
+        visitValueDu Comparison exp qb
+
+    and private visitStoredValueDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
+        match unwrapConvert exp with
+        // A bare entity assignment retains the update root-path representation.
+        // Computed values read their operands before writing the result.
+        | :? ParameterExpression -> visitValueDu Stored exp qb
+        | _ -> visitValueDu Stored exp { qb with UpdateMode = false }
+
+    // Comparison mode belongs to this operand only. Recursive expression visits
+    // use visitDu, preserving the released kinds inside arithmetic and functions.
+    and private visitValueDu valueUse (exp: Expression) (qb: QueryBuilder) : SqlExpr =
         qb.StepTranslation()
+        let exp = unwrapStructCopy exp
         // Pre-expression handlers (DBRef etc.) — return DU directly via DuHandlerResult
         qb.DuHandlerResult.Value <- ValueNone
         if runHandler preExpressionHandler qb exp then
@@ -295,6 +289,10 @@ module internal QueryTranslatorVisitCore =
             | ValueNone -> raise (InvalidOperationException "Pre-expression handler returned true but did not set DuHandlerResult")
         else
 
+        match qb.SourceContext.BindQueryValue |> ValueOption.bind (fun bind -> bind.TryBind (valueUse = Comparison) exp) with
+        | ValueSome value -> value
+        | ValueNone ->
+
         // Fully-constant early-out (same guard as legacy visit)
         if exp.NodeType <> ExpressionType.Lambda
             && exp.NodeType <> ExpressionType.Quote
@@ -302,7 +300,11 @@ module internal QueryTranslatorVisitCore =
             && isFullyConstant exp
             && (match exp with :? NewExpression as ne when DateTimeFunctions.isDateTimeLikeType ne.Type -> false | _ -> true)
             && (match exp with :? ConstantExpression as ce when ce.Value = null -> false | _ -> true) then
-            qb.AllocateParamExpr(evaluateExpr<obj> exp)
+            let value = evaluateExpr<obj> exp
+            match valueUse with
+            | Comparison -> qb.AllocateComparisonParamExpr value
+            | Stored -> qb.AllocateStoredParamExpr value
+            | Value -> qb.AllocateParamExpr value
         else
 
         match exp.NodeType with

@@ -67,18 +67,6 @@ let coreHasRelationMaterialization (core: SelectCore) : bool =
 let coreHasGroupMaterialization (core: SelectCore) : bool =
     core.Projections |> ProjectionSetOps.toList |> List.exists (fun p -> isGroupMaterializationExpr p.Expr)
 
-/// Determine if a JsonSetExpr in a core is a transport-only wrapper
-/// that can be safely flattened. In practice, all live corpus JsonSetExpr
-/// usages are either relation materialization or group aggregation,
-/// both of which are PRESERVE_REQUIRED.
-let isTransportOnlyWrapper (core: SelectCore) (expr: SqlExpr) : bool =
-    match expr with
-    | JsonSetExpr _ ->
-        not (isRelationMaterializationExpr expr)
-        && not (isGroupMaterializationExpr expr)
-        && not (isCoalesceInitializationExpr expr)
-    | _ -> false
-
 /// Check if a JsonSetExpr assignment is an identity write:
 /// the value is jsonb_extract(target, same_path) — writing a path back to itself.
 /// Comparing source alias/column of the target with the extraction source.

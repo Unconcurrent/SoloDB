@@ -83,7 +83,7 @@ module internal QueryableHelperBase =
             SqlExpr.FunctionCall("json_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
 
     /// Emit a SqlSelect to a StringBuilder via the minimal emitter.
-    let internal emitSelectToSb (sb: StringBuilder) (variables: Dictionary<string, obj>) (indexModel: SoloDatabase.IndexModel.IndexModel) (sel: SqlSelect) =
+    let internal emitSelectToSb (sb: StringBuilder) (variables: Dictionary<string, obj>) (indexModel: SoloDatabase.IndexModel.IndexModel) transform (sel: SqlSelect) =
         let qb : QueryBuilder = {
             StringBuilder = sb
             Variables = variables
@@ -107,7 +107,7 @@ module internal QueryableHelperBase =
         }
         let passes = PassPipeline.standardWithIndexModel indexModel
         match PassRunner.optimize passes (SelectStmt sel) with
-        | SelectStmt outSel -> SqlDuMinimalEmit.emitSelect qb outSel
+        | SelectStmt outSel -> SqlDuMinimalEmit.emitSelect qb (transform outSel)
         | _ -> failwith "internal invariant violation: expected SelectStmt from optimizer pipeline"
 
     /// Map the closed-enum RuntimeErrorKind to its string name embedded in the

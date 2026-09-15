@@ -32,7 +32,7 @@ module internal QueryableBuildQueryGroupByOps =
 
     let internal applyGroupByKeyOnly<'T>
         (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>) (expressions: Expression array) =
-        addLoweredKeySelector statements (lowerKeySelectorLambda sourceCtx tableName expressions.[0] GroupByKey)
+        addSelector statements (KeyProjection expressions.[0])
 
     // ── GroupBy aggregate translation helpers ──
 

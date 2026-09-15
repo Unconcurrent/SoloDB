@@ -52,18 +52,17 @@ type internal HasTypeId<'t> =
 
 
 module internal JsonFunctions =
+    // JSON numbers and decimal parameters share SQLite's INTEGER/REAL boundary.
+    let internal numberToSQLValue (number: decimal) : obj =
+        if Decimal.IsInteger number && number >= decimal Int64.MinValue && number <= decimal Int64.MaxValue then
+            box (int64 number)
+        else box (float number)
+
     let internal jsonValueToSQLValue (element: JsonValue) =
         match element with
         | Boolean b -> (if b then 1L :> obj else 0L :> obj), false
         | Null -> null, false
-        | Number n ->
-            if System.Decimal.IsInteger n then
-                if n >= decimal System.Int64.MinValue && n <= decimal System.Int64.MaxValue then
-                    int64 n :> obj, false
-                else
-                    float n :> obj, false
-            else
-                float n :> obj, false
+        | Number n -> numberToSQLValue n, false
         | String s -> s :> obj, false
         | other -> other.ToJsonString() :> obj, true
 
@@ -92,59 +91,74 @@ module internal JsonFunctions =
             | _ -> ()
         element.ToJsonString()
 
-    /// Internal serialization helper. Not part of the public API.
-    let toSQLJson (item: obj) =
-        match box item with
-        | null -> null, false
+    /// Conservative scalar fast path. Other types use the encoding flag returned by
+    /// the canonical converter, so their storage representation is not duplicated in callers.
+    let internal parameterMayNeedJson (valueType: Type) =
+        let t = match Nullable.GetUnderlyingType valueType with null -> valueType | underlying -> underlying
+        not (t.IsPrimitive || t.IsEnum || t = typeof<string>)
+
+    let internal toSQLParameterForComparison comparison (item: obj) =
+        match item with
+        | null -> struct (null, false)
 
         // Strings and chars
-        | :? string as s -> s :> obj, false
-        | :? char as c -> string c :> obj, false
+        | :? string -> struct (item, false)
+        | :? char as c -> struct (string c :> obj, false)
 
         // Boolean — SQLite stores as integer 0/1
-        | :? bool as b -> (if b then 1L :> obj else 0L :> obj), false
+        | :? bool as b -> struct ((if b then 1L :> obj else 0L :> obj), false)
 
         // Type → full name string
-        | :? Type as t -> t.FullName :> obj, false
+        | :? Type as t -> struct (t.FullName :> obj, false)
 
         // Signed integers — all pass through directly to SQLite INTEGER
-        | :? int8 as x -> x :> obj, false
-        | :? int16 as x -> x :> obj, false
-        | :? int32 as x -> x :> obj, false
-        | :? int64 as x -> x :> obj, false
-        | :? nativeint as x -> x :> obj, false
+        | :? int8 -> struct (item, false)
+        | :? int16 -> struct (item, false)
+        | :? int32 -> struct (item, false)
+        | :? int64 -> struct (item, false)
+        | :? nativeint -> struct (item, false)
 
         // Unsigned integers — pass through directly
-        | :? uint8 as x -> x :> obj, false
-        | :? uint16 as x -> x :> obj, false
-        | :? uint32 as x -> x :> obj, false
-        | :? uint64 as x -> x :> obj, false
-        | :? unativeint as x -> x :> obj, false
+        | :? uint8 -> struct (item, false)
+        | :? uint16 -> struct (item, false)
+        | :? uint32 -> struct (item, false)
+        | :? uint64 -> struct (item, false)
+        | :? unativeint -> struct (item, false)
 
         // Floating point — pass through directly to SQLite REAL
-        | :? float32 as x -> x :> obj, false
-        | :? float as x -> x :> obj, false
-        | :? decimal as x -> (float x) :> obj, false  // decimal → double for SQLite REAL comparison
+        | :? float32 -> struct (item, false)
+        | :? float -> struct (item, false)
+        | :? decimal as x -> struct ((if comparison then numberToSQLValue x else box (float x)), false)
 
         // Date/time types — must match JsonSerializator storage format (all stored as numeric values).
-        | :? DateOnly as x -> x.DayNumber :> obj, false
-        | :? DateTime as x -> x.ToBinary() :> obj, false
-        | :? DateTimeOffset as x -> x.ToUnixTimeMilliseconds() :> obj, false
-        | :? TimeOnly as x -> (int64 (x.ToTimeSpan().TotalMilliseconds)) :> obj, false
-        | :? TimeSpan as x -> (int64 x.TotalMilliseconds) :> obj, false
+        | :? DateOnly as x -> struct (x.DayNumber :> obj, false)
+        | :? DateTime as x -> struct (x.ToBinary() :> obj, false)
+        | :? DateTimeOffset as x -> struct (x.ToUnixTimeMilliseconds() :> obj, false)
+        | :? TimeOnly as x -> struct ((int64 (x.ToTimeSpan().TotalMilliseconds)) :> obj, false)
+        | :? TimeSpan as x -> struct ((int64 x.TotalMilliseconds) :> obj, false)
 
         // Guid — string representation
-        | :? System.Guid as x -> x.ToString("D") :> obj, false
+        | :? System.Guid as x -> struct (x.ToString("D") :> obj, false)
 
         // Enums — serialize as underlying integer value (matches SoloDB JSON storage)
-        | _ when item.GetType().IsEnum -> System.Convert.ToInt64(item) :> obj, false
+        | _ when item.GetType().IsEnum -> struct (System.Convert.ToInt64(item) :> obj, false)
 
         // Fallback: complex objects — serialize via JSON round-trip.
         // This path handles arrays, lists, custom objects, and any other structured types.
         | _other ->
-            JsonValue.Serialize item |> jsonValueToSQLValue
+            let value, json = JsonValue.Serialize item |> jsonValueToSQLValue
+            struct (value, json)
 
     
+    // Value expressions preserve released decimal REAL arithmetic; direct comparisons
+    // use INTEGER when every digit is representable. Other parameter kinds are unchanged.
+    let internal toSQLParameter item = toSQLParameterForComparison false item
+
+    /// Compatibility surface; internal binders use the allocation-free struct result.
+    let toSQLJson item =
+        let struct (value, json) = toSQLParameter item
+        value, json
+
     let internal fromJson<'T> (json: JsonValue) =
         match json with
         | Null when typeof<float> = typeof<'T> -> 

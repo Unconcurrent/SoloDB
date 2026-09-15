@@ -25,11 +25,16 @@ let mergeNestedExtract (expr: SqlExpr) : SqlExpr option =
         // jsonb_extract(Value, '$.outerSegs') where Value is itself a column
         // This is already flat — no nesting to merge.
         None
+    | FunctionCall("jsonb_extract", [FunctionCall("json_quote", [JsonExtractExpr _ as inner]); Literal(String "$")]) ->
+        Some inner
+    | FunctionCall("jsonb_extract", [FunctionCall("json_quote", [JsonExtractExpr(alias, col, innerPath)]); Literal(String pathStr)])
     | FunctionCall("jsonb_extract", [JsonExtractExpr(alias, col, innerPath); Literal(String pathStr)]) ->
         // FunctionCall("jsonb_extract", [inner_extract, path_literal])
         // Merge: jsonb_extract(jsonb_extract(alias.col, '$.inner'), '$.outer')
         // -> jsonb_extract(alias.col, '$.inner.outer')
-        if pathStr.StartsWith("$.") then
+        // Quoted labels may contain dot-bracket text. The segment formatter
+        // treats that spelling as an array boundary, so retain the safe nesting.
+        if pathStr.StartsWith("$.") && pathStr.IndexOf('"') < 0 then
             let outerSegs = pathStr.Substring(2).Split('.') |> Array.toList
             Some(JsonExtractExpr(alias, col, JsonPathOps.ofList (JsonPathOps.toList innerPath @ outerSegs)))
         else

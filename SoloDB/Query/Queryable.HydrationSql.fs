@@ -262,8 +262,8 @@ module internal HydrationSqlBuilder =
         // Emit to SQL string via optimizer pipeline.
         let sb = StringBuilder(256)
         let modelTableNames = QueryableHelperBase.collectIndexModelTableNames tableName select
-        let indexModel = SoloDatabase.IndexModel.loadModelForTables connection modelTableNames
-        emitSelectToSb sb initialVars indexModel select
+        let indexModel = RuntimeIndexModelCache.loadModelForTables connection modelTableNames
+        emitSelectToSb sb initialVars indexModel id select
 
         sb.ToString(), singleHydrated, manyHydrated
 
@@ -315,8 +315,8 @@ module internal HydrationSqlBuilder =
 
         let sb = StringBuilder(256)
         let modelTableNames = QueryableHelperBase.collectIndexModelTableNames tableName select
-        let indexModel = SoloDatabase.IndexModel.loadModelForTables connection modelTableNames
-        emitSelectToSb sb initialVars indexModel select
+        let indexModel = RuntimeIndexModelCache.loadModelForTables connection modelTableNames
+        emitSelectToSb sb initialVars indexModel id select
 
         sb.ToString(), manyHydrated
 

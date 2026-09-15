@@ -40,7 +40,7 @@ module internal QueryableBuildQuerySequenceOps =
         (m: {| Value: SupportedLinqMethods; OriginalMethod: MethodInfo; Expressions: Expression array |}) =
                 match m.Value with
                 | SupportedLinqMethods.Where -> 
-                    addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName m.Expressions.[0] WherePredicate)
+                    addFilter statements m.Expressions.[0]
                 | SupportedLinqMethods.Select ->
                     let selectFingerprint = expressionFingerprint m.Expressions.[0]
                     match pendingDistinctByScalarReuse with
@@ -235,8 +235,8 @@ module internal QueryableBuildQuerySequenceOps =
 
                 | SupportedLinqMethods.DistinctBy ->
                     // Edge case 7: SupportedLinqMethods.DistinctBy with ROW_NUMBER OVER — window function + derived table
-                    let lowered = lowerKeySelectorLambda sourceCtx tableName m.Expressions.[0] DistinctByKey
-                    addLoweredKeySelector statements lowered
+                    let lowered = lowerKeySelectorLambda m.Expressions.[0]
+                    addSelector statements (KeyProjection lowered.KeyExpression)
                     pendingDistinctByScalarReuse <-
                         match lowered.RelationAccess with
                         | HasRelationAccess -> Some lowered
@@ -310,7 +310,7 @@ module internal QueryableBuildQuerySequenceOps =
                                     "Fix: Remove the comparer or normalize the key inside the selector."))
                     | None -> ()
 
-                    addLoweredKeySelector statements (lowerKeySelectorLambda sourceCtx tableName keySelectorExpr GroupByKey)
+                    addSelector statements (KeyProjection keySelectorExpr)
                     addComplexFinal statements (fun ctx ->
                         let core =
                             { mkCore

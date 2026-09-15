@@ -65,20 +65,18 @@ module Connections =
                 try pooledConn.DisposeReal() with _ -> ()
             else
 
-                // Verify no stray transaction is active before returning to pool.
-                let probeOk =
-                    try pooledConn.Execute("BEGIN; ROLLBACK;") |> ignore; true
-                    with
-                    | :? SqliteException as se when se.SqliteErrorCode = 1 && se.SqliteExtendedErrorCode = 1 ->
-                        ("Error: Connection returned to pool while a transaction is still active.\nReason: The transaction must be finished before returning the connection.\nFix: Commit or rollback the transaction before returning the connection.", se)
-                        |> InvalidOperationException |> raise
-                    | _ ->
-                        // Connection is in unknown state (concurrent DDL schema churn, driver error, etc.).
-                        // Fail-safe: dispose instead of returning to pool.
-                        try pooledConn.DisposeReal() with _ -> ()
-                        false
-
-                if probeOk then
+                // Inspect SQLite's actual state without starting a transaction just
+                // to prove that none exists. This also detects raw-SQL transactions.
+                if pooledConn.State <> ConnectionState.Open then
+                    pooledConn.DisposeReal()
+                elif pooledConn.HasManagedTransaction then
+                    // ADO owns this transaction; disposing rolls it back. Raw BEGIN
+                    // has no managed owner and must still be completed by its caller.
+                    try pooledConn.DisposeReal() with _ -> ()
+                elif SQLitePCL.raw.sqlite3_get_autocommit(pooledConn.Handle) = 0 then
+                    raise (InvalidOperationException(
+                        "Error: Connection returned to pool while a transaction is still active.\nReason: The transaction must be finished before returning the connection.\nFix: Commit or rollback the transaction before returning the connection."))
+                else
                     pooledConn.ResetEventDispatchState()
                     pool.Push pooledConn
 

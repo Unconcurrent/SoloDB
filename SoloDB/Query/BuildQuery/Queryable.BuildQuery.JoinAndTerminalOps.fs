@@ -70,12 +70,7 @@ module internal QueryableBuildQueryJoinAndTerminalOps =
                     match m.Expressions.Length with
                     | 0 -> ()
                     | 1 ->
-                        let role =
-                            match m.Value with
-                            | SupportedLinqMethods.Count
-                            | SupportedLinqMethods.LongCount -> LongCountPredicate
-                            | _ -> CountPredicate
-                        addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName m.Expressions.[0] role)
+                        addFilter statements m.Expressions.[0]
                     | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
                     addComplexFinal statements (fun ctx ->

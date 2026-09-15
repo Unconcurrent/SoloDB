@@ -36,7 +36,7 @@ module internal QueryableBuildQuerySetAndTypeOps =
                 | SupportedLinqMethods.All ->
                     match m.Expressions.Length with
                     | 0 -> ()
-                    | 1 -> addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName (negatePredicateForAllExpression m.Expressions.[0]) AllPredicate)
+                    | 1 -> addFilter statements (negatePredicateForAllExpression m.Expressions.[0])
                     | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
                     addTake statements (UtilsReflection.ExpressionHelper.constant 1)
@@ -51,7 +51,7 @@ module internal QueryableBuildQuerySetAndTypeOps =
                 | SupportedLinqMethods.Any ->
                     match m.Expressions.Length with
                     | 0 -> ()
-                    | 1 -> addLoweredPredicate statements (lowerPredicateLambda sourceCtx tableName m.Expressions.[0] AnyPredicate)
+                    | 1 -> addFilter statements m.Expressions.[0]
                     | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
                     addTake statements (UtilsReflection.ExpressionHelper.constant 1)
@@ -209,7 +209,7 @@ module internal QueryableBuildQuerySetAndTypeOps =
                             (Some (DerivedTable(rhsSelect, "o")))
                     )
                     // After UNION ALL, apply DistinctBy-style deduplication via ROW_NUMBER window.
-                    addLoweredKeySelector statements (lowerKeySelectorLambda sourceCtx tableName keySelE DistinctByKey)
+                    addSelector statements (KeyProjection keySelE)
                     addComplexFinal statements (fun ctx ->
                         let innerProjs =
                             [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }

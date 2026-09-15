@@ -62,6 +62,7 @@ and internal SelectBody =
     | UnionAllSelect of head: SelectCore * tail: SelectCore list
 and internal CteBinding = {
     Name: string
+    Materialized: bool
     Query: SqlSelect
 }
 and internal SqlSelect = {

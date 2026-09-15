@@ -17,11 +17,8 @@ type internal CollectionScaffold<'T>(connection: Connection, connectionString: s
         RuntimeIndexModelCache.invalidate connectionString name
 
     member _.GetIndexModelSnapshot() =
-        match RuntimeIndexModelCache.tryGet connectionString name with
-        | Some model -> model
-        | None ->
-            use conn = connection.Get()
-            RuntimeIndexModelCache.loadAndStore conn connectionString name
+        use conn = connection.Get()
+        RuntimeIndexModelCache.loadModelForTables conn [name]
 
     member _.MkRelationTx(conn: SqliteConnection) : RelationsTypes.RelationTxContext = {
         Connection = conn

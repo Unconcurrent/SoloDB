@@ -39,4 +39,6 @@ open System.Runtime.CompilerServices
 [<assembly: InternalsVisibleTo("StressGen.Core")>]
 [<assembly: InternalsVisibleTo("StressGen.CSharp.Tests")>]
 [<assembly: InternalsVisibleTo("StressGen.FSharp.Tests")>]
+[<assembly: InternalsVisibleTo("CompiledQueries.CSharp")>]
+[<assembly: InternalsVisibleTo("CompiledQueries.FSharp")>]
 do ()

@@ -2,22 +2,35 @@ namespace SoloDatabase
 
 open System.Collections.Concurrent
 open Microsoft.Data.Sqlite
+open SQLiteTools
 
+/// One index metadata authority for collection operations and query translation.
 module internal RuntimeIndexModelCache =
-    let private snapshots = ConcurrentDictionary<string, SoloDatabase.IndexModel.IndexModel>()
+    let private snapshots = ConcurrentDictionary<struct (string * string), IndexModel.IndexModel>()
 
-    let private mkKey (connectionString: string) (collectionName: string) =
-        $"{connectionString}\u001F{collectionName}"
+    let private inTransaction (connection: SqliteConnection) =
+        match connection with
+        | :? CachingDbConnection as cached -> cached.InsideTransaction
+        | _ -> false
 
-    let tryGet (connectionString: string) (collectionName: string) =
-        match snapshots.TryGetValue(mkKey connectionString collectionName) with
-        | true, model -> Some model
-        | _ -> None
+    let invalidate connectionString collectionName =
+        snapshots.TryRemove(struct (connectionString, collectionName)) |> ignore
 
-    let invalidate (connectionString: string) (collectionName: string) =
-        snapshots.TryRemove(mkKey connectionString collectionName) |> ignore
-
-    let loadAndStore (connection: SqliteConnection) (connectionString: string) (collectionName: string) =
-        let model = SoloDatabase.IndexModel.loadModelForTables connection [collectionName]
-        snapshots.[mkKey connectionString collectionName] <- model
+    let loadAndStore (connection: SqliteConnection) connectionString collectionName =
+        let model = IndexModel.loadModelForTables connection [collectionName]
+        // Uncommitted schema must never become another connection's cached metadata.
+        if not (inTransaction connection) then
+            snapshots.[struct (connectionString, collectionName)] <- model
         model
+
+    let loadModelForTables (connection: SqliteConnection) (tableNames: seq<string>) =
+        let connectionString = connection.ConnectionString
+        let transactional = inTransaction connection
+        let get table =
+            match snapshots.TryGetValue(struct (connectionString, table)) with
+            | true, model when not transactional -> model
+            | _ -> loadAndStore connection connectionString table
+        match tableNames |> Seq.distinct |> Seq.toList with
+        | [] -> IndexModel.emptyModel
+        | [table] -> get table
+        | tables -> { IndexModel.Indexes = tables |> List.collect (fun table -> (get table).Indexes) }

@@ -37,12 +37,12 @@ module internal StoredValueParameter =
         | :? bool as booleanValue -> box (if booleanValue then 1 else 0)
         | _ -> value
 
-    let allocateNamed
+    let private allocateNamedForComparison comparison
         (variables: #IDictionary<string, obj>)
         (name: string)
         (value: obj)
         : SqlExpr =
-        let jsonValue, shouldEncode = value |> normalizeBoolean |> toSQLJson
+        let struct (jsonValue, shouldEncode) = value |> normalizeBoolean |> toSQLParameterForComparison comparison
         variables.[name] <- jsonValue
 
         let parameter = SqlExpr.Parameter name
@@ -50,6 +50,11 @@ module internal StoredValueParameter =
             SqlExpr.FunctionCall("jsonb", [parameter])
         else
             parameter
+
+    let allocateNamed variables name value = allocateNamedForComparison false variables name value
+
+    let allocateComparison variables value =
+        allocateNamedForComparison true variables (sprintf "dp%d" variables.Count) value
 
     let allocateNext
         (variables: #IDictionary<string, obj>)

@@ -15,8 +15,23 @@ open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBase
 open SqlDu.Engine.C1.Spec
 
+/// Upper bound shared by literal and invocation-bound ordinal prefixes.
+type internal QueryPrefixBounds =
+    static member Next(value: obj) =
+        // Keep null strings null, as in ordinary prefix translation.
+        let prefix = match value with :? char as c -> string c | _ -> value :?> string
+        let chars = prefix.ToCharArray()
+        let rec bump i =
+            if i < 0 then prefix + "\u0000"
+            elif chars.[i] < Char.MaxValue then
+                chars.[i] <- char (int chars.[i] + 1)
+                System.String(chars, 0, i + 1)
+            else bump (i - 1)
+        bump (chars.Length - 1)
+
 module internal QueryTranslatorVisitCoreMethodCall =
-    let internal visitMethodCallDu (visitDu: Expression -> QueryBuilder -> SqlExpr) (visitMathMethodDu: MethodCallExpression -> QueryBuilder -> SqlExpr voption) (arrayIndexDu: Expression -> Expression -> QueryBuilder -> SqlExpr) (visitPropertyDu: Expression -> obj -> Expression -> QueryBuilder -> SqlExpr) (containsImplDu: QueryBuilder -> Expression -> Expression -> SqlExpr) (visitNestedArrayPredicateDu: QueryBuilder -> Expression -> Expression -> bool -> SqlExpr) (castToDu: QueryBuilder -> Type -> Expression -> SqlExpr) (newObjectDu: struct(string * SqlExpr) array -> SqlExpr) (emitStringOperandDu: QueryBuilder -> bool -> Expression -> SqlExpr) (m: MethodCallExpression) (qb: QueryBuilder) : SqlExpr =
+    let private nextPrefixMethod = typeof<QueryPrefixBounds>.GetMethod("Next", BindingFlags.Static ||| BindingFlags.Public ||| BindingFlags.NonPublic)
+    let internal visitMethodCallDu (visitDu: Expression -> QueryBuilder -> SqlExpr) (visitStoredValueDu: Expression -> QueryBuilder -> SqlExpr) (visitMathMethodDu: MethodCallExpression -> QueryBuilder -> SqlExpr voption) (arrayIndexDu: Expression -> Expression -> QueryBuilder -> SqlExpr) (visitPropertyDu: Expression -> obj -> Expression -> QueryBuilder -> SqlExpr) (containsImplDu: QueryBuilder -> Expression -> Expression -> SqlExpr) (visitNestedArrayPredicateDu: QueryBuilder -> Expression -> Expression -> bool -> SqlExpr) (castToDu: QueryBuilder -> Type -> Expression -> SqlExpr) (newObjectDu: struct(string * SqlExpr) array -> SqlExpr) (emitStringOperandDu: QueryBuilder -> bool -> Expression -> SqlExpr) (m: MethodCallExpression) (qb: QueryBuilder) : SqlExpr =
         match visitMathMethodDu m qb with
         | ValueSome result -> result
         | ValueNone ->
@@ -40,7 +55,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
         // UpdateMode methods — DU path replacing legacy visit-based UpdateMode handlers.
         | OfShape1 null null "Set" null (oldValue, newValue) when qb.UpdateMode ->
             let pathExpr = visitDu oldValue qb
-            let valueExpr = visitDu newValue qb
+            let valueExpr = visitStoredValueDu newValue qb
             qb.UpdateAssignments.Add(pathExpr, valueExpr)
             SqlExpr.Literal(SqlLiteral.Null)
 
@@ -51,7 +66,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
                 match arrayPathExpr with
                 | SqlExpr.Literal(SqlLiteral.String path) -> SqlExpr.Literal(SqlLiteral.String $"{path}[#]")
                 | other -> other
-            let valueExpr = visitDu newValue qb
+            let valueExpr = visitStoredValueDu newValue qb
             qb.UpdateAssignments.Add(modifiedPath, valueExpr)
             SqlExpr.Literal(SqlLiteral.Null)
 
@@ -62,7 +77,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
                 match arrayPathExpr with
                 | SqlExpr.Literal(SqlLiteral.String path) -> SqlExpr.Literal(SqlLiteral.String $"{path}[{indexVal}]")
                 | other -> other
-            let valueExpr = visitDu newValue qb
+            let valueExpr = visitStoredValueDu newValue qb
             qb.UpdateAssignments.Add(modifiedPath, valueExpr)
             SqlExpr.Literal(SqlLiteral.Null)
 
@@ -80,8 +95,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
             SqlExpr.Literal(SqlLiteral.Null)
 
         | OfShape2 null null "Insert" null null (array, indexExpr, newValue) when qb.UpdateMode ->
-            // Shift-insert into a JSON array via json_each rebuild. SQLite 3.49.1
-            // (bundled) lacks json_array_insert (added in 3.50.0), so we emit a
+            // Shift-insert into a JSON array via json_each rebuild. Emit a
             // 3-arm UNION ALL (rows before idx, the new value at idx, rows from
             // idx onward shifted by +1) and re-aggregate via jsonb_group_array.
             // The intermediate SELECT applies ORDER BY k LIMIT -1 — a documented
@@ -94,7 +108,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
                     "indexExpr",
                     indexVal,
                     "Insert: negative index is not supported. Use a non-negative index."))
-            let newValueExpr = visitDu newValue qb
+            let newValueExpr = visitStoredValueDu newValue qb
             let tableNameDot = qb.GetTableNameDot()
             let alias = if String.IsNullOrEmpty tableNameDot then None else Some(tableNameDot.TrimEnd('.'))
             let extractArrayExpr =
@@ -215,21 +229,30 @@ module internal QueryTranslatorVisitCoreMethodCall =
                 SqlExpr.FunctionCall("SUBSTR", [emitStringOperandDu qb ic arg; SqlExpr.Literal(SqlLiteral.Integer 1L); SqlExpr.FunctionCall("LENGTH", [visitDu v qb])]),
                 BinaryOperator.Eq, emitStringOperandDu qb ic v)
         | OfShape1 null OfString "StartsWith" null (arg, v) ->
+            match qb.SourceContext.BindQueryValue with
+            | ValueSome binder when binder.IsValue v && (v.Type = typeof<string> || v.Type = typeof<char>) ->
+                let local = binder.Local v
+                let prefix = binder.Prefix local
+                let upper = visitDu (Expression.Call(nextPrefixMethod, Expression.Convert(local, typeof<obj>))) qb
+                let value = visitDu arg qb
+                let range = SqlExpr.Binary(SqlExpr.Binary(value, BinaryOperator.Ge, prefix), BinaryOperator.And,
+                                           SqlExpr.Binary(value, BinaryOperator.Lt, upper))
+                if qb.SourceContext.GeneralPrefixMatch then
+                    // Empty prefixes preserve the existing IS NOT NULL behavior,
+                    // including documents whose stored value is not a JSON string.
+                    SqlExpr.CaseExpr(
+                        (SqlExpr.Binary(prefix, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.String "")),
+                         SqlExpr.Unary(UnaryOperator.IsNotNull, value)), [], Some range)
+                else range
+            | _ ->
             if isFullyConstant v then
                 let prefix = if v.Type = typeof<char> then (string << evaluateExpr<char>) v else evaluateExpr<string> v
                 if prefix.Length = 0 then SqlExpr.Unary(UnaryOperator.IsNotNull, visitDu arg qb)
                 else
-                    let nextString (s: string) =
-                        let chars = s.ToCharArray()
-                        let rec bump i =
-                            if i < 0 then s + "\u0000"
-                            elif chars.[i] < System.Char.MaxValue then chars.[i] <- char (int chars.[i] + 1); new string(chars, 0, i + 1)
-                            else bump (i - 1)
-                        bump (chars.Length - 1)
                     SqlExpr.Binary(
                         SqlExpr.Binary(visitDu arg qb, BinaryOperator.Ge, qb.AllocateParamExpr prefix),
                         BinaryOperator.And,
-                        SqlExpr.Binary(visitDu arg qb, BinaryOperator.Lt, qb.AllocateParamExpr(nextString prefix)))
+                        SqlExpr.Binary(visitDu arg qb, BinaryOperator.Lt, qb.AllocateParamExpr(QueryPrefixBounds.Next prefix)))
             else
                 SqlExpr.Binary(
                     SqlExpr.FunctionCall("SUBSTR", [visitDu arg qb; SqlExpr.Literal(SqlLiteral.Integer 1L); SqlExpr.FunctionCall("LENGTH", [visitDu v qb])]),

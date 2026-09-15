@@ -4,6 +4,20 @@ open System.Collections.Generic
 open SQLiteTools
 open SqlDu.Engine.C1.Spec
 
+/// Compilation owns value evaluation; the translator owns SQL semantics.
+type internal QueryValueBinder = {
+    IsValue: System.Linq.Expressions.Expression -> bool
+    Parameter: System.Linq.Expressions.Expression -> SqlExpr
+    Comparison: System.Linq.Expressions.Expression -> SqlExpr
+    Scalar: System.Linq.Expressions.Expression -> SqlExpr
+    Prefix: System.Linq.Expressions.Expression -> SqlExpr
+    Local: System.Linq.Expressions.Expression -> System.Linq.Expressions.Expression
+} with
+    member this.TryBind comparison expression =
+        if not (this.IsValue expression) then ValueNone
+        elif comparison then ValueSome(this.Comparison expression)
+        else ValueSome(this.Parameter expression)
+
 /// Loads relation metadata for exactly what a translation asks for, at the moment it asks.
 ///
 /// The catalogs are read through their existing unique indexes -- SoloDBRelation has
@@ -272,6 +286,9 @@ type internal QueryContext = {
     /// lookup made anywhere in a translation is cached for the whole translation.
     /// ValueNone for contexts that never resolve relation metadata.
     MetadataSource: RelationMetadataSource voption
+    /// Resolves invocation values into SQL parameters during compiled translation.
+    BindQueryValue: QueryValueBinder voption
+    GeneralPrefixMatch: bool
     /// True ONLY at the OUTERMOST translation context (top-level user query
     /// terminator). Cleared in CloneForSubquery (any nested subquery loses the flag)
     /// so cardinality emit sites can detect they are nested and emit bare scalars
@@ -296,6 +313,8 @@ type internal QueryContext = {
           RelationLinks = Dictionary(System.StringComparer.Ordinal)
           RelationOwnerUsesSource = Dictionary(System.StringComparer.Ordinal)
           TypeCollections = Dictionary(System.StringComparer.Ordinal)
+          GeneralPrefixMatch = false
+          BindQueryValue = ValueNone
           MetadataSource = ValueNone
           IsAtTopLevel = false }
 
@@ -318,6 +337,8 @@ type internal QueryContext = {
           RelationLinks = Dictionary(System.StringComparer.Ordinal)
           RelationOwnerUsesSource = Dictionary(System.StringComparer.Ordinal)
           TypeCollections = Dictionary(System.StringComparer.Ordinal)
+          GeneralPrefixMatch = false
+          BindQueryValue = ValueNone
           MetadataSource = ValueNone
           IsAtTopLevel = false }
 
@@ -345,7 +366,7 @@ type internal QueryContext = {
     /// must keep the parent's metadata authority; without it relation access through the child
     /// silently falls back to defaults.
     static member ChildOf(parent: QueryContext, tableName: string) =
-        { QueryContext.SingleSource(tableName) with MetadataSource = parent.MetadataSource }
+        { QueryContext.SingleSource(tableName) with MetadataSource = parent.MetadataSource; BindQueryValue = parent.BindQueryValue; GeneralPrefixMatch = parent.GeneralPrefixMatch }
 
     member this.CloneForSubquery(?rootTable: string) =
         { this with

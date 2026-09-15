@@ -107,28 +107,10 @@ module internal HydrationManyPopulator =
                             | _ -> ()
                 | _ -> ()
 
-type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, data: obj) =
-    static let enumerableDispatchCache = System.Collections.Concurrent.ConcurrentDictionary<Type, MethodInfo>()
-
-    interface ISoloDBCollectionQueryProvider with
-        override this.Source = source
-        override this.AdditionalData = data
-        override this.TranslateToSQL(expression: Expression) =
-            let query, _, _, _ = QueryableTranslationCore.startTranslation source expression
-            query
-        override this.DescribeUnoptimizedSelect(expression: Expression) =
-            let _, _, _, select = QueryableTranslationCore.startTranslation source expression
-            sprintf "%A" select
-        override this.GetExplainQueryPlan(expression: Expression) =
-            let query, variables, _, _ = QueryableTranslationCore.startTranslation source expression
-            let explainQuery = "EXPLAIN QUERY PLAN " + query
-            use connection = source.GetInternalConnection()
-            let result = connection.Query<{|detail: string|}>(explainQuery, variables) |> Seq.toList
-            result |> List.map(_.detail) |> String.concat ";\n"
-
-    interface SoloDBQueryProvider
-    member internal this.ExecuteEnumetable<'Elem> (query: string) (par: obj) (batchCtxObj: obj) : IEnumerable<'Elem> =
-        let batchCtx = batchCtxObj :?> QueryableTranslationCore.BatchLoadContext voption
+module internal QueryableExecution =
+    let enumerate<'Source, 'Elem>
+        (source: ISoloDBCollection<'Source>) (query: string) (par: obj)
+        (batchCtx: QueryableTranslationCore.BatchLoadContext voption) : IEnumerable<'Elem> =
         seq {
             use connection = source.GetInternalConnection()
             match batchCtx with
@@ -188,6 +170,29 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                 for row in connection.Query<Types.DbObjectRow>(query, par) do
                     yield JsonFunctions.fromSQLite<'Elem> row
         }
+
+type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, data: obj) =
+    static let enumerableDispatchCache = System.Collections.Concurrent.ConcurrentDictionary<Type, MethodInfo>()
+
+    interface ISoloDBCollectionQueryProvider with
+        override this.Source = source
+        override this.AdditionalData = data
+        override this.TranslateToSQL(expression: Expression) =
+            let query, _, _, _ = QueryableTranslationCore.startTranslation source expression
+            query
+        override this.DescribeUnoptimizedSelect(expression: Expression) =
+            let _, _, _, select = QueryableTranslationCore.startTranslation source expression
+            sprintf "%A" select
+        override this.GetExplainQueryPlan(expression: Expression) =
+            let query, variables, _, _ = QueryableTranslationCore.startTranslation source expression
+            let explainQuery = "EXPLAIN QUERY PLAN " + query
+            use connection = source.GetInternalConnection()
+            let result = connection.Query<{|detail: string|}>(explainQuery, variables) |> Seq.toList
+            result |> List.map(_.detail) |> String.concat ";\n"
+
+    interface SoloDBQueryProvider
+    member internal _.ExecuteEnumetable<'Elem> (query: string) (par: obj) (batchCtxObj: obj) : IEnumerable<'Elem> =
+        QueryableExecution.enumerate<'T, 'Elem> source query par (unbox batchCtxObj)
 
     interface IQueryProvider with
         member this.CreateQuery<'TResult>(expression: Expression) : IQueryable<'TResult> =
@@ -335,7 +340,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
 
             finally
                 ()
-            
+
 /// <summary>
 /// The internal implementation of <c>IQueryable</c> and <c>IOrderedQueryable</c> for SoloDB collections.
 /// </summary>

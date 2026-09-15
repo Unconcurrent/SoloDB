@@ -14,9 +14,6 @@ open QueryTranslatorBaseHelpers
 open SqlDu.Engine.C1.Spec
 
 module internal QueryTranslatorBase =
-    let inline compareKnownJsonDu (qb: QueryBuilder) (targetExpr: SqlExpr) (targetType: Type) (knownObject: obj) : SqlExpr =
-        QueryTranslatorBaseHelpers.compareKnownJsonDu qb targetExpr targetType knownObject
-
     [<return: Struct>]
     let internal (|OfShape0|_|) (_retType: ('any1 -> 'T) | null) (_objType: ('any2 -> 'O) | null) (name: string) (m: MethodCallExpression) =
         if m.Method.Name = name && (isNull _retType || typeof<'T>.IsAssignableFrom m.Type) then

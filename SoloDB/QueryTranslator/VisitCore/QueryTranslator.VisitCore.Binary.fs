@@ -24,14 +24,14 @@ module internal QueryTranslatorVisitCoreBinary =
         || nodeType = ExpressionType.GreaterThan
         || nodeType = ExpressionType.GreaterThanOrEqual
 
-    let internal visitBinaryDu (visitDu: Expression -> QueryBuilder -> SqlExpr) (normalizeKnownJsonForJsonEachValueDu: SqlExpr -> obj -> obj) (b: BinaryExpression) (qb: QueryBuilder) : SqlExpr =
+    let internal visitBinaryDu (visitDu: Expression -> QueryBuilder -> SqlExpr) (visitComparisonDu: Expression -> QueryBuilder -> SqlExpr) (visitStoredValueDu: Expression -> QueryBuilder -> SqlExpr) (b: BinaryExpression) (qb: QueryBuilder) : SqlExpr =
         // In UpdateMode an `Assign` on a member access lowers to the same
         // assignment that the `Extensions.Set(member, value)` path records.
         // This accepts the F# canonical owner-side property-mutation form
         // `o.Field <- value` alongside `o.Field.Set value`.
         if b.NodeType = ExpressionType.Assign && qb.UpdateMode then
             let pathExpr = visitDu b.Left qb
-            let valueExpr = visitDu b.Right qb
+            let valueExpr = visitStoredValueDu b.Right qb
             qb.UpdateAssignments.Add(pathExpr, valueExpr)
             SqlExpr.Literal(SqlLiteral.Null)
         elif b.NodeType = ExpressionType.Add && (b.Left.Type = typeof<string> || b.Right.Type = typeof<string>) then
@@ -42,21 +42,34 @@ module internal QueryTranslatorVisitCoreBinary =
         let isRightNull = match b.Right with :? ConstantExpression as c when c.Value = null -> true | _ -> false
         let isAnyNull = isLeftNull || isRightNull
         let struct(left, right) = if isLeftNull then struct(b.Right, b.Left) else struct(b.Left, b.Right)
-        let shouldUseComplex = not isAnyNull && not (isPrimitiveSQLiteType left.Type || isPrimitiveSQLiteType right.Type) && (left.Type <> typeof<obj> && right.Type <> typeof<obj>) && (isFullyConstant left || isFullyConstant right)
+        let complexTypes = not isAnyNull && not (isPrimitiveSQLiteType left.Type || isPrimitiveSQLiteType right.Type) && (left.Type <> typeof<obj> && right.Type <> typeof<obj>)
+        let boundComparison =
+            match qb.SourceContext.BindQueryValue with
+            | ValueSome bind when complexTypes && (b.NodeType = ExpressionType.Equal || b.NodeType = ExpressionType.NotEqual) ->
+                if bind.IsValue right then ValueSome(EqualityComparison.bound qb bind (visitDu left qb) right)
+                elif bind.IsValue left then ValueSome(EqualityComparison.bound qb bind (visitDu right qb) left)
+                else ValueNone
+            | _ -> ValueNone
+        match boundComparison with
+        | ValueSome comparison ->
+            if b.NodeType = ExpressionType.Equal then comparison else SqlExpr.Unary(UnaryOperator.Not, comparison)
+        | ValueNone ->
+        let shouldUseComplex = complexTypes && (isFullyConstant left || isFullyConstant right)
         match struct(shouldUseComplex, b.NodeType) with
         | struct(true, ExpressionType.Equal) ->
             let struct(constant, expression) = if isFullyConstant left then struct(left, right) else struct(right, left)
             let targetExpr = visitDu expression qb
-            let knownObject = evaluateExpr<obj> constant |> normalizeKnownJsonForJsonEachValueDu targetExpr
-            compareKnownJsonDu qb targetExpr expression.Type knownObject
+            let knownObject = evaluateExpr<obj> constant
+            EqualityComparison.known qb targetExpr expression.Type knownObject
         | struct(true, ExpressionType.NotEqual) ->
             let struct(constant, expression) = if isFullyConstant left then struct(left, right) else struct(right, left)
             let targetExpr = visitDu expression qb
-            let knownObject = evaluateExpr<obj> constant |> normalizeKnownJsonForJsonEachValueDu targetExpr
-            SqlExpr.Unary(UnaryOperator.Not, compareKnownJsonDu qb targetExpr expression.Type knownObject)
+            let knownObject = evaluateExpr<obj> constant
+            SqlExpr.Unary(UnaryOperator.Not, EqualityComparison.known qb targetExpr expression.Type knownObject)
         | _ ->
-        let leftDu = visitDu left qb
-        let rightDu = visitDu right qb
+        let visitOperand = if isRelationalBinary b.NodeType then visitComparisonDu else visitDu
+        let leftDu = visitOperand left qb
+        let rightDu = visitOperand right qb
         let leftType = DateTimeFunctions.unwrapNullable left.Type
         let rightType = DateTimeFunctions.unwrapNullable right.Type
         let struct(leftDu, rightDu) =

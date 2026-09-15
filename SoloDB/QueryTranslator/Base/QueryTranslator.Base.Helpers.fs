@@ -202,89 +202,36 @@ module internal QueryTranslatorBaseHelpers =
             body
 
 
-    /// Compares a database value with a known .NET object, returning an SqlExpr conjunction.
-    let inline internal compareKnownJsonDu (qb: QueryBuilder) (targetExpr: SqlExpr) (targetType: Type) (knownObject: obj) : SqlExpr =
-        if isPrimitiveSQLiteType targetType then
-            SqlExpr.Binary(targetExpr, BinaryOperator.Is, qb.AllocateParamExpr knownObject)
-        else
-            let json =
-                match knownObject with
-                | :? JsonSerializator.JsonValue as json -> json
-                | _ -> JsonSerializator.JsonValue.Serialize knownObject
+    /// F# copies a struct receiver into a local before reading a member. This
+    /// single-read form can be reduced without duplicating receiver evaluation.
+    let internal unwrapStructCopy (expr: Expression) =
+        match expr with
+        | :? BlockExpression as block when block.Variables.Count = 1 && block.Expressions.Count = 2
+                                              && block.Variables.[0].Type.IsValueType ->
+            let variable = block.Variables.[0]
+            match block.Expressions.[0], block.Expressions.[1] with
+            | (:? BinaryExpression as assignment), (:? MemberExpression as access)
+                when assignment.NodeType = ExpressionType.Assign
+                     && Object.ReferenceEquals(assignment.Left, variable)
+                     && Object.ReferenceEquals(access.Expression, variable) ->
+                // A self-dependent assignment must not leave a free local after reduction.
+                let mutable readsLocal = false
+                let visitor =
+                    { new ExpressionVisitor() with
+                        override _.VisitParameter parameter =
+                            if Object.ReferenceEquals(parameter, variable) then readsLocal <- true
+                            parameter :> Expression }
+                visitor.Visit assignment.Right |> ignore
+                if readsLocal then expr
+                else Expression.MakeMemberAccess(assignment.Right, access.Member) :> Expression
+            | _ -> expr
+        | _ -> expr
 
-            let rec buildConjunction (comparisons: SqlExpr list) : SqlExpr =
-                match comparisons with
-                | [] -> SqlExpr.Literal(SqlLiteral.Boolean true)
-                | [single] -> single
-                | head :: tail -> SqlExpr.Binary(head, BinaryOperator.And, buildConjunction tail)
-
-            let appendObjectPathSegment (path: string) (key: string) =
-                let key = key.Replace("\000", "")
-                let needsQuoted =
-                    key |> Seq.exists (fun c -> not (Char.IsLetterOrDigit c || c = '_' || c = '$'))
-
-                if needsQuoted then
-                    if path = "$" then sprintf "$.\"%s\"" key else sprintf "%s.\"%s\"" path key
-                else
-                    if path = "$" then sprintf "$.%s" key else sprintf "%s.%s" path key
-
-            let rec compareJsonDu (path: string) (json: JsonSerializator.JsonValue) : SqlExpr list =
-                let extract = SqlExpr.FunctionCall("jsonb_extract", [targetExpr; SqlExpr.Literal(SqlLiteral.String path)])
-                // Path ending in $type carries the F# DU polymorphic-type
-                // discriminator. The captured side (Serialize<obj> via
-                // SerializeByTypeWithType) always writes it; the stored side
-                // (plain Serialize<T> for nested DU fields) doesn't. To make
-                // DU equality match both polymorphic and plain storage shapes,
-                // emit  (stored IS captured) OR (stored IS NULL)  for $type
-                // only so missing discriminators still match; every other
-                // path uses a single IS comparison (CLR-equality semantics,
-                // index-usable per SQLite >= 3.21).
-                let isTypeDiscriminator = path.EndsWith ".$type"
-                let inline cmp value =
-                    let strictEq = SqlExpr.Binary(extract, BinaryOperator.Is, qb.AllocateParamExpr value)
-                    if isTypeDiscriminator then
-                        let storedIsNull = SqlExpr.Unary(UnaryOperator.IsNull, extract)
-                        SqlExpr.Binary(strictEq, BinaryOperator.Or, storedIsNull)
-                    else
-                        strictEq
-                match json with
-                | JsonSerializator.JsonValue.Null ->
-                    [SqlExpr.Unary(UnaryOperator.IsNull, extract)]
-                | JsonSerializator.JsonValue.Boolean b ->
-                    [cmp b]
-                | JsonSerializator.JsonValue.Number n ->
-                    [cmp n]
-                | JsonSerializator.JsonValue.String s ->
-                    [cmp s]
-                | JsonSerializator.JsonValue.Object dict ->
-                    [for KeyValue(k, v) in dict do
-                        let newPath = appendObjectPathSegment path k
-                        yield! compareJsonDu newPath v]
-                | JsonSerializator.JsonValue.List items ->
-                    let lengthCheck =
-                        SqlExpr.Binary(
-                            SqlExpr.FunctionCall("json_array_length", [SqlExpr.FunctionCall("jsonb_extract", [targetExpr; SqlExpr.Literal(SqlLiteral.String path)])]),
-                            BinaryOperator.Is,
-                            qb.AllocateParamExpr items.Count)
-                    [yield lengthCheck
-                     for i in 0 .. items.Count - 1 do
-                        let newPath = if path = "$" then $"$[{i}]" else $"{path}[{i}]"
-                        yield! compareJsonDu newPath items.[i]]
-
-            let comparisons =
-                match json with
-                | JsonSerializator.JsonValue.Object d ->
-                    [for KeyValue(k, v) in d do
-                        yield! compareJsonDu (appendObjectPathSegment "$" k) v]
-                | _ -> compareJsonDu "$" json
-
-            buildConjunction comparisons
-
-    /// Unwrap a single Convert node to get the actual expression.
+    /// Unwrap the conversion or struct-copy wrapper used around a source expression.
     let internal unwrapConvert (expr: Expression) =
         match expr with
-        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> ue.Operand
-        | e -> e
+        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> unwrapStructCopy ue.Operand
+        | e -> unwrapStructCopy e
 
     /// Returns true if the expression is a DBRef<T>.Value member access boundary.
     let internal isDBRefValueBoundary (expr: MemberExpression) =

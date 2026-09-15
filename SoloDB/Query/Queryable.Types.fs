@@ -137,31 +137,11 @@ type internal SQLSubquery =
     | Simple of UsedSQLStatements
     | ComplexDu of (struct {|Vars: Dictionary<string, obj>; Inner: SqlSelect; TableName: string|} -> SqlSelect)
 
-type internal PredicateRole =
-| WherePredicate
-| AnyPredicate
-| AllPredicate
-| CountPredicate
-| LongCountPredicate
-
 type internal RelationAccessKind =
 | NoRelationAccess
 | HasRelationAccess
 
-type internal LoweredPredicate = {
-    Role: PredicateRole
-    Predicate: Expression
-    LayerPosition: LayerPosition
-    RelationAccess: RelationAccessKind
-    MaterializedPathsSnapshot: string array
-}
-
-type internal KeySelectorRole =
-| DistinctByKey
-| GroupByKey
-
 type internal LoweredKeySelector = {
-    Role: KeySelectorRole
     KeyExpression: Expression
     RelationAccess: RelationAccessKind
     Fingerprint: string

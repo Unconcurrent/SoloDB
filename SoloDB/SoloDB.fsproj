@@ -98,6 +98,7 @@
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.CompositeGroupByCanonicalization.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.CompositeGroupByCanonicalizationPass.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.IndexModel.fs" />
+    <Compile Include="SoloDBCore/SoloDB.RuntimeIndexModelCache.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.ExpressionMatcher.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.IndexPlanShaping.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.IndexPlanShapingPass.fs" />
@@ -111,6 +112,9 @@
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Types.fs" />
     <Compile Include="QueryTranslator/SqlDu/Emit/SqlDu.MinimalEmit.fs" />
     <Compile Include="SoloDBCore/SoloDB.StatementExecution.fs" />
+    <Compile Include="QueryTranslator/Equality/EqualityRules.fs" />
+    <Compile Include="QueryTranslator/Equality/JsonValueEqualityExtensions.fs" />
+    <Compile Include="QueryTranslator/Equality/EqualityComparison.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Helpers.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.CastAggregate.fs" />
@@ -199,14 +203,16 @@
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.JoinAndTerminalOps.fs" />
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.SetAndTypeOps.fs" />
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.Main.fs" />
+            <Compile Include="Query/Queryable.CompiledPage.fs" />
+            <Compile Include="Query/Queryable.CompiledPlanning.fs" />
 		    <Compile Include="Query/Queryable.Translation.fs" />
 		    <Compile Include="Query/Queryable.Provider.fs" />
+            <Compile Include="Query/Queryable.Compiled.fs" />
 	    <Compile Include="SoloDBCore/SoloDB.Location.fs" />
     <Compile Include="SoloDBCore/SoloDB.ToCollectionData.fs" />
     <Compile Include="SoloDBCore/SoloDB.SchemaMigration.fs" />
     <Compile Include="SoloDBCore/SoloDB.Bootstrap.fs" />
     <Compile Include="SoloDBCore/SoloDB.QueryUtils.fs" />
-    <Compile Include="SoloDBCore/SoloDB.RuntimeIndexModelCache.fs" />
     <Compile Include="SoloDBCore/SoloDB.EventDbCache.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.Core.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.Insert.fs" />

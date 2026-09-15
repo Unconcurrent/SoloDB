@@ -145,7 +145,7 @@ module internal QueryableTranslationCore =
     /// <param name="source">The source collection of the query.</param>
     /// <param name="expression">The LINQ expression to translate.</param>
     /// <returns>A tuple containing the generated SQL string and the dictionary of parameters.</returns>
-    let internal startTranslationCore (metadataConnection: SqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
+    let private translateWithBindings bindQueryValue generalPrefixMatch (metadataConnection: SqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
         let variables = Dictionary<string, obj>(16)
 
         let valueDecodedType =
@@ -158,7 +158,7 @@ module internal QueryableTranslationCore =
         // SelectMany, nested builders) while running and resolves them against this context,
         // so the root type does not bound which collections will be consulted. The resolver
         // costs nothing until something is actually asked for.
-        let ctx = { QueryContext.SingleSource(source.Name) with MetadataSource = ValueSome (RelationMetadataSource metadataConnection) }
+        let ctx = { QueryContext.SingleSource(source.Name) with MetadataSource = ValueSome (RelationMetadataSource metadataConnection); BindQueryValue = bindQueryValue; GeneralPrefixMatch = generalPrefixMatch }
         // Mark this as the OUTERMOST translation context. Cleared in CloneForSubquery
         // so nested cardinality emit sites can detect they are nested and emit bare
         // scalars (default(T) propagation) rather than typed exceptions.
@@ -260,8 +260,9 @@ module internal QueryableTranslationCore =
         // Emit to string via the minimal emitter.
         let sb = StringBuilder(256)
         let modelTableNames = collectIndexModelTableNames source.Name outerSelect
-        let indexModel = SoloDatabase.IndexModel.loadModelForTables metadataConnection modelTableNames
-        emitSelectToSb sb variables indexModel outerSelect
+        let indexModel = RuntimeIndexModelCache.loadModelForTables metadataConnection modelTableNames
+        let retainedPlan = if bindQueryValue.IsSome then CompiledQueryPlanning.latePayload indexModel else id
+        emitSelectToSb sb variables indexModel retainedPlan outerSelect
 
         let actuallyHydrated = singleRelationsHydrated && hydrationAliasCounter > 0
         let actuallyManyHydrated = manyRelationsHydrated && manyHydrationProjection.IsSome
@@ -285,6 +286,12 @@ module internal QueryableTranslationCore =
         // The pre-optimizer SqlSelect is returned alongside the emitted text so callers can
         // inspect the structure the translator actually produced, before any pass rewrites it.
         sb.ToString(), variables, batchLoadContext, outerSelect
+
+    let internal startTranslationCore connection source expression =
+        translateWithBindings ValueNone false connection source expression
+
+    let internal startCompiledTranslation connection source expression bindQueryValue generalPrefixMatch =
+        translateWithBindings (ValueSome bindQueryValue) generalPrefixMatch connection source expression
 
     let internal startTranslation (source: ISoloDBCollection<'T>) (expression: Expression) =
         use metadataConnection = source.GetInternalConnection()

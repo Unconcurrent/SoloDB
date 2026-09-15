@@ -39,6 +39,14 @@ type JsonValueType =
     /// <summary>An object (dictionary) of string keys and JsonValues.</summary>
     | Object = 6uy
 
+/// Shape selected by the actual serializer dispatch, before any values are supplied.
+type internal JsonSerializationShape =
+    | Dynamic
+    | Scalar
+    | ObjectMembers of MemberInfo array
+    | ArrayMembers of MemberInfo array
+    | NullableValue of Type
+
 /// <summary>
 /// Represents a JSON value, which can be a null, boolean, string, number, list, or object.
 /// This is a discriminated union that forms the core of the JSON representation.
@@ -76,12 +84,27 @@ type JsonValue =
             | Object a, Object b ->
                 if a.Count <> b.Count then false
                 else
+                    let find key =
+                        match b with
+                        | :? Dictionary<string, JsonValue> as dictionary
+                            when dictionary.Comparer = EqualityComparer<string>.Default
+                                 || dictionary.Comparer = StringComparer.Ordinal ->
+                            match dictionary.TryGetValue key with
+                            | true, value -> ValueSome value
+                            | _ -> ValueNone
+                        | _ ->
+                            use entries = b.GetEnumerator()
+                            let mutable result = ValueNone
+                            while result.IsNone && entries.MoveNext() do
+                                if StringComparer.Ordinal.Equals(entries.Current.Key, key) then
+                                    result <- ValueSome entries.Current.Value
+                            result
                     use e = a.GetEnumerator()
                     let rec loop () =
                         if e.MoveNext() then
                             let kvp = e.Current
-                            match b.TryGetValue(kvp.Key) with
-                            | true, value when equals kvp.Value value -> loop ()
+                            match find kvp.Key with
+                            | ValueSome value when equals kvp.Value value -> loop ()
                             | _ -> false
                         else
                             true
@@ -264,6 +287,11 @@ type JsonValue =
     static member Serialize<'T>(t: 'T) : JsonValue =
         JsonSerializerImpl<'T>.Serialize t
 
+    /// Query compilation reads the serializer contract once and retains typed accessors.
+    static member internal SerializationShape(t: Type) : JsonSerializationShape =
+        let serializer = typedefof<JsonSerializerImpl<_>>.MakeGenericType(t)
+        serializer.GetProperty("Shape", BindingFlags.NonPublic ||| BindingFlags.Static).GetValue(null) :?> JsonSerializationShape
+
     /// <summary>
     /// Serializes a given object of type 'T into a JsonValue, including a "$type" property with the object's type name.
     /// </summary>
@@ -324,7 +352,7 @@ type JsonValue =
         | Object o -> o.ContainsKey name
         | List list -> 
             match Int32.TryParse (name, NumberStyles.Integer, CultureInfo.InvariantCulture) with
-            | true, index -> list.Count > index
+            | true, index -> index >= 0 && index < list.Count
             | false, _ -> false
         | other -> failwithf "Cannot index %s" (other.ToString())
 
@@ -345,9 +373,13 @@ type JsonValue =
                 v <- out
                 false
         | List list -> 
-            let index = Int32.Parse (name, NumberStyles.Integer, CultureInfo.InvariantCulture)
-            v <- list.[index]
-            true
+            match Int32.TryParse (name, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+            | true, index when index >= 0 && index < list.Count ->
+                v <- list.[index]
+                true
+            | _ ->
+                v <- Unchecked.defaultof<JsonValue>
+                false
         | other -> failwithf "Cannot index %s" (other.ToString())
 
     /// <summary>
@@ -473,12 +505,18 @@ type JsonValue =
         sb.ToString()
 
     /// <summary>
-    /// Compares this JsonValue with another object for equality by parsing the other object's string representation.
+    /// Compares this value structurally with the plain serialized value of the argument.
+    /// Unlike EqLoose, equality requires the same object keys and array elements on both sides.
     /// </summary>
-    /// <param name="other">The object to compare with.</param>
-    /// <returns>True if the parsed object is equal to this JsonValue.</returns>
+    /// <param name="other">A value to serialize by its runtime type, or a JsonValue used directly.</param>
+    /// <returns>True when the complete JSON structures are equal.</returns>
     member this.Eq (other: obj) =
-        this = JsonValue.Parse $"{other}"
+        let json =
+            match other with
+            | null -> JsonValue.Null
+            | :? JsonValue as value -> value
+            | value -> JsonImpl.SerializeByType (value.GetType()) value
+        JsonValue.EqualsCore this json
 
     /// <summary>
     /// Creates a new, empty JsonValue.Object.
@@ -1089,6 +1127,18 @@ and private JsonImpl =
                 ))
             
             fn.Invoke v
+
+    // The plain serializer uses the runtime type as its declared type, as storage does.
+    static member val internal SerializeByType =
+        let cache = ConcurrentDictionary<Type, Func<obj, JsonValue>>()
+        let create = Func<Type, Func<obj, JsonValue>>(fun t ->
+            let value = Expression.Parameter typeof<obj>
+            let method =
+                typedefof<JsonSerializerImpl<_>>.MakeGenericType(t)
+                    .GetMethod(nameof JsonSerializerImpl<_>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
+            Expression.Lambda<Func<obj, JsonValue>>(
+                Expression.Call(method, Expression.Convert(value, t)), value).Compile(false))
+        fun (runtimeType: Type) (value: obj) -> cache.GetOrAdd(runtimeType, create).Invoke value
 
     /// <summary>
     /// A cached function to serialize an object of a specific runtime type to a JsonValue, including type information.
@@ -2484,6 +2534,10 @@ and private JsonDeserializerImpl<'A> =
 /// </summary>
 /// <typeparam name="'A">The source type for serialization.</typeparam>
 and private JsonSerializerImpl<'A> =
+    static let mutable shape = JsonSerializationShape.Dynamic
+
+    static member internal Shape = shape
+
     /// <summary>
     /// A static function delegate for the compiled serializer.
     /// </summary>
@@ -2582,95 +2636,118 @@ and private JsonSerializerImpl<'A> =
             :> obj :?> ('A -> JsonValue)
 
         | OfType bool -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (o: bool) -> Boolean o)
             :> obj :?> ('A -> JsonValue)
 
         | OfType char -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (o: char) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
         | OfType uint8 -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (o: uint8) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
             
         | OfType uint16 ->
+            shape <- JsonSerializationShape.Scalar
             (fun (o: uint16) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
         | OfType uint32 -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (o: uint32) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
         | OfType uint64 ->
+            shape <- JsonSerializationShape.Scalar
             (fun (o: uint64) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
         | OfType int8 ->
+            shape <- JsonSerializationShape.Scalar
             (fun (o: int8) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
         | OfType int16 ->
+            shape <- JsonSerializationShape.Scalar
             (fun (o: int16) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
         | OfType int32 ->
+            shape <- JsonSerializationShape.Scalar
             (fun (o: int32) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
         | OfType int64 -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (o: int64) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
         | OfType (id: bigint -> bigint) -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (o: bigint) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
 
         | OfType (id: IntPtr -> IntPtr) -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (o: IntPtr) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
         | OfType (id: UIntPtr -> UIntPtr) -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (o: UIntPtr) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
         | OfType float32 ->
+            shape <- JsonSerializationShape.Scalar
             (fun (o: float32) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
         | OfType float ->
+            shape <- JsonSerializationShape.Scalar
             (fun (o: float) -> Number (decimal o))
             :> obj :?> ('A -> JsonValue)
 
         | OfType decimal ->
+            shape <- JsonSerializationShape.Scalar
             (fun (o: decimal) -> Number o)
             :> obj :?> ('A -> JsonValue)
 
         | OfType DateTimeOffset -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (date: DateTimeOffset) -> date.ToUnixTimeMilliseconds() |> decimal |> Number)
             :> obj :?> ('A -> JsonValue)
 
         | OfType DateTime -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (date: DateTime) -> date.ToBinary() |> decimal |> Number)
             :> obj :?> ('A -> JsonValue)
 
         | OfType (DateOnly: unit -> DateOnly) -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (date: DateOnly) -> date.DayNumber |> decimal |> Number)
             :> obj :?> ('A -> JsonValue)
 
         | OfType TimeOnly -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (time: TimeOnly) -> time.ToTimeSpan().TotalMilliseconds |> int64 (* Convert to int64 to allow for higher precision in SQLite. *) |> decimal |> Number)
             :> obj :?> ('A -> JsonValue)
 
         | OfType TimeSpan -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (ts: TimeSpan) -> ts.TotalMilliseconds |> int64 |> decimal |> Number)
             :> obj :?> ('A -> JsonValue)
 
         | OfType (Guid: unit -> Guid) -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (guid: Guid) -> guid.ToString("D", CultureInfo.InvariantCulture) |> String)
             :> obj :?> ('A -> JsonValue)
 
         | OfType string -> 
+            shape <- JsonSerializationShape.Scalar
             (fun (s: string) -> 
                 if isNull s
                 then Null
@@ -2679,6 +2756,7 @@ and private JsonSerializerImpl<'A> =
 
         // For efficient storage.
         | OfType (id: byte array -> byte array) ->
+            shape <- JsonSerializationShape.Scalar
             (fun (ba: byte array) ->
                 if isNull ba
                 then Null
@@ -2686,6 +2764,7 @@ and private JsonSerializerImpl<'A> =
             :> obj :?> ('A -> JsonValue)
 
         | OfType (id: byte seq -> byte seq) ->
+            shape <- JsonSerializationShape.Scalar
             let fn = 
                 Func<byte seq, JsonValue>(
                     (fun (bs: byte seq) ->
@@ -2709,6 +2788,7 @@ and private JsonSerializerImpl<'A> =
             )
 
         | t when t.IsEnum ->
+            shape <- JsonSerializationShape.Scalar
             let underlyingType = Enum.GetUnderlyingType(t)
             let p = Expression.Parameter t
             
@@ -2735,6 +2815,7 @@ and private JsonSerializerImpl<'A> =
             let keyType, valueType = args.[0], args.[1]
             let keyProp = t.GetProperty("Key")
             let valueProp = t.GetProperty("Value")
+            shape <- JsonSerializationShape.ObjectMembers [|keyProp :> MemberInfo; valueProp :> MemberInfo|]
             let keySerializeMeth =
                 typedefof<JsonSerializerImpl<_>>
                     .MakeGenericType(keyType)
@@ -2780,6 +2861,7 @@ and private JsonSerializerImpl<'A> =
         | t when t.Name = "Nullable`1" ->
 
             let underlyingType = (UtilsReflection.GenericTypeArgCache.Get t).[0]
+            shape <- JsonSerializationShape.NullableValue underlyingType
             let serializerType = typedefof<JsonSerializerImpl<_>>.MakeGenericType(underlyingType)
             let serializeMethod = serializerType.GetMethod(nameof JsonSerializerImpl<_>.SerializeFunc, BindingFlags.NonPublic ||| BindingFlags.Static)
     
@@ -2913,6 +2995,10 @@ and private JsonSerializerImpl<'A> =
             let tupleFields = 
                 [| for i in 1..tupleItemTypes.Length do
                     t.GetField($"Item{i}") |] |> Array.filter(fun f -> not (isNull f))
+            shape <- JsonSerializationShape.ArrayMembers
+                [| if t.IsValueType then
+                       for field in tupleFields do yield field :> MemberInfo
+                   for prop in tupleProps do yield prop :> MemberInfo |]
             
             let lambda = Expression.Lambda<Func<'A, List<JsonValue>>>(
                 Expression.Block(
@@ -2967,6 +3053,10 @@ and private JsonSerializerImpl<'A> =
                 t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
                 |> Array.filter (fun prop -> prop.CanRead && not (isIgnoredDataMember prop) && not (DBRefTypeHelpers.isDBRefManyType prop.PropertyType))
             let fields = t.GetFields()
+            shape <- JsonSerializationShape.ObjectMembers
+                [| if t.IsValueType then
+                       for field in fields do yield field :> MemberInfo
+                   for prop in props do yield prop :> MemberInfo |]
 
             let param = Expression.Parameter(t)
             let outDict = Expression.Variable(typeof<IDictionary<string, JsonValue>>)

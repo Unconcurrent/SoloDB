@@ -135,6 +135,7 @@ module SQLiteTools =
     
         /// <summary>The underlying SqliteConnection.</summary>
         member internal this.Inner = this :> SqliteConnection
+        member internal this.HasManagedTransaction = not (isNull base.Transaction)
         /// <summary>Indicates if the connection is currently part of a transaction.</summary>
         member val InsideTransaction = false with get, set
 

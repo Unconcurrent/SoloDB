@@ -149,6 +149,8 @@ module internal QueryableHelperPreprocess =
             RootTable = sourceCtx.RootTable
             // Shared so a lookup made in the cloned layer is cached for the whole translation.
             MetadataSource = sourceCtx.MetadataSource
+            BindQueryValue = sourceCtx.BindQueryValue
+            GeneralPrefixMatch = sourceCtx.GeneralPrefixMatch
             LayerPosition = OuterLayer
             RootGraph =
                 {
@@ -207,9 +209,14 @@ module internal QueryableHelperPreprocess =
                 { Expr = normalizeOrderKeyExpr expr (orderKeyClrType o.OrderingRule); Direction = if o.Descending then SortDirection.Desc else SortDirection.Asc }
             ) |> Seq.toList
 
+        let bindBound bound =
+            match sourceCtx.BindQueryValue |> ValueOption.bind (fun bind -> bind.TryBind false bound) with
+            | ValueSome parameter -> parameter
+            | ValueNone -> allocateParam vars (QueryTranslatorBaseHelpers.evaluateExpr<obj> bound)
+
         let limit =
             match statement.Take with
-            | Some take -> Some (allocateParam vars (QueryTranslatorBaseHelpers.evaluateExpr<obj> take))
+            | Some take -> Some (bindBound take)
             | None ->
                 match statement.Skip with
                 | Some _ -> Some (SqlExpr.Literal(SqlLiteral.Integer -1L))
@@ -217,7 +224,7 @@ module internal QueryableHelperPreprocess =
 
         let offset =
             match statement.Skip with
-            | Some skip -> Some (allocateParam vars (QueryTranslatorBaseHelpers.evaluateExpr<obj> skip))
+            | Some skip -> Some (bindBound skip)
             | None -> None
 
         struct (where, orderBy, limit, offset, unionAlls)

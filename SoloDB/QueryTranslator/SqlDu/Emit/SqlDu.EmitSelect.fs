@@ -139,7 +139,7 @@ and private emitSelectCore (ctx: EmitContext) (core: SelectCore) : Emitted =
 /// Emit a CTE binding: name AS (SELECT ...)
 and private emitCteBinding (ctx: EmitContext) (cte: CteBinding) : Emitted =
     let queryEmitted = emitSelect ctx cte.Query
-    { Sql = sprintf "%s AS (%s)" (EmitJson.quoteIdentifier ctx cte.Name) queryEmitted.Sql
+    { Sql = sprintf "%s AS %s(%s)" (EmitJson.quoteIdentifier ctx cte.Name) (if cte.Materialized then "MATERIALIZED " else "") queryEmitted.Sql
       Parameters = queryEmitted.Parameters }
 
 /// Emit a full SqlSelect (CTEs + body).

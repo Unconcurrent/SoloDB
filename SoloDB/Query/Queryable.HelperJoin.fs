@@ -234,6 +234,26 @@ Fix: Rewrite the query to use direct lambda arguments or move it after AsEnumera
         (innerParam: ParameterExpression)
         (expr: Expression) =
 
+        // F# may wrap record construction in literal lambda invocations to
+        // preserve field evaluation order. Reduce those before classifying which
+        // join source supplies each constructor argument.
+        let rec normalizeInvocation (value: Expression) =
+            match value with
+            | :? MethodCallExpression as call when call.Method.Name = "Invoke" ->
+                match call.Object with
+                | :? LambdaExpression as lambda ->
+                    QueryTranslatorBaseHelpers.inlineLambdaInvocation lambda call.Arguments |> normalizeInvocation
+                | _ -> value
+            | :? InvocationExpression as call ->
+                match call.Expression with
+                | :? LambdaExpression as lambda ->
+                    QueryTranslatorBaseHelpers.inlineLambdaInvocation lambda call.Arguments |> normalizeInvocation
+                | _ -> value
+            | :? NewExpression as constructor when isNull constructor.Members && FSharp.Reflection.FSharpType.IsRecord constructor.Type ->
+                let members = FSharp.Reflection.FSharpType.GetRecordFields constructor.Type |> Array.map (fun field -> field :> MemberInfo)
+                Expression.New(constructor.Constructor, constructor.Arguments, members) :> Expression
+            | _ -> value
+        let expr = normalizeInvocation expr
         match classifyJoinResultExpression outerParam innerParam expr with
         | NoJoinSource ->
             translateJoinSingleSourceExpression outerCtx outerAlias vars None expr

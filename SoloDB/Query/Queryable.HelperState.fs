@@ -58,30 +58,10 @@ module internal QueryableHelperState =
         | _ ->
             addNewQuery ()
 
-    let internal lowerPredicateLambda (_sourceCtx: QueryContext) (_tableName: string) (expr: Expression) (role: PredicateRole) =
-        let relationAccess = detectRelationAccess expr
-        // First migration-family seam: centralize predicate lowering call sites
-        // while preserving the current translator and payload behavior byte-for-byte.
-        {
-            Role = role
-            Predicate = expr
-            LayerPosition = _sourceCtx.LayerPosition
-            RelationAccess = relationAccess
-            MaterializedPathsSnapshot = _sourceCtx.MaterializedPaths |> Seq.toArray
-        }
-
-    let internal addLoweredPredicate (statements: ResizeArray<SQLSubquery>) (lowered: LoweredPredicate) =
-        addFilter statements lowered.Predicate
-
-    let internal lowerKeySelectorLambda (_sourceCtx: QueryContext) (_tableName: string) (expr: Expression) (role: KeySelectorRole) =
-        // Second migration-family seam: centralize key-selector lowering call sites
-        // while preserving the current KeyProjection behavior for the inner layer.
-        {
-            Role = role
-            KeyExpression = expr
-            RelationAccess = detectRelationAccess expr
-            Fingerprint = expressionFingerprint expr
-        }
+    let internal lowerKeySelectorLambda (expr: Expression) =
+        { KeyExpression = expr
+          RelationAccess = detectRelationAccess expr
+          Fingerprint = expressionFingerprint expr }
 
     let addOrder (statements: ResizeArray<SQLSubquery>) (ordering: Expression) (descending: bool) =
         let current = ifSelectorNewStatement statements
@@ -99,9 +79,6 @@ module internal QueryableHelperState =
                 last.Selector <- Some selector
         | _ ->
             (statements.Add << Simple) { emptySQLStatement () with Selector = Some selector }
-
-    let internal addLoweredKeySelector (statements: ResizeArray<SQLSubquery>) (lowered: LoweredKeySelector) =
-        addSelector statements (KeyProjection lowered.KeyExpression)
 
     let addTake (statements: ResizeArray<SQLSubquery>) (e: Expression) =
         let current = simpleCurrent statements
