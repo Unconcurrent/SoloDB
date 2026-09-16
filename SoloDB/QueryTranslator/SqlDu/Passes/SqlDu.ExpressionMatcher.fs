@@ -81,6 +81,47 @@ let private binaryCollation (term: IndexTerm) =
 
 let private direct = function Parameter _ | Literal _ -> true | _ -> false
 
+/// Disjoint excluded ranges for one directly compared key, including NULL.
+/// Callers must establish that the original predicate has a match before using
+/// the partition: contradictory or NULL bounds can otherwise overlap.
+let tryComparisonComplement predicate =
+    let binary op left right = Binary(left, op, right)
+    let comparison = function
+        | Binary(key, op, value) when direct value -> Some(key, op, value)
+        | Binary(value, op, key) when direct value ->
+            let reversed = match op with
+                           | BinaryOperator.Lt -> BinaryOperator.Gt
+                           | BinaryOperator.Le -> BinaryOperator.Ge
+                           | BinaryOperator.Gt -> BinaryOperator.Lt
+                           | BinaryOperator.Ge -> BinaryOperator.Le
+                           | other -> other
+            Some(key, reversed, value)
+        | _ -> None
+    let opposite = function
+        | BinaryOperator.Lt -> Some BinaryOperator.Ge
+        | BinaryOperator.Le -> Some BinaryOperator.Gt
+        | BinaryOperator.Gt -> Some BinaryOperator.Le
+        | BinaryOperator.Ge -> Some BinaryOperator.Lt
+        | _ -> None
+    let single = function
+        | Some(key, BinaryOperator.Eq, value) ->
+            Some(key, [binary BinaryOperator.Lt key value; binary BinaryOperator.Gt key value; Unary(UnaryOperator.IsNull, key)])
+        | Some(key, op, value) -> opposite op |> Option.map (fun inverse -> key, [binary inverse key value; Unary(UnaryOperator.IsNull, key)])
+        | None -> None
+    match predicate with
+    | Binary(left, BinaryOperator.And, right) ->
+        match comparison left, comparison right with
+        | Some(key, lop, lower), Some(other, rop, upper) when key = other ->
+            let lowerBound = function BinaryOperator.Ge | BinaryOperator.Gt -> true | _ -> false
+            let upperBound = function BinaryOperator.Le | BinaryOperator.Lt -> true | _ -> false
+            if (lowerBound lop && upperBound rop) || (upperBound lop && lowerBound rop) then
+                match opposite lop, opposite rop with
+                | Some l, Some r -> Some(key, [binary l key lower; binary r key upper; Unary(UnaryOperator.IsNull, key)])
+                | _ -> None
+            else None
+        | _ -> None
+    | other -> single (comparison other)
+
 /// A covered conjunction can be counted without fetching document payloads.
 /// Requiring a constrained leading term avoids costing an unbounded index scan.
 let findCoveringFilterIndex (model: IndexModel) tableName predicate =

@@ -261,11 +261,13 @@ module internal QueryableTranslationCore =
         let sb = StringBuilder(256)
         let modelTableNames = collectIndexModelTableNames source.Name outerSelect
         let indexModel = RuntimeIndexModelCache.loadModelForTables metadataConnection modelTableNames
-        let retainedPlan =
-            if bindQueryValue.IsSome then
-                let estimates = IndexModel.loadTableEstimates metadataConnection modelTableNames
-                CompiledQueryPlanning.planPage indexModel estimates
-            else id
+        let estimates = lazy (IndexModel.loadTableEstimates metadataConnection modelTableNames)
+        let retainedPlan query =
+            let counted =
+                if doesNotReturnIdFn expression then QueryCountPlanning.plan source.Name indexModel estimates query
+                else query
+            if bindQueryValue.IsSome then CompiledQueryPlanning.planPage indexModel estimates.Value counted
+            else counted
         emitSelectToSb sb variables indexModel retainedPlan outerSelect
 
         let actuallyHydrated = singleRelationsHydrated && hydrationAliasCounter > 0

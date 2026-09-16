@@ -153,14 +153,38 @@ module internal CompiledPage =
                 let matchingIds =
                     { core with Projections = ProjectionSetOps.ofList [project "Id" (column source "Id")]
                                 OrderBy = []; Limit = None; Offset = None }
+                let complementCtes, membershipPredicate =
+                    let ordinary = InSubquery(column orderedAlias "Id", select matchingIds)
+                    match ExpressionMatcher.tryComparisonComplement core.Where.Value with
+                    | Some(key, excluded) when indexed key ->
+                        let excludedArms = excluded |> List.map (fun predicate -> { matchingIds with Where = Some predicate })
+                        let excludedIds = { Ctes = []; Body = UnionAllSelect(excludedArms.Head, excludedArms.Tail) }
+                        let excludedName = table + "_page_excluded_count"
+                        let bounded =
+                            { empty with Source = Some(DerivedTable(excludedIds, table + "_excluded_ids"))
+                                         Projections = ProjectionSetOps.ofList [project "present" (integer 1L)]
+                                         Limit = Some(CaseExpr((broad, integer threshold), [], Some(integer 0L))) }
+                        let excludedCount =
+                            { empty with Source = Some(DerivedTable(select bounded, table + "_excluded_rows"))
+                                         Projections = ProjectionSetOps.ofList [project "count" (AggregateCall(AggregateKind.Count, None, false, None))] }
+                        let excludedValue = ScalarSubquery(select {
+                            empty with Source = Some(BaseTable(excludedName, None))
+                                       Projections = ProjectionSetOps.ofList [project "count" (column excludedName "count")] })
+                        let smaller = binary BinaryOperator.And broad (binary BinaryOperator.Lt excludedValue (integer threshold))
+                        // Broad predicates can have a much smaller excluded set.
+                        // Id is non-null, so NOT IN over these disjoint ranges
+                        // preserves membership while building a smaller lookup.
+                        let negative = Unary(UnaryOperator.Not, InSubquery(column orderedAlias "Id", excludedIds))
+                        [materialized excludedName excludedCount], CaseExpr((smaller, negative), [], Some ordinary)
+                    | _ -> [], ordinary
                 let orderedPage =
                     { empty with Source = Some(DerivedTable(select orderedRows, orderedAlias))
                                  Projections = projected orderedAlias
-                                 Where = Some(InSubquery(column orderedAlias "Id", select matchingIds))
+                                 Where = Some membershipPredicate
                                  OrderBy = ordering orderedAlias; Offset = core.Offset
                                  // LIMIT zero prevents entering the ordered coroutine.
                                  Limit = Some(CaseExpr((broad, limit), [], Some(integer 0L))) }
-                [materialized sizeName size; materialized retryName retry], [orderedPage], retryName
+                [materialized sizeName size; materialized retryName retry] @ complementCtes, [orderedPage], retryName
         let success =
             { core with Source = Some(BaseTable(hitsName, None)); Joins = [CrossJoin(BaseTable(stateName, None))]
                         Projections = projected hitsName; Where = Some(column stateName "enough"); OrderBy = ordering hitsName }

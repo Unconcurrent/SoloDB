@@ -203,6 +203,7 @@
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.JoinAndTerminalOps.fs" />
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.SetAndTypeOps.fs" />
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.Main.fs" />
+            <Compile Include="Query/Queryable.CountPlanning.fs" />
             <Compile Include="Query/Queryable.CompiledPage.fs" />
             <Compile Include="Query/Queryable.CompiledPlanning.fs" />
 		    <Compile Include="Query/Queryable.Translation.fs" />
