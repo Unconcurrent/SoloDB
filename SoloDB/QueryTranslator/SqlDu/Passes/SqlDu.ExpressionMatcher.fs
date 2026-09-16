@@ -122,6 +122,23 @@ let tryComparisonComplement predicate =
         | _ -> None
     | other -> single (comparison other)
 
+/// Independent maintained index expressions can be filtered without reading payloads.
+let independentFilterGroups model tableName predicate =
+    let rec terms = function
+        | Binary(left, BinaryOperator.And, right) ->
+            match terms left, terms right with
+            | Some l, Some r -> Some(l @ r)
+            | _ -> None
+        | Binary(key, (BinaryOperator.Eq | BinaryOperator.Is | BinaryOperator.Lt | BinaryOperator.Le | BinaryOperator.Gt | BinaryOperator.Ge), value) as term
+            when direct value && hasMatchingIndex model tableName key -> Some [key, term]
+        | Binary(value, (BinaryOperator.Eq | BinaryOperator.Is | BinaryOperator.Lt | BinaryOperator.Le | BinaryOperator.Gt | BinaryOperator.Ge), key) as term
+            when direct value && hasMatchingIndex model tableName key -> Some [key, term]
+        | _ -> None
+    terms predicate |> Option.bind (fun terms ->
+        let groups = terms |> List.groupBy fst |> List.map (fun (_, terms) ->
+            terms |> List.map snd |> List.reduce (fun left right -> Binary(left, BinaryOperator.And, right)))
+        if groups.Length > 1 then Some groups else None)
+
 /// A covered conjunction can be counted without fetching document payloads.
 /// Requiring a constrained leading term avoids costing an unbounded index scan.
 let findCoveringFilterIndex (model: IndexModel) tableName predicate =

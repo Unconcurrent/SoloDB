@@ -353,9 +353,42 @@ let loadModelForTables (connection: SqliteConnection) (tableNames: string seq) :
         |> Seq.toList
     { Indexes = indexes }
 
+/// Cost facts are separate from schema facts. Payload sampling is lazy so
+/// ordinary aggregate translation never reads document samples.
+type TableEstimate = {
+    Rows: int64
+    PayloadBytes: Lazy<float option>
+}
+
+let private samplePayloadBytes (connection: SqliteConnection) (table: string) =
+    try
+        let quoted = "\"" + table.Replace("\"", "\"\"") + "\""
+        use bounds = connection.CreateCommand()
+        bounds.CommandText <- "SELECT MIN(Id) FROM " + quoted
+        let first = bounds.ExecuteScalar()
+        bounds.CommandText <- "SELECT MAX(Id) FROM " + quoted
+        let last = bounds.ExecuteScalar()
+        if isNull first || Convert.IsDBNull first || isNull last || Convert.IsDBNull last then None else
+        let low, high = Convert.ToDecimal(first), Convert.ToDecimal(last)
+        use command = connection.CreateCommand()
+        command.CommandText <- "SELECT length(Value) FROM " + quoted + " WHERE Id >= @start ORDER BY Id LIMIT 4;"
+        let start = command.Parameters.Add("@start", SqliteType.Integer)
+        let mutable bytes, count = 0.0, 0
+        // Bounded primary-key seeks sample across the identifier range rather
+        // than assuming the oldest or newest documents represent the table.
+        for i in 0 .. 7 do
+            start.Value <- int64 (low + (high - low) * decimal i / 7M)
+            use reader = command.ExecuteReader()
+            while reader.Read() do
+                if not (reader.IsDBNull 0) then
+                    bytes <- bytes + float (reader.GetInt64 0)
+                    count <- count + 1
+        if count = 0 then None else Some(max 1.0 (bytes / float count))
+    with :? SqliteException -> None
+
 /// Read current ANALYZE estimates once at compilation, independently of the
 /// cached index definitions. Missing or malformed estimates disable costing.
-let loadTableEstimates (connection: SqliteConnection) (tableNames: string seq) : Map<string, int64> =
+let loadTableEstimates (connection: SqliteConnection) (tableNames: string seq) : Map<string, TableEstimate> =
     try
         use exists = connection.CreateCommand()
         exists.CommandText <- "SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1' AND type = 'table';"
@@ -375,5 +408,5 @@ let loadTableEstimates (connection: SqliteConnection) (tableNames: string seq) :
                     match Int64.TryParse(first, Globalization.NumberStyles.None, Globalization.CultureInfo.InvariantCulture) with
                     | true, count when count > estimate -> estimate <- count
                     | _ -> ()
-            if estimate > 0L then Some(table, estimate) else None) |> Map.ofSeq
+            if estimate > 0L then Some(table, { Rows = estimate; PayloadBytes = lazy (samplePayloadBytes connection table) }) else None) |> Map.ofSeq
     with :? SqliteException -> Map.empty

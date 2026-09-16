@@ -19,7 +19,7 @@ module internal QueryCountPlanning =
         | Column(qualifier, "Id") -> from alias qualifier
         | _ -> false
 
-    let private rewrite root model (estimates: Lazy<Map<string, int64>>) (query: SqlSelect) (core: SelectCore) =
+    let private rewrite root model (estimates: Lazy<Map<string, IndexModel.TableEstimate>>) (query: SqlSelect) (core: SelectCore) =
         match core.Source, ProjectionSetOps.toList core.Projections with
         | Some(DerivedTable({ Ctes = []; Body = SingleSelect rows }, alias)), [result]
             when query.Ctes.IsEmpty && plain core && core.Where.IsNone && core.OrderBy.IsEmpty && plain rows && rows.OrderBy.IsEmpty ->
@@ -38,7 +38,7 @@ module internal QueryCountPlanning =
                     | JsonExtractExpr(Some a, col, path) when a = source -> JsonExtractExpr(Some table, col, path)
                     | Column(Some a, col) when a = source -> Column(Some table, col)
                     | node -> node) (FlattenTransform.normalizeExprQuoting expression)
-                let estimate = if rows.Where.IsSome then Map.tryFind table estimates.Value else None
+                let estimate = if rows.Where.IsSome then Map.tryFind table estimates.Value |> Option.map (fun estimate -> estimate.Rows) else None
                 let admission =
                     match rows.Where, estimate with
                     | Some predicate, Some size ->
@@ -47,42 +47,96 @@ module internal QueryCountPlanning =
                                 Some(max 4096L (size / 16L), excluded)
                             else None)
                     | _ -> None
-                match admission with
-                | None -> { query with Body = SingleSelect { baseRows with Projections = ProjectionSetOps.ofList [{result with Expr = star}] } }
-                | Some(cap, excluded) ->
-                    let scalar q = ScalarSubquery q
-                    let countRows q =
-                        select { baseRows with Source = Some(DerivedTable(q, "count_rows")); Where = None; Projections = projection star }
-                    let limited predicate =
-                        { rows with Projections = projection (integer 1L); Where = predicate; OrderBy = []; Limit = Some(integer cap) }
-                    let directCap = 4096L
-                    let directCount = countRows (select { limited rows.Where with Limit = Some(integer directCap) })
-                    let arms = excluded |> List.map (fun p -> { limited (Some p) with Limit = None })
-                    let excludedRows = { Ctes = []; Body = UnionAllSelect(arms.Head, arms.Tail) }
-                    let boundedExcluded =
-                        select { baseRows with Source = Some(DerivedTable(excludedRows, "excluded_rows")); Where = None
-                                               Projections = projection (integer 1L); Limit = Some(integer cap) }
-                    let excludedCount = countRows boundedExcluded
-                    let read name = scalar (select { baseRows with Source = Some(BaseTable(name, None)); Where = None; Projections = projection (Column(None, "Value")) })
-                    let directName = table + "_count_matches"
-                    let excludedName = table + "_count_excluded"
-                    let directValue = read directName
-                    let excludedValue = read excludedName
-                    let total = scalar (select { baseRows with Where = None })
-                    let full = scalar (select baseRows)
-                    // CASE evaluates the complementary probe only when the direct
-                    // probe saturates. An unsaturated probe is an exact answer.
-                    // Disjoint ranges plus NULL partition the excluded rows; an
-                    // empty/contradictory or NULL-bound range returns before them.
-                    let value = CaseExpr(
-                        (binary BinaryOperator.Lt directValue (integer directCap), directValue),
-                        [binary BinaryOperator.Lt excludedValue (integer cap), binary BinaryOperator.Sub total excludedValue],
-                        Some full)
-                    let resultCore = { core with Source = None; Projections = ProjectionSetOps.ofList [{ result with Expr = value }] }
-                    { Ctes = query.Ctes @ [
-                        {Name=directName;Materialized=true;Query=directCount}
-                        {Name=excludedName;Materialized=true;Query=excludedCount}]
-                      Body = SingleSelect resultCore }
+                match IndexedFilterPlanning.tryIds model table source rows with
+                | Some intersection ->
+                    let ids = intersection.Query
+                    let counted = { baseRows with Source = Some(DerivedTable(ids, "count_indexed_ids")); Where = None
+                                                  Projections = ProjectionSetOps.ofList [{ result with Expr = star }] }
+                    let partitions =
+                        IndexedFilterPlanning.groups model table source rows
+                        |> Option.bind (fun groups ->
+                            let parts = groups |> List.map ExpressionMatcher.tryComparisonComplement
+                            if parts |> List.forall Option.isSome then Some(groups, parts |> List.collect (fun p -> snd p.Value))
+                            else None)
+                    match partitions, estimate with
+                    | Some(groups, excluded), Some size ->
+                        let scan predicate =
+                            { rows with Source = Some(BaseTable(table, None)); Where = Some predicate
+                                        Projections = ProjectionSetOps.ofList [{ Alias = Some "Id"; Expr = Column(Some table, "Id") }] }
+                        let nonempty = intersection.Nonempty
+                        let arms = excluded |> List.map scan
+                        let union = { Ctes = []; Body = UnionAllSelect(arms.Head, arms.Tail) }
+                        let cap = max 4096L (size / 2L)
+                        let distinct =
+                            { counted with Source = Some(DerivedTable(union, "count_excluded_ids"))
+                                           Projections = ProjectionSetOps.ofList [{ Alias = Some "Id"; Expr = Column(None, "Id") }]
+                                           Distinct = true }
+                        let excludedCount = { counted with Source = Some(DerivedTable(select distinct, "count_excluded_unique")) }
+                        let parts = groups |> List.map (fun group -> ExpressionMatcher.tryComparisonComplement group |> Option.get |> snd)
+                        let probes = parts |> List.mapi (fun i predicates ->
+                            let scans = predicates |> List.map scan
+                            let union = { Ctes = []; Body = UnionAllSelect(scans.Head, scans.Tail) }
+                            let bounded = { counted with Source = Some(DerivedTable(union, "count_group_ids"))
+                                                         Projections = projection (integer 1L); Limit = Some(integer cap) }
+                            let count = { counted with Source = Some(DerivedTable(select bounded, "count_group_rows")) }
+                            let name = table + "_count_group_" + string i
+                            let readCount =
+                                { counted with
+                                    Source = Some(BaseTable(name, None))
+                                    Projections = projection (Column(None, result.Alias |> Option.defaultValue "Value")) }
+                            { Name = name; Materialized = true; Query = select count }, ScalarSubquery(select readCount))
+                        // The sum bounds the union before DISTINCT work is paid.
+                        // Every probe must be unsaturated; overlapping excluded
+                        // identifiers are deduplicated only in the selected arm.
+                        let small = probes |> List.map (fun (_, value) -> binary BinaryOperator.Lt value (integer cap))
+                                    |> List.reduce (binary BinaryOperator.And)
+                        let sum = probes |> List.map snd |> List.reduce (binary BinaryOperator.Add)
+                        let affordable = binary BinaryOperator.And small (binary BinaryOperator.Lt sum (integer cap))
+                        let total = ScalarSubquery(select { baseRows with Where = None })
+                        let value = CaseExpr(
+                            (Unary(UnaryOperator.Not, nonempty), integer 0L),
+                            [affordable, binary BinaryOperator.Sub total (ScalarSubquery(select excludedCount))],
+                            Some(ScalarSubquery(select counted)))
+                        { Ctes = probes |> List.map fst
+                          Body = SingleSelect { core with Source = None; Projections = ProjectionSetOps.ofList [{ result with Expr = value }] } }
+                    | _ -> { query with Body = SingleSelect counted }
+                | None ->
+                    match admission with
+                    | None -> { query with Body = SingleSelect { baseRows with Projections = ProjectionSetOps.ofList [{result with Expr = star}] } }
+                    | Some(cap, excluded) ->
+                        let scalar q = ScalarSubquery q
+                        let countRows q =
+                            select { baseRows with Source = Some(DerivedTable(q, "count_rows")); Where = None; Projections = projection star }
+                        let limited predicate =
+                            { rows with Projections = projection (integer 1L); Where = predicate; OrderBy = []; Limit = Some(integer cap) }
+                        let directCap = 4096L
+                        let directCount = countRows (select { limited rows.Where with Limit = Some(integer directCap) })
+                        let arms = excluded |> List.map (fun p -> { limited (Some p) with Limit = None })
+                        let excludedRows = { Ctes = []; Body = UnionAllSelect(arms.Head, arms.Tail) }
+                        let boundedExcluded =
+                            select { baseRows with Source = Some(DerivedTable(excludedRows, "excluded_rows")); Where = None
+                                                   Projections = projection (integer 1L); Limit = Some(integer cap) }
+                        let excludedCount = countRows boundedExcluded
+                        let read name = scalar (select { baseRows with Source = Some(BaseTable(name, None)); Where = None; Projections = projection (Column(None, "Value")) })
+                        let directName = table + "_count_matches"
+                        let excludedName = table + "_count_excluded"
+                        let directValue = read directName
+                        let excludedValue = read excludedName
+                        let total = scalar (select { baseRows with Where = None })
+                        let full = scalar (select baseRows)
+                        // CASE evaluates the complementary probe only when the direct
+                        // probe saturates. An unsaturated probe is an exact answer.
+                        // Disjoint ranges plus NULL partition the excluded rows; an
+                        // empty/contradictory or NULL-bound range returns before them.
+                        let value = CaseExpr(
+                            (binary BinaryOperator.Lt directValue (integer directCap), directValue),
+                            [binary BinaryOperator.Lt excludedValue (integer cap), binary BinaryOperator.Sub total excludedValue],
+                            Some full)
+                        let resultCore = { core with Source = None; Projections = ProjectionSetOps.ofList [{ result with Expr = value }] }
+                        { Ctes = query.Ctes @ [
+                            {Name=directName;Materialized=true;Query=directCount}
+                            {Name=excludedName;Materialized=true;Query=excludedCount}]
+                          Body = SingleSelect resultCore }
             | _ -> query
         | _ -> query
 

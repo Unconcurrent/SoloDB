@@ -18,7 +18,7 @@ module internal CompiledPage =
             | JsonRootExtract(None, name) -> JsonRootExtract(Some source, name)
             | node -> node)
 
-    let tryPlan model estimates table source (core: SelectCore) =
+    let tryPlan model (estimates: Map<string, IndexModel.TableEstimate>) table source (core: SelectCore) =
         // Caller admits a plain limited collection rowset. Collection DDL makes
         // Id an INTEGER PRIMARY KEY, hence each index's implicit rowid key is Id.
         let isId expression =
@@ -60,6 +60,34 @@ module internal CompiledPage =
             match filterIndex, ExpressionMatcher.findOrderingIndex model table predicate ordering with
             | Some filter, Some ordered -> filter.IndexName = ordered.IndexName
             | _ -> false
+        let independentIds = IndexedFilterPlanning.tryIds model table source core
+        let indexedPlan =
+          match independentIds with
+          | Some intersection when orderedIndex ->
+            let ids = intersection.Query
+            let alias = table + "_indexed_order"
+            let keys = core.OrderBy |> List.mapi (fun i order -> if isId order.Expr then None else Some(project ("ord" + string i) order.Expr)) |> List.choose id
+            let ordered =
+                { core with Where = intersection.RowIdPredicate |> Option.map (SqlExpr.map (function
+                                      | Column(Some alias, name) when alias = table -> column source name
+                                      | node -> node))
+                            Offset = None
+                            Limit = Some(CaseExpr((intersection.Nonempty, integer -1L), [], Some(integer 0L)))
+                            Projections = ProjectionSetOps.ofList (project "Id" (column source "Id") :: keys) }
+            let result =
+                if core.OrderBy |> List.forall (fun order -> isId order.Expr) then
+                    { core with Source = Some(DerivedTable(ids, alias))
+                                Projections = ProjectionSetOps.ofList [project "Id" (column alias "Id")]
+                                Where = None
+                                OrderBy = core.OrderBy |> List.map (fun order -> { order with Expr = column alias "Id" }) }
+                else
+                    { core with
+                        Source = Some(DerivedTable(select ordered, alias))
+                        Projections = ProjectionSetOps.ofList [project "Id" (column alias "Id")]
+                        Where = Some(InSubquery(column alias "Id", ids))
+                        OrderBy = core.OrderBy |> List.mapi (fun i order -> { order with Expr = column alias (if isId order.Expr then "Id" else "ord" + string i) }) }
+            Some(select result)
+          | _ -> None
         if not orderedIndex || not localFilter || equalityOrdered || filterProvidesOrder then select core else
         let windowName = table + "_page_window"
         let hitsName = table + "_page_hits"
@@ -72,14 +100,18 @@ module internal CompiledPage =
                               (binary BinaryOperator.Gt limit (integer 0L))
                               (binary BinaryOperator.Ge offset (integer 0L))
         // A fixed cap bounds extra work even for a filter clustered at the far end.
-        let allowed = binary BinaryOperator.And validBounds (binary BinaryOperator.Le need (integer 4096L))
+        let allowed =
+            let bounded = binary BinaryOperator.And validBounds (binary BinaryOperator.Le need (integer 4096L))
+            match independentIds with
+            | Some intersection -> binary BinaryOperator.And bounded intersection.Nonempty
+            | None -> bounded
         let empty =
             { core with Source = None; Joins = []; Where = None; OrderBy = []; Limit = None; Offset = None }
-        let keys = core.OrderBy |> List.mapi (fun i order -> project ("ord" + string i) (qualify source order.Expr))
+        let keys = core.OrderBy |> List.mapi (fun i order -> if isId order.Expr then None else Some(project ("ord" + string i) (qualify source order.Expr))) |> List.choose id
         let pageProjection = project "Id" (column source "Id") :: keys
         let projected alias = pageProjection |> List.map (fun p -> project p.Alias.Value (column alias p.Alias.Value)) |> ProjectionSetOps.ofList
-        let ordering alias = core.OrderBy |> List.mapi (fun i order -> { order with Expr = column alias ("ord" + string i) })
-        let limitHits = filterIndex.IsSome && orderIndex.IsSome
+        let ordering alias = core.OrderBy |> List.mapi (fun i order -> { order with Expr = column alias (if isId order.Expr then "Id" else "ord" + string i) })
+        let limitHits = (filterIndex.IsSome || independentIds.IsSome) && orderIndex.IsSome
         let window =
             { core with
                 Projections = if limitHits then ProjectionSetOps.ofList pageProjection else core.Projections
@@ -121,7 +153,13 @@ module internal CompiledPage =
         let threshold =
             match orderIndex, filterIndex, core.OrderBy with
             | Some _, Some _, first :: _ when not (isId first.Expr) ->
-                estimates |> Map.tryFind table |> Option.map (fun rows -> max 4096L (rows / 16L))
+                estimates |> Map.tryFind table |> Option.map (fun estimate ->
+                    let rows = estimate.Rows
+                    let crossover =
+                        match estimate.PayloadBytes.Value with
+                        | Some bytes -> min (float rows / 16.0) (float rows * 64.0 / bytes) |> int64
+                        | None -> rows / 16L
+                    max 4096L crossover)
             | _ -> None
         let retryName = table + "_page_sort"
         let costCtes, membership, retrySource =
@@ -153,7 +191,7 @@ module internal CompiledPage =
                 let matchingIds =
                     { core with Projections = ProjectionSetOps.ofList [project "Id" (column source "Id")]
                                 OrderBy = []; Limit = None; Offset = None }
-                let complementCtes, membershipPredicate =
+                let complementCtes, membershipPredicates =
                     let ordinary = InSubquery(column orderedAlias "Id", select matchingIds)
                     match ExpressionMatcher.tryComparisonComplement core.Where.Value with
                     | Some(key, excluded) when indexed key ->
@@ -175,24 +213,32 @@ module internal CompiledPage =
                         // Id is non-null, so NOT IN over these disjoint ranges
                         // preserves membership while building a smaller lookup.
                         let negative = Unary(UnaryOperator.Not, InSubquery(column orderedAlias "Id", excludedIds))
-                        [materialized excludedName excludedCount], CaseExpr((smaller, negative), [], Some ordinary)
-                    | _ -> [], ordinary
-                let orderedPage =
-                    { empty with Source = Some(DerivedTable(select orderedRows, orderedAlias))
-                                 Projections = projected orderedAlias
-                                 Where = Some membershipPredicate
-                                 OrderBy = ordering orderedAlias; Offset = core.Offset
-                                 // LIMIT zero prevents entering the ordered coroutine.
-                                 Limit = Some(CaseExpr((broad, limit), [], Some(integer 0L))) }
-                [materialized sizeName size; materialized retryName retry] @ complementCtes, [orderedPage], retryName
+                        [materialized excludedName excludedCount], [smaller, negative; binary BinaryOperator.And broad (Unary(UnaryOperator.Not, smaller)), ordinary]
+                    | _ -> [], [broad, ordinary]
+                let orderedPages =
+                    membershipPredicates |> List.map (fun (enabled, predicate) ->
+                        { empty with Source = Some(DerivedTable(select orderedRows, orderedAlias))
+                                     Projections = projected orderedAlias
+                                     Where = Some predicate
+                                     OrderBy = ordering orderedAlias; Offset = core.Offset
+                                     // Choose the statement arm once, before the scan,
+                                     // instead of evaluating strategy CASE for every row.
+                                     Limit = Some(CaseExpr((enabled, limit), [], Some(integer 0L))) })
+                [materialized sizeName size; materialized retryName retry] @ complementCtes, orderedPages, retryName
         let success =
             { core with Source = Some(BaseTable(hitsName, None)); Joins = [CrossJoin(BaseTable(stateName, None))]
                         Projections = projected hitsName; Where = Some(column stateName "enough"); OrderBy = ordering hitsName }
         let fallback =
-            { core with Source = Some(BaseTable(retrySource, None)); Joins = [CrossJoin core.Source.Value]
-                        Projections = ProjectionSetOps.ofList [project "Id" (column source "Id")]
-                        Where = core.Where |> Option.map (qualify source)
-                        OrderBy = core.OrderBy |> List.map (fun order -> { order with Expr = qualify source order.Expr }) }
+            match indexedPlan with
+            | Some { Body = SingleSelect indexed } ->
+                let enabled = ScalarSubquery(select { empty with Source = Some(BaseTable(retrySource, None))
+                                                                 Projections = ProjectionSetOps.ofList [project "enabled" (integer 1L)] })
+                { indexed with Limit = Some(CaseExpr((binary BinaryOperator.Eq enabled (integer 1L), core.Limit.Value), [], Some(integer 0L))) }
+            | _ ->
+                { core with Source = Some(BaseTable(retrySource, None)); Joins = [CrossJoin core.Source.Value]
+                            Projections = ProjectionSetOps.ofList [project "Id" (column source "Id")]
+                            Where = core.Where |> Option.map (qualify source)
+                            OrderBy = core.OrderBy |> List.map (fun order -> { order with Expr = qualify source order.Expr }) }
         // Recover ordering values for the selected fallback IDs, rather than
         // carrying duplicate key projections through the full fallback sorter.
         // Admission requires Id or an indexed deterministic expression, so the
