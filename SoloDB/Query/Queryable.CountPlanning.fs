@@ -73,31 +73,30 @@ module internal QueryCountPlanning =
                                            Distinct = true }
                         let excludedCount = { counted with Source = Some(DerivedTable(select distinct, "count_excluded_unique")) }
                         let parts = groups |> List.map (fun group -> ExpressionMatcher.tryComparisonComplement group |> Option.get |> snd)
-                        let probes = parts |> List.mapi (fun i predicates ->
+                        let probes, sum = parts |> List.indexed |> List.mapFold (fun used (i, predicates) ->
+                            let remaining = binary BinaryOperator.Sub (integer cap) used
                             let scans = predicates |> List.map scan
                             let union = { Ctes = []; Body = UnionAllSelect(scans.Head, scans.Tail) }
                             let bounded = { counted with Source = Some(DerivedTable(union, "count_group_ids"))
-                                                         Projections = projection (integer 1L); Limit = Some(integer cap) }
+                                                         Projections = projection (integer 1L); Limit = Some remaining }
                             let count = { counted with Source = Some(DerivedTable(select bounded, "count_group_rows")) }
                             let name = table + "_count_group_" + string i
                             let readCount =
                                 { counted with
                                     Source = Some(BaseTable(name, None))
                                     Projections = projection (Column(None, result.Alias |> Option.defaultValue "Value")) }
-                            { Name = name; Materialized = true; Query = select count }, ScalarSubquery(select readCount))
-                        // The sum bounds the union before DISTINCT work is paid.
-                        // Every probe must be unsaturated; overlapping excluded
-                        // identifiers are deduplicated only in the selected arm.
-                        let small = probes |> List.map (fun (_, value) -> binary BinaryOperator.Lt value (integer cap))
-                                    |> List.reduce (binary BinaryOperator.And)
-                        let sum = probes |> List.map snd |> List.reduce (binary BinaryOperator.Add)
-                        let affordable = binary BinaryOperator.And small (binary BinaryOperator.Lt sum (integer cap))
+                            let value = ScalarSubquery(select readCount)
+                            { Name = name; Materialized = true; Query = select count }, binary BinaryOperator.Add used value) (integer 0L)
+                        // Each probe spends only the remaining shared budget.
+                        // A sum below the cap proves every group was fully read;
+                        // saturation leaves zero budget and selects intersection.
+                        let affordable = binary BinaryOperator.Lt sum (integer cap)
                         let total = ScalarSubquery(select { baseRows with Where = None })
                         let value = CaseExpr(
                             (Unary(UnaryOperator.Not, nonempty), integer 0L),
                             [affordable, binary BinaryOperator.Sub total (ScalarSubquery(select excludedCount))],
                             Some(ScalarSubquery(select counted)))
-                        { Ctes = probes |> List.map fst
+                        { Ctes = probes
                           Body = SingleSelect { core with Source = None; Projections = ProjectionSetOps.ofList [{ result with Expr = value }] } }
                     | _ -> { query with Body = SingleSelect counted }
                 | None ->

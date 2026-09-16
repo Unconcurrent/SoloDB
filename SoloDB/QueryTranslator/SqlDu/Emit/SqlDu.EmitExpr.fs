@@ -157,6 +157,9 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
     | Unary(op, operand) ->
         let operandEmitted = emitE ctx operand
         match op with
+        | Pos ->
+            { Sql = sprintf "+(%s)" operandEmitted.Sql
+              Parameters = operandEmitted.Parameters }
         | Not ->
             { Sql = sprintf "NOT (%s)" operandEmitted.Sql
               Parameters = operandEmitted.Parameters }

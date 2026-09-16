@@ -66,14 +66,6 @@ module internal CompiledPage =
           | Some intersection when orderedIndex ->
             let ids = intersection.Query
             let alias = table + "_indexed_order"
-            let keys = core.OrderBy |> List.mapi (fun i order -> if isId order.Expr then None else Some(project ("ord" + string i) order.Expr)) |> List.choose id
-            let ordered =
-                { core with Where = intersection.RowIdPredicate |> Option.map (SqlExpr.map (function
-                                      | Column(Some alias, name) when alias = table -> column source name
-                                      | node -> node))
-                            Offset = None
-                            Limit = Some(CaseExpr((intersection.Nonempty, integer -1L), [], Some(integer 0L)))
-                            Projections = ProjectionSetOps.ofList (project "Id" (column source "Id") :: keys) }
             let result =
                 if core.OrderBy |> List.forall (fun order -> isId order.Expr) then
                     { core with Source = Some(DerivedTable(ids, alias))
@@ -81,11 +73,22 @@ module internal CompiledPage =
                                 Where = None
                                 OrderBy = core.OrderBy |> List.map (fun order -> { order with Expr = column alias "Id" }) }
                 else
+                    // Disqualify rowid membership as a lookup constraint so SQLite
+                    // can stream the covering order index without a derived scan.
+                    // Both operands are integer collection IDs; removing affinity
+                    // therefore preserves membership, including extreme IDs.
+                    let membership = InSubquery(Unary(UnaryOperator.Pos, column source "Id"), ids)
+                    let bounded =
+                        match intersection.RowIdPredicate with
+                        | Some bounds ->
+                            let bounds = bounds |> SqlExpr.map (function
+                                | Column(Some alias, name) when alias = table -> column source name
+                                | node -> node)
+                            binary BinaryOperator.And bounds membership
+                        | None -> membership
                     { core with
-                        Source = Some(DerivedTable(select ordered, alias))
-                        Projections = ProjectionSetOps.ofList [project "Id" (column alias "Id")]
-                        Where = Some(InSubquery(column alias "Id", ids))
-                        OrderBy = core.OrderBy |> List.mapi (fun i order -> { order with Expr = column alias (if isId order.Expr then "Id" else "ord" + string i) }) }
+                        Projections = ProjectionSetOps.ofList [project "Id" (column source "Id")]
+                        Where = Some bounded }
             Some(select result)
           | _ -> None
         if not orderedIndex || not localFilter || equalityOrdered || filterProvidesOrder then select core else
@@ -233,7 +236,12 @@ module internal CompiledPage =
             | Some { Body = SingleSelect indexed } ->
                 let enabled = ScalarSubquery(select { empty with Source = Some(BaseTable(retrySource, None))
                                                                  Projections = ProjectionSetOps.ofList [project "enabled" (integer 1L)] })
-                { indexed with Limit = Some(CaseExpr((binary BinaryOperator.Eq enabled (integer 1L), core.Limit.Value), [], Some(integer 0L))) }
+                let enabled = binary BinaryOperator.Eq enabled (integer 1L)
+                let enabled =
+                    match independentIds with
+                    | Some intersection -> binary BinaryOperator.And enabled intersection.Nonempty
+                    | None -> enabled
+                { indexed with Limit = Some(CaseExpr((enabled, core.Limit.Value), [], Some(integer 0L))) }
             | _ ->
                 { core with Source = Some(BaseTable(retrySource, None)); Joins = [CrossJoin core.Source.Value]
                             Projections = ProjectionSetOps.ofList [project "Id" (column source "Id")]

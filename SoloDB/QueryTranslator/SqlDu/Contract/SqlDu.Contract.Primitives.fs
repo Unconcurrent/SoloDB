@@ -130,6 +130,7 @@ type internal BinaryOperator =
     | BitwiseAnd
 
 type internal UnaryOperator =
+    | Pos
     | Not
     | Neg
     | IsNull
