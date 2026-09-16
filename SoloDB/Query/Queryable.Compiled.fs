@@ -87,12 +87,12 @@ module internal CompiledQueries =
             checkRoot source call.Arguments.[0]
         | _ -> invalid "the query must be rooted in the supplied source parameter."
 
-    type private Plan<'Args> = {
+    type private Plan<'Args, 'State> = {
         Sql: string
         EmptyPrefixSql: string option
         Parameters: SQLiteToolsParams.ParameterValues
         Hydration: QueryableTranslationCore.BatchLoadContext voption
-        Bind: Func<'Args, obj array, bool>
+        Bind: Func<'Args, obj array, struct (bool * 'State)>
     }
 
     type private ParameterWriter =
@@ -104,9 +104,10 @@ module internal CompiledQueries =
 
     let private writeParameter = typeof<ParameterWriter>.GetMethod("Add", Reflection.BindingFlags.Static ||| Reflection.BindingFlags.Public ||| Reflection.BindingFlags.NonPublic)
 
-    let compile<'Source, 'Args, 'Result>
+    let private prepare<'Source, 'Args, 'State>
         (source: ISoloDBCollection<'Source>) (query: LambdaExpression)
-        (argument: ParameterExpression) (arguments: Expression array) =
+        (argument: ParameterExpression) (arguments: Expression array)
+        (invocationState: Expression -> Expression option) =
         if isNull (box source) then nullArg "source"
         if isNull query then nullArg "query"
         if source.InTransaction then invalid "transactional collections are not supported."
@@ -151,12 +152,38 @@ module internal CompiledQueries =
                            Scalar = bind true false false
                            Prefix = (fun value -> bind false false (value.Type = typeof<string>) value)
                            Local = local }
-            let sql, constants, hydration, _ = QueryableTranslationCore.startCompiledTranslation connection source expression binder false
+            let translate empty =
+                // Operator arguments are evaluated while constructing an ordinary query;
+                // quoted predicates are evaluated later by its provider. Capture those
+                // arguments first, preserving source-call and left-to-right order.
+                let eager =
+                    { new ExpressionVisitor() with
+                        override _.VisitLambda<'Delegate>(lambda: Expression<'Delegate>) = lambda :> Expression
+                        override this.VisitUnary unary =
+                            if unary.NodeType = ExpressionType.Quote then unary :> Expression
+                            else base.VisitUnary unary
+                        override this.VisitMethodCall call =
+                            if call.Method.DeclaringType = typeof<Queryable> then
+                                let args = call.Arguments |> Seq.toArray
+                                args.[0] <- this.Visit args.[0]
+                                for i = 1 to args.Length - 1 do
+                                    let value = args.[i]
+                                    if not (typeof<Expression>.IsAssignableFrom value.Type) && isValue value then
+                                        args.[i] <- local value
+                                call.Update(call.Object, args) :> Expression
+                            else base.VisitMethodCall call }
+                let prepared = eager.Visit expression
+                let state = invocationState prepared |> Option.defaultWith (fun () -> Expression.Default(typeof<'State>) :> Expression)
+                let sql, constants, hydration, _ = QueryableTranslationCore.startCompiledTranslation connection source prepared binder empty
+                sql, constants, hydration, state
+            let sql, constants, hydration, state = translate false
             let slotNames = names.ToArray()
+            let result = Expression.New(typeof<struct (bool * 'State)>.GetConstructor([|typeof<bool>; typeof<'State>|]),
+                                        emptyPrefix, Expression.Convert(state, typeof<'State>))
             let body = Expression.Block(Array.append [|emptyPrefix|] (locals.ToArray()),
                            Array.concat [ [|Expression.Assign(emptyPrefix, Expression.Constant(false)) :> Expression|]
-                                          assignments.ToArray(); [|emptyPrefix :> Expression|] ])
-            let run = Expression.Lambda<Func<'Args, obj array, bool>>(body, argument, parameters).Compile()
+                                          assignments.ToArray(); [|result :> Expression|] ])
+            let run = Expression.Lambda<Func<'Args, obj array, struct (bool * 'State)>>(body, argument, parameters).Compile()
             let emptyPrefixSql =
                 if hasPrefix then
                     // Both translations allocate the same parameter names in the same order.
@@ -164,7 +191,9 @@ module internal CompiledQueries =
                     names.Clear()
                     assignments.Clear()
                     locals.Clear()
-                    let sql, _, _, _ = QueryableTranslationCore.startCompiledTranslation connection source expression binder true
+                    // Revisit the original expression so this translation owns all of
+                    // its eager locals; no substituted local outlives its classifier.
+                    let sql, _, _, _ = translate true
                     Some sql
                 else None
             { Sql = sql; EmptyPrefixSql = emptyPrefixSql; Hydration = hydration; Bind = run
@@ -174,10 +203,84 @@ module internal CompiledQueries =
             use connection = source.GetInternalConnection()
             build connection
 
-        fun (args: 'Args) ->
+        let bind (args: 'Args) =
             let parameters =
                 if current.Parameters.Names.Length = 0 then current.Parameters
                 else { current.Parameters with Values = Array.zeroCreate current.Parameters.Names.Length }
-            let emptyPrefix = current.Bind.Invoke(args, parameters.Values)
+            let struct (emptyPrefix, state) = current.Bind.Invoke(args, parameters.Values)
             let sql = if emptyPrefix then defaultArg current.EmptyPrefixSql current.Sql else current.Sql
-            QueryableExecution.enumerate<'Source, 'Result> source sql parameters current.Hydration
+            struct (sql, parameters, current.Hydration, state)
+        struct (expression, bind)
+
+    let compile<'Source, 'Args, 'Elem>
+        (source: ISoloDBCollection<'Source>) (query: LambdaExpression)
+        (argument: ParameterExpression) (arguments: Expression array) =
+        let struct (_, bind) = prepare<'Source, 'Args, unit> source query argument arguments (fun _ -> None)
+        fun args ->
+            let struct (sql, parameters, hydration, _) = bind args
+            QueryableExecution.enumerate<'Source, 'Elem> source sql parameters hydration
+
+    // Reflection closes the element type once during compilation. Invocation uses
+    // the resulting typed delegate, including for Enumerable materializers.
+    type private ResultFactory =
+        static member Sequence<'Source, 'Args, 'Elem>
+            (source: ISoloDBCollection<'Source>, query: LambdaExpression, argument: ParameterExpression, arguments: Expression array) =
+            let run = compile<'Source, 'Args, 'Elem> source query argument arguments
+            Func<'Args, IEnumerable<'Elem>>(run)
+
+        static member Scalar<'Source, 'Args, 'Result>
+            (source: ISoloDBCollection<'Source>, query: LambdaExpression, argument: ParameterExpression, arguments: Expression array) =
+            let struct (expression, bind) =
+                prepare<'Source, 'Args, 'Result> source query argument arguments QueryableExecution.terminalDefaultExpression
+            let methodName =
+                match expression with
+                | :? MethodCallExpression as call -> call.Method.Name
+                | _ -> "Execute"
+            let run args =
+                let struct (sql, parameters, hydration, fallback) = bind args
+                QueryableExecution.scalar source sql parameters hydration methodName (fun () -> fallback)
+            Func<'Args, 'Result>(run)
+
+    let compileResult<'Source, 'Args, 'Result>
+        (source: ISoloDBCollection<'Source>) (query: LambdaExpression)
+        (argument: ParameterExpression) (arguments: Expression array) =
+        if isNull query then nullArg "query"
+        let body = NormalizeQuotations().Visit query.Body
+        let replacements = arguments |> Array.mapi (fun i value -> query.Parameters.[i + 1], value)
+        let mutable retained = false
+        let rec rooted (expression: Expression) =
+            match expression with
+            | :? ParameterExpression as parameter -> obj.ReferenceEquals(parameter, query.Parameters.[0])
+            | :? UnaryExpression as unary -> rooted unary.Operand
+            | :? MethodCallExpression as call when call.Arguments.Count > 0
+                                                        && typeof<IQueryable>.IsAssignableFrom(call.Arguments.[0].Type) -> rooted call.Arguments.[0]
+            | _ -> false
+        let visitor =
+            { new ExpressionVisitor() with
+                override this.Visit expression =
+                    if isNull expression then null else
+                    let sequence = typeof<IQueryable>.IsAssignableFrom expression.Type
+                    let terminal =
+                        match expression with
+                        | :? MethodCallExpression as call -> call.Method.DeclaringType = typeof<Queryable>
+                        | _ -> false
+                    if (sequence || terminal) && rooted expression then
+                        retained <- true
+                        let resultType =
+                            if sequence then (UtilsReflection.GenericTypeArgCache.Get expression.Type).[0]
+                            else expression.Type
+                        let name = if sequence then "Sequence" else "Scalar"
+                        let factory = typeof<ResultFactory>.GetMethod(name, Reflection.BindingFlags.Static ||| Reflection.BindingFlags.Public ||| Reflection.BindingFlags.NonPublic).MakeGenericMethod(typeof<'Source>, typeof<'Args>, resultType)
+                        let part = Expression.Lambda(expression, query.Parameters)
+                        let run =
+                            try factory.Invoke(null, [|box source; part; argument; arguments|])
+                            with :? Reflection.TargetInvocationException as error when not (isNull error.InnerException) ->
+                                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw()
+                                Unchecked.defaultof<obj>
+                        let invocation = Expression.Invoke(Expression.Constant(run), argument)
+                        invocation :> Expression
+                    else base.Visit expression }
+        let executable = visitor.Visit body |> Substitute(replacements).Visit
+        if not retained then invalid "the query must be rooted in the supplied source parameter."
+        let run = Expression.Lambda<Func<'Args, 'Result>>(executable, argument).Compile()
+        fun args -> run.Invoke args

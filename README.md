@@ -429,7 +429,7 @@ teamsR.Insert(teamR) |> ignore
 
 ### Compiled Queries
 
-Retain a compiled function when you execute the same query structure with different values. `Compile` translates and optimizes the expression once using collection indexes and available SQLite statistics, then returns a regular `Func` whose result is `IEnumerable<T>`.
+Retain a compiled function when you execute the same query structure with different values. `Compile` translates and optimizes the expression once using collection indexes and available SQLite statistics, then returns a regular `Func`. Sequence expressions return `Func<IEnumerable<T>>`; result expressions return their actual result type, such as `Func<long>` for `LongCount()`.
 
 ```csharp
 var findUsers = users.Compile((IQueryable<User> q, string prefix, int offset, int limit) =>
@@ -441,9 +441,22 @@ var firstPage = findUsers("Jo", 0, 20).ToArray();
 var nextPage = findUsers("Jo", 20, 20).ToArray();
 ```
 
-The source parameter is bound to the receiving collection. Supply zero to three additional arguments; `Select` can change the result type. Query values are bound on invocation, and each enumeration reads current data through the ordinary query executor. Retain the function rather than calling `Compile` for every request.
+The source parameter is bound to the receiving collection. Supply zero to three additional arguments; `Select` can change the result type. Query values are bound on invocation, and each enumeration reads current data through the ordinary query executor. Retain the function rather than calling `Compile` for every request. Pass stateful values as invocation arguments; do not rely on callback evaluation order inside an optimized query expression.
 
-Compile from a nontransactional collection and keep that collection alive while using the function. Recompile after changing its model or indexes, or to use refreshed statistics. Counts remain ordinary queries. Unindexed filtering and deep offsets still require database work.
+Read terminals and materializers can be included directly:
+
+```csharp
+var countUsers = users.Compile((IQueryable<User> q, string prefix) =>
+    q.LongCount(u => u.Name.StartsWith(prefix)));
+var firstUser = users.Compile(q => q.OrderBy(u => u.Id).FirstOrDefault());
+var userNames = users.Compile(q => q.OrderBy(u => u.Id).Select(u => u.Name).ToArray());
+
+long count = countUsers("Al");
+```
+
+Counts, quantifiers, aggregates and element terminals share ordinary query execution, including empty-result and multiple-result behavior. Materializers such as `ToArray`, `ToList` and `ToDictionary` execute on each invocation. An explicit `AsEnumerable()` keeps subsequent operations on the client, just as in an ordinary query. Compiling retains query machinery, never result rows or counts.
+
+Compile from a nontransactional collection and keep that collection alive while using the function. Recompile after changing its model or indexes, or to use refreshed statistics. Unindexed filtering and deep offsets still require database work.
 
 For supported ordered pages with an explicit `Id` tie-breaker, compiled queries select page IDs before fetching payloads. Planning considers compound-index ordering, bounded early-page scans and, when statistics are available, a capped covering count to choose a deep-page strategy within the same statement. These choices preserve your results and ordering; gains depend on the filter, indexes and data distribution.
 

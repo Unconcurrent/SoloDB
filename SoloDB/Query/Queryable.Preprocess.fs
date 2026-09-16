@@ -171,12 +171,10 @@ module internal QueryableHelperPreprocess =
         }
 
     let internal serializeForCollection (value: 'T) =
-        struct (
-            match typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T> with
-            | true -> JsonSerializator.JsonValue.SerializeWithType value
-            | false -> JsonSerializator.JsonValue.Serialize value
-            |> _.ToJsonString(), HasTypeId<'T>.Value
-        )
+        match typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T> with
+        | true -> JsonSerializator.JsonValue.SerializeWithType value
+        | false -> JsonSerializator.JsonValue.Serialize value
+        |> _.ToJsonString()
 
     /// Build WHERE, ORDER BY, LIMIT, OFFSET, UnionAll from a UsedSQLStatements layer as DU values.
     /// Returns (where, orderBy, limit, offset, unionAlls).

@@ -171,6 +171,112 @@ module internal QueryableExecution =
                     yield JsonFunctions.fromSQLite<'Elem> row
         }
 
+    let terminalDefaultExpression (expression: Expression) =
+        let isExpressionLikeArgument (expr: Expression) =
+            match expr with
+            | :? LambdaExpression -> true
+            | _ -> typeof<Expression>.IsAssignableFrom expr.Type
+        let defaultExprOpt =
+            match expression with
+            | :? MethodCallExpression as mce ->
+                let args = Array.init (mce.Arguments.Count - 1) (fun i -> mce.Arguments.[i + 1])
+                match mce.Method.Name, args with
+                | ("FirstOrDefault" | "SingleOrDefault"), [| defaultValue |]
+                    when not (isExpressionLikeArgument defaultValue) ->
+                    Some defaultValue
+                | ("FirstOrDefault" | "SingleOrDefault"), [| predicate; defaultValue |]
+                    when isExpressionLikeArgument predicate ->
+                    Some defaultValue
+                | _ ->
+                    None
+            | _ ->
+                None
+        defaultExprOpt
+
+    let scalar<'Source, 'TResult>
+        (source: ISoloDBCollection<'Source>) (query: string) (variables: obj)
+        (batchCtx: QueryableTranslationCore.BatchLoadContext voption)
+        (methodName: string) (getTerminalDefaultValue: unit -> 'TResult) : 'TResult =
+        let inline batchLoadSingle (connection: SqliteConnection) (row: Types.DbObjectRow) (entity: 'TResult) =
+            match batchCtx with
+            | ValueSome ctx when (ctx.HasSingleRelations || ctx.HasManyRelations) && not (isNull (box entity)) && row.Id.HasValue && ctx.OwnerType.IsAssignableFrom(typeof<'TResult>) ->
+                if ctx.HasSingleRelations && not ctx.SingleRelationsHydrated then
+                    RelationsCore.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefProperties" (fun () ->
+                        RelationsSync.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
+                    )
+                if ctx.HasManyRelations && not ctx.ManyRelationsHydrated then
+                    RelationsCore.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefManyProperties" (fun () ->
+                        RelationsSync.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
+                    )
+                // Populate DBRefMany from HydrationJSON for scalar path.
+                if ctx.ManyRelationsHydrated && not (isNull row.HydrationJSON) then
+                    let hydMap = Dictionary<int64, string>()
+                    hydMap.[row.Id.Value] <- row.HydrationJSON
+                    HydrationManyPopulator.populateFromHydrationJson ctx.OwnerType [| (row.Id.Value, box entity) |] hydMap
+                if ctx.SingleRelationsHydrated || ctx.ManyRelationsHydrated then
+                    RelationsSync.recurseLoadedRelationTargets connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
+                if ctx.HasSingleRelations || ctx.HasManyRelations then
+                    RelationsSync.captureRelationVersionForEntities connection ctx.OwnerTable [| (row.Id.Value, box entity) |]
+            | _ -> ()
+            entity
+
+        use connection = source.GetInternalConnection()
+        let query = connection.Query<Types.DbObjectRow>(query, variables)
+
+        match methodName with
+        | "Single" ->
+            let row = query.Single()
+            let entity = JsonFunctions.fromSQLite<'TResult> row
+            batchLoadSingle connection row entity
+        | "SingleOrDefault" ->
+            // Emulate query.SupportedLinqMethods.SingleOrDefault()
+            use enumerator = query.GetEnumerator()
+            match enumerator.MoveNext() with
+            | false -> getTerminalDefaultValue()
+            | true ->
+                let prevElement = enumerator.Current
+                match enumerator.MoveNext() with
+                | true -> raise (InvalidOperationException("Sequence contains more than one element"))
+                | false ->
+                    // Only one element was found, return it.
+                    let entity = JsonFunctions.fromSQLite<'TResult> prevElement
+                    batchLoadSingle connection prevElement entity
+
+        | "First" ->
+            let row = query.First()
+            let entity = JsonFunctions.fromSQLite<'TResult> row
+            batchLoadSingle connection row entity
+        | "FirstOrDefault" ->
+            match query |> Seq.tryHead with
+            | None -> getTerminalDefaultValue()
+            | Some row ->
+                let entity = JsonFunctions.fromSQLite<'TResult> row
+                batchLoadSingle connection row entity
+
+        | "MinBy"
+        | "MaxBy" ->
+            match query |> Seq.tryHead with
+            | Some row ->
+                let entity = JsonFunctions.fromSQLite<'TResult> row
+                batchLoadSingle connection row entity
+            | None when typeof<'TResult>.IsValueType && isNull (Nullable.GetUnderlyingType(typeof<'TResult>)) ->
+                raise (InvalidOperationException("Sequence contains no elements"))
+            | None ->
+                Unchecked.defaultof<'TResult>
+
+        | methodName when methodName.EndsWith("OrDefault", StringComparison.Ordinal) ->
+            match query |> Seq.tryHead with
+            | None -> getTerminalDefaultValue()
+            | Some row ->
+                let entity = JsonFunctions.fromSQLite<'TResult> row
+                batchLoadSingle connection row entity
+        | _ ->
+            match query |> Seq.tryHead with
+            | None -> raise (InvalidOperationException("Sequence contains no elements"))
+            | Some row ->
+                let entity = JsonFunctions.fromSQLite<'TResult> row
+                batchLoadSingle connection row entity
+
 type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, data: obj) =
     static let enumerableDispatchCache = System.Collections.Concurrent.ConcurrentDictionary<Type, MethodInfo>()
 
@@ -214,29 +320,6 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                 printfn "%s" query
             #endif
 
-            let inline batchLoadSingle (connection: SqliteConnection) (row: Types.DbObjectRow) (entity: 'TResult) =
-                match batchCtx with
-                | ValueSome ctx when (ctx.HasSingleRelations || ctx.HasManyRelations) && not (isNull (box entity)) && row.Id.HasValue && ctx.OwnerType.IsAssignableFrom(typeof<'TResult>) ->
-                    if ctx.HasSingleRelations && not ctx.SingleRelationsHydrated then
-                        RelationsCore.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefProperties" (fun () ->
-                            RelationsSync.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
-                        )
-                    if ctx.HasManyRelations && not ctx.ManyRelationsHydrated then
-                        RelationsCore.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefManyProperties" (fun () ->
-                            RelationsSync.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
-                        )
-                    // Populate DBRefMany from HydrationJSON for scalar path.
-                    if ctx.ManyRelationsHydrated && not (isNull row.HydrationJSON) then
-                        let hydMap = Dictionary<int64, string>()
-                        hydMap.[row.Id.Value] <- row.HydrationJSON
-                        HydrationManyPopulator.populateFromHydrationJson ctx.OwnerType [| (row.Id.Value, box entity) |] hydMap
-                    if ctx.SingleRelationsHydrated || ctx.ManyRelationsHydrated then
-                        RelationsSync.recurseLoadedRelationTargets connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
-                    if ctx.HasSingleRelations || ctx.HasManyRelations then
-                        RelationsSync.captureRelationVersionForEntities connection ctx.OwnerTable [| (row.Id.Value, box entity) |]
-                | _ -> ()
-                entity
-
             try
                 match typeof<'TResult> with
                 | t when t.IsGenericType && typeof<IEnumerable<'T>>.Equals typeof<'TResult> ->
@@ -252,91 +335,15 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         ))
                     m.Invoke(this, [|query; variables; box batchCtx|]) :?> 'TResult
                 | _other ->
-                    use connection = source.GetInternalConnection()
                     let methodName =
                         match expression with
-                        | :? MethodCallExpression as mce -> mce.Method.Name
+                        | :? MethodCallExpression as call -> call.Method.Name
                         | _ -> "Execute"
-                    let getTerminalDefaultValue() =
-                        let isExpressionLikeArgument (expr: Expression) =
-                            match expr with
-                            | :? LambdaExpression -> true
-                            | _ -> typeof<Expression>.IsAssignableFrom expr.Type
-                        let defaultExprOpt =
-                            match expression with
-                            | :? MethodCallExpression as mce ->
-                                let args = Array.init (mce.Arguments.Count - 1) (fun i -> mce.Arguments.[i + 1])
-                                match mce.Method.Name, args with
-                                | ("FirstOrDefault" | "SingleOrDefault"), [| defaultValue |]
-                                    when not (isExpressionLikeArgument defaultValue) ->
-                                    Some defaultValue
-                                | ("FirstOrDefault" | "SingleOrDefault"), [| predicate; defaultValue |]
-                                    when isExpressionLikeArgument predicate ->
-                                    Some defaultValue
-                                | _ ->
-                                    None
-                            | _ ->
-                                None
-                        match defaultExprOpt with
-                        | Some defaultExpr -> QueryTranslatorBaseHelpers.evaluateExpr<'TResult> defaultExpr
+                    let getDefault() =
+                        match QueryableExecution.terminalDefaultExpression expression with
+                        | Some value -> QueryTranslatorBaseHelpers.evaluateExpr<'TResult> value
                         | None -> Unchecked.defaultof<'TResult>
-
-                    // Add Single, First, and the OrDefault Variant here.
-                    let query = connection.Query<Types.DbObjectRow>(query, variables)
-
-                    match methodName with
-                    | "Single" ->
-                        let row = query.Single()
-                        let entity = JsonFunctions.fromSQLite<'TResult> row
-                        batchLoadSingle connection row entity
-                    | "SingleOrDefault" ->
-                        // Emulate query.SupportedLinqMethods.SingleOrDefault()
-                        use enumerator = query.GetEnumerator()
-                        match enumerator.MoveNext() with
-                        | false -> getTerminalDefaultValue()
-                        | true ->
-                            let prevElement = enumerator.Current
-                            match enumerator.MoveNext() with
-                            | true -> raise (InvalidOperationException("Sequence contains more than one element"))
-                            | false ->
-                                // Only one element was found, return it.
-                                let entity = JsonFunctions.fromSQLite<'TResult> prevElement
-                                batchLoadSingle connection prevElement entity
-
-                    | "First" ->
-                        let row = query.First()
-                        let entity = JsonFunctions.fromSQLite<'TResult> row
-                        batchLoadSingle connection row entity
-                    | "FirstOrDefault" ->
-                        match query |> Seq.tryHead with
-                        | None -> getTerminalDefaultValue()
-                        | Some row ->
-                            let entity = JsonFunctions.fromSQLite<'TResult> row
-                            batchLoadSingle connection row entity
-
-                    | "MinBy"
-                    | "MaxBy" ->
-                        match query |> Seq.tryHead with
-                        | Some row ->
-                            let entity = JsonFunctions.fromSQLite<'TResult> row
-                            batchLoadSingle connection row entity
-                        | None when typeof<'TResult>.IsValueType && isNull (Nullable.GetUnderlyingType(typeof<'TResult>)) ->
-                            raise (InvalidOperationException("Sequence contains no elements"))
-                        | None ->
-                            Unchecked.defaultof<'TResult>
-
-                    | methodName when methodName.EndsWith("OrDefault", StringComparison.Ordinal) ->
-                        match query |> Seq.tryHead with
-                        | None -> getTerminalDefaultValue()
-                        | Some row ->
-                            let entity = JsonFunctions.fromSQLite<'TResult> row
-                            batchLoadSingle connection row entity
-                    | _ ->
-                        match query |> Seq.tryHead with
-                        | None -> raise (InvalidOperationException("Sequence contains no elements"))
-                        | Some row ->
-                            let entity = JsonFunctions.fromSQLite<'TResult> row
-                            batchLoadSingle connection row entity
+                    QueryableExecution.scalar source query variables batchCtx methodName getDefault
 
             finally
                 ()

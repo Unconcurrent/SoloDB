@@ -64,12 +64,9 @@ module internal QueryableBuildQuerySetAndTypeOps =
 
 
                 | SupportedLinqMethods.Contains ->
-                    let struct (t, value) =
-                        match m.Expressions.[0] with
-                        | :? ConstantExpression as ce -> struct (ce.Type, ce.Value)
-                        | other -> raise (NotSupportedException(sprintf "Invalid Contains(...) parameter: %A" other))
-
-                    let filter = (UtilsReflection.ExpressionHelper.eq t value)
+                    let value = m.Expressions.[0]
+                    let parameter = Expression.Parameter value.Type
+                    let filter = Expression.Lambda(Expression.Equal(parameter, value), [|parameter|])
                     addFilter statements filter
                     addTake statements (UtilsReflection.ExpressionHelper.constant 1)
 
@@ -82,22 +79,36 @@ module internal QueryableBuildQuerySetAndTypeOps =
                 // todo: Append works at root level but is not yet supported at DBRefMany level (see Extract.fs)
                 | SupportedLinqMethods.Append ->
                     addUnionAll statements (fun _tableName vars ->
-                        let appendingObj = QueryTranslatorBaseHelpers.evaluateExpr<'T> m.Expressions.[0]
-                        match QueryTranslatorBaseTypes.isPrimitiveSQLiteType typeof<'T> with
-                        | false ->
-                            let struct (jsonStringElement, hasId) = serializeForCollection appendingObj
-                            let idExpr =
-                                if hasId then
-                                    let id = HasTypeId<'T>.Read appendingObj
-                                    SqlExpr.Literal(SqlLiteral.Integer id)
-                                else
-                                    SqlExpr.Literal(SqlLiteral.Integer -1L)
-                            let valueExpr = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Literal(SqlLiteral.String jsonStringElement); SqlExpr.Literal(SqlLiteral.String "$")])
-                            mkCore [{ Alias = Some "Id"; Expr = idExpr }; { Alias = Some "Value"; Expr = valueExpr }] None
-                        | true ->
-                            let valueExpr = allocateParam vars (box appendingObj)
-                            mkCore [{ Alias = Some "Value"; Expr = valueExpr }] None
-                    )
+                        match sourceCtx.BindQueryValue with
+                        | ValueSome binder when binder.IsValue m.Expressions.[0] ->
+                            let value = binder.Local m.Expressions.[0]
+                            if QueryTranslatorBaseTypes.isPrimitiveSQLiteType value.Type then
+                                mkCore [{ Alias = Some "Value"; Expr = binder.Parameter value }] None
+                            else
+                                let serializer = UtilsReflection.ExpressionHelper.get(fun (item: 'T) -> serializeForCollection item)
+                                let idReader = UtilsReflection.ExpressionHelper.get(fun (item: 'T) ->
+                                    if HasTypeId<'T>.Value then HasTypeId<'T>.Read item else -1L)
+                                let json = binder.Scalar(Expression.Invoke(serializer, value))
+                                let id = binder.Scalar(Expression.Invoke(idReader, value))
+                                let payload = SqlExpr.FunctionCall("jsonb_extract", [json; SqlExpr.Literal(SqlLiteral.String "$")])
+                                mkCore [{ Alias = Some "Id"; Expr = id }; { Alias = Some "Value"; Expr = payload }] None
+                        | _ ->
+                            let appendingObj = QueryTranslatorBaseHelpers.evaluateExpr<'T> m.Expressions.[0]
+                            match QueryTranslatorBaseTypes.isPrimitiveSQLiteType typeof<'T> with
+                            | false ->
+                                let jsonStringElement = serializeForCollection appendingObj
+                                let idExpr =
+                                    if HasTypeId<'T>.Value then
+                                        let id = HasTypeId<'T>.Read appendingObj
+                                        SqlExpr.Literal(SqlLiteral.Integer id)
+                                    else
+                                        SqlExpr.Literal(SqlLiteral.Integer -1L)
+                                let valueExpr = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Literal(SqlLiteral.String jsonStringElement); SqlExpr.Literal(SqlLiteral.String "$")])
+                                mkCore [{ Alias = Some "Id"; Expr = idExpr }; { Alias = Some "Value"; Expr = valueExpr }] None
+                            | true ->
+                                let valueExpr = allocateParam vars (box appendingObj)
+                                mkCore [{ Alias = Some "Value"; Expr = valueExpr }] None
+                        )
                 
                 
                 | SupportedLinqMethods.Concat ->

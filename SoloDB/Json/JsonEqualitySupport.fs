@@ -27,4 +27,3 @@ module internal JsonEqualitySupport =
             match segment with
             | Member key -> appendMember path key
             | Index index -> sprintf "%s[%d]" path index) segments "$"
-

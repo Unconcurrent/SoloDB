@@ -12,6 +12,12 @@ open SoloDatabase.Types
 open System
 open Microsoft.Data.Sqlite
 
+/// <summary>Reserved options for result compilation. No execution settings are defined.</summary>
+/// <remarks>The nullable optional parameter distinguishes result overloads from sequence
+/// overloads during F# overload resolution. Callers normally omit it.</remarks>
+[<AllowNullLiteral; Sealed>]
+type CompileOptions() = class end
+
 /// <summary>
 /// Represents the outcome of an event handler invocation.
 /// </summary>
@@ -148,20 +154,67 @@ and ISoloDBCollection<'T> =
     inherit IOrderedQueryable<'T>
     inherit ISoloDBCollectionEvents<'T>
 
-    /// <summary>Optimizes and retains a read query using collection indexes and available SQLite statistics.</summary>
-    /// <remarks>Query values bind at invocation and enumerations read fresh results.
-    /// Recompile after model or index changes, or to use refreshed statistics.
-    /// Transactional collections cannot compile queries.</remarks>
+    // Separate ordered signatures prevent a lambda ending in OrderBy/ThenBy from
+    // selecting the generic-result overload and exposing IQueryable as its result.
+    /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
+    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
     abstract member Compile<'R> : query: Expression<Func<IQueryable<'T>, IQueryable<'R>>> -> Func<IEnumerable<'R>>
 
-    /// <summary>Compiles a read query with one invocation argument. Recompile after model or index changes.</summary>
+    /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
+    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    abstract member Compile<'R> : query: Expression<Func<IQueryable<'T>, IOrderedQueryable<'R>>> -> Func<IEnumerable<'R>>
+
+    /// <summary>Compiles a read result, retaining translation and binding values on invocation.</summary>
+    /// <param name="query">The read expression rooted in the supplied collection.</param>
+    /// <param name="_marker">Omit this parameter. Its optional position makes F# prefer
+    /// the sequence overload when applicable; it does not alter query execution.</param>
+    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    abstract member Compile<'R> : query: Expression<Func<IQueryable<'T>, 'R>> * [<Optional; DefaultParameterValue(null: CompileOptions)>] _marker: CompileOptions -> Func<'R>
+
+    /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
+    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
     abstract member Compile<'A, 'R> : query: Expression<Func<IQueryable<'T>, 'A, IQueryable<'R>>> -> Func<'A, IEnumerable<'R>>
 
-    /// <summary>Compiles a read query with two invocation arguments. Recompile after model or index changes.</summary>
+    /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
+    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    abstract member Compile<'A, 'R> : query: Expression<Func<IQueryable<'T>, 'A, IOrderedQueryable<'R>>> -> Func<'A, IEnumerable<'R>>
+
+    /// <summary>Compiles a read result, retaining translation and binding values on invocation.</summary>
+    /// <param name="query">The read expression rooted in the supplied collection.</param>
+    /// <param name="_marker">Omit this parameter. Its optional position makes F# prefer
+    /// the sequence overload when applicable; it does not alter query execution.</param>
+    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    abstract member Compile<'A, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'R>> * [<Optional; DefaultParameterValue(null: CompileOptions)>] _marker: CompileOptions -> Func<'A, 'R>
+
+    /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
+    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
     abstract member Compile<'A, 'B, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, IQueryable<'R>>> -> Func<'A, 'B, IEnumerable<'R>>
 
-    /// <summary>Compiles a read query with three invocation arguments. Recompile after model or index changes.</summary>
+    /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
+    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    abstract member Compile<'A, 'B, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, IOrderedQueryable<'R>>> -> Func<'A, 'B, IEnumerable<'R>>
+
+    /// <summary>Compiles a read result, retaining translation and binding values on invocation.</summary>
+    /// <param name="query">The read expression rooted in the supplied collection.</param>
+    /// <param name="_marker">Omit this parameter. Its optional position makes F# prefer
+    /// the sequence overload when applicable; it does not alter query execution.</param>
+    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    abstract member Compile<'A, 'B, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, 'R>> * [<Optional; DefaultParameterValue(null: CompileOptions)>] _marker: CompileOptions -> Func<'A, 'B, 'R>
+
+    /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
+    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
     abstract member Compile<'A, 'B, 'C, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, IQueryable<'R>>> -> Func<'A, 'B, 'C, IEnumerable<'R>>
+
+    /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
+    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    abstract member Compile<'A, 'B, 'C, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, IOrderedQueryable<'R>>> -> Func<'A, 'B, 'C, IEnumerable<'R>>
+
+    /// <summary>Compiles a read result, retaining translation and binding values on invocation.</summary>
+    /// <param name="query">The read expression rooted in the supplied collection.</param>
+    /// <param name="_marker">Omit this parameter. Its optional position makes F# prefer
+    /// the sequence overload when applicable; it does not alter query execution.</param>
+    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    abstract member Compile<'A, 'B, 'C, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, 'R>> * [<Optional; DefaultParameterValue(null: CompileOptions)>] _marker: CompileOptions -> Func<'A, 'B, 'C, 'R>
 
     /// <summary>
     /// Gets the name of the collection within the database.

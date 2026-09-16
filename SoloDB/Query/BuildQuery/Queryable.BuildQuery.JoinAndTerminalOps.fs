@@ -231,10 +231,17 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                                 else
                                     SqlExpr.Literal(SqlLiteral.Null)
                             | 1 ->
-                                let o = QueryTranslatorBaseHelpers.evaluateExpr<obj> m.Expressions.[0]
-                                let jsonObj = JsonSerializator.JsonValue.Serialize o
-                                let jsonText = jsonObj.ToJsonString()
-                                SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.FunctionCall("jsonb", [SqlExpr.Literal(SqlLiteral.String jsonText)]); SqlExpr.Literal(SqlLiteral.String "$")])
+                                let value = m.Expressions.[0]
+                                let json =
+                                    match sourceCtx.BindQueryValue with
+                                    | ValueSome binder when binder.IsValue value ->
+                                        let serializer = UtilsReflection.ExpressionHelper.get(fun (item: obj) -> JsonValue.Serialize(item).ToJsonString())
+                                        binder.Scalar(Expression.Invoke(serializer, Expression.Convert(value, typeof<obj>)))
+                                    | _ ->
+                                        let item = QueryTranslatorBaseHelpers.evaluateExpr<obj> value
+                                        SqlExpr.Literal(SqlLiteral.String (JsonValue.Serialize(item).ToJsonString()))
+                                SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.FunctionCall("jsonb", [json]); SqlExpr.Literal(SqlLiteral.String "$")])
+
                             | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
 
                         // SELECT Id, Value FROM (inner) o

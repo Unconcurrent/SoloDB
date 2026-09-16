@@ -349,20 +349,56 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
             let argument = Expression.Parameter(typeof<unit>, "args")
             let run = CompiledQueries.compile<'T, unit, 'R> (this :> ISoloDBCollection<'T>) query argument [||]
             Func<IEnumerable<'R>>(fun () -> run ())
+        member this.Compile(query: Expression<Func<IQueryable<'T>, IOrderedQueryable<'R>>>) : Func<IEnumerable<'R>> =
+            let argument = Expression.Parameter(typeof<unit>, "args")
+            let run = CompiledQueries.compile<'T, unit, 'R> (this :> ISoloDBCollection<'T>) query argument [||]
+            Func<IEnumerable<'R>>(fun () -> run ())
+        member this.Compile(query: Expression<Func<IQueryable<'T>, 'R>>, _marker: CompileOptions) : Func<'R> =
+            let argument = Expression.Parameter(typeof<unit>, "args")
+            let run = CompiledQueries.compileResult<'T, unit, 'R> (this :> ISoloDBCollection<'T>) query argument [||]
+            Func<'R>(fun () -> run ())
         member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, IQueryable<'R>>>) : Func<'A, IEnumerable<'R>> =
             let argument = Expression.Parameter(typeof<'A>, "args")
             let run = CompiledQueries.compile<'T, 'A, 'R> (this :> ISoloDBCollection<'T>) query argument [|argument|]
             Func<'A, IEnumerable<'R>>(run)
+        member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, IOrderedQueryable<'R>>>) : Func<'A, IEnumerable<'R>> =
+            let argument = Expression.Parameter(typeof<'A>, "args")
+            let run = CompiledQueries.compile<'T, 'A, 'R> (this :> ISoloDBCollection<'T>) query argument [|argument|]
+            Func<'A, IEnumerable<'R>>(run)
+        member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'R>>, _marker: CompileOptions) : Func<'A, 'R> =
+            let argument = Expression.Parameter(typeof<'A>, "args")
+            let run = CompiledQueries.compileResult<'T, 'A, 'R> (this :> ISoloDBCollection<'T>) query argument [|argument|]
+            Func<'A, 'R>(run)
         member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, IQueryable<'R>>>) : Func<'A, 'B, IEnumerable<'R>> =
             let argument = Expression.Parameter(typeof<struct ('A * 'B)>, "args")
-            let values = [|Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression|]
+            let values = [| Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression |]
             let run = CompiledQueries.compile<'T, struct ('A * 'B), 'R> (this :> ISoloDBCollection<'T>) query argument values
             Func<'A, 'B, IEnumerable<'R>>(fun a b -> run (struct (a, b)))
+        member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, IOrderedQueryable<'R>>>) : Func<'A, 'B, IEnumerable<'R>> =
+            let argument = Expression.Parameter(typeof<struct ('A * 'B)>, "args")
+            let values = [| Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression |]
+            let run = CompiledQueries.compile<'T, struct ('A * 'B), 'R> (this :> ISoloDBCollection<'T>) query argument values
+            Func<'A, 'B, IEnumerable<'R>>(fun a b -> run (struct (a, b)))
+        member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, 'R>>, _marker: CompileOptions) : Func<'A, 'B, 'R> =
+            let argument = Expression.Parameter(typeof<struct ('A * 'B)>, "args")
+            let values = [| Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression |]
+            let run = CompiledQueries.compileResult<'T, struct ('A * 'B), 'R> (this :> ISoloDBCollection<'T>) query argument values
+            Func<'A, 'B, 'R>(fun a b -> run (struct (a, b)))
         member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, IQueryable<'R>>>) : Func<'A, 'B, 'C, IEnumerable<'R>> =
             let argument = Expression.Parameter(typeof<struct ('A * 'B * 'C)>, "args")
-            let values = [| for name in [|"Item1"; "Item2"; "Item3"|] -> Expression.Field(argument, name) :> Expression |]
+            let values = [| Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression; Expression.Field(argument, "Item3") :> Expression |]
             let run = CompiledQueries.compile<'T, struct ('A * 'B * 'C), 'R> (this :> ISoloDBCollection<'T>) query argument values
             Func<'A, 'B, 'C, IEnumerable<'R>>(fun a b c -> run (struct (a, b, c)))
+        member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, IOrderedQueryable<'R>>>) : Func<'A, 'B, 'C, IEnumerable<'R>> =
+            let argument = Expression.Parameter(typeof<struct ('A * 'B * 'C)>, "args")
+            let values = [| Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression; Expression.Field(argument, "Item3") :> Expression |]
+            let run = CompiledQueries.compile<'T, struct ('A * 'B * 'C), 'R> (this :> ISoloDBCollection<'T>) query argument values
+            Func<'A, 'B, 'C, IEnumerable<'R>>(fun a b c -> run (struct (a, b, c)))
+        member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, 'R>>, _marker: CompileOptions) : Func<'A, 'B, 'C, 'R> =
+            let argument = Expression.Parameter(typeof<struct ('A * 'B * 'C)>, "args")
+            let values = [| Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression; Expression.Field(argument, "Item3") :> Expression |]
+            let run = CompiledQueries.compileResult<'T, struct ('A * 'B * 'C), 'R> (this :> ISoloDBCollection<'T>) query argument values
+            Func<'A, 'B, 'C, 'R>(fun a b c -> run (struct (a, b, c)))
         member this.InTransaction = this.InTransaction
         member this.IncludeType = this.IncludeType 
         member this.Name = this.Name
