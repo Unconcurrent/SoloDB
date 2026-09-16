@@ -52,7 +52,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
         | OfShape1 null null "GetArray" null (array, index) -> arrayIndexDu array index qb
         | OfShape1 null null "Like" null (str, likeWhat) ->
             SqlExpr.Binary(visitDu str qb, BinaryOperator.Like, visitDu likeWhat qb)
-        // UpdateMode methods — DU path replacing legacy visit-based UpdateMode handlers.
+        // Update methods collect target paths and stored values.
         | OfShape1 null null "Set" null (oldValue, newValue) when qb.UpdateMode ->
             let pathExpr = visitDu oldValue qb
             let valueExpr = visitStoredValueDu newValue qb

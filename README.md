@@ -21,7 +21,6 @@ I wrote a detailed comparison with a popular alternative, [LiteDB](https://githu
   - [Working with Collections](#working-with-collections)
   - [Relations (DBRef, DBRefMany, SoloRef)](#relations-dbref-dbrefmany-soloref)
   - [Compiled Queries](#compiled-queries)
-  - [JSON Value Equality](#json-value-equality)
   - [Indexing for Performance](#indexing-for-performance)
   - [Atomic Transactions](#atomic-transactions)
   - [Storing Polymorphic Data](#storing-polymorphic-data)
@@ -446,29 +445,7 @@ The source parameter is bound to the receiving collection. Supply zero to three 
 
 Compile from a nontransactional collection and keep that collection alive while using the function. Recompile after changing its model or indexes. Counts remain ordinary queries. Retaining SQL avoids translation work; unindexed filtering and deep offsets still require database work.
 
-For supported ordered pages with an explicit `Id` tie-breaker, compiled queries fetch document payloads after selecting page IDs. When an existing index supplies the complete order, early pages can use a bounded 4,096-candidate scan with an exact fallback in the same statement. Pages needing more than 4,096 matches use the fallback directly. This favors early matches; it does not guarantee a speedup for every filter or deep page, and it does not add a count query or change your ordering.
-
-### JSON Value Equality
-
-`Eq` compares complete JSON structures symmetrically. Its argument is serialized using its runtime type without adding an extra root type discriminator; an existing `JsonValue` is used directly. It compares a string as a string, not as JSON text.
-
-`EqLoose` is an extension in `SoloDatabase`. It compares values in memory using object-query matching rules: the receiver is the stored side, extra stored fields are allowed, missing fields compare as null, arrays require matching lengths and positions, and a missing stored type discriminator is accepted. Its argument uses query serialization. Neither method mutates a supplied `JsonValue` or executes a database query.
-
-```csharp
-using SoloDatabase;
-using SoloDatabase.JsonSerializator;
-
-var stored = JsonValue.Parse("{\"Name\":\"Ada\",\"Active\":true}");
-var subset = JsonValue.Parse("{\"Name\":\"Ada\"}");
-
-stored.Eq(subset);       // false: the complete structures differ
-stored.EqLoose(subset);  // true: every requested field matches
-subset.EqLoose(stored);  // false: Active is missing
-```
-
-Direct comparisons with integral decimal values within `Int64` retain integer precision in ordinary and compiled queries. Fractional decimals and integers outside that range retain SQLite REAL comparison precision. Value expressions, including arithmetic and function inputs, keep the existing decimal REAL behavior. `Eq` itself compares JSON numbers as decimals.
-
-Object-comparison paths escape empty names, quotes, backslashes and NUL characters. SQLite JSON lookup still compares names only up to their first NUL; `EqLoose` mirrors that behavior and selects the first matching member in object order. Distinct names with the same prefix can therefore alias, and when they coexist, strict equality need not imply loose matching. Leaf string values retain their full contents.
+For supported ordered pages with an explicit `Id` tie-breaker, compiled queries fetch document payloads after selecting page IDs. A single indexed equality ordered by `Id`, or by that fixed key then `Id`, goes straight to the filtered page query. For other filters where an existing index supplies the complete order, early pages can use a bounded 4,096-candidate scan with an exact fallback in the same statement. Pages needing more than 4,096 matches use the fallback directly. This favors early matches; it does not guarantee a speedup for every filter or deep page, and it does not add a count query or change your ordering.
 
 ### Indexing for Performance
 

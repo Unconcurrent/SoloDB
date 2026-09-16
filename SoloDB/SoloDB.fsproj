@@ -47,6 +47,7 @@
     <Compile Include="Core/Extensions.fs" />
     <Compile Include="Json/JsonHelper.fs" />
     <Compile Include="Json/JsonLexer.fs" />
+    <Compile Include="Json/JsonEqualitySupport.fs" />
     <Compile Include="Json/JsonSerializator.fs" />
     <Compile Include="Json/JsonFunctions.fs" />
     <Compile Include="SQLiteTools/SQLiteTools.Params.fs" />
@@ -113,7 +114,6 @@
     <Compile Include="QueryTranslator/SqlDu/Emit/SqlDu.MinimalEmit.fs" />
     <Compile Include="SoloDBCore/SoloDB.StatementExecution.fs" />
     <Compile Include="QueryTranslator/Equality/EqualityRules.fs" />
-    <Compile Include="QueryTranslator/Equality/JsonValueEqualityExtensions.fs" />
     <Compile Include="QueryTranslator/Equality/EqualityComparison.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Helpers.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.fs" />

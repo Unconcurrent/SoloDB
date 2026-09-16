@@ -17,19 +17,6 @@ open SoloDatabase.SqlModel
 
 module internal QueryTranslatorVisitCore =
     type private ValueUse = Value | Comparison | Stored
-    // ─── DU-constructing visitor (legacy visit path removed) ─────────
-    // All expression families produce SqlExpr DU nodes via visitDu.
-    // Pre-expression and unknown-expression handlers now return DU via DuHandlerResult.
-
-    /// Placeholder: legacy visit removed. All callers now use visitDu + emitExpr.
-    let internal visit (_exp: Expression) (_qb: QueryBuilder) : unit =
-        raise (NotSupportedException "Legacy visit path removed. Use visitDu + SqlDuMinimalEmit.emitExpr.")
-
-    // Legacy visitor functions removed (visitBinary, visitMemberAccess, visitMethodCall,
-    // visitParameter, visitNot, visitNegate, visitNew, visitMemberInit, visitConvert, visitConstant,
-    // visitListInit, visitTypeIs, visitIfElse, arrayIndex, visitProperty, castTo, visitMathMethod,
-    // visitLambda, newObject, containsImpl, emitStringOperand).
-    // All callers now use visitDu + SqlDuMinimalEmit.emitExpr.
 
     let private isByRefLikeType (t: Type) =
         t.CustomAttributes
@@ -293,7 +280,7 @@ module internal QueryTranslatorVisitCore =
         | ValueSome value -> value
         | ValueNone ->
 
-        // Fully-constant early-out (same guard as legacy visit)
+        // Fully-constant early-out
         if exp.NodeType <> ExpressionType.Lambda
             && exp.NodeType <> ExpressionType.Quote
             && not (isByRefLikeType exp.Type)

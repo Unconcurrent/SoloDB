@@ -152,18 +152,11 @@ module internal QueryTranslatorBaseTypes =
             Parameters: ReadOnlyCollection<ParameterExpression>
             /// <summary>The index of the parameter representing the document ID.</summary>
             IdParameterIndex: int
-            /// <summary>Query source context for multi-source (JOIN) support. When Joins is empty, behavior is identical to pre-relation pipeline.</summary>
+            /// <summary>Query source context for multi-source (JOIN) support.</summary>
             SourceContext: QueryContext
-            /// <summary>Placeholder field — DU parameter names now derived from Variables.Count.</summary>
-            ParamCounter: int ref
-            /// <summary>DU result from pre-expression/unknown handler — replaces __raw__ StringBuilder capture.</summary>
-            /// Ordered assignments collected while visiting an update expression.
-            ///
-            /// An update is a sequence of path/value pairs, which is not a SQLite expression and
-            /// so has no place in the expression tree. The visitor records them here and returns
-            /// a neutral expression, leaving the caller to build a real statement from structure
-            /// rather than to take apart a pretend expression afterwards.
+            /// Ordered update path/value assignments, emitted as a statement rather than a scalar expression.
             UpdateAssignments: ResizeArray<SqlExpr * SqlExpr>
+            /// Result supplied by a pre-expression or unknown-expression handler.
             DuHandlerResult: SqlExpr voption ref
             /// <summary>Maps outer-scope ParameterExpressions to their SQL alias (quoted, e.g. '"RecursiveNode"').
             /// Used by visitParameterDu and related Id fast paths to resolve outer-captured variables correctly across ForSubquery boundaries.</summary>
@@ -268,7 +261,6 @@ module internal QueryTranslatorBaseTypes =
                     | _ -> System.Collections.ObjectModel.ReadOnlyCollection(Array.empty<ParameterExpression>)
                 IdParameterIndex = idIndex
                 SourceContext = sourceCtx
-                ParamCounter = ref 0
                 DuHandlerResult = ref ValueNone
                 OuterParameterAliases = Dictionary<ParameterExpression, string>()
                 TranslationStepCounter = ref 0

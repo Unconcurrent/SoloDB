@@ -15,6 +15,14 @@ open System.Data.Common
 /// Internal helpers for SQLiteTools: parameter processing, command creation, and type-mapper building blocks.
 /// </summary>
 module internal SQLiteToolsParams =
+    // Names and constants belong to the retained plan. Values belong to one
+    // invocation and remain alive with its enumerable; binding only reads them.
+    type ParameterValues = {
+        Constants: KeyValuePair<string, obj> array
+        Names: string array
+        Values: obj array
+    }
+
     type internal DateTimeFamilyReaderSpec = {
         ClrType: Type
         BuildExpression: Expression -> Expression
@@ -64,23 +72,16 @@ module internal SQLiteToolsParams =
     /// both.
     let mutable internal sqlBoundTraceCallback: Action<string, IReadOnlyList<KeyValuePair<string, obj>>> voption = ValueNone
 
-    /// <summary>
-    /// Caches PropertyInfo for Nullable types' 'HasValue' and 'Value' properties for performance.
-    /// </summary>
+    /// <summary>Caches PropertyInfo for Nullable types' 'HasValue' and 'Value' properties for performance.</summary>
     let private nullablePropsCache = ConcurrentDictionary<Type, struct (PropertyInfo * PropertyInfo)>()
 
-    /// <summary>
-    /// Retrieves the 'HasValue' and 'Value' properties for a given Nullable type from the cache or via reflection.
-    /// </summary>
-    /// <param name="nullableType">The Nullable type.</param>
+    /// <summary>Retrieves the 'HasValue' and 'Value' properties for a given Nullable type from the cache or via reflection.</summary>
     /// <returns>A struct tuple containing the PropertyInfo for HasValue and Value.</returns>
     let private getNullableProperties (nullableType: Type) =
         nullablePropsCache.GetOrAdd(nullableType, fun t ->
             struct (t.GetProperty("HasValue"), t.GetProperty("Value")))
 
-    /// <summary>
-    /// A private struct to pass an array along with its effective length, for BLOB operations.
-    /// </summary>
+    /// <summary>A private struct to pass an array along with its effective length, for BLOB operations.</summary>
     [<Struct>]
     type TrimmedArray = {
         /// <summary>The underlying array.</summary>
@@ -90,10 +91,7 @@ module internal SQLiteToolsParams =
     }
 
 
-    /// <summary>
-    /// Processes a parameter value before it's added to a DB command, handling nulls, DateTimeOffset, and Nullable types.
-    /// </summary>
-    /// <param name="value">The input parameter value.</param>
+    /// <summary>Processes a parameter value before it's added to a DB command, handling nulls, DateTimeOffset, and Nullable types.</summary>
     /// <returns>A struct tuple containing the processed value and its size if applicable.</returns>
     let private processParameter (value: obj) =
         match value with
@@ -114,12 +112,7 @@ module internal SQLiteToolsParams =
             else
                 struct (value, -1)
 
-    /// <summary>
-    /// Creates and adds a new IDbDataParameter to a command.
-    /// </summary>
-    /// <param name="command">The command to add the parameter to.</param>
-    /// <param name="key">The name of the parameter.</param>
-    /// <param name="value">The value of the parameter.</param>
+    /// <summary>Creates and adds a new IDbDataParameter to a command.</summary>
     let internal addParameter (command: IDbCommand) (key: string) (value: obj) =
         let struct (value, size) = processParameter value
 
@@ -132,12 +125,7 @@ module internal SQLiteToolsParams =
 
         command.Parameters.Add par |> ignore
 
-    /// <summary>
-    /// Updates an existing parameter or adds a new one if it doesn't exist. Used for cached commands.
-    /// </summary>
-    /// <param name="command">The command to update.</param>
-    /// <param name="key">The name of the parameter.</param>
-    /// <param name="value">The value of the parameter.</param>
+    /// <summary>Updates an existing parameter or adds a new one if it doesn't exist. Used for cached commands.</summary>
     let internal setOrAddParameter (command: IDbCommand) (key: string) (value: obj) =
         let struct (value, size) = processParameter value
 
@@ -155,20 +143,18 @@ module internal SQLiteToolsParams =
         if size > 0 then
             par.Size <- size
 
-    /// <summary>
-    /// Caches compiled lambda expressions for dynamically processing anonymous-type parameters.
-    /// </summary>
+    /// <summary>Caches compiled lambda expressions for dynamically processing anonymous-type parameters.</summary>
     let private dynamicParameterCache = ConcurrentDictionary<Type, Action<IDbCommand, obj, Action<IDbCommand,string,obj>>>()
 
-    /// <summary>
-    /// Processes parameters from an object (either an IDictionary or an anonymous type) and adds them to a command.
-    /// </summary>
-    /// <param name="processFn">The function to use for adding/setting a parameter (e.g., addParameter).</param>
-    /// <param name="command">The command to add parameters to.</param>
-    /// <param name="parameters">The parameter object (IDictionary or anonymous type).</param>
+    /// <summary>Binds retained, dictionary or anonymous-object parameters through the supplied command writer.</summary>
     let internal processParameters processFn (command: IDbCommand) (parameters: obj) =
         match parameters with
         | null -> ()
+        | :? ParameterValues as packet ->
+            for pair in packet.Constants do
+                processFn command pair.Key pair.Value
+            for i = 0 to packet.Names.Length - 1 do
+                processFn command packet.Names.[i] packet.Values.[i]
         | :? IDictionary<string, obj> as dict ->
             for KeyValue(key, value) in dict do
                 processFn command key value
@@ -199,12 +185,7 @@ module internal SQLiteToolsParams =
             ))
             fn.Invoke(command, parameters, processFn)
 
-    /// <summary>
-    /// Creates an IDbCommand with the given SQL and parameters.
-    /// </summary>
-    /// <param name="this">The connection to create the command on.</param>
-    /// <param name="sql">The SQL command text.</param>
-    /// <param name="parameters">The parameters for the command.</param>
+    /// <summary>Creates an IDbCommand with the given SQL and parameters.</summary>
     /// <returns>A new IDbCommand.</returns>
     let internal createCommand (this: SqliteConnection) (sql: string) (parameters: obj) =
         match sqlTraceCallback with ValueSome cb -> cb.Invoke(sql) | ValueNone -> ()
@@ -223,9 +204,7 @@ module internal SQLiteToolsParams =
 
         command
 
-    /// <summary>
-    /// Lazily gets all methods from DbDataReader and its interfaces for later use in the TypeMapper.
-    /// </summary>
+    /// <summary>Lazily gets all methods from DbDataReader and its interfaces for later use in the TypeMapper.</summary>
     let internal dataReaderMethods =
         let rec getMethods (t: Type) =
             let implements = t.GetInterfaces()
@@ -252,9 +231,7 @@ module internal SQLiteToolsParams =
             totalRead <- totalRead + read
         arr
 
-    /// <summary>
-    /// Creates an Expression that calls streamToNativeArrayFuncDisposing on a SqliteBlob expression.
-    /// </summary>
+    /// <summary>Creates an Expression that calls streamToNativeArrayFuncDisposing on a SqliteBlob expression.</summary>
     let internal streamToNativeArray =
         let method = typeof<Func<SqliteBlob, NativeArray.NativeArray>>.GetMethod "Invoke"
         let stna = Expression.Constant (Func<SqliteBlob, NativeArray.NativeArray> streamToNativeArrayFuncDisposing)
@@ -321,9 +298,7 @@ module internal SQLiteToolsParams =
             | _ ->
                 "GetValue", true, Some (fun (expr: Expression) -> Expression.Convert(expr, t) :> Expression)
 
-    /// <summary>
-    /// Builds the final reader call expression from the resolved method and conversion.
-    /// </summary>
+    /// <summary>Builds the final reader call expression from the resolved method and conversion.</summary>
     let private buildReaderExpr (readerParam: Expression) (columnVar: Expression) (getMethodName: string, needsConversion: bool, conversionFunc: (Expression -> Expression) option) =
         let method = dataReaderMethods |> List.find(fun m -> m.Name = getMethodName)
         let readerParam = Expression.TypeAs(readerParam, typeof<DbDataReader>)
@@ -346,9 +321,7 @@ module internal SQLiteToolsParams =
     let internal matchMethodWithType (t: Type) (readerParam: Expression) (columnVar: Expression) =
         resolveReaderMethod t |> buildReaderExpr readerParam columnVar
 
-    /// <summary>
-    /// Dynamically builds a LINQ Expression to read a value from an IDataReader for a specific member (property or field).
-    /// </summary>
+    /// <summary>Dynamically builds a LINQ Expression to read a value from an IDataReader for a specific member (property or field).</summary>
     let internal matchMethodWithMemberType (prop: MemberInfo) (readerParam: Expression) (columnVar: Expression) =
         let (getMethodName, needsConversion, conversionFunc) =
             let t = match prop with | :? PropertyInfo as p -> p.PropertyType | :? FieldInfo as p -> p.FieldType | _ -> failwithf "Unknown member type."

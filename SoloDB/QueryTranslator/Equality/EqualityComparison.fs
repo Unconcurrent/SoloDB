@@ -3,6 +3,7 @@ namespace SoloDatabase
 open System
 open System.Linq.Expressions
 open SoloDatabase.JsonSerializator
+open JsonEqualitySupport
 open QueryTranslatorBaseTypes
 open SoloDatabase.SqlModel
 
@@ -29,11 +30,12 @@ module internal EqualityComparison =
                 let result =
                     match comparison with
                     | Length count -> length stored (qb.AllocateComparisonParamExpr count)
-                    | Scalar value ->
+                    | Scalar json ->
+                        let value = scalarValue json
                         let parameter = if isNull value then SqlExpr.Literal(SqlLiteral.Null) else qb.AllocateComparisonParamExpr value
                         scalar stored parameter (SqlExpr.Literal(SqlLiteral.Boolean(not (isNull value) && path.EndsWith ".$type")))
                 comparisons.Add result
-            walk ignoreDiscriminators [] json emit
+            JsonEquality.Walk(ignoreDiscriminators, [], json, emit)
             conjunction (List.ofSeq comparisons)
 
     let private rowsMethod = typeof<Arguments>.GetMethod("Rows", Reflection.BindingFlags.Static ||| Reflection.BindingFlags.Public ||| Reflection.BindingFlags.NonPublic)

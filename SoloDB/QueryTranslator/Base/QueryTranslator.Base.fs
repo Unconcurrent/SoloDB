@@ -168,8 +168,3 @@ module internal QueryTranslatorBase =
             handled <- handler.[index].Invoke(qb, exp)
             index <- index - 1
         handled
-
-    // Legacy string-builder visitor helpers removed:
-    // visitNestedArrayPredicateHelper, buildJsonPathFromMemberExpression, formatMemberAccessPath,
-    // tryHandleCollectionOrGroupingMemberAccess, tryHandleRootParameterMemberAccess, emitFallbackMemberAccess.
-    // All callers now use the DU visitor path (visitDu + SqlDuMinimalEmit.emitExpr).

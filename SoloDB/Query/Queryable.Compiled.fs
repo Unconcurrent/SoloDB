@@ -90,17 +90,16 @@ module internal CompiledQueries =
     type private Plan<'Args> = {
         Sql: string
         EmptyPrefixSql: string option
-        Constants: Dictionary<string, obj>
+        Parameters: SQLiteToolsParams.ParameterValues
         Hydration: QueryableTranslationCore.BatchLoadContext voption
-        Bind: Func<'Args, Dictionary<string, obj>, bool>
-        ParameterCount: int
+        Bind: Func<'Args, obj array, bool>
     }
 
     type private ParameterWriter =
-        static member Add(parameters: Dictionary<string, obj>, name: string, jsonName: string, prefix: bool, comparison: bool, value: obj) =
+        static member Add(parameters: obj array, slot: int, encoded: bool, prefix: bool, comparison: bool, value: obj) =
             let struct (value, json) = JsonFunctions.toSQLParameterForComparison comparison value
-            parameters.Add(name, value)
-            if not (isNull jsonName) then parameters.Add(jsonName, box json)
+            parameters.[slot] <- value
+            if encoded then parameters.[slot + 1] <- box json
             prefix && Object.Equals(value, "")
 
     let private writeParameter = typeof<ParameterWriter>.GetMethod("Add", Reflection.BindingFlags.Static ||| Reflection.BindingFlags.Public ||| Reflection.BindingFlags.NonPublic)
@@ -118,22 +117,24 @@ module internal CompiledQueries =
                 (arguments |> Array.mapi (fun i value -> query.Parameters.[i + 1], value))
         let expression = Substitute(replacements).Visit body
         let build (connection: SqliteConnection) =
-            let parameters = Expression.Parameter(typeof<Dictionary<string, obj>>, "parameters")
+            let parameters = Expression.Parameter(typeof<obj array>, "parameters")
             let emptyPrefix = Expression.Variable(typeof<bool>, "emptyPrefix")
             let locals = ResizeArray<ParameterExpression>()
             let assignments = ResizeArray<Expression>()
             let isValue = valueClassifier argument locals
             let mutable bindingCount = 0
-            let mutable parameterCount = 0
+            let names = ResizeArray<string>()
             let mutable hasPrefix = false
             let bind comparison encoded prefix (value: Expression) =
                 let name = "cq" + string bindingCount
                 bindingCount <- bindingCount + 1
                 let jsonName = if encoded then name + "j" else null
                 hasPrefix <- hasPrefix || prefix
-                parameterCount <- parameterCount + (if encoded then 2 else 1)
-                let write = Expression.Call(writeParameter, parameters, Expression.Constant(name),
-                                Expression.Constant(jsonName, typeof<string>), Expression.Constant(prefix), Expression.Constant(comparison),
+                let slot = names.Count
+                names.Add name
+                if encoded then names.Add jsonName
+                let write = Expression.Call(writeParameter, parameters, Expression.Constant(slot),
+                                Expression.Constant(encoded), Expression.Constant(prefix), Expression.Constant(comparison),
                                 Expression.Convert(value, typeof<obj>))
                 assignments.Add(Expression.Assign(emptyPrefix, Expression.Or(emptyPrefix, write)))
                 let parameter = SqlExpr.Parameter name
@@ -151,30 +152,32 @@ module internal CompiledQueries =
                            Prefix = (fun value -> bind false false (value.Type = typeof<string>) value)
                            Local = local }
             let sql, constants, hydration, _ = QueryableTranslationCore.startCompiledTranslation connection source expression binder false
-            let slots = parameterCount
+            let slotNames = names.ToArray()
             let body = Expression.Block(Array.append [|emptyPrefix|] (locals.ToArray()),
                            Array.concat [ [|Expression.Assign(emptyPrefix, Expression.Constant(false)) :> Expression|]
                                           assignments.ToArray(); [|emptyPrefix :> Expression|] ])
-            let run = Expression.Lambda<Func<'Args, Dictionary<string, obj>, bool>>(body, argument, parameters).Compile()
+            let run = Expression.Lambda<Func<'Args, obj array, bool>>(body, argument, parameters).Compile()
             let emptyPrefixSql =
                 if hasPrefix then
                     // Both translations allocate the same parameter names in the same order.
                     bindingCount <- 0
+                    names.Clear()
                     assignments.Clear()
                     locals.Clear()
                     let sql, _, _, _ = QueryableTranslationCore.startCompiledTranslation connection source expression binder true
                     Some sql
                 else None
-            { Sql = sql; EmptyPrefixSql = emptyPrefixSql; Constants = constants; Hydration = hydration
-              Bind = run; ParameterCount = constants.Count + slots }
+            { Sql = sql; EmptyPrefixSql = emptyPrefixSql; Hydration = hydration; Bind = run
+              Parameters = { Constants = constants |> Seq.toArray; Names = slotNames; Values = [||] } }
 
         let current =
             use connection = source.GetInternalConnection()
             build connection
 
         fun (args: 'Args) ->
-            let parameters = Dictionary<string, obj>(current.ParameterCount)
-            for KeyValue(name, value) in current.Constants do parameters.Add(name, value)
-            let emptyPrefix = current.Bind.Invoke(args, parameters)
+            let parameters =
+                if current.Parameters.Names.Length = 0 then current.Parameters
+                else { current.Parameters with Values = Array.zeroCreate current.Parameters.Names.Length }
+            let emptyPrefix = current.Bind.Invoke(args, parameters.Values)
             let sql = if emptyPrefix then defaultArg current.EmptyPrefixSql current.Sql else current.Sql
             QueryableExecution.enumerate<'Source, 'Result> source sql parameters current.Hydration

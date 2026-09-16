@@ -8,6 +8,7 @@ open SoloDatabase
 open Utils
 open SoloDatabase.Types
 open SoloDatabase.JsonSerializator
+open JsonEqualitySupport
 open System.Runtime.CompilerServices
 
 
@@ -52,20 +53,6 @@ type internal HasTypeId<'t> =
 
 
 module internal JsonFunctions =
-    // JSON numbers and decimal parameters share SQLite's INTEGER/REAL boundary.
-    let internal numberToSQLValue (number: decimal) : obj =
-        if Decimal.IsInteger number && number >= decimal Int64.MinValue && number <= decimal Int64.MaxValue then
-            box (int64 number)
-        else box (float number)
-
-    let internal jsonValueToSQLValue (element: JsonValue) =
-        match element with
-        | Boolean b -> (if b then 1L :> obj else 0L :> obj), false
-        | Null -> null, false
-        | Number n -> numberToSQLValue n, false
-        | String s -> s :> obj, false
-        | other -> other.ToJsonString() :> obj, true
-
     let inline internal mustIncludeTypeInformationInSerializationFn (t: Type) = 
         t.IsAbstract || not (isNull (t.GetCustomAttribute<Attributes.PolymorphicAttribute>()))
 
@@ -146,7 +133,7 @@ module internal JsonFunctions =
         // Fallback: complex objects — serialize via JSON round-trip.
         // This path handles arrays, lists, custom objects, and any other structured types.
         | _other ->
-            let value, json = JsonValue.Serialize item |> jsonValueToSQLValue
+            let value, json = (JsonValue.Serialize item).ToSQLValue()
             struct (value, json)
 
     

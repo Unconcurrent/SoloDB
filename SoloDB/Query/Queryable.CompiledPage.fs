@@ -36,12 +36,24 @@ module internal CompiledPage =
             | [order] -> isId order.Expr
             | [key; id] -> key.Direction = id.Direction && isId id.Expr && indexed key.Expr
             | _ -> false
+        // One equality fixes the index's leading key; its implicit rowid then
+        // supplies Id order for every argument, without an unfiltered window.
+        let equalityOrdered =
+            let direct = function Parameter _ | Literal _ -> true | _ -> false
+            let ordered key value =
+                direct value && (isId key || indexed key)
+                && (core.OrderBy |> List.forall (fun order ->
+                    isId order.Expr || FlattenTransform.normalizeExprQuoting order.Expr = FlattenTransform.normalizeExprQuoting key))
+            match core.Where with
+            | Some(Binary(left, (BinaryOperator.Eq | BinaryOperator.Is), right)) ->
+                ordered left right || ordered right left
+            | _ -> false
         let localFilter =
             core.Where |> Option.exists (SqlExpr.fold (fun valid node ->
                 valid && match node with
                          | Exists _ | InSubquery _ | ScalarSubquery _ | AggregateCall _ | WindowCall _ -> false
                          | _ -> true) true)
-        if not orderedIndex || not localFilter then select core else
+        if not orderedIndex || not localFilter || equalityOrdered then select core else
         let windowName = table + "_page_window"
         let hitsName = table + "_page_hits"
         let stateName = table + "_page_state"

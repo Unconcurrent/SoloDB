@@ -18,6 +18,7 @@ open System.Linq
 open System.Numerics
 open System.Runtime.Serialization
 open SoloDatabase
+open JsonEqualitySupport
 
 #nowarn "9" // NativePtr stuff
 #nowarn "51" // voidptr of a stack var
@@ -519,6 +520,27 @@ type JsonValue =
         JsonValue.EqualsCore this json
 
     /// <summary>
+    /// Tests whether this stored value matches the argument as an object query predicate would.
+    /// Extra stored object fields are allowed; missing fields compare as null, and missing
+    /// type discriminators are accepted. The argument uses query serialization, with JsonValue passthrough.
+    /// Use Eq for symmetric equality of complete JSON structures.
+    /// </summary>
+    /// <remarks>
+    /// Property names follow SQLite JSON lookup: ordinal comparison, terminating at the first NUL.
+    /// Names sharing that prefix can alias; colliding names can prevent Eq from implying EqLoose.
+    /// Fractional numbers and integers outside Int64 retain SQLite REAL comparison precision.
+    /// </remarks>
+    member this.EqLoose(other: obj) = JsonEquality.Matches(this, other)
+
+    member internal this.ToSQLValue() =
+        match this with
+        | Boolean b -> (if b then 1L :> obj else 0L :> obj), false
+        | Null -> null, false
+        | Number n -> numberToSQLValue n, false
+        | String s -> s :> obj, false
+        | other -> other.ToJsonString() :> obj, true
+
+    /// <summary>
     /// Creates a new, empty JsonValue.Object.
     /// </summary>
     /// <returns>A new JsonValue.Object.</returns>
@@ -758,6 +780,84 @@ type JsonValue =
         /// </summary>
         override this.GetEnumerator (): IEnumerator = 
             (this :> IEnumerable<KeyValuePair<string, JsonValue>>).GetEnumerator () :> IEnumerator
+
+and [<Struct>] internal JsonComparison =
+    | Scalar of value: JsonValue
+    | Length of count: int
+
+// Recursive with JsonValue so its members and SQL consumers share one walker.
+and internal JsonEquality =
+    static member Walk(ignoreDiscriminators, path, json, emit) =
+        match json with
+        | JsonValue.Object fields ->
+            for KeyValue(key, value) in fields do
+                if not (ignoreDiscriminators && key = "$type") then
+                    JsonEquality.Walk(ignoreDiscriminators, Member key :: path, value, emit)
+        | JsonValue.List items ->
+            emit path (Length items.Count)
+            for i = 0 to items.Count - 1 do
+                JsonEquality.Walk(ignoreDiscriminators, Index i :: path, items.[i], emit)
+        | scalar -> emit path (Scalar scalar)
+
+    // SQLite's JSON label comparison terminates at NUL, even in escaped labels.
+    static member private SameMember(left: string, right: string) =
+        let leftEnd = left.IndexOf '\000'
+        let rightEnd = right.IndexOf '\000'
+        let leftLength = if leftEnd < 0 then left.Length else leftEnd
+        let rightLength = if rightEnd < 0 then right.Length else rightEnd
+        leftLength = rightLength && String.CompareOrdinal(left, 0, right, 0, leftLength) = 0
+
+    static member private ReadPath(stored, path) =
+        match path with
+        | [] -> stored
+        | segment :: parent ->
+            match segment, JsonEquality.ReadPath(stored, parent) with
+            | Member key, JsonValue.Object fields ->
+                let name = key
+                use entries = fields.GetEnumerator()
+                let mutable found = false
+                let mutable value = JsonValue.Null
+                while not found && entries.MoveNext() do
+                    if JsonEquality.SameMember(entries.Current.Key, name) then
+                        found <- true
+                        value <- entries.Current.Value
+                value
+            | Index index, JsonValue.List items when index < items.Count -> items.[index]
+            | _ -> JsonValue.Null
+
+    // SQLite compares INTEGER and REAL without rounding the integer to a double.
+    static member private IntegerEqualsReal(integer, real) =
+        real >= -9223372036854775808.0 && real < 9223372036854775808.0
+        && Math.Truncate(real) = real && int64 real = integer
+
+    static member private SqlIs(left: obj, right: obj) =
+        match left, right with
+        | null, null -> true
+        | (:? int64 as a), (:? double as b) -> JsonEquality.IntegerEqualsReal(a, b)
+        | (:? double as a), (:? int64 as b) -> JsonEquality.IntegerEqualsReal(b, a)
+        | _ -> Object.Equals(left, right)
+
+    static member Matches(stored, argument: obj) =
+        let expected = match argument with :? JsonValue as json -> json | _ -> JsonValue.Serialize argument
+        let mutable matches = true
+        let compare path comparison =
+            if matches then
+                let actual = JsonEquality.ReadPath(stored, path)
+                matches <-
+                    match comparison with
+                    | Length count ->
+                        match actual with
+                        | JsonValue.Null -> false
+                        | JsonValue.List items -> items.Count = count
+                        | _ -> count = 0
+                    | Scalar value ->
+                        let discriminator = match path with Member "$type" :: _ -> true | _ -> false
+                        let storedValue, isJson = actual.ToSQLValue()
+                        let expectedValue, _ = value.ToSQLValue()
+                        (discriminator && isNull storedValue)
+                        || (not isJson && JsonEquality.SqlIs(storedValue, expectedValue))
+        JsonEquality.Walk(false, [], expected, compare)
+        matches
 
 /// <summary>
 /// Provides a cached conversion function from a string to a specified primitive type 'T.

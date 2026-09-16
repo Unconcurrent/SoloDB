@@ -84,8 +84,7 @@ module internal StoredValueParameter =
         (value: obj)
         : SqlExpr =
         let storedValue, shouldEncode =
-            serializeAsDeclaredType declaredType value
-            |> jsonValueToSQLValue
+            (serializeAsDeclaredType declaredType value).ToSQLValue()
         variables.[name] <- storedValue
 
         let parameter = SqlExpr.Parameter name
