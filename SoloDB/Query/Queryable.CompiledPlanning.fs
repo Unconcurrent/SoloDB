@@ -1,5 +1,6 @@
 namespace SoloDatabase
 
+open System
 open SoloDatabase.SqlModel
 
 /// Additional planning paid once by retained queries.
@@ -21,8 +22,43 @@ module internal CompiledQueryPlanning =
         | Column(qualifier, column) -> column = name && (qualifier.IsNone || qualifier = Some source)
         | _ -> false
 
-    /// Leave the ordered limited rowset intact, but fetch its payload after selection.
-    let latePayload model (query: SqlSelect) =
+    let private fromSource source (qualifier: string option) = qualifier.IsNone || qualifier = Some source
+
+    let private simplePath path =
+        JsonPathOps.toList path |> List.forall (fun segment ->
+            not (String.IsNullOrEmpty segment)
+            && (segment |> Seq.forall (fun c -> Char.IsLetterOrDigit c || c = '_' || c = '$')))
+
+    let private readsDocument source expression =
+        match FlattenTransform.normalizeExprQuoting expression with
+        | JsonExtractExpr(qualifier, "Value", path) -> fromSource source qualifier && simplePath path
+        | JsonRootExtract(qualifier, "Value") -> fromSource source qualifier
+        | _ -> false
+
+    let private movableValue source (core: SelectCore) expression =
+        match FlattenTransform.normalizeExprQuoting expression with
+        | Literal _ | Parameter _ -> true
+        | Column(qualifier, ("Id" | "Value")) -> fromSource source qualifier
+        | expression when readsDocument source expression ->
+            // A sorter may evaluate projections on discarded rows. Preserve parse
+            // errors through the same extraction in the order key: JSONB can
+            // validate one path without validating another in the same document.
+            let sameRead order =
+                readsDocument source order.Expr &&
+                match expression, FlattenTransform.normalizeExprQuoting order.Expr with
+                | JsonExtractExpr(_, _, path), JsonExtractExpr(_, _, orderPath) -> path = orderPath
+                | JsonRootExtract _, JsonRootExtract _ -> true
+                | _ -> false
+            (core.OrderBy |> List.exists sameRead)
+            // An unfiltered primary-key scan evaluates only emitted rows.
+            || (core.Where.IsNone &&
+                match core.OrderBy with
+                | [order] -> baseColumn source "Id" order.Expr
+                | _ -> false)
+        | _ -> false
+
+    /// Select identifiers first, then recover the projected values for emitted rows.
+    let planPage model estimates (query: SqlSelect) =
         match query with
         | { Ctes = []; Body = SingleSelect outer } when projectionOnly outer ->
             match outer.Source with
@@ -34,8 +70,11 @@ module internal CompiledQueryPlanning =
                     let source = defaultArg tableAlias table
                     let exposes name projection =
                         (projection.Alias.IsNone || projection.Alias = Some name) && baseColumn source name projection.Expr
+                    let value = projections |> List.tryFind (fun projection ->
+                        projection.Alias = Some "Value" || exposes "Value" projection)
                     let usable =
-                        (projections |> List.exists (exposes "Id")) && (projections |> List.exists (exposes "Value"))
+                        (projections |> List.exists (exposes "Id"))
+                        && (value |> Option.exists (fun projection -> movableValue source inner projection.Expr))
                         && (inner.OrderBy |> List.exists (fun order -> baseColumn source "Id" order.Expr))
                     let wrapper = ProjectionSetOps.toList outer.Projections
                     let valid expression =
@@ -47,19 +86,31 @@ module internal CompiledQueryPlanning =
                                      | _ -> true) true expression
                     if not usable || wrapper.IsEmpty || not (wrapper |> List.forall (fun p -> valid p.Expr)) then query else
                     let payloadAlias = alias + "_value"
+                    let projectedValue = FlattenTransform.normalizeExprQuoting value.Value.Expr
+                    let fetchedValue =
+                        match projectedValue with
+                        | Column(_, name) -> Column(Some payloadAlias, name)
+                        | JsonExtractExpr(_, name, path) -> JsonExtractExpr(Some payloadAlias, name, path)
+                        | JsonRootExtract(_, name) -> JsonRootExtract(Some payloadAlias, name)
+                        | value -> value
                     let fetch = ScalarSubquery {
                         Ctes = []
                         Body = SingleSelect {
                             inner with
                                 Source = Some(BaseTable(table, Some payloadAlias))
-                                Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = Column(Some payloadAlias, "Value") }]
+                                Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = fetchedValue }]
                                 Where = Some(Binary(Column(Some payloadAlias, "Id"), BinaryOperator.Eq, Column(Some alias, "Id")))
                                 OrderBy = []; Limit = None; Offset = None } }
-                    let rewrite = SqlExpr.map (function Column(_, "Value") -> fetch | node -> node)
+                    let replacement =
+                        match projectedValue with
+                        | Literal _ | Parameter _ -> projectedValue
+                        | value when baseColumn source "Id" value -> Column(Some alias, "Id")
+                        | _ -> fetch
+                    let rewrite = SqlExpr.map (function Column(_, "Value") -> replacement | node -> node)
                     let ids = { inner with Projections = ProjectionSetOps.ofList (projections |> List.filter (exposes "Id")) }
                     let result =
                         { outer with
-                            Source = Some(DerivedTable(CompiledPage.tryPlan model table source ids, alias))
+                            Source = Some(DerivedTable(CompiledPage.tryPlan model estimates table source ids, alias))
                             Projections = ProjectionSetOps.map (fun p -> { p with Expr = rewrite p.Expr }) outer.Projections }
                     { query with Body = SingleSelect result }
                 | _ -> query

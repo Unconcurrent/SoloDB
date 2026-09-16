@@ -429,7 +429,7 @@ teamsR.Insert(teamR) |> ignore
 
 ### Compiled Queries
 
-Retain a compiled function when you execute the same query structure with different values. `Compile` translates the expression once and returns a regular `Func` whose result is `IEnumerable<T>`.
+Retain a compiled function when you execute the same query structure with different values. `Compile` translates and optimizes the expression once using collection indexes and available SQLite statistics, then returns a regular `Func` whose result is `IEnumerable<T>`.
 
 ```csharp
 var findUsers = users.Compile((IQueryable<User> q, string prefix, int offset, int limit) =>
@@ -443,9 +443,9 @@ var nextPage = findUsers("Jo", 20, 20).ToArray();
 
 The source parameter is bound to the receiving collection. Supply zero to three additional arguments; `Select` can change the result type. Query values are bound on invocation, and each enumeration reads current data through the ordinary query executor. Retain the function rather than calling `Compile` for every request.
 
-Compile from a nontransactional collection and keep that collection alive while using the function. Recompile after changing its model or indexes. Counts remain ordinary queries. Retaining SQL avoids translation work; unindexed filtering and deep offsets still require database work.
+Compile from a nontransactional collection and keep that collection alive while using the function. Recompile after changing its model or indexes, or to use refreshed statistics. Counts remain ordinary queries. Unindexed filtering and deep offsets still require database work.
 
-For supported ordered pages with an explicit `Id` tie-breaker, compiled queries fetch document payloads after selecting page IDs. A single indexed equality ordered by `Id`, or by that fixed key then `Id`, goes straight to the filtered page query. For other filters where an existing index supplies the complete order, early pages can use a bounded 4,096-candidate scan with an exact fallback in the same statement. Pages needing more than 4,096 matches use the fallback directly. This favors early matches; it does not guarantee a speedup for every filter or deep page, and it does not add a count query or change your ordering.
+For supported ordered pages with an explicit `Id` tie-breaker, compiled queries select page IDs before fetching payloads. Planning considers compound-index ordering, bounded early-page scans and, when statistics are available, a capped covering count to choose a deep-page strategy within the same statement. These choices preserve your results and ordering; gains depend on the filter, indexes and data distribution.
 
 ### Indexing for Performance
 

@@ -148,8 +148,9 @@ and ISoloDBCollection<'T> =
     inherit IOrderedQueryable<'T>
     inherit ISoloDBCollectionEvents<'T>
 
-    /// <summary>Compiles a read query into a function that enumerates fresh results using retained SQL.</summary>
-    /// <remarks>Query values bind at invocation. Recompile after model or index changes.
+    /// <summary>Optimizes and retains a read query using collection indexes and available SQLite statistics.</summary>
+    /// <remarks>Query values bind at invocation and enumerations read fresh results.
+    /// Recompile after model or index changes, or to use refreshed statistics.
     /// Transactional collections cannot compile queries.</remarks>
     abstract member Compile<'R> : query: Expression<Func<IQueryable<'T>, IQueryable<'R>>> -> Func<IEnumerable<'R>>
 

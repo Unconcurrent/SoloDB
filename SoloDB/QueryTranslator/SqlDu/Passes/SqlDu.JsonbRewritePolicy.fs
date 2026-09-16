@@ -52,7 +52,8 @@ let private exprMatchesIndexEntry (indexExpr: SqlExpr) (expr: SqlExpr) : bool =
 let exprContainsIndexedForm (model: IndexModel) (expr: SqlExpr) : bool =
     SqlExpr.exists
         (fun node ->
-            model.Indexes |> List.exists (fun idx -> exprMatchesIndexEntry idx.Expression node))
+            model.Indexes |> List.exists (fun idx ->
+                idx.Terms |> List.exists (fun term -> exprMatchesIndexEntry term.Expression node)))
         expr
 
 /// Apply path-canonicalization and set-chain rewrites to a single expression.

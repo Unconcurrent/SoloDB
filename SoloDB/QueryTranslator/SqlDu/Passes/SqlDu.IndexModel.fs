@@ -11,18 +11,25 @@ open System.Text.RegularExpressions
 // Index Knowledge Model
 //
 // Read-only model of available indexes for optimizer decisions.
-// Binary presence/absence only — no cost model, no cardinality,
-// no statistics. Populated from runtime SQLite metadata.
+// Index definitions and optional cardinality estimates come from SQLite.
+// Estimates inform costs; they never establish ordering or correctness.
 //
 // Index expressions are stored as SqlExpr DU nodes to enable
 // structural matching against DU tree nodes during optimization.
 // ══════════════════════════════════════════════════════════════
 
-/// A single index entry in the knowledge model.
+/// One declared index key in SQLite's key order.
+type IndexTerm = {
+    Expression: SqlExpr
+    Direction: SortDirection
+    Collation: string
+}
+
+/// An index and its ordered key terms; the rowid trailer is implicit.
 type IndexEntry = {
     TableName: string
     IndexName: string
-    Expression: SqlExpr
+    Terms: IndexTerm list
     IsUnique: bool
 }
 
@@ -207,7 +214,7 @@ let private splitTopLevelCommaTerms (s: string) : string list =
     flush ()
     result |> Seq.toList
 
-let private tryExtractSingleIndexTerm (indexSql: string) : string option =
+let private tryExtractIndexTerms (indexSql: string) : string list option =
     let sql = indexSql.Trim()
     let openParen = sql.IndexOf '('
     if openParen < 0 then None
@@ -236,8 +243,8 @@ let private tryExtractSingleIndexTerm (indexSql: string) : string option =
         else
             let inner = sql.Substring(openParen + 1, closeParen - openParen - 1).Trim()
             match splitTopLevelCommaTerms inner with
-            | [ single ] -> Some single
-            | _ -> None
+            | [] -> None
+            | terms -> Some terms
 
 let private columnIdentifierRegex = Regex(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled)
 let private jsonExtractRegex =
@@ -285,13 +292,15 @@ let private tryNormalizeCastJsonExtractExpr (expr: string) : SqlExpr option =
             Some(Cast(inner, sqlType))
         | None -> None
 
-let private tryNormalizeExpressionFromSql (indexSql: string) : SqlExpr option =
-    match tryExtractSingleIndexTerm indexSql with
-    | None -> None
-    | Some term ->
-        match tryNormalizeJsonExtractExpr term with
-        | Some expr -> Some expr
-        | None -> tryNormalizeCastJsonExtractExpr term
+let private termDirectionRegex = Regex(@"\s+(?:ASC|DESC)\s*$", RegexOptions.IgnoreCase)
+let private termCollationRegex =
+    Regex(@"\s+COLLATE\s+(?:""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)\s*$", RegexOptions.IgnoreCase)
+
+let private tryNormalizeIndexExpression (term: string) : SqlExpr option =
+    let expression = termCollationRegex.Replace(termDirectionRegex.Replace(term, ""), "")
+    match tryNormalizeJsonExtractExpr expression with
+    | Some expr -> Some expr
+    | None -> tryNormalizeCastJsonExtractExpr expression
 
 let private tryBuildIndexEntry (tableName: string) (row: IndexListRow) (xinfo: IndexXInfoRow list) (indexSql: string option) : IndexEntry option =
     if row.IsPartial then None
@@ -299,30 +308,29 @@ let private tryBuildIndexEntry (tableName: string) (row: IndexListRow) (xinfo: I
         let keyRows = xinfo |> List.filter (fun x -> x.Key = 1)
         let hasAuxiliaryColumns =
             xinfo |> List.exists (fun x -> x.Key = 0 && x.Cid >= 0)
-        if keyRows.Length <> 1 || hasAuxiliaryColumns then None
+        if keyRows.IsEmpty || hasAuxiliaryColumns then None
         else
-            let keyRow = keyRows.Head
-            let hasUnsupportedSortOrCollation =
-                keyRow.Desc <> 0
-                || match keyRow.Collation with
-                   | Some coll when not (String.Equals(coll, "BINARY", StringComparison.OrdinalIgnoreCase)) -> true
-                   | _ -> false
-            if hasUnsupportedSortOrCollation then None
-            else
-                let exprOpt =
-                    if keyRow.Cid >= 0 then
-                        keyRow.Name |> Option.bind tryNormalizeSingleKeyColumnExpr
-                    elif keyRow.Cid = -2 then
-                        indexSql |> Option.bind tryNormalizeExpressionFromSql
-                    else None
-
-                exprOpt
-                |> Option.map (fun expr -> {
+            let sqlTerms =
+                indexSql |> Option.bind tryExtractIndexTerms |> Option.defaultValue [] |> List.toArray
+            let terms =
+                keyRows |> List.mapi (fun i keyRow ->
+                    let expression =
+                        if keyRow.Cid >= 0 then
+                            keyRow.Name |> Option.bind tryNormalizeSingleKeyColumnExpr
+                        elif keyRow.Cid = -2 && sqlTerms.Length = keyRows.Length then
+                            tryNormalizeIndexExpression sqlTerms.[i]
+                        else None
+                    expression |> Option.map (fun expression -> {
+                        Expression = expression
+                        Direction = if keyRow.Desc = 0 then Asc else Desc
+                        Collation = defaultArg keyRow.Collation "BINARY" }))
+            if terms |> List.exists Option.isNone then None
+            else Some {
                     TableName = tableName
                     IndexName = row.Name
-                    Expression = expr
+                    Terms = terms |> List.choose id
                     IsUnique = row.IsUnique
-                })
+                }
 
 /// Load index entries for a single table from runtime SQLite metadata.
 /// Fail-closed on concurrent schema changes: return empty list on any exception.
@@ -344,3 +352,28 @@ let loadModelForTables (connection: SqliteConnection) (tableNames: string seq) :
         |> Seq.collect (loadTableIndexes connection)
         |> Seq.toList
     { Indexes = indexes }
+
+/// Read current ANALYZE estimates once at compilation, independently of the
+/// cached index definitions. Missing or malformed estimates disable costing.
+let loadTableEstimates (connection: SqliteConnection) (tableNames: string seq) : Map<string, int64> =
+    try
+        use exists = connection.CreateCommand()
+        exists.CommandText <- "SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1' AND type = 'table';"
+        if isNull (exists.ExecuteScalar()) then Map.empty else
+        use command = connection.CreateCommand()
+        command.CommandText <- "SELECT stat FROM sqlite_stat1 WHERE tbl = @tableName;"
+        let tableParameter = command.Parameters.Add("@tableName", SqliteType.Text)
+        tableNames |> Seq.distinct |> Seq.choose (fun table ->
+            tableParameter.Value <- table
+            use reader = command.ExecuteReader()
+            let mutable estimate = 0L
+            while reader.Read() do
+                if not (reader.IsDBNull 0) then
+                    let stat = reader.GetString 0
+                    let endOfCount = stat.IndexOf(' ')
+                    let first = if endOfCount < 0 then stat else stat.Substring(0, endOfCount)
+                    match Int64.TryParse(first, Globalization.NumberStyles.None, Globalization.CultureInfo.InvariantCulture) with
+                    | true, count when count > estimate -> estimate <- count
+                    | _ -> ()
+            if estimate > 0L then Some(table, estimate) else None) |> Map.ofSeq
+    with :? SqliteException -> Map.empty

@@ -67,11 +67,70 @@ let findMatchingIndex (model: IndexModel) (tableName: string) (expr: SqlExpr) : 
     model.Indexes
     |> List.tryFind (fun entry ->
         entry.TableName = tableName
-        && expressionMatchesIndex tableName expr entry.Expression)
+        && match entry.Terms with
+           | [term] when term.Direction = Asc && System.String.Equals(term.Collation, "BINARY", System.StringComparison.OrdinalIgnoreCase) ->
+               expressionMatchesIndex tableName expr term.Expression
+           | _ -> false)
 
 /// Check if an expression has a matching index in the model.
 let hasMatchingIndex (model: IndexModel) (tableName: string) (expr: SqlExpr) : bool =
     findMatchingIndex model tableName expr |> Option.isSome
+
+let private binaryCollation (term: IndexTerm) =
+    System.String.Equals(term.Collation, "BINARY", System.StringComparison.OrdinalIgnoreCase)
+
+let private direct = function Parameter _ | Literal _ -> true | _ -> false
+
+/// A covered conjunction can be counted without fetching document payloads.
+/// Requiring a constrained leading term avoids costing an unbounded index scan.
+let findCoveringFilterIndex (model: IndexModel) tableName predicate =
+    let rec keys = function
+        | Binary(left, BinaryOperator.And, right) ->
+            match keys left, keys right with
+            | Some left, Some right -> Some(left @ right)
+            | _ -> None
+        | Binary(left, (BinaryOperator.Eq | BinaryOperator.Is | BinaryOperator.Lt
+                      | BinaryOperator.Le | BinaryOperator.Gt | BinaryOperator.Ge), right) ->
+            if direct right then Some [left]
+            elif direct left then Some [right]
+            else None
+        | _ -> None
+    match keys predicate with
+    | None | Some [] -> None
+    | Some keys ->
+        model.Indexes |> List.tryFind (fun entry ->
+            entry.TableName = tableName && not entry.Terms.IsEmpty
+            && (entry.Terms |> List.forall binaryCollation)
+            && (keys |> List.exists (fun key -> expressionMatchesIndex tableName key entry.Terms.Head.Expression))
+            && (keys |> List.forall (fun key ->
+                entry.Terms |> List.exists (fun term -> expressionMatchesIndex tableName key term.Expression))))
+
+/// Match a complete ordering, allowing equality-constrained keys to be omitted.
+/// Collection Id is the rowid trailer, ascending in a forward index scan.
+let findOrderingIndex (model: IndexModel) tableName predicate (ordering: OrderBy list) =
+    let rec fixedKeys = function
+        | Binary(left, BinaryOperator.And, right) -> fixedKeys left @ fixedKeys right
+        | Binary(left, (BinaryOperator.Eq | BinaryOperator.Is), right) when direct right -> [left]
+        | Binary(left, (BinaryOperator.Eq | BinaryOperator.Is), right) when direct left -> [right]
+        | _ -> []
+    let fixedKeys = predicate |> Option.map fixedKeys |> Option.defaultValue []
+    let isFixed expression = fixedKeys |> List.exists (fun key -> expressionMatchesIndex tableName key expression)
+    let direction reverse direction = if not reverse then direction else if direction = Asc then Desc else Asc
+    let rec matches reverse terms orders =
+        match terms, orders with
+        | _, [] -> true
+        | _, order :: rest when isFixed order.Expr -> matches reverse terms rest
+        | term :: rest, _ when isFixed term.Expression -> matches reverse rest orders
+        | term :: rest, order :: remaining ->
+            direction reverse term.Direction = order.Direction
+            && expressionMatchesIndex tableName order.Expr term.Expression
+            && matches reverse rest remaining
+        | [], _ -> false
+    model.Indexes |> List.tryFind (fun entry ->
+        let terms = entry.Terms @ [{ Expression = Column(None, "Id"); Direction = Asc; Collation = "BINARY" }]
+        entry.TableName = tableName && not entry.Terms.IsEmpty
+        && (entry.Terms |> List.forall binaryCollation)
+        && (matches false terms ordering || matches true terms ordering))
 
 /// Strip table qualification from an expression to match the index form.
 /// Only normalizes alias references; never adds or removes CAST or other operations.
@@ -99,11 +158,12 @@ let rec private stripQualificationToMatch (tableName: string) (expr: SqlExpr) (i
 let canonicalizeForIndex (model: IndexModel) (tableName: string) (expr: SqlExpr) : SqlExpr option =
     match findMatchingIndex model tableName expr with
     | None -> None
-    | Some entry ->
+    | Some { Terms = [term] } ->
         // Check if the expression already matches the index form exactly (no change needed)
-        if expr = entry.Expression then None
+        if expr = term.Expression then None
         else
             // The expression matches modulo alias normalization.
             // Produce the canonical form by stripping table qualification
             // to match the unqualified index expression.
-            Some (stripQualificationToMatch tableName expr entry.Expression)
+            Some (stripQualificationToMatch tableName expr term.Expression)
+    | Some _ -> None
