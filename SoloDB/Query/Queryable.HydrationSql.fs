@@ -14,7 +14,7 @@ open SoloDatabase.RelationsSchemaBuilder
 open SoloDatabase.RelationsSchemaValidator
 open SoloDatabase.RelationsSchemaLinkTableDDL
 open SoloDatabase.QueryableGroupByAliases
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// Shared hydration SQL builders for both queryable and non-queryable paths.
 /// Single canonical typed DU generator — no duplicated SQL string templates.

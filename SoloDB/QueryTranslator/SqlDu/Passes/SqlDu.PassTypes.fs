@@ -1,6 +1,6 @@
 module internal SoloDatabase.PassTypes
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// A single optimizer pass: a named pure function from statement to statement.
 type Pass = {

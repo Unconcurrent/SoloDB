@@ -3,7 +3,7 @@ namespace SoloDatabase
 open System.Collections.Generic
 open Microsoft.Data.Sqlite
 open SQLiteTools
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// Canonical execution of a typed SQL statement.
 ///

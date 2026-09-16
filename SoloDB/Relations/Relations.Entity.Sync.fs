@@ -13,7 +13,7 @@ open RelationsTypes
 open RelationsSchemaBuilder
 open RelationsSchemaValidator
 open RelationsSchemaLinkTableDDL
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// Canonical collection names for a catalogue row.
 ///

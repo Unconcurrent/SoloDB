@@ -6,7 +6,7 @@ open System.Linq.Expressions
 open System.Threading
 open Utils
 open SoloDatabase
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.DBRefManyDescriptor
 
 /// The values a GroupJoin chain build carries, and whether a descriptor has chain operations at

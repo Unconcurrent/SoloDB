@@ -4,10 +4,9 @@ open System
 open System.Collections.Generic
 open System.Linq
 open System.Linq.Expressions
-open System.Runtime.CompilerServices
 open Microsoft.Data.Sqlite
 open SQLiteTools
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 module internal CompiledQueries =
     type private Substitute(replacements: (ParameterExpression * Expression) array) =
@@ -179,38 +178,3 @@ module internal CompiledQueries =
             let emptyPrefix = current.Bind.Invoke(args, parameters)
             let sql = if emptyPrefix then defaultArg current.EmptyPrefixSql current.Sql else current.Sql
             QueryableExecution.enumerate<'Source, 'Result> source sql parameters current.Hydration
-
-/// Compiles parameterized read queries into functions that execute retained SQL.
-/// Recompile after changing the collection model or indexes.
-/// Query values are evaluated when the returned function is invoked.
-[<Extension>]
-type CompiledQueryExtensions =
-    /// Compile a read query with no invocation arguments. Enumeration reads fresh results.
-    [<Extension>]
-    static member Compile(source: ISoloDBCollection<'T>, query: Expression<Func<IQueryable<'T>, IQueryable<'R>>>) : Func<IEnumerable<'R>> =
-        let argument = Expression.Parameter(typeof<unit>, "args")
-        let run = CompiledQueries.compile<'T, unit, 'R> source query argument [||]
-        Func<IEnumerable<'R>>(fun () -> run ())
-
-    /// Compile a read query with one invocation argument.
-    [<Extension>]
-    static member Compile(source: ISoloDBCollection<'T>, query: Expression<Func<IQueryable<'T>, 'A, IQueryable<'R>>>) : Func<'A, IEnumerable<'R>> =
-        let argument = Expression.Parameter(typeof<'A>, "args")
-        let run = CompiledQueries.compile<'T, 'A, 'R> source query argument [|argument|]
-        Func<'A, IEnumerable<'R>>(run)
-
-    /// Compile a read query with two invocation arguments.
-    [<Extension>]
-    static member Compile(source: ISoloDBCollection<'T>, query: Expression<Func<IQueryable<'T>, 'A, 'B, IQueryable<'R>>>) : Func<'A, 'B, IEnumerable<'R>> =
-        let argument = Expression.Parameter(typeof<struct ('A * 'B)>, "args")
-        let values = [|Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression|]
-        let run = CompiledQueries.compile<'T, struct ('A * 'B), 'R> source query argument values
-        Func<'A, 'B, IEnumerable<'R>>(fun a b -> run (struct (a, b)))
-
-    /// Compile a read query with three invocation arguments.
-    [<Extension>]
-    static member Compile(source: ISoloDBCollection<'T>, query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, IQueryable<'R>>>) : Func<'A, 'B, 'C, IEnumerable<'R>> =
-        let argument = Expression.Parameter(typeof<struct ('A * 'B * 'C)>, "args")
-        let values = [| for name in [|"Item1"; "Item2"; "Item3"|] -> Expression.Field(argument, name) :> Expression |]
-        let run = CompiledQueries.compile<'T, struct ('A * 'B * 'C), 'R> source query argument values
-        Func<'A, 'B, 'C, IEnumerable<'R>>(fun a b c -> run (struct (a, b, c)))

@@ -7,7 +7,7 @@ open System.Linq.Expressions
 open System.Reflection
 open JsonFunctions
 open SoloDatabase.JsonSerializator
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// Canonical allocation boundary for values compared with SQLite-stored document values.
 module internal StoredValueParameter =

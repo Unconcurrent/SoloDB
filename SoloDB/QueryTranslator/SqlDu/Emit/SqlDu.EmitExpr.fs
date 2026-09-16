@@ -1,6 +1,6 @@
 module internal SoloDatabase.EmitExpr
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// Emit a binary operator as SQL text.
 let private emitBinaryOp (op: BinaryOperator) : string =

@@ -1,6 +1,6 @@
 module internal SoloDatabase.FlattenSafety
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.ExpressionPredicates
 
 // ══════════════════════════════════════════════════════════════

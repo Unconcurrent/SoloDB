@@ -8,7 +8,7 @@ open System.Reflection
 open Utils
 open SQLiteTools
 open SoloDatabase
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 module internal HelperSchema =
     /// Emit a SqlExpr to SQL string.

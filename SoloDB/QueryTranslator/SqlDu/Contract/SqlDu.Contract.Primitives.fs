@@ -1,4 +1,4 @@
-namespace SqlDu.Engine.C1.Spec
+namespace SoloDatabase.SqlModel
 
 // ======================================================================
 // DU Contract Substrate — Compile-Time Only

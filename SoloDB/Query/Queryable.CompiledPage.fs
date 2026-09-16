@@ -1,6 +1,6 @@
 namespace SoloDatabase
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// A bounded order-index attempt and its exact fallback share one retained statement.
 module internal CompiledPage =

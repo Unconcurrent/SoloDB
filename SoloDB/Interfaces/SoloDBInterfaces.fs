@@ -148,6 +148,20 @@ and ISoloDBCollection<'T> =
     inherit IOrderedQueryable<'T>
     inherit ISoloDBCollectionEvents<'T>
 
+    /// <summary>Compiles a read query into a function that enumerates fresh results using retained SQL.</summary>
+    /// <remarks>Query values bind at invocation. Recompile after model or index changes.
+    /// Transactional collections cannot compile queries.</remarks>
+    abstract member Compile<'R> : query: Expression<Func<IQueryable<'T>, IQueryable<'R>>> -> Func<IEnumerable<'R>>
+
+    /// <summary>Compiles a read query with one invocation argument. Recompile after model or index changes.</summary>
+    abstract member Compile<'A, 'R> : query: Expression<Func<IQueryable<'T>, 'A, IQueryable<'R>>> -> Func<'A, IEnumerable<'R>>
+
+    /// <summary>Compiles a read query with two invocation arguments. Recompile after model or index changes.</summary>
+    abstract member Compile<'A, 'B, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, IQueryable<'R>>> -> Func<'A, 'B, IEnumerable<'R>>
+
+    /// <summary>Compiles a read query with three invocation arguments. Recompile after model or index changes.</summary>
+    abstract member Compile<'A, 'B, 'C, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, IQueryable<'R>>> -> Func<'A, 'B, 'C, IEnumerable<'R>>
+
     /// <summary>
     /// Gets the name of the collection within the database.
     /// </summary>

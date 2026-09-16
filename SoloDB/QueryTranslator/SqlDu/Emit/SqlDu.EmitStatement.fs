@@ -1,6 +1,6 @@
 module internal SoloDatabase.EmitStatement
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// Internal expression emitter — delegates to EmitSelect.emitExpr which has
 /// the subquery resolution wired in.

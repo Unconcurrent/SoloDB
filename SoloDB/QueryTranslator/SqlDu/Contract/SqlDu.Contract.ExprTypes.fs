@@ -1,4 +1,4 @@
-namespace SqlDu.Engine.C1.Spec
+namespace SoloDatabase.SqlModel
 type internal SqlExpr =
     | Column of sourceAlias: string option * column: string
     | Literal of SqlLiteral

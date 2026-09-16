@@ -9,7 +9,7 @@ open System.Runtime.InteropServices
 open JsonFunctions
 open Utils
 open QueryTranslatorBaseTypes
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 module internal QueryTranslatorBaseHelpers =
     /// <summary>

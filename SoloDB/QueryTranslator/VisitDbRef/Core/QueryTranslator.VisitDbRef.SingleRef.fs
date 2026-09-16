@@ -3,7 +3,7 @@ namespace SoloDatabase
 open System
 open System.Linq.Expressions
 open System.Reflection
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorVisitPostJoin

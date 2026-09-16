@@ -8,7 +8,7 @@ open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.QueryTranslatorVisitPost
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open DBRefTypeHelpers
 
 module internal QueryTranslatorVisitPostJoin =

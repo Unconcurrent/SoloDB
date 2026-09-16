@@ -2,7 +2,7 @@ namespace SoloDatabase
 
 open System
 open System.Linq.Expressions
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.QueryTranslatorVisitPost
 open SoloDatabase.ChainExpr

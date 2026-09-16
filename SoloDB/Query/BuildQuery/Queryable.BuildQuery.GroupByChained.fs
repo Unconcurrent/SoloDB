@@ -5,7 +5,7 @@ open System.Collections
 open System.Collections.Generic
 open System.Linq.Expressions
 open System.Threading
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.ChainExpr
 open SoloDatabase.ChainPolicy

@@ -1,6 +1,6 @@
 module internal SoloDatabase.AliasRewrite
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 type AliasRewritePolicy = {
     MatchEmptyDerivedAlias: bool

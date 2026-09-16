@@ -10,7 +10,7 @@ open SoloDatabase
 open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryableGroupByAliases
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.GroupJoinRuntimeTypes
 open SoloDatabase.GroupJoinChainParts
 open SoloDatabase.GroupJoinExtract

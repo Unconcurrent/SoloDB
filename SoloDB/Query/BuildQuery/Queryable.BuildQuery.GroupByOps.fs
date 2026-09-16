@@ -19,7 +19,7 @@ open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryableGroupByAliases
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// GroupBy deferred emission + GroupBy+Select fusion for root-level queries.
 /// Separated from SequenceOps to keep files under 400 lines.

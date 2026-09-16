@@ -1,6 +1,6 @@
 module internal SoloDatabase.PushdownTransform
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.PushdownSafety
 open SoloDatabase.AliasRewrite
 

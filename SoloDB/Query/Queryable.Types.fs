@@ -16,7 +16,7 @@ open Connections
 open SoloDatabase.RelationsTypes
 open SoloDatabase.JsonSerializator
 open Microsoft.Data.Sqlite
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.QueryTranslatorBaseTypes
 
 /// <summary>

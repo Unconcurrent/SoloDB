@@ -5,7 +5,7 @@ open System.Linq.Expressions
 open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.QueryTranslatorVisitCore
 open SoloDatabase.QueryTranslatorBaseTypes
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open Utils
 
 module internal DBRefManyBuilderTerminals =

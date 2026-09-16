@@ -11,7 +11,7 @@ open JsonFunctions
 open Utils
 open QueryTranslatorBaseTypes
 open QueryTranslatorBaseHelpers
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 module internal QueryTranslatorBase =
     [<return: Struct>]

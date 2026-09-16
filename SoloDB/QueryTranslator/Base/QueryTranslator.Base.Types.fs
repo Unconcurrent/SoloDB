@@ -7,7 +7,7 @@ open System.Linq.Expressions
 open System.Reflection
 open System.Text
 open Utils
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 module internal QueryTranslatorBaseTypes =
     let internal maxTranslationSteps = 10000

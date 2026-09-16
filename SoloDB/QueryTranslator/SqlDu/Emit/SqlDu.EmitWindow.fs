@@ -1,6 +1,6 @@
 module internal SoloDatabase.EmitWindow
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// Emit a window function call: func(args) OVER (PARTITION BY ... ORDER BY ...)
 let emitWindowCall (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emitted) (spec: WindowSpec) : Emitted =

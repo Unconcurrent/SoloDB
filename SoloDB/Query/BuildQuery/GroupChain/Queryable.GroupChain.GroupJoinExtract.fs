@@ -8,7 +8,7 @@ open Utils
 open SoloDatabase
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorVisitPost
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.ChainExpr
 open SoloDatabase.ChainPolicy

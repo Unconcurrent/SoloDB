@@ -1,6 +1,6 @@
 module internal SoloDatabase.EmitJson
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.QueryableGroupByAliases
 
 /// Escape single quotes and null characters for inline SQLite string literals.

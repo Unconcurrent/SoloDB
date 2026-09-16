@@ -16,7 +16,7 @@ open SoloDatabase
 open SoloDatabase.JsonSerializator
 open SoloDatabase.RelationsTypes
 open SoloDatabase.QueryTranslatorBaseTypes
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 module internal QueryableHelperBase =
     let internal orderKeyClrType (orderingExpr: Expression) =

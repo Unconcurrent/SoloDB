@@ -4,7 +4,7 @@ open System
 open System.Linq.Expressions
 open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.QueryTranslatorBaseTypes
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 module internal DBRefManyBuilderSetOpTerminals =
     let private buildSetOpProjectedRowset

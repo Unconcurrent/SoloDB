@@ -13,7 +13,7 @@ open Utils
 open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBase
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 module internal QueryTranslatorVisitCore =
     type private ValueUse = Value | Comparison | Stored

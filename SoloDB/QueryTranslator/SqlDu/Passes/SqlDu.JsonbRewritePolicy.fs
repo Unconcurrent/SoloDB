@@ -1,6 +1,6 @@
 module internal SoloDatabase.JsonbRewritePolicy
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.IndexModel
 open SoloDatabase.PathCanonicalizer
 open SoloDatabase.SetChainAnalyzer

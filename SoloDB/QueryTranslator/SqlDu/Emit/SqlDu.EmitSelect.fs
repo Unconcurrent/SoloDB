@@ -1,6 +1,6 @@
 module internal SoloDatabase.EmitSelect
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// Internal expression emitter bound to emitSelect for subquery resolution.
 let rec private emitE (ctx: EmitContext) (expr: SqlExpr) : Emitted =

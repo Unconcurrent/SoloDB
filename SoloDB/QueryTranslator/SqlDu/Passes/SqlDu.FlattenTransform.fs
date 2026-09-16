@@ -1,6 +1,6 @@
 module internal SoloDatabase.FlattenTransform
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.FlattenSafety
 open SoloDatabase.AliasRewrite
 

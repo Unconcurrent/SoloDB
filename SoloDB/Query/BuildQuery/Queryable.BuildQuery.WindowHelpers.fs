@@ -1,6 +1,6 @@
 namespace SoloDatabase
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 module internal QueryableBuildQueryWindowHelpers =
     let rowNumberExpr (partitionBy: SqlExpr list) (orderBy: (SqlExpr * SortDirection) list) =

@@ -13,7 +13,7 @@ open Utils
 open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBase
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 module internal QueryTranslatorVisitCoreCastAggregate =
     let internal castToDu (visitDu: Expression -> QueryBuilder -> SqlExpr) (qb: QueryBuilder) (castToType: Type) (o: Expression) : SqlExpr =

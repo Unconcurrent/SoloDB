@@ -4,7 +4,7 @@ open System
 open System.Linq.Expressions
 open SoloDatabase.JsonSerializator
 open QueryTranslatorBaseTypes
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// One comparison authority; callers supply known values or invocation accessors.
 module internal EqualityComparison =

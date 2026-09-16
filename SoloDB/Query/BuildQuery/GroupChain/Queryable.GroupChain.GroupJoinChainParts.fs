@@ -7,7 +7,7 @@ open System.Threading
 open Utils
 open SoloDatabase
 open SoloDatabase.QueryTranslatorVisitPost
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.GroupJoinRuntimeTypes
 

@@ -1,6 +1,6 @@
 module internal SoloDatabase.MaterializationPolicy
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 // ══════════════════════════════════════════════════════════════
 // Materialization policy engine.

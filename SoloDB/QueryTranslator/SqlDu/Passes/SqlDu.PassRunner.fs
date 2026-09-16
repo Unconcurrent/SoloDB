@@ -1,6 +1,6 @@
 module internal SoloDatabase.PassRunner
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.PassTypes
 open SoloDatabase.PathCanonicalizer
 open SoloDatabase.ProjectionLiveness

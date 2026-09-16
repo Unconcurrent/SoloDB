@@ -1,6 +1,6 @@
 namespace SoloDatabase
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.QueryTranslatorBaseTypes
 
 /// Thin adapter: bridges the canonical emitter (QB-free, returns Emitted records)

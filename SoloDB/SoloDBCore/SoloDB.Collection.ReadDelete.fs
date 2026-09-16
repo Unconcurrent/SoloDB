@@ -9,7 +9,7 @@ open JsonFunctions
 open Utils
 open SQLiteTools
 open SoloDatabase
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 [<AutoOpen>]
 module internal CollectionReadDeletePrivate =

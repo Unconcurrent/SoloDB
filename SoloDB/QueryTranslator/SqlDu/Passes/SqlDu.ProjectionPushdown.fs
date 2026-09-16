@@ -1,6 +1,6 @@
 module internal SoloDatabase.ProjectionPushdown
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.ProjectionLiveness
 open SoloDatabase.ExpressionPredicates
 

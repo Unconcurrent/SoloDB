@@ -1,7 +1,7 @@
 namespace SoloDatabase
 
 open System.Linq.Expressions
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// Shared types for DBRefMany query translation.
 module internal DBRefManyDescriptor =

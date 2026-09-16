@@ -2,7 +2,7 @@ namespace SoloDatabase
 
 open System
 open System.Linq.Expressions
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// The shape of a chain-extraction policy.
 ///

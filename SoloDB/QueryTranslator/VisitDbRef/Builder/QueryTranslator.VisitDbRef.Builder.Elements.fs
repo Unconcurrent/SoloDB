@@ -5,7 +5,7 @@ open System.Linq.Expressions
 open System.Collections.Generic
 open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.QueryTranslatorBaseTypes
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 module internal DBRefManyBuilderElements =
     let private castMissingTypeMessage =

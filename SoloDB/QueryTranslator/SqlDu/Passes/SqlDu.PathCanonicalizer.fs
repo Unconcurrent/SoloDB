@@ -1,6 +1,6 @@
 module internal SoloDatabase.PathCanonicalizer
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 // ══════════════════════════════════════════════════════════════
 // Path canonicalization engine.

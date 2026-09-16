@@ -14,7 +14,7 @@ open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.QueryTranslatorVisitCore
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.QueryTranslatorVisitPost
 open SoloDatabase.QueryTranslatorVisitPostJoin
 open DBRefTypeHelpers

@@ -9,7 +9,7 @@ open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.QueryTranslatorVisitCore
 open SoloDatabase.QueryTranslatorVisitPost
 open SoloDatabase.QueryTranslatorVisitDbRef
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// <summary>
 /// Contains functions to translate .NET LINQ expression trees into SQLite SQL queries.

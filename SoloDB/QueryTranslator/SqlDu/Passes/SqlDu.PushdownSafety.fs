@@ -1,6 +1,6 @@
 module internal SoloDatabase.PushdownSafety
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.ExpressionPredicates
 open SoloDatabase.Provenance
 

@@ -1,6 +1,6 @@
 module internal SoloDatabase.ExpressionPredicates
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 let hasWindowFunction (expr: SqlExpr) : bool =
     SqlExpr.exists

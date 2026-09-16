@@ -8,7 +8,7 @@ open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryTranslatorBaseHelpers
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 module internal DBRefManyBuilderSetOps =
     let evaluateConstantEnumerable (isFullyConstant: Expression -> bool) (evaluateExpr: Expression -> IEnumerable) (expr: Expression) : obj list =

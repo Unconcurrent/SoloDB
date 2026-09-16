@@ -12,7 +12,7 @@ open System.Text
 open SQLiteTools
 open JsonFunctions
 open FileStorage
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open Connections
 open Utils
 open System.Reflection
@@ -220,10 +220,10 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
                         QueryableHelperBase.allocateNamedStoredValueParam
                             vars "_cid0" idProp.PropertyType idValue
                     let whereExpr =
-                        SqlDu.Engine.C1.Spec.SqlExpr.Binary(
-                            SqlDu.Engine.C1.Spec.SqlExpr.FunctionCall("jsonb_extract",
-                                [SqlDu.Engine.C1.Spec.SqlExpr.Column(Some "o", "Value"); SqlDu.Engine.C1.Spec.SqlExpr.Literal(SqlDu.Engine.C1.Spec.SqlLiteral.String ("$." + idProp.Name))]),
-                            SqlDu.Engine.C1.Spec.BinaryOperator.Eq,
+                        SoloDatabase.SqlModel.SqlExpr.Binary(
+                            SoloDatabase.SqlModel.SqlExpr.FunctionCall("jsonb_extract",
+                                [SoloDatabase.SqlModel.SqlExpr.Column(Some "o", "Value"); SoloDatabase.SqlModel.SqlExpr.Literal(SoloDatabase.SqlModel.SqlLiteral.String ("$." + idProp.Name))]),
+                            SoloDatabase.SqlModel.BinaryOperator.Eq,
                             idParameter)
                     let sql, _ =
                         HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> whereExpr vars true
@@ -345,6 +345,24 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         member this.GetEnumerator() =
             (this :> IEnumerable<'T>).GetEnumerator() :> IEnumerator
     interface ISoloDBCollection<'T> with
+        member this.Compile(query: Expression<Func<IQueryable<'T>, IQueryable<'R>>>) : Func<IEnumerable<'R>> =
+            let argument = Expression.Parameter(typeof<unit>, "args")
+            let run = CompiledQueries.compile<'T, unit, 'R> (this :> ISoloDBCollection<'T>) query argument [||]
+            Func<IEnumerable<'R>>(fun () -> run ())
+        member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, IQueryable<'R>>>) : Func<'A, IEnumerable<'R>> =
+            let argument = Expression.Parameter(typeof<'A>, "args")
+            let run = CompiledQueries.compile<'T, 'A, 'R> (this :> ISoloDBCollection<'T>) query argument [|argument|]
+            Func<'A, IEnumerable<'R>>(run)
+        member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, IQueryable<'R>>>) : Func<'A, 'B, IEnumerable<'R>> =
+            let argument = Expression.Parameter(typeof<struct ('A * 'B)>, "args")
+            let values = [|Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression|]
+            let run = CompiledQueries.compile<'T, struct ('A * 'B), 'R> (this :> ISoloDBCollection<'T>) query argument values
+            Func<'A, 'B, IEnumerable<'R>>(fun a b -> run (struct (a, b)))
+        member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, IQueryable<'R>>>) : Func<'A, 'B, 'C, IEnumerable<'R>> =
+            let argument = Expression.Parameter(typeof<struct ('A * 'B * 'C)>, "args")
+            let values = [| for name in [|"Item1"; "Item2"; "Item3"|] -> Expression.Field(argument, name) :> Expression |]
+            let run = CompiledQueries.compile<'T, struct ('A * 'B * 'C), 'R> (this :> ISoloDBCollection<'T>) query argument values
+            Func<'A, 'B, 'C, IEnumerable<'R>>(fun a b c -> run (struct (a, b, c)))
         member this.InTransaction = this.InTransaction
         member this.IncludeType = this.IncludeType 
         member this.Name = this.Name

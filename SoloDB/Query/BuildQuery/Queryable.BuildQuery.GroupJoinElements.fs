@@ -5,7 +5,7 @@ open System.Linq.Expressions
 open System.Threading
 open Utils
 open SoloDatabase
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.GroupJoinRuntimeTypes
 open SoloDatabase.GroupJoinChainParts
 open SoloDatabase.GroupJoinExtract

@@ -1,6 +1,6 @@
 module internal SoloDatabase.SetChainAnalyzer
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 // ══════════════════════════════════════════════════════════════
 // Set-chain analyzer.

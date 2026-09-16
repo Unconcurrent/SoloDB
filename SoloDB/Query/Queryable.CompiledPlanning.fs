@@ -1,6 +1,6 @@
 namespace SoloDatabase
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// Additional planning paid once by retained queries.
 module internal CompiledQueryPlanning =

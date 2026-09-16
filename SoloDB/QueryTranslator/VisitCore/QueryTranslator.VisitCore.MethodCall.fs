@@ -13,7 +13,7 @@ open Utils
 open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorBase
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// Upper bound shared by literal and invocation-bound ordinal prefixes.
 type internal QueryPrefixBounds =

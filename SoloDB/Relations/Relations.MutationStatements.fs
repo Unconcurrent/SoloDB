@@ -20,7 +20,7 @@ module internal SoloDatabase.RelationMutationStatements
 
 open System.Collections.Generic
 open Microsoft.Data.Sqlite
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// Execute a relation mutation statement, returning the affected row count.
 ///

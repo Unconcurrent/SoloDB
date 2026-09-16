@@ -4,7 +4,7 @@ open System
 open System.Collections.Generic
 open System.Globalization
 open SoloDatabase.JsonSerializator
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 module internal EqualityRules =
     [<Struct>]

@@ -1,6 +1,6 @@
 module internal SoloDatabase.SelectCoreBoundary
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.ExpressionPredicates
 
 let hasMustNotBoundary (core: SelectCore) : bool =

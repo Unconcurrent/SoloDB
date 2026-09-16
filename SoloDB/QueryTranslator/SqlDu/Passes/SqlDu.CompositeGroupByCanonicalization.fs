@@ -1,6 +1,6 @@
 module internal SoloDatabase.CompositeGroupByCanonicalization
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.QueryableGroupByAliases
 
 // ══════════════════════════════════════════════════════════════

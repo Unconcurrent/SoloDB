@@ -7,7 +7,7 @@ open System.Threading
 open Utils
 open SoloDatabase
 open SoloDatabase.QueryTranslatorVisitPost
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open SoloDatabase.DBRefManyDescriptor
 
 /// The GroupJoin terminals: collection materialisation, aggregate, exists and contains over a

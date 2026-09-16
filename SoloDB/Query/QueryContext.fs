@@ -2,7 +2,7 @@ namespace SoloDatabase
 
 open System.Collections.Generic
 open SQLiteTools
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// Compilation owns value evaluation; the translator owns SQL semantics.
 type internal QueryValueBinder = {

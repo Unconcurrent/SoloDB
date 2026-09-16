@@ -1,7 +1,7 @@
 module internal SoloDatabase.Provenance
 
 open System.Runtime.CompilerServices
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 
 /// A resolved column reference: either a base table column or an opaque (unresolvable) expression.
 type ColumnSource =

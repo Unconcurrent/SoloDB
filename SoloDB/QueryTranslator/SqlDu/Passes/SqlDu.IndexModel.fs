@@ -1,6 +1,6 @@
 module internal SoloDatabase.IndexModel
 
-open SqlDu.Engine.C1.Spec
+open SoloDatabase.SqlModel
 open Microsoft.Data.Sqlite
 open System
 open System.Collections.Generic
