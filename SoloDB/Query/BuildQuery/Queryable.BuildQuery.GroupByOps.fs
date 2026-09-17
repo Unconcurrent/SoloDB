@@ -47,6 +47,54 @@ module internal QueryableBuildQueryGroupByOps =
         | :? ParameterExpression as p -> obj.ReferenceEquals(p, groupParam)
         | _ -> false
 
+    // F# anonymous records with conditional fields use nested lambda applications.
+    // Reduce those bindings through the same substitution used by scalar translation.
+    let private inlineProjectionBindings (expression: Expression) =
+        let visitor =
+            { new ExpressionVisitor() with
+                override self.VisitMethodCall call =
+                    if call.Method.Name = "Invoke" && not (isNull call.Object) then
+                        match self.Visit call.Object with
+                        | :? LambdaExpression as lambda ->
+                            self.Visit(inlineLambdaInvocation lambda call.Arguments)
+                        | _ -> base.VisitMethodCall call
+                    else base.VisitMethodCall call
+                override self.VisitInvocation invocation =
+                    match self.Visit invocation.Expression with
+                    | :? LambdaExpression as lambda ->
+                        self.Visit(inlineLambdaInvocation lambda invocation.Arguments)
+                    | _ -> base.VisitInvocation invocation }
+        visitor.Visit expression
+
+    /// Bounds commute with total aggregate projections, not element terminals
+    /// such as Single or expressions that can fail for a discarded group.
+    let internal canPageProjection (expression: Expression) =
+        let lambda = extractLambdaFromExpr expression
+        let rec total (expr: Expression) =
+            match expr with
+            | :? ConstantExpression | :? ParameterExpression -> true
+            | :? MemberExpression as memberExpr ->
+                not (isNull memberExpr.Expression) && total memberExpr.Expression
+                && (memberExpr.Member :? PropertyInfo || memberExpr.Member :? FieldInfo)
+            | :? NewExpression as creation when creation.Type.IsDefined(typeof<CompilerGeneratedAttribute>, false) ->
+                creation.Arguments |> Seq.forall total
+            | :? ConditionalExpression as choice -> total choice.Test && total choice.IfTrue && total choice.IfFalse
+            | :? BinaryExpression as binary ->
+                match binary.NodeType with
+                | ExpressionType.Equal | ExpressionType.NotEqual | ExpressionType.LessThan | ExpressionType.LessThanOrEqual
+                | ExpressionType.GreaterThan | ExpressionType.GreaterThanOrEqual | ExpressionType.AndAlso | ExpressionType.OrElse ->
+                    total binary.Left && total binary.Right
+                | _ -> false
+            | :? UnaryExpression as unary when unary.NodeType = ExpressionType.Quote || unary.NodeType = ExpressionType.Not -> total unary.Operand
+            | :? LambdaExpression as predicate -> total predicate.Body
+            | :? MethodCallExpression as call when
+                (call.Method.DeclaringType = typeof<Enumerable> || call.Method.DeclaringType = typeof<Queryable>)
+                && (call.Method.Name = "Count" || call.Method.Name = "LongCount")
+                && call.Arguments.Count >= 1 && isGroupSource call.Arguments.[0] lambda.Parameters.[0] ->
+                call.Arguments |> Seq.skip 1 |> Seq.forall total
+            | _ -> false
+        total (inlineProjectionBindings lambda.Body)
+
     let private tryTranslateProjectedAggregate
         (sourceCtx: QueryContext) (ctxTableName: string) (groupRowTableName: string) (groupParam: ParameterExpression) (vars: Dictionary<string, obj>)
         (source: Expression) (aggKind: AggregateKind) (coalesceZero: bool) : SqlExpr option =
@@ -64,12 +112,19 @@ module internal QueryableBuildQueryGroupByOps =
             | :? MethodCallExpression as mc when mc.Method.Name = "Where" && mc.Arguments.Count = 2 ->
                 Some (extractLambdaFromExpr mc.Arguments.[1]), mc.Arguments.[0]
             | _ -> None, innerSource2
-        if not (isGroupSource innerSource3 groupParam) then None
+        if not (isGroupSource innerSource3 groupParam) || (aggKind = AggregateKind.Count && isDistinct) then None
         else
         let translateInner (lambda: LambdaExpression) =
             translateExprDu sourceCtx groupRowTableName (lambda :> Expression) vars
+        if aggKind = AggregateKind.Count then
+            projLambda |> Option.iter (fun projection -> translateInner projection |> ignore)
         let argExpr =
             match projLambda, whereLambda with
+            // Element counts include NULL projections. Select preserves cardinality;
+            // Distinct must retain its rowset so its NULL element is counted too.
+            | _, Some where when aggKind = AggregateKind.Count ->
+                SqlExpr.CaseExpr((translateInner where, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], None)
+            | _, None when aggKind = AggregateKind.Count -> SqlExpr.Literal(SqlLiteral.Integer 1L)
             | Some proj, Some where -> SqlExpr.CaseExpr((translateInner where, translateInner proj), [], None)
             | Some proj, None -> translateInner proj
             | None, Some where -> SqlExpr.CaseExpr((translateInner where, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], None)
@@ -77,7 +132,7 @@ module internal QueryableBuildQueryGroupByOps =
                 if aggKind = AggregateKind.Count then SqlExpr.Literal(SqlLiteral.Integer 1L)
                 else raise (NotSupportedException("Projected aggregate without Select is not supported."))
         let aggArg =
-            if aggKind = AggregateKind.Count && projLambda.IsNone && whereLambda.IsNone then None
+            if aggKind = AggregateKind.Count && whereLambda.IsNone then None
             else Some argExpr
         let aggExpr = SqlExpr.AggregateCall(aggKind, aggArg, isDistinct, None)
         if coalesceZero then Some (SqlExpr.Coalesce(aggExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)]))
@@ -90,7 +145,10 @@ module internal QueryableBuildQueryGroupByOps =
         | :? ConstantExpression as ce ->
             Some (match ce.Value with null -> SqlExpr.Literal(SqlLiteral.Null) | _ -> allocateParam vars ce.Value)
         | :? MemberExpression as me when not (isNull me.Expression) && me.Expression :? ParameterExpression && obj.ReferenceEquals(me.Expression, groupParam) && me.Member.Name = "Key" ->
-            Some (SqlExpr.Column(Some "o", syntheticGroupKeyAlias))
+            let key = SqlExpr.Column(Some "o", syntheticGroupKeyAlias)
+            // A derived column loses SQLite's JSON subtype. Composite keys must
+            // remain objects when embedded into the grouped result document.
+            Some (if isPrimitiveSQLiteType me.Type then key else SqlExpr.FunctionCall("json", [key]))
         | :? MemberExpression as me when not (isNull me.Expression) && obj.ReferenceEquals(me.Expression, groupParam) ->
             Some (translateExprDu sourceCtx groupRowTableName (Expression.Lambda(me, [| groupParam |]) :> Expression) vars)
         | :? MemberExpression as me when not (isNull me.Expression) ->
@@ -126,9 +184,9 @@ module internal QueryableBuildQueryGroupByOps =
                               mc.Arguments.Count
                               (if mc.Arguments.Count >= 1 then Some mc.Arguments.[0] else None))
                 | None -> None
-            | "Count" when mc.Arguments.Count = 1 && isGroupSource mc.Arguments.[0] groupParam ->
+            | ("Count" | "LongCount") when mc.Arguments.Count = 1 && isGroupSource mc.Arguments.[0] groupParam ->
                 Some (SqlExpr.AggregateCall(AggregateKind.Count, None, false, None))
-            | "Count" when mc.Arguments.Count = 2 && isGroupSource mc.Arguments.[0] groupParam ->
+            | ("Count" | "LongCount") when mc.Arguments.Count = 2 && isGroupSource mc.Arguments.[0] groupParam ->
                 let pred = extractLambdaFromExpr mc.Arguments.[1]
                 let predDu = translateExprDu sourceCtx groupRowTableName (pred :> Expression) vars
                 Some (SqlExpr.AggregateCall(AggregateKind.Sum, Some (SqlExpr.CaseExpr(
@@ -147,7 +205,7 @@ module internal QueryableBuildQueryGroupByOps =
                 let sel = extractLambdaFromExpr mc.Arguments.[1]
                 Some (SqlExpr.AggregateCall(AggregateKind.Avg, Some (translateExprDu sourceCtx groupRowTableName (sel :> Expression) vars), false, None))
             | "Sum" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupRowTableName groupParam vars mc.Arguments.[0] AggregateKind.Sum true
-            | "Count" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupRowTableName groupParam vars mc.Arguments.[0] AggregateKind.Count false
+            | ("Count" | "LongCount") when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupRowTableName groupParam vars mc.Arguments.[0] AggregateKind.Count false
             | "Min" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupRowTableName groupParam vars mc.Arguments.[0] AggregateKind.Min false
             | "Max" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupRowTableName groupParam vars mc.Arguments.[0] AggregateKind.Max false
             | "Average" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate sourceCtx ctxTableName groupRowTableName groupParam vars mc.Arguments.[0] AggregateKind.Avg false
@@ -392,7 +450,7 @@ module internal QueryableBuildQueryGroupByOps =
         (groupByExpressions: Expression array) (havingPreds: Expression list) (groupOrders: (Expression * bool) list) (selectExpressions: Expression array) =
         let selectLambda = extractLambdaFromExpr selectExpressions.[0]
         let groupParam = selectLambda.Parameters.[0]
-        let body = selectLambda.Body
+        let body = inlineProjectionBindings selectLambda.Body
         addComplexFinal statements (fun ctx ->
             let havingExpr =
                 if havingPreds.IsEmpty then None

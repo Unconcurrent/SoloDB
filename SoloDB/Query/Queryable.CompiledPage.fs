@@ -2,7 +2,7 @@ namespace SoloDatabase
 
 open SoloDatabase.SqlModel
 
-/// A bounded order-index attempt and its exact fallback share one retained statement.
+/// A bounded order-index attempt and its exact fallback share one statement.
 module internal CompiledPage =
     let private integer value = Literal(SqlLiteral.Integer value)
     let private column source name = Column(Some source, name)
@@ -18,7 +18,7 @@ module internal CompiledPage =
             | JsonRootExtract(None, name) -> JsonRootExtract(Some source, name)
             | node -> node)
 
-    let tryPlan model (estimates: Map<string, IndexModel.TableEstimate>) table source (core: SelectCore) =
+    let tryPlan model (estimates: System.Lazy<Map<string, IndexModel.TableEstimate>>) table source (core: SelectCore) =
         // Caller admits a plain limited collection rowset. Collection DDL makes
         // Id an INTEGER PRIMARY KEY, hence each index's implicit rowid key is Id.
         let isId expression =
@@ -33,11 +33,20 @@ module internal CompiledPage =
         let indexed expression = ExpressionMatcher.hasMatchingIndex model table (normalize expression)
         let ordering = core.OrderBy |> List.map (fun order -> { order with Expr = normalize order.Expr })
         let predicate = core.Where |> Option.map normalize
-        let orderIndex = ExpressionMatcher.findOrderingIndex model table None ordering
+        let orderIndex =
+            ExpressionMatcher.findOrderingIndex model table None ordering
+            |> Option.orElseWith (fun () ->
+                // An index prefix can stream ordered groups while SQLite sorts
+                // their suffixes. All keys must remain maintained/readable;
+                // the explicit complete ORDER BY still defines the result.
+                match ordering with
+                | first :: _ when ordering |> List.forall (fun o -> isId o.Expr || indexed o.Expr) ->
+                    ExpressionMatcher.findOrderingIndex model table None [first]
+                | _ -> None)
         let filterIndex = predicate |> Option.bind (ExpressionMatcher.findCoveringFilterIndex model table)
         let orderedIndex =
             match core.OrderBy with
-            | [order] -> isId order.Expr
+            | [order] -> isId order.Expr || orderIndex.IsSome
             | _ -> orderIndex.IsSome
         // One equality fixes the index's leading key; its implicit rowid then
         // supplies Id order for every argument, without an unfiltered window.
@@ -156,7 +165,7 @@ module internal CompiledPage =
         let threshold =
             match orderIndex, filterIndex, core.OrderBy with
             | Some _, Some _, first :: _ when not (isId first.Expr) ->
-                estimates |> Map.tryFind table |> Option.map (fun estimate ->
+                estimates.Value |> Map.tryFind table |> Option.map (fun estimate ->
                     let rows = estimate.Rows
                     let crossover =
                         match estimate.PayloadBytes.Value with
@@ -263,5 +272,5 @@ module internal CompiledPage =
         let pageAlias = table + "_page_result"
         { Ctes = [materialized windowName window; materialized hitsName hits; materialized stateName state; materialized fallbackName fallbackGate] @ costCtes
           Body = SingleSelect { empty with Source = Some(DerivedTable(union, pageAlias))
-                                           Projections = ProjectionSetOps.ofList [project "Id" (column pageAlias "Id")]
+                                           Projections = projected pageAlias
                                            OrderBy = ordering pageAlias } }

@@ -132,7 +132,16 @@ module internal ChainWalk =
                 flushBoundary state
                 state.Limit <- arg
                 state.Offset <- None
-                walkChain config state src
+                // Adjacency is an expression-tree fact. Do not infer it from
+                // partially accumulated flags: Distinct or a set operation
+                // between the bounds changes which rows the Take observes.
+                match src with
+                | :? MethodCallExpression as skip when skip.Method.Name = "Skip"
+                                                      && skip.Arguments.Count = 2
+                                                      && skip.Method.DeclaringType = mc.Method.DeclaringType ->
+                    state.Offset <- getArg skip
+                    walkChain config state skip.Arguments.[0]
+                | _ -> walkChain config state src
 
             | "Skip" ->
                 if state.SeenBoundary

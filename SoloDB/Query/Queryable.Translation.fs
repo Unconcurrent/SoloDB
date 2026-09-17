@@ -266,8 +266,7 @@ module internal QueryableTranslationCore =
             let counted =
                 if doesNotReturnIdFn expression then QueryCountPlanning.plan source.Name indexModel estimates query
                 else query
-            if bindQueryValue.IsSome then CompiledQueryPlanning.planPage indexModel estimates.Value counted
-            else counted
+            QueryReadPlanning.plan indexModel estimates counted
         emitSelectToSb sb variables indexModel retainedPlan outerSelect
 
         let actuallyHydrated = singleRelationsHydrated && hydrationAliasCounter > 0

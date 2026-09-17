@@ -78,6 +78,25 @@ module internal QueryableBuildQueryMain =
         let mutable pendingGroupByOrders : (Expression * bool) list = []
         let mutable idx = 0
         while idx < reversed.Length do
+            // Keep aggregate projection fused when group paging precedes Select.
+            // Only cross consecutive bounds: filters and new orderings after a
+            // bound must keep their original scope.
+            if pendingGroupByExprs.IsSome then
+                let mutable projection = idx
+                let isBound = function
+                    | Method m -> m.Value = SupportedLinqMethods.Skip || m.Value = SupportedLinqMethods.Take
+                    | _ -> false
+                while projection < reversed.Length && isBound reversed.[projection] do
+                    projection <- projection + 1
+                if projection > idx && projection < reversed.Length then
+                    match reversed.[projection] with
+                    | Method m when m.Value = SupportedLinqMethods.Select
+                                    && QueryableBuildQueryGroupByOps.canPageProjection m.Expressions.[0] ->
+                        let selector = reversed.[projection]
+                        for position = projection downto idx + 1 do
+                            reversed.[position] <- reversed.[position - 1]
+                        reversed.[idx] <- selector
+                    | _ -> ()
             let q = reversed.[idx]
             match q with
             | RootQuery rq -> tableName <- rq.SourceTableName

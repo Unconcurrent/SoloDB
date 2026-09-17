@@ -3,8 +3,8 @@ namespace SoloDatabase
 open System
 open SoloDatabase.SqlModel
 
-/// Additional planning paid once by retained queries.
-module internal CompiledQueryPlanning =
+/// Shared page planning; retained queries pay translation only at compilation.
+module internal QueryReadPlanning =
     let private rowExpression expression =
         SqlExpr.fold (fun valid node ->
             valid && match node with
@@ -35,7 +35,16 @@ module internal CompiledQueryPlanning =
         | JsonRootExtract(qualifier, "Value") -> fromSource source qualifier
         | _ -> false
 
-    let private movableValue source (core: SelectCore) expression =
+    let rec private movableValue (model: IndexModel.IndexModel) table source (core: SelectCore) expression =
+        let indexed expression =
+            let normalized = expression |> SqlExpr.map (function
+                | JsonExtractExpr(Some alias, name, path) when alias = source -> JsonExtractExpr(Some table, name, path)
+                | Column(Some alias, name) when alias = source -> Column(Some table, name)
+                | node -> node)
+            model.Indexes |> List.exists (fun entry ->
+                entry.TableName = table && (entry.Terms |> List.exists (fun term ->
+                    String.Equals(term.Collation, "BINARY", StringComparison.OrdinalIgnoreCase)
+                    && ExpressionMatcher.expressionMatchesIndex table normalized term.Expression)))
         match FlattenTransform.normalizeExprQuoting expression with
         | Literal _ | Parameter _ -> true
         | Column(qualifier, ("Id" | "Value")) -> fromSource source qualifier
@@ -49,16 +58,121 @@ module internal CompiledQueryPlanning =
                 | JsonExtractExpr(_, _, path), JsonExtractExpr(_, _, orderPath) -> path = orderPath
                 | JsonRootExtract _, JsonRootExtract _ -> true
                 | _ -> false
-            (core.OrderBy |> List.exists sameRead)
+            // Maintained non-partial index expressions are already readable on
+            // every stored row, including partially valid JSONB documents.
+            indexed expression || (core.OrderBy |> List.exists sameRead)
             // An unfiltered primary-key scan evaluates only emitted rows.
             || (core.Where.IsNone &&
                 match core.OrderBy with
                 | [order] -> baseColumn source "Id" order.Expr
                 | _ -> false)
+        | JsonObjectExpr properties ->
+            properties |> List.forall (fun (_, value) -> movableValue model table source core value)
         | _ -> false
 
+    let private mapProjectionExpression rewrite (projection: Projection) =
+        let alias =
+            match projection.Alias, projection.Expr with
+            | None, Column(_, name) -> Some name
+            | alias, _ -> alias
+        { projection with Alias = alias; Expr = rewrite projection.Expr }
+
+    /// Compute grouped keys from covered index values instead of repeatedly
+    /// reading documents. The input boundary prevents SQLite flattening those
+    /// values back into payload extraction while preserving one read snapshot.
+    let private coverGroups (model: IndexModel.IndexModel) (core: SelectCore) =
+        let local expression =
+            SqlExpr.fold (fun valid node ->
+                valid && match node with
+                         | ScalarSubquery _ | Exists _ | InSubquery _ | WindowCall _ -> false
+                         | AggregateCall((AggregateKind.Count | AggregateKind.Min | AggregateKind.Max), _, _, _) -> true
+                         | AggregateCall _ -> false // Floating sums and ordered aggregates depend on input order.
+                         | FunctionCall(name, _) ->
+                             match name.ToUpperInvariant() with
+                             | "SUBSTR" | "SUBSTRING" | "LOWER" | "UPPER" | "LENGTH" | "JSON" | "JSON_OBJECT" | "JSONB_OBJECT" -> true
+                             | _ -> false
+                         | _ -> true) true expression
+        let expressions (row: SelectCore) =
+            (ProjectionSetOps.toList row.Projections |> List.map _.Expr)
+            @ row.GroupBy @ (row.OrderBy |> List.map _.Expr)
+            @ Option.toList row.Where @ Option.toList row.Having
+        if core.GroupBy.IsEmpty || not core.Joins.IsEmpty || core.Distinct
+           || ((core.Limit.IsSome || core.Offset.IsSome) && core.OrderBy.IsEmpty) then core else
+        let expanded =
+            match core.Source with
+            | Some(DerivedTable({ Ctes = []; Body = SingleSelect inner }, alias))
+                when plainRows inner && inner.Limit.IsNone && inner.Offset.IsNone && inner.OrderBy.IsEmpty ->
+                let projections = ProjectionSetOps.toList inner.Projections
+                let replace = SqlExpr.map (function
+                    | Column(qualifier, name) as original when qualifier.IsNone || qualifier = Some alias ->
+                        projections |> List.tryFind (fun p -> p.Alias = Some name || p.Alias.IsNone && p.Expr = Column(None, name))
+                        |> Option.map _.Expr |> Option.defaultValue original
+                    | node -> node)
+                let where =
+                    match core.Where |> Option.map replace, inner.Where with
+                    | Some l, Some r -> Some(Binary(l, BinaryOperator.And, r))
+                    | Some p, None | None, Some p -> Some p
+                    | _ -> None
+                { core with Source = inner.Source; Where = where
+                            Projections = ProjectionSetOps.map (mapProjectionExpression replace) core.Projections
+                            GroupBy = core.GroupBy |> List.map replace
+                            Having = core.Having |> Option.map replace
+                            OrderBy = core.OrderBy |> List.map (fun o -> { o with Expr = replace o.Expr }) }
+            | _ -> core
+        match expanded.Source with
+        | Some(BaseTable(table, sourceAlias)) when expressions expanded |> List.forall local ->
+            let source = defaultArg sourceAlias table
+            let normalize = SqlExpr.map (function
+                | Column(Some alias, name) when alias = source -> Column(Some table, name)
+                | JsonExtractExpr(Some alias, name, path) when alias = source -> JsonExtractExpr(Some table, name, path)
+                | node -> node) << FlattenTransform.normalizeExprQuoting
+            model.Indexes |> List.tryPick (fun index ->
+                if index.TableName <> table || index.Terms.IsEmpty
+                   || index.Terms |> List.exists (fun term -> not (String.Equals(term.Collation, "BINARY", StringComparison.OrdinalIgnoreCase))) then None else
+                let alias = table + "_group_input"
+                let rewrite = normalize >> SqlExpr.map (fun node ->
+                    index.Terms |> List.tryFindIndex (fun term -> ExpressionMatcher.expressionMatchesIndex table node term.Expression)
+                    |> Option.map (fun i -> Column(Some alias, "key" + string i))
+                    |> Option.defaultValue node)
+                let covered expr =
+                    SqlExpr.fold (fun valid node ->
+                        valid && match node with
+                                 | Column(Some q, _) -> q = alias
+                                 | Column _ | JsonExtractExpr _ | JsonRootExtract _ -> false
+                                 | _ -> true) true (rewrite expr)
+                if not (expressions expanded |> List.forall covered) then None else
+                let input =
+                    { expanded with Source = Some(BaseTable(table, None))
+                                    Projections = index.Terms |> List.mapi (fun i term ->
+                                        { Alias = Some("key" + string i); Expr = term.Expression }) |> ProjectionSetOps.ofList
+                                    Where = expanded.Where |> Option.map normalize; GroupBy = []; Having = None
+                                    OrderBy = index.Terms |> List.map (fun term -> { Expr = term.Expression; Direction = term.Direction })
+                                    Limit = Some(Literal(SqlLiteral.Integer -1L)); Offset = None }
+                Some { expanded with Source = Some(DerivedTable({ Ctes = []; Body = SingleSelect input }, alias))
+                                     Projections = ProjectionSetOps.map (mapProjectionExpression rewrite) expanded.Projections
+                                     GroupBy = expanded.GroupBy |> List.map rewrite
+                                     Where = None
+                                     Having = expanded.Having |> Option.map rewrite
+                                     OrderBy = expanded.OrderBy |> List.map (fun o -> { o with Expr = rewrite o.Expr }) })
+            |> Option.defaultValue core
+        | _ -> core
+
+    let rec private planGroups model query =
+        let body =
+            match query.Body with
+            | SingleSelect core ->
+                let planned = coverGroups model core
+                if planned <> core then SingleSelect planned else
+                let source =
+                    match core.Source with
+                    | Some(DerivedTable(inner, alias)) -> Some(DerivedTable(planGroups model inner, alias))
+                    | other -> other
+                SingleSelect { core with Source = source }
+            | other -> other
+        { query with Body = body }
+
     /// Select identifiers first, then recover the projected values for emitted rows.
-    let planPage model estimates (query: SqlSelect) =
+    let planPage model (estimates: Lazy<Map<string, IndexModel.TableEstimate>>) (query: SqlSelect) =
         match query with
         | { Ctes = []; Body = SingleSelect outer } when projectionOnly outer ->
             match outer.Source with
@@ -74,8 +188,7 @@ module internal CompiledQueryPlanning =
                         projection.Alias = Some "Value" || exposes "Value" projection)
                     let usable =
                         (projections |> List.exists (exposes "Id"))
-                        && (value |> Option.exists (fun projection -> movableValue source inner projection.Expr))
-                        && (inner.OrderBy |> List.exists (fun order -> baseColumn source "Id" order.Expr))
+                        && (value |> Option.exists (fun projection -> movableValue model table source inner projection.Expr))
                     let wrapper = ProjectionSetOps.toList outer.Projections
                     let valid expression =
                         rowExpression expression && SqlExpr.fold (fun valid node ->
@@ -87,12 +200,11 @@ module internal CompiledQueryPlanning =
                     if not usable || wrapper.IsEmpty || not (wrapper |> List.forall (fun p -> valid p.Expr)) then query else
                     let payloadAlias = alias + "_value"
                     let projectedValue = FlattenTransform.normalizeExprQuoting value.Value.Expr
-                    let fetchedValue =
-                        match projectedValue with
-                        | Column(_, name) -> Column(Some payloadAlias, name)
-                        | JsonExtractExpr(_, name, path) -> JsonExtractExpr(Some payloadAlias, name, path)
-                        | JsonRootExtract(_, name) -> JsonRootExtract(Some payloadAlias, name)
-                        | value -> value
+                    let fetchedValue = projectedValue |> SqlExpr.map (function
+                        | Column(qualifier, name) when fromSource source qualifier -> Column(Some payloadAlias, name)
+                        | JsonExtractExpr(qualifier, name, path) when fromSource source qualifier -> JsonExtractExpr(Some payloadAlias, name, path)
+                        | JsonRootExtract(qualifier, name) when fromSource source qualifier -> JsonRootExtract(Some payloadAlias, name)
+                        | node -> node)
                     let fetch = ScalarSubquery {
                         Ctes = []
                         Body = SingleSelect {
@@ -107,12 +219,23 @@ module internal CompiledQueryPlanning =
                         | value when baseColumn source "Id" value -> Column(Some alias, "Id")
                         | _ -> fetch
                     let rewrite = SqlExpr.map (function Column(_, "Value") -> replacement | node -> node)
-                    let ids = { inner with Projections = ProjectionSetOps.ofList (projections |> List.filter (exposes "Id")) }
+                    // Carry the caller's actual order through the page boundary. Id is
+                    // identity only; no additional ordering term is introduced.
+                    let orderName i order = if baseColumn source "Id" order.Expr then "Id" else "ord" + string i
+                    let keys = inner.OrderBy |> List.mapi (fun i order ->
+                        if baseColumn source "Id" order.Expr then None
+                        else Some { Alias = Some(orderName i order); Expr = order.Expr }) |> List.choose id
+                    let ids = { inner with Projections = ProjectionSetOps.ofList ((projections |> List.filter (exposes "Id")) @ keys) }
                     let result =
                         { outer with
                             Source = Some(DerivedTable(CompiledPage.tryPlan model estimates table source ids, alias))
-                            Projections = ProjectionSetOps.map (fun p -> { p with Expr = rewrite p.Expr }) outer.Projections }
+                            Projections = ProjectionSetOps.map (fun p -> { p with Expr = rewrite p.Expr }) outer.Projections
+                            OrderBy = inner.OrderBy |> List.mapi (fun i order ->
+                                { order with Expr = Column(Some alias, orderName i order) }) }
                     { query with Body = SingleSelect result }
                 | _ -> query
             | _ -> query
         | _ -> query
+
+    let plan model estimates query =
+        planGroups model query |> planPage model estimates
