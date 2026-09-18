@@ -33,7 +33,6 @@ I wrote a detailed comparison with a popular alternative, [LiteDB](https://githu
   - [Backups](#backups)
   - [Optimization](#optimization)
 - [License](#license)
-- [FAQ](#faq)
 
 ## Core Features
 
@@ -798,13 +797,3 @@ This project is licensed under the GNU Lesser General Public License v3.0 (LGPL-
 In addition, special permission is granted to distribute applications that incorporate an unmodified DLL of this library in Single-file deployments, Native AOT builds, and other bundling technologies that embed the library directly into the executable file. This ensures you can use modern .NET deployment strategies without violating the license.
 
 Full license details are available [here](https://solodb.org/legal.html).
-
-## FAQ
-
-### Why create this project?
-
-For fun, for profit, and to create a simpler, more integrated alternative to document databases like MongoDB, while retaining the unparalleled reliability and simplicity of SQLite.
-
-### Why 1.0.0?
-
-After over two years of production use managing a 1.5TB database with zero critical issues, SoloDB has earned its stable release designation. This is battle-tested software.

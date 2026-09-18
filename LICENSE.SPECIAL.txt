@@ -1,0 +1,5 @@
+In addition, special permission is granted to distribute applications that
+incorporate an unmodified DLL of this library in Single-file deployments,
+Native AOT builds, and other bundling technologies that embed the library
+directly into the executable file. This ensures you can use modern .NET
+deployment strategies without violating the license.
