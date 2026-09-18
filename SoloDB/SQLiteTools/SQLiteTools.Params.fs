@@ -23,40 +23,45 @@ module internal SQLiteToolsParams =
         Values: obj array
     }
 
-    type internal DateTimeFamilyReaderSpec = {
+    type private DateTimeFamilyReaderSpec = {
         ClrType: Type
         BuildExpression: Expression -> Expression
-        MapInt64: int64 -> obj
+        BuildTextExpression: Expression -> Expression
     }
+
+    let private parseInvariant (t: Type) (text: Expression) =
+        Expression.Call(
+            t.GetMethod("Parse", [| typeof<string>; typeof<IFormatProvider> |]),
+            text, Expression.Constant(Globalization.CultureInfo.InvariantCulture, typeof<IFormatProvider>)) :> Expression
 
     let private dateTimeFamilyReaderSpecs =
         [|
             { ClrType = typeof<DateTime>
+              BuildTextExpression = parseInvariant typeof<DateTime>
               BuildExpression = fun expr ->
-                  Expression.Call(typeof<DateTime>.GetMethod("FromBinary", [| typeof<int64> |]), expr) :> Expression
-              MapInt64 = fun value -> DateTime.FromBinary value :> obj }
+                  Expression.Call(typeof<DateTime>.GetMethod("FromBinary", [| typeof<int64> |]), expr) :> Expression }
             { ClrType = typeof<DateTimeOffset>
+              BuildTextExpression = parseInvariant typeof<DateTimeOffset>
               BuildExpression = fun expr ->
-                  Expression.Call(typeof<DateTimeOffset>.GetMethod("FromUnixTimeMilliseconds", [| typeof<int64> |]), expr) :> Expression
-              MapInt64 = fun value -> DateTimeOffset.FromUnixTimeMilliseconds value :> obj }
+                  Expression.Call(typeof<DateTimeOffset>.GetMethod("FromUnixTimeMilliseconds", [| typeof<int64> |]), expr) :> Expression }
             { ClrType = typeof<DateOnly>
+              BuildTextExpression = parseInvariant typeof<DateOnly>
               BuildExpression = fun expr ->
-                  Expression.Call(typeof<DateOnly>.GetMethod("FromDayNumber", [| typeof<int> |]), Expression.Convert(expr, typeof<int>)) :> Expression
-              MapInt64 = fun value -> DateOnly.FromDayNumber(int value) :> obj }
+                  Expression.Call(typeof<DateOnly>.GetMethod("FromDayNumber", [| typeof<int> |]), Expression.Convert(expr, typeof<int>)) :> Expression }
             { ClrType = typeof<TimeOnly>
+              BuildTextExpression = parseInvariant typeof<TimeOnly>
               BuildExpression = fun expr ->
                   let ms = Expression.Convert(expr, typeof<float>)
                   let ts = Expression.Call(typeof<TimeSpan>.GetMethod("FromMilliseconds", [| typeof<float> |]), ms)
-                  Expression.Call(typeof<TimeOnly>.GetMethod("FromTimeSpan", [| typeof<TimeSpan> |]), ts) :> Expression
-              MapInt64 = fun value -> value |> float |> TimeSpan.FromMilliseconds |> TimeOnly.FromTimeSpan :> obj }
+                  Expression.Call(typeof<TimeOnly>.GetMethod("FromTimeSpan", [| typeof<TimeSpan> |]), ts) :> Expression }
             { ClrType = typeof<TimeSpan>
+              BuildTextExpression = parseInvariant typeof<TimeSpan>
               BuildExpression = fun expr ->
                   let ms = Expression.Convert(expr, typeof<float>)
-                  Expression.Call(typeof<TimeSpan>.GetMethod("FromMilliseconds", [| typeof<float> |]), ms) :> Expression
-              MapInt64 = fun value -> value |> float |> TimeSpan.FromMilliseconds :> obj }
+                  Expression.Call(typeof<TimeSpan>.GetMethod("FromMilliseconds", [| typeof<float> |]), ms) :> Expression }
         |]
 
-    let internal tryGetDateTimeFamilyReaderSpec (t: Type) =
+    let private tryGetDateTimeFamilyReaderSpec (t: Type) =
         dateTimeFamilyReaderSpecs
         |> Array.tryFind (fun spec -> spec.ClrType = t)
 
@@ -112,6 +117,11 @@ module internal SQLiteToolsParams =
             else
                 struct (value, -1)
 
+    let internal setRetainedParameterValue (parameter: SqliteParameter) (value: obj) =
+        let struct (value, size) = processParameter value
+        parameter.Value <- value
+        parameter.Size <- size
+
     /// <summary>Creates and adds a new IDbDataParameter to a command.</summary>
     let internal addParameter (command: IDbCommand) (key: string) (value: obj) =
         let struct (value, size) = processParameter value
@@ -120,8 +130,7 @@ module internal SQLiteToolsParams =
         par.ParameterName <- key
         par.Value <- value
 
-        if size > 0 then
-            par.Size <- size
+        par.Size <- size
 
         command.Parameters.Add par |> ignore
 
@@ -140,32 +149,38 @@ module internal SQLiteToolsParams =
 
         par.Value <-value
 
-        if size > 0 then
-            par.Size <- size
+        par.Size <- size
 
     /// <summary>Caches compiled lambda expressions for dynamically processing anonymous-type parameters.</summary>
-    let private dynamicParameterCache = ConcurrentDictionary<Type, Action<IDbCommand, obj, Action<IDbCommand,string,obj>>>()
+    let private dynamicParameterCache = ConcurrentDictionary<Type, struct(Action<IDbCommand, obj, Action<IDbCommand,string,obj>> * int)>()
 
     /// <summary>Binds retained, dictionary or anonymous-object parameters through the supplied command writer.</summary>
     let internal processParameters processFn (command: IDbCommand) (parameters: obj) =
         match parameters with
-        | null -> ()
+        | null -> 0
         | :? ParameterValues as packet ->
             for pair in packet.Constants do
                 processFn command pair.Key pair.Value
             for i = 0 to packet.Names.Length - 1 do
                 processFn command packet.Names.[i] packet.Values.[i]
+            packet.Constants.Length + packet.Names.Length
         | :? IDictionary<string, obj> as dict ->
+            let mutable count = 0
             for KeyValue(key, value) in dict do
                 processFn command key value
+                count <- count + 1
+            count
         | :? IDictionary as dict ->
+            let mutable count = 0
             for key in dict.Keys do
                 let value = dict.[key]
                 let key = key :?> string
                 processFn command key value
+                count <- count + 1
+            count
 
         | parameters ->
-            let fn = dynamicParameterCache.GetOrAdd(parameters.GetType(), Func<Type, Action<IDbCommand, obj, Action<IDbCommand,string,obj>>>(
+            let struct(fn, count) = dynamicParameterCache.GetOrAdd(parameters.GetType(), Func<Type, struct(Action<IDbCommand, obj, Action<IDbCommand,string,obj>> * int)>(
                 fun t ->
                     let props = t.GetProperties() |> Array.filter(_.CanRead)
                     let dbCmdPar = Expression.Parameter typeof<IDbCommand>
@@ -181,28 +196,33 @@ module internal SQLiteToolsParams =
                                 |]),
                                 [|dbCmdPar; parametersPar; actionPar|])
 
-                    l.Compile(false)
+                    struct(l.Compile(false), props.Length)
             ))
             fn.Invoke(command, parameters, processFn)
+            count
 
     /// <summary>Creates an IDbCommand with the given SQL and parameters.</summary>
     /// <returns>A new IDbCommand.</returns>
     let internal createCommand (this: SqliteConnection) (sql: string) (parameters: obj) =
         match sqlTraceCallback with ValueSome cb -> cb.Invoke(sql) | ValueNone -> ()
         let command = this.CreateCommand()
-        command.CommandText <- sql
-        processParameters addParameter command parameters
+        try
+            command.CommandText <- sql
+            processParameters addParameter command parameters |> ignore
 
-        match sqlBoundTraceCallback with
-        | ValueSome cb ->
-            let bound = ResizeArray<KeyValuePair<string, obj>>(command.Parameters.Count)
-            for i in 0 .. command.Parameters.Count - 1 do
-                let p = command.Parameters.[i]
-                bound.Add(KeyValuePair(p.ParameterName, p.Value))
-            cb.Invoke(sql, bound :> IReadOnlyList<KeyValuePair<string, obj>>)
-        | ValueNone -> ()
+            match sqlBoundTraceCallback with
+            | ValueSome cb ->
+                let bound = ResizeArray<KeyValuePair<string, obj>>(command.Parameters.Count)
+                for i in 0 .. command.Parameters.Count - 1 do
+                    let p = command.Parameters.[i]
+                    bound.Add(KeyValuePair(p.ParameterName, p.Value))
+                cb.Invoke(sql, bound :> IReadOnlyList<KeyValuePair<string, obj>>)
+            | ValueNone -> ()
 
-        command
+            command
+        with _ ->
+            command.Dispose()
+            reraise()
 
     /// <summary>Lazily gets all methods from DbDataReader and its interfaces for later use in the TypeMapper.</summary>
     let internal dataReaderMethods =
@@ -242,61 +262,51 @@ module internal SQLiteToolsParams =
     /// Resolves the IDataReader method, conversion flag, and optional conversion function for a given target type.
     /// Shared logic used by both member-based and type-based expression builders.
     /// </summary>
-    let private resolveReaderMethod (t: Type) : string * bool * (Expression -> Expression) option =
+    let rec private tryResolveReaderMethod (t: Type) : (string * bool * (Expression -> Expression) option) option =
+        let direct name = Some (name, false, None)
+        let convert name conversion = Some (name, true, Some conversion)
         match tryGetDateTimeFamilyReaderSpec t with
-        | Some spec ->
-            "GetInt64", true, Some spec.BuildExpression
+        | Some spec -> convert "GetInt64" spec.BuildExpression
+        | None when t.IsEnum ->
+            let underlying = Enum.GetUnderlyingType t
+            if underlying = typeof<int64> then
+                // Existing Int64 enum members read the native storage value strictly.
+                convert "GetValue" (fun expr -> Expression.Convert(expr, t) :> Expression)
+            else
+                tryResolveReaderMethod underlying
+                |> Option.map (fun (methodName, needsConversion, conversion) ->
+                    methodName, true, Some (fun expr ->
+                        let value =
+                            match needsConversion, conversion with
+                            | true, Some convertValue -> convertValue expr
+                            | _ -> expr
+                        Expression.Convert(value, t) :> Expression))
         | None ->
             match t with
-            | t when t = typeof<byte> || t = typeof<int8> ->
-                "GetByte", false, None
-            | t when t = typeof<uint8> ->
-                "GetByte", true, Some (fun (expr: Expression) -> Expression.Convert(expr, typeof<uint8>) :> Expression)
-            | t when t = typeof<int16> ->
-                "GetInt16", false, None
+            | t when t = typeof<byte> -> direct "GetByte"
+            | t when t = typeof<int8> ->
+                convert "GetInt16" (fun expr -> Expression.ConvertChecked(expr, t) :> Expression)
+            | t when t = typeof<int16> -> direct "GetInt16"
             | t when t = typeof<uint16> ->
-                "GetInt32", true, Some (fun (expr: Expression) ->
-                    Expression.Convert(Expression.Call(
-                        null,
-                        typeof<uint16>.GetMethod("op_Explicit", [|typeof<int32>|]),
-                        expr),
-                        typeof<uint16>) :> Expression)
-            | t when t = typeof<int32> ->
-                "GetInt32", false, None
+                convert "GetInt32" (fun expr -> Expression.Convert(expr, t) :> Expression)
+            | t when t = typeof<int32> -> direct "GetInt32"
             | t when t = typeof<uint32> ->
-                "GetInt64", true, Some (fun (expr: Expression) ->
-                    Expression.Convert(Expression.Call(
-                        null,
-                        typeof<uint32>.GetMethod("op_Explicit", [|typeof<int64>|]),
-                        expr),
-                        typeof<uint32>) :> Expression)
-            | t when t = typeof<int64> ->
-                "GetInt64", false, None
+                convert "GetInt64" (fun expr -> Expression.Convert(expr, t) :> Expression)
+            | t when t = typeof<int64> -> direct "GetInt64"
             | t when t = typeof<uint64> ->
-                "GetInt64", true, Some (fun (expr: Expression) ->
-                    Expression.Convert(Expression.Call(
-                        null,
-                        typeof<uint64>.GetMethod("op_Explicit", [|typeof<int64>|]),
-                        expr),
-                        typeof<uint64>) :> Expression)
-            | t when t = typeof<float32> || t = typeof<float> ->
-                "GetFloat", false, None
-            | t when t = typeof<double> ->
-                "GetDouble", false, None
-            | t when t = typeof<decimal> ->
-                "GetDecimal", false, None
-            | t when t = typeof<string> ->
-                "GetString", false, None
-            | t when t = typeof<bool> ->
-                "GetBoolean", false, None
+                convert "GetInt64" (fun expr -> Expression.Convert(expr, t) :> Expression)
+            | t when t = typeof<float32> -> direct "GetFloat"
+            | t when t = typeof<double> -> direct "GetDouble"
+            | t when t = typeof<decimal> -> direct "GetDecimal"
+            | t when t = typeof<string> -> direct "GetString"
+            | t when t = typeof<char> -> direct "GetChar"
+            | t when t = typeof<bool> -> direct "GetBoolean"
             | t when t = typeof<NativeArray.NativeArray> ->
-                "GetStream", true, Some (fun (expr: Expression) -> streamToNativeArray (Expression.TypeAs(expr, typeof<SqliteBlob>)) :> Expression)
+                convert "GetStream" (fun expr -> streamToNativeArray (Expression.TypeAs(expr, typeof<SqliteBlob>)) :> Expression)
             | t when t = typeof<byte[]> ->
-                "GetValue", true, Some (fun (expr: Expression) -> Expression.TypeAs(expr, typeof<byte[]>) :> Expression)
-            | t when t = typeof<Guid> ->
-                "GetGuid", false, None
-            | _ ->
-                "GetValue", true, Some (fun (expr: Expression) -> Expression.Convert(expr, t) :> Expression)
+                convert "GetValue" (fun expr -> Expression.TypeAs(expr, typeof<byte[]>) :> Expression)
+            | t when t = typeof<Guid> -> direct "GetGuid"
+            | _ -> None
 
     /// <summary>Builds the final reader call expression from the resolved method and conversion.</summary>
     let private buildReaderExpr (readerParam: Expression) (columnVar: Expression) (getMethodName: string, needsConversion: bool, conversionFunc: (Expression -> Expression) option) =
@@ -318,81 +328,62 @@ module internal SQLiteToolsParams =
     /// Dynamically builds a LINQ Expression to read a value from an IDataReader for a given target type.
     /// Used by the tuple mapper for ordinal-based element reads.
     /// </summary>
-    let internal matchMethodWithType (t: Type) (readerParam: Expression) (columnVar: Expression) =
-        resolveReaderMethod t |> buildReaderExpr readerParam columnVar
-
-    /// <summary>Dynamically builds a LINQ Expression to read a value from an IDataReader for a specific member (property or field).</summary>
-    let internal matchMethodWithMemberType (prop: MemberInfo) (readerParam: Expression) (columnVar: Expression) =
-        let (getMethodName, needsConversion, conversionFunc) =
-            let t = match prop with | :? PropertyInfo as p -> p.PropertyType | :? FieldInfo as p -> p.FieldType | _ -> failwithf "Unknown member type."
+    let rec internal matchMethodWithType (t: Type) (readerParam: Expression) (columnVar: Expression) : Expression =
+        if not (isNull (Nullable.GetUnderlyingType t)) then
+            readNullableValue t readerParam columnVar
+        else
+            let spec =
+                tryResolveReaderMethod t
+                |> Option.defaultWith (fun () ->
+                    "GetValue", true, Some (fun expr -> Expression.Convert(expr, t) :> Expression))
+            let read = buildReaderExpr readerParam columnVar spec
             match tryGetDateTimeFamilyReaderSpec t with
-            | Some spec ->
-                "GetInt64", true, Some spec.BuildExpression
-            | None ->
-                match t with
-                | t when t = typeof<byte> || t = typeof<int8> ->
-                    "GetByte", false, None
-                | t when t = typeof<uint8> ->
-                    "GetByte", true, Some (fun (expr: Expression) -> Expression.Convert(expr, typeof<uint8>) :> Expression)
-                | t when t = typeof<int16> ->
-                    "GetInt16", false, None
-                | t when t = typeof<uint16> ->
-                    "GetInt32", true, Some (fun expr ->
-                        Expression.Convert(Expression.Call(
-                            null,
-                            typeof<uint16>.GetMethod("op_Explicit", [|typeof<int32>|]),
-                            expr),
-                            typeof<uint16>))
-                | t when t = typeof<int32> ->
-                    "GetInt32", false, None
-                | t when t = typeof<uint32> ->
-                    "GetInt64", true, Some (fun expr ->
-                        Expression.Convert(Expression.Call(
-                            null,
-                            typeof<uint32>.GetMethod("op_Explicit", [|typeof<int64>|]),
-                            expr),
-                            typeof<uint32>))
-                | t when t = typeof<int64> ->
-                    "GetInt64", false, None
-                | t when t = typeof<uint64> ->
-                    "GetInt64", true, Some (fun expr ->
-                        Expression.Convert(Expression.Call(
-                            null,
-                            typeof<uint64>.GetMethod("op_Explicit", [|typeof<int64>|]),
-                            expr),
-                            typeof<uint64>))
-                | t when t = typeof<float32> || t = typeof<float> ->
-                    "GetFloat", false, None
-                | t when t = typeof<double> ->
-                    "GetDouble", false, None
-                | t when t = typeof<decimal> ->
-                    "GetDecimal", false, None
-                | t when t = typeof<string> ->
-                    "GetString", false, None
-                | t when t = typeof<bool> ->
-                    "GetBoolean", false, None
-                | t when t = typeof<NativeArray.NativeArray> ->
-                    "GetStream", true, Some (fun expr -> streamToNativeArray (Expression.TypeAs(expr, typeof<SqliteBlob>)))
-                | t when t = typeof<byte[]> ->
-                    "GetValue", true, Some (fun expr -> Expression.TypeAs(expr, typeof<byte[]>))
-                | t when t = typeof<Guid> ->
-                    "GetGuid", false, None
-                | _ ->
-                    "GetValue", true, Some (fun expr -> Expression.Convert(expr, t))
+            | Some temporal ->
+                // Keep numeric document encodings, while accepting native ADO TEXT parameters.
+                let storedType = Expression.Call(readerParam, typeof<IDataRecord>.GetMethod("GetFieldType"), columnVar)
+                let textRead =
+                    if t = typeof<DateTime> then
+                        buildReaderExpr readerParam columnVar ("GetDateTime", false, None)
+                    else
+                        buildReaderExpr readerParam columnVar ("GetString", true, Some temporal.BuildTextExpression)
+                Expression.Condition(
+                    Expression.Equal(storedType, Expression.Constant(typeof<string>, typeof<Type>)),
+                    textRead, read) :> Expression
+            | None -> read
 
+    /// Nullable values share the underlying reader's storage conversions.
+    and internal readNullableValue (t: Type) (readerParam: Expression) (columnVar: Expression) : Expression =
+        let underlying = Nullable.GetUnderlyingType t
+        if underlying = typeof<int64> || underlying = typeof<double> then
+            // These native SQLite storage classes already supported strict unboxing.
+            let value = Expression.Variable(typeof<obj>, "nullableValue")
+            let read = buildReaderExpr readerParam columnVar ("GetValue", false, None)
+            Expression.Block(
+                [| value |],
+                [| Expression.Assign(value, read) :> Expression
+                   Expression.Condition(
+                       Expression.ReferenceEqual(value, Expression.Constant(DBNull.Value, typeof<obj>)),
+                       Expression.Default(t),
+                       Expression.Convert(value, t)) :> Expression |]) :> Expression
+        else
+            let read = matchMethodWithType underlying readerParam columnVar
+            Expression.Condition(
+                Expression.Call(readerParam, typeof<IDataRecord>.GetMethod("IsDBNull"), columnVar),
+                Expression.Default(t),
+                Expression.New(t.GetConstructor([|underlying|]), read)) :> Expression
 
-        let method = dataReaderMethods |> List.find(fun m -> m.Name = getMethodName)
-        let readerParam = Expression.TypeAs(readerParam, typeof<DbDataReader>)
+    /// Scalar primitives use the same reader as fields and tuple slots.
+    let internal tryBuildScalarRead (t: Type) readerParam columnVar =
+        if not (isNull (Nullable.GetUnderlyingType t))
+           || (t <> typeof<NativeArray.NativeArray> && t <> typeof<byte[]> && (tryResolveReaderMethod t).IsSome) then
+            Some (matchMethodWithType t readerParam columnVar)
+        else None
 
-        let valueExpr = Expression.Call(
-            readerParam,
-            method,
-            [| columnVar |]
-        )
-
-        let finalValueExpr =
-            match needsConversion, conversionFunc with
-            | true, Some convFunc -> convFunc(valueExpr)
-            | _ -> valueExpr
-
-        finalValueExpr
+    /// Resolve member and ordinal reads through the same storage-type rules.
+    let internal matchMethodWithMemberType (prop: MemberInfo) (readerParam: Expression) (columnVar: Expression) =
+        let t =
+            match prop with
+            | :? PropertyInfo as p -> p.PropertyType
+            | :? FieldInfo as p -> p.FieldType
+            | _ -> failwithf "Unknown member type."
+        matchMethodWithType t readerParam columnVar

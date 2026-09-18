@@ -372,3 +372,5 @@ GEMINI.md
 .crew/
 .metateam.json
 .vscode/
+
+.idea/

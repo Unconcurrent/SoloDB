@@ -80,7 +80,9 @@ let rewriteDerivedAliasExpr (policy: AliasRewritePolicy) (aliasMap: Map<string, 
                 | None -> node
             | JsonRootExtract(Some src, col) when matchesDerivedAlias policy derivedAlias src ->
                 match Map.tryFind col aliasMap with
-                | Some innerExpr -> innerExpr
+                | Some(Column(innerSrc, innerCol)) -> JsonRootExtract(innerSrc, innerCol)
+                | Some innerExpr ->
+                    FunctionCall("jsonb_extract", [innerExpr; Literal(SqlLiteral.String "$")])
                 | None -> node
             | InSubquery(valueExpr, sel) ->
                 InSubquery(valueExpr, policy.OnSubquerySelect sel)

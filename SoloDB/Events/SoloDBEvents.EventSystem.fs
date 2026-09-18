@@ -24,11 +24,11 @@ type internal EventSystem internal () =
     member val internal UpdatedHandlerMapping = CowByteSpanMap<ResizeArray<UpdatingHandlerSystem>>()
 
     member this.CreateFunctions(connection: SqliteConnection) =
+        // Empty snapshots need no SQLite text-to-bytes conversion; validate arguments first.
         connection.CreateRawFunction("SHOULD_HANDLE_INSERTING", RawScalarFunc1(fun sqliteCtx sqliteCollectionName ->
             if not sqliteCollectionName.IsText then invalidArg (nameof sqliteCollectionName) "The first argument of SHOULD_HANDLE_INSERTING must be a string"
-            let sqliteCollectionNameUTF8 = sqliteCollectionName.GetBlobSpan()
-            let should = if this.InsertingHandlerMapping.ContainsKey sqliteCollectionNameUTF8 then 1 else 0
-            sqliteCtx.SetInt32 should
+            let should = this.InsertingHandlerMapping.Count > 0 && this.InsertingHandlerMapping.ContainsKey(sqliteCollectionName.GetBlobSpan())
+            sqliteCtx.SetInt32(if should then 1 else 0)
         ))
 
         connection.CreateRawFunction("ON_INSERTING_HANDLER", RawScalarFunc2(fun sqliteCtx sqliteCollectionName jsonNew ->
@@ -53,8 +53,8 @@ type internal EventSystem internal () =
 
         connection.CreateRawFunction("SHOULD_HANDLE_DELETING", RawScalarFunc1(fun sqliteCtx sqliteCollectionName ->
             if not sqliteCollectionName.IsText then invalidArg (nameof sqliteCollectionName) "The first argument of SHOULD_HANDLE_DELETING must be a string"
-            let sqliteCollectionNameUTF8 = sqliteCollectionName.GetBlobSpan()
-            sqliteCtx.SetInt32(if this.DeletingHandlerMapping.ContainsKey sqliteCollectionNameUTF8 then 1 else 0)
+            let should = this.DeletingHandlerMapping.Count > 0 && this.DeletingHandlerMapping.ContainsKey(sqliteCollectionName.GetBlobSpan())
+            sqliteCtx.SetInt32(if should then 1 else 0)
         ))
 
         connection.CreateRawFunction("ON_DELETING_HANDLER", RawScalarFunc2(fun sqliteCtx sqliteCollectionName jsonOld ->
@@ -79,8 +79,8 @@ type internal EventSystem internal () =
 
         connection.CreateRawFunction("SHOULD_HANDLE_UPDATING", RawScalarFunc1(fun sqliteCtx sqliteCollectionName ->
             if not sqliteCollectionName.IsText then invalidArg (nameof sqliteCollectionName) "The first argument of SHOULD_HANDLE_UPDATING must be a string"
-            let sqliteCollectionNameUTF8 = sqliteCollectionName.GetBlobSpan()
-            sqliteCtx.SetInt32(if this.UpdatingHandlerMapping.ContainsKey sqliteCollectionNameUTF8 then 1 else 0)
+            let should = this.UpdatingHandlerMapping.Count > 0 && this.UpdatingHandlerMapping.ContainsKey(sqliteCollectionName.GetBlobSpan())
+            sqliteCtx.SetInt32(if should then 1 else 0)
         ))
 
         connection.CreateRawFunction("ON_UPDATING_HANDLER", RawScalarFunc3(fun sqliteCtx sqliteCollectionName jsonOld jsonNew ->
@@ -106,8 +106,8 @@ type internal EventSystem internal () =
 
         connection.CreateRawFunction("SHOULD_HANDLE_INSERTED", RawScalarFunc1(fun sqliteCtx sqliteCollectionName ->
             if not sqliteCollectionName.IsText then invalidArg (nameof sqliteCollectionName) "The first argument of SHOULD_HANDLE_INSERTED must be a string"
-            let sqliteCollectionNameUTF8 = sqliteCollectionName.GetBlobSpan()
-            sqliteCtx.SetInt32(if this.InsertedHandlerMapping.ContainsKey sqliteCollectionNameUTF8 then 1 else 0)
+            let should = this.InsertedHandlerMapping.Count > 0 && this.InsertedHandlerMapping.ContainsKey(sqliteCollectionName.GetBlobSpan())
+            sqliteCtx.SetInt32(if should then 1 else 0)
         ))
 
         connection.CreateRawFunction("ON_INSERTED_HANDLER", RawScalarFunc2(fun sqliteCtx sqliteCollectionName jsonNew ->
@@ -132,8 +132,8 @@ type internal EventSystem internal () =
 
         connection.CreateRawFunction("SHOULD_HANDLE_DELETED", RawScalarFunc1(fun sqliteCtx sqliteCollectionName ->
             if not sqliteCollectionName.IsText then invalidArg (nameof sqliteCollectionName) "The first argument of SHOULD_HANDLE_DELETED must be a string"
-            let sqliteCollectionNameUTF8 = sqliteCollectionName.GetBlobSpan()
-            sqliteCtx.SetInt32(if this.DeletedHandlerMapping.ContainsKey sqliteCollectionNameUTF8 then 1 else 0)
+            let should = this.DeletedHandlerMapping.Count > 0 && this.DeletedHandlerMapping.ContainsKey(sqliteCollectionName.GetBlobSpan())
+            sqliteCtx.SetInt32(if should then 1 else 0)
         ))
 
         connection.CreateRawFunction("ON_DELETED_HANDLER", RawScalarFunc2(fun sqliteCtx sqliteCollectionName jsonOld ->
@@ -158,8 +158,8 @@ type internal EventSystem internal () =
 
         connection.CreateRawFunction("SHOULD_HANDLE_UPDATED", RawScalarFunc1(fun sqliteCtx sqliteCollectionName ->
             if not sqliteCollectionName.IsText then invalidArg (nameof sqliteCollectionName) "The first argument of SHOULD_HANDLE_UPDATED must be a string"
-            let sqliteCollectionNameUTF8 = sqliteCollectionName.GetBlobSpan()
-            sqliteCtx.SetInt32(if this.UpdatedHandlerMapping.ContainsKey sqliteCollectionNameUTF8 then 1 else 0)
+            let should = this.UpdatedHandlerMapping.Count > 0 && this.UpdatedHandlerMapping.ContainsKey(sqliteCollectionName.GetBlobSpan())
+            sqliteCtx.SetInt32(if should then 1 else 0)
         ))
 
         connection.CreateRawFunction("ON_UPDATED_HANDLER", RawScalarFunc3(fun sqliteCtx sqliteCollectionName jsonOld jsonNew ->

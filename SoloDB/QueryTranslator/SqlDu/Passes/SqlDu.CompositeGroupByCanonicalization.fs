@@ -336,39 +336,9 @@ let private rewriteCore (changed: bool ref) (core: SelectCore) : SelectCore =
 /// Post-order rewrite: recurse into children (Source DerivedTable, Joins
 /// DerivedTables, CTEs) first, then apply rewrite at the current core.
 let rec private rewriteSelect (changed: bool ref) (sel: SqlSelect) : SqlSelect =
-    let newBody =
-        match sel.Body with
-        | SingleSelect core ->
-            let coreAfterSource =
-                match core.Source with
-                | Some (DerivedTable(innerSel, alias)) ->
-                    { core with
-                        Source = Some (DerivedTable(rewriteSelect changed innerSel, alias)) }
-                | _ -> core
-            let coreAfterJoins =
-                { coreAfterSource with
-                    Joins =
-                        coreAfterSource.Joins
-                        |> List.map (fun j ->
-                            match j with
-                            | CrossJoin(DerivedTable(jSel, jAlias)) ->
-                                CrossJoin(DerivedTable(rewriteSelect changed jSel, jAlias))
-                            | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
-                                ConditionedJoin(
-                                    kind,
-                                    DerivedTable(rewriteSelect changed jSel, jAlias),
-                                    onExpr)
-                            | CrossJoin _ -> j
-                            | ConditionedJoin _ -> j) }
-            SingleSelect (rewriteCore changed coreAfterJoins)
-        | UnionAllSelect _ as body ->
-            // UnionAll cores are out of scope for v1 (plan E13). Falls through.
-            body
-    let newCtes =
-        sel.Ctes
-        |> List.map (fun cte ->
-            { cte with Query = rewriteSelect changed cte.Query })
-    { Ctes = newCtes; Body = newBody }
+    let recurse = rewriteSelect changed
+    let core = mapDerivedSources recurse >> rewriteCore changed
+    mapSelectParts (mapSingleCore core) recurse sel
 
 /// Transform entry point. Identity on non-SELECT statements (plan E35).
 let transform (stmt: SqlStatement) : struct(SqlStatement * bool) =
@@ -376,7 +346,7 @@ let transform (stmt: SqlStatement) : struct(SqlStatement * bool) =
     | SelectStmt sel ->
         let changed = ref false
         let rewritten = rewriteSelect changed sel
-        struct(SelectStmt rewritten, changed.Value)
+        struct((if obj.ReferenceEquals(sel, rewritten) then stmt else SelectStmt rewritten), changed.Value)
     | InsertStmt _
     | UpdateStmt _
     | DeleteStmt _ ->

@@ -33,7 +33,29 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     let hasRelations =
         typeof<'T>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
         |> Array.exists (fun p -> DBRefTypeHelpers.isAnyRelationRefType p.PropertyType)
-    let scaffold = CollectionScaffold<'T>(connection, connectionString, name, hasRelations)
+    let relationCollectionFactory (conn: SqliteConnection) =
+        let rec onActiveConnection source =
+            match source with
+            | Guarded (guard, inner) -> Guarded(guard, onActiveConnection inner)
+            | _ -> Transactional conn
+        let targetConnection = onActiveConnection connection
+        // One target collection per type and table for this transaction-scoped factory.
+        let collections = Dictionary<struct (Type * string), obj>()
+        { new RelationsTypes.IRelationCollectionFactory with
+            member _.CreateCollection<'U>(collectionName: string) =
+                let key = struct (typeof<'U>, collectionName)
+                System.Threading.Monitor.Enter collections
+                try
+                    let mutable existing = null
+                    if collections.TryGetValue(key, &existing) then
+                        existing :?> ISoloDBCollection<'U>
+                    else
+                        let created = Collection<'U>(targetConnection, collectionName, connectionString, parentData) :> ISoloDBCollection<'U>
+                        collections.Add(key, created)
+                        created
+                finally
+                    System.Threading.Monitor.Exit collections }
+    let scaffold = CollectionScaffold<'T>(connection, connectionString, name, hasRelations, relationCollectionFactory)
 
     member val private SoloDBQueryable = SoloDBCollectionQueryable<'T, 'T>(SoloDBCollectionQueryProvider(this, parentData), Expression.Constant(RootQueryable<'T>(this))) :> IOrderedQueryable<'T>
     member val private ConnectionString = connectionString

@@ -48,16 +48,25 @@ type internal CustomIdRunner =
 
     static let runOpenMethod =
         typeof<CustomIdRunner>.GetMethods(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Static)
-        |> Array.tryFind (fun m -> m.Name = "RunIfEmpty" && m.IsGenericMethodDefinition)
+        |> Array.tryFind (fun m -> m.Name = "RunCascadeIfEmpty" && m.IsGenericMethodDefinition)
         |> Option.defaultWith (fun () ->
-            raise (System.InvalidOperationException("CustomIdRunner.RunIfEmpty<'T> not found via reflection — internal SoloDB defect.")))
+            raise (System.InvalidOperationException("CustomIdRunner.RunCascadeIfEmpty<'T> not found via reflection — internal SoloDB defect.")))
+
+    static member private RunCascadeIfEmpty<'T when 'T :> obj> (item: 'T, collectionName: string, tx: RelationsTypes.RelationTxContext) =
+        match CustomTypeId<'T>.Get(), tx.CollectionFactory with
+        | None, _ -> ()
+        | Some _, Some factory ->
+            let collection = factory.CreateCollection<'T>(collectionName)
+            CustomIdRunner.RunIfEmpty(item, collection)
+        | Some _, None ->
+            raise (InvalidOperationException("A cascade ID generator requires a transactional collection factory."))
 
     /// Reflection trampoline for cascade context: boxed entity, runtime Type. Calls RunIfEmpty
     /// via MakeGenericMethod (cached per Type).
-    static member RunBoxedIfEmpty (targetType: System.Type, item: obj) : unit =
+    static member RunBoxedIfEmpty (targetType: System.Type, item: obj, collectionName: string, tx: RelationsTypes.RelationTxContext) : unit =
         let mi = runMiCache.GetOrAdd(targetType, fun (t: System.Type) -> runOpenMethod.MakeGenericMethod(t))
         try
-            mi.Invoke(null, [| item; null |]) |> ignore
+            mi.Invoke(null, [| item; collectionName; tx |]) |> ignore
         with
         | :? System.Reflection.TargetInvocationException as tie when not (isNull tie.InnerException) ->
             raise tie.InnerException

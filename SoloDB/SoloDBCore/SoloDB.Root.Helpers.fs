@@ -40,6 +40,7 @@ module internal SoloDBRootOps =
                             OwnerTable = name
                             OwnerType = typeof<'T>
                             InTransaction = true
+                            CollectionFactory = None
                         }
                         RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
                 )
@@ -58,6 +59,7 @@ module internal SoloDBRootOps =
                             OwnerTable = name
                             OwnerType = typeof<'T>
                             InTransaction = true
+                            CollectionFactory = None
                         }
                         RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
                     )

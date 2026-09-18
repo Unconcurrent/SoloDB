@@ -16,7 +16,7 @@ type internal EmitContext() =
     /// Allocate the next parameter name and register the value.
     /// Returns Emitted with placeholder and single param.
     member _.AllocParam(value: obj) : Emitted =
-        let name = sprintf "@p%d" paramCounter
+        let name = "@p" + string paramCounter
         paramCounter <- paramCounter + 1
         let ps = ResizeArray<string * obj>(1)
         ps.Add(name, value)
@@ -24,7 +24,7 @@ type internal EmitContext() =
 
     /// Quote an identifier using SQLite double-quote convention.
     member _.QuoteIdent(name: string) : string =
-        sprintf "\"%s\"" (name.Replace("\"", "\"\""))
+        "\"" + name.Replace("\"", "\"\"") + "\""
 
     /// Format a JSON path for use in json_extract/jsonb_extract.
     /// JsonPath is a list of path segments; result is '$.<seg1>.<seg2>...'
@@ -36,7 +36,7 @@ type internal EmitContext() =
             let path = System.String.Join(".", segs)
             let path = path.Replace(".[", "[")
             let escaped = path.Replace("'", "''").Replace("\0", "")
-            sprintf "'$.%s'" escaped
+            "'$." + escaped + "'"
 
     /// Current parameter count (for determinism verification).
     member _.ParamCount = paramCounter

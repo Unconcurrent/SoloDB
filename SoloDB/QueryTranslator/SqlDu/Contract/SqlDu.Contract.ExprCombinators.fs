@@ -2,334 +2,287 @@ namespace SoloDatabase.SqlModel
 
 [<AutoOpen>]
 module internal SqlExprCombinators =
-  type SqlExpr with
-    static member fold (folder: 'State -> SqlExpr -> 'State) (state: 'State) (expr: SqlExpr) : 'State =
-        let rec loop (acc: 'State) (node: SqlExpr) : 'State =
-            let acc = folder acc node
-            match node with
-            | Column _ -> acc
-            | Literal _ -> acc
-            | Parameter _ -> acc
-            | JsonExtractExpr _ -> acc
-            | JsonRootExtract _ -> acc
-            | JsonSetExpr(target, assignments) ->
-                let acc = loop acc target
-                assignments |> List.fold (fun s (_, value) -> loop s value) acc
-            | JsonArrayExpr(elements) ->
-                elements |> List.fold loop acc
-            | JsonObjectExpr(properties) ->
-                properties |> List.fold (fun s (_, value) -> loop s value) acc
-            | FunctionCall(_, arguments) ->
-                arguments |> List.fold loop acc
-            | AggregateCall(_, argument, _, separator) ->
-                let acc =
-                    match argument with
-                    | Some arg -> loop acc arg
-                    | None -> acc
-                match separator with
-                | Some sep -> loop acc sep
-                | None -> acc
-            | WindowCall(spec) ->
-                let acc = spec.Arguments |> List.fold loop acc
-                let acc = spec.PartitionBy |> List.fold loop acc
-                spec.OrderBy |> List.fold (fun s (orderExpr, _) -> loop s orderExpr) acc
-            | Unary(_, inner) ->
-                loop acc inner
-            | Binary(left, _, right) ->
-                let acc = loop acc left
-                loop acc right
-            | Between(valueExpr, lower, upper) ->
-                let acc = loop acc valueExpr
-                let acc = loop acc lower
-                loop acc upper
-            | InList(valueExpr, head, tail) ->
-                let acc = loop acc valueExpr
-                let acc = loop acc head
-                tail |> List.fold loop acc
-            | InSubquery(valueExpr, _) ->
-                loop acc valueExpr
-            | Cast(inner, _) ->
-                loop acc inner
-            | Coalesce(head, tail) ->
-                let acc = loop acc head
-                tail |> List.fold loop acc
-            | Exists _ ->
-                acc
-            | ScalarSubquery _ ->
-                acc
-            | CaseExpr(firstBranch, restBranches, elseExpr) ->
-                let acc =
-                    (firstBranch :: restBranches)
-                    |> List.fold (fun s (condExpr, resultExpr) ->
-                        let s = loop s condExpr
-                        loop s resultExpr) acc
-                match elseExpr with
-                | Some elseNode -> loop acc elseNode
-                | None -> acc
-        loop state expr
-    static member map (mapper: SqlExpr -> SqlExpr) (expr: SqlExpr) : SqlExpr =
-        let rec loop (node: SqlExpr) : SqlExpr =
-            let mappedNode =
+    let private same left right = obj.ReferenceEquals(left, right)
+
+    // Walk unchanged lists without allocating; map each element exactly once.
+    let mapList (mapper: 'T -> 'T) (values: 'T list) =
+        let mutable remaining = values
+        let mutable prefixLength = 0
+        let mutable changed: ResizeArray<_> = null
+        while not remaining.IsEmpty do
+            let original = remaining.Head
+            let mapped = mapper original
+            if isNull changed && not (same original mapped) then
+                changed <- ResizeArray()
+                let mutable prefix = values
+                for _ in 1 .. prefixLength do
+                    changed.Add prefix.Head
+                    prefix <- prefix.Tail
+            if not (isNull changed) then changed.Add mapped
+            prefixLength <- prefixLength + 1
+            remaining <- remaining.Tail
+        if isNull changed then values else List.ofSeq changed
+
+    let mapOption mapper value =
+        match value with
+        | None -> value
+        | Some original ->
+            let mapped = mapper original
+            if same original mapped then value else Some mapped
+
+    /// Map derived source queries only; expression scopes belong to the caller.
+    let mapDerivedSources (mapQuery: SqlSelect -> SqlSelect) (core: SelectCore) =
+        let source (original: TableSource) =
+            match original with
+            | DerivedTable(query, alias) ->
+                let mapped = mapQuery query
+                if same query mapped then original else DerivedTable(mapped, alias)
+            | _ -> original
+        let sources = mapOption source core.Source
+        let joins = core.Joins |> mapList (fun original ->
+            match original with
+            | CrossJoin table ->
+                let mapped = source table
+                if same table mapped then original else CrossJoin mapped
+            | ConditionedJoin(kind, table, predicate) ->
+                let mapped = source table
+                if same table mapped then original else ConditionedJoin(kind, mapped, predicate))
+        if same core.Source sources && same core.Joins joins then core
+        else { core with Source = sources; Joins = joins }
+
+    /// Keep UNION arms outside a single-core rewrite unless its caller opts in.
+    let mapSingleCore mapper body =
+        match body with
+        | SingleSelect core ->
+            let mapped = mapper core
+            if same core mapped then body else SingleSelect mapped
+        | UnionAllSelect _ -> body
+
+    /// Map each core without merging or redistributing UNION arms.
+    let mapCores mapper body =
+        match body with
+        | SingleSelect _ -> mapSingleCore mapper body
+        | UnionAllSelect(head, tail) ->
+            let mappedHead = mapper head
+            let mappedTail = mapList mapper tail
+            if same head mappedHead && same tail mappedTail then body
+            else UnionAllSelect(mappedHead, mappedTail)
+
+    /// Preserve body-before-CTE evaluation and unchanged query identity.
+    let mapSelectParts mapBody mapQuery (query: SqlSelect) =
+        let body = mapBody query.Body
+        let ctes = query.Ctes |> mapList (fun cte ->
+            let mapped = mapQuery cte.Query
+            if same cte.Query mapped then cte else { cte with Query = mapped })
+        if same query.Body body && same query.Ctes ctes then query
+        else { Ctes = ctes; Body = body }
+
+    /// Maps immediate children; each caller owns recursion and subquery scope.
+    let mapChildren (map: SqlExpr -> SqlExpr) (mapSelect: SqlSelect -> SqlSelect) (node: SqlExpr) =
+        let valuePair ((key, value) as pair) =
+            let mapped = map value
+            if same value mapped then pair else key, mapped
+        match node with
+        | Column _ | Literal _ | Parameter _ | JsonExtractExpr _ | JsonRootExtract _ -> node
+        | JsonSetExpr(target, assignments) ->
+            let mappedTarget = map target
+            let mappedAssignments = mapList valuePair assignments
+            if same target mappedTarget && same assignments mappedAssignments then node
+            else JsonSetExpr(mappedTarget, mappedAssignments)
+        | JsonArrayExpr elements ->
+            let mapped = mapList map elements
+            if same elements mapped then node else JsonArrayExpr mapped
+        | JsonObjectExpr properties ->
+            let mapped = mapList valuePair properties
+            if same properties mapped then node else JsonObjectExpr mapped
+        | FunctionCall(name, arguments) ->
+            let mapped = mapList map arguments
+            if same arguments mapped then node else FunctionCall(name, mapped)
+        | AggregateCall(kind, argument, distinct, separator) ->
+            let mappedArgument = mapOption map argument
+            let mappedSeparator = mapOption map separator
+            if same argument mappedArgument && same separator mappedSeparator then node
+            else AggregateCall(kind, mappedArgument, distinct, mappedSeparator)
+        | WindowCall spec ->
+            let arguments = mapList map spec.Arguments
+            let partitions = mapList map spec.PartitionBy
+            let ordering = mapList (fun ((expression, direction) as original) ->
+                let mapped = map expression
+                if same expression mapped then original else mapped, direction) spec.OrderBy
+            if same spec.Arguments arguments && same spec.PartitionBy partitions && same spec.OrderBy ordering then node
+            else WindowCall { spec with Arguments = arguments; PartitionBy = partitions; OrderBy = ordering }
+        | Unary(op, inner) ->
+            let mapped = map inner
+            if same inner mapped then node else Unary(op, mapped)
+        | Binary(left, op, right) ->
+            let mappedLeft = map left
+            let mappedRight = map right
+            if same left mappedLeft && same right mappedRight then node else Binary(mappedLeft, op, mappedRight)
+        | Between(value, lower, upper) ->
+            let mappedValue = map value
+            let mappedLower = map lower
+            let mappedUpper = map upper
+            if same value mappedValue && same lower mappedLower && same upper mappedUpper then node
+            else Between(mappedValue, mappedLower, mappedUpper)
+        | InList(value, head, tail) ->
+            let mappedValue = map value
+            let mappedHead = map head
+            let mappedTail = mapList map tail
+            if same value mappedValue && same head mappedHead && same tail mappedTail then node
+            else InList(mappedValue, mappedHead, mappedTail)
+        | InSubquery(value, query) ->
+            let mappedValue = map value
+            let mappedQuery = mapSelect query
+            if same value mappedValue && same query mappedQuery then node else InSubquery(mappedValue, mappedQuery)
+        | Cast(inner, sqlType) ->
+            let mapped = map inner
+            if same inner mapped then node else Cast(mapped, sqlType)
+        | Coalesce(head, tail) ->
+            let mappedHead = map head
+            let mappedTail = mapList map tail
+            if same head mappedHead && same tail mappedTail then node else Coalesce(mappedHead, mappedTail)
+        | Exists query ->
+            let mapped = mapSelect query
+            if same query mapped then node else Exists mapped
+        | ScalarSubquery query ->
+            let mapped = mapSelect query
+            if same query mapped then node else ScalarSubquery mapped
+        | CaseExpr(first, rest, otherwise) ->
+            let branch ((condition, value) as pair) =
+                let mappedCondition = map condition
+                let mappedValue = map value
+                if same condition mappedCondition && same value mappedValue then pair
+                else mappedCondition, mappedValue
+            let mappedFirst = branch first
+            let mappedRest = mapList branch rest
+            let mappedOtherwise = mapOption map otherwise
+            if same first mappedFirst && same rest mappedRest && same otherwise mappedOtherwise then node
+            else CaseExpr(mappedFirst, mappedRest, mappedOtherwise)
+
+    type SqlExpr with
+        static member fold (folder: 'State -> SqlExpr -> 'State) (state: 'State) (expr: SqlExpr) : 'State =
+            let rec loop (acc: 'State) (node: SqlExpr) : 'State =
+                let acc = folder acc node
                 match node with
-                | Column _ -> node
-                | Literal _ -> node
-                | Parameter _ -> node
-                | JsonExtractExpr _ -> node
-                | JsonRootExtract _ -> node
+                | Column _ -> acc
+                | Literal _ -> acc
+                | Parameter _ -> acc
+                | JsonExtractExpr _ -> acc
+                | JsonRootExtract _ -> acc
                 | JsonSetExpr(target, assignments) ->
-                    JsonSetExpr(
-                        loop target,
-                        assignments |> List.map (fun (path, value) -> path, loop value))
+                    let acc = loop acc target
+                    assignments |> List.fold (fun s (_, value) -> loop s value) acc
                 | JsonArrayExpr(elements) ->
-                    JsonArrayExpr(elements |> List.map loop)
+                    elements |> List.fold loop acc
                 | JsonObjectExpr(properties) ->
-                    JsonObjectExpr(properties |> List.map (fun (key, value) -> key, loop value))
-                | FunctionCall(name, arguments) ->
-                    FunctionCall(name, arguments |> List.map loop)
-                | AggregateCall(kind, argument, distinct, separator) ->
-                    AggregateCall(
-                        kind,
-                        argument |> Option.map loop,
-                        distinct,
-                        separator |> Option.map loop)
-                | WindowCall(spec) ->
-                    WindowCall({
-                        spec with
-                            Arguments = spec.Arguments |> List.map loop
-                            PartitionBy = spec.PartitionBy |> List.map loop
-                            OrderBy = spec.OrderBy |> List.map (fun (orderExpr, dir) -> loop orderExpr, dir)
-                    })
-                | Unary(op, inner) ->
-                    Unary(op, loop inner)
-                | Binary(left, op, right) ->
-                    Binary(loop left, op, loop right)
-                | Between(valueExpr, lower, upper) ->
-                    Between(loop valueExpr, loop lower, loop upper)
-                | InList(valueExpr, head, tail) ->
-                    InList(loop valueExpr, loop head, tail |> List.map loop)
-                | InSubquery(valueExpr, query) ->
-                    InSubquery(loop valueExpr, query)
-                | Cast(inner, sqlType) ->
-                    Cast(loop inner, sqlType)
-                | Coalesce(head, tail) ->
-                    Coalesce(loop head, tail |> List.map loop)
-                | Exists query ->
-                    Exists query
-                | ScalarSubquery query ->
-                    ScalarSubquery query
-                | CaseExpr(firstBranch, restBranches, elseExpr) ->
-                    CaseExpr(
-                        let mapBranch (condExpr, resultExpr) = loop condExpr, loop resultExpr
-                        mapBranch firstBranch,
-                        restBranches |> List.map mapBranch,
-                        elseExpr |> Option.map loop)
-            mapper mappedNode
-        loop expr
-    static member exists (predicate: SqlExpr -> bool) (expr: SqlExpr) : bool =
-        let rec loop (node: SqlExpr) : bool =
-            if predicate node then true
-            else
-                match node with
-                | Column _ -> false
-                | Literal _ -> false
-                | Parameter _ -> false
-                | JsonExtractExpr _ -> false
-                | JsonRootExtract _ -> false
-                | JsonSetExpr(target, assignments) ->
-                    loop target || (assignments |> List.exists (fun (_, value) -> loop value))
-                | JsonArrayExpr(elements) ->
-                    elements |> List.exists loop
-                | JsonObjectExpr(properties) ->
-                    properties |> List.exists (fun (_, value) -> loop value)
+                    properties |> List.fold (fun s (_, value) -> loop s value) acc
                 | FunctionCall(_, arguments) ->
-                    arguments |> List.exists loop
+                    arguments |> List.fold loop acc
                 | AggregateCall(_, argument, _, separator) ->
-                    (argument |> Option.map loop |> Option.defaultValue false)
-                    || (separator |> Option.map loop |> Option.defaultValue false)
+                    let acc =
+                        match argument with
+                        | Some arg -> loop acc arg
+                        | None -> acc
+                    match separator with
+                    | Some sep -> loop acc sep
+                    | None -> acc
                 | WindowCall(spec) ->
-                    (spec.Arguments |> List.exists loop)
-                    || (spec.PartitionBy |> List.exists loop)
-                    || (spec.OrderBy |> List.exists (fun (orderExpr, _) -> loop orderExpr))
+                    let acc = spec.Arguments |> List.fold loop acc
+                    let acc = spec.PartitionBy |> List.fold loop acc
+                    spec.OrderBy |> List.fold (fun s (orderExpr, _) -> loop s orderExpr) acc
                 | Unary(_, inner) ->
-                    loop inner
+                    loop acc inner
                 | Binary(left, _, right) ->
-                    loop left || loop right
+                    let acc = loop acc left
+                    loop acc right
                 | Between(valueExpr, lower, upper) ->
-                    loop valueExpr || loop lower || loop upper
+                    let acc = loop acc valueExpr
+                    let acc = loop acc lower
+                    loop acc upper
                 | InList(valueExpr, head, tail) ->
-                    loop valueExpr || loop head || (tail |> List.exists loop)
+                    let acc = loop acc valueExpr
+                    let acc = loop acc head
+                    tail |> List.fold loop acc
                 | InSubquery(valueExpr, _) ->
-                    loop valueExpr
+                    loop acc valueExpr
                 | Cast(inner, _) ->
-                    loop inner
+                    loop acc inner
                 | Coalesce(head, tail) ->
-                    loop head || (tail |> List.exists loop)
+                    let acc = loop acc head
+                    tail |> List.fold loop acc
                 | Exists _ ->
-                    false
+                    acc
                 | ScalarSubquery _ ->
-                    false
+                    acc
                 | CaseExpr(firstBranch, restBranches, elseExpr) ->
-                    ((firstBranch :: restBranches) |> List.exists (fun (condExpr, resultExpr) -> loop condExpr || loop resultExpr))
-                    || (elseExpr |> Option.map loop |> Option.defaultValue false)
-        loop expr
-    static member tryMap (mapper: SqlExpr -> SqlExpr option) (expr: SqlExpr) : SqlExpr option =
-        let rec loop (node: SqlExpr) : SqlExpr option =
-            let rebuiltNode, childChanged =
-                match node with
-                | Column _ -> node, false
-                | Literal _ -> node, false
-                | Parameter _ -> node, false
-                | JsonExtractExpr _ -> node, false
-                | JsonRootExtract _ -> node, false
-                | JsonSetExpr(target, assignments) ->
-                    let newTargetOpt = loop target
-                    let newTarget = newTargetOpt |> Option.defaultValue target
-                    let mutable changed = newTargetOpt.IsSome
-                    let newAssignments =
-                        assignments
-                        |> List.map (fun (path, value) ->
-                            let rewritten = loop value
-                            if rewritten.IsSome then changed <- true
-                            path, (rewritten |> Option.defaultValue value))
-                    JsonSetExpr(newTarget, newAssignments), changed
-                | JsonArrayExpr(elements) ->
-                    let mutable changed = false
-                    let newElements =
-                        elements
-                        |> List.map (fun element ->
-                            let rewritten = loop element
-                            if rewritten.IsSome then changed <- true
-                            rewritten |> Option.defaultValue element)
-                    JsonArrayExpr(newElements), changed
-                | JsonObjectExpr(properties) ->
-                    let mutable changed = false
-                    let newProperties =
-                        properties
-                        |> List.map (fun (key, value) ->
-                            let rewritten = loop value
-                            if rewritten.IsSome then changed <- true
-                            key, (rewritten |> Option.defaultValue value))
-                    JsonObjectExpr(newProperties), changed
-                | FunctionCall(name, arguments) ->
-                    let mutable changed = false
-                    let newArgs =
-                        arguments
-                        |> List.map (fun argument ->
-                            let rewritten = loop argument
-                            if rewritten.IsSome then changed <- true
-                            rewritten |> Option.defaultValue argument)
-                    FunctionCall(name, newArgs), changed
-                | AggregateCall(kind, argument, distinct, separator) ->
-                    let newArgument =
-                        argument |> Option.bind loop
-                    let newSeparator =
-                        separator |> Option.bind loop
-                    let changed = newArgument.IsSome || newSeparator.IsSome
-                    let argumentValue =
-                        match newArgument, argument with
-                        | Some arg, _ -> Some arg
-                        | None, original -> original
-                    let separatorValue =
-                        match newSeparator, separator with
-                        | Some sep, _ -> Some sep
-                        | None, original -> original
-                    AggregateCall(
-                        kind,
-                        argumentValue,
-                        distinct,
-                        separatorValue), changed
-                | WindowCall(spec) ->
-                    let mutable changed = false
-                    let newArguments =
-                        spec.Arguments |> List.map (fun arg ->
-                            let rewritten = loop arg
-                            if rewritten.IsSome then changed <- true
-                            rewritten |> Option.defaultValue arg)
-                    let newPartitionBy =
-                        spec.PartitionBy |> List.map (fun part ->
-                            let rewritten = loop part
-                            if rewritten.IsSome then changed <- true
-                            rewritten |> Option.defaultValue part)
-                    let newOrderBy =
-                        spec.OrderBy |> List.map (fun (orderExpr, dir) ->
-                            let rewritten = loop orderExpr
-                            if rewritten.IsSome then changed <- true
-                            (rewritten |> Option.defaultValue orderExpr), dir)
-                    WindowCall({
-                        spec with
-                            Arguments = newArguments
-                            PartitionBy = newPartitionBy
-                            OrderBy = newOrderBy
-                    }), changed
-                | Unary(op, inner) ->
-                    let innerOpt = loop inner
-                    Unary(op, innerOpt |> Option.defaultValue inner), innerOpt.IsSome
-                | Binary(left, op, right) ->
-                    let leftOpt = loop left
-                    let rightOpt = loop right
-                    Binary(leftOpt |> Option.defaultValue left, op, rightOpt |> Option.defaultValue right), (leftOpt.IsSome || rightOpt.IsSome)
-                | Between(valueExpr, lower, upper) ->
-                    let valueOpt = loop valueExpr
-                    let lowerOpt = loop lower
-                    let upperOpt = loop upper
-                    Between(
-                        valueOpt |> Option.defaultValue valueExpr,
-                        lowerOpt |> Option.defaultValue lower,
-                        upperOpt |> Option.defaultValue upper), (valueOpt.IsSome || lowerOpt.IsSome || upperOpt.IsSome)
-                | InList(valueExpr, head, tail) ->
-                    let valueOpt = loop valueExpr
-                    let headOpt = loop head
-                    let mutable changed = valueOpt.IsSome || headOpt.IsSome
-                    let newTail =
-                        tail |> List.map (fun value ->
-                            let rewritten = loop value
-                            if rewritten.IsSome then changed <- true
-                            rewritten |> Option.defaultValue value)
-                    InList(
-                        valueOpt |> Option.defaultValue valueExpr,
-                        headOpt |> Option.defaultValue head,
-                        newTail), changed
-                | InSubquery(valueExpr, query) ->
-                    let valueOpt = loop valueExpr
-                    InSubquery(valueOpt |> Option.defaultValue valueExpr, query), valueOpt.IsSome
-                | Cast(inner, sqlType) ->
-                    let innerOpt = loop inner
-                    Cast(innerOpt |> Option.defaultValue inner, sqlType), innerOpt.IsSome
-                | Coalesce(head, tail) ->
-                    let headOpt = loop head
-                    let mutable changed = headOpt.IsSome
-                    let newTail =
-                        tail |> List.map (fun value ->
-                            let rewritten = loop value
-                            if rewritten.IsSome then changed <- true
-                            rewritten |> Option.defaultValue value)
-                    Coalesce(headOpt |> Option.defaultValue head, newTail), changed
-                | Exists query ->
-                    Exists query, false
-                | ScalarSubquery query ->
-                    ScalarSubquery query, false
-                | CaseExpr(firstBranch, restBranches, elseExpr) ->
-                    let rewriteBranch (condExpr, resultExpr) =
-                            let condOpt = loop condExpr
-                            let resultOpt = loop resultExpr
-                            let changed = condOpt.IsSome || resultOpt.IsSome
-                            (condOpt |> Option.defaultValue condExpr), (resultOpt |> Option.defaultValue resultExpr), changed
-                    let firstCond, firstResult, firstChanged = rewriteBranch firstBranch
-                    let mutable changed = firstChanged
-                    let newRest =
-                        restBranches |> List.map (fun branch ->
-                            let condExpr, resultExpr, branchChanged = rewriteBranch branch
-                            if branchChanged then changed <- true
-                            (condExpr, resultExpr))
-                    let newElseOpt =
-                        elseExpr |> Option.bind loop
-                    if newElseOpt.IsSome then changed <- true
-                    CaseExpr(
-                        (firstCond, firstResult),
-                        newRest,
-                        match newElseOpt, elseExpr with | Some e, _ -> Some e | None, original -> original), changed
-            match mapper rebuiltNode with
-            | Some rewritten -> Some rewritten
-            | None when childChanged -> Some rebuiltNode
-            | None -> None
-        loop expr
+                    let acc =
+                        (firstBranch :: restBranches)
+                        |> List.fold (fun s (condExpr, resultExpr) ->
+                            let s = loop s condExpr
+                            loop s resultExpr) acc
+                    match elseExpr with
+                    | Some elseNode -> loop acc elseNode
+                    | None -> acc
+            loop state expr
+        static member map (mapper: SqlExpr -> SqlExpr) (expr: SqlExpr) : SqlExpr =
+            let rec loop node = mapper (mapChildren loop id node)
+            loop expr
+        static member exists (predicate: SqlExpr -> bool) (expr: SqlExpr) : bool =
+            let rec loop (node: SqlExpr) : bool =
+                if predicate node then true
+                else
+                    match node with
+                    | Column _ -> false
+                    | Literal _ -> false
+                    | Parameter _ -> false
+                    | JsonExtractExpr _ -> false
+                    | JsonRootExtract _ -> false
+                    | JsonSetExpr(target, assignments) ->
+                        loop target || (assignments |> List.exists (fun (_, value) -> loop value))
+                    | JsonArrayExpr(elements) ->
+                        elements |> List.exists loop
+                    | JsonObjectExpr(properties) ->
+                        properties |> List.exists (fun (_, value) -> loop value)
+                    | FunctionCall(_, arguments) ->
+                        arguments |> List.exists loop
+                    | AggregateCall(_, argument, _, separator) ->
+                        (argument |> Option.map loop |> Option.defaultValue false)
+                        || (separator |> Option.map loop |> Option.defaultValue false)
+                    | WindowCall(spec) ->
+                        (spec.Arguments |> List.exists loop)
+                        || (spec.PartitionBy |> List.exists loop)
+                        || (spec.OrderBy |> List.exists (fun (orderExpr, _) -> loop orderExpr))
+                    | Unary(_, inner) ->
+                        loop inner
+                    | Binary(left, _, right) ->
+                        loop left || loop right
+                    | Between(valueExpr, lower, upper) ->
+                        loop valueExpr || loop lower || loop upper
+                    | InList(valueExpr, head, tail) ->
+                        loop valueExpr || loop head || (tail |> List.exists loop)
+                    | InSubquery(valueExpr, _) ->
+                        loop valueExpr
+                    | Cast(inner, _) ->
+                        loop inner
+                    | Coalesce(head, tail) ->
+                        loop head || (tail |> List.exists loop)
+                    | Exists _ ->
+                        false
+                    | ScalarSubquery _ ->
+                        false
+                    | CaseExpr(firstBranch, restBranches, elseExpr) ->
+                        ((firstBranch :: restBranches) |> List.exists (fun (condExpr, resultExpr) -> loop condExpr || loop resultExpr))
+                        || (elseExpr |> Option.map loop |> Option.defaultValue false)
+            loop expr
+        static member tryMap (mapper: SqlExpr -> SqlExpr option) (expr: SqlExpr) : SqlExpr option =
+            let mutable changed = false
+            let rec loop node =
+                let mapped = mapChildren loop id node
+                match mapper mapped with
+                | Some replacement ->
+                    // Some is an explicit rewrite signal, even for the same object.
+                    changed <- true
+                    replacement
+                | None -> mapped
+            let result = loop expr
+            if changed then Some result else None

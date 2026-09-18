@@ -157,24 +157,6 @@ module FileStorageCore =
         if result <> 1 then failwithf "updateLen failed."
 
     /// <summary>
-    /// Reduces the length of a file and deletes chunks beyond the new length.
-    /// </summary>
-    /// <remarks>
-    /// Requires an active transaction at callsite to keep DELETE + UPDATE atomic.
-    /// </remarks>
-    let internal downsetFileLength (db: SqliteConnection) (fileId: int64) (newFileLength: int64) =
-        let lastChunkNumberKeep = ((float(newFileLength) / float(chunkSize)) |> Math.Ceiling |> int64) - 1L
-
-        let _resultDelete = db.Execute(@"DELETE FROM SoloDBFileChunk WHERE FileId = @FileId AND Number > @LastChunkNumber",
-                       {| FileId = fileId; LastChunkNumber = lastChunkNumberKeep |})
-
-        let _resultUpdate = db.Execute(@"UPDATE SoloDBFileHeader
-                        SET Length = @NewFileLength
-                        WHERE Id = @FileId",
-                       {| FileId = fileId; NewFileLength = newFileLength |})
-        ()
-
-    /// <summary>
     /// Deletes a file from the database based on its header information.
     /// </summary>
     let internal deleteFileById (db: SqliteConnection) (fileId: int64) =
@@ -192,9 +174,7 @@ module FileStorageCore =
         db.Execute(@"DELETE FROM SoloDBDirectoryHeader WHERE Id = @DirId", {| DirId = dirId |}) |> ignore
 
     let internal deleteDirectory (db: SqliteConnection) (dir: SoloDBDirectoryHeader) =
-        let _result = db.Execute(@"DELETE FROM SoloDBDirectoryHeader WHERE Id = @DirId",
-                        {| DirId = dir.Id; |})
-        ()
+        deleteDirectoryById db dir.Id
 
     /// <summary>
     /// Represents an entry in the file system for recursive listing operations.

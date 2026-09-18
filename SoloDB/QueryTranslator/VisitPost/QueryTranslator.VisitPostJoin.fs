@@ -41,17 +41,17 @@ module internal QueryTranslatorVisitPostJoin =
             0
 
     /// Given a MemberExpression for a DBRef property (e.g., o.Customer or o.Author.Value.Publisher),
-    /// resolve the source prefix and property name for JSON extraction.
-    let rec internal resolveDBRefPropertyLocation (qb: QueryBuilder) (dbrefPropExpr: MemberExpression) : struct(string * string) =
+    /// resolve the source alias and property name for JSON extraction.
+    let rec internal resolveDBRefPropertyLocation (qb: QueryBuilder) (dbrefPropExpr: MemberExpression) : struct(string option * string) =
         match dbrefPropExpr.Expression with
         | :? ParameterExpression ->
-            struct(qb.TableNameDot, dbrefPropExpr.Member.Name)
+            struct(qb.SourceAlias, dbrefPropExpr.Member.Name)
         | :? MemberExpression as parentMe when isDBRefValueBoundary parentMe ->
             let parentAlias = ensureDBRefJoin qb parentMe
-            struct(parentAlias + ".", dbrefPropExpr.Member.Name)
+            struct(Some parentAlias, dbrefPropExpr.Member.Name)
         | _ ->
             let fullPath = computePathKey dbrefPropExpr
-            struct(qb.TableNameDot, fullPath)
+            struct(qb.SourceAlias, fullPath)
 
     and internal resolveDBRefOwnerCollectionAndProperty (qb: QueryBuilder) (dbrefPropExpr: MemberExpression) : struct(string * string) =
         match dbrefPropExpr.Expression with
@@ -99,10 +99,10 @@ module internal QueryTranslatorVisitPostJoin =
         | None ->
             let alias = ctx.NextAlias()
 
-            let struct(sourcePrefix, propName) =
+            let struct(sourceAlias, propName) =
                 match dbrefExpr with
                 | :? MemberExpression as me -> resolveDBRefPropertyLocation qb me
-                | _ -> struct(qb.TableNameDot, computePathKey dbrefExpr)
+                | _ -> struct(qb.SourceAlias, computePathKey dbrefExpr)
 
             let struct(ownerCollection, relationPropertyName) =
                 match dbrefExpr with
@@ -111,9 +111,6 @@ module internal QueryTranslatorVisitPostJoin =
 
             let targetTable = resolveTargetCollectionForRelation ctx ownerCollection relationPropertyName targetType
 
-            let sourceAlias =
-                if String.IsNullOrEmpty sourcePrefix then None
-                else Some(sourcePrefix.TrimEnd('.'))
             ctx.Joins.Add({
                 TargetAlias = alias
                 TargetTable = targetTable

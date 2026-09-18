@@ -18,6 +18,126 @@ open SoloDatabase.QueryableGroupByAliases
 /// Internal module containing the TypeMapper and query execution helpers for SQLiteTools.
 /// </summary>
 module internal SQLiteToolsMapper =
+    let private tupleBody (t: Type) (elementTypes: Type array) (readerParam: ParameterExpression) (startIndexParam: ParameterExpression) =
+        let arity = elementTypes.Length
+        let elementExprs =
+            elementTypes
+            |> Array.mapi (fun i elemType ->
+                let ordinalExpr = Expression.Add(startIndexParam, Expression.Constant(i)) :> Expression
+                let readExpr = matchMethodWithType elemType readerParam ordinalExpr
+                let isDbNullExpr =
+                    Expression.Call(
+                        readerParam,
+                        typeof<IDataRecord>.GetMethod("IsDBNull"),
+                        [| ordinalExpr |]
+                    )
+                if not (isNull (Nullable.GetUnderlyingType elemType)) then
+                    readExpr
+                elif elemType.IsValueType then
+                    let exCtor = typeof<InvalidOperationException>.GetConstructor([| typeof<string> |])
+                    let msg = $"DB null in non-nullable tuple element %i{i} of type '%s{elemType.Name}'."
+                    let throwExpr = Expression.Throw(Expression.New(exCtor, Expression.Constant(msg)), elemType)
+                    Expression.Condition(isDbNullExpr, throwExpr, readExpr) :> Expression
+                else
+                    let nullExpr =
+                        if elemType.IsValueType then Expression.Default(elemType) :> Expression
+                        else Expression.Constant(null, elemType) :> Expression
+                    Expression.Condition(isDbNullExpr, nullExpr, readExpr) :> Expression)
+        let ctor =
+            t.GetConstructors()
+            |> Array.find (fun c -> c.GetParameters().Length = arity)
+        let body = Expression.New(ctor, elementExprs) :> Expression
+        body
+
+    let private recordBody (t: Type) (readerParam: ParameterExpression) (startIndexParam: ParameterExpression) (columnsParam: ParameterExpression) =
+        let columnVar = Expression.Variable typeof<int>
+        let recordFields = FSharpType.GetRecordFields(t, true)
+        let recordFieldsType = recordFields |> Array.map (_.PropertyType)
+        let ctor =
+            t.GetConstructors(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
+            |> Array.find (fun c -> c.GetParameters() |> Array.map (_.ParameterType) = recordFieldsType)
+        let parameterExprs =
+            recordFields
+            |> Array.map (fun prop ->
+                let nullable = not (isNull (Nullable.GetUnderlyingType prop.PropertyType))
+                let available =
+                    Expression.AndAlso(
+                        Expression.Call(
+                            columnsParam,
+                            typeof<IDictionary<string, int>>.GetMethod("TryGetValue"),
+                            [ Expression.Constant(prop.Name) :> Expression; columnVar :> Expression ]),
+                        Expression.GreaterThanOrEqual(columnVar, startIndexParam))
+                let hasPropertyExpr =
+                    if nullable then available
+                    else
+                        Expression.AndAlso(available,
+                            Expression.Not(Expression.Call(readerParam, typeof<IDataRecord>.GetMethod("IsDBNull"), [| columnVar :> Expression |])))
+                let getValueAndDeserialize = matchMethodWithMemberType prop readerParam columnVar
+                let defaultValue =
+                    if prop.PropertyType.IsValueType then Expression.Default(prop.PropertyType) :> Expression
+                    else Expression.Constant(null, prop.PropertyType) :> Expression
+                Expression.Condition(hasPropertyExpr, getValueAndDeserialize, defaultValue) :> Expression)
+        let body = Expression.Block([| columnVar |], [| Expression.New(ctor, parameterExprs) :> Expression |])
+        body
+
+    let private objectBody (t: Type) (readerParam: ParameterExpression) (startIndexParam: ParameterExpression) (columnsParam: ParameterExpression) (uninitialized: unit -> Expression) =
+        let expr =
+            let props: MemberInfo array =
+                let props = t.GetProperties() |> Array.filter (fun p -> p.CanWrite) |> Array.map (fun x -> x :> MemberInfo)
+                if t.IsValueType && props.Length = 0 then
+                    t.GetFields(BindingFlags.NonPublic ||| BindingFlags.Instance) |> Array.filter (fun p -> not p.IsPrivate) |> Array.map (fun x -> x :> MemberInfo)
+                else
+                    props
+            let resultVar = Expression.Variable(t, "result")
+            let statements = ResizeArray<Expression>()
+            let ctor = t.GetConstructor([||])
+            let createInstanceExpr =
+                if ctor <> null then
+                    Expression.New(ctor) :> Expression
+                elif t.IsValueType then
+                    Expression.Default t
+                else
+                    uninitialized()
+            statements.Add(Expression.Assign(resultVar, createInstanceExpr) :> Expression)
+            for prop in props do
+                let columnVar = Expression.Variable(typeof<int>, "columnIndex")
+                let propName = if prop.Name.EndsWith "@" then prop.Name.TrimEnd '@' else prop.Name
+                let finalValueExpr = matchMethodWithMemberType prop readerParam columnVar
+                let propExpr =
+                    Expression.Block(
+                        [| columnVar |],
+                        [|
+                            Expression.IfThen(
+                                Expression.Call(
+                                    columnsParam,
+                                    typeof<IDictionary<string, int>>.GetMethod("TryGetValue"),
+                                    [ Expression.Constant(propName) :> Expression; columnVar :> Expression ]
+                                ),
+                                Expression.IfThen(
+                                    Expression.AndAlso(
+                                        Expression.GreaterThanOrEqual(columnVar, startIndexParam),
+                                        Expression.Equal(
+                                            Expression.Call(readerParam, typeof<IDataRecord>.GetMethod("IsDBNull"), [| columnVar :> Expression |]),
+                                            Expression.Constant(false)
+                                        )
+                                    ),
+                                    Expression.Assign(
+                                        match prop with
+                                        | :? PropertyInfo as p -> Expression.Property(resultVar, p)
+                                        | :? FieldInfo as f -> Expression.Field(resultVar, f)
+                                        | _ -> failwithf "Unknown member type."
+                                        ,
+                                        finalValueExpr
+                                    )
+                                )
+                            ) :> Expression
+                        |]
+                    )
+                statements.Add(propExpr)
+            statements.Add(resultVar :> Expression)
+            Expression.Block([| resultVar |], statements) :> Expression
+        expr
+
     /// <summary>
     /// A helper type that provides a cached, compiled function for mapping an IDataReader record to an instance of type 'T.
     /// </summary>
@@ -29,51 +149,31 @@ module internal SQLiteToolsMapper =
         static member val Map =
             let buildFallbackMap () =
                 match typeof<'T> with
-                | OfType int8 ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetByte(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-                | OfType uint8 ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetInt16(startIndex) |> uint8) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-                | OfType int16 ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetInt16(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-                | OfType uint16 ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetInt32(startIndex) |> uint16) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-                | OfType int32 ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetInt32(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-                | OfType uint32 ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetInt64(startIndex) |> uint32) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-                | OfType int64 ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetInt64(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-                | OfType uint64 ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetInt64(startIndex) |> uint64) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-                | OfType float32 ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetFloat(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-                | OfType double ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetDouble(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-                | OfType decimal ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetDecimal(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-                | OfType string ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetString(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-                | OfType bool ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetBoolean(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
+                | t when t = typeof<Types.DbObjectRow> ->
+                    // The query and mutation readers share this fixed row shape. Keep
+                    // missing columns and SQL NULLs equivalent to the general mapper.
+                    fun (reader: IDataReader) (startIndex: int) (columns: IDictionary<string, int>) ->
+                        let ordinal name =
+                            let mutable value = 0
+                            if columns.TryGetValue(name, &value) && value >= startIndex then value
+                            else -1
+                        let idColumn = ordinal "Id"
+                        let valueColumn = ordinal "ValueJSON"
+                        let hydrationColumn = ordinal "HydrationJSON"
+                        let id =
+                            if idColumn >= 0 && not (reader.IsDBNull idColumn) then Nullable(reader.GetInt64 idColumn)
+                            else Nullable()
+                        let readString column =
+                            if column >= 0 && not (reader.IsDBNull column) then reader.GetString column
+                            else null
+                        let row: Types.DbObjectRow =
+                            { Id = id
+                              ValueJSON = readString valueColumn
+                              HydrationJSON = readString hydrationColumn }
+                        row :> obj :?> 'T
                 | OfType (id: byte array -> byte array) ->
                     (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
                         reader.GetValue(startIndex) :?> 'T) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-                | OfType (id: Guid -> Guid) ->
-                    (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                        reader.GetGuid(startIndex)) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
                 | t when t = typeof<NativeArray.NativeArray> ->
                     (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
                         match reader with
@@ -120,31 +220,7 @@ module internal SQLiteToolsMapper =
                     let readerParam = Expression.Parameter(typeof<IDataReader>, "reader")
                     let startIndexParam = Expression.Parameter(typeof<int>, "startIndex")
                     let columnsParam = Expression.Parameter(typeof<IDictionary<string, int>>, "columns")
-                    let elementExprs =
-                        elementTypes
-                        |> Array.mapi (fun i elemType ->
-                            let ordinalExpr = Expression.Add(startIndexParam, Expression.Constant(i)) :> Expression
-                            let readExpr = matchMethodWithType elemType readerParam ordinalExpr
-                            let isDbNullExpr =
-                                Expression.Call(
-                                    readerParam,
-                                    typeof<IDataRecord>.GetMethod("IsDBNull"),
-                                    [| ordinalExpr |]
-                                )
-                            if elemType.IsValueType && not (elemType.IsGenericType && elemType.GetGenericTypeDefinition() = typedefof<Nullable<_>>) then
-                                let exCtor = typeof<InvalidOperationException>.GetConstructor([| typeof<string> |])
-                                let msg = $"DB null in non-nullable tuple element %i{i} of type '%s{elemType.Name}'."
-                                let throwExpr = Expression.Throw(Expression.New(exCtor, Expression.Constant(msg)), elemType)
-                                Expression.Condition(isDbNullExpr, throwExpr, readExpr) :> Expression
-                            else
-                                let nullExpr =
-                                    if elemType.IsValueType then Expression.Default(elemType) :> Expression
-                                    else Expression.Constant(null, elemType) :> Expression
-                                Expression.Condition(isDbNullExpr, nullExpr, readExpr) :> Expression)
-                    let ctor =
-                        t.GetConstructors()
-                        |> Array.find (fun c -> c.GetParameters().Length = arity)
-                    let body = Expression.New(ctor, elementExprs) :> Expression
+                    let body = tupleBody t elementTypes readerParam startIndexParam
                     let lambda = Expression.Lambda<Func<IDataReader, int, IDictionary<string, int>, 'T>>(body, [| readerParam; startIndexParam; columnsParam |])
                     let fn = lambda.Compile()
                     fun (reader: IDataReader) (startIndex: int) (columns: IDictionary<string, int>) ->
@@ -157,35 +233,7 @@ module internal SQLiteToolsMapper =
                     let readerParam = Expression.Parameter(typeof<IDataReader>, "reader")
                     let startIndexParam = Expression.Parameter(typeof<int>, "startIndex")
                     let columnsParam = Expression.Parameter(typeof<IDictionary<string, int>>, "columns")
-                    let columnVar = Expression.Variable typeof<int>
-                    let recordFields = FSharpType.GetRecordFields(t, true)
-                    let recordFieldsType = recordFields |> Array.map (_.PropertyType)
-                    let ctor =
-                        t.GetConstructors(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
-                        |> Array.find (fun c -> c.GetParameters() |> Array.map (_.ParameterType) = recordFieldsType)
-                    let parameterExprs =
-                        recordFields
-                        |> Array.map (fun prop ->
-                            let hasPropertyExpr =
-                                Expression.AndAlso(
-                                    Expression.Call(
-                                        columnsParam,
-                                        typeof<IDictionary<string, int>>.GetMethod("TryGetValue"),
-                                        [ Expression.Constant(prop.Name) :> Expression; columnVar :> Expression ]
-                                    ),
-                                    Expression.AndAlso(
-                                        Expression.GreaterThanOrEqual(columnVar, startIndexParam),
-                                        Expression.Equal(
-                                            Expression.Call(readerParam, typeof<IDataRecord>.GetMethod("IsDBNull"), [| columnVar :> Expression |]),
-                                            Expression.Constant(false)
-                                        )
-                                    ))
-                            let getValueAndDeserialize = matchMethodWithMemberType prop readerParam columnVar
-                            let defaultValue =
-                                if prop.PropertyType.IsValueType then Expression.Default(prop.PropertyType) :> Expression
-                                else Expression.Constant(null, prop.PropertyType) :> Expression
-                            Expression.Condition(hasPropertyExpr, getValueAndDeserialize, defaultValue) :> Expression)
-                    let body = Expression.Block([| columnVar |], [| Expression.New(ctor, parameterExprs) :> Expression |])
+                    let body = recordBody t readerParam startIndexParam columnsParam
                     let lambda = Expression.Lambda<Func<IDataReader, int, IDictionary<string, int>, 'T>>(body, [| readerParam; startIndexParam; columnsParam |])
                     let fn = lambda.Compile()
                     fun (reader: IDataReader) (startIndex: int) (columns: IDictionary<string, int>) ->
@@ -197,62 +245,10 @@ module internal SQLiteToolsMapper =
                     let readerParam = Expression.Parameter(typeof<IDataReader>, "reader")
                     let startIndexParam = Expression.Parameter(typeof<int>, "startIndex")
                     let columnsParam = Expression.Parameter(typeof<IDictionary<string, int>>, "columns")
-                    let expr =
-                        let props: MemberInfo array =
-                            let props = t.GetProperties() |> Array.filter (fun p -> p.CanWrite) |> Array.map (fun x -> x :> MemberInfo)
-                            if t.IsValueType && props.Length = 0 then
-                                t.GetFields(BindingFlags.NonPublic ||| BindingFlags.Instance) |> Array.filter (fun p -> not p.IsPrivate) |> Array.map (fun x -> x :> MemberInfo)
-                            else
-                                props
-                        let resultVar = Expression.Variable(t, "result")
-                        let statements = ResizeArray<Expression>()
-                        let ctor = t.GetConstructor([||])
-                        let createInstanceExpr =
-                            if ctor <> null then
-                                Expression.New(ctor) :> Expression
-                            elif t.IsValueType then
-                                Expression.Default t
-                            else
-                                let fn = Func<'T>(fun () -> FormatterServices.GetSafeUninitializedObject(t) :?> 'T)
-                                Expression.Call(Expression.Constant(fn), typeof<Func<'T>>.GetMethod("Invoke"), [||]) :> Expression
-                        statements.Add(Expression.Assign(resultVar, createInstanceExpr) :> Expression)
-                        for prop in props do
-                            let columnVar = Expression.Variable(typeof<int>, "columnIndex")
-                            let propName = if prop.Name.EndsWith "@" then prop.Name.TrimEnd '@' else prop.Name
-                            let finalValueExpr = matchMethodWithMemberType prop readerParam columnVar
-                            let propExpr =
-                                Expression.Block(
-                                    [| columnVar |],
-                                    [|
-                                        Expression.IfThen(
-                                            Expression.Call(
-                                                columnsParam,
-                                                typeof<IDictionary<string, int>>.GetMethod("TryGetValue"),
-                                                [ Expression.Constant(propName) :> Expression; columnVar :> Expression ]
-                                            ),
-                                            Expression.IfThen(
-                                                Expression.AndAlso(
-                                                    Expression.GreaterThanOrEqual(columnVar, startIndexParam),
-                                                    Expression.Equal(
-                                                        Expression.Call(readerParam, typeof<IDataRecord>.GetMethod("IsDBNull"), [| columnVar :> Expression |]),
-                                                        Expression.Constant(false)
-                                                    )
-                                                ),
-                                                Expression.Assign(
-                                                    match prop with
-                                                    | :? PropertyInfo as p -> Expression.Property(resultVar, p)
-                                                    | :? FieldInfo as f -> Expression.Field(resultVar, f)
-                                                    | _ -> failwithf "Unknown member type."
-                                                    ,
-                                                    finalValueExpr
-                                                )
-                                            )
-                                        ) :> Expression
-                                    |]
-                                )
-                            statements.Add(propExpr)
-                        statements.Add(resultVar :> Expression)
-                        Expression.Block([| resultVar |], statements) :> Expression
+                    let uninitialized () =
+                        let fn = Func<'T>(fun () -> FormatterServices.GetSafeUninitializedObject(t) :?> 'T)
+                        Expression.Call(Expression.Constant(fn), typeof<Func<'T>>.GetMethod("Invoke"), [||]) :> Expression
+                    let expr = objectBody t readerParam startIndexParam columnsParam uninitialized
                     let lambda = Expression.Lambda<Func<IDataReader, int, IDictionary<string, int>, 'T>>(expr, [| readerParam; startIndexParam; columnsParam |])
                     let fn = lambda.Compile()
                     fun (reader: IDataReader) (startIndex: int) (columns: IDictionary<string, int>) ->
@@ -261,12 +257,13 @@ module internal SQLiteToolsMapper =
                         with _ex ->
                             reraise()
 
-            match tryGetDateTimeFamilyReaderSpec typeof<'T> with
-            | Some spec ->
-                (fun (reader: IDataReader) (startIndex: int) (_columns: IDictionary<string, int>) ->
-                    reader.GetInt64(startIndex) |> spec.MapInt64 |> unbox<'T>) :> obj :?> IDataReader -> int -> IDictionary<string, int> -> 'T
-            | None ->
-                buildFallbackMap ()
+            let readerParam = Expression.Parameter(typeof<IDataReader>, "reader")
+            let ordinalParam = Expression.Parameter(typeof<int>, "ordinal")
+            match tryBuildScalarRead typeof<'T> readerParam ordinalParam with
+            | Some body ->
+                let fn = Expression.Lambda<Func<IDataReader, int, 'T>>(body, [| readerParam; ordinalParam |]).Compile()
+                fun reader ordinal _columns -> fn.Invoke(reader, ordinal)
+            | None -> buildFallbackMap ()
 
     let internal defaultOf<'T> () : 'T = SQLiteToolsMapperQuery.defaultOf<'T> ()
 

@@ -42,13 +42,16 @@ let private emitLiteral (ctx: EmitContext) (lit: SqlLiteral) : Emitted =
         else
             ctx.AllocParam(box v)
     | SqlLiteral.Float v ->
-        if ctx.InlineLiterals then
-            { Sql = sprintf "%.17g" v; Parameters = Emitted.emptyParameters () }
+        if ctx.InlineLiterals && not (System.Double.IsNaN v || System.Double.IsInfinity v) then
+            let value = sprintf "%.17g" v
+            // A decimal or exponent keeps integral-valued doubles in SQLite's REAL class.
+            let sql = if value.IndexOf('.') >= 0 || value.IndexOf('e') >= 0 || value.IndexOf('E') >= 0 then value else value + ".0"
+            { Sql = sql; Parameters = Emitted.emptyParameters () }
         else
             ctx.AllocParam(box v)
     | SqlLiteral.String v ->
-        if ctx.InlineLiterals then
-            { Sql = sprintf "'%s'" (EmitJson.escapeSQLiteStringLiteral v); Parameters = Emitted.emptyParameters () }
+        if ctx.InlineLiterals && v.IndexOf('\000') < 0 then
+            { Sql = "'" + EmitJson.escapeSQLiteStringLiteral v + "'"; Parameters = Emitted.emptyParameters () }
         else
             ctx.AllocParam(box v)
     | SqlLiteral.Blob v -> ctx.AllocParam(box v)
@@ -76,12 +79,12 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
     | Column(sourceAlias, column) ->
         if column = "*" then
             match sourceAlias with
-            | Some alias -> { Sql = sprintf "%s.*" (EmitJson.quoteIdentifier ctx alias); Parameters = Emitted.emptyParameters () }
+            | Some alias -> { Sql = EmitJson.quoteIdentifier ctx alias + ".*"; Parameters = Emitted.emptyParameters () }
             | None -> { Sql = "*"; Parameters = Emitted.emptyParameters () }
         else
             match sourceAlias with
             | Some alias ->
-                { Sql = sprintf "%s.%s" (EmitJson.quoteIdentifier ctx alias) (EmitJson.quoteIdentifier ctx column)
+                { Sql = EmitJson.quoteIdentifier ctx alias + "." + EmitJson.quoteIdentifier ctx column
                   Parameters = Emitted.emptyParameters () }
             | None ->
                 { Sql = EmitJson.quoteIdentifier ctx column
@@ -93,7 +96,7 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
 
     // Case 3: Named parameter reference
     | Parameter name ->
-        { Sql = sprintf "@%s" name; Parameters = Emitted.emptyParameters () }
+        { Sql = "@" + name; Parameters = Emitted.emptyParameters () }
 
     // Case 4: JSON extract expression — jsonb_extract(source, '$.path')
     | JsonExtractExpr(sourceAlias, column, jsonPath) ->
@@ -103,9 +106,9 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
     | JsonRootExtract(sourceAlias, column) ->
         let src =
             match sourceAlias with
-            | Some alias -> sprintf "%s.%s" (EmitJson.quoteIdentifier ctx alias) (EmitJson.quoteIdentifier ctx column)
+            | Some alias -> EmitJson.quoteIdentifier ctx alias + "." + EmitJson.quoteIdentifier ctx column
             | None -> EmitJson.quoteIdentifier ctx column
-        { Sql = sprintf "jsonb_extract(%s, '$')" src
+        { Sql = "jsonb_extract(" + src + ", '$')"
           Parameters = Emitted.emptyParameters () }
 
     // Case 5: JSON set expression — jsonb_set(target, path, value)
@@ -125,14 +128,14 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
         let argsEmitted = arguments |> List.map (emitE ctx)
         let argsSql = argsEmitted |> List.map (fun e -> e.Sql) |> String.concat ", "
         let parms = Emitted.collectParameters argsEmitted
-        { Sql = sprintf "%s(%s)" name argsSql; Parameters = parms }
+        { Sql = name + "(" + argsSql + ")"; Parameters = parms }
 
     // Case 9: Aggregate call
     | AggregateCall(kind, argument, distinct, separator) ->
         let funcName = emitAggregateKind kind
         match kind, argument, distinct, separator with
         | Count, None, false, None ->
-            { Sql = sprintf "%s(*)" funcName; Parameters = Emitted.emptyParameters () }
+            { Sql = funcName + "(*)"; Parameters = Emitted.emptyParameters () }
         | Count, None, _, _ ->
             raise (System.NotSupportedException("COUNT with no argument must emit COUNT(*) only."))
         | _, Some argExpr, _, _ ->
@@ -141,10 +144,10 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
             match separator with
             | Some sepExpr ->
                 let sepEmitted = emitE ctx sepExpr
-                { Sql = sprintf "%s(%s%s, %s)" funcName distinctStr argEmitted.Sql sepEmitted.Sql
+                { Sql = funcName + "(" + distinctStr + argEmitted.Sql + ", " + sepEmitted.Sql + ")"
                   Parameters = Emitted.concatParameterSets [ argEmitted.Parameters; sepEmitted.Parameters ] }
             | None ->
-                { Sql = sprintf "%s(%s%s)" funcName distinctStr argEmitted.Sql
+                { Sql = funcName + "(" + distinctStr + argEmitted.Sql + ")"
                   Parameters = argEmitted.Parameters }
         | _, None, _, _ ->
             raise (System.NotSupportedException($"Aggregate '{funcName}' requires an argument."))
@@ -158,19 +161,19 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
         let operandEmitted = emitE ctx operand
         match op with
         | Pos ->
-            { Sql = sprintf "+(%s)" operandEmitted.Sql
+            { Sql = "+(" + operandEmitted.Sql + ")"
               Parameters = operandEmitted.Parameters }
         | Not ->
-            { Sql = sprintf "NOT (%s)" operandEmitted.Sql
+            { Sql = "NOT (" + operandEmitted.Sql + ")"
               Parameters = operandEmitted.Parameters }
         | Neg ->
-            { Sql = sprintf "-%s" operandEmitted.Sql
+            { Sql = "-" + operandEmitted.Sql
               Parameters = operandEmitted.Parameters }
         | IsNull ->
-            { Sql = sprintf "%s IS NULL" operandEmitted.Sql
+            { Sql = operandEmitted.Sql + " IS NULL"
               Parameters = operandEmitted.Parameters }
         | IsNotNull ->
-            { Sql = sprintf "%s IS NOT NULL" operandEmitted.Sql
+            { Sql = operandEmitted.Sql + " IS NOT NULL"
               Parameters = operandEmitted.Parameters }
 
     // Case 12: Binary operator — handles precedence via parenthesization
@@ -180,13 +183,13 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
         let opStr = emitBinaryOp op
         let leftSql =
             match left with
-            | Binary(_, Or, _) when op = And -> sprintf "(%s)" leftEmitted.Sql
+            | Binary(_, Or, _) when op = And -> "(" + leftEmitted.Sql + ")"
             | _ -> leftEmitted.Sql
         let rightSql =
             match right with
-            | Binary(_, Or, _) when op = And -> sprintf "(%s)" rightEmitted.Sql
+            | Binary(_, Or, _) when op = And -> "(" + rightEmitted.Sql + ")"
             | _ -> rightEmitted.Sql
-        { Sql = sprintf "(%s %s %s)" leftSql opStr rightSql
+        { Sql = "(" + leftSql + " " + opStr + " " + rightSql + ")"
           Parameters = Emitted.concatParameterSets [ leftEmitted.Parameters; rightEmitted.Parameters ] }
 
     // Case 13: BETWEEN
@@ -194,7 +197,7 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
         let exprEmitted = emitE ctx expr
         let lowerEmitted = emitE ctx lower
         let upperEmitted = emitE ctx upper
-        { Sql = sprintf "%s BETWEEN %s AND %s" exprEmitted.Sql lowerEmitted.Sql upperEmitted.Sql
+        { Sql = exprEmitted.Sql + " BETWEEN " + lowerEmitted.Sql + " AND " + upperEmitted.Sql
           Parameters = Emitted.concatParameterSets [ exprEmitted.Parameters; lowerEmitted.Parameters; upperEmitted.Parameters ] }
 
     // Case 14: IN list
@@ -203,20 +206,20 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
         let valuesEmitted = (head :: tail) |> List.map (emitE ctx)
         let valuesSql = valuesEmitted |> List.map (fun e -> e.Sql) |> String.concat ", "
         let parms = Emitted.collectParameters valuesEmitted
-        { Sql = sprintf "%s IN (%s)" exprEmitted.Sql valuesSql
+        { Sql = exprEmitted.Sql + " IN (" + valuesSql + ")"
           Parameters = Emitted.concatParameterSets [ exprEmitted.Parameters; parms ] }
 
     // Case 15: IN subquery
     | InSubquery(expr, subSelect) ->
         let exprEmitted = emitE ctx expr
         let subEmitted = emitSubSelect ctx subSelect
-        { Sql = sprintf "%s IN (%s)" exprEmitted.Sql subEmitted.Sql
+        { Sql = exprEmitted.Sql + " IN (" + subEmitted.Sql + ")"
           Parameters = Emitted.concatParameterSets [ exprEmitted.Parameters; subEmitted.Parameters ] }
 
     // Case 16: CAST
     | Cast(expr, sqlType) ->
         let exprEmitted = emitE ctx expr
-        { Sql = sprintf "CAST(%s AS %s)" exprEmitted.Sql sqlType
+        { Sql = "CAST(" + exprEmitted.Sql + " AS " + sqlType + ")"
           Parameters = exprEmitted.Parameters }
 
     // Case 17: COALESCE
@@ -224,18 +227,18 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
         let partsEmitted = (head :: tail) |> List.map (emitE ctx)
         let sql = partsEmitted |> List.map (fun e -> e.Sql) |> String.concat ", "
         let parms = Emitted.collectParameters partsEmitted
-        { Sql = sprintf "COALESCE(%s)" sql; Parameters = parms }
+        { Sql = "COALESCE(" + sql + ")"; Parameters = parms }
 
     // Case 18: EXISTS
     | Exists subSelect ->
         let subEmitted = emitSubSelect ctx subSelect
-        { Sql = sprintf "EXISTS (%s)" subEmitted.Sql
+        { Sql = "EXISTS (" + subEmitted.Sql + ")"
           Parameters = subEmitted.Parameters }
 
     // Case 19: Scalar subquery
     | ScalarSubquery subSelect ->
         let subEmitted = emitSubSelect ctx subSelect
-        { Sql = sprintf "(%s)" subEmitted.Sql
+        { Sql = "(" + subEmitted.Sql + ")"
           Parameters = subEmitted.Parameters }
 
     // Case 20: CASE expression
@@ -245,16 +248,16 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
             |> List.map (fun (cond, result) ->
                 let condEmitted = emitE ctx cond
                 let resultEmitted = emitE ctx result
-                { Sql = sprintf "WHEN %s THEN %s" condEmitted.Sql resultEmitted.Sql
+                { Sql = "WHEN " + condEmitted.Sql + " THEN " + resultEmitted.Sql
                   Parameters = Emitted.concatParameterSets [ condEmitted.Parameters; resultEmitted.Parameters ] })
         let branchSql = branchParts |> List.map (fun e -> e.Sql) |> String.concat " "
         let branchParams = Emitted.collectParameters branchParts
         match elseExpr with
         | Some elseE ->
             let elseEmitted = emitE ctx elseE
-            { Sql = sprintf "CASE %s ELSE %s END" branchSql elseEmitted.Sql
+            { Sql = "CASE " + branchSql + " ELSE " + elseEmitted.Sql + " END"
               Parameters = Emitted.concatParameterSets [ branchParams; elseEmitted.Parameters ] }
         | None ->
-            { Sql = sprintf "CASE %s END" branchSql
+            { Sql = "CASE " + branchSql + " END"
               Parameters = branchParams }
 

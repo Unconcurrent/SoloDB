@@ -404,6 +404,16 @@ type internal CollectionMutationOps<'T>() =
                 setSerializedItem variables item
                 conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filterSql}) LIMIT 1)", variables))
 
+    static member private ExpandUpdateTransforms (transforms: Expression<System.Action<'T>> array) =
+        let expanded = ResizeArray<Expression<System.Action<'T>>>(transforms.Length)
+        for expression in transforms do
+            match expression.Body with
+            | :? BlockExpression as block when block.Variables.Count = 0 ->
+                for child in block.Expressions do
+                    expanded.Add(Expression.Lambda<System.Action<'T>>(child, expression.Parameters))
+            | _ -> expanded.Add expression
+        expanded.ToArray()
+
     static member UpdateMany
         (transform: Expression<System.Action<'T>> array)
         (filter: Expression<Func<'T, bool>>)
@@ -432,15 +442,15 @@ type internal CollectionMutationOps<'T>() =
         // last-writer-wins semantics expected by callers and lets each statement be
         // classified individually as relation-op vs. json-set.
         let expandedTransforms =
-            [|
-                for expr in transform do
-                    let lambda = expr :> LambdaExpression
-                    match lambda.Body with
-                    | :? BlockExpression as block when block.Variables.Count = 0 ->
-                        for child in block.Expressions do
-                            yield Expression.Lambda<System.Action<'T>>(child, lambda.Parameters)
-                    | _ -> yield expr
-            |]
+            let needsExpansion =
+                transform |> Array.exists (fun expression ->
+                    match expression.Body with
+                    | :? BlockExpression as block -> block.Variables.Count = 0
+                    | _ -> false)
+            if needsExpansion then
+                CollectionMutationOps<'T>.ExpandUpdateTransforms transform
+            else
+                transform
 
         let relationTransforms = ResizeArray<QueryTranslatorBaseTypes.UpdateManyRelationTransform>()
         let jsonTransforms = ResizeArray<Expression<System.Action<'T>>>()
@@ -503,6 +513,7 @@ type internal CollectionMutationOps<'T>() =
                                 OwnerTable = Utils.formatName ownerType.Name
                                 OwnerType = ownerType
                                 InTransaction = tx.InTransaction
+                                CollectionFactory = tx.CollectionFactory
                             }
                             let d = RelationsSchemaValidator.buildRelationDescriptors hopTx ownerType
                             descriptorCache.[ownerType] <- d

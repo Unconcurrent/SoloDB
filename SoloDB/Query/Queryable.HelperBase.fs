@@ -19,6 +19,46 @@ open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.SqlModel
 
 module internal QueryableHelperBase =
+    /// A null Id carries a typed runtime error; ordinary base rowids cannot carry one.
+    let rec internal canExposeNullId (query: SqlSelect) =
+        let coreCanExposeNullId (core: SelectCore) =
+            let rec nullableId = function
+                | SqlExpr.Literal SqlLiteral.Null -> true
+                | SqlExpr.Literal _ -> false
+                | SqlExpr.CaseExpr((_, first), rest, otherwise) ->
+                    nullableId first || List.exists (snd >> nullableId) rest
+                    || Option.fold (fun _ expr -> nullableId expr) true otherwise
+                | SqlExpr.Coalesce(first, rest) -> nullableId first && List.forall nullableId rest
+                | SqlExpr.Column(qualifier, "Id") ->
+                    let matches (name: string) = qualifier |> Option.forall (fun q -> q.Trim('"') = name.Trim('"'))
+                    match core.Source with
+                    | Some(BaseTable(name, alias)) when matches (defaultArg alias name) ->
+                        query.Ctes |> List.exists (fun cte -> cte.Name = name)
+                    | Some(DerivedTable(inner, alias)) when matches alias -> canExposeNullId inner
+                    | _ -> true
+                | _ -> true
+            match core.Projections with
+            | AllColumns ->
+                match core.Source with
+                | Some(DerivedTable(inner, _)) -> canExposeNullId inner
+                | Some(BaseTable(name, _)) -> query.Ctes |> List.exists (fun cte -> cte.Name = name)
+                | _ -> true
+            | Explicit(head, tail) ->
+                head :: tail
+                |> List.tryFind (fun projection ->
+                    match projection.Alias, projection.Expr with
+                    | Some "Id", _ | None, SqlExpr.Column(_, "Id") -> true
+                    | _ -> false)
+                |> Option.exists (fun projection -> nullableId projection.Expr)
+        if not query.Ctes.IsEmpty then true
+        else
+            match query.Body with
+            | SingleSelect core -> coreCanExposeNullId core
+            | UnionAllSelect(head, tail) -> coreCanExposeNullId head || List.exists coreCanExposeNullId tail
+
+    let internal preserveRuntimeErrorValue id value projected =
+        SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNull, id), value), [], Some projected)
+
     let internal orderKeyClrType (orderingExpr: Expression) =
         match orderingExpr with
         | :? LambdaExpression as lambda -> lambda.Body.Type
@@ -82,31 +122,15 @@ module internal QueryableHelperBase =
         else
             SqlExpr.FunctionCall("json_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
 
-    /// Emit a SqlSelect to a StringBuilder via the minimal emitter.
-    let internal emitSelectToSb (sb: StringBuilder) (variables: Dictionary<string, obj>) (indexModel: SoloDatabase.IndexModel.IndexModel) transform (sel: SqlSelect) =
-        let qb : QueryBuilder = {
-            StringBuilder = sb
-            Variables = variables
-            AppendVariable = appendVariable sb variables
-            RollBack = fun N -> sb.Remove(sb.Length - (int)N, (int)N) |> ignore
-            UpdateMode = false
-            TableNameDot = ""
-            JsonExtractSelfValue = true
-            InsideJsonObjectProjection = false
-            Parameters = System.Collections.ObjectModel.ReadOnlyCollection(Array.empty)
-            IdParameterIndex = -1
-            // Empty placeholder for a builder that is not translating against a table; it
-            // resolves no relation metadata, so it carries no metadata source.
-            SourceContext = QueryContext.SingleSource("")
-            UpdateAssignments = ResizeArray()
-            DuHandlerResult = ref ValueNone
-            OuterParameterAliases = Dictionary<ParameterExpression, string>()
-            TranslationStepCounter = ref 0
-            InPredicateContext = false
-        }
+    /// Optimize and emit a SELECT through the canonical emitter, retaining its SQL string.
+    let internal emitSelectSql (variables: Dictionary<string, obj>) (indexModel: SoloDatabase.IndexModel.IndexModel) transform (sel: SqlSelect) =
         let passes = PassPipeline.standardWithIndexModel indexModel
         match PassRunner.optimize passes (SelectStmt sel) with
-        | SelectStmt outSel -> SqlDuMinimalEmit.emitSelect qb (transform outSel)
+        | SelectStmt outSel ->
+            let result = EmitSelect.emitSelect (EmitContext(InlineLiterals = true)) (transform outSel)
+            for (name, value) in result.Parameters do
+                variables.[name] <- value
+            result.Sql
         | _ -> failwith "internal invariant violation: expected SelectStmt from optimizer pipeline"
 
     /// Map the closed-enum RuntimeErrorKind to its string name embedded in the

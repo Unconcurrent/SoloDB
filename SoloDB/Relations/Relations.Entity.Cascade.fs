@@ -47,6 +47,7 @@ let rec internal cascadeInsertDeep
         OwnerTable = targetTable
         OwnerType = targetType
         InTransaction = tx.InTransaction
+        CollectionFactory = tx.CollectionFactory
     }
 
     // 3. Process the target entity's own relation properties.

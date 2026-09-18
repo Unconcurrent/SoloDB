@@ -7,11 +7,9 @@ open System.Threading
 open Utils
 open SoloDatabase
 open SoloDatabase.SqlModel
-open SoloDatabase.DBRefManyDescriptor
 
-/// The values a GroupJoin chain build carries, and whether a descriptor has chain operations at
-/// all. Both the chain emitter and the element builder need these, so they are owned here rather
-/// than by whichever of the two happens to be compiled first.
+/// Source correlation and expression-binding dependencies for grouped joins.
+/// Bare element access retains its specialized scalar projection over that source.
 module internal GroupJoinRuntimeTypes =
     type GroupJoinElementKind =
         | FirstLike of orDefault: bool
@@ -20,8 +18,7 @@ module internal GroupJoinRuntimeTypes =
         | ElementAtLike of indexExpr: Expression * orDefault: bool
     type GroupJoinElementCall =
         { Call: MethodCallExpression
-          Kind: GroupJoinElementKind
-          Chain: QueryDescriptor }
+          Kind: GroupJoinElementKind }
     type GroupJoinRuntime =
         { InnerCtx: QueryContext
           InnerRootTable: string
@@ -37,14 +34,3 @@ module internal GroupJoinRuntimeTypes =
           TryTranslateDbRefValueIdKey: ParameterExpression -> string -> Expression -> SqlExpr option
           ReplaceExpression: Expression -> Expression -> Expression -> Expression
           TranslateOuterExpr: Expression -> SqlExpr }
-    let hasQueryDescriptorChainOps (desc: QueryDescriptor) =
-        not desc.WherePredicates.IsEmpty
-        || not desc.SortKeys.IsEmpty
-        || desc.Offset.IsSome
-        || desc.Limit.IsSome
-        || desc.SelectProjection.IsSome
-        || desc.Distinct
-        || desc.DefaultIfEmpty.IsSome
-        || desc.TakeWhileInfo.IsSome
-        || desc.GroupByKey.IsSome
-        || not desc.SetOps.IsEmpty

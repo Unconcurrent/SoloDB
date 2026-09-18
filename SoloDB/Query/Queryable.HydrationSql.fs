@@ -260,12 +260,11 @@ module internal HydrationSqlBuilder =
         let select = wrapCore core
 
         // Emit to SQL string via optimizer pipeline.
-        let sb = StringBuilder(256)
         let modelTableNames = QueryableHelperBase.collectIndexModelTableNames tableName select
         let indexModel = RuntimeIndexModelCache.loadModelForTables connection modelTableNames
-        emitSelectToSb sb initialVars indexModel id select
+        let sql = emitSelectSql initialVars indexModel id select
 
-        sb.ToString(), singleHydrated, manyHydrated
+        sql, singleHydrated, manyHydrated
 
     /// Build a mutation-prep SELECT with DBRefMany-only HydrationJSON (no DBRef enrichment).
     /// Returns (sqlString, hasManyHydration).
@@ -313,12 +312,11 @@ module internal HydrationSqlBuilder =
                 Limit = if addLimit then Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) else None }
         let select = wrapCore core
 
-        let sb = StringBuilder(256)
         let modelTableNames = QueryableHelperBase.collectIndexModelTableNames tableName select
         let indexModel = RuntimeIndexModelCache.loadModelForTables connection modelTableNames
-        emitSelectToSb sb initialVars indexModel id select
+        let sql = emitSelectSql initialVars indexModel id select
 
-        sb.ToString(), manyHydrated
+        sql, manyHydrated
 
     /// Strip source aliases from a SqlExpr (re-exported from Preprocess for use by SoloDBCore callers).
     let stripSourceAlias = QueryableHelperPreprocess.stripSourceAlias

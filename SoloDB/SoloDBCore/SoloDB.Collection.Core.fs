@@ -8,7 +8,14 @@ open SQLiteTools
 
 /// Non-recursive collection scaffold helper:
 /// relation-tx bootstrap, relation delete checks, and index snapshot cache operations.
-type internal CollectionScaffold<'T>(connection: Connection, connectionString: string, name: string, hasRelations: bool) =
+type internal CollectionScaffold<'T>(connection: Connection, connectionString: string, name: string, hasRelations: bool, collectionFactory: SqliteConnection -> RelationsTypes.IRelationCollectionFactory) =
+    // Transactional collections can serve several cascade calls on the same connection.
+    let transactionalFactory =
+        match connection with
+        | Transactional _
+        | Guarded (_, Transactional _) when hasRelations ->
+            Some (lazy (collectionFactory (connection.Get())))
+        | _ -> None
 
     member _.RefreshIndexModelSnapshot(conn: SqliteConnection) =
         RuntimeIndexModelCache.loadAndStore conn connectionString name |> ignore
@@ -25,6 +32,10 @@ type internal CollectionScaffold<'T>(connection: Connection, connectionString: s
         OwnerTable = name
         OwnerType = typeof<'T>
         InTransaction = true
+        CollectionFactory =
+            match transactionalFactory with
+            | Some cached -> Some cached.Value
+            | None -> Some (collectionFactory conn)
     }
 
     static member MkRelationPathSets() =

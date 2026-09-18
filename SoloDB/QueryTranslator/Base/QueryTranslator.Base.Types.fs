@@ -142,8 +142,8 @@ module internal QueryTranslatorBaseTypes =
             RollBack: uint -> unit
             /// <summary>Indicates if the builder is in 'update' mode, changing translation logic.</summary>
             UpdateMode: bool
-            /// <summary>The table name prefix (e.g., "MyTable.") for column access.</summary>
-            TableNameDot: string
+            /// <summary>The source alias used by column and JSON expressions.</summary>
+            SourceAlias: string option
             /// <summary>Determines if a root parameter should be wrapped in json_extract.</summary>
             JsonExtractSelfValue: bool
             /// <summary>True when translating a value that becomes one field inside a json_object projection.</summary>
@@ -180,12 +180,13 @@ module internal QueryTranslatorBaseTypes =
         member internal this.ForSubquery(tableName: string, lambdaExpr: LambdaExpression, ?subqueryRootTable: string) =
             // Record current scope's parameters with their alias before creating child scope.
             let outerAliases = Dictionary<ParameterExpression, string>(this.OuterParameterAliases)
-            let currentAlias = this.TableNameDot.TrimEnd([|'.'|])
-            if not (String.IsNullOrEmpty currentAlias) then
+            match this.SourceAlias with
+            | Some currentAlias ->
                 for p in this.Parameters do
                     outerAliases.[p] <- currentAlias
+            | None -> ()
             { this with
-                TableNameDot = if String.IsNullOrEmpty tableName then String.Empty else "\"" + tableName + "\"."
+                SourceAlias = if String.IsNullOrEmpty tableName then None else Some ("\"" + tableName + "\"")
                 Parameters = lambdaExpr.Parameters
                 JsonExtractSelfValue = true
                 UpdateMode = false
@@ -216,7 +217,6 @@ module internal QueryTranslatorBaseTypes =
         member internal this.GetSourceContext() = this.SourceContext
         member internal this.GetIdParameterIndex() = this.IdParameterIndex
         member internal this.IsUpdateMode() = this.UpdateMode
-        member internal this.GetTableNameDot() = this.TableNameDot
         member internal this.AppendVariableBoxed(value: obj) = this.AppendVariable value
         member internal this.RollBackBy(n: uint) = this.RollBack n
 
@@ -245,7 +245,7 @@ module internal QueryTranslatorBaseTypes =
                 RollBack = fun N -> sb.Remove(sb.Length - (int)N, (int)N) |> ignore
                 UpdateMode = updateMode
                 UpdateAssignments = ResizeArray()
-                TableNameDot = if String.IsNullOrEmpty tableName then String.Empty else "\"" + tableName + "\"."
+                SourceAlias = if String.IsNullOrEmpty tableName then None else Some ("\"" + tableName + "\"")
                 JsonExtractSelfValue = true
                 InsideJsonObjectProjection = false
                 Parameters =

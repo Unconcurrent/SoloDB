@@ -116,60 +116,18 @@ and private flattenCore (changed: bool ref) (outer: SelectCore) (innerCore: Sele
 
 /// Recursively flatten a SqlSelect. Applies flattening at every nesting level.
 and flattenSelect (changed: bool ref) (sel: SqlSelect) : SqlSelect =
-    let flattenedBody =
-        match sel.Body with
-        | SingleSelect outer ->
-            // First, recursively flatten any nested DerivedTables in the source
-            let outerWithFlattenedSource =
-                match outer.Source with
-                | Some(DerivedTable(innerSel, alias)) ->
-                    let flatInner = flattenSelect changed innerSel
-                    { outer with Source = Some(DerivedTable(flatInner, alias)) }
-                | _ -> outer
-
-            // Also flatten any DerivedTables in JOINs
-            let outerWithFlattenedJoins =
-                { outerWithFlattenedSource with
-                    Joins = outerWithFlattenedSource.Joins |> List.map (fun j ->
-                        match j with
-                        | CrossJoin(DerivedTable(jSel, jAlias)) ->
-                            CrossJoin(DerivedTable(flattenSelect changed jSel, jAlias))
-                        | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
-                            ConditionedJoin(kind, DerivedTable(flattenSelect changed jSel, jAlias), onExpr)
-                        | CrossJoin _ ->
-                            j
-                        | ConditionedJoin _ ->
-                            j
-                    )
-                }
-
-            // Now try to flatten this level
-            match outerWithFlattenedJoins.Source with
-            | Some(DerivedTable(innerSel, alias)) ->
-                match innerSel.Body with
-                | SingleSelect innerCore when innerSel.Ctes.IsEmpty && isFlattenSafe outerWithFlattenedJoins innerCore ->
-                    changed.Value <- true
-                    SingleSelect(flattenCore changed outerWithFlattenedJoins innerCore alias)
-                | _ -> SingleSelect outerWithFlattenedJoins
-            | _ -> SingleSelect outerWithFlattenedJoins
-
-        | UnionAllSelect(head, tail) ->
-            // Flatten inside each arm but don't merge the union
-            let flatHead = flattenSelectCore changed head
-            let flatTail = tail |> List.map (flattenSelectCore changed)
-            UnionAllSelect(flatHead, flatTail)
-
-    let flatCtes =
-        sel.Ctes |> List.map (fun cte -> { cte with Query = flattenSelect changed cte.Query })
-    { Ctes = flatCtes; Body = flattenedBody }
-
-/// Flatten DerivedTables within a SelectCore (for UNION ALL arms).
-and private flattenSelectCore (changed: bool ref) (core: SelectCore) : SelectCore =
-    let sel = { Ctes = []; Body = SingleSelect core }
-    let flattened = flattenSelect changed sel
-    match flattened.Body with
-    | SingleSelect c -> c
-    | _ -> core
+    let recurse = flattenSelect changed
+    let core original =
+        let outer = mapDerivedSources recurse original
+        match outer.Source with
+        | Some(DerivedTable(innerSel, alias)) ->
+            match innerSel.Body with
+            | SingleSelect innerCore when innerSel.Ctes.IsEmpty && isFlattenSafe outer innerCore ->
+                changed.Value <- true
+                flattenCore changed outer innerCore alias
+            | _ -> outer
+        | _ -> outer
+    mapSelectParts (mapCores core) recurse sel
 
 /// Recursively flatten any nested SELECT inside an SqlExpr — covers InSubquery, ScalarSubquery,
 /// and Exists at any depth (including nested under Binary, Unary, CaseExpr, FunctionCall, etc.).
@@ -178,9 +136,15 @@ and private flattenSelectCore (changed: bool ref) (core: SelectCore) : SelectCor
 let private flattenExprDeep (changed: bool ref) (expr: SqlExpr) : SqlExpr =
     SqlExpr.map (fun node ->
         match node with
-        | InSubquery(e, sel) -> InSubquery(e, flattenSelect changed sel)
-        | ScalarSubquery sel -> ScalarSubquery (flattenSelect changed sel)
-        | Exists sel -> Exists (flattenSelect changed sel)
+        | InSubquery(e, sel) ->
+            let mapped = flattenSelect changed sel
+            if obj.ReferenceEquals(sel, mapped) then node else InSubquery(e, mapped)
+        | ScalarSubquery sel ->
+            let mapped = flattenSelect changed sel
+            if obj.ReferenceEquals(sel, mapped) then node else ScalarSubquery mapped
+        | Exists sel ->
+            let mapped = flattenSelect changed sel
+            if obj.ReferenceEquals(sel, mapped) then node else Exists mapped
         | _ -> node) expr
 
 /// Flatten a SqlStatement.
@@ -189,16 +153,16 @@ let flattenStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
     match stmt with
     | SelectStmt sel ->
         let result = flattenSelect changed sel
-        struct(SelectStmt result, changed.Value)
+        struct((if obj.ReferenceEquals(sel, result) then stmt else SelectStmt result), changed.Value)
     | InsertStmt ins ->
-        let flattenedSource =
-            match ins.Source with
-            | InsertValues rows -> InsertValues rows
-            | InsertSelect sel -> InsertSelect (flattenSelect changed sel)
-        struct(InsertStmt { ins with Source = flattenedSource }, changed.Value)
+        match ins.Source with
+        | InsertValues _ -> struct(stmt, changed.Value)
+        | InsertSelect sel ->
+            let result = flattenSelect changed sel
+            struct((if obj.ReferenceEquals(sel, result) then stmt else InsertStmt { ins with Source = InsertSelect result }), changed.Value)
     | UpdateStmt upd ->
-        let flatWhere = upd.Where |> Option.map (flattenExprDeep changed)
-        struct(UpdateStmt { upd with Where = flatWhere }, changed.Value)
+        let flatWhere = upd.Where |> mapOption (flattenExprDeep changed)
+        struct((if obj.ReferenceEquals(upd.Where, flatWhere) then stmt else UpdateStmt { upd with Where = flatWhere }), changed.Value)
     | DeleteStmt del ->
-        let flatWhere = del.Where |> Option.map (flattenExprDeep changed)
-        struct(DeleteStmt { del with Where = flatWhere }, changed.Value)
+        let flatWhere = del.Where |> mapOption (flattenExprDeep changed)
+        struct((if obj.ReferenceEquals(del.Where, flatWhere) then stmt else DeleteStmt { del with Where = flatWhere }), changed.Value)

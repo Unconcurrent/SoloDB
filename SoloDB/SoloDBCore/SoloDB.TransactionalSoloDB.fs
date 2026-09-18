@@ -80,6 +80,7 @@ type TransactionalSoloDB internal (connection: CachingDbConnection, parentData: 
                 OwnerTable = name
                 OwnerType = typeof<'T>
                 InTransaction = true // TransactionalSoloDB is always inside a transaction.
+                CollectionFactory = None
             }
             RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
 

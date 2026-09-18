@@ -19,8 +19,13 @@ module internal QueryTranslatorVisitCore =
     type private ValueUse = Value | Comparison | Stored
 
     let private isByRefLikeType (t: Type) =
+#if NETSTANDARD2_1
+        t.IsByRefLike
+#else
+        t.IsValueType &&
         t.CustomAttributes
         |> Seq.exists (fun attr -> attr.AttributeType.FullName = "System.Runtime.CompilerServices.IsByRefLikeAttribute")
+#endif
 
     let rec private emitStringOperandDu (qb: QueryBuilder) (ignoreCase: bool) (expr: Expression) : SqlExpr =
         if ignoreCase then SqlExpr.FunctionCall("TO_LOWER", [visitDu expr qb])
@@ -39,21 +44,19 @@ module internal QueryTranslatorVisitCore =
         | _ -> raise (NotSupportedException("The index of the array must always be a constant value."))
 
     /// Resolve the correct SQL alias for a ParameterExpression.
-    /// If the parameter belongs to the current scope, use qb.TableNameDot.
+    /// If the parameter belongs to the current scope, use qb.SourceAlias.
     /// If it's an outer-captured parameter, look up OuterParameterAliases.
     and private resolveAliasForParameter (paramExpr: ParameterExpression) (qb: QueryBuilder) : string option =
         if qb.Parameters |> Seq.exists (fun p -> obj.ReferenceEquals(p, paramExpr)) then
             // Current scope parameter
-            if String.IsNullOrEmpty qb.TableNameDot then None
-            else Some(qb.TableNameDot.TrimEnd([|'.'|]))
+            qb.SourceAlias
         else
             // Outer scope parameter — check dictionary
             match qb.OuterParameterAliases.TryGetValue(paramExpr) with
             | true, outerAlias -> Some outerAlias
             | false, _ ->
                 // Fallback: use current scope (pre-existing behavior for edge cases)
-                if String.IsNullOrEmpty qb.TableNameDot then None
-                else Some(qb.TableNameDot.TrimEnd([|'.'|]))
+                qb.SourceAlias
 
     and private visitPropertyDu (o: Expression) (property: obj) (m: Expression) (qb: QueryBuilder) : SqlExpr =
         match property with
@@ -61,7 +64,7 @@ module internal QueryTranslatorVisitCore =
             let alias =
                 match o with
                 | :? ParameterExpression as pe -> resolveAliasForParameter pe qb
-                | _ -> if String.IsNullOrEmpty qb.TableNameDot then None else Some(qb.TableNameDot.TrimEnd([|'.'|]))
+                | _ -> qb.SourceAlias
             if property = "Id" && o.NodeType = ExpressionType.Parameter && (m.Type = typeof<int64> || m.Type = typeof<int32>) then
                 SqlExpr.Column(alias, "Id")
             else
@@ -81,7 +84,7 @@ module internal QueryTranslatorVisitCore =
             SqlExpr.Column(alias, "Id")
         elif qb.UpdateMode then
             SqlExpr.Literal(SqlLiteral.String "$")
-        elif qb.JsonExtractSelfValue && ((not << isPrimitiveSQLiteType) m.Type || (not << String.IsNullOrWhiteSpace) qb.TableNameDot) then
+        elif qb.JsonExtractSelfValue && ((not << isPrimitiveSQLiteType) m.Type || qb.SourceAlias.IsSome) then
             SqlExpr.JsonRootExtract(alias, "Value")
         else
             SqlExpr.Column(alias, "Value")
@@ -90,7 +93,7 @@ module internal QueryTranslatorVisitCore =
         let alias =
             match m.Expression with
             | :? ParameterExpression as pe -> resolveAliasForParameter pe qb
-            | _ -> if String.IsNullOrEmpty qb.TableNameDot then None else Some(qb.TableNameDot.TrimEnd([|'.'|]))
+            | _ -> qb.SourceAlias
         let isNullableValueType =
             m.InputType.IsGenericType && m.InputType.GetGenericTypeDefinition() = typedefof<Nullable<_>>
         if m.MemberName = "Length" && m.InputType.GetInterface(typeof<IEnumerable>.FullName) <> null then
@@ -206,7 +209,7 @@ module internal QueryTranslatorVisitCore =
         match tryConstantIntegerInList normalizedArray with
         | Some expr -> expr
         | None ->
-        let arrayQb = if qb.TableNameDot = "" then {qb with TableNameDot = "o."} else qb
+        let arrayQb = if qb.SourceAlias.IsNone then {qb with SourceAlias = Some "o"} else qb
         let arrayExpr = visitDu normalizedArray arrayQb
         let whereExpr =
             if isPrimitiveSQLiteType value.Type then
@@ -230,9 +233,9 @@ module internal QueryTranslatorVisitCore =
             | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote -> ue.Operand
             | :? LambdaExpression as le -> le :> Expression
             | _ -> let exprFunc = Expression.Lambda<Func<Expression>>(whereFuncExpr).Compile(true) in exprFunc.Invoke()
-        let arrayQb = if qb.TableNameDot = "" then {qb with TableNameDot = "o."} else qb
+        let arrayQb = if qb.SourceAlias.IsNone then {qb with SourceAlias = Some "o"} else qb
         let arrayExpr = visitDu array arrayQb
-        let innerQb = {qb with TableNameDot = "json_each."; JsonExtractSelfValue = false}
+        let innerQb = {qb with SourceAlias = Some "json_each"; JsonExtractSelfValue = false}
         let predicateExpr = visitDu expr innerQb
         let whereExpr = if isAll then SqlExpr.Unary(UnaryOperator.Not, predicateExpr) else predicateExpr
         let existsExpr = SqlExpr.Exists({ Ctes = []; Body = SelectBody.SingleSelect {
@@ -321,6 +324,20 @@ module internal QueryTranslatorVisitCore =
             let m = exp :?> UnaryExpression
             if m.Type = typeof<obj> || m.Operand.Type = typeof<obj> then visitDu m.Operand qb
             else castToDu qb m.Type m.Operand
+        | ExpressionType.NewArrayInit ->
+            let array = exp :?> NewArrayExpression
+            let items =
+                [for item in array.Expressions do
+                    let value = visitDu item qb
+                    match item with
+                    | :? ParameterExpression as parameter when not (isNull (parameter.Type.GetProperty("Id")))
+                                                              && parameter.Type.GetProperty("Id").PropertyType = typeof<int64> ->
+                        // The rowid is stored beside the document and must accompany
+                        // an entity embedded in a constructed sequence.
+                        yield SqlExpr.FunctionCall("jsonb_set", [value; SqlExpr.Literal(SqlLiteral.String "$.Id");
+                                                                SqlExpr.Column(resolveAliasForParameter parameter qb, "Id")])
+                    | _ -> yield value]
+            SqlExpr.JsonArrayExpr items
         | ExpressionType.New ->
             let m = exp :?> NewExpression
             match DateTimeFunctions.translateDateTimeLikeConstructor m (fun arg -> visitDu arg qb) with
@@ -345,7 +362,7 @@ module internal QueryTranslatorVisitCore =
                 let arg = evaluateExpr<string> arge
                 match arg with
                 | "Id" when isRootParameter indexExp.Object ->
-                    let alias = if String.IsNullOrEmpty qb.TableNameDot then None else Some(qb.TableNameDot.TrimEnd([|'.'|]))
+                    let alias = qb.SourceAlias
                     SqlExpr.Column(alias, "Id")
                 | arg -> visitPropertyDu indexExp.Object arg ({new Expression() with member this.Type = indexExp.Object.Type}) qb
             else arrayIndexDu indexExp.Object arge qb

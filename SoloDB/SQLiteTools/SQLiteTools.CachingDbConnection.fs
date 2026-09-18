@@ -4,7 +4,6 @@ open System
 open System.Collections.Generic
 open System.Data
 open System.Runtime.CompilerServices
-open System.Runtime.ExceptionServices
 open System.Runtime.InteropServices
 open Microsoft.Data.Sqlite
 open System.Data.Common
@@ -13,6 +12,30 @@ open SQLiteToolsMapper
 
 module SQLiteTools =
     open SQLiteToolsHandlerFaultState
+
+    type internal PreparedCacheEntry = {
+        Command: SqliteCommand
+        ColumnDict: Dictionary<string, int>
+        CallCount: int64 ref
+        InUse: bool ref
+        HasParameters: bool ref
+        mutable Retired: bool
+        mutable BindingOwner: obj
+        mutable BindingSlots: SqliteParameter array
+    }
+
+    /// A compiled query remembers entries weakly; the connection cache owns the commands.
+    type internal RetainedPreparedHandle(sql: string) =
+        let entries = ConditionalWeakTable<SqliteConnection, WeakReference<PreparedCacheEntry>>()
+        member _.Sql = sql
+        member _.TryGet(connection: SqliteConnection) =
+            let mutable weak = Unchecked.defaultof<WeakReference<PreparedCacheEntry>>
+            let mutable entry = Unchecked.defaultof<PreparedCacheEntry>
+            if entries.TryGetValue(connection, &weak) && weak.TryGetTarget(&entry) then ValueSome entry else ValueNone
+        member _.Remember(connection: SqliteConnection, entry: PreparedCacheEntry) =
+            let weak = entries.GetValue(connection, fun _ -> WeakReference<PreparedCacheEntry>(entry))
+            weak.SetTarget(entry)
+
     /// <summary>
     /// A sealed wrapper around SqliteConnection that adds command caching capabilities.
     /// </summary>
@@ -21,7 +44,9 @@ module SQLiteTools =
     /// <param name="config">The database configuration.</param>
     type [<Sealed>] CachingDbConnection internal (connectionStr: string, onDispose, config: Types.SoloDBConfiguration, onEnterEventHandlerScope: unit -> unit, onExitEventHandlerScope: unit -> unit) =
         inherit SqliteConnection(connectionStr)
-        let mutable preparedCache = Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
+        let mutable preparedCache = Dictionary<string, PreparedCacheEntry>()
+        let mutable preparedCreated = 0
+        let mutable preparedDisposed = 0
         let maxCacheSize = 1000
         // Connection-level reader-active guard to prevent indefinite hang from overlapping readers.
         let mutable readerActive = false
@@ -63,11 +88,57 @@ module SQLiteTools =
                         else Threading.Thread.Sleep(1 <<< (attempt - 2))
             if not ok then raise lastExn
 
-        let tryCachedCommand (this: CachingDbConnection) (sql: string) (parameters: obj) =
+        let retireEntry (entry: PreparedCacheEntry) =
+            entry.Retired <- true
+            if not !entry.InUse then
+                entry.Command.Dispose()
+                preparedDisposed <- preparedDisposed + 1
+
+        let releaseEntry (entry: PreparedCacheEntry) =
+            lock cacheLock (fun () ->
+                if !entry.InUse then
+                    entry.InUse := false
+                    if entry.Retired then
+                        entry.Command.Dispose()
+                        preparedDisposed <- preparedDisposed + 1)
+
+        let bindRetained (entry: PreparedCacheEntry) (handle: RetainedPreparedHandle) (packet: ParameterValues) =
+            let count = packet.Constants.Length + packet.Names.Length
+            if not (Object.ReferenceEquals(entry.BindingOwner, handle)) then
+                // Another caller may have changed or removed named parameters. Rebuild this
+                // handle's references once, then use the same objects on subsequent calls.
+                if entry.HasParameters.Value then
+                    for i = 0 to entry.Command.Parameters.Count - 1 do
+                        entry.Command.Parameters.[i].Value <- null
+                for pair in packet.Constants do
+                    setOrAddParameter entry.Command pair.Key pair.Value
+                for i = 0 to packet.Names.Length - 1 do
+                    setOrAddParameter entry.Command packet.Names.[i] packet.Values.[i]
+                for i = entry.Command.Parameters.Count - 1 downto 0 do
+                    if isNull entry.Command.Parameters.[i].Value then
+                        entry.Command.Parameters.RemoveAt i
+                entry.BindingSlots <- Array.init count (fun i ->
+                    let name = if i < packet.Constants.Length then packet.Constants.[i].Key
+                               else packet.Names.[i - packet.Constants.Length]
+                    entry.Command.Parameters.[name])
+                entry.BindingOwner <- handle
+            else
+                for i = 0 to packet.Constants.Length - 1 do
+                    setRetainedParameterValue entry.BindingSlots.[i] packet.Constants.[i].Value
+                for i = 0 to packet.Names.Length - 1 do
+                    setRetainedParameterValue entry.BindingSlots.[packet.Constants.Length + i] packet.Values.[i]
+            entry.HasParameters.Value <- count > 0
+            count
+
+        let tryCachedCommand (this: CachingDbConnection) (sql: string) (parameters: obj) (retained: RetainedPreparedHandle voption) =
+            match retained with
+            | ValueSome handle when handle.Sql <> sql ->
+                invalidArg "retained" "The retained prepared handle does not match the statement."
+            | _ -> ()
             // @VAR variable names are randomly generated, so caching them is not possible.
-            if sql.Contains "@VAR" then ValueNone else
+            if sql.Contains "@VAR" then struct(ValueNone, parameters) else
             if not config.CachingEnabled then
-                ValueNone
+                struct(ValueNone, parameters)
             else
             lock cacheLock (fun () ->
 
@@ -78,39 +149,100 @@ module SQLiteTools =
 
                 for i in 0..(maxCacheSize / 4 - 1) do
                     preparedCache.Remove (arr.[i].Key) |> ignore
-                    arr.[i].Value.Command.Dispose()
+                    retireEntry arr.[i].Value
 
 
-            let item =
-                match preparedCache.TryGetValue sql with
-                | true, x -> x
-                | false, _ ->
+            let struct(item, needsBinding, remembered) =
+                let retainedEntry =
+                    match retained with
+                    | ValueSome handle ->
+                        match handle.TryGet(this :> SqliteConnection) with
+                        | ValueSome entry when not entry.Retired -> ValueSome entry
+                        | _ -> ValueNone
+                    | ValueNone -> ValueNone
+                match retainedEntry with
+                | ValueSome entry -> struct(entry, true, true)
+                | ValueNone ->
+                  match preparedCache.TryGetValue sql with
+                  | true, x -> struct(x, true, false)
+                  | false, _ ->
                     let command = this.CreateCommand()
-                    command.CommandText <- sql
-                    processParameters addParameter command parameters
-                    prepareWithSchemaRetry command
+                    try
+                        command.CommandText <- sql
+                        let count = processParameters addParameter command parameters
+                        prepareWithSchemaRetry command
 
-                    let item = {| Command = command; ColumnDict = Dictionary<string, int>(); CallCount = ref 0L; InUse = ref false |}
-                    preparedCache.[sql] <- item
-                    item
+                        let item = {
+                            Command = command; ColumnDict = Dictionary<string, int>()
+                            CallCount = ref 0L; InUse = ref false; HasParameters = ref (count > 0)
+                            Retired = false; BindingOwner = null; BindingSlots = [||]
+                        }
+                        preparedCache.[sql] <- item
+                        preparedCreated <- preparedCreated + 1
+                        struct(item, false, false)
+                    with _ ->
+                        command.Dispose()
+                        reraise()
 
-            if !item.InUse then ValueNone else
+            if !item.InUse then struct(ValueNone, parameters) else
 
             item.CallCount := !item.CallCount + 1L
             item.InUse := true
+            if not remembered then
+                match retained with
+                | ValueSome handle -> handle.Remember(this :> SqliteConnection, item)
+                | ValueNone -> ()
 
-            processParameters setOrAddParameter item.Command parameters
-            match sqlTraceCallback with ValueSome cb -> cb.Invoke(sql) | ValueNone -> ()
-            // Reported after binding, so a caller can see what a cached statement actually ran with.
-            match sqlBoundTraceCallback with
-            | ValueSome cb ->
-                let bound = ResizeArray<KeyValuePair<string, obj>>(item.Command.Parameters.Count)
-                for i in 0 .. item.Command.Parameters.Count - 1 do
-                    let p = item.Command.Parameters.[i]
-                    bound.Add(KeyValuePair(p.ParameterName, p.Value))
-                cb.Invoke(sql, bound :> IReadOnlyList<KeyValuePair<string, obj>>)
-            | ValueNone -> ()
-            struct (item.Command, item.ColumnDict, item.InUse) |> ValueSome)
+            try
+                let mutable emptyRebind = false
+                if needsBinding then
+                    match retained, parameters with
+                    | ValueSome handle, (:? ParameterValues as packet) ->
+                        if packet.Constants.Length + packet.Names.Length = 0 && item.HasParameters.Value then
+                            item.BindingOwner <- null
+                            emptyRebind <- true
+                        else
+                            bindRetained item handle packet |> ignore
+                    | _ ->
+                        item.BindingOwner <- null
+                        // Do not initialize the provider's lazy parameter collection for
+                        // parameterless calls: that also changes its missing-value errors.
+                        if item.HasParameters.Value then
+                            let parameters = item.Command.Parameters
+                            for i = 0 to parameters.Count - 1 do
+                                parameters.[i].Value <- null
+                        let count = processParameters setOrAddParameter item.Command parameters
+                        emptyRebind <- count = 0 && item.HasParameters.Value
+                        if count > 0 then
+                            item.HasParameters.Value <- true
+                            // DBNull is a supplied SQL NULL. Remove only omitted values
+                            // and leave missing-name reporting with the provider.
+                            for i = item.Command.Parameters.Count - 1 downto 0 do
+                                if isNull item.Command.Parameters.[i].Value then
+                                    item.Command.Parameters.RemoveAt i
+                if emptyRebind then
+                    releaseEntry item
+                    // The argument source was consumed once and supplied no values.
+                    // Use a fresh parameterless command, without enumerating it again.
+                    struct(ValueNone, null)
+                else
+                    match sqlTraceCallback with ValueSome cb -> cb.Invoke(sql) | ValueNone -> ()
+                    // Reported after binding, so a caller can see what a cached statement actually ran with.
+                    match sqlBoundTraceCallback with
+                    | ValueSome cb ->
+                        let bound = ResizeArray<KeyValuePair<string, obj>>(item.Command.Parameters.Count)
+                        for i in 0 .. item.Command.Parameters.Count - 1 do
+                            let p = item.Command.Parameters.[i]
+                            bound.Add(KeyValuePair(p.ParameterName, p.Value))
+                        cb.Invoke(sql, bound :> IReadOnlyList<KeyValuePair<string, obj>>)
+                    | ValueNone -> ()
+                    struct(ValueSome item, parameters)
+            with _ ->
+                // A throwing getter may have added a prefix of the arguments.
+                if needsBinding then item.HasParameters.Value <- true
+                item.BindingOwner <- null
+                releaseEntry item
+                reraise())
 
         // Uncached command lifecycle helpers. The SqliteConnection internal command list is
         // appended to by CreateCommand and removed from by SqliteCommand.Dispose. Both sides
@@ -119,8 +251,12 @@ module SQLiteTools =
             let command =
                 lock cacheLock (fun () ->
                     let c = createCommand this sql parameters
-                    prepareWithSchemaRetry c
-                    c)
+                    try
+                        prepareWithSchemaRetry c
+                        c
+                    with _ ->
+                        c.Dispose()
+                        reraise())
             let guard =
                 { new IDisposable with
                     member _.Dispose() = lock cacheLock (fun () -> command.Dispose()) }
@@ -135,6 +271,8 @@ module SQLiteTools =
     
         /// <summary>The underlying SqliteConnection.</summary>
         member internal this.Inner = this :> SqliteConnection
+        member internal _.PreparedCacheSnapshot =
+            lock cacheLock (fun () -> struct (preparedCache.Count, preparedCreated, preparedDisposed))
         member internal this.HasManagedTransaction = not (isNull base.Transaction)
         /// <summary>Indicates if the connection is currently part of a transaction.</summary>
         member val InsideTransaction = false with get, set
@@ -196,37 +334,13 @@ module SQLiteTools =
             eventDispatchPendingRemovals.Clear()
     
         /// <summary>
-        /// Clears the prepared statement cache, waiting for any in-use commands to be released.
+        /// Retires cached commands. Active readers finish before their commands are disposed.
         /// </summary>
         member this.ClearCache() =
-            let oldCache =
-                lock cacheLock (fun () ->
-                    if preparedCache.Count = 0 then
-                        null
-                    else
-                        let old = preparedCache
-                        preparedCache <- Dictionary<string, {| Command: SqliteCommand; ColumnDict: Dictionary<string, int>; CallCount: int64 ref; InUse : bool ref |}>()
-                        old)
-
-            if isNull oldCache then () else
-
-            // Bounded timeout to prevent livelock from permanently in-use commands.
-            let deadline = System.Diagnostics.Stopwatch.StartNew()
-            let maxWaitMs = 5000L
-            while oldCache.Count > 0 && deadline.ElapsedMilliseconds < maxWaitMs do
-                lock cacheLock (fun () ->
-                    for KeyValue(k, v) in oldCache |> Seq.toArray do
-                        if (not !v.InUse) then
-                            v.Command.Dispose()
-                            ignore (oldCache.Remove k))
-                if oldCache.Count > 0 then
-                    Threading.Thread.Sleep(1)
-
-            // Force-dispose any commands still in-use after deadline.
             lock cacheLock (fun () ->
-                for KeyValue(_, v) in oldCache do
-                    v.Command.Dispose()
-                oldCache.Clear())
+                let oldCache = preparedCache
+                preparedCache <- Dictionary<string, PreparedCacheEntry>()
+                for KeyValue(_, entry) in oldCache do retireEntry entry)
     
         member internal this.ReaderActive
             with get() = lock cacheLock (fun () -> readerActive)
@@ -242,12 +356,13 @@ module SQLiteTools =
         member this.Execute(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             withHandlerFaultWrap (this :> SqliteConnection) (fun () ->
                 this.CheckNoActiveReader()
-                match tryCachedCommand this sql parameters with
-                | ValueSome struct (command, _columnDict, inUse) ->
+                let struct(cached, parameters) = tryCachedCommand this sql parameters ValueNone
+                match cached with
+                | ValueSome item ->
                     try
-                        command.ExecuteNonQuery()
+                        item.Command.ExecuteNonQuery()
                     finally
-                        inUse := false
+                        releaseEntry item
                 | ValueNone ->
                     let command, cmdGuard = createUncachedLocked this sql parameters
                     use _guard = cmdGuard
@@ -260,10 +375,11 @@ module SQLiteTools =
         /// <returns>An IDisposable to manage the lifetime of the reader and command.</returns>
         member this.OpenReader(sql: string, outReader: outref<SqliteDataReader>, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             this.CheckNoActiveReader()
-            match tryCachedCommand this sql parameters with
-            | ValueSome struct (command, _columnDict, inUse) ->
+            let struct(cached, parameters) = tryCachedCommand this sql parameters ValueNone
+            match cached with
+            | ValueSome item ->
                 try
-                    let reader = command.ExecuteReader()
+                    let reader = item.Command.ExecuteReader()
                     let conn = this
                     let lease =
                         { new IDisposable with
@@ -272,7 +388,7 @@ module SQLiteTools =
                                 try
                                     reader.Dispose()
                                 finally
-                                    inUse := false }
+                                    releaseEntry item }
                     try
                         raiseIfHandlerFaultRecorded (this :> SqliteConnection)
                         outReader <- reader
@@ -285,7 +401,7 @@ module SQLiteTools =
                         tryRecordHandlerFault (this :> SqliteConnection) ex
                         reraise()
                 with ex ->
-                    inUse := false
+                    releaseEntry item
                     tryRecordHandlerFault (this :> SqliteConnection) ex
                     reraise()
             | ValueNone ->
@@ -327,26 +443,29 @@ module SQLiteTools =
         /// <param name="sql">The SQL query text.</param>
         /// <param name="parameters">The parameters for the query.</param>
         /// <returns>A sequence of 'T objects. Callers that stop early observe the pre-check but not the post-enumeration check.</returns>
-        member this.Query<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) = seq {
-            try
-                this.CheckNoActiveReader()
-                raiseIfHandlerFaultRecorded (this :> SqliteConnection)
-                match tryCachedCommand this sql parameters with
-                | ValueSome struct (command, columnDict, inUse) ->
-                    try
-                        yield! queryCommand<'T> command columnDict
-                        raiseIfHandlerFaultRecorded (this :> SqliteConnection)
-                    finally
-                        inUse := false
-                | ValueNone ->
-                    let command, cmdGuard = createUncachedLocked this sql parameters
-                    use _guard = cmdGuard
-                    yield! queryCommand<'T> command null
+        member private this.QueryCore<'T>(sql: string, parameters: obj, retained: RetainedPreparedHandle voption) = recordEnumerationFaults (this :> SqliteConnection) (seq {
+            this.CheckNoActiveReader()
+            raiseIfHandlerFaultRecorded (this :> SqliteConnection)
+            let struct(cached, parameters) = tryCachedCommand this sql parameters retained
+            match cached with
+            | ValueSome item ->
+                try
+                    yield! queryCommand<'T> item.Command item.ColumnDict
                     raiseIfHandlerFaultRecorded (this :> SqliteConnection)
-            with ex ->
-                tryRecordHandlerFault (this :> SqliteConnection) ex
-                ExceptionDispatchInfo.Capture(ex).Throw()
-        }
+                finally
+                    releaseEntry item
+            | ValueNone ->
+                let command, cmdGuard = createUncachedLocked this sql parameters
+                use _guard = cmdGuard
+                yield! queryCommand<'T> command null
+                raiseIfHandlerFaultRecorded (this :> SqliteConnection)
+        })
+
+        member this.Query<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
+            this.QueryCore<'T>(sql, parameters, ValueNone)
+
+        member internal this.QueryRetained<'T>(handle: RetainedPreparedHandle, parameters: ParameterValues) =
+            this.QueryCore<'T>(handle.Sql, box parameters, ValueSome handle)
     
         /// <summary>Executes a query and returns the first result, utilizing the cache if possible.</summary>
         /// <typeparam name="'T">The type to map the result to.</typeparam>
@@ -356,12 +475,13 @@ module SQLiteTools =
         member this.QueryFirst<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             withHandlerFaultWrap (this :> SqliteConnection) (fun () ->
                 this.CheckNoActiveReader()
-                match tryCachedCommand this sql parameters with
-                | ValueSome struct (command, columnDict, inUse) ->
+                let struct(cached, parameters) = tryCachedCommand this sql parameters ValueNone
+                match cached with
+                | ValueSome item ->
                     try
-                        queryCommand<'T> command columnDict |> Seq.head
+                        queryCommand<'T> item.Command item.ColumnDict |> Seq.head
                     finally
-                        inUse := false
+                        releaseEntry item
                 | ValueNone ->
                     let command, cmdGuard = createUncachedLocked this sql parameters
                     use _guard = cmdGuard
@@ -375,13 +495,14 @@ module SQLiteTools =
         member this.QueryFirstOrDefault<'T>(sql: string, [<Optional; DefaultParameterValue(null: obj)>] parameters: obj) =
             withHandlerFaultWrap (this :> SqliteConnection) (fun () ->
                 this.CheckNoActiveReader()
-                match tryCachedCommand this sql parameters with
-                | ValueSome struct (command, columnDict, inUse) ->
+                let struct(cached, parameters) = tryCachedCommand this sql parameters ValueNone
+                match cached with
+                | ValueSome item ->
                     try
-                        match queryCommand<'T> command columnDict |> Seq.tryHead with
+                        match queryCommand<'T> item.Command item.ColumnDict |> Seq.tryHead with
                         | Some x -> x
                         | None -> defaultOf<'T>()
-                    finally inUse := false
+                    finally releaseEntry item
                 | ValueNone ->
                     let command, cmdGuard = createUncachedLocked this sql parameters
                     use _guard = cmdGuard
@@ -401,44 +522,41 @@ module SQLiteTools =
         /// <param name="parameters">The parameters for the query.</param>
         /// <param name="splitOn">The column name to split the results on.</param>
         /// <returns>A sequence of 'TReturn objects. Callers that stop early observe the pre-check but not the post-enumeration check.</returns>
-        member this.Query<'T1, 'T2, 'TReturn>(sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = seq {
+        member this.Query<'T1, 'T2, 'TReturn>(sql: string, map: Func<'T1, 'T2, 'TReturn>, parameters: obj, splitOn: string) = recordEnumerationFaults (this :> SqliteConnection) (seq {
+            this.CheckNoActiveReader()
+            raiseIfHandlerFaultRecorded (this :> SqliteConnection)
+            let struct (command, dict, uncachedGuard, cachedEntry) =
+                let struct(cached, parameters) = tryCachedCommand this sql parameters ValueNone
+                match cached with
+                | ValueSome item ->
+                    struct (item.Command, item.ColumnDict, (null: IDisposable), Some item)
+                | ValueNone ->
+                    let c, g = createUncachedLocked this sql parameters
+                    struct (c, Dictionary<string, int>(), g, None)
             try
-                this.CheckNoActiveReader()
+                use reader = command.ExecuteReader()
+
+                if dict.Count = 0 then
+                    for i in 0..(reader.FieldCount - 1) do
+                        dict.Add(reader.GetName(i), i)
+
+                let splitIndex = reader.GetOrdinal(splitOn)
+
+                while reader.Read() do
+                    let t1 = TypeMapper<'T1>.Map reader 0 dict
+                    let t2 =
+                        if reader.IsDBNull(splitIndex) then Unchecked.defaultof<'T2>
+                        else TypeMapper<'T2>.Map reader splitIndex dict
+
+                    yield map.Invoke (t1, t2)
+
                 raiseIfHandlerFaultRecorded (this :> SqliteConnection)
-                let struct (command, dict, uncachedGuard, inUse) =
-                    match tryCachedCommand this sql parameters with
-                    | ValueSome struct (command, columnDict, inUse) ->
-                        struct (command, columnDict, (null: IDisposable), Some inUse)
-                    | ValueNone ->
-                        let c, g = createUncachedLocked this sql parameters
-                        struct (c, Dictionary<string, int>(), g, None)
-                try
-                    use reader = command.ExecuteReader()
-
-                    if dict.Count = 0 then
-                        for i in 0..(reader.FieldCount - 1) do
-                            dict.Add(reader.GetName(i), i)
-
-                    let splitIndex = reader.GetOrdinal(splitOn)
-
-                    while reader.Read() do
-                        let t1 = TypeMapper<'T1>.Map reader 0 dict
-                        let t2 =
-                            if reader.IsDBNull(splitIndex) then Unchecked.defaultof<'T2>
-                            else TypeMapper<'T2>.Map reader splitIndex dict
-
-                        yield map.Invoke (t1, t2)
-
-                    raiseIfHandlerFaultRecorded (this :> SqliteConnection)
-                finally
-                    match inUse with
-                    | Some inUse -> inUse := false
-                    | _ -> ()
-                    if not (isNull uncachedGuard) then uncachedGuard.Dispose()
-            with ex ->
-                tryRecordHandlerFault (this :> SqliteConnection) ex
-                ExceptionDispatchInfo.Capture(ex).Throw()
-        }
+            finally
+                match cachedEntry with
+                | Some item -> releaseEntry item
+                | _ -> ()
+                if not (isNull uncachedGuard) then uncachedGuard.Dispose()
+        })
     
         /// <summary>
         /// Performs the actual disposal of the base connection.

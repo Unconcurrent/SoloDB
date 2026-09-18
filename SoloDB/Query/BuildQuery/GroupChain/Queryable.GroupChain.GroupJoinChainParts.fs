@@ -29,7 +29,6 @@ module internal GroupJoinChainParts =
             [],
             Some(SqlExpr.FunctionCall("DECIMAL_DIV", [SqlExpr.AggregateCall(AggregateKind.Sum, Some argExpr, false, None); countExpr])))
     let buildCountSubquery (rt: GroupJoinRuntime) (baseCore: SelectCore) (limit: int option) =
-        let countSourceAlias = GroupJoinAliases.nextCountSource rt.InnerCtx
         let countSourceCore =
             { baseCore with
                 Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
@@ -51,28 +50,3 @@ module internal GroupJoinChainParts =
               Limit = None
               Offset = None }
         SqlExpr.ScalarSubquery { Ctes = []; Body = SingleSelect countCore }
-
-    let buildCountSelectSubquery (rt: GroupJoinRuntime) (sourceSel: SqlSelect) (limit: int option) =
-        let countSourceAlias = GroupJoinAliases.nextCountSource rt.InnerCtx
-        let countSourceCore =
-            { Distinct = false
-              Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }]
-              Source = Some(DerivedTable(sourceSel, countSourceAlias))
-              Joins = []
-              Where = None
-              GroupBy = []
-              Having = None
-              OrderBy = []
-              Limit = limit |> Option.map (fun n -> SqlExpr.Literal(SqlLiteral.Integer(int64 n)))
-              Offset = None }
-        buildCountSubquery rt countSourceCore None
-
-    let entityJsonExpr alias =
-        SqlExpr.FunctionCall("jsonb_set", [
-            SqlExpr.Column(Some alias, "Value")
-            SqlExpr.Literal(SqlLiteral.String "$.Id")
-            SqlExpr.Column(Some alias, "Id")
-        ])
-    /// Helper: extract LambdaExpression from Expression (shared extractor stores them as Expression).
-    let asLambda (e: Expression) : LambdaExpression = e :?> LambdaExpression
-

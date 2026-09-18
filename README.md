@@ -629,20 +629,12 @@ Console.WriteLine($"Generated ID: {newItem.Id}");
 
 #### IIdGenerator contract: cascade-context behaviour
 
-`GenerateId` is invoked from two paths: (a) direct `Insert` of an entity
-of `MyObject`, where `collection` is the typed `ISoloDBCollection<MyObject>`
-the user just opened; (b) cascade insertion when the entity is reached
-through `DBRef.From(unsavedTarget)` on a parent of a different type, where
-the cascade primitive does NOT have a typed `ISoloDBCollection<MyObject>`
-in scope and **passes `null`**.
-
-Generators that do not need to consult the collection (the common case —
-`Guid.NewGuid()`, hashing the entity's own fields, etc.) work in both
-contexts unchanged. Generators that DO consult the collection (e.g. to
-read `OrderByDescending(x => x.Id).FirstOrDefault()` to compute the next
-sequential id) must handle `collection == null` defensively, or accept
-that cascade-context invocation throws `NullReferenceException` and the
-parent's `Insert` aborts cleanly via the surrounding transaction.
+`GenerateId` receives a typed `ISoloDBCollection<MyObject>` for both direct
+`Insert` and cascade insertion through `DBRef.From(unsavedTarget)`. During a
+cascade, this collection reads through the same transaction as the parent
+insert. A generator may consult existing target rows when choosing an ID.
+The cascade and parent insert commit together, or roll back together if the
+generator fails. Do not retain the transactional collection after the insert.
 
 ### Integrated File Storage
 

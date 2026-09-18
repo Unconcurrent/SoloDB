@@ -163,7 +163,7 @@ and batchLoadDBRefManyProperties
     else
 
     let ownerTable = formatName ownerTable
-    let tx: RelationTxContext = { Connection = connection; OwnerTable = ownerTable; OwnerType = ownerType; InTransaction = inTransaction }
+    let tx: RelationTxContext = { Connection = connection; OwnerTable = ownerTable; OwnerType = ownerType; InTransaction = inTransaction; CollectionFactory = None }
     let manyDescriptors = buildRelationDescriptors tx ownerType |> Array.filter (fun d -> d.Kind = Many)
     if manyDescriptors.Length = 0 then ()
     else
@@ -288,7 +288,7 @@ let internal recurseLoadedRelationTargets
         if ownerEntities.Length = 0 || depth >= maxRecursiveDepth then ()
         else
         let ownerTable = formatName ownerTable
-        let tx: RelationTxContext = { Connection = connection; OwnerTable = ownerTable; OwnerType = ownerType; InTransaction = inTransaction }
+        let tx: RelationTxContext = { Connection = connection; OwnerTable = ownerTable; OwnerType = ownerType; InTransaction = inTransaction; CollectionFactory = None }
         let descriptors = buildRelationDescriptors tx ownerType
 
         let fullPath (propName: string) =

@@ -103,47 +103,9 @@ let private pushdownInCore (changed: bool ref) (outer: SelectCore) : SelectCore 
 
 /// Recursively apply projection pushdown to a SqlSelect at every nesting level.
 let rec pushdownProjectionSelect (changed: bool ref) (sel: SqlSelect) : SqlSelect =
-    let pushedBody =
-        match sel.Body with
-        | SingleSelect outer ->
-            let outerWithRecursedSource =
-                match outer.Source with
-                | Some(DerivedTable(innerSel, alias)) ->
-                    { outer with Source = Some(DerivedTable(pushdownProjectionSelect changed innerSel, alias)) }
-                | _ -> outer
-
-            let outerWithRecursedJoins =
-                { outerWithRecursedSource with
-                    Joins = outerWithRecursedSource.Joins |> List.map (fun j ->
-                        match j with
-                        | CrossJoin(DerivedTable(jSel, jAlias)) ->
-                            CrossJoin(DerivedTable(pushdownProjectionSelect changed jSel, jAlias))
-                        | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
-                            ConditionedJoin(kind, DerivedTable(pushdownProjectionSelect changed jSel, jAlias), onExpr)
-                        | CrossJoin _
-                        | ConditionedJoin _ ->
-                            j
-                    )
-                }
-
-            SingleSelect(pushdownInCore changed outerWithRecursedJoins)
-
-        | UnionAllSelect(head, tail) ->
-            let pushHead = pushdownProjectionCore changed head
-            let pushTail = tail |> List.map (pushdownProjectionCore changed)
-            UnionAllSelect(pushHead, pushTail)
-
-    let pushedCtes =
-        sel.Ctes |> List.map (fun cte -> { cte with Query = pushdownProjectionSelect changed cte.Query })
-    { Ctes = pushedCtes; Body = pushedBody }
-
-/// Pushdown within a SelectCore (for UNION ALL arms).
-and private pushdownProjectionCore (changed: bool ref) (core: SelectCore) : SelectCore =
-    let sel = { Ctes = []; Body = SingleSelect core }
-    let pushed = pushdownProjectionSelect changed sel
-    match pushed.Body with
-    | SingleSelect c -> c
-    | _ -> core
+    let recurse = pushdownProjectionSelect changed
+    let core = mapDerivedSources recurse >> pushdownInCore changed
+    mapSelectParts (mapCores core) recurse sel
 
 /// Push projections in a SqlStatement.
 let pushdownProjectionStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
@@ -151,7 +113,7 @@ let pushdownProjectionStatement (stmt: SqlStatement) : struct(SqlStatement * boo
     | SelectStmt sel ->
         let changed = ref false
         let result = pushdownProjectionSelect changed sel
-        struct(SelectStmt result, changed.Value)
+        struct((if obj.ReferenceEquals(sel, result) then stmt else SelectStmt result), changed.Value)
     // INSERT … SELECT recurses so projection pushdown reaches the chain SELECT subtree
     // emitted for N-hop B4. UPDATE/DELETE/DDL have no SELECT subtree at this layer: the chain
     // SELECT used by N-hop B4 inside Update.Where is reached via FlattenTransform's
@@ -162,5 +124,5 @@ let pushdownProjectionStatement (stmt: SqlStatement) : struct(SqlStatement * boo
         | InsertSelect sel ->
             let changed = ref false
             let pushed = pushdownProjectionSelect changed sel
-            struct(InsertStmt { ins with Source = InsertSelect pushed }, changed.Value)
+            struct((if obj.ReferenceEquals(sel, pushed) then stmt else InsertStmt { ins with Source = InsertSelect pushed }), changed.Value)
     | UpdateStmt _ | DeleteStmt _ -> struct(stmt, false)

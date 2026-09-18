@@ -14,108 +14,65 @@ open QueryTranslatorBaseHelpers
 open SoloDatabase.SqlModel
 
 module internal QueryTranslatorBase =
+    let private tryMethodSource (m: MethodCallExpression) =
+        if not (isNull m.Object) then ValueSome struct (m.Object, 0)
+        elif m.Arguments.Count > 0 then ValueSome struct (m.Arguments.[0], 1)
+        else ValueNone
+
     [<return: Struct>]
     let internal (|OfShape0|_|) (_retType: ('any1 -> 'T) | null) (_objType: ('any2 -> 'O) | null) (name: string) (m: MethodCallExpression) =
-        if m.Method.Name = name && (isNull _retType || typeof<'T>.IsAssignableFrom m.Type) then
-            let ret =
-                if not (isNull m.Object) then
-                    // Instance method: target is m.Object
-                    ValueSome struct (m.Object, m.Arguments, 0)
-                elif m.Arguments.Count > 0 then
-                    // Static/Extension method: target is first arg
-                    ValueSome struct (m.Arguments.[0], m.Arguments, 1)
-                else
-                    ValueNone
-
-            let ret =
-                match ret with
-                | ValueSome struct (o, _, _) when isNull _objType || typeof<'O>.IsAssignableFrom o.Type -> ret
-                | _ -> ValueNone
-
-            match ret with
-            | ValueSome struct (o, _, _) -> ValueSome o
-            | _ -> ValueNone
-        else
+        if m.Method.Name <> name || (not (isNull _retType) && not (typeof<'T>.IsAssignableFrom m.Type)) then
             ValueNone
+        else
+            match tryMethodSource m with
+            | ValueSome struct (receiver, firstArgument) when isNull _objType || typeof<'O>.IsAssignableFrom receiver.Type ->
+                ValueSome receiver
+            | _ -> ValueNone
 
     [<return: Struct>]
     let internal (|OfShape1|_|) (_retType: ('any1 -> 'T) | null) (_objType: ('any2 -> 'O) | null) (name: string) (_argType: (unit -> 'A) | null) (m: MethodCallExpression) =
-        if m.Method.Name = name && (isNull _retType || typeof<'T>.IsAssignableFrom m.Type) then
-            let ret =
-                if not (isNull m.Object) then
-                    // Instance method: target is m.Object, args are m.Arguments
-                    ValueSome struct (m.Object, m.Arguments, 0)
-                elif m.Arguments.Count > 0 then
-                    // Static/Extension method: target is first arg, rest are args
-                    ValueSome struct (m.Arguments.[0], m.Arguments, 1)
-                else
-                    ValueNone
-
-            let ret =
-                match ret with
-                | ValueSome struct (o, _, _) when isNull _objType || typeof<'O>.IsAssignableFrom o.Type -> ret
-                | _ -> ValueNone
-
-            let ret =
-                match ret with
-                | ValueSome struct (o, args, argsIndex) when args.Count > argsIndex && (isNull _argType || typeof<'A>.IsAssignableFrom args.[argsIndex].Type) ->
-                        ValueSome struct (o, args.[argsIndex])
-                | _ -> ValueNone
-
-            ret
-        else
+        if m.Method.Name <> name || (not (isNull _retType) && not (typeof<'T>.IsAssignableFrom m.Type)) then
             ValueNone
+        else
+            match tryMethodSource m with
+            | ValueSome struct (receiver, firstArgument) when isNull _objType || typeof<'O>.IsAssignableFrom receiver.Type ->
+                if m.Arguments.Count > firstArgument
+                   && (isNull _argType || typeof<'A>.IsAssignableFrom m.Arguments.[firstArgument].Type)
+                then
+                    ValueSome struct (receiver, m.Arguments.[firstArgument])
+                else ValueNone
+            | _ -> ValueNone
 
     [<return: Struct>]
     let internal (|OfShape2|_|) (_retType: ('any1 -> 'T) | null) (_objType: ('any2 -> 'O) | null) (name: string) (_arg1Type: (unit -> 'A) | null) (_arg2Type: (unit -> 'B) | null) (m: MethodCallExpression) =
-        if m.Method.Name = name && (isNull _retType || typeof<'T>.IsAssignableFrom m.Type) then
-            let ret =
-                if not (isNull m.Object) then
-                    ValueSome struct (m.Object, m.Arguments, 0)
-                elif m.Arguments.Count > 0 then
-                    ValueSome struct (m.Arguments.[0], m.Arguments, 1)
-                else
-                    ValueNone
-
-            let ret =
-                match ret with
-                | ValueSome struct (o, _, _) when isNull _objType || typeof<'O>.IsAssignableFrom o.Type -> ret
-                | _ -> ValueNone
-
-            match ret with
-            | ValueSome struct (o, args, argsIndex) when args.Count > argsIndex + 1
-                && (isNull _arg1Type || typeof<'A>.IsAssignableFrom args.[argsIndex].Type)
-                && (isNull _arg2Type || typeof<'B>.IsAssignableFrom args.[argsIndex + 1].Type) ->
-                    ValueSome struct (o, args.[argsIndex], args.[argsIndex + 1])
-            | _ -> ValueNone
-        else
+        if m.Method.Name <> name || (not (isNull _retType) && not (typeof<'T>.IsAssignableFrom m.Type)) then
             ValueNone
+        else
+            match tryMethodSource m with
+            | ValueSome struct (receiver, firstArgument) when isNull _objType || typeof<'O>.IsAssignableFrom receiver.Type ->
+                if m.Arguments.Count > firstArgument + 1
+                   && (isNull _arg1Type || typeof<'A>.IsAssignableFrom m.Arguments.[firstArgument].Type)
+                   && (isNull _arg2Type || typeof<'B>.IsAssignableFrom m.Arguments.[firstArgument + 1].Type)
+                then
+                    ValueSome struct (receiver, m.Arguments.[firstArgument], m.Arguments.[firstArgument + 1])
+                else ValueNone
+            | _ -> ValueNone
 
     [<return: Struct>]
     let internal (|OfShape3|_|) (_retType: ('any1 -> 'T) | null) (_objType: ('any2 -> 'O) | null) (name: string) (_arg1Type: (unit -> 'A) | null) (_arg2Type: (unit -> 'B) | null) (_arg3Type: (unit -> 'C) | null) (m: MethodCallExpression) =
-        if m.Method.Name = name && (isNull _retType || typeof<'T>.IsAssignableFrom m.Type) then
-            let ret =
-                if not (isNull m.Object) then
-                    ValueSome struct (m.Object, m.Arguments, 0)
-                elif m.Arguments.Count > 0 then
-                    ValueSome struct (m.Arguments.[0], m.Arguments, 1)
-                else
-                    ValueNone
-
-            let ret =
-                match ret with
-                | ValueSome struct (o, _, _) when isNull _objType || typeof<'O>.IsAssignableFrom o.Type -> ret
-                | _ -> ValueNone
-
-            match ret with
-            | ValueSome struct (o, args, argsIndex) when args.Count > argsIndex + 2
-                && (isNull _arg1Type || typeof<'A>.IsAssignableFrom args.[argsIndex].Type)
-                && (isNull _arg2Type || typeof<'B>.IsAssignableFrom args.[argsIndex + 1].Type)
-                && (isNull _arg3Type || typeof<'C>.IsAssignableFrom args.[argsIndex + 2].Type) ->
-                    ValueSome struct (o, args.[argsIndex], args.[argsIndex + 1], args.[argsIndex + 2])
-            | _ -> ValueNone
-        else
+        if m.Method.Name <> name || (not (isNull _retType) && not (typeof<'T>.IsAssignableFrom m.Type)) then
             ValueNone
+        else
+            match tryMethodSource m with
+            | ValueSome struct (receiver, firstArgument) when isNull _objType || typeof<'O>.IsAssignableFrom receiver.Type ->
+                if m.Arguments.Count > firstArgument + 2
+                   && (isNull _arg1Type || typeof<'A>.IsAssignableFrom m.Arguments.[firstArgument].Type)
+                   && (isNull _arg2Type || typeof<'B>.IsAssignableFrom m.Arguments.[firstArgument + 1].Type)
+                   && (isNull _arg3Type || typeof<'C>.IsAssignableFrom m.Arguments.[firstArgument + 2].Type)
+                then
+                    ValueSome struct (receiver, m.Arguments.[firstArgument], m.Arguments.[firstArgument + 1], m.Arguments.[firstArgument + 2])
+                else ValueNone
+            | _ -> ValueNone
 
     // You cannot use the generic's "<" or ">" chars inside match's case
     let inline internal OfIEnum () = Unchecked.defaultof<IEnumerable>

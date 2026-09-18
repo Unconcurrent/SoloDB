@@ -6,8 +6,8 @@ open SoloDatabase.PathCanonicalizer
 open SoloDatabase.ProjectionLiveness
 open SoloDatabase.Provenance
 
-let private addMetric (d1, u1, p1, w1) (d2, u2, p2, w2) =
-    (d1 + d2, u1 + u2, p1 + p2, w1 + w2)
+let private addMetric struct(d1, u1, p1, w1) struct(d2, u2, p2, w2) =
+    struct(d1 + d2, u1 + u2, p1 + p2, w1 + w2)
 
 let private metricIsLower candidate current =
     compare candidate current < 0
@@ -29,13 +29,13 @@ let rec private exprMetric (expr: SqlExpr) =
             expr
 
     let recurseList xs =
-        xs |> List.fold (fun acc item -> addMetric acc (exprMetric item)) (0, 0, 0, 0)
+        xs |> List.fold (fun acc item -> addMetric acc (exprMetric item)) struct(0, 0, 0, 0)
 
     let recurseBranches firstBranch restBranches =
         (firstBranch :: restBranches)
         |> List.fold (fun acc (condExpr, resultExpr) ->
             let acc = addMetric acc (exprMetric condExpr)
-            addMetric acc (exprMetric resultExpr)) (0, 0, 0, 0)
+            addMetric acc (exprMetric resultExpr)) struct(0, 0, 0, 0)
 
     let subqueryMetric =
         match expr with
@@ -52,12 +52,12 @@ let rec private exprMetric (expr: SqlExpr) =
             recurseList elements
         | JsonObjectExpr properties ->
             properties
-            |> List.fold (fun acc (_, valueExpr) -> addMetric acc (exprMetric valueExpr)) (0, 0, 0, 0)
+            |> List.fold (fun acc (_, valueExpr) -> addMetric acc (exprMetric valueExpr)) struct(0, 0, 0, 0)
         | AggregateCall(_, argument, _, separator) ->
             let acc =
                 match argument with
                 | Some arg -> exprMetric arg
-                | None -> (0, 0, 0, 0)
+                | None -> struct(0, 0, 0, 0)
             match separator with
             | Some sep -> addMetric acc (exprMetric sep)
             | None -> acc
@@ -89,18 +89,18 @@ let rec private exprMetric (expr: SqlExpr) =
         | Parameter _
         | JsonExtractExpr _
         | JsonRootExtract _ ->
-            (0, 0, 0, 0)
+            struct(0, 0, 0, 0)
 
-    addMetric (0, 0, 0, localWrapperCount) subqueryMetric
+    addMetric struct(0, 0, 0, localWrapperCount) subqueryMetric
 
 and private sourceMetric source =
     match source with
     | BaseTable _ ->
-        (0, 0, 0, 0)
+        struct(0, 0, 0, 0)
     | FromJsonEach(valueExpr, _) ->
         exprMetric valueExpr
     | DerivedTable(query, _) ->
-        addMetric (1, 0, 0, 0) (selectMetric query)
+        addMetric struct(1, 0, 0, 0) (selectMetric query)
 
 and private joinMetric joinShape =
     match joinShape with
@@ -134,35 +134,35 @@ and private coreMetric (core: SelectCore) =
     let projectionMetric =
         core.Projections
         |> ProjectionSetOps.toList
-        |> List.fold (fun acc projection -> addMetric acc (exprMetric projection.Expr)) (0, 0, 0, 0)
+        |> List.fold (fun acc projection -> addMetric acc (exprMetric projection.Expr)) struct(0, 0, 0, 0)
 
     let whereMetric =
         match core.Where with
         | Some whereExpr -> exprMetric whereExpr
-        | None -> (0, 0, 0, 0)
+        | None -> struct(0, 0, 0, 0)
 
     let groupByMetric =
-        core.GroupBy |> List.fold (fun acc groupExpr -> addMetric acc (exprMetric groupExpr)) (0, 0, 0, 0)
+        core.GroupBy |> List.fold (fun acc groupExpr -> addMetric acc (exprMetric groupExpr)) struct(0, 0, 0, 0)
 
     let havingMetric =
         match core.Having with
         | Some havingExpr -> exprMetric havingExpr
-        | None -> (0, 0, 0, 0)
+        | None -> struct(0, 0, 0, 0)
 
     let orderByMetric =
         core.OrderBy
-        |> List.fold (fun acc orderBy -> addMetric acc (exprMetric orderBy.Expr)) (0, 0, 0, 0)
+        |> List.fold (fun acc orderBy -> addMetric acc (exprMetric orderBy.Expr)) struct(0, 0, 0, 0)
 
     let sourceAndJoinMetric =
         let sourceContribution =
             match core.Source with
             | Some source -> sourceMetric source
-            | None -> (0, 0, 0, 0)
+            | None -> struct(0, 0, 0, 0)
         core.Joins
         |> List.fold (fun acc joinShape -> addMetric acc (joinMetric joinShape)) sourceContribution
 
     addMetric
-        (0, unresolvedCount, deadProjectionCount core, 0)
+        struct(0, unresolvedCount, deadProjectionCount core, 0)
         (projectionMetric
          |> fun acc -> addMetric acc whereMetric
          |> fun acc -> addMetric acc groupByMetric
@@ -181,7 +181,7 @@ and private bodyMetric body =
 and private selectMetric (select: SqlSelect) =
     let cteMetric =
         select.Ctes
-        |> List.fold (fun acc cte -> addMetric acc (selectMetric cte.Query)) (0, 0, 0, 0)
+        |> List.fold (fun acc cte -> addMetric acc (selectMetric cte.Query)) struct(0, 0, 0, 0)
     addMetric cteMetric (bodyMetric select.Body)
 
 let private statementMetric (stmt: SqlStatement) =
@@ -193,20 +193,20 @@ let private statementMetric (stmt: SqlStatement) =
         | InsertValues rows ->
             rows
             |> List.fold (fun acc row ->
-                row |> List.fold (fun rowAcc expr -> addMetric rowAcc (exprMetric expr)) acc) (0, 0, 0, 0)
+                row |> List.fold (fun rowAcc expr -> addMetric rowAcc (exprMetric expr)) acc) struct(0, 0, 0, 0)
         | InsertSelect select ->
             selectMetric select
     | UpdateStmt update ->
         let setMetric =
             update.SetClauses
-            |> List.fold (fun acc (_, expr) -> addMetric acc (exprMetric expr)) (0, 0, 0, 0)
+            |> List.fold (fun acc (_, expr) -> addMetric acc (exprMetric expr)) struct(0, 0, 0, 0)
         match update.Where with
         | Some whereExpr -> addMetric setMetric (exprMetric whereExpr)
         | None -> setMetric
     | DeleteStmt delete ->
         match delete.Where with
         | Some whereExpr -> exprMetric whereExpr
-        | None -> (0, 0, 0, 0)
+        | None -> struct(0, 0, 0, 0)
 
 /// Apply every pass once, reporting the resulting statement and whether any pass changed it.
 ///
@@ -227,25 +227,31 @@ let private applyPassesOnce (passes: Pass list) (input: SqlStatement) : struct(S
 ///
 /// The first round is applied without the acceptance test, which is what the pipeline has always
 /// done — the seed round was produced by a plain pipeline run and adopted as the starting point.
+/// Follow-up rounds are needed only when the preceding round changed something.
 /// Every later round is accepted only when some pass changed something, the metric is strictly
 /// lower, and the result verifies; the first round that fails any of those stops the loop, and the
 /// iteration ceiling is unchanged.
 let optimize (passes: Pass list) (input: SqlStatement) : SqlStatement =
-    let struct(seeded, _) = applyPassesOnce passes input
+    let struct(seeded, seedChanged) = applyPassesOnce passes input
     let mutable current = seeded
-    let mutable continueRounds = true
+    let mutable acceptedMetric = ValueNone
+    let mutable continueRounds = seedChanged
     let mutable iterationCount = 0
     let maxIterations = 10
 
     while continueRounds && iterationCount < maxIterations do
         iterationCount <- iterationCount + 1
-        let currentMetric = statementMetric current
         let struct(candidate, anyChanged) = applyPassesOnce passes current
 
         if anyChanged then
+            let currentMetric =
+                match acceptedMetric with
+                | ValueSome metric -> metric
+                | ValueNone -> statementMetric current
             let candidateMetric = statementMetric candidate
             if metricIsLower candidateMetric currentMetric && verifyStatement candidate then
                 current <- candidate
+                acceptedMetric <- ValueSome candidateMetric
             else
                 continueRounds <- false
         else

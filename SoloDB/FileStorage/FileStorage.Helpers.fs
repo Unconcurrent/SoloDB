@@ -123,11 +123,11 @@ module internal FileStorageHelpers =
 
     let internal deleteDirectoryAt (db: SqliteConnection) (path: string) =
         let dirPath = formatPath path
-        match tryGetDir db dirPath with
-        | None -> false
-        | Some dir ->
-        deleteDirectory db dir
-        true
+        db.Execute("DELETE FROM SoloDBDirectoryHeader WHERE FullPath = @Path", {| Path = dirPath |}) > 0
+
+    let internal deleteFileAt (db: SqliteConnection) (path: string) =
+        let filePath = formatPath path
+        db.Execute("DELETE FROM SoloDBFileHeader WHERE FullPath = @Path", {| Path = filePath |}) > 0
 
     let internal getOrCreateDirectoryAt (db: SqliteConnection) (path: string) =
         let dirPath = formatPath path

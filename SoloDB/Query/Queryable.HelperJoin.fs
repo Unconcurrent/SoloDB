@@ -23,12 +23,15 @@ open SoloDatabase.SqlModel
 module internal QueryableHelperJoin =
     open QueryableHelperState
     open QueryableHelperBase
-    let internal readSoloDBQueryable<'T> (methodArg: Expression) =
+    let rec internal readSoloDBQueryable<'T> (methodArg: Expression) =
         let unsupportedConcatMessage = "Cannot concat with an IEnumerable other than another SoloDB IQueryable on the same connection. To do this anyway, use AsEnumerable()."
         match methodArg with
+        | :? MemberExpression when typeof<IQueryable>.IsAssignableFrom(methodArg.Type) && QueryTranslatorBaseHelpers.isFullyConstant methodArg ->
+            let query = QueryTranslatorBaseHelpers.evaluateExpr<IQueryable> methodArg
+            readSoloDBQueryable<'T> (Expression.Constant(query, typeof<IQueryable>))
         | :? ConstantExpression as ce -> 
             match QueryTranslatorBaseHelpers.evaluateExpr<IEnumerable> ce with
-            | :? IQueryable<'T> as appendingQuery when (match appendingQuery.Provider with :? SoloDBQueryProvider -> true | _other -> false) ->
+            | :? IQueryable as appendingQuery when (match appendingQuery.Provider with :? SoloDBQueryProvider -> true | _other -> false) ->
                 appendingQuery.Expression
             | :? IRootQueryable as rq ->
                 Expression.Constant(rq, typeof<IRootQueryable>)
@@ -37,7 +40,7 @@ module internal QueryableHelperJoin =
             mcl
         | _other -> raise (NotSupportedException(unsupportedConcatMessage))
 
-    let internal readSoloDBQueryableUntyped (methodArg: Expression) =
+    let rec internal readSoloDBQueryableUntyped (methodArg: Expression) =
         let unsupportedJoinMessage = "Join is supported only when the inner source is another SoloDB IQueryable. To do this anyway, use AsEnumerable() first."
 
         let rec isSoloDBQueryableExpression (expr: Expression) =
@@ -52,6 +55,9 @@ module internal QueryableHelperJoin =
             | _ -> false
 
         match methodArg with
+        | :? MemberExpression when typeof<IQueryable>.IsAssignableFrom(methodArg.Type) && QueryTranslatorBaseHelpers.isFullyConstant methodArg ->
+            let query = QueryTranslatorBaseHelpers.evaluateExpr<IQueryable> methodArg
+            readSoloDBQueryableUntyped (Expression.Constant(query, typeof<IQueryable>))
         | :? ConstantExpression as ce ->
             match ce.Value with
             | :? IQueryable as q when (match q.Provider with | :? SoloDBQueryProvider -> true | _ -> false) ->

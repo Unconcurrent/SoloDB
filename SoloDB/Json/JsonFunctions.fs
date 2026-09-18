@@ -163,52 +163,60 @@ module internal JsonFunctions =
 
         id, value
 
-    let internal fromSQLite<'R when 'R :> obj> (row: DbObjectRow) : 'R =
-        let inline genericReinterpret (a: 'a when 'a : unmanaged) = 
+    // A null Id carries the translator-generated exception payload. Keep its
+    // decoder outside successful row materialization.
+    [<MethodImpl(MethodImplOptions.NoInlining)>]
+    let private raiseRowError (row: DbObjectRow) : unit =
+        match JsonValue.Parse row.ValueJSON with
+        | Object o ->
+            let kind =
+                match o.TryGetValue "kind" with
+                | true, String s -> s
+                | _ -> ""
+            let msg =
+                match o.TryGetValue "msg" with
+                | true, String s -> s
+                | _ -> row.ValueJSON
+            match kind with
+            | "CardinalityError" -> raise (InvalidOperationException msg)
+            | "CastError" -> raise (InvalidCastException msg)
+            | "RangeError" -> raise (ArgumentOutOfRangeException(null, msg))
+            | _ ->
+                // Internal invariant violation: Id=NULL row carried an unrecognized
+                // kind. All translator emit sites must use the closed
+                // RuntimeErrorKind enum (CardinalityError | CastError | RangeError).
+                raise (InvalidOperationException msg)
+        | _ ->
+            // Internal invariant violation: Id=NULL row payload is not a JSON object.
+            raise (InvalidOperationException row.ValueJSON)
+
+
+    let private fromSQLiteJson<'R when 'R :> obj> (row: DbObjectRow) : 'R =
+        match JsonValue.Parse row.ValueJSON with
+        | Null when typeof<JsonValue> = typeof<'R> ->
+            JsonValue.Null :> obj :?> 'R
+        | Null when typeof<'R>.IsValueType && typeof<float> <> typeof<'R> && typeof<float32> <> typeof<'R> ->
+            Unchecked.defaultof<'R>
+        | json when typeof<JsonValue> = typeof<'R> ->
+            let id = row.Id.Value
+            if json.JsonType = JsonValueType.Object && not (json.Contains "Id") && id >= 0 then
+                json.["Id"] <- id
+
+            json :> obj :?> 'R
+        | json ->
+
+        let mutable obj = fromJson<'R> json
+
+        // An Id of -1 mean that it is an inserted object inside the IQueryable.
+        if not (isNull (obj :> obj)) && row.Id.Value <> -1 && HasTypeId<'R>.Value then
+            HasTypeId<'R>.Write obj row.Id.Value
+        obj
+
+    [<MethodImpl(MethodImplOptions.NoInlining)>]
+    let private fromSQLiteValue<'R when 'R :> obj> (row: DbObjectRow) : 'R =
+        let inline genericReinterpret (a: 'a when 'a : unmanaged) =
             // No allocations.
             Unsafe.As<'a, 'R>(&Unsafe.AsRef(&a))
-
-        if row :> obj = null then
-            Unchecked.defaultof<'R>
-        else
-
-        // Id=NULL is the SoloDB internal error-signaling channel. When the Id column
-        // is NULL, the ValueJSON column carries a typed-payload JSON object emitted
-        // by the translator's runtime-error sites:
-        //     {"kind": "<closed-enum-name>", "msg": "<message>"}
-        // The closed kind names dispatch to the matching .NET LINQ exception type.
-        // The kind names are translator-emitted from the closed F# DU
-        // SoloDatabase.RuntimeErrorKind; user expression-trees cannot fabricate
-        // Id=NULL emit (rowid is set by SQLite, not user data), so the structural
-        // payload is collision-free.
-        if not row.Id.HasValue then
-            match JsonValue.Parse row.ValueJSON with
-            | Object o ->
-                let kind =
-                    match o.TryGetValue "kind" with
-                    | true, String s -> s
-                    | _ -> ""
-                let msg =
-                    match o.TryGetValue "msg" with
-                    | true, String s -> s
-                    | _ -> row.ValueJSON
-                match kind with
-                | "CardinalityError" -> raise (InvalidOperationException msg)
-                | "CastError" -> raise (InvalidCastException msg)
-                | "RangeError" -> raise (ArgumentOutOfRangeException(null, msg))
-                | _ ->
-                    // Internal invariant violation: Id=NULL row carried an unrecognized
-                    // kind. All translator emit sites must use the closed
-                    // RuntimeErrorKind enum (CardinalityError | CastError | RangeError).
-                    raise (InvalidOperationException msg)
-            | _ ->
-                // Internal invariant violation: Id=NULL row payload is not a JSON object.
-                raise (InvalidOperationException row.ValueJSON)
-
-        // Checking if the SQLite returned a raw string.
-        if typeof<'R> = typeof<string> then
-            row.ValueJSON :> obj :?> 'R
-        else
 
         let isNonNullableDateTimeLikeNull =
             isNull row.ValueJSON
@@ -237,24 +245,13 @@ module internal JsonFunctions =
         | OfType unativeint -> (genericReinterpret << unativeint) row.ValueJSON
 
         | _ ->
+        fromSQLiteJson<'R> row
 
-
-        match JsonValue.Parse row.ValueJSON with
-        | Null when typeof<JsonValue> = typeof<'R> -> 
-            JsonValue.Null :> obj :?> 'R
-        | Null when typeof<'R>.IsValueType && typeof<float> <> typeof<'R> && typeof<float32> <> typeof<'R> -> 
-            Unchecked.defaultof<'R>
-        | json when typeof<JsonValue> = typeof<'R> ->
-            let id = row.Id.Value
-            if json.JsonType = JsonValueType.Object && not (json.Contains "Id") && id >= 0 then
-                json.["Id"] <- id
-
-            json :> obj :?> 'R
-        | json ->
-
-        let mutable obj = fromJson<'R> json
-            
-        // An Id of -1 mean that it is an inserted object inside the IQueryable.
-        if not (isNull (obj :> obj)) && row.Id.Value <> -1 && HasTypeId<'R>.Value then
-            HasTypeId<'R>.Write obj row.Id.Value
-        obj
+    let internal fromSQLite<'R when 'R :> obj> (row: DbObjectRow) : 'R =
+        if isNull (row :> obj) then Unchecked.defaultof<'R>
+        else
+            if not row.Id.HasValue then raiseRowError row
+            if typeof<'R> = typeof<string> then row.ValueJSON :> obj :?> 'R
+            elif typeof<'R>.IsValueType then fromSQLiteValue<'R> row
+            elif isNull row.ValueJSON then Unchecked.defaultof<'R>
+            else fromSQLiteJson<'R> row

@@ -204,40 +204,9 @@ let private shapeInCore (model: IndexModel) (changed: bool ref) (core: SelectCor
 
 /// Recursively apply index plan shaping to a SqlSelect.
 let rec shapeIndexSelect (model: IndexModel) (changed: bool ref) (sel: SqlSelect) : SqlSelect =
-    let shapedBody =
-        match sel.Body with
-        | SingleSelect core ->
-            // First recurse into DerivedTable source
-            let coreWithRecursedSource =
-                match core.Source with
-                | Some(DerivedTable(innerSel, alias)) ->
-                    { core with Source = Some(DerivedTable(shapeIndexSelect model changed innerSel, alias)) }
-                | _ -> core
-
-            // Recurse into JOINs
-            let coreWithRecursedJoins =
-                { coreWithRecursedSource with
-                    Joins = coreWithRecursedSource.Joins |> List.map (fun j ->
-                        match j with
-                        | CrossJoin(DerivedTable(jSel, jAlias)) ->
-                            CrossJoin(DerivedTable(shapeIndexSelect model changed jSel, jAlias))
-                        | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
-                            ConditionedJoin(kind, DerivedTable(shapeIndexSelect model changed jSel, jAlias), onExpr)
-                        | CrossJoin _ ->
-                            j
-                        | ConditionedJoin _ ->
-                            j)
-                }
-
-            // Apply shaping at this level
-            SingleSelect(shapeInCore model changed coreWithRecursedJoins)
-
-        | UnionAllSelect(head, tail) ->
-            UnionAllSelect(head, tail)
-
-    let shapedCtes =
-        sel.Ctes |> List.map (fun cte -> { cte with Query = shapeIndexSelect model changed cte.Query })
-    { Ctes = shapedCtes; Body = shapedBody }
+    let recurse = shapeIndexSelect model changed
+    let core = mapDerivedSources recurse >> shapeInCore model changed
+    mapSelectParts (mapSingleCore core) recurse sel
 
 /// Apply index plan shaping to a SqlStatement.
 let shapeIndexStatement (model: IndexModel) (stmt: SqlStatement) : struct(SqlStatement * bool) =
@@ -245,7 +214,7 @@ let shapeIndexStatement (model: IndexModel) (stmt: SqlStatement) : struct(SqlSta
     | SelectStmt sel ->
         let changed = ref false
         let result = shapeIndexSelect model changed sel
-        struct(SelectStmt result, changed.Value)
+        struct((if obj.ReferenceEquals(sel, result) then stmt else SelectStmt result), changed.Value)
     | InsertStmt ins ->
         // INSERT … VALUES has no SELECT subtree to shape; INSERT … SELECT must recurse so the
         // chain SELECT emitted for N-hop relation chains receives index-plan shaping (no
@@ -258,5 +227,5 @@ let shapeIndexStatement (model: IndexModel) (stmt: SqlStatement) : struct(SqlSta
         | InsertSelect sel ->
             let changed = ref false
             let shaped = shapeIndexSelect model changed sel
-            struct(InsertStmt { ins with Source = InsertSelect shaped }, changed.Value)
+            struct((if obj.ReferenceEquals(sel, shaped) then stmt else InsertStmt { ins with Source = InsertSelect shaped }), changed.Value)
     | UpdateStmt _ | DeleteStmt _ -> struct(stmt, false)

@@ -9,25 +9,12 @@ open SoloDatabase.QueryTranslatorVisitCore
 open SoloDatabase.QueryTranslatorVisitPost
 
 /// Shared helpers for DBRefMany query translation.
-/// Used by both the unified Builder and the legacy handler.
 module internal DBRefManyHelpers =
-    [<Literal>]
-    let multipleTakeSkipBoundariesMessage =
-        "Error: Multiple Take/Skip boundaries in DBRefMany query are not supported.\nReason: The descriptor model admits only one semantic pagination boundary.\nFix: Keep at most one Take or Skip in the DBRefMany chain, or move additional pagination after AsEnumerable()."
-
     [<Literal>]
     let takeWhileOrderingRequiredMessage =
         "Error: TakeWhile/SkipWhile requires explicit ordering.\nReason: TakeWhile/SkipWhile needs a deterministic row order.\nFix: Add .OrderBy() before .TakeWhile(), or set OrderBy on the [SoloRef] attribute."
 
-    let appendPredicatesWithAnd (head: SqlExpr) (tail: SqlExpr list) =
-        tail |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) head
-
-    let foldPredicatesWithAnd (predicates: SqlExpr list) =
-        match predicates with
-        | [] -> None
-        | h :: t -> Some(appendPredicatesWithAnd h t)
-
-    let wrapAggregateEmptySemantics (aggKind: AggregateKind) (insideJsonObjectProjection: bool) (scalarExpr: SqlExpr) : SqlExpr =
+    let wrapAggregateEmptySemantics (aggKind: AggregateKind) (scalarExpr: SqlExpr) : SqlExpr =
         // DBRefMany aggregate sites are always nested. Per the SoloDB 1.2.2 contract,
         // nested cardinality DOES NOT throw — empty/multiple silently emits default(T)
         // via NULL propagation to the materializer (Unchecked.defaultof<T>).
@@ -37,12 +24,6 @@ module internal DBRefManyHelpers =
             SqlExpr.Coalesce(scalarExpr, [SqlExpr.Literal(SqlLiteral.Integer 0L)])
         else
             scalarExpr
-
-    let buildTakeWhileCfFilter (alias: string) (isTakeWhile: bool) =
-        if isTakeWhile then
-            SqlExpr.Binary(SqlExpr.Column(Some alias, "_cf"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
-        else
-            SqlExpr.Binary(SqlExpr.Column(Some alias, "_cf"), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
 
     let joinEdgesToClauses (edges: ResizeArray<JoinEdge>) : JoinShape list =
         [ for j in edges ->
@@ -62,7 +43,10 @@ module internal DBRefManyHelpers =
     /// Translate an IGrouping predicate body (g => g.Count() > N) to a HAVING DU expression.
     /// Recognizes g.Count(), g.Sum(sel), g.Min(sel), g.Max(sel), g.Average(sel), g.Key,
     /// and binary comparisons/logic.
-    let translateGroupingPredicate (qb: QueryBuilder) (tgtAlias: string) (targetTable: string) (groupKeyDu: SqlExpr) (groupParam: ParameterExpression) (body: Expression) (aggregateJoinEdges: ResizeArray<JoinEdge>) : SqlExpr =
+    let translateGroupingExpression
+        (translateValue: Expression -> SqlExpr)
+        (translateSelector: LambdaExpression -> SqlExpr)
+        (groupKeyDu: SqlExpr) (groupParam: ParameterExpression) (body: Expression) : SqlExpr =
         let rec visit (e: Expression) : SqlExpr =
             let e = unwrapConvert e
             match e with
@@ -86,13 +70,13 @@ module internal DBRefManyHelpers =
                 | :? double as v -> SqlExpr.Literal(SqlLiteral.Float v)
                 | :? string as v -> SqlExpr.Literal(SqlLiteral.String v)
                 | :? bool as v -> SqlExpr.Literal(SqlLiteral.Integer(if v then 1L else 0L))
-                | _ -> visitDu e qb
+                | _ -> translateValue e
             | :? MemberExpression as me ->
                 if me.Member.Name = "Key" && me.Expression :? ParameterExpression then
                     let pe = me.Expression :?> ParameterExpression
                     if Object.ReferenceEquals(pe, groupParam) then groupKeyDu
-                    else visitDu e qb
-                else visitDu e qb
+                    else translateValue e
+                else translateValue e
             | :? NewExpression as ne when not (isNull ne.Members) ->
                 SqlExpr.JsonObjectExpr(
                     [ for i in 0 .. ne.Arguments.Count - 1 ->
@@ -119,7 +103,15 @@ module internal DBRefManyHelpers =
                 if isGroupMethod then
                     match mc.Method.Name with
                     | "Count" | "LongCount" ->
-                        SqlExpr.AggregateCall(AggregateKind.Count, None, false, None)
+                        let predicate =
+                            if mc.Arguments.Count < 2 then None
+                            else
+                                match tryExtractLambdaExpression mc.Arguments.[1] with
+                                | ValueSome selector -> Some(translateSelector selector)
+                                | ValueNone -> raise (NotSupportedException("Cannot extract predicate for GroupBy count."))
+                        let argument = predicate |> Option.map (fun condition ->
+                            SqlExpr.CaseExpr((condition, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal SqlLiteral.Null)))
+                        SqlExpr.AggregateCall(AggregateKind.Count, argument, false, None)
                     | "Sum" | "Min" | "Max" | "Average" ->
                         let aggKind =
                             match mc.Method.Name with
@@ -137,38 +129,15 @@ module internal DBRefManyHelpers =
                             raise (NotSupportedException(sprintf "GroupBy aggregate %s requires a selector lambda." mc.Method.Name))
                         match tryExtractLambdaExpression selectorExpr with
                         | ValueSome selectorLambda ->
-                            let subQb = qb.ForSubquery(tgtAlias, selectorLambda, subqueryRootTable = targetTable)
-                            let selectorDu = visitDu selectorLambda.Body subQb
-                            aggregateJoinEdges.AddRange(subQb.SourceContext.Joins)
+                            let selectorDu = translateSelector selectorLambda
                             let aggExpr = SqlExpr.AggregateCall(aggKind, Some selectorDu, false, None)
-                            wrapAggregateEmptySemantics aggKind true aggExpr
+                            wrapAggregateEmptySemantics aggKind aggExpr
                         | ValueNone ->
                             raise (NotSupportedException("Cannot extract selector for GroupBy aggregate."))
                     | other ->
                         raise (NotSupportedException(sprintf "Unsupported group method: %s" other))
-                else visitDu e qb
+                else translateValue e
             | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Not ->
                 SqlExpr.Unary(UnaryOperator.Not, visit ue.Operand)
-            | _ -> visitDu e qb
+            | _ -> translateValue e
         visit body
-
-    /// Shared LIMIT/OFFSET builder for correlated subqueries.
-    /// Handles constant expressions as literals, non-constant via visitDu callback.
-    /// SQLite requires LIMIT with OFFSET — emits LIMIT -1 when only offset is present.
-    let buildLimitOffsetShared (visitDu: Expression -> QueryBuilder -> SqlExpr) (qb: QueryBuilder) (limitExpr: Expression option) (offsetExpr: Expression option) =
-        let visitArg (e: Expression) =
-            match e with
-            | :? ConstantExpression as ce -> SqlExpr.Literal(SqlLiteral.Integer(Convert.ToInt64(ce.Value)))
-            | _ -> visitDu e qb
-        let limit =
-            match limitExpr with
-            | Some e -> Some (visitArg e)
-            | None ->
-                match offsetExpr with
-                | Some _ -> Some (SqlExpr.Literal(SqlLiteral.Integer -1L))
-                | None -> None
-        let offset =
-            match offsetExpr with
-            | Some e -> Some (visitArg e)
-            | None -> None
-        limit, offset

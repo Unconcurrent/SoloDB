@@ -108,9 +108,16 @@ module internal HydrationManyPopulator =
                 | _ -> ()
 
 module internal QueryableExecution =
+    let private queryRows<'T> (connection: SqliteConnection) (query: string) (parameters: obj) (retained: RetainedPreparedHandle voption) =
+        match retained, connection with
+        | ValueSome handle, (:? CachingDbConnection as cached) ->
+            cached.QueryRetained<'T>(handle, parameters :?> SQLiteToolsParams.ParameterValues)
+        | _ -> connection.Query<'T>(query, parameters)
+
     let enumerate<'Source, 'Elem>
         (source: ISoloDBCollection<'Source>) (query: string) (par: obj)
-        (batchCtx: QueryableTranslationCore.BatchLoadContext voption) : IEnumerable<'Elem> =
+        (batchCtx: QueryableTranslationCore.BatchLoadContext voption)
+        (retained: RetainedPreparedHandle voption) : IEnumerable<'Elem> =
         seq {
             use connection = source.GetInternalConnection()
             match batchCtx with
@@ -121,7 +128,7 @@ module internal QueryableExecution =
                 // Map: ownerId → HydrationJSON string for post-deserialization tracker population.
                 let hydrationMap =
                     if ctx.ManyRelationsHydrated then Dictionary<int64, string>() else null
-                for row in connection.Query<Types.DbObjectRow>(query, par) do
+                for row in queryRows<Types.DbObjectRow> connection query par retained do
                     let entity = JsonFunctions.fromSQLite<'Elem> row
                     buffer.Add(row.Id.Value, entity)
                     if not (isNull hydrationMap) && not (isNull row.HydrationJSON) then
@@ -167,7 +174,7 @@ module internal QueryableExecution =
                 for (_id, entity) in buffer do
                     yield entity
             | _ ->
-                for row in connection.Query<Types.DbObjectRow>(query, par) do
+                for row in queryRows<Types.DbObjectRow> connection query par retained do
                     yield JsonFunctions.fromSQLite<'Elem> row
         }
 
@@ -196,7 +203,8 @@ module internal QueryableExecution =
     let scalar<'Source, 'TResult>
         (source: ISoloDBCollection<'Source>) (query: string) (variables: obj)
         (batchCtx: QueryableTranslationCore.BatchLoadContext voption)
-        (methodName: string) (getTerminalDefaultValue: unit -> 'TResult) : 'TResult =
+        (methodName: string) (getTerminalDefaultValue: unit -> 'TResult)
+        (retained: RetainedPreparedHandle voption) : 'TResult =
         let inline batchLoadSingle (connection: SqliteConnection) (row: Types.DbObjectRow) (entity: 'TResult) =
             match batchCtx with
             | ValueSome ctx when (ctx.HasSingleRelations || ctx.HasManyRelations) && not (isNull (box entity)) && row.Id.HasValue && ctx.OwnerType.IsAssignableFrom(typeof<'TResult>) ->
@@ -221,7 +229,7 @@ module internal QueryableExecution =
             entity
 
         use connection = source.GetInternalConnection()
-        let query = connection.Query<Types.DbObjectRow>(query, variables)
+        let query = queryRows<Types.DbObjectRow> connection query variables retained
 
         match methodName with
         | "Single" ->
@@ -278,7 +286,17 @@ module internal QueryableExecution =
                 batchLoadSingle connection row entity
 
 type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, data: obj) =
-    static let enumerableDispatchCache = System.Collections.Concurrent.ConcurrentDictionary<Type, MethodInfo>()
+    static let enumerableDispatchCache =
+        System.Collections.Concurrent.ConcurrentDictionary<Type, Func<SoloDBCollectionQueryProvider<'T>, string, obj, QueryableTranslationCore.BatchLoadContext voption, obj>>()
+    static let queryDispatchCache = System.Collections.Concurrent.ConcurrentDictionary<Type, Func<IQueryProvider, Expression, IQueryable>>()
+    static let resultDispatchCache = System.Collections.Concurrent.ConcurrentDictionary<Type, Func<IQueryProvider, Expression, obj>>()
+
+    // Non-generic entry points retain the generic provider's construction and execution contracts.
+    static member private CreateTypedQuery<'Elem>(provider: IQueryProvider, expression: Expression) : IQueryable =
+        provider.CreateQuery<'Elem>(expression) :> IQueryable
+
+    static member private ExecuteTypedResult<'Result>(provider: IQueryProvider, expression: Expression) : obj =
+        box (provider.Execute<'Result>(expression))
 
     interface ISoloDBCollectionQueryProvider with
         override this.Source = source
@@ -297,8 +315,8 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
             result |> List.map(_.detail) |> String.concat ";\n"
 
     interface SoloDBQueryProvider
-    member internal _.ExecuteEnumetable<'Elem> (query: string) (par: obj) (batchCtxObj: obj) : IEnumerable<'Elem> =
-        QueryableExecution.enumerate<'T, 'Elem> source query par (unbox batchCtxObj)
+    member internal _.ExecuteEnumetable<'Elem> (query: string) (par: obj) (batchCtx: QueryableTranslationCore.BatchLoadContext voption) : IEnumerable<'Elem> =
+        QueryableExecution.enumerate<'T, 'Elem> source query par batchCtx ValueNone
 
     interface IQueryProvider with
         member this.CreateQuery<'TResult>(expression: Expression) : IQueryable<'TResult> =
@@ -306,11 +324,26 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
 
         member this.CreateQuery(expression: Expression) : IQueryable =
             let elementType = expression.Type.GetGenericArguments().[0]
-            let queryableType = typedefof<SoloDBCollectionQueryable<_,_>>.MakeGenericType(elementType)
-            Activator.CreateInstance(queryableType, source, this, expression) :?> IQueryable
+            let create = queryDispatchCache.GetOrAdd(elementType, Func<Type, Func<IQueryProvider, Expression, IQueryable>>(fun et ->
+                typeof<SoloDBCollectionQueryProvider<'T>>
+                    .GetMethod("CreateTypedQuery", BindingFlags.NonPublic ||| BindingFlags.Static)
+                    .MakeGenericMethod(et)
+                    .CreateDelegate(typeof<Func<IQueryProvider, Expression, IQueryable>>)
+                :?> Func<IQueryProvider, Expression, IQueryable>))
+            create.Invoke(this, expression)
 
         member this.Execute(expression: Expression) : obj =
-            (this :> IQueryProvider).Execute<IEnumerable<'T>>(expression)
+            let resultType =
+                if typeof<IQueryable>.IsAssignableFrom expression.Type then
+                    typedefof<IEnumerable<_>>.MakeGenericType(expression.Type.GetGenericArguments().[0])
+                else expression.Type
+            let execute = resultDispatchCache.GetOrAdd(resultType, Func<Type, Func<IQueryProvider, Expression, obj>>(fun rt ->
+                typeof<SoloDBCollectionQueryProvider<'T>>
+                    .GetMethod("ExecuteTypedResult", BindingFlags.NonPublic ||| BindingFlags.Static)
+                    .MakeGenericMethod(rt)
+                    .CreateDelegate(typeof<Func<IQueryProvider, Expression, obj>>)
+                :?> Func<IQueryProvider, Expression, obj>))
+            execute.Invoke(this, expression)
 
         member this.Execute<'TResult>(expression: Expression) : 'TResult =
             let query, variables, batchCtx, _ = QueryableTranslationCore.startTranslation source expression
@@ -323,17 +356,19 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
             try
                 match typeof<'TResult> with
                 | t when t.IsGenericType && typeof<IEnumerable<'T>>.Equals typeof<'TResult> ->
-                    let result = this.ExecuteEnumetable<'T> query variables (box batchCtx)
+                    let result = this.ExecuteEnumetable<'T> query variables batchCtx
                     result :> obj :?> 'TResult
                 | t when t.IsGenericType && typedefof<IEnumerable<_>>.Equals typedefof<'TResult> ->
                     let elemType = (UtilsReflection.GenericTypeArgCache.Get t).[0]
-                    let m : MethodInfo =
-                        enumerableDispatchCache.GetOrAdd(elemType, Func<Type, MethodInfo>(fun et ->
+                    let execute =
+                        enumerableDispatchCache.GetOrAdd(elemType, Func<Type, Func<SoloDBCollectionQueryProvider<'T>, string, obj, QueryableTranslationCore.BatchLoadContext voption, obj>>(fun et ->
                             typeof<SoloDBCollectionQueryProvider<'T>>
                                 .GetMethod(nameof(this.ExecuteEnumetable), BindingFlags.NonPublic ||| BindingFlags.Instance)
                                 .MakeGenericMethod(et)
+                                .CreateDelegate(typeof<Func<SoloDBCollectionQueryProvider<'T>, string, obj, QueryableTranslationCore.BatchLoadContext voption, obj>>)
+                            :?> Func<SoloDBCollectionQueryProvider<'T>, string, obj, QueryableTranslationCore.BatchLoadContext voption, obj>
                         ))
-                    m.Invoke(this, [|query; variables; box batchCtx|]) :?> 'TResult
+                    execute.Invoke(this, query, variables, batchCtx) :?> 'TResult
                 | _other ->
                     let methodName =
                         match expression with
@@ -343,7 +378,7 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         match QueryableExecution.terminalDefaultExpression expression with
                         | Some value -> QueryTranslatorBaseHelpers.evaluateExpr<'TResult> value
                         | None -> Unchecked.defaultof<'TResult>
-                    QueryableExecution.scalar source query variables batchCtx methodName getDefault
+                    QueryableExecution.scalar source query variables batchCtx methodName getDefault ValueNone
 
             finally
                 ()

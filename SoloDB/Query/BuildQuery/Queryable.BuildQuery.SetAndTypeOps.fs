@@ -26,6 +26,14 @@ module internal QueryableBuildQuerySetAndTypeOps =
     open QueryableHelperPreprocess
     open QueryableLayerBuild
     open QueryableHelperBase
+    let private setValue elementType alias =
+        let column = SqlExpr.Column(Some alias, "Value")
+        let decoded = SqlExpr.FunctionCall("jsonb_extract", [column; SqlExpr.Literal(SqlLiteral.String "$")])
+        if QueryTranslatorBaseTypes.isPrimitiveSQLiteType elementType then
+            SqlExpr.CaseExpr(
+                (SqlExpr.Binary(SqlExpr.FunctionCall("typeof", [column]), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.String "blob")), decoded),
+                [], Some column)
+        else decoded
     let internal apply<'T>
         (sourceCtx: QueryContext)
         (tableName: string)
@@ -64,6 +72,8 @@ module internal QueryableBuildQuerySetAndTypeOps =
 
 
                 | SupportedLinqMethods.Contains ->
+                    if m.Expressions.Length <> 1 then
+                        raise (NotSupportedException("Custom query comparers cannot be translated to SQL. Use the default comparer overload or call AsEnumerable() first."))
                     let value = m.Expressions.[0]
                     let parameter = Expression.Parameter value.Type
                     let filter = Expression.Lambda(Expression.Equal(parameter, value), [|parameter|])
@@ -116,131 +126,120 @@ module internal QueryableBuildQuerySetAndTypeOps =
                     addUnionAll statements (fun _tableName vars ->
                         let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
                         let rhsSelect = translateQueryFn sourceCtx vars rhs
-                        let valueExpr = extractValueAsJsonDu rhs.Type
+                        let elementType = m.OriginalMethod.GetGenericArguments().[0]
+                        let valueExpr =
+                            if QueryTranslatorBaseTypes.isPrimitiveSQLiteType elementType then setValue elementType "o"
+                            else SqlExpr.Column(Some "o", "Value")
                         mkCore
                             [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
                              { Alias = Some "Value"; Expr = valueExpr }]
                             (Some (DerivedTable(rhsSelect, "o")))
                     )
 
-                | SupportedLinqMethods.Except ->
-                    // Edge case 16: SupportedLinqMethods.ExceptBy/SupportedLinqMethods.IntersectBy key selector — NOT IN subquery
-                    addComplexFinal statements (fun ctx ->
-                        let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
-                        let rhsSelect = translateQueryFn sourceCtx ctx.Vars rhs
-                        let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
-                        let rhsSubquery = wrapCore (mkCore
-                            [{ Alias = Some "Value"; Expr = extractVal }]
-                            (Some (DerivedTable(rhsSelect, "o"))))
-                        let core =
-                            { mkCore
-                                [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
-                                 { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
-                                (Some (DerivedTable(ctx.Inner, "o")))
-                              with Where = Some (SqlExpr.Binary(extractVal, BinaryOperator.NotInOp, SqlExpr.ScalarSubquery(rhsSubquery))) }
-                        wrapCore core
-                    )
-
-                | SupportedLinqMethods.Intersect ->
-                    addComplexFinal statements (fun ctx ->
-                        let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
-                        let rhsSelect = translateQueryFn sourceCtx ctx.Vars rhs
-                        let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
-                        let rhsSubquery = wrapCore (mkCore
-                            [{ Alias = Some "Value"; Expr = extractVal }]
-                            (Some (DerivedTable(rhsSelect, "o"))))
-                        let core =
-                            { mkCore
-                                [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
-                                 { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
-                                (Some (DerivedTable(ctx.Inner, "o")))
-                              with Where = Some (SqlExpr.InSubquery(extractVal, rhsSubquery)) }
-                        wrapCore core
-                    )
-
-                | SupportedLinqMethods.ExceptBy ->
-                    // Arguments: other, keySelector
-                    if m.Expressions.Length <> 2 then raise (NotSupportedException(sprintf "Invalid number of arguments, expected 2, in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
-                    let keySelE = m.Expressions.[1]
-                    addComplexFinal statements (fun ctx ->
-                        let keyExpr = translateExprDu sourceCtx ctx.TableName keySelE ctx.Vars
-                        let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
-                        let rhsSelect = translateQueryFn sourceCtx ctx.Vars rhs
-                        let rhsValueExpr =
-                            if isIdentityLambda keySelE then extractValueAsJsonDu rhs.Type
-                            else translateExprDu sourceCtx ctx.TableName keySelE ctx.Vars
-                        let rhsSubquery = wrapCore (mkCore
-                            [{ Alias = Some "Value"; Expr = rhsValueExpr }]
-                            (Some (DerivedTable(rhsSelect, "o"))))
-                        let core =
-                            { mkCore
-                                [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
-                                 { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
-                                (Some (DerivedTable(ctx.Inner, "o")))
-                              with Where = Some (SqlExpr.Binary(keyExpr, BinaryOperator.NotInOp, SqlExpr.ScalarSubquery(rhsSubquery))) }
-                        wrapCore core
-                    )
-
+                | SupportedLinqMethods.Except
+                | SupportedLinqMethods.Intersect
+                | SupportedLinqMethods.ExceptBy
                 | SupportedLinqMethods.IntersectBy ->
-                    // Arguments: other, keySelector
-                    if m.Expressions.Length <> 2 then raise (NotSupportedException(sprintf "Invalid number of arguments, expected 2, in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
-                    let keySelE = m.Expressions.[1]
+                    let isExcept = m.Value = SupportedLinqMethods.Except || m.Value = SupportedLinqMethods.ExceptBy
+                    let byKey = m.Value = SupportedLinqMethods.ExceptBy || m.Value = SupportedLinqMethods.IntersectBy
+                    let argumentCount = if byKey then 2 else 1
+                    if m.Expressions.Length <> argumentCount then
+                        raise (NotSupportedException("Custom set comparers cannot be translated to SQL. Use the default comparer or call AsEnumerable() first."))
+                    let elementType = m.OriginalMethod.GetGenericArguments().[if byKey then 1 else 0]
                     addComplexFinal statements (fun ctx ->
-                        let keyExpr = translateExprDu sourceCtx ctx.TableName keySelE ctx.Vars
                         let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
                         let rhsSelect = translateQueryFn sourceCtx ctx.Vars rhs
-                        let rhsValueExpr =
-                            if isIdentityLambda keySelE then extractValueAsJsonDu rhs.Type
-                            else translateExprDu sourceCtx ctx.TableName keySelE ctx.Vars
-                        let rhsSubquery = wrapCore (mkCore
-                            [{ Alias = Some "Value"; Expr = rhsValueExpr }]
-                            (Some (DerivedTable(rhsSelect, "o"))))
+                        // Set membership includes NULL and emits each matching value once.
+                        // Scalar projections are already SQL values, not JSON documents.
+                        let leftValue =
+                            if byKey && not (isIdentityLambda m.Expressions.[1]) then translateExprDu sourceCtx "set_left" m.Expressions.[1] ctx.Vars
+                            else setValue elementType "set_left"
+                        let rightValue = setValue elementType "set_right"
+                        let rightSource = Some (DerivedTable(rhsSelect, "set_right"))
+                        let nonNullValues =
+                            { mkCore [{ Alias = Some "Value"; Expr = rightValue }] rightSource
+                              with Where = Some (SqlExpr.Unary(UnaryOperator.IsNotNull, rightValue)) }
+                            |> wrapCore
+                        let hasNull =
+                            { mkCore [{ Alias = None; Expr = SqlExpr.Literal(SqlLiteral.Integer 1L) }] rightSource
+                              with Where = Some (SqlExpr.Unary(UnaryOperator.IsNull, rightValue)) }
+                            |> wrapCore |> SqlExpr.Exists
+                        // Keep the right-hand sets uncorrelated: SQLite can build membership
+                        // once instead of scanning the right input for every left row.
+                        let matches =
+                            SqlExpr.Binary(
+                                SqlExpr.Coalesce(SqlExpr.InSubquery(leftValue, nonNullValues), [SqlExpr.Literal(SqlLiteral.Integer 0L)]),
+                                BinaryOperator.Or,
+                                SqlExpr.Binary(SqlExpr.Unary(UnaryOperator.IsNull, leftValue), BinaryOperator.And, hasNull))
+                        let predicate = if isExcept then SqlExpr.Unary(UnaryOperator.Not, matches) else matches
+                        let input =
+                            if byKey then
+                                // A window over the completed input keeps its delivered order,
+                                // including bounds, before choosing the first value for each key.
+                                let ordinal = SqlExpr.WindowCall { Kind = WindowFunctionKind.RowNumber; Arguments = []; PartitionBy = []; OrderBy = [] }
+                                wrapCore (mkCore
+                                    [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "set_input", "Id") }
+                                     { Alias = Some "Value"; Expr = SqlExpr.Column(Some "set_input", "Value") }
+                                     { Alias = Some "__set_ordinal"; Expr = ordinal }]
+                                    (Some(DerivedTable(ctx.Inner, "set_input"))))
+                            else ctx.Inner
+                        let first = SqlExpr.AggregateCall(AggregateKind.Min, Some(SqlExpr.Column(Some "set_left", "__set_ordinal")), false, None)
+                        let id = SqlExpr.Column(Some "set_left", "Id")
+                        let projections =
+                            [{ Alias = Some "Id"; Expr = if byKey then id else SqlExpr.AggregateCall(AggregateKind.Min, Some id, false, None) }
+                             { Alias = Some "Value"; Expr = SqlExpr.Column(Some "set_left", "Value") }]
+                            @ (if byKey then [{ Alias = Some "__set_first"; Expr = first }] else [])
                         let core =
-                            { mkCore
-                                [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
-                                 { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
-                                (Some (DerivedTable(ctx.Inner, "o")))
-                              with Where = Some (SqlExpr.InSubquery(keyExpr, rhsSubquery)) }
+                            { mkCore projections (Some (DerivedTable(input, "set_left")))
+                              with Where = Some predicate
+                                   GroupBy = [leftValue]
+                                   OrderBy = if byKey then [{ Expr = first; Direction = SortDirection.Asc }] else [] }
                         wrapCore core
                     )
 
                 | SupportedLinqMethods.UnionBy ->
-                    // UnionBy(other, keySelector): UNION ALL + deduplicate by key (first occurrence wins).
-                    // Emits: SELECT Id, Value FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY key ORDER BY Id) AS _rn
-                    //         FROM (left UNION ALL right)) WHERE _rn = 1
-                    if m.Expressions.Length <> 2 then raise (NotSupportedException(sprintf "Invalid number of arguments, expected 2, in %s: %A" m.OriginalMethod.Name m.Expressions.Length))
-                    let keySelE = m.Expressions.[1]
-                    addUnionAll statements (fun _tableName vars ->
-                        let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
-                        let rhsSelect = translateQueryFn sourceCtx vars rhs
-                        let valueExpr = extractValueAsJsonDu rhs.Type
-                        mkCore
-                            [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
-                             { Alias = Some "Value"; Expr = valueExpr }]
-                            (Some (DerivedTable(rhsSelect, "o")))
-                    )
-                    // After UNION ALL, apply DistinctBy-style deduplication via ROW_NUMBER window.
-                    addSelector statements (KeyProjection keySelE)
+                    if m.Expressions.Length <> 2 then
+                        raise (NotSupportedException("Custom set comparers cannot be translated to SQL. Use the default comparer overload or call AsEnumerable() first."))
                     addComplexFinal statements (fun ctx ->
-                        let innerProjs =
-                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }
-                             { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") }
-                             { Alias = Some "__solodb_rn"; Expr = SqlExpr.WindowCall({
-                                Kind = WindowFunctionKind.RowNumber
-                                Arguments = []
-                                PartitionBy = [SqlExpr.Column(Some "o", syntheticGroupKeyAlias)]
-                                OrderBy = [(SqlExpr.Column(Some "o", "Id"), SortDirection.Asc)]
-                             }) }]
-                        let innerCore = mkCore innerProjs (Some (DerivedTable(ctx.Inner, "o")))
-                        let innerSel = wrapCore innerCore
-                        let outerProjs =
-                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }
-                             { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") }]
-                        let outerCore =
-                            { mkCore outerProjs (Some (DerivedTable(innerSel, "o")))
-                              with Where = Some (SqlExpr.Binary(SqlExpr.Column(Some "o", "__solodb_rn"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L))) }
-                        wrapCore outerCore
-                    )
+                        let rhs = readSoloDBQueryable<'T> m.Expressions.[0]
+                        let rhsSelect = translateQueryFn sourceCtx ctx.Vars rhs
+                        let arm input alias branch =
+                            let col name = SqlExpr.Column(Some alias, name)
+                            let elementType = m.OriginalMethod.GetGenericArguments().[0]
+                            let value =
+                                if QueryTranslatorBaseTypes.isPrimitiveSQLiteType elementType then setValue elementType alias
+                                else col "Value"
+                            let key =
+                                if isIdentityLambda m.Expressions.[1] then
+                                    setValue elementType alias
+                                else translateExprDu sourceCtx alias m.Expressions.[1] ctx.Vars
+                            let ordinal = SqlExpr.WindowCall {
+                                Kind = WindowFunctionKind.RowNumber; Arguments = []; PartitionBy = []; OrderBy = [] }
+                            mkCore
+                                [{ Alias = Some "Id"; Expr = col "Id" }
+                                 { Alias = Some "Value"; Expr = value }
+                                 { Alias = Some "__set_key"; Expr = key }
+                                 { Alias = Some "__set_branch"; Expr = SqlExpr.Literal(SqlLiteral.Integer branch) }
+                                 { Alias = Some "__set_ordinal"; Expr = ordinal }]
+                                (Some(DerivedTable(input, alias)))
+                        // Rank each completed input before combining them. Row identity
+                        // is not sequence position, and the entire left input precedes right.
+                        let combined = { Ctes = []; Body = UnionAllSelect(arm ctx.Inner "set_left" 0L, [arm rhsSelect "set_right" 1L]) }
+                        let col name = SqlExpr.Column(Some "set_union", name)
+                        let position = [col "__set_branch", SortDirection.Asc; col "__set_ordinal", SortDirection.Asc]
+                        let rank = SqlExpr.WindowCall {
+                            Kind = WindowFunctionKind.RowNumber; Arguments = []
+                            PartitionBy = [col "__set_key"]; OrderBy = position }
+                        let ranked = mkCore
+                                        (["Id"; "Value"; "__set_branch"; "__set_ordinal"] |> List.map (fun name -> { Alias = Some name; Expr = col name })
+                                         |> fun fields -> fields @ [{ Alias = Some "__set_rank"; Expr = rank }])
+                                        (Some(DerivedTable(combined, "set_union"))) |> wrapCore
+                        let resultColumn name = SqlExpr.Column(Some "set_result", name)
+                        { mkCore [{ Alias = Some "Id"; Expr = resultColumn "Id" }; { Alias = Some "Value"; Expr = resultColumn "Value" }]
+                                 (Some(DerivedTable(ranked, "set_result"))) with
+                            Where = Some(SqlExpr.Binary(resultColumn "__set_rank", BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L)))
+                            OrderBy = ["__set_branch"; "__set_ordinal"] |> List.map (fun name -> { Expr = resultColumn name; Direction = SortDirection.Asc }) }
+                        |> wrapCore)
 
                 // --- Type filtering / casting over polymorphic payloads ---
                 | SupportedLinqMethods.Cast ->

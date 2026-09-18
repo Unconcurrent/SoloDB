@@ -173,6 +173,7 @@ module internal QueryableTranslationCore =
                     match metadataConnection with
                     | :? CachingDbConnection as cc -> cc.InsideTransaction
                     | _ -> false
+                CollectionFactory = None
             }
             RelationsCore.withRelationSqliteWrap "build" "startTranslation.ensureSchemaForOwnerType" (fun () ->
                 RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
@@ -235,6 +236,10 @@ module internal QueryableTranslationCore =
         let rawIdExpr =
             if doesNotReturnIdFn expression then SqlExpr.Literal(SqlLiteral.Integer -1L)
             else SqlExpr.Column(None, "Id")
+        let effectiveValueDecodedExpr =
+            if not (doesNotReturnIdFn expression) && canExposeNullId innerSelect then
+                preserveRuntimeErrorValue rawIdExpr (SqlExpr.Column(None, "Value")) effectiveValueDecodedExpr
+            else effectiveValueDecodedExpr
         // Preserve the master alias shape for backward-compat with column-name
         // resolution: Alias=Some "Id" only when doesNotReturnIdFn=true (synthetic Id);
         // Alias=None for the natural Id column projection so DbObjectRow maps via
@@ -257,8 +262,7 @@ module internal QueryableTranslationCore =
         let outerCore = mkCore outerProjections (Some (DerivedTable(innerSelect, "o")))
         let outerSelect = wrapCore outerCore
 
-        // Emit to string via the minimal emitter.
-        let sb = StringBuilder(256)
+        // Optimize and emit through the shared SELECT owner.
         let modelTableNames = collectIndexModelTableNames source.Name outerSelect
         let indexModel = RuntimeIndexModelCache.loadModelForTables metadataConnection modelTableNames
         let estimates = lazy (IndexModel.loadTableEstimates metadataConnection modelTableNames)
@@ -267,7 +271,7 @@ module internal QueryableTranslationCore =
                 if doesNotReturnIdFn expression then QueryCountPlanning.plan source.Name indexModel estimates query
                 else query
             QueryReadPlanning.plan indexModel estimates counted
-        emitSelectToSb sb variables indexModel retainedPlan outerSelect
+        let sql = emitSelectSql variables indexModel retainedPlan outerSelect
 
         let actuallyHydrated = singleRelationsHydrated && hydrationAliasCounter > 0
         let actuallyManyHydrated = manyRelationsHydrated && manyHydrationProjection.IsSome
@@ -290,7 +294,7 @@ module internal QueryableTranslationCore =
 
         // The pre-optimizer SqlSelect is returned alongside the emitted text so callers can
         // inspect the structure the translator actually produced, before any pass rewrites it.
-        sb.ToString(), variables, batchLoadContext, outerSelect
+        sql, variables, batchLoadContext, outerSelect
 
     let internal startTranslationCore connection source expression =
         translateWithBindings ValueNone false connection source expression

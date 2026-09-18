@@ -97,6 +97,23 @@ module internal FileStorageCoreChunks =
 
         if result <> 1 then failwithf "writeChunkData failed."
 
+    /// Truncate within the caller's transaction, including the discarded tail of
+    /// a retained chunk so a subsequent sparse write cannot reveal old bytes.
+    let internal downsetFileLength (db: SqliteConnection) (fileId: int64) (newFileLength: int64) =
+        let lastChunk = if newFileLength = 0L then -1L else (newFileLength - 1L) / chunkSize
+        let retainedBytes = newFileLength % chunkSize
+        if retainedBytes <> 0L then
+            use buffer = NativeArray.NativeArray.Alloc (int chunkSize)
+            let bytes = buffer.Span
+            bytes.Clear()
+            let stored = tryGetChunkData db fileId lastChunk bytes
+            if not stored.IsEmpty then
+                bytes.Slice(int retainedBytes).Clear()
+                writeChunkData db fileId lastChunk bytes
+        db.Execute("DELETE FROM SoloDBFileChunk WHERE FileId = @FileId AND Number > @LastChunkNumber",
+                   {| FileId = fileId; LastChunkNumber = lastChunk |}) |> ignore
+        updateLenById db fileId newFileLength
+
     [<Struct; CLIMutable>]
     type internal ChunkDTO = { Number: int64; Data: NativeArray.NativeArray }
 

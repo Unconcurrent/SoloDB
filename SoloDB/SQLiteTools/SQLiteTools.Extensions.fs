@@ -88,13 +88,7 @@ module SQLiteToolsExtensions =
             match box this with
             | :? ICachingDbConnectionOps as c -> c.Query<'T>(sql, parameters)
             | _ ->
-                seq {
-                    try
-                        yield! queryInner<'T> this sql parameters
-                    with ex ->
-                        tryRecordHandlerFault this ex
-                        raise ex
-                }
+                queryInner<'T> this sql parameters |> recordEnumerationFaults this
     
         /// <summary>
         /// Extension method to execute a query and return the first result.

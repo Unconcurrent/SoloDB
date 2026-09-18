@@ -13,11 +13,15 @@ open SoloDatabase.JsonSerializator
 open SQLiteTools
 open JsonFunctions
 
+type internal IRelationCollectionFactory =
+    abstract CreateCollection<'T> : collectionName: string -> ISoloDBCollection<'T>
+
 type internal RelationTxContext = {
     Connection: Microsoft.Data.Sqlite.SqliteConnection
     OwnerTable: string
     OwnerType: Type
     InTransaction: bool
+    CollectionFactory: IRelationCollectionFactory option
 }
 
 type internal RelationUpdateManyOp =

@@ -144,6 +144,28 @@ module internal SQLiteToolsHandlerFaultState =
         if depth > 0 then
             state.Record(depth, ex)
 
+    /// Record enumeration failures without a sequence try/with generator per row.
+    /// The source keeps ownership of its command, reader and completion checks.
+    let internal recordEnumerationFaults (connection: SqliteConnection) (source: seq<'T>) : seq<'T> =
+        { new System.Collections.Generic.IEnumerable<'T> with
+            member _.GetEnumerator() =
+                let inner = source.GetEnumerator()
+                { new System.Collections.Generic.IEnumerator<'T> with
+                    member _.Current = inner.Current
+                  interface System.Collections.IEnumerator with
+                    member _.Current = box inner.Current
+                    member _.MoveNext() =
+                        try inner.MoveNext()
+                        with ex ->
+                            tryRecordHandlerFault connection ex
+                            reraise()
+                    member _.Reset() = (inner :> System.Collections.IEnumerator).Reset()
+                  interface IDisposable with
+                    member _.Dispose() = inner.Dispose() }
+          interface System.Collections.IEnumerable with
+            member this.GetEnumerator() =
+                (this :?> System.Collections.Generic.IEnumerable<'T>).GetEnumerator() :> System.Collections.IEnumerator }
+
     let internal takeHandlerFault (connection: SqliteConnection) =
         let mutable state = Unchecked.defaultof<HandlerFaultState>
         if handlerFaults.TryGetValue(connection, &state) && not (isNull (box state)) then

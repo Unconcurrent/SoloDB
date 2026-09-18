@@ -88,8 +88,8 @@ module internal CompiledQueries =
         | _ -> invalid "the query must be rooted in the supplied source parameter."
 
     type private Plan<'Args, 'State> = {
-        Sql: string
-        EmptyPrefixSql: string option
+        Handle: RetainedPreparedHandle
+        EmptyPrefixHandle: RetainedPreparedHandle option
         Parameters: SQLiteToolsParams.ParameterValues
         Hydration: QueryableTranslationCore.BatchLoadContext voption
         Bind: Func<'Args, obj array, struct (bool * 'State)>
@@ -196,7 +196,9 @@ module internal CompiledQueries =
                     let sql, _, _, _ = translate true
                     Some sql
                 else None
-            { Sql = sql; EmptyPrefixSql = emptyPrefixSql; Hydration = hydration; Bind = run
+            { Handle = RetainedPreparedHandle(sql)
+              EmptyPrefixHandle = emptyPrefixSql |> Option.map RetainedPreparedHandle
+              Hydration = hydration; Bind = run
               Parameters = { Constants = constants |> Seq.toArray; Names = slotNames; Values = [||] } }
 
         let current =
@@ -208,8 +210,8 @@ module internal CompiledQueries =
                 if current.Parameters.Names.Length = 0 then current.Parameters
                 else { current.Parameters with Values = Array.zeroCreate current.Parameters.Names.Length }
             let struct (emptyPrefix, state) = current.Bind.Invoke(args, parameters.Values)
-            let sql = if emptyPrefix then defaultArg current.EmptyPrefixSql current.Sql else current.Sql
-            struct (sql, parameters, current.Hydration, state)
+            let handle = if emptyPrefix then defaultArg current.EmptyPrefixHandle current.Handle else current.Handle
+            struct (handle, parameters, current.Hydration, state)
         struct (expression, bind)
 
     let compile<'Source, 'Args, 'Elem>
@@ -217,8 +219,8 @@ module internal CompiledQueries =
         (argument: ParameterExpression) (arguments: Expression array) =
         let struct (_, bind) = prepare<'Source, 'Args, unit> source query argument arguments (fun _ -> None)
         fun args ->
-            let struct (sql, parameters, hydration, _) = bind args
-            QueryableExecution.enumerate<'Source, 'Elem> source sql parameters hydration
+            let struct (handle, parameters, hydration, _) = bind args
+            QueryableExecution.enumerate<'Source, 'Elem> source handle.Sql parameters hydration (ValueSome handle)
 
     // Reflection closes the element type once during compilation. Invocation uses
     // the resulting typed delegate, including for Enumerable materializers.
@@ -237,8 +239,8 @@ module internal CompiledQueries =
                 | :? MethodCallExpression as call -> call.Method.Name
                 | _ -> "Execute"
             let run args =
-                let struct (sql, parameters, hydration, fallback) = bind args
-                QueryableExecution.scalar source sql parameters hydration methodName (fun () -> fallback)
+                let struct (handle, parameters, hydration, fallback) = bind args
+                QueryableExecution.scalar source handle.Sql parameters hydration methodName (fun () -> fallback) (ValueSome handle)
             Func<'Args, 'Result>(run)
 
     let compileResult<'Source, 'Args, 'Result>

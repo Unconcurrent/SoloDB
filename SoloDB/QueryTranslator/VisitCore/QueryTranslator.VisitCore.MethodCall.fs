@@ -84,8 +84,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
         | OfShape1 null null "RemoveAt" null (array, indexExpr) when qb.UpdateMode ->
             let arrayPathExpr = visitDu array qb
             let indexVal = evaluateExpr<obj> indexExpr
-            let tableNameDot = qb.GetTableNameDot()
-            let alias = if String.IsNullOrEmpty tableNameDot then None else Some(tableNameDot.TrimEnd('.'))
+            let alias = qb.SourceAlias
             let valueExpr =
                 SqlExpr.FunctionCall("jsonb_remove", [
                     SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(alias, "Value"); arrayPathExpr])
@@ -109,8 +108,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
                     indexVal,
                     "Insert: negative index is not supported. Use a non-negative index."))
             let newValueExpr = visitStoredValueDu newValue qb
-            let tableNameDot = qb.GetTableNameDot()
-            let alias = if String.IsNullOrEmpty tableNameDot then None else Some(tableNameDot.TrimEnd('.'))
+            let alias = qb.SourceAlias
             let extractArrayExpr =
                 SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(alias, "Value"); arrayPathExpr])
             let beforeAlias = "_je_b"
@@ -300,11 +298,12 @@ module internal QueryTranslatorVisitCoreMethodCall =
             SqlExpr.FunctionCall("SUBSTR", [visitDu str qb; SqlExpr.Binary(visitDu index qb, BinaryOperator.Add, SqlExpr.Literal(SqlLiteral.Integer 1L)); SqlExpr.Literal(SqlLiteral.Integer 1L)])
         | OfShape1 null null "GetString" null (str, index) ->
             SqlExpr.FunctionCall("SUBSTR", [visitDu str qb; SqlExpr.Binary(visitDu index qb, BinaryOperator.Add, SqlExpr.Literal(SqlLiteral.Integer 1L)); SqlExpr.Literal(SqlLiteral.Integer 1L)])
-        | OfShape0 null null "Count" _ when let t = m.Arguments.[0].Type in t.IsConstructedGenericType && t.GetGenericTypeDefinition() = typedefof<System.Linq.IGrouping<_,_>> ->
-            let alias = if String.IsNullOrEmpty qb.TableNameDot then None else Some(qb.TableNameDot.TrimEnd([|'.'|]))
+        | OfShape0 null null "Count" _
+        | OfShape0 null null "LongCount" _ when let t = m.Arguments.[0].Type in t.IsConstructedGenericType && t.GetGenericTypeDefinition() = typedefof<System.Linq.IGrouping<_,_>> ->
+            let alias = qb.SourceAlias
             SqlExpr.FunctionCall("json_array_length", [SqlExpr.Column(alias, "Value"); SqlExpr.Literal(SqlLiteral.String "$.Items")])
         | OfShape0 null null "Items" _ when let t = m.Arguments.[0].Type in t.IsConstructedGenericType && t.GetGenericTypeDefinition() = typedefof<System.Linq.IGrouping<_,_>> ->
-            let alias = if String.IsNullOrEmpty qb.TableNameDot then None else Some(qb.TableNameDot.TrimEnd([|'.'|]))
+            let alias = qb.SourceAlias
             SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(alias, "Value"); SqlExpr.Literal(SqlLiteral.String "$.Items")])
         | OfShape0 null null "Invoke" _ when FSharp.Reflection.FSharpType.IsRecord m.Type ->
             let rec collectArgs (expr: Expression) (args: ResizeArray<struct (ParameterExpression * Expression)>) =

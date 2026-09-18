@@ -262,9 +262,7 @@ module FileStorage =
 
         member this.DeleteFileAt(path) =
             connection.WithTransaction(fun tx ->
-                match tryGetFileIdAt tx path with
-                | ValueNone -> false
-                | ValueSome fileId -> deleteFileById tx fileId
+                deleteFileAt tx path
             )
 
         member this.DeleteDirAt(path) =

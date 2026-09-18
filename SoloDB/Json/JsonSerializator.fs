@@ -1540,6 +1540,10 @@ and private JsonDeserializerImpl<'A> =
         | OfType (id: JsonValue -> JsonValue) ->
             (fun (json: JsonValue) -> json) :> obj :?> (JsonValue -> 'A)
 
+        | _ -> JsonDeserializerImpl<'A>.BuildStructuredDeserializer()
+
+    static member private BuildStructuredDeserializer() : JsonValue -> 'A =
+        match typeof<'A> with
         | t when t.FullName = "SoloDatabase.MongoDB.BsonDocument" ->
             let p = Expression.Parameter typeof<JsonValue>
                                 

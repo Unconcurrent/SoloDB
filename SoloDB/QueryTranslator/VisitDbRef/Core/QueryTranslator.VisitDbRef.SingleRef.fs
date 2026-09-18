@@ -26,25 +26,21 @@ module internal QueryTranslatorVisitDbRefSingleRef =
         | :? MemberExpression as topMe when not (isNull topMe.Expression) ->
             let innerExpr = unwrapConvert topMe.Expression
 
-            let inline prefixToAlias (prefix: string) =
-                if String.IsNullOrEmpty prefix then None
-                else Some(prefix.TrimEnd('.'))
-
             // Case 1: Direct member on DBRef<T> — o.Ref.Id, o.Ref.HasValue, o.Ref.TypedId (typed only)
             if isDBRefType innerExpr.Type then
                 match topMe.Member.Name with
                 | "Id" ->
                     match innerExpr with
                     | :? MemberExpression as dbrefPropExpr ->
-                        let struct(prefix, prop) = resolveDBRefPropertyLocation qb dbrefPropExpr
-                        qb.DuHandlerResult.Value <- ValueSome(SqlExpr.JsonExtractExpr(prefixToAlias prefix, "Value", JsonPath(prop, [])))
+                        let struct(alias, prop) = resolveDBRefPropertyLocation qb dbrefPropExpr
+                        qb.DuHandlerResult.Value <- ValueSome(SqlExpr.JsonExtractExpr(alias, "Value", JsonPath(prop, [])))
                         true
                     | _ -> false
                 | "HasValue" ->
                     match innerExpr with
                     | :? MemberExpression as dbrefPropExpr ->
-                        let struct(prefix, prop) = resolveDBRefPropertyLocation qb dbrefPropExpr
-                        let extract = SqlExpr.JsonExtractExpr(prefixToAlias prefix, "Value", JsonPath(prop, []))
+                        let struct(alias, prop) = resolveDBRefPropertyLocation qb dbrefPropExpr
+                        let extract = SqlExpr.JsonExtractExpr(alias, "Value", JsonPath(prop, []))
                         qb.DuHandlerResult.Value <- ValueSome(
                             SqlExpr.Binary(
                                 SqlExpr.Unary(UnaryOperator.IsNotNull, extract),

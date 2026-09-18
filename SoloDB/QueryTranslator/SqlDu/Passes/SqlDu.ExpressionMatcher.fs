@@ -163,15 +163,21 @@ let findCoveringFilterIndex (model: IndexModel) tableName predicate =
             && (keys |> List.forall (fun key ->
                 entry.Terms |> List.exists (fun term -> expressionMatchesIndex tableName key term.Expression))))
 
-/// Match a complete ordering, allowing equality-constrained keys to be omitted.
-/// Collection Id is the rowid trailer, ascending in a forward index scan.
-let findOrderingIndex (model: IndexModel) tableName predicate (ordering: OrderBy list) =
-    let rec fixedKeys = function
-        | Binary(left, BinaryOperator.And, right) -> fixedKeys left @ fixedKeys right
+let private equalityKeys predicate =
+    let rec keys = function
+        | Binary(left, BinaryOperator.And, right) -> keys left @ keys right
         | Binary(left, (BinaryOperator.Eq | BinaryOperator.Is), right) when direct right -> [left]
         | Binary(left, (BinaryOperator.Eq | BinaryOperator.Is), right) when direct left -> [right]
         | _ -> []
-    let fixedKeys = predicate |> Option.map fixedKeys |> Option.defaultValue []
+    predicate |> Option.map keys |> Option.defaultValue []
+
+let private rowIdColumn = Column(None, "Id")
+let private rowIdTrailer = [{ Expression = rowIdColumn; Direction = Asc; Collation = "BINARY" }]
+
+/// Match a complete ordering, allowing equality-constrained keys to be omitted.
+/// Collection Id is the rowid trailer, ascending in a forward index scan.
+let private orderingMatcher tableName predicate (ordering: OrderBy list) =
+    let fixedKeys = equalityKeys predicate
     let isFixed expression = fixedKeys |> List.exists (fun key -> expressionMatchesIndex tableName key expression)
     let direction reverse direction = if not reverse then direction else if direction = Asc then Desc else Asc
     let rec matches reverse terms orders =
@@ -184,11 +190,37 @@ let findOrderingIndex (model: IndexModel) tableName predicate (ordering: OrderBy
             && expressionMatchesIndex tableName order.Expr term.Expression
             && matches reverse rest remaining
         | [], _ -> false
-    model.Indexes |> List.tryFind (fun entry ->
-        let terms = entry.Terms @ [{ Expression = Column(None, "Id"); Direction = Asc; Collation = "BINARY" }]
+    fun (entry: IndexEntry) ->
         entry.TableName = tableName && not entry.Terms.IsEmpty
         && (entry.Terms |> List.forall binaryCollation)
-        && (matches false terms ordering || matches true terms ordering))
+        && (let terms = entry.Terms @ rowIdTrailer
+            matches false terms ordering || matches true terms ordering)
+
+let findOrderingIndex (model: IndexModel) tableName predicate ordering =
+    model.Indexes |> List.tryFind (orderingMatcher tableName predicate ordering)
+
+/// An already covered ordered page needs no late payload lookup. Check the
+/// complete required row against one index, not against independent indexes.
+let hasCoveringOrderingIndex (model: IndexModel) tableName predicate ordering expressions =
+    let matchesOrder = orderingMatcher tableName predicate ordering
+    model.Indexes |> List.exists (fun entry ->
+        matchesOrder entry
+        && (expressions @ Option.toList predicate |> List.forall (fun expression ->
+            let remaining = expression |> SqlExpr.map (fun node ->
+                if expressionMatchesIndex tableName node rowIdColumn
+                   || (entry.Terms |> List.exists (fun term -> expressionMatchesIndex tableName node term.Expression))
+                then Literal SqlLiteral.Null else node)
+            not (remaining |> SqlExpr.exists (function
+                | Column _ | JsonExtractExpr _ | JsonRootExtract _
+                | ScalarSubquery _ | Exists _ | InSubquery _
+                | AggregateCall _ | WindowCall _ -> true
+                | _ -> false)))))
+
+/// Covered BINARY keys fixed by equality cannot distinguish surviving rows.
+let removeFixedOrdering tableName predicate (ordering: OrderBy list) =
+    let fixedKeys = equalityKeys predicate
+    ordering |> List.filter (fun order ->
+        not (fixedKeys |> List.exists (fun key -> expressionMatchesIndex tableName order.Expr key)))
 
 /// Strip table qualification from an expression to match the index form.
 /// Only normalizes alias references; never adds or removes CAST or other operations.

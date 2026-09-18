@@ -113,6 +113,9 @@ module internal QueryTranslatorVisitPost =
                 |> function
                    | Some le -> ValueSome le
                    | None -> tryEvaluateAsLambda (mc :> Expression)
+        | (:? MemberExpression | :? ConstantExpression) as captured
+            when typeof<LambdaExpression>.IsAssignableFrom(captured.Type) && isFullyConstant captured ->
+            tryEvaluateAsLambda captured
         | :? InvocationExpression as ie ->
             match tryExtractLambdaExpression ie.Expression with
             | ValueSome _ as hit -> hit

@@ -195,15 +195,20 @@ module FileStorageCoreStream =
 
         override this.Seek(offset: int64, origin: SeekOrigin) =
             checkDisposed()
+            let relativePosition basis =
+                if offset > 0L && basis > Int64.MaxValue - offset then
+                    raise (IOException("The seek position exceeds the supported file range."))
+                let target = basis + offset
+                if target < 0L then
+                    raise (IOException("Attempted to seek before the beginning of the file."))
+                target
             let newPosition =
                 match origin with
                 | SeekOrigin.Begin ->
                     if offset < 0L then raise (ArgumentOutOfRangeException(nameof offset, offset, "Seek offset from Begin must not be negative."))
                     offset
-                | SeekOrigin.Current -> position + offset
-                | SeekOrigin.End ->
-                    let len = this.Length
-                    len + offset
+                | SeekOrigin.Current -> relativePosition position
+                | SeekOrigin.End -> relativePosition this.Length
                 | other -> failwithf "Invalid SeekOrigin: %A" other
             position <- newPosition
             position

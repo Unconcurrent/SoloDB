@@ -40,13 +40,13 @@ module internal QueryableBuildQueryMain =
         // Set when Select consumes a carried scalar slot (SupportedLinqMethods.DistinctBy → Select reuse path).
         // Terminal zero-arg aggregates use this to consume Value directly instead of retranslating.
         let mutable isPostScalarProjection = false
-        let preprocessed = preprocessQuery e |> Seq.toArray
+        let preprocessed = preprocessQuery e
 
         // Register Include/Exclude/ThenInclude/ThenExclude paths up-front so behavior is deterministic regardless method-call order.
-        // Process in reverse (expression-tree order: root → Include → ThenInclude → ThenExclude)
+        // Process in expression-tree order: root → Include → ThenInclude → ThenExclude
         // to accumulate dotted chain paths for ThenInclude/ThenExclude.
         let mutable chainPath = ""
-        for q in preprocessed |> Array.rev do
+        for q in preprocessed do
             match q with
             | Method m when m.Value = SupportedLinqMethods.Include ->
                 let path = extractRelationPathOrThrow "Include" m.Expressions
@@ -72,7 +72,7 @@ module internal QueryableBuildQueryMain =
 
         validateIncludeExcludeConflicts sourceCtx
 
-        let reversed = preprocessed |> Array.rev
+        let reversed = preprocessed
         let mutable pendingGroupByExprs : Expression array option = None
         let mutable pendingGroupByHavingPreds : Expression list = []
         let mutable pendingGroupByOrders : (Expression * bool) list = []
@@ -174,7 +174,7 @@ module internal QueryableBuildQueryMain =
                     | SupportedLinqMethods.CountBy
                     | SupportedLinqMethods.TakeWhile
                     | SupportedLinqMethods.SkipWhile ->
-                        QueryableBuildQuerySequenceOps.apply<'T>
+                        QueryableBuildQuerySequenceOps.apply
                             sourceCtx
                             tableName
                             statements
@@ -184,6 +184,10 @@ module internal QueryableBuildQueryMain =
                             installTerminalOrdering
                             m
                     | SupportedLinqMethods.GroupBy ->
+                        let last = m.OriginalMethod.GetParameters() |> Array.last
+                        if last.ParameterType.IsGenericType
+                           && last.ParameterType.GetGenericTypeDefinition() = typedefof<System.Collections.Generic.IEqualityComparer<_>> then
+                            ChainExpr.validateGroupingComparer "GroupBy" (m.OriginalMethod.GetGenericArguments().[1]) (Array.last m.Expressions)
                         QueryableBuildQueryGroupByOps.applyGroupByKeyOnly<'T>
                             sourceCtx tableName statements m.Expressions
                         pendingGroupByExprs <- Some m.Expressions

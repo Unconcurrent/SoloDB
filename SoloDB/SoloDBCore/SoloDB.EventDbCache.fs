@@ -60,6 +60,7 @@ type internal EventDbCache(connectionString: string, directConnection: SqliteCon
                 OwnerTable = collectionName
                 OwnerType = typeof<'U>
                 InTransaction = true
+                CollectionFactory = None
             }
             RelationsCore.ensureSchemaForOwnerType relationTx typeof<'U>
 

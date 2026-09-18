@@ -153,52 +153,9 @@ let private pushdownInCore (changed: bool ref) (outer: SelectCore) : SelectCore 
 
 /// Recursively apply pushdown to a SqlSelect at every nesting level.
 let rec pushdownSelect (changed: bool ref) (sel: SqlSelect) : SqlSelect =
-    let pushedBody =
-        match sel.Body with
-        | SingleSelect outer ->
-            // First, recurse into DerivedTable source
-            let outerWithRecursedSource =
-                match outer.Source with
-                | Some(DerivedTable(innerSel, alias)) ->
-                    { outer with Source = Some(DerivedTable(pushdownSelect changed innerSel, alias)) }
-                | _ -> outer
-
-            // Recurse into JOINs
-            let outerWithRecursedJoins =
-                { outerWithRecursedSource with
-                    Joins = outerWithRecursedSource.Joins |> List.map (fun j ->
-                        match j with
-                        | CrossJoin(DerivedTable(jSel, jAlias)) ->
-                            CrossJoin(DerivedTable(pushdownSelect changed jSel, jAlias))
-                        | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
-                            ConditionedJoin(kind, DerivedTable(pushdownSelect changed jSel, jAlias), onExpr)
-                        | CrossJoin _ ->
-                            j
-                        | ConditionedJoin _ ->
-                            j
-                    )
-                }
-
-            // Now try pushdown at this level
-            SingleSelect(pushdownInCore changed outerWithRecursedJoins)
-
-        | UnionAllSelect(head, tail) ->
-            // Recurse into each arm but don't push across UNION ALL
-            let pushHead = pushdownSelectCore changed head
-            let pushTail = tail |> List.map (pushdownSelectCore changed)
-            UnionAllSelect(pushHead, pushTail)
-
-    let pushedCtes =
-        sel.Ctes |> List.map (fun cte -> { cte with Query = pushdownSelect changed cte.Query })
-    { Ctes = pushedCtes; Body = pushedBody }
-
-/// Pushdown within a SelectCore (for UNION ALL arms).
-and private pushdownSelectCore (changed: bool ref) (core: SelectCore) : SelectCore =
-    let sel = { Ctes = []; Body = SingleSelect core }
-    let pushed = pushdownSelect changed sel
-    match pushed.Body with
-    | SingleSelect c -> c
-    | _ -> core
+    let recurse = pushdownSelect changed
+    let core = mapDerivedSources recurse >> pushdownInCore changed
+    mapSelectParts (mapCores core) recurse sel
 
 /// Push predicates in a SqlStatement.
 let pushdownStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
@@ -206,7 +163,7 @@ let pushdownStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
     | SelectStmt sel ->
         let changed = ref false
         let result = pushdownSelect changed sel
-        struct(SelectStmt result, changed.Value)
+        struct((if obj.ReferenceEquals(sel, result) then stmt else SelectStmt result), changed.Value)
     // INSERT … SELECT recurses so predicate pushdown reaches the chain SELECT subtree
     // emitted for N-hop B4. UPDATE/DELETE WHERE is intentionally skipped: pushing predicates
     // through a DML WHERE has no inner subquery to push them into, and the chain SELECT used
@@ -219,5 +176,5 @@ let pushdownStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
         | InsertSelect sel ->
             let changed = ref false
             let pushed = pushdownSelect changed sel
-            struct(InsertStmt { ins with Source = InsertSelect pushed }, changed.Value)
+            struct((if obj.ReferenceEquals(sel, pushed) then stmt else InsertStmt { ins with Source = InsertSelect pushed }), changed.Value)
     | UpdateStmt _ | DeleteStmt _ -> struct(stmt, false)

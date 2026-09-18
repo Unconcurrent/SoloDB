@@ -26,7 +26,8 @@ module internal QueryableHelperPreprocess =
 
     let private normalizeOrderKeyExpr (expr: SqlExpr) (clrType: Type) =
         DateTimeFunctions.canonicalizeForCompareOrOrder clrType expr
-    let internal preprocessQuery (expression: Expression) : PreprocessedQuery seq = seq {
+    let internal preprocessQuery (expression: Expression) : PreprocessedQuery array =
+        let queries = ResizeArray<PreprocessedQuery>()
         let mutable expression = expression
 
         while expression <> null do
@@ -38,25 +39,27 @@ module internal QueryableHelperPreprocess =
                     | :? MethodCallExpression as groupJoin when groupJoin.Method.Name = "GroupJoin" ->
                         expression <- groupJoin.Arguments.[0]
                         let exprs = [| groupJoin :> Expression; mce.Arguments.[1]; mce.Arguments.[2] |]
-                        Method {| Value = SupportedLinqMethods.SelectMany; Expressions = exprs; OriginalMethod = mce.Method |}
+                        queries.Add(Method {| Value = SupportedLinqMethods.SelectMany; Expressions = exprs; OriginalMethod = mce.Method |})
                     | _ ->
                         expression <- mce.Arguments.[0]
                         let exprs = Array.init (mce.Arguments.Count - 1) (fun i -> mce.Arguments.[i + 1])
-                        Method {| Value = SupportedLinqMethods.SelectMany; Expressions = exprs; OriginalMethod = mce.Method |}
+                        queries.Add(Method {| Value = SupportedLinqMethods.SelectMany; Expressions = exprs; OriginalMethod = mce.Method |})
                 | Some value ->
                     expression <- mce.Arguments.[0]
                     let exprs = Array.init (mce.Arguments.Count - 1) (fun i -> mce.Arguments.[i + 1])
-                    Method {| Value = value; Expressions = exprs; OriginalMethod = mce.Method |}
+                    queries.Add(Method {| Value = value; Expressions = exprs; OriginalMethod = mce.Method |})
                 | None ->
                     raise (NotSupportedException(
                         sprintf "Error: Queryable method '%s' is not supported.\nReason: The expression cannot be translated to SQL.\nFix: Call AsEnumerable() before this method or rewrite the query to a supported shape." mce.Method.Name))
             | :? ConstantExpression as ce when typeof<IRootQueryable>.IsAssignableFrom ce.Type ->
-                RootQuery (ce.Value :?> IRootQueryable)
+                queries.Add(RootQuery (ce.Value :?> IRootQueryable))
                 expression <- null
             | e ->
                 raise (NotSupportedException(
                     sprintf "Error: Cannot preprocess expression of type %A.\nReason: The expression shape is not supported for SQL translation.\nFix: Simplify the expression or switch to AsEnumerable() before this operation." e.NodeType))
-    }
+        let ordered = queries.ToArray()
+        Array.Reverse(ordered)
+        ordered
 
     let internal isExpressionLikeArgument (expr: Expression) =
         match expr with

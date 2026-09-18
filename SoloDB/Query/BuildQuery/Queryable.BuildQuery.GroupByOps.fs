@@ -378,7 +378,7 @@ module internal QueryableBuildQueryGroupByOps =
         match tryTranslateGroupArg sourceCtx ctxTableName "o" groupParam vars expr with
         | Some sqlExpr -> Some sqlExpr
         | None ->
-            QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr sourceCtx tableName innerSelect "o" groupParam vars groupByExpressions expr
+            QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr sourceCtx innerSelect "o" groupParam vars expr
 
     /// Handle string interpolation (String.Concat / String.Format) in GroupBy Select body.
     let private tryTranslateGroupByStringInterpolation
@@ -482,7 +482,7 @@ module internal QueryableBuildQueryGroupByOps =
                         | Some sqlExpr -> yield (memberName, sqlExpr)
                         | None ->
                             // Fallback: try shared descriptor extraction for chained group patterns
-                            match QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr sourceCtx tableName ctx.Inner "o" groupParam ctx.Vars groupByExpressions arg with
+                            match QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr sourceCtx ctx.Inner "o" groupParam ctx.Vars arg with
                             | Some sqlExpr -> yield (memberName, sqlExpr)
                             | None ->
                                 raise (NotSupportedException(

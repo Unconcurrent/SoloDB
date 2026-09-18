@@ -1,6 +1,6 @@
 namespace SoloDatabase
 
-/// Mutable result payload for all emission operations.
+/// Result payload for emission; parameter lists are immutable after construction.
 /// Sql contains the emitted SQL text with named parameter placeholders.
 /// Parameters contains the ordered list of (name, value) pairs.
 type internal Emitted = {
@@ -11,16 +11,23 @@ type internal Emitted = {
 module internal Emitted =
     let emptyParameters () = ResizeArray<string * obj>()
 
-    let concatParameterSets (parts: seq<ResizeArray<string * obj>>) =
-        let parts = parts |> Seq.toArray
-        let total = parts |> Array.sumBy (fun ps -> ps.Count)
-        let combined = ResizeArray<string * obj>(total)
-        for ps in parts do
-            combined.AddRange(ps)
-        combined
+    let private collect (parameters: 'T -> ResizeArray<string * obj>) (parts: 'T list) =
+        let mutable combined: ResizeArray<string * obj> = null
+        let mutable ownsCombined = false
+        for part in parts do
+            let values = parameters part
+            if isNull combined || combined.Count = 0 then
+                combined <- values
+            elif values.Count > 0 then
+                if not ownsCombined then
+                    combined <- ResizeArray(combined)
+                    ownsCombined <- true
+                combined.AddRange(values)
+        if isNull combined then emptyParameters () else combined
 
-    let collectParameters (parts: seq<Emitted>) =
-        parts |> Seq.map (fun e -> e.Parameters) |> concatParameterSets
+    let concatParameterSets parts = collect id parts
+
+    let collectParameters (parts: Emitted list) = collect (fun part -> part.Parameters) parts
 
     /// Empty emission result — used as identity for combining.
     let empty = { Sql = ""; Parameters = emptyParameters () }

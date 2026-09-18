@@ -47,14 +47,20 @@ let private exprMatchesIndexEntry (indexExpr: SqlExpr) (expr: SqlExpr) : bool =
         c1 = c2 && p1 = p2 && t1 = t2
     | _ -> indexExpr = expr
 
+let rec private termsContain (node: SqlExpr) (terms: IndexTerm list) =
+    match terms with
+    | [] -> false
+    | term :: rest -> exprMatchesIndexEntry term.Expression node || termsContain node rest
+
+let rec private indexesContain (indexes: IndexEntry list) (node: SqlExpr) =
+    match indexes with
+    | [] -> false
+    | index :: rest -> termsContain node index.Terms || indexesContain rest node
+
 /// Check if an expression or any sub-expression matches any known index entry.
 /// Used as a guard to prevent rewrites that would break index visibility.
 let exprContainsIndexedForm (model: IndexModel) (expr: SqlExpr) : bool =
-    SqlExpr.exists
-        (fun node ->
-            model.Indexes |> List.exists (fun idx ->
-                idx.Terms |> List.exists (fun term -> exprMatchesIndexEntry term.Expression node)))
-        expr
+    not model.Indexes.IsEmpty && SqlExpr.exists (indexesContain model.Indexes) expr
 
 /// Apply path-canonicalization and set-chain rewrites to a single expression.
 /// Extract-wrapper normalization is disabled due to return-type change risk.
@@ -76,12 +82,15 @@ let private rewriteExpr (model: IndexModel) (expr: SqlExpr) : SqlExpr =
 /// Apply rewrites to a predicate tree (walks AND/OR).
 let rec private rewritePredicate (model: IndexModel) (expr: SqlExpr) : SqlExpr =
     match expr with
-    | Binary(l, (And as op), r) ->
-        Binary(rewritePredicate model l, op, rewritePredicate model r)
+    | Binary(l, (And as op), r)
     | Binary(l, (Or as op), r) ->
-        Binary(rewritePredicate model l, op, rewritePredicate model r)
+        let left = rewritePredicate model l
+        let right = rewritePredicate model r
+        if obj.ReferenceEquals(l, left) && obj.ReferenceEquals(r, right) then expr
+        else Binary(left, op, right)
     | Unary(Not, e) ->
-        Unary(Not, rewritePredicate model e)
+        let inner = rewritePredicate model e
+        if obj.ReferenceEquals(e, inner) then expr else Unary(Not, inner)
     | _ -> rewriteExpr model expr
 
 /// Apply the JSONB rewrite policy to a single SelectCore.
@@ -109,7 +118,7 @@ let private rewriteInCore (model: IndexModel) (changed: bool ref) (core: SelectC
             // Rewrite JOIN ON clauses (with index guard)
             shaped <-
                 let newJoins =
-                    shaped.Joins |> List.map (fun j ->
+                    shaped.Joins |> mapList (fun j ->
                         match j with
                         | ConditionedJoin(kind, source, onExpr) ->
                             let rewritten = rewritePredicate model onExpr
@@ -124,7 +133,7 @@ let private rewriteInCore (model: IndexModel) (changed: bool ref) (core: SelectC
                 if shaped.OrderBy.IsEmpty then shaped
                 else
                     let newOrderBy =
-                        shaped.OrderBy |> List.map (fun ob ->
+                        shaped.OrderBy |> mapList (fun ob ->
                             let rewritten = rewriteExpr model ob.Expr
                             if rewritten = ob.Expr then ob
                             else changed.Value <- true; { ob with Expr = rewritten })
@@ -154,41 +163,9 @@ let private rewriteInCore (model: IndexModel) (changed: bool ref) (core: SelectC
 
 /// Recursively apply the JSONB rewrite policy to a SqlSelect.
 let rec rewriteSelectWithModel (model: IndexModel) (changed: bool ref) (sel: SqlSelect) : SqlSelect =
-    let rewrittenBody =
-        match sel.Body with
-        | SingleSelect core ->
-            // Recurse into DerivedTable source
-            let coreWithRecursedSource =
-                match core.Source with
-                | Some(DerivedTable(innerSel, alias)) ->
-                    { core with Source = Some(DerivedTable(rewriteSelectWithModel model changed innerSel, alias)) }
-                | _ -> core
-
-            // Recurse into JOIN sources
-            let coreWithRecursedJoins =
-                { coreWithRecursedSource with
-                    Joins = coreWithRecursedSource.Joins |> List.map (fun j ->
-                        match j with
-                        | CrossJoin(DerivedTable(jSel, jAlias)) ->
-                            CrossJoin(DerivedTable(rewriteSelectWithModel model changed jSel, jAlias))
-                        | ConditionedJoin(kind, DerivedTable(jSel, jAlias), onExpr) ->
-                            ConditionedJoin(kind, DerivedTable(rewriteSelectWithModel model changed jSel, jAlias), onExpr)
-                        | CrossJoin _ ->
-                            j
-                        | ConditionedJoin _ ->
-                            j)
-                }
-
-            // Apply rewrite at this level
-            SingleSelect(rewriteInCore model changed coreWithRecursedJoins)
-
-        | UnionAllSelect(head, tail) ->
-            // UNION ALL is a hard must-not boundary — return entirely unchanged
-            UnionAllSelect(head, tail)
-
-    let rewrittenCtes =
-        sel.Ctes |> List.map (fun cte -> { cte with Query = rewriteSelectWithModel model changed cte.Query })
-    { Ctes = rewrittenCtes; Body = rewrittenBody }
+    let recurse = rewriteSelectWithModel model changed
+    let core = mapDerivedSources recurse >> rewriteInCore model changed
+    mapSelectParts (mapSingleCore core) recurse sel
 
 /// Apply the JSONB rewrite policy to a SqlStatement with index model.
 let rewriteStatementWithModel (model: IndexModel) (stmt: SqlStatement) : struct(SqlStatement * bool) =
@@ -196,7 +173,7 @@ let rewriteStatementWithModel (model: IndexModel) (stmt: SqlStatement) : struct(
     | SelectStmt sel ->
         let changed = ref false
         let result = rewriteSelectWithModel model changed sel
-        struct(SelectStmt result, changed.Value)
+        struct((if obj.ReferenceEquals(sel, result) then stmt else SelectStmt result), changed.Value)
     // INSERT … SELECT recurses so the JSONB rewrite policy reaches the chain SELECT subtree
     // emitted for N-hop B4 — projections and predicates over jsonb_extract on link/target
     // tables benefit from index-aligned rewrites. UPDATE/DELETE WHERE is skipped: the chain
@@ -211,7 +188,7 @@ let rewriteStatementWithModel (model: IndexModel) (stmt: SqlStatement) : struct(
         | InsertSelect sel ->
             let changed = ref false
             let rewritten = rewriteSelectWithModel model changed sel
-            struct(InsertStmt { ins with Source = InsertSelect rewritten }, changed.Value)
+            struct((if obj.ReferenceEquals(sel, rewritten) then stmt else InsertStmt { ins with Source = InsertSelect rewritten }), changed.Value)
     | UpdateStmt _ | DeleteStmt _ -> struct(stmt, false)
 
 /// Apply the JSONB rewrite policy to a SqlStatement (no index model — empty).

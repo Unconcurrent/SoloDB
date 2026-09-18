@@ -31,8 +31,9 @@ module internal SQLiteToolsMapperQuery =
             for i in 0..(reader.FieldCount - 1) do
                 dict.[reader.GetName(i)] <- i
 
+        let mapper = OptimizedClosures.FSharpFunc<IDataReader, int, IDictionary<string, int>, 'T>.Adapt map
         while reader.Read() do
-            yield map reader 0 dict
+            yield mapper.Invoke(reader, 0, dict)
     }
 
     let internal queryInnerWith<'T> (map: IDataReader -> int -> IDictionary<string, int> -> 'T) this (sql: string) (parameters: obj) = seq {

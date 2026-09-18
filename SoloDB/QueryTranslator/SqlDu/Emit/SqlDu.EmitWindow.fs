@@ -21,7 +21,7 @@ let emitWindowCall (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emi
         | [] -> ""
         | parts ->
             let sql = parts |> List.map (fun e -> e.Sql) |> String.concat ", "
-            sprintf "PARTITION BY %s" sql
+            "PARTITION BY " + sql
     let partitionParams = Emitted.collectParameters partitionParts
 
     let orderParts =
@@ -29,13 +29,13 @@ let emitWindowCall (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emi
         |> List.map (fun (expr, dir) ->
             let e = emitExprFn ctx expr
             let dirStr = match dir with Asc -> "ASC" | Desc -> "DESC"
-            { Sql = sprintf "%s %s" e.Sql dirStr; Parameters = e.Parameters })
+            { Sql = e.Sql + " " + dirStr; Parameters = e.Parameters })
     let orderSql =
         match orderParts with
         | [] -> ""
         | parts ->
             let sql = parts |> List.map (fun e -> e.Sql) |> String.concat ", "
-            sprintf "ORDER BY %s" sql
+            "ORDER BY " + sql
     let orderParams = Emitted.collectParameters orderParts
 
     // For aggregate window functions (SUM, etc.), emit ROWS UNBOUNDED PRECEDING
@@ -54,5 +54,5 @@ let emitWindowCall (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emi
         |> String.concat " "
 
     let allParams = Emitted.concatParameterSets [ argsParams; partitionParams; orderParams ]
-    { Sql = sprintf "%s(%s) OVER (%s)" funcName argsSql overParts
+    { Sql = funcName + "(" + argsSql + ") OVER (" + overParts + ")"
       Parameters = allParams }
