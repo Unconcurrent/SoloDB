@@ -21,7 +21,6 @@
     <PackageOutputPath>$(OutputPath)</PackageOutputPath>
     <VersionPrefix>1.3.0</VersionPrefix>
     <EnablePackageValidation>true</EnablePackageValidation>
-    <PackageValidationBaselineVersion>1.2.6</PackageValidationBaselineVersion>
     <LangVersion>10</LangVersion>
     <ParallelCompilation>true</ParallelCompilation>
     <Deterministic>false</Deterministic>
