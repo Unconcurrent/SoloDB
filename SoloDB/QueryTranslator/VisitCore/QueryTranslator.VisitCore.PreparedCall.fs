@@ -8,7 +8,7 @@ open SoloDatabase.QueryTranslatorBaseHelpers
 
 /// Closed operations prepare layout constants and operands at their original sampling positions.
 module internal QueryTranslatorVisitCorePreparedCall =
-    let internal tryProduced visitProduced (m: MethodCallExpression) (qb: QueryBuilder) render =
+    let private tryLayout visitProduced (m: MethodCallExpression) (qb: QueryBuilder) render =
         let layout =
             if typeof<string>.Equals m.Method.DeclaringType then
                 m.Arguments |> Seq.tryFindIndex (fun argument -> typeof<StringComparison>.Equals(argument.Type))
@@ -36,3 +36,17 @@ module internal QueryTranslatorVisitCorePreparedCall =
                     QueryProduced.typed m.Type (render operand stringOperand call)) components
             Some(match prepared with PreparedConstant value -> produce value | DeferredConstant complete -> complete produce)
         | _ -> None
+
+    let internal tryProduced visitProduced visitComparisonProduced (m: MethodCallExpression) (qb: QueryBuilder) render =
+        match QueryTranslatorCharacters.trimmingOperation m with
+        | ValueSome(kind,input) ->
+            let source = visitProduced m.Object qb
+            let argument =
+                match input with
+                | QueryTranslatorCharacters.Character -> visitComparisonProduced m.Arguments[0] qb
+                | QueryTranslatorCharacters.Characters -> visitProduced m.Arguments[0] qb
+                | _ -> QueryProduced.typed typeof<char[]> (SqlExpr.Literal SqlLiteral.Null)
+            Some(QueryProduced.construct qb.SourceContext.NextAlias (fun components ->
+                QueryTranslatorCharacters.trimming kind input (fst components[0]) (fst components[1])
+                |> QueryProduced.typed m.Type) [|source;argument|])
+        | ValueNone -> tryLayout visitProduced m qb render
