@@ -88,7 +88,7 @@ module internal HelperSchema =
 
         // Use translateWhereExpr → DU → strip aliases → emit.
         // No .Replace/.Substring string surgery.
-        let duExpr, variables = QueryTranslator.translateWhereExpr name expression
+        let duExpr, input, variables = QueryTranslator.translateIndexExpr name expression
         if variables.Count > 0 then raise (ArgumentException "Cannot have variables in index.")
         // Strip table-qualification at DU level (not string Replace).
         let stripped = stripAlias duExpr
@@ -106,6 +106,9 @@ module internal HelperSchema =
             raise (InvalidOperationException
                 "Error: Cannot index an outside or constant expression.\nReason: Index expressions must reference the entity parameter.\nFix: Use a member access on the entity parameter.")
 
+        let indexTerm (input: QuerySerializationInput) expression =
+            QueryTranslatorNumeric.nativeExtraction expression
+            |> fun value -> QueryTranslatorCharacters.comparable input.OriginalType value input
         let whereSQL =
             match expressionBody with
             | :? NewExpression as ne when isTuple ne.Type ->
@@ -113,14 +116,16 @@ module internal HelperSchema =
                 // Unwrap to (arg1, arg2, ...) at DU level so CREATE INDEX sees plain expressions.
                 match tryGetTupleExprArgs stripped with
                 | Some args ->
-                    let argsSql = args |> List.map (QueryTranslatorNumeric.nativeExtraction >> emitExprToSqlLocal) |> String.concat ", "
+                    let argsSql = args |> List.mapi (fun index value ->
+                        let struct(child,_) = QueryTranslatorSerialization.serializationAccess input (StoredLabel(box index))
+                        indexTerm child value |> emitExprToSqlLocal) |> String.concat ", "
                     $"({argsSql})"
                 | _ ->
                     $"({emitted})"
             | :? MethodCallExpression
             | :? MemberExpression ->
-                let indexTerm = QueryTranslatorNumeric.nativeExtraction stripped
-                $"({emitExprToSqlLocal indexTerm})"
+                let term = indexTerm input stripped
+                $"({emitExprToSqlLocal term})"
             | other -> raise (ArgumentException (sprintf "Cannot index an expression with type: %s" (other.GetType().FullName)))
 
         let expressionStr = whereSQL.ToCharArray() |> Seq.filter (fun c -> Char.IsAsciiLetterOrDigit c || c = '_') |> Seq.map string |> String.concat ""

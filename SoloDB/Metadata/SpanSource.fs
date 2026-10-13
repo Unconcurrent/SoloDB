@@ -44,8 +44,9 @@ module internal QuerySpanSource =
 
     /// Subtraction avoids overflow even when the supplied length is Int32.MaxValue.
     let tryBounds available start length =
+        if start < 0L || start > available then ValueNone else
         let length = length |> Option.defaultValue (available - start)
-        if start < 0L || start > available || length < 0L || length > available - start then ValueNone
+        if length < 0L || length > available - start then ValueNone
         else ValueSome(struct(int start, int length))
 
     let bounds stringSource available start length =

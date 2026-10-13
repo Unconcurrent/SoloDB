@@ -218,7 +218,7 @@ type internal CollectionMutationOps<'T>() =
                                 idParameter)
                         | None -> raise (InvalidOperationException("Update requires int64 Id or custom Id."))
                 let sql, manyHydrated =
-                    HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> whereExpr manyVars true
+                    HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> (QueryTranslator.mutationWhere conn name whereExpr) manyVars true
                 let oldRow = readHydratedDocument conn sql manyVars
                 if isNull oldRow then
                     raise (KeyNotFoundException "Could not Update any entities with specified Id.")
@@ -307,7 +307,7 @@ type internal CollectionMutationOps<'T>() =
             else
                 // translateWhereExpr + emitted WHERE for DeleteMany.
                 let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
-                let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
+                let filterSql = QueryTranslator.mutationWhere conn name filterExpr |> HydrationSqlBuilder.emitExprToSql
                 let mutable statement = conn.OpenStatement($"DELETE FROM \"{name}\" WHERE {filterSql}")
                 try
                     statement.BindValues(variables)
@@ -346,7 +346,7 @@ type internal CollectionMutationOps<'T>() =
             else
                 // translateWhereExpr + emitted WHERE for DeleteOne no-rel.
                 let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
-                let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
+                let filterSql = QueryTranslator.mutationWhere conn name filterExpr |> HydrationSqlBuilder.emitExprToSql
                 let mutable statement = conn.OpenStatement($"DELETE FROM \"{name}\" WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filterSql}) LIMIT 1)")
                 try
                     statement.BindValues(variables)
@@ -372,10 +372,11 @@ type internal CollectionMutationOps<'T>() =
 
         // translateWhereExpr canonical predicate path for ReplaceMany.
         let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
-        let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
+        let filterSql conn = QueryTranslator.mutationWhere conn name filterExpr |> HydrationSqlBuilder.emitExprToSql
 
         if hasRelations then
             withTransaction (fun conn ->
+                let filterSql = filterSql conn
                 let tx = ensureRelationTx conn
 
                 // mutation-prep old-state read with DBRefMany-only hydration.
@@ -428,6 +429,7 @@ type internal CollectionMutationOps<'T>() =
             )
         else
             withTransaction (fun conn ->
+                let filterSql = filterSql conn
                 CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloIdAgainstStored "ReplaceMany" conn name filterSql variables item
                 setSerializedItem variables item
                 let mutable statement = conn.OpenStatement($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {filterSql}")
@@ -454,10 +456,11 @@ type internal CollectionMutationOps<'T>() =
 
         // translateWhereExpr canonical predicate path for ReplaceOne.
         let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
-        let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
+        let filterSql conn = QueryTranslator.mutationWhere conn name filterExpr |> HydrationSqlBuilder.emitExprToSql
 
         if hasRelations then
             withTransaction (fun conn ->
+                let filterSql = filterSql conn
                 let tx = ensureRelationTx conn
 
                 let sql, manyHydrated =
@@ -490,6 +493,7 @@ type internal CollectionMutationOps<'T>() =
             )
         else
             withTransaction (fun conn ->
+                let filterSql = filterSql conn
                 CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloIdAgainstStored "ReplaceOne" conn name filterSql variables item
                 setSerializedItem variables item
                 let mutable statement = conn.OpenStatement($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filterSql}) LIMIT 1)")
@@ -881,7 +885,7 @@ type internal CollectionMutationOps<'T>() =
                     SqlExpr.Column(None, "Value")
                     :: [ for (path, value) in assignments do yield path; yield value ])
 
-            let where = QueryTranslator.translateWhereExprInto name filter variables
+            let where = QueryTranslator.translateWhereExprInto name filter variables |> QueryTranslator.mutationWhere conn name
 
             let statement =
                 UpdateStmt

@@ -44,25 +44,63 @@ let private canonicalizeExpr (model: IndexModel) (tableName: string) (expr: SqlE
     | Some canonicalized -> canonicalized
     | None -> expr
 
-/// Canonicalize WHERE predicate expressions.
-/// Walks the binary tree of AND/OR and canonicalizes leaf comparison operands.
-let rec private canonicalizePredicate (model: IndexModel) (tableName: string) (expr: SqlExpr) : SqlExpr =
-    match expr with
-    | Binary(l, (Eq | Ne | Lt | Le | Gt | Ge | Like | Glob | Regexp as op), r) ->
-        let cl = canonicalizeExpr model tableName l
-        let cr = canonicalizeExpr model tableName r
-        Binary(cl, op, cr)
-    | Binary(l, And, r) ->
-        Binary(canonicalizePredicate model tableName l, And, canonicalizePredicate model tableName r)
-    | Binary(l, Or, r) ->
-        Binary(canonicalizePredicate model tableName l, Or, canonicalizePredicate model tableName r)
-    | Unary(Not, e) ->
-        Unary(Not, canonicalizePredicate model tableName e)
-    | Between(e, lo, hi) ->
-        Between(canonicalizeExpr model tableName e, lo, hi)
-    | InList(e, head, tail) ->
-        InList(canonicalizeExpr model tableName e, head, tail)
-    | _ -> expr
+let private characterComparison = function
+    | Binary((FunctionCall("CHARACTER_VALUE",[Literal(Integer 7L);raw;Literal Null;Literal Null]) as operand),Eq,value)
+    | Binary(value,Eq,(FunctionCall("CHARACTER_VALUE",[Literal(Integer 7L);raw;Literal Null;Literal Null]) as operand)) ->
+        let extraction = match raw with JsonExtractExpr(_,"Value",_) | JsonRootExtract(_,"Value") | FunctionCall("jsonb_extract",[Column(_,"Value");Literal(String _)]) -> true | _ -> false
+        let acquired = match value with Literal(Integer _) | Literal Null | Parameter _ -> true | _ -> false
+        if extraction && acquired then Some(operand,raw,value) else None
+    | _ -> None
+
+/// The old decoder index admits only the canonical zero key as one-unit text.
+/// Keep the real Char residual: longer fractional keys can share the zero bucket.
+let private characterCandidates model tableName sourceAlias surrounding predicate =
+    match characterComparison predicate with
+    | None -> predicate
+    | Some(operand,raw,value) ->
+        let indexed expression =
+            let expression = forSource tableName sourceAlias expression
+            indexesForTable model tableName |> List.tryPick (fun entry ->
+                match entry.Terms with
+                | term :: _ when System.String.Equals(term.Collation,"BINARY",System.StringComparison.OrdinalIgnoreCase)
+                                 && expressionMatchesIndex tableName expression term.Expression -> Some term.Expression
+                | _ -> None)
+        let old = FunctionCall("DECIMAL",[Literal(Integer(int64(int ExactNumericOperation.NativeValue)));Literal(Integer(int64(int ExactNumericOperation.ToUInt16)));raw])
+        match indexed operand, indexed old with
+        | None, Some definition ->
+            let zeroUnit = int64 ((NumericKey.encode ExactNumber.zero).[0])
+            let alternate = CaseExpr((Binary(value,Eq,Literal(Integer zeroUnit)),Literal(Integer 0L)),[],Some value)
+            let already = surrounding |> SqlExpr.exists (function
+                | InList(candidate,head,[tail]) when head = value && tail = alternate ->
+                    expressionMatchesIndex tableName (forSource tableName sourceAlias candidate) definition
+                | _ -> false)
+            if already then predicate else
+            Binary(InList(old,value,[alternate]),And,predicate)
+        | _ -> predicate
+
+/// One predicate traversal serves canonical terms and the Char-only retained-index alignment.
+let private canonicalizePredicate model tableName sourceAlias allowCharacter characterOnly expr =
+    let rec visit expression =
+        match expression with
+        | Binary(l, (Eq | Ne | Lt | Le | Gt | Ge | Like | Glob | Regexp as op), r) ->
+            let cl = if characterOnly then l else canonicalizeExpr model tableName l
+            let cr = if characterOnly then r else canonicalizeExpr model tableName r
+            let result = Binary(cl,op,cr)
+            if allowCharacter then characterCandidates model tableName sourceAlias expr result else result
+        | Binary(l,And,r) -> Binary(visit l,And,visit r)
+        | Binary(l,Or,r) -> Binary(visit l,Or,visit r)
+        | Unary(Not,e) -> Unary(Not,visit e)
+        | Between(e,lo,hi) when not characterOnly -> Between(canonicalizeExpr model tableName e,lo,hi)
+        | InList(e,head,tail) when not characterOnly -> InList(canonicalizeExpr model tableName e,head,tail)
+        | _ -> expression
+    visit expr
+
+/// Mutation emission uses only this exact, effect-free retained-index alignment.
+let alignCharacterPredicate loadModel tableName expression =
+    if expression |> SqlExpr.exists (characterComparison >> Option.isSome) then
+        let model = loadModel()
+        canonicalizePredicate model tableName tableName true true expression
+    else expression
 
 /// Canonicalize ORDER BY expressions for index alignment.
 let private canonicalizeOrderBy (model: IndexModel) (tableName: string) (orderBy: OrderBy list) : OrderBy list =
@@ -195,10 +233,15 @@ let private reshapeJoinsForIndex (model: IndexModel) (core: SelectCore) : Select
         else { core with Joins = sorted }
 
 /// Apply index plan shaping to a single SelectCore.
-let private shapeInCore (model: IndexModel) (changed: bool ref) allowPartition (core: SelectCore) : SelectCore =
-    // Refuse at must-not-shape boundaries
-    if hasMustNotBoundary core then core
-    elif hasAggregateOrWindowProjections core then core
+let private shapeInCore (model: IndexModel) (changed: bool ref) allowPartition allowCharacter (core: SelectCore) : SelectCore =
+    let core =
+        match core.Source,core.Where with
+        | Some(BaseTable(tableName,alias)), Some where when allowCharacter && core.Joins.IsEmpty ->
+            let aligned = canonicalizePredicate model tableName (alias |> Option.defaultValue tableName) true true where
+            if aligned = where then core else changed.Value <- true; {core with Where = Some aligned}
+        | _ -> core
+    // Char alignment stays at the original WHERE; it adds no decoder/error work.
+    if hasMustNotBoundary core || hasAggregateOrWindowProjections core then core
     else
         // Resolve the base table name for index lookup
         let tableName =
@@ -219,7 +262,8 @@ let private shapeInCore (model: IndexModel) (changed: bool ref) allowPartition (
                 else
                     match shaped.Where with
                     | Some where ->
-                        let canonical = canonicalizePredicate model tName where
+                        let alias = match shaped.Source with Some(BaseTable(_,Some alias)) -> alias | _ -> tName
+                        let canonical = canonicalizePredicate model tName alias false false where
                         let canonical =
                             if allowPartition then
                                 let alias = match shaped.Source with Some(BaseTable(_, Some alias)) -> alias | _ -> tName
@@ -241,8 +285,8 @@ let private shapeInCore (model: IndexModel) (changed: bool ref) allowPartition (
                                     match resolveTableName source with
                                     | Some n -> n
                                     | None -> tName
-                                let canonical = canonicalizePredicate model joinTableName onExpr
-                                let canonical2 = canonicalizePredicate model tName canonical
+                                let canonical = canonicalizePredicate model joinTableName joinTableName false false onExpr
+                                let canonical2 = canonicalizePredicate model tName tName false false canonical
                                 if canonical2 = onExpr then j
                                 else changed.Value <- true; ConditionedJoin(kind, source, canonical2)
                             | CrossJoin _ -> j)
@@ -265,15 +309,16 @@ let private shapeInCore (model: IndexModel) (changed: bool ref) allowPartition (
             shaped
 
 /// Recursively apply index plan shaping to a SqlSelect.
-let rec private shapeSelect (model: IndexModel) (changed: bool ref) allowPartition (sel: SqlSelect) : SqlSelect =
+let rec private shapeSelect (model: IndexModel) (changed: bool ref) allowPartition allowCharacter (sel: SqlSelect) : SqlSelect =
     let allowPartition = allowPartition && sel.Ctes.IsEmpty
+    let allowCharacter = allowCharacter && sel.Ctes.IsEmpty
     let core original =
         let allowed = allowPartition && allowsNativePartition original
-        original |> mapDerivedSources (shapeSelect model changed allowed)
-                 |> shapeInCore model changed allowed
-    mapSelectParts (mapSingleCore core) (shapeSelect model changed false) sel
+        original |> mapDerivedSources (shapeSelect model changed allowed allowCharacter)
+                 |> shapeInCore model changed allowed allowCharacter
+    mapSelectParts (mapSingleCore core) (shapeSelect model changed false false) sel
 
-let shapeIndexSelect model changed sel = shapeSelect model changed true sel
+let shapeIndexSelect model changed sel = shapeSelect model changed true true sel
 
 /// Apply index plan shaping to a SqlStatement.
 let shapeIndexStatement (model: IndexModel) (stmt: SqlStatement) : struct(SqlStatement * bool) =
@@ -293,6 +338,6 @@ let shapeIndexStatement (model: IndexModel) (stmt: SqlStatement) : struct(SqlSta
         | InsertValues _ -> struct(stmt, false)
         | InsertSelect sel ->
             let changed = ref false
-            let shaped = shapeSelect model changed false sel
+            let shaped = shapeSelect model changed false false sel
             struct((if obj.ReferenceEquals(sel, shaped) then stmt else InsertStmt { ins with Source = InsertSelect shaped }), changed.Value)
     | UpdateStmt _ | DeleteStmt _ -> struct(stmt, false)

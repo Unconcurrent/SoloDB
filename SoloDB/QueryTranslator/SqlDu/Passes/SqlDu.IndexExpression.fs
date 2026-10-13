@@ -131,7 +131,7 @@ let private castRegex =
         @"^\s*cast\s*\(\s*(?<inner>.+)\s+as\s+(?<type>[A-Za-z0-9_]+)\s*\)\s*$",
         RegexOptions.Compiled ||| RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
 let private numericalExpressionRegex =
-    Regex(@"^\s*(?<function>DECIMAL|BIGINTEGER)\s*\((?<arguments>.+)\)\s*$", RegexOptions.Compiled ||| RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
+    Regex(@"^\s*(?<function>DECIMAL|BIGINTEGER|CHARACTER_VALUE)\s*\((?<arguments>.+)\)\s*$", RegexOptions.Compiled ||| RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
 let private jsonTextRegex =
     Regex(@"^\s*(?:""Value""|Value)\s*->\s*" + pathLiteralPattern + @"\s*$", RegexOptions.Compiled ||| RegexOptions.IgnoreCase)
 
@@ -236,7 +236,12 @@ and private tryNormalizeNumericalExpr (expr: string) : SqlExpr option =
     let m = numericalExpressionRegex.Match expr
     if not m.Success then None else
     match splitTopLevelCommaTerms m.Groups.["arguments"].Value with
-    | operation :: target :: operand :: descriptors when descriptors.Length <= 1 ->
+    | [operation; operand; first; second] when m.Groups.["function"].Value.Equals("CHARACTER_VALUE",StringComparison.OrdinalIgnoreCase) &&
+         operation.Trim() = "7" && first.Trim().Equals("NULL",StringComparison.OrdinalIgnoreCase) && second.Trim().Equals("NULL",StringComparison.OrdinalIgnoreCase) ->
+        tryNormalizeJsonExtractExpr operand |> Option.map (fun operand ->
+            FunctionCall("CHARACTER_VALUE",[Literal(SqlLiteral.Integer 7L);operand;Literal SqlLiteral.Null;Literal SqlLiteral.Null]))
+    | operation :: target :: operand :: descriptors when descriptors.Length <= 1 &&
+        not(m.Groups.["function"].Value.Equals("CHARACTER_VALUE",StringComparison.OrdinalIgnoreCase)) ->
         let integer (text: string) =
             match Int32.TryParse(text.Trim(), Globalization.NumberStyles.Integer, Globalization.CultureInfo.InvariantCulture) with
             | true, value -> Some value

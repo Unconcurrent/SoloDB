@@ -38,11 +38,22 @@ module internal QueryTranslator =
     /// reads. A predicate translated into a dictionary of its own would start numbering from the
     /// beginning and could not then be merged without either colliding with the assignments or
     /// renaming them, so the caller's dictionary is threaded through rather than combined after.
-    let translateWhereExprInto (tableName: string) (expression: Expression) (variables: Dictionary<string, obj>) : SqlExpr =
+    let private lowerWhere (tableName: string) (expression: Expression) (variables: Dictionary<string, obj>) =
         ensureDbRefHandlersInitialized()
-        let sb = StringBuilder()
-        let builder = QueryBuilder.New sb variables false tableName expression -1 ValueNone
-        visitDu expression builder
+        let builder = QueryBuilder.New (StringBuilder()) variables false tableName expression -1 ValueNone
+        let produced = visitProduced expression builder
+        QueryProduced.value builder.SourceContext.NextAlias produced, produced.Input
+
+    let translateWhereExprInto tableName expression variables : SqlExpr =
+        lowerWhere tableName expression variables |> fst
+
+    let internal translateIndexExpr tableName expression =
+        let variables = Dictionary<string,obj>()
+        let value,input = lowerWhere tableName expression variables
+        value,input,variables
+
+    let internal mutationWhere (connection: NativeSqliteConnection) tableName expression =
+        IndexPlanShaping.alignCharacterPredicate (fun () -> RuntimeIndexModelCache.loadModelForTables connection [tableName]) tableName expression
 
     let translateWhereExpr (tableName: string) (expression: Expression) : SqlExpr * Dictionary<string, obj> =
         let variables = Dictionary<string, obj>()

@@ -130,7 +130,10 @@ module internal QueryTranslatorVisitCoreMemberAccess =
               || (m.MemberName = "Id" && m.Expression.NodeType = ExpressionType.Parameter && (typeof<JsonSerializator.JsonValue>.Equals(m.Expression.Type) || m.Expression.Type.FullName = "SoloDatabase.MongoDB.BsonDocument")) then
             let parent = visitProduced m.Expression qb
             if not qb.UpdateMode && parent.Input.PhysicalOwner.IsSome then
-                accessValue qb.SourceContext.NextAlias false (StoredLabel(box m.MemberName)) m.ReturnType parent
+                let access =
+                    if typeof<JsonSerializator.JsonValue>.Equals m.Expression.Type || m.Expression.Type.FullName = "SoloDatabase.MongoDB.BsonDocument" then StoredLabel(box m.MemberName)
+                    else ClrMember(m.MemberName, m.ReturnType)
+                accessValue qb.SourceContext.NextAlias false access m.ReturnType parent
             else scalar(SqlExpr.Column(alias, "Id"))
         else
             match m.OriginalExpression with
