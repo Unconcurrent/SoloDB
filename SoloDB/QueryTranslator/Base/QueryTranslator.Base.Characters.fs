@@ -8,7 +8,7 @@ open SoloDatabase.SqlModel
 
 /// Character operations consume UTF16 units, separately from ordinary SQL text.
 module internal QueryTranslatorCharacters =
-    type Operation = Index = 0 | Contains = 1 | StartsWith = 2 | EndsWith = 3 | Replace = 4 | IndexOf = 5 | Concat = 6 | Comparable = 7
+    type Operation = Index = 0 | Contains = 1 | StartsWith = 2 | EndsWith = 3 | Replace = 4 | IndexOf = 5 | Concat = 6 | Comparable = 7 | Trim = 8 | TrimStart = 9 | TrimEnd = 10
 
     let private nullValue = SqlExpr.Literal SqlLiteral.Null
     let private call operation source first second =
@@ -62,6 +62,45 @@ module internal QueryTranslatorCharacters =
         | "IndexOf" when charFirst && comparison && typeof<int>.Equals method.ReturnType -> ValueSome Operation.IndexOf
         | _ -> ValueNone
 
+    type TrimmingInput = Parameterless | Character | Characters | EmptySpan
+
+    let private readOnlyCharactersType =
+        typeof<MemoryExtensions>.GetMethod("AsSpan", [|typeof<string>|]).ReturnType
+
+    let trimmingOperation (expression: MethodCallExpression) =
+        let method = expression.Method
+        if method.IsStatic || method.ContainsGenericParameters || isNull expression.Object ||
+           not(typeof<string>.Equals method.DeclaringType) || not(typeof<string>.Equals method.ReturnType) then ValueNone else
+        let operation =
+            match method.Name with
+            | "Trim" -> ValueSome Operation.Trim
+            | "TrimStart" -> ValueSome Operation.TrimStart
+            | "TrimEnd" -> ValueSome Operation.TrimEnd
+            | _ -> ValueNone
+        let parameters = method.GetParameters()
+        let input =
+            if parameters.Length <> expression.Arguments.Count then ValueNone
+            elif parameters.Length = 0 then ValueSome Parameterless
+            elif parameters.Length <> 1 then ValueNone
+            elif typeof<char>.Equals parameters[0].ParameterType then ValueSome Character
+            elif typeof<char[]>.Equals parameters[0].ParameterType then ValueSome Characters
+            elif readOnlyCharactersType.Equals parameters[0].ParameterType &&
+                 expression.Arguments[0].NodeType = ExpressionType.Default then ValueSome EmptySpan
+            else ValueNone
+        match operation, input with
+        | ValueSome operation, ValueSome input -> ValueSome(operation,input)
+        | _ -> ValueNone
+
+    let trimming kind input source value =
+        match input with
+        | Parameterless ->
+            let name = if kind = Operation.Trim then "TRIM" elif kind = Operation.TrimStart then "LTRIM" else "RTRIM"
+            SqlExpr.FunctionCall(name,[source])
+        | _ ->
+            let array = input = Characters || input = EmptySpan
+            let value = if array then SqlExpr.FunctionCall("json",[value]) else value
+            call kind source value (SqlExpr.Literal(SqlLiteral.Integer(if array then 1L else 0L)))
+
     let operation kind source first second = call kind source first second
 
     let register (lower: string -> string) (connection: NativeSqliteConnection) =
@@ -93,6 +132,27 @@ module internal QueryTranslatorCharacters =
                         if character then output.Append(characterText value) |> ignore
                         else output.Append(value.CopyToString()) |> ignore
                 context.SetText(output.ToString())
+            elif operation = Operation.Trim || operation = Operation.TrimStart || operation = Operation.TrimEnd then
+                if arguments[1].IsNull then context.SetNull()
+                else
+                    let source = arguments[1].CopyToString()
+                    let array = arguments[3].GetInt32() <> 0
+                    if not array && arguments[2].IsNull then context.SetNull()
+                    else
+                        let characters =
+                            if array then
+                                if arguments[2].IsNull then null
+                                else JsonSerializator.JsonValue.ParseInto<char[]>(arguments[2].CopyToString())
+                            else (characterText arguments[2]).ToCharArray()
+                        // Empty legacy scalar extraction is an empty text set, not
+                        // the authored null/empty array switch to whitespace trimming.
+                        if not array && characters.Length = 0 then context.SetText(source)
+                        else
+                            let result =
+                                if operation = Operation.Trim then source.Trim(characters)
+                                elif operation = Operation.TrimStart then source.TrimStart(characters)
+                                else source.TrimEnd(characters)
+                            context.SetText(result)
             elif (operation = Operation.Contains || operation = Operation.IndexOf) && arguments[3].GetInt32() <> 0 && arguments[2].IsNull then
                 context.SetText(lower null)
             elif arguments[1].IsNull || arguments[2].IsNull || operation = Operation.Replace && arguments[3].IsNull then context.SetNull()

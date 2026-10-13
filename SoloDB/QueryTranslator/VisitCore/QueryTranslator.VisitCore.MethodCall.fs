@@ -281,9 +281,6 @@ module internal QueryTranslatorVisitCoreMethodCall =
         | OfShape0 null null "LongCount" _ when let t = m.Arguments.[0].Type in t.IsConstructedGenericType && typedefof<System.Linq.IGrouping<_,_>>.Equals(t.GetGenericTypeDefinition()) ->
             let alias = qb.SourceAlias
             SqlExpr.FunctionCall("json_array_length", [SqlExpr.Column(alias, "Value"); SqlExpr.Literal(SqlLiteral.String "$.Items")])
-        | OfShape0 null OfString "Trim" str -> SqlExpr.FunctionCall("TRIM", [visitDu str qb])
-        | OfShape0 null OfString "TrimStart" str -> SqlExpr.FunctionCall("LTRIM", [visitDu str qb])
-        | OfShape0 null OfString "TrimEnd" str -> SqlExpr.FunctionCall("RTRIM", [visitDu str qb])
         | OfShape2 null OfString "Replace" null null (str, oldValue, newValue) ->
             SqlExpr.FunctionCall("REPLACE", [visitDu str qb; visitDu oldValue qb; visitDu newValue qb])
         | OfShape0 null OfString "IsNullOrEmpty" str ->
@@ -329,9 +326,21 @@ module internal QueryTranslatorVisitCoreMethodCall =
         let operationOperand expression builder = visitOperation expression builder |> QueryProduced.value builder.SourceContext.NextAlias
         let render operand stringOperand call =
             visitScalarMethodCallDu operand visitStoredValueDu visitPresenceDu visitMathMethodDu containsImplDu visitNestedArrayPredicateDu stringOperand call qb
-        match QueryTranslatorVisitCorePreparedCall.tryProduced visitOperation m qb render with
-        | Some result -> result
-        | None -> visitFormattedMethodCallDu visitProduced visitTextProduced visitRequested (if characterOperation then operationOperand else visitDu) visitStoredValueDu visitPresenceDu visitMathMethodDu arrayIndexDu visitPropertyDu visitPreparedPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu membersProduced emitStringOperandDu m qb
+        match QueryTranslatorCharacters.trimmingOperation m with
+        | ValueSome(kind,input) ->
+            let source = visitProduced m.Object qb
+            let argument =
+                match input with
+                | QueryTranslatorCharacters.Character -> visitComparisonProduced m.Arguments[0] qb
+                | QueryTranslatorCharacters.Characters -> visitProduced m.Arguments[0] qb
+                | _ -> QueryProduced.typed typeof<char[]> (SqlExpr.Literal SqlLiteral.Null)
+            QueryProduced.construct qb.SourceContext.NextAlias (fun components ->
+                QueryTranslatorCharacters.trimming kind input (fst components[0]) (fst components[1])
+                |> QueryProduced.typed m.Type) [|source;argument|]
+        | ValueNone ->
+            match QueryTranslatorVisitCorePreparedCall.tryProduced visitOperation m qb render with
+            | Some result -> result
+            | None -> visitFormattedMethodCallDu visitProduced visitTextProduced visitRequested (if characterOperation then operationOperand else visitDu) visitStoredValueDu visitPresenceDu visitMathMethodDu arrayIndexDu visitPropertyDu visitPreparedPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu membersProduced emitStringOperandDu m qb
 
     and private visitFormattedMethodCallDu visitProduced visitTextProduced visitRequested visitDu visitStoredValueDu visitPresenceDu visitMathMethodDu arrayIndexDu visitPropertyDu visitPreparedPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu membersProduced emitStringOperandDu (m: MethodCallExpression) (qb: QueryBuilder) =
         match QueryTranslatorVisitCoreStringFormatting.tryProduced visitTextProduced m qb with
