@@ -8,8 +8,7 @@ open System.Linq.Expressions
 open System.Reflection
 open System.Text
 open System.Runtime.CompilerServices
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open Utils
 open JsonFunctions
 open Connections
@@ -41,141 +40,91 @@ type internal ISoloDBCollectionQueryProvider =
     abstract member DescribeUnoptimizedSelect: expression: Expression -> string
 
 module internal QueryableTranslation =
-    let startFilterTranslationWithConnection (metadataConnection: SqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
+    let startFilterTranslationWithConnection (metadataConnection: NativeSqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
         let query, variables, _, _ = QueryableTranslationCore.startTranslationWithConnection metadataConnection source expression
         query, variables
 
-/// <summary>
-/// The internal implementation of <c>IQueryProvider</c> for SoloDB collections.
-/// </summary>
-/// <param name="source">The source collection.</param>
-/// <param name="data">Additional data, such as cache clearing functions.</param>
-/// Populates DBRefMany trackers from HydrationJSON data.
-/// HydrationJSON shape: {"PropName": [{"Id": n, "Value": {...}}, ...], ...}
-module internal HydrationManyPopulator =
-    open SoloDatabase.JsonSerializator
-    open SoloDatabase.RelationsTypes
-
-    let populateFromHydrationJson (ownerType: Type) (ownerEntities: (int64 * obj) array) (hydrationMap: Dictionary<int64, string>) =
-        // Descriptor carries the accessors this loop needs, so materialization no longer
-        // re-resolves a getter, setter, constructor and Id writer per owner per property.
-        let descriptor = HydrationSqlMetadata.getRelationDescriptor ownerType
-
-        if descriptor.ManyCount = 0 then ()
-        else
-
-        for (ownerId, ownerObj) in ownerEntities do
-            match hydrationMap.TryGetValue(ownerId) with
-            | false, _ -> ()
-            | true, hydrationJsonStr ->
-                let hydrationObj = JsonValue.Parse hydrationJsonStr
-                match hydrationObj with
-                | JsonValue.Object dict ->
-                    for manyIndex in 0 .. descriptor.ManyCount - 1 do
-                        let relation = descriptor.Many manyIndex
-                        let prop = relation.Property
-                        let targetType = relation.TargetType
-                        match dict.TryGetValue(prop.Name) with
-                        | false, _ -> ()
-                        | true, jsonArray ->
-                            let items = ResizeArray<int64 * obj>()
-                            match jsonArray with
-                            | JsonValue.List arr ->
-                                for elem in arr do
-                                    match elem with
-                                    | JsonValue.Object elemDict ->
-                                        match elemDict.TryGetValue("Id"), elemDict.TryGetValue("Value") with
-                                        | (true, idJson), (true, valueJson) ->
-                                            let id = int64 (idJson.ToObject<decimal>())
-                                            let targetObj = valueJson.ToObject(targetType)
-                                            relation.TargetIdWriter.Invoke(targetObj, id)
-                                            items.Add(id, targetObj)
-                                        | _ -> ()
-                                    | _ -> ()
-                            | _ -> ()
-
-                            // Populate the DBRefMany tracker via SetLoadedBoxed.
-                            let tracker = relation.TrackerGetter.Invoke(ownerObj)
-                            match tracker with
-                            | :? IDBRefManyInternal as internal' ->
-                                internal'.SetLoadedBoxed (items |> Seq.map snd) (items |> Seq.map fst)
-                            | null ->
-                                let instance = relation.TrackerCtor.Invoke()
-                                relation.TrackerSetter.Invoke(ownerObj, instance)
-                                let internal' = instance :?> IDBRefManyInternal
-                                internal'.SetLoadedBoxed (items |> Seq.map snd) (items |> Seq.map fst)
-                            | _ -> ()
-                | _ -> ()
-
 module internal QueryableExecution =
-    let private queryRows<'T> (connection: SqliteConnection) (query: string) (parameters: obj) (retained: RetainedPreparedHandle voption) =
-        match retained, connection with
-        | ValueSome handle, (:? CachingDbConnection as cached) ->
-            cached.QueryRetained<'T>(handle, parameters :?> SQLiteToolsParams.ParameterValues)
-        | _ -> connection.Query<'T>(query, parameters)
+    let private openQuery (connection: NativeSqliteConnection) (query: NativeStatementSource) (parameters: obj) =
+        let mutable statement = connection.OpenStatementSource(query)
+        try
+            match parameters with
+            | :? IReadOnlyDictionary<string, obj> as values -> statement.BindValues(values)
+            | _ -> statement.Bind(statement.Statement.Capture(parameters))
+            statement
+        with error -> statement.Abort(error); reraise()
+
+    let private readDocument owned (statement: byref<NativeStatementScope>) : struct(Types.DbObjectRow * int * int) voption =
+        try
+            if statement.Step() then
+                let row=statement.Row
+                let storageClass=row.StorageClass(1)
+                let owner = if owned then row.GetInt32 3 else -1
+                ValueSome(struct(SqlRowValue.Document(row),storageClass,owner))
+            else ValueNone
+        with error -> statement.Abort(error); reraise()
+
+    let private readEntity<'Elem> owned (statement: byref<NativeStatementScope>) =
+        try
+            if statement.Step() then
+                let row = statement.Row
+                let struct(document, entity) = JsonFunctions.fromSQLiteRow<'Elem> row
+                let owner = if owned then row.GetInt32 3 else -1
+                ValueSome(struct(document, entity, owner))
+            else ValueNone
+        with error -> statement.Abort(error); reraise()
+
+    let private queryRows<'Elem> (connection: NativeSqliteConnection) query parameters owned = seq {
+        let mutable statement = openQuery connection query parameters
+        try
+            let mutable reading = true
+            while reading do
+                match readEntity<'Elem> owned &statement with
+                | ValueSome row -> yield row
+                | ValueNone -> reading <- false
+        finally statement.Dispose()
+    }
+
+    /// Both scalar and sequence delivery hydrate only the row's selected physical owner.
+    let private hydrateOwners (connection: NativeSqliteConnection) inTransaction (context: QueryableTranslationCore.BatchLoadContext)
+                              (entities: (int64 * obj) array) (hydration: Dictionary<int64, string>) =
+        if entities.Length > 0 then
+            if context.HasSingleRelations && not context.SingleRelationsHydrated then
+                RelationsSync.batchLoadDBRefProperties connection context.OwnerTable context.OwnerType context.ExcludedPaths context.IncludedPaths context.WhitelistMode entities inTransaction
+            if context.HasManyRelations && not context.ManyRelationsHydrated then
+                RelationsSync.batchLoadDBRefManyProperties connection context.OwnerTable context.OwnerType context.ExcludedPaths context.IncludedPaths context.WhitelistMode entities inTransaction
+            if context.ManyRelationsHydrated then
+                RelationsFileSystemBatchLoad.batchLoadFileSystemProperties connection context.OwnerTable context.OwnerType context.ExcludedPaths context.IncludedPaths context.WhitelistMode entities RelationKind.Many ""
+                HydrationManyPopulator.populateFromHydrationJson context.OwnerType entities hydration
+            if context.SingleRelationsHydrated || context.ManyRelationsHydrated then
+                RelationsSync.recurseLoadedRelationTargets connection context.OwnerTable context.OwnerType context.ExcludedPaths context.IncludedPaths context.WhitelistMode entities inTransaction
 
     let enumerate<'Source, 'Elem>
-        (source: ISoloDBCollection<'Source>) (query: string) (par: obj)
-        (batchCtx: QueryableTranslationCore.BatchLoadContext voption)
-        (retained: RetainedPreparedHandle voption) : IEnumerable<'Elem> =
+        (source: ISoloDBCollection<'Source>) (query: NativeStatementSource) (par: obj)
+        (batchCtx: QueryableTranslationCore.BatchLoadPlan voption) : IEnumerable<'Elem> =
         seq {
-            use connection = source.GetInternalConnection()
+            use connection = (source :?> INativeConnectionSource).AcquireNativeConnection()
             match batchCtx with
-            | ValueSome ctx when ctx.HasSingleRelations || ctx.HasManyRelations ->
-                // Buffer all results, then batch-load or hydrate relation properties.
-                let buffer = ResizeArray<int64 * 'Elem>()
-                // When ManyRelationsHydrated, rows include HydrationJSON column.
-                // Map: ownerId → HydrationJSON string for post-deserialization tracker population.
-                let hydrationMap =
-                    if ctx.ManyRelationsHydrated then Dictionary<int64, string>() else null
-                for row in queryRows<Types.DbObjectRow> connection query par retained do
-                    let entity = JsonFunctions.fromSQLite<'Elem> row
-                    buffer.Add(row.Id.Value, entity)
-                    if not (isNull hydrationMap) && not (isNull row.HydrationJSON) then
-                        hydrationMap.[row.Id.Value] <- row.HydrationJSON
-
-                if buffer.Count > 0 then
-                    let ownerEntities =
-                        buffer
-                        |> Seq.choose (fun (id, e) ->
-                            let boxed = box e
-                            if isNull boxed then None
-                            elif ctx.OwnerType.IsInstanceOfType boxed then Some(id, boxed)
-                            else None)
-                        |> Seq.toArray
-
-                    if ownerEntities.Length > 0 then
-                        // Skip batchLoadDBRefProperties when single relations are hydrated
-                        // inline via correlated subqueries in the SQL projection.
-                        if ctx.HasSingleRelations && not ctx.SingleRelationsHydrated then
-                            RelationsCore.withRelationSqliteWrap "query-batch-load" "ExecuteEnumerable.batchLoadDBRefProperties" (fun () ->
-                                RelationsSync.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
-                            )
-
-                        // Skip batchLoadDBRefManyProperties when many relations are hydrated
-                        // inline via HydrationJSON column with json_group_array subqueries.
-                        if ctx.HasManyRelations && not ctx.ManyRelationsHydrated then
-                            RelationsCore.withRelationSqliteWrap "query-batch-load" "ExecuteEnumerable.batchLoadDBRefManyProperties" (fun () ->
-                                RelationsSync.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
-                            )
-
-                        // Populate DBRefMany trackers from HydrationJSON.
-                        if ctx.ManyRelationsHydrated && not (isNull hydrationMap) then
-                            HydrationManyPopulator.populateFromHydrationJson ctx.OwnerType ownerEntities hydrationMap
-
-                        // Inline hydration loads hop-1 relations, but nested traversal still
-                        // belongs to the recursive batch-loader.
-                        if ctx.SingleRelationsHydrated || ctx.ManyRelationsHydrated then
-                            RelationsSync.recurseLoadedRelationTargets connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode ownerEntities source.InTransaction
-
-                        if ctx.HasSingleRelations || ctx.HasManyRelations then
-                            RelationsSync.captureRelationVersionForEntities connection ctx.OwnerTable ownerEntities
-
-                for (_id, entity) in buffer do
-                    yield entity
+            | ValueSome plan ->
+                let buffer = ResizeArray<'Elem>()
+                let owners = Array.init plan.Owners.Length (fun _ -> ResizeArray<int64 * obj>())
+                let hydration = Array.init plan.Owners.Length (fun _ -> Dictionary<int64, string>())
+                try
+                    for struct(row, entity, position) in queryRows<'Elem> connection query par batchCtx.IsSome do
+                        buffer.Add entity
+                        if position >= 0 && position < owners.Length && row.Id.HasValue && not(isNull(box entity))
+                           && plan.Owners[position].OwnerType.IsInstanceOfType(box entity) then
+                            owners[position].Add(row.Id.Value, box entity)
+                            if not(isNull row.HydrationJSON) then hydration[position][row.Id.Value] <- row.HydrationJSON
+                    for index = 0 to owners.Length - 1 do
+                        hydrateOwners connection source.InTransaction plan.Owners[index] (owners[index].ToArray()) hydration[index]
+                with error ->
+                    SQLiteToolsHandlerFaultState.tryRecordHandlerFault connection error
+                    reraiseAnywhere error
+                yield! buffer
             | _ ->
-                for row in queryRows<Types.DbObjectRow> connection query par retained do
-                    yield JsonFunctions.fromSQLite<'Elem> row
+                for struct(_, entity, _) in queryRows<'Elem> connection query par batchCtx.IsSome do
+                    yield entity
         }
 
     let terminalDefaultExpression (expression: Expression) =
@@ -183,114 +132,58 @@ module internal QueryableExecution =
             match expr with
             | :? LambdaExpression -> true
             | _ -> typeof<Expression>.IsAssignableFrom expr.Type
-        let defaultExprOpt =
-            match expression with
-            | :? MethodCallExpression as mce ->
-                let args = Array.init (mce.Arguments.Count - 1) (fun i -> mce.Arguments.[i + 1])
-                match mce.Method.Name, args with
-                | ("FirstOrDefault" | "SingleOrDefault"), [| defaultValue |]
-                    when not (isExpressionLikeArgument defaultValue) ->
-                    Some defaultValue
-                | ("FirstOrDefault" | "SingleOrDefault"), [| predicate; defaultValue |]
-                    when isExpressionLikeArgument predicate ->
-                    Some defaultValue
-                | _ ->
-                    None
-            | _ ->
-                None
-        defaultExprOpt
+        match expression with
+        | :? MethodCallExpression as call when call.Method.Name = "FirstOrDefault" || call.Method.Name = "SingleOrDefault" ->
+            match call.Arguments.Count with
+            | 2 when not (isExpressionLikeArgument call.Arguments.[1]) -> Some call.Arguments.[1]
+            | 3 when isExpressionLikeArgument call.Arguments.[1] -> Some call.Arguments.[2]
+            | _ -> None
+        | _ -> None
 
     let scalar<'Source, 'TResult>
-        (source: ISoloDBCollection<'Source>) (query: string) (variables: obj)
-        (batchCtx: QueryableTranslationCore.BatchLoadContext voption)
-        (methodName: string) (getTerminalDefaultValue: unit -> 'TResult)
-        (retained: RetainedPreparedHandle voption) : 'TResult =
-        let inline batchLoadSingle (connection: SqliteConnection) (row: Types.DbObjectRow) (entity: 'TResult) =
+        (source: ISoloDBCollection<'Source>) (query: NativeStatementSource) (variables: obj)
+        (batchCtx: QueryableTranslationCore.BatchLoadPlan voption)
+        (methodName: string) (getTerminalDefaultValue: unit -> 'TResult) : 'TResult =
+        let batchLoadSingle (connection: NativeSqliteConnection) (row: Types.DbObjectRow) position (entity: 'TResult) =
             match batchCtx with
-            | ValueSome ctx when (ctx.HasSingleRelations || ctx.HasManyRelations) && not (isNull (box entity)) && row.Id.HasValue && ctx.OwnerType.IsAssignableFrom(typeof<'TResult>) ->
-                if ctx.HasSingleRelations && not ctx.SingleRelationsHydrated then
-                    RelationsCore.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefProperties" (fun () ->
-                        RelationsSync.batchLoadDBRefProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
-                    )
-                if ctx.HasManyRelations && not ctx.ManyRelationsHydrated then
-                    RelationsCore.withRelationSqliteWrap "query-batch-load" "ExecuteScalar.batchLoadDBRefManyProperties" (fun () ->
-                        RelationsSync.batchLoadDBRefManyProperties connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
-                    )
-                // Populate DBRefMany from HydrationJSON for scalar path.
-                if ctx.ManyRelationsHydrated && not (isNull row.HydrationJSON) then
-                    let hydMap = Dictionary<int64, string>()
-                    hydMap.[row.Id.Value] <- row.HydrationJSON
-                    HydrationManyPopulator.populateFromHydrationJson ctx.OwnerType [| (row.Id.Value, box entity) |] hydMap
-                if ctx.SingleRelationsHydrated || ctx.ManyRelationsHydrated then
-                    RelationsSync.recurseLoadedRelationTargets connection ctx.OwnerTable ctx.OwnerType ctx.ExcludedPaths ctx.IncludedPaths ctx.WhitelistMode [| (row.Id.Value, box entity) |] source.InTransaction
-                if ctx.HasSingleRelations || ctx.HasManyRelations then
-                    RelationsSync.captureRelationVersionForEntities connection ctx.OwnerTable [| (row.Id.Value, box entity) |]
+            | ValueSome plan when position >= 0 && position < plan.Owners.Length && not(isNull(box entity)) && row.Id.HasValue
+                                  && plan.Owners[position].OwnerType.IsInstanceOfType(box entity) ->
+                let hydration = Dictionary<int64, string>()
+                if not(isNull row.HydrationJSON) then hydration[row.Id.Value] <- row.HydrationJSON
+                hydrateOwners connection source.InTransaction plan.Owners[position] [|(row.Id.Value, box entity)|] hydration
             | _ -> ()
             entity
 
-        use connection = source.GetInternalConnection()
-        let query = queryRows<Types.DbObjectRow> connection query variables retained
-
-        match methodName with
-        | "Single" ->
-            let row = query.Single()
-            let entity = JsonFunctions.fromSQLite<'TResult> row
-            batchLoadSingle connection row entity
-        | "SingleOrDefault" ->
-            // Emulate query.SupportedLinqMethods.SingleOrDefault()
-            use enumerator = query.GetEnumerator()
-            match enumerator.MoveNext() with
-            | false -> getTerminalDefaultValue()
-            | true ->
-                let prevElement = enumerator.Current
-                match enumerator.MoveNext() with
-                | true -> raise (InvalidOperationException("Sequence contains more than one element"))
-                | false ->
-                    // Only one element was found, return it.
-                    let entity = JsonFunctions.fromSQLite<'TResult> prevElement
-                    batchLoadSingle connection prevElement entity
-
-        | "First" ->
-            let row = query.First()
-            let entity = JsonFunctions.fromSQLite<'TResult> row
-            batchLoadSingle connection row entity
-        | "FirstOrDefault" ->
-            match query |> Seq.tryHead with
-            | None -> getTerminalDefaultValue()
-            | Some row ->
-                let entity = JsonFunctions.fromSQLite<'TResult> row
-                batchLoadSingle connection row entity
-
-        | "MinBy"
-        | "MaxBy" ->
-            match query |> Seq.tryHead with
-            | Some row ->
-                let entity = JsonFunctions.fromSQLite<'TResult> row
-                batchLoadSingle connection row entity
-            | None when typeof<'TResult>.IsValueType && isNull (Nullable.GetUnderlyingType(typeof<'TResult>)) ->
-                raise (InvalidOperationException("Sequence contains no elements"))
-            | None ->
+        use connection = (source :?> INativeConnectionSource).AcquireNativeConnection()
+        let mutable statement = openQuery connection query variables
+        try
+            let row =
+                try
+                    let row = readDocument batchCtx.IsSome &statement
+                    match methodName, row with
+                    | ("Single" | "SingleOrDefault"), ValueSome _ ->
+                        if (readDocument batchCtx.IsSome &statement).IsSome then
+                            raise (InvalidOperationException("Sequence contains more than one element"))
+                    | _ -> ()
+                    statement.Dispose()
+                    row
+                with error -> statement.Abort(error); reraise()
+            match row with
+            | ValueSome struct(row,storageClass,position) ->
+                let entity = JsonFunctions.fromSQLiteCaptured<'TResult> storageClass row
+                batchLoadSingle connection row position entity
+            | ValueNone when methodName.EndsWith("OrDefault", StringComparison.Ordinal) -> getTerminalDefaultValue()
+            | ValueNone when methodName = "MinBy" || methodName = "MaxBy" ->
+                if typeof<'TResult>.IsValueType && isNull (TypeMetadata.nullableUnderlying(typeof<'TResult>)) then
+                    raise (InvalidOperationException("Sequence contains no elements"))
                 Unchecked.defaultof<'TResult>
-
-        | methodName when methodName.EndsWith("OrDefault", StringComparison.Ordinal) ->
-            match query |> Seq.tryHead with
-            | None -> getTerminalDefaultValue()
-            | Some row ->
-                let entity = JsonFunctions.fromSQLite<'TResult> row
-                batchLoadSingle connection row entity
-        | _ ->
-            match query |> Seq.tryHead with
-            | None -> raise (InvalidOperationException("Sequence contains no elements"))
-            | Some row ->
-                let entity = JsonFunctions.fromSQLite<'TResult> row
-                batchLoadSingle connection row entity
+            | ValueNone -> raise (InvalidOperationException("Sequence contains no elements"))
+        with error ->
+            SQLiteToolsHandlerFaultState.tryRecordHandlerFault connection error
+            statement.Abort(error)
+            reraise()
 
 type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, data: obj) =
-    static let enumerableDispatchCache =
-        System.Collections.Concurrent.ConcurrentDictionary<Type, Func<SoloDBCollectionQueryProvider<'T>, string, obj, QueryableTranslationCore.BatchLoadContext voption, obj>>()
-    static let queryDispatchCache = System.Collections.Concurrent.ConcurrentDictionary<Type, Func<IQueryProvider, Expression, IQueryable>>()
-    static let resultDispatchCache = System.Collections.Concurrent.ConcurrentDictionary<Type, Func<IQueryProvider, Expression, obj>>()
-
     // Non-generic entry points retain the generic provider's construction and execution contracts.
     static member private CreateTypedQuery<'Elem>(provider: IQueryProvider, expression: Expression) : IQueryable =
         provider.CreateQuery<'Elem>(expression) :> IQueryable
@@ -310,13 +203,21 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
         override this.GetExplainQueryPlan(expression: Expression) =
             let query, variables, _, _ = QueryableTranslationCore.startTranslation source expression
             let explainQuery = "EXPLAIN QUERY PLAN " + query
-            use connection = source.GetInternalConnection()
-            let result = connection.Query<{|detail: string|}>(explainQuery, variables) |> Seq.toList
-            result |> List.map(_.detail) |> String.concat ";\n"
+            use connection = (source :?> INativeConnectionSource).AcquireNativeConnection()
+            let mutable statement = connection.OpenStatement(explainQuery)
+            try
+                statement.BindValues(variables)
+                let details = System.Text.StringBuilder()
+                while statement.Step() do
+                    if details.Length > 0 then details.Append(";\n") |> ignore
+                    details.Append(statement.Row.GetString(3)) |> ignore
+                statement.Dispose()
+                details.ToString()
+            with error -> statement.Abort(error); reraise()
 
     interface SoloDBQueryProvider
-    member internal _.ExecuteEnumetable<'Elem> (query: string) (par: obj) (batchCtx: QueryableTranslationCore.BatchLoadContext voption) : IEnumerable<'Elem> =
-        QueryableExecution.enumerate<'T, 'Elem> source query par batchCtx ValueNone
+    member internal _.ExecuteEnumetable<'Elem> (query: string) (par: obj) (batchCtx: QueryableTranslationCore.BatchLoadPlan voption) : IEnumerable<'Elem> =
+        QueryableExecution.enumerate<'T, 'Elem> source (NativeStatementSource.Text query) par batchCtx
 
     interface IQueryProvider with
         member this.CreateQuery<'TResult>(expression: Expression) : IQueryable<'TResult> =
@@ -324,25 +225,15 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
 
         member this.CreateQuery(expression: Expression) : IQueryable =
             let elementType = expression.Type.GetGenericArguments().[0]
-            let create = queryDispatchCache.GetOrAdd(elementType, Func<Type, Func<IQueryProvider, Expression, IQueryable>>(fun et ->
-                typeof<SoloDBCollectionQueryProvider<'T>>
-                    .GetMethod("CreateTypedQuery", BindingFlags.NonPublic ||| BindingFlags.Static)
-                    .MakeGenericMethod(et)
-                    .CreateDelegate(typeof<Func<IQueryProvider, Expression, IQueryable>>)
-                :?> Func<IQueryProvider, Expression, IQueryable>))
+            let create = QueryProviderMetadata<SoloDBCollectionQueryProvider<'T>>.CreateQuery(elementType)
             create.Invoke(this, expression)
 
         member this.Execute(expression: Expression) : obj =
             let resultType =
                 if typeof<IQueryable>.IsAssignableFrom expression.Type then
-                    typedefof<IEnumerable<_>>.MakeGenericType(expression.Type.GetGenericArguments().[0])
+                    QueryProviderMetadata<SoloDBCollectionQueryProvider<'T>>.SequenceResultType((TypeMetadata.GenericTypeArgCache.Get expression.Type).[0])
                 else expression.Type
-            let execute = resultDispatchCache.GetOrAdd(resultType, Func<Type, Func<IQueryProvider, Expression, obj>>(fun rt ->
-                typeof<SoloDBCollectionQueryProvider<'T>>
-                    .GetMethod("ExecuteTypedResult", BindingFlags.NonPublic ||| BindingFlags.Static)
-                    .MakeGenericMethod(rt)
-                    .CreateDelegate(typeof<Func<IQueryProvider, Expression, obj>>)
-                :?> Func<IQueryProvider, Expression, obj>))
+            let execute = QueryProviderMetadata<SoloDBCollectionQueryProvider<'T>>.ExecuteResult(resultType)
             execute.Invoke(this, expression)
 
         member this.Execute<'TResult>(expression: Expression) : 'TResult =
@@ -359,15 +250,8 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                     let result = this.ExecuteEnumetable<'T> query variables batchCtx
                     result :> obj :?> 'TResult
                 | t when t.IsGenericType && typedefof<IEnumerable<_>>.Equals typedefof<'TResult> ->
-                    let elemType = (UtilsReflection.GenericTypeArgCache.Get t).[0]
-                    let execute =
-                        enumerableDispatchCache.GetOrAdd(elemType, Func<Type, Func<SoloDBCollectionQueryProvider<'T>, string, obj, QueryableTranslationCore.BatchLoadContext voption, obj>>(fun et ->
-                            typeof<SoloDBCollectionQueryProvider<'T>>
-                                .GetMethod(nameof(this.ExecuteEnumetable), BindingFlags.NonPublic ||| BindingFlags.Instance)
-                                .MakeGenericMethod(et)
-                                .CreateDelegate(typeof<Func<SoloDBCollectionQueryProvider<'T>, string, obj, QueryableTranslationCore.BatchLoadContext voption, obj>>)
-                            :?> Func<SoloDBCollectionQueryProvider<'T>, string, obj, QueryableTranslationCore.BatchLoadContext voption, obj>
-                        ))
+                    let elemType = (TypeMetadata.GenericTypeArgCache.Get t).[0]
+                    let execute = QueryProviderMetadata<SoloDBCollectionQueryProvider<'T>>.ExecuteSequence(elemType)
                     execute.Invoke(this, query, variables, batchCtx) :?> 'TResult
                 | _other ->
                     let methodName =
@@ -376,9 +260,9 @@ type internal SoloDBCollectionQueryProvider<'T>(source: ISoloDBCollection<'T>, d
                         | _ -> "Execute"
                     let getDefault() =
                         match QueryableExecution.terminalDefaultExpression expression with
-                        | Some value -> QueryTranslatorBaseHelpers.evaluateExpr<'TResult> value
+                        | Some value -> ExpressionEvaluation.evaluateExpr<'TResult> value
                         | None -> Unchecked.defaultof<'TResult>
-                    QueryableExecution.scalar source query variables batchCtx methodName getDefault ValueNone
+                    QueryableExecution.scalar source (NativeStatementSource.Text query) variables batchCtx methodName getDefault
 
             finally
                 ()

@@ -2,6 +2,7 @@ module internal SoloDatabase.ProjectionLiveness
 
 open SoloDatabase.SqlModel
 open SoloDatabase.ExpressionPredicates
+open SoloDatabase.AliasRewrite
 
 // ══════════════════════════════════════════════════════════════
 // Projection Liveness Analysis
@@ -89,16 +90,6 @@ let computeLiveColumns (outer: SelectCore) (derivedAlias: string) : Set<string> 
         |> Set.unionMany
 
     Set.unionMany [fromProjections; fromWhere; fromOrderBy; fromGroupBy; fromHaving; fromJoinOn]
-
-/// Get the alias name for an inner projection.
-/// Returns the explicit alias, or for bare Column references, the column name.
-let projectionAlias (p: Projection) : string option =
-    match p.Alias with
-    | Some alias -> Some alias
-    | None ->
-        match p.Expr with
-        | Column(_, colName) -> Some colName
-        | _ -> None
 
 /// Check if the inner query uses implicit projections (SELECT *)
 /// that we cannot safely narrow. PROJ-3.

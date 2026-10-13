@@ -5,6 +5,8 @@ open System.Runtime.CompilerServices
 [<assembly: InternalsVisibleTo("Tests")>]
 [<assembly: InternalsVisibleTo("Tests.EventApi")>]
 [<assembly: InternalsVisibleTo("CSharpTests")>]
+[<assembly: InternalsVisibleTo("GeneratedMetadata.Contracts")>]
+[<assembly: InternalsVisibleTo("GeneratedFrontend.Contracts")>]
 [<assembly: InternalsVisibleTo("BenchMaster")>]
 [<assembly: InternalsVisibleTo("ChainBaselineCapture")>]
 [<assembly: InternalsVisibleTo("SqlDu.C1.Corpus")>]

@@ -8,8 +8,7 @@ open System.Linq.Expressions
 open System.Reflection
 open System.Text
 open System.Runtime.CompilerServices
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open Utils
 open Connections
 open SoloDatabase
@@ -98,29 +97,28 @@ module internal QueryableHelperBase =
     let internal translateExprDuForPredicate (sourceCtx: QueryContext) (tableName: string) (expr: Expression) (vars: Dictionary<string, obj>) : SqlExpr =
         QueryTranslator.translateToSqlExprForPredicate sourceCtx tableName expr vars
 
-    /// Return the DU expression for extracting Value as JSON if the type is not a primitive SQLite type.
+    /// Preserve direct scalar results and frame other results for their selected JSON reader.
     let internal extractValueAsJsonDu (x: Type) : SqlExpr =
-        let isPrimitive = QueryTranslatorBaseTypes.isPrimitiveSQLiteType x
+        let isPrimitive = QueryTranslatorBaseTypes.isSqlScalarResult x
+        let value = SqlExpr.Column(None, "Value")
+        let jsonValue () =
+            let blob =
+                SqlExpr.Binary(SqlExpr.FunctionCall("typeof", [value]), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.String "blob")),
+                SqlExpr.FunctionCall("json", [value])
+            let scalar = Some(SqlExpr.FunctionCall("json_quote", [value]))
+            if Utils.isOptionType x then SqlExpr.CaseExpr(blob, [], scalar)
+            else SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNull, value), SqlExpr.Literal(SqlLiteral.Null)), [blob], scalar)
         if isPrimitive then
-            let value = SqlExpr.Column(None, "Value")
-            if x = typeof<double> || x = typeof<float32> then
+            let payload = Utils.optionalPayloadType x
+            if typeof<double>.Equals(payload) || typeof<float32>.Equals(payload) then
                 SqlExpr.CaseExpr(
                     (SqlExpr.Unary(UnaryOperator.IsNull, value), SqlExpr.Literal(SqlLiteral.Null)),
                     [],
                     Some (SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%!.17g"); value])))
-            else
-                value
-        elif x = typeof<obj> || typeof<JsonValue>.IsAssignableFrom x then
-            SqlExpr.CaseExpr(
-                (SqlExpr.Binary(
-                    SqlExpr.FunctionCall("typeof", [SqlExpr.Column(None, "Value")]),
-                    BinaryOperator.Eq,
-                    SqlExpr.Literal(SqlLiteral.String "blob")),
-                  SqlExpr.FunctionCall("json_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])),
-                [],
-                Some(SqlExpr.Column(None, "Value")))
+            elif JsonFunctions.consumesSqlScalar x then value
+            else jsonValue ()
         else
-            SqlExpr.FunctionCall("json_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
+            jsonValue ()
 
     /// Optimize and emit a SELECT through the canonical emitter, retaining its SQL string.
     let internal emitSelectSql (variables: Dictionary<string, obj>) (indexModel: SoloDatabase.IndexModel.IndexModel) transform (sel: SqlSelect) =
@@ -233,8 +231,8 @@ module internal QueryableHelperBase =
                     not (isNull declaring)
                     && declaring.IsGenericType
                     && (
-                        declaring.GetGenericTypeDefinition() = typedefof<DBRef<_>>
-                        || declaring.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
+                        typedefof<DBRef<_>>.Equals(declaring.GetGenericTypeDefinition())
+                        || typedefof<DBRefMany<_>>.Equals(declaring.GetGenericTypeDefinition())
                     )
                 hitsRelationMember || detectRelationAccessNode m.Expression
             | :? MethodCallExpression as m ->
@@ -242,7 +240,7 @@ module internal QueryableHelperBase =
                 let hitsRelationCall =
                     not (isNull declaring)
                     && declaring.IsGenericType
-                    && declaring.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
+                    && typedefof<DBRefMany<_>>.Equals(declaring.GetGenericTypeDefinition())
                 hitsRelationCall
                 || (not (isNull m.Object) && detectRelationAccessNode m.Object)
                 || (m.Arguments |> Seq.exists detectRelationAccessNode)
@@ -327,6 +325,7 @@ module internal QueryableHelperBase =
         | "ExceptBy" -> Some SupportedLinqMethods.ExceptBy
         | "Intersect" -> Some SupportedLinqMethods.Intersect
         | "IntersectBy" -> Some SupportedLinqMethods.IntersectBy
+        | "Union" -> Some SupportedLinqMethods.Union
         | "UnionBy" -> Some SupportedLinqMethods.UnionBy
         | "Cast" -> Some SupportedLinqMethods.Cast
         | "OfType" -> Some SupportedLinqMethods.OfType
@@ -336,23 +335,6 @@ module internal QueryableHelperBase =
         | "Exclude" -> Some SupportedLinqMethods.Exclude
         | "ThenExclude" -> Some SupportedLinqMethods.ThenExclude
         | _ -> None
-
-    /// <summary>
-    /// Determines the appropriate SQL to select a value, extracting it from JSON if the type is not a primitive SQLite type.
-    /// </summary>
-    /// <param name="x">The .NET type of the value being selected.</param>
-    /// <returns>An SQL string snippet for selecting the value.</returns>
-    let internal extractValueAsJsonIfNecesary (x: Type) =
-        let isPrimitive = QueryTranslatorBaseTypes.isPrimitiveSQLiteType x
-
-        if isPrimitive then
-            "Value "
-        else
-            if (*unknown type*)
-               x = typeof<obj> || typeof<JsonValue>.IsAssignableFrom x then
-                "CASE WHEN typeof(Value) = 'blob' THEN json_extract(Value, '$') ELSE Value END "
-            else
-                "json_extract(Value, '$') "
 
     let rec internal isIdentityLambda (expr: Expression) =
         match expr with

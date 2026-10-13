@@ -8,8 +8,7 @@ open System.Linq.Expressions
 open System.Reflection
 open System.Text
 open System.Runtime.CompilerServices
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open Utils
 open JsonFunctions
 open Connections
@@ -33,11 +32,12 @@ module internal QueryableBuildQuerySequenceOps =
         match pendingDistinctByScalarReuse with
         | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = expressionFingerprint m.Expressions.[0] ->
             // Edge case 13: PostScalarProjection path — SupportedLinqMethods.DistinctBy → Select reuse consuming __solodb_scalar_slot0
-            addSelector statements (DuSelector (fun tableName _vars ->
+            addSelector statements (DuSelector (fun _currentCtx input tableName _vars ->
                 let hasTableName = not (String.IsNullOrEmpty tableName)
                 let idExpr = if hasTableName then SqlExpr.Column(Some tableName, "Id") else SqlExpr.Column(None, "Id")
-                [{ Alias = Some "Id"; Expr = idExpr }
-                 { Alias = Some "Value"; Expr = SqlExpr.Column(None, (syntheticScalarSlotAlias 0)) }]
+                let facts = input.KeyInput |> ValueOption.defaultWith (fun () -> invalidOp "A reused key requires its produced input.")
+                struct([{ Alias = Some "Id"; Expr = idExpr }
+                        { Alias = Some "Value"; Expr = SqlExpr.Column(None, syntheticScalarSlotAlias 0) }], facts)
             ))
             pendingDistinctByScalarReuse <- None
             isPostScalarProjection <- true
@@ -48,11 +48,8 @@ module internal QueryableBuildQuerySequenceOps =
             // Edge case 20: Relation-backed SupportedLinqMethods.DistinctBy scalar slot reuse
             match tryExtractRelationJsonPath m.Expressions.[0] with
             | Some jsonPath ->
-                let capturedPath = jsonPath
-                addSelector statements (DuSelector (fun _tableName _vars ->
-                    [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-                     { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String capturedPath)]) }]
-                ))
+                let _ = jsonPath
+                addSelector statements (Expression m.Expressions[0])
                 isPostScalarProjection <- true
             | None ->
                 addSelector statements (Expression m.Expressions.[0])
@@ -62,124 +59,34 @@ module internal QueryableBuildQuerySequenceOps =
             pendingDistinctByScalarReuse <- None
 
     let private applyAggregate (sourceCtx: QueryContext) (statements: ResizeArray<SQLSubquery>) (isPostScalarProjection: bool) (m: {| Value: SupportedLinqMethods; OriginalMethod: MethodInfo; Expressions: Expression array |}) =
-        match m.Value with
-        | SupportedLinqMethods.Sum ->
-            if isPostScalarProjection && m.Expressions.Length = 0 then
-                let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
-                addSelector statements (DuSelector (fun _tableName _vars ->
-                    [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-                     { Alias = Some "Value"; Expr = SqlExpr.Coalesce(SqlExpr.FunctionCall("SUM", [extractVal]), [SqlExpr.Literal(SqlLiteral.Integer 0L)]) }]
-                ))
-            else
-                // SUM() return NULL if all elements are NULL, TOTAL() return 0.0.
-                // TOTAL() always returns a float, therefore we will just check for NULL
-                zeroIfNullAggregateTranslator sourceCtx "SUM" statements m.OriginalMethod m.Expressions
-
-        | SupportedLinqMethods.Average ->
-            if isPostScalarProjection && m.Expressions.Length = 0 then
-                let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
-                let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, extractVal)
-                addSelector statements (DuSelector (fun _tableName _vars ->
-                    [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-                     { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("AVG", [extractVal]) }]
-                ))
-                // Edge case 14: Aggregate NULL handling — error message for empty sequences
-                addSelector statements (DuSelector (fun _tableName _vars ->
-                    [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.Null)), [], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
-                     { Alias = Some "Value"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements")), [], Some(SqlExpr.Column(None, "Value"))) }]
-                ))
-            else
-                raiseIfNullAggregateTranslator sourceCtx "AVG" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
-
-        | SupportedLinqMethods.Min ->
-            if isPostScalarProjection && m.Expressions.Length = 0 then
-                let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
-                let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, extractVal)
-                addSelector statements (DuSelector (fun _tableName _vars ->
-                    [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-                     { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("MIN", [extractVal]) }]
-                ))
-                addSelector statements (DuSelector (fun _tableName _vars ->
-                    [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.Null)), [], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
-                     { Alias = Some "Value"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements")), [], Some(SqlExpr.Column(None, "Value"))) }]
-                ))
-            else
-                raiseIfNullAggregateTranslator sourceCtx "MIN" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
-
-        | SupportedLinqMethods.Max ->
-            if isPostScalarProjection && m.Expressions.Length = 0 then
-                let extractVal = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
-                let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, extractVal)
-                addSelector statements (DuSelector (fun _tableName _vars ->
-                    [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-                     { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("MAX", [extractVal]) }]
-                ))
-                addSelector statements (DuSelector (fun _tableName _vars ->
-                    [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.Null)), [], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
-                     { Alias = Some "Value"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.String "Sequence contains no elements")), [], Some(SqlExpr.Column(None, "Value"))) }]
-                ))
-            else
-                raiseIfNullAggregateTranslator sourceCtx "MAX" statements m.OriginalMethod m.Expressions "Sequence contains no elements"
-
-        | _ -> ()
-
-    let private applyDistinct (sourceCtx: QueryContext) (statements: ResizeArray<SQLSubquery>) (m: {| Value: SupportedLinqMethods; OriginalMethod: MethodInfo; Expressions: Expression array |}) =
-        let mutable carriedOrders : PreprocessedOrder array = Array.empty
-        let mutable latestSelectorInfo : (string * bool) option = None
-        for i = statements.Count - 1 downto 0 do
-            if latestSelectorInfo.IsNone then
-                match statements.[i] with
-                | Simple s ->
-                    match s.Selector with
-                    | Some (Expression selector) ->
-                        let selectorType =
-                            match unwrapQuotedLambda selector with
-                            | :? LambdaExpression as le -> le.Body.Type
-                            | other -> other.Type
-                        latestSelectorInfo <-
-                            Some (expressionFingerprint selector, QueryTranslatorBaseTypes.isPrimitiveSQLiteType selectorType)
-                    | _ -> ()
-                | _ -> ()
-            if carriedOrders.Length = 0 then
-                match statements.[i] with
-                | Simple s when s.Orders.Count > 0 ->
-                    carriedOrders <-
-                        s.Orders
-                        |> Seq.map (fun o ->
-                            { OrderingRule = o.OrderingRule
-                              Descending = o.Descending
-                              RawExpr = o.RawExpr })
-                        |> Seq.toArray
-                | _ -> ()
-        addComplexFinal statements (fun ctx ->
-            // SELECT -1 AS Id, Value FROM (inner) o GROUP BY {identity expr}
-            let groupByExpr = translateExprDu sourceCtx ctx.TableName (UtilsReflection.GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> UtilsReflection.ExpressionHelper.id) ctx.Vars
-            let core =
-                { mkCore
-                    [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-                     { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
-                    (Some (DerivedTable(ctx.Inner, "o")))
-                  with GroupBy = [groupByExpr] }
-            wrapCore core
-        )
-        if carriedOrders.Length > 0 then
-            let orderedLayer = emptySQLStatement ()
-            for order in carriedOrders do
-                let rawExpr =
-                    match latestSelectorInfo with
-                    | Some (selectorFingerprint, true) when expressionFingerprint order.OrderingRule = selectorFingerprint ->
-                        Some (SqlExpr.Column(None, "Value"))
-                    | _ ->
-                        order.RawExpr
-                orderedLayer.Orders.Add({
-                    OrderingRule = order.OrderingRule
-                    Descending = order.Descending
-                    RawExpr = rawExpr
-                })
-            statements.Add(Simple orderedLayer)
+        let name =
+            match m.Value with
+            | SupportedLinqMethods.Sum -> "SUM"
+            | SupportedLinqMethods.Average -> "AVG"
+            | SupportedLinqMethods.Min -> "MIN"
+            | SupportedLinqMethods.Max -> "MAX"
+            | _ -> invalidArg "m" "An aggregate terminal is required."
+        if isPostScalarProjection && m.Expressions.Length = 0 then
+            let inputType=QueryTranslatorNumeric.aggregateInput m.OriginalMethod
+            let value=SqlExpr.Column(None,"Value")
+            let extractVal =
+                if JsonFunctions.consumesSqlScalar inputType then value
+                else SqlExpr.FunctionCall("jsonb_extract", [value; SqlExpr.Literal(SqlLiteral.String "$")])
+            let aggregate = QueryTranslatorNumeric.aggregate m.OriginalMethod inputType (QueryTranslatorNumeric.kind name) extractVal false
+            let result = if name = "SUM" then SqlExpr.Coalesce(aggregate,[QueryTranslatorNumeric.zero m.OriginalMethod.ReturnType]) else aggregate
+            addSelector statements (DuSelector (fun _currentCtx _input _tableName _vars ->
+                let produced = QueryProduced.typed m.OriginalMethod.ReturnType result
+                struct([{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                        { Alias = Some "Value"; Expr = result }], produced.Input)))
+            if name <> "SUM" then checkEmptyAggregate statements m.OriginalMethod "Sequence contains no elements"
+        elif name = "SUM" then
+            zeroIfNullAggregateTranslator sourceCtx name statements m.OriginalMethod m.Expressions
+        else
+            raiseIfNullAggregateTranslator sourceCtx name statements m.OriginalMethod m.Expressions "Sequence contains no elements"
 
 
-    let private applyDistinctBy (statements: ResizeArray<SQLSubquery>) (pendingDistinctByScalarReuse: byref<LoweredKeySelector option>) (m: {| Value: SupportedLinqMethods; OriginalMethod: MethodInfo; Expressions: Expression array |}) =
+    let private applyDistinctBy (sourceCtx: QueryContext) (statements: ResizeArray<SQLSubquery>) (pendingDistinctByScalarReuse: byref<LoweredKeySelector option>) (m: {| Value: SupportedLinqMethods; OriginalMethod: MethodInfo; Expressions: Expression array |}) =
+        OrderedChainPlan.validateDefaultComparerArity m.OriginalMethod.Name (m.Expressions.Length + 1)
         // Edge case 7: SupportedLinqMethods.DistinctBy with ROW_NUMBER OVER — window function + derived table
         let lowered = lowerKeySelectorLambda m.Expressions.[0]
         addSelector statements (KeyProjection lowered.KeyExpression)
@@ -188,20 +95,25 @@ module internal QueryableBuildQuerySequenceOps =
             | HasRelationAccess -> Some lowered
             | NoRelationAccess -> None
         addComplexFinal statements (fun ctx ->
-            // Inner: SELECT o.Id, o.Value, [o.__solodb_group_key AS __solodb_scalar_slot0,] ROW_NUMBER() OVER (PARTITION BY o.__solodb_group_key ORDER BY o.Id) AS __solodb_rn FROM (inner) o
+            let source = QueryProduced.completedKeyRows sourceCtx.NextAlias ctx.Inner ctx.Input ctx.KeyInput.Value
+            let ordinal = "_tree_ordinal"
+            // Rank representatives by completed position while retaining scalar-slot reuse.
+            let companions = QueryTranslatorSerialization.companionProjections (Some "o") ctx.Input
+                             @ (ctx.KeyInput |> ValueOption.map (QueryTranslatorSerialization.companionProjections (Some "o")) |> ValueOption.defaultValue [])
             let innerProjs =
-                [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }
+                [{ Alias = Some "Id"; Expr = QueryDefaultEquality.outputIdentity (m.OriginalMethod.GetGenericArguments().[0])
+                                              (QueryTranslatorSerialization.scopeSerializationInput (Some "o") OuterLayer ctx.Input) (SqlExpr.Column(Some "o", "Id")) }
                  { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") }]
+                @ [{ Alias = Some "_tree_ordinal"; Expr = SqlExpr.Column(Some "o", "_tree_ordinal") }]
                 @ (if lowered.RelationAccess = HasRelationAccess then
                        [{ Alias = Some (syntheticScalarSlotAlias 0); Expr = SqlExpr.Column(Some "o", syntheticGroupKeyAlias) }]
                    else [])
-                @ [{ Alias = Some "__solodb_rn"; Expr = SqlExpr.WindowCall({
-                        Kind = WindowFunctionKind.RowNumber
-                        Arguments = []
-                        PartitionBy = [SqlExpr.Column(Some "o", syntheticGroupKeyAlias)]
-                        OrderBy = [(SqlExpr.Column(Some "o", "Id"), SortDirection.Asc)]
-                    }) }]
-            let innerCore = mkCore innerProjs (Some (DerivedTable(ctx.Inner, "o")))
+                @ companions
+                @ [{ Alias = Some "__solodb_rn"; Expr = QueryableBuildQueryWindowHelpers.rowNumberExpr
+                        (QueryDefaultEquality.terms (QueryDefaultEquality.key sourceCtx.NextAlias (m.OriginalMethod.GetGenericArguments().[1]) (SqlExpr.Column(Some "o", syntheticGroupKeyAlias))
+                            (QueryTranslatorSerialization.scopeSerializationInput (Some "o") OuterLayer ctx.KeyInput.Value)))
+                        [(SqlExpr.Column(Some "o", ordinal), SortDirection.Asc)] }]
+            let innerCore = mkCore innerProjs (Some (DerivedTable(source, "o")))
             let innerSel = wrapCore innerCore
 
             // Outer: SELECT o.Id, o.Value [, o.__solodb_scalar_slot0] FROM (inner) o WHERE o.__solodb_rn = 1
@@ -212,13 +124,14 @@ module internal QueryableBuildQuerySequenceOps =
                        [{ Alias = Some (syntheticScalarSlotAlias 0); Expr = SqlExpr.Column(Some "o", (syntheticScalarSlotAlias 0)) }]
                    else [])
             let outerCore =
-                { mkCore outerProjs (Some (DerivedTable(innerSel, "o")))
-                  with Where = Some (SqlExpr.Binary(SqlExpr.Column(Some "o", "__solodb_rn"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L))) }
-            wrapCore outerCore
+                { mkCore (outerProjs @ companions) (Some (DerivedTable(innerSel, "o")))
+                  with Where = Some (SqlExpr.Binary(SqlExpr.Column(Some "o", "__solodb_rn"), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L)))
+                       OrderBy = [{ Expr = SqlExpr.Column(Some "o", "_tree_ordinal"); Direction = SortDirection.Asc }] }
+            { Query = wrapCore outerCore; SerializationInput = ctx.Input; KeyInput = ctx.KeyInput }
         )
 
 
-    let private applyCountBy (m: {| Value: SupportedLinqMethods; OriginalMethod: MethodInfo; Expressions: Expression array |}) (statements: ResizeArray<SQLSubquery>) =
+    let private applyCountBy (sourceCtx: QueryContext) (m: {| Value: SupportedLinqMethods; OriginalMethod: MethodInfo; Expressions: Expression array |}) (statements: ResizeArray<SQLSubquery>) =
         let keySelectorExpr, comparerExprOpt =
             match m.Expressions with
             | [| keySelector |] -> keySelector, None
@@ -232,23 +145,28 @@ module internal QueryableBuildQuerySequenceOps =
                 raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other.Length))
 
         comparerExprOpt |> Option.iter (fun comparer ->
-            ChainExpr.validateGroupingComparer "CountBy" (UtilsReflection.GenericMethodArgCache.Get m.OriginalMethod).[1] comparer)
+            ChainExpr.validateGroupingComparer "CountBy" (TypeMetadata.GenericMethodArgCache.Get m.OriginalMethod).[1] comparer)
 
         addSelector statements (KeyProjection keySelectorExpr)
         addComplexFinal statements (fun ctx ->
+            let key = ctx.KeyInput |> ValueOption.defaultWith (fun () -> invalidOp "CountBy requires its produced key.")
+            let rows = if QueryDefaultEquality.requiresPrepared (m.OriginalMethod.GetGenericArguments().[1]) key then QueryProduced.completedKeyRows sourceCtx.NextAlias ctx.Inner ctx.Input key else ctx.Inner
+            let struct(rows, key, equalityName) = QueryDefaultEquality.prepareGroups sourceCtx.NextAlias syntheticGroupKeyAlias
+                                                    (m.OriginalMethod.GetGenericArguments().[1]) rows ctx.Input key "_tree_ordinal"
+            let key = QueryTranslatorSerialization.scopeSerializationInput (Some "o") OuterLayer
+                          { key with Source = ValueSome(jsonToken (SqlExpr.Column(None, syntheticGroupKeyAlias))) }
+            let count = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None)
+            let resultType = ModelMetadata.SequenceElement m.OriginalMethod.ReturnType
+            let input = QuerySerializationInput.Members(resultType, [|"Key"; "Value"|], [|key.OriginalType; typeof<int>|],
+                            [| key; (QueryProduced.typed typeof<int> count).Input |])
+            let value = SqlExpr.FunctionCall(jsonbObjectFn, [SqlExpr.Literal(SqlLiteral.String "Key"); jsonToken (SqlExpr.Column(Some "o", syntheticGroupKeyAlias));
+                                                          SqlExpr.Literal(SqlLiteral.String "Value"); count])
             let core =
-                { mkCore
-                    [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-                     { Alias = Some "Value"; Expr =
-                        SqlExpr.FunctionCall(jsonObjectFn, [
-                            SqlExpr.Literal(SqlLiteral.String "Key")
-                            SqlExpr.Column(Some "o", syntheticGroupKeyAlias)
-                            SqlExpr.Literal(SqlLiteral.String "Value")
-                            SqlExpr.AggregateCall(AggregateKind.Count, None, false, None)
-                        ]) }]
-                    (Some (DerivedTable(ctx.Inner, "o")))
-                  with GroupBy = [SqlExpr.Column(Some "o", syntheticGroupKeyAlias)] }
-            wrapCore core
+                { mkCore [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }; { Alias = Some "Value"; Expr = value }]
+                         (Some (DerivedTable(rows, "o")))
+                  with GroupBy = equalityName |> List.map (fun name -> SqlExpr.Column(Some "o", name)) }
+            let struct(query, output) = QueryProduced.publishCore sourceCtx.NextAlias core (DirectValue(value, input)) false
+            { Query = query; SerializationInput = output; KeyInput = ValueNone }
         )
 
 
@@ -271,13 +189,14 @@ module internal QueryableBuildQuerySequenceOps =
         let capturedOrders = foundOrders
         let predExpr = m.Expressions.[0]
         addComplexFinal statements (fun ctx ->
-            let predDu = translateExprDu sourceCtx ctx.TableName predExpr ctx.Vars
+            let currentCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input }
+            let predDu = translateExprDu currentCtx ctx.TableName predExpr ctx.Vars
             let orderDus =
                 capturedOrders |> Array.map (fun o ->
                     let expr =
                         match o.RawExpr with
                         | Some duExpr -> duExpr
-                        | None -> translateExprDu sourceCtx ctx.TableName o.OrderingRule ctx.Vars
+                        | None -> translateExprDu currentCtx ctx.TableName o.OrderingRule ctx.Vars
                     { Expr = normalizeOrderKeyExpr expr (orderKeyClrType o.OrderingRule); Direction = if o.Descending then SortDirection.Desc else SortDirection.Asc }
                 ) |> Array.toList
             // SUM(NOT pred) OVER (ORDER BY key) — cumulative failure window.
@@ -290,9 +209,10 @@ module internal QueryableBuildQuerySequenceOps =
             let cfExpr = SqlExpr.WindowCall windowSpec
             let innerCore =
                 { mkCore
-                    [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }
-                     { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") }
+                    ([{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") };
+                     { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") };
                      { Alias = Some "_cf"; Expr = cfExpr }]
+                     @ QueryTranslatorSerialization.companionProjections (Some "o") ctx.Input)
                     (Some(DerivedTable(ctx.Inner, "o")))
                   with OrderBy = orderDus }
             let innerSelect = wrapCore innerCore
@@ -304,11 +224,12 @@ module internal QueryableBuildQuerySequenceOps =
                     SqlExpr.Binary(SqlExpr.Column(Some twAlias, "_cf"), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L))
             let outerCore =
                 { mkCore
-                    [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some twAlias, "Id") }
+                    ([{ Alias = Some "Id"; Expr = SqlExpr.Column(Some twAlias, "Id") };
                      { Alias = Some "Value"; Expr = SqlExpr.Column(Some twAlias, "Value") }]
+                     @ QueryTranslatorSerialization.companionProjections (Some twAlias) ctx.Input)
                     (Some(DerivedTable(innerSelect, twAlias)))
                   with Where = Some cfFilter }
-            wrapCore outerCore
+            { Query = wrapCore outerCore; SerializationInput = ctx.Input; KeyInput = ValueNone }
         )
 
     let internal apply
@@ -327,7 +248,7 @@ module internal QueryableBuildQuerySequenceOps =
                     applySelect statements &pendingDistinctByScalarReuse &isPostScalarProjection m
 
                 | SupportedLinqMethods.Order | SupportedLinqMethods.OrderDescending ->
-                    addOrder statements (UtilsReflection.GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> UtilsReflection.ExpressionHelper.id) (m.Value = SupportedLinqMethods.OrderDescending)
+                    addOrder statements (TypeMetadata.GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> Expression.Parameter) (m.Value = SupportedLinqMethods.OrderDescending)
                 | SupportedLinqMethods.OrderBy | SupportedLinqMethods.OrderByDescending  ->
                     let descending = (m.Value = SupportedLinqMethods.OrderByDescending)
                     match pendingDistinctByScalarReuse with
@@ -370,20 +291,20 @@ module internal QueryableBuildQuerySequenceOps =
                             | _ ->
                                 None
                         installTerminalOrdering m.Expressions.[0] descending rawExpr
-                        addTake statements (UtilsReflection.ExpressionHelper.constant 1)
+                        addTake statements (TypeMetadata.ExpressionHelper.constant 1)
                     | 2 ->
                         raise (NotSupportedException("MinBy/MaxBy comparer overloads are not supported."))
                     | other ->
                         raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" m.OriginalMethod.Name other))
                 
                 | SupportedLinqMethods.Distinct ->
-                    applyDistinct sourceCtx statements m
+                    QueryableBuildQueryDistinct.apply sourceCtx statements m
 
                 | SupportedLinqMethods.DistinctBy ->
-                    applyDistinctBy statements &pendingDistinctByScalarReuse m
+                    applyDistinctBy sourceCtx statements &pendingDistinctByScalarReuse m
 
                 | SupportedLinqMethods.CountBy ->
-                    applyCountBy m statements
+                    applyCountBy sourceCtx m statements
 
                 | SupportedLinqMethods.GroupBy ->
                     // GroupBy is intercepted in BuildQuery.Main.fs for look-ahead fusion.

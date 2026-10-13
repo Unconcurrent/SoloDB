@@ -3,8 +3,7 @@ namespace SoloDatabase
 open System.Collections.Generic
 open System
 open System.IO
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open SoloDatabase.Types
 open NativeArray
 open SoloDatabase.Connections
@@ -27,10 +26,13 @@ module FileStorage =
     /// <summary>
     /// Provides an API for interacting with a virtual file system within the SQLite database.
     /// </summary>
-    type internal FileSystem(connection: Connection) =
+    type internal FileSystem(connection: NativeConnection, events: unit -> ISoloDBFileSystemEvents) =
+        member _.Events =
+            use _connection = connection.Get()
+            events()
         member this.Upload(path, stream: Stream) =
             connection.WithTransaction(fun tx ->
-                let innerConnection = Transactional tx
+                let innerConnection = NativeTransactional tx
                 use file = openOrCreateFile innerConnection path
                 stream.CopyTo(file, int chunkSize)
                 file.SetLength file.Position
@@ -38,16 +40,19 @@ module FileStorage =
 
         member this.UploadAsync(path, stream: Stream) = task {
             return! connection.WithAsyncTransaction(fun tx -> task {
-                let innerConnection = Transactional tx
+                let innerConnection = NativeTransactional tx
                 use file = openOrCreateFile innerConnection path
-                do! stream.CopyToAsync(file, int chunkSize)
+                if connection.IsEventHandlerScope then
+                    FileStorageAsyncTransfers.copyOnCallbackThread stream file (int chunkSize)
+                else
+                    do! stream.CopyToAsync(file, int chunkSize)
                 file.SetLength file.Position
             })
         }
 
         member this.UploadBulk(files: BulkFileData seq) =
             connection.WithTransaction(fun tx ->
-                let innerConnection = Transactional tx
+                let innerConnection = NativeTransactional tx
                 for file in files do
                     let fileHeader = getOrCreateFileAt tx file.FullPath
                     do
@@ -63,9 +68,12 @@ module FileStorage =
 
         member this.ReplaceAsyncWithinTransaction(path, stream: Stream) = task {
             return! connection.WithAsyncTransaction(fun tx -> task {
-                let innerConnection = Transactional tx
+                let innerConnection = NativeTransactional tx
                 use file = openOrCreateFile innerConnection path
-                do! stream.CopyToAsync(file, int chunkSize)
+                if connection.IsEventHandlerScope then
+                    FileStorageAsyncTransfers.copyOnCallbackThread stream file (int chunkSize)
+                else
+                    do! stream.CopyToAsync(file, int chunkSize)
                 file.SetLength file.Position
             })
         }
@@ -82,7 +90,10 @@ module FileStorage =
                 use db = connection.Get()
                 requireFileStreamIdentityAt db path
             use fileStream = openFileByIdentity connection identity
-            do! fileStream.CopyToAsync(stream, int chunkSize * 10)
+            if connection.IsEventHandlerScope then
+                FileStorageAsyncTransfers.copyOnCallbackThread fileStream stream (int chunkSize * 10)
+            else
+                do! fileStream.CopyToAsync(stream, int chunkSize * 10)
         }
 
         member this.GetAt path =
@@ -95,14 +106,7 @@ module FileStorage =
 
         member this.Exists(path: string) =
             use db = connection.Get()
-            let sql = """
-                SELECT EXISTS (
-                    SELECT 1 FROM SoloDBFileHeader WHERE FullPath = @Path
-                    UNION ALL
-                    SELECT 1 FROM SoloDBDirectoryHeader WHERE FullPath = @Path
-                )
-                """
-            db.QueryFirst<bool>(sql, {| Path = formatPath path |})
+            pathExists db (formatPath path)
 
         member this.GetOrCreateAt path =
             let existing =
@@ -133,13 +137,13 @@ module FileStorage =
             // Stream identity only: a metadata join here would be built and discarded.
             use db = connection.Get()
             match tryGetFileStreamIdentityAt db path with
-            | ValueSome f -> new FileStorageCoreStream.DbFileStream(connection, f.Id, f.DirectoryId, f.FullPath)
+            | ValueSome f -> new FileStorageCoreStream.DbFileStream(connection, f.Id, f.FullPath)
             | ValueNone -> raise (FileNotFoundException("File not found.", path))
 
         member this.TryOpenAt path =
             use db = connection.Get()
             match tryGetFileStreamIdentityAt db path with
-            | ValueSome f -> new FileStorageCoreStream.DbFileStream(connection, f.Id, f.DirectoryId, f.FullPath) |> Some
+            | ValueSome f -> new FileStorageCoreStream.DbFileStream(connection, f.Id, f.FullPath) |> Some
             | ValueNone -> None
 
         member this.OpenOrCreateAt path = openOrCreateFile connection path
@@ -147,7 +151,7 @@ module FileStorage =
         member this.WriteAt(path: string, offset: int64, data: byte[], [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool) =
              connection.WithTransaction(fun tx ->
                 let identity = if createIfInexistent then getOrCreateFileStreamIdentity tx path else requireFileStreamIdentityAt tx path
-                let innerConnection = Transactional tx
+                let innerConnection = NativeTransactional tx
                 use fileStream = openFileByIdentity innerConnection identity
                 fileStream.Position <- offset
                 fileStream.Write(data, 0, data.Length)
@@ -157,7 +161,7 @@ module FileStorage =
         member this.WriteAt(path: string, offset: int64, data: Stream, [<Optional; DefaultParameterValue(true)>] createIfInexistent: bool) =
             connection.WithTransaction(fun tx ->
                 let identity = if createIfInexistent then getOrCreateFileStreamIdentity tx path else requireFileStreamIdentityAt tx path
-                let innerConnection = Transactional tx
+                let innerConnection = NativeTransactional tx
                 use fileStream = openFileByIdentity innerConnection identity
                 fileStream.Position <- offset
                 data.CopyTo (fileStream, int chunkSize * 10)
@@ -171,7 +175,7 @@ module FileStorage =
             fileStream.BaseStream.Position <- offset
             fileStream.ReadBytes len
 
-        member private _.WithFileAt(path: string, f: SqliteConnection -> SoloDBFileHeader -> 'T) =
+        member private _.WithFileAt(path: string, f: NativeSqliteConnection -> SoloDBFileHeader -> 'T) =
             connection.WithTransaction(fun tx ->
                 let file = match tryGetFileAt tx path with | Some x -> x | None -> raise (FileNotFoundException("File not found.", path))
                 f tx file
@@ -179,7 +183,7 @@ module FileStorage =
 
         /// Id-only counterpart of WithFileAt, for operations keyed on the file id that would
         /// otherwise pay for a metadata join and a discarded header.
-        member private _.WithFileIdAt(path: string, f: SqliteConnection -> int64 -> 'T) =
+        member private _.WithFileIdAt(path: string, f: NativeSqliteConnection -> int64 -> 'T) =
             connection.WithTransaction(fun tx ->
                 match tryGetFileIdAt tx path with
                 | ValueSome fileId -> f tx fileId
@@ -187,14 +191,14 @@ module FileStorage =
             )
 
         /// Id-only counterpart of WithDirectoryAt.
-        member private _.WithDirectoryIdAt(path: string, f: SqliteConnection -> int64 -> 'T) =
+        member private _.WithDirectoryIdAt(path: string, f: NativeSqliteConnection -> int64 -> 'T) =
             connection.WithTransaction(fun tx ->
                 match tryGetDirIdAt tx (formatPath path) with
                 | ValueSome dirId -> f tx dirId
                 | ValueNone -> raise (DirectoryNotFoundException("Directory not found at: " + path))
             )
 
-        member private _.WithDirectoryAt(path: string, f: SqliteConnection -> SoloDBDirectoryHeader -> 'T) =
+        member private _.WithDirectoryAt(path: string, f: NativeSqliteConnection -> SoloDBDirectoryHeader -> 'T) =
             connection.WithTransaction(fun tx ->
                 let dir = match tryGetDir tx path with | Some x -> x | None -> raise (DirectoryNotFoundException("Directory not found at: " + path))
                 f tx dir
@@ -342,6 +346,7 @@ module FileStorage =
         member _.CopyReplaceDirectoryAsync(fromPath, toPath, recursive, copyMetadata) = copyReplaceDirectoryAsync connection fromPath toPath recursive copyMetadata
 
         interface IFileSystem with
+            member this.Events = this.Events
             member this.Upload(path, stream) = this.Upload(path, stream)
             member this.UploadAsync(path, stream) = this.UploadAsync(path, stream)
             member this.UploadBulk(files) = this.UploadBulk(files)

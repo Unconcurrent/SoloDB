@@ -21,16 +21,10 @@ module internal GroupJoinRuntimeTypes =
           Kind: GroupJoinElementKind }
     type GroupJoinRuntime =
         { InnerCtx: QueryContext
-          InnerRootTable: string
           InnerSelect: SqlSelect
-          OuterAlias: string
-          OuterParam: ParameterExpression
           GroupParam: ParameterExpression
           OuterKeyExpr: SqlExpr
-          InnerKeySelector: LambdaExpression
+          InnerParameter: ParameterExpression
+          InnerKeyName: string
           Vars: Dictionary<string, obj>
-          TranslateJoinExpr: QueryContext -> string -> Dictionary<string, obj> -> ParameterExpression option -> Expression -> SqlExpr
-          MaterializeDiscoveredJoins: ResizeArray<JoinEdge> -> string option -> Collections.Generic.HashSet<string> option -> JoinShape list
-          TryTranslateDbRefValueIdKey: ParameterExpression -> string -> Expression -> SqlExpr option
-          ReplaceExpression: Expression -> Expression -> Expression -> Expression
-          TranslateOuterExpr: Expression -> SqlExpr }
+          ReplaceExpression: Expression -> Expression -> Expression -> Expression }

@@ -40,14 +40,22 @@ module internal EqualityRules =
     let scalarValue = function
         | JsonValue.Null -> null
         | JsonValue.Boolean value -> box value
-        | JsonValue.Number value -> box value
+        | JsonValue.Number value -> numberToSQLValue value
         | JsonValue.String value -> box value
         | _ -> invalidOp "Expected a scalar serialization for a comparison field."
 
     type Arguments =
-        static member Scalar<'T>(value: 'T) = JsonValue.Serialize value |> scalarValue
+        static member Scalar(value: obj, valueType: Type) = JsonValue.StoredParameter(valueType,value)
 
-        static member Rows<'T>(value: 'T, missing: bool, ignoreDiscriminators: bool, knownOperand: bool) =
+        static member StoredJson(value: obj, valueType: Type, root: bool) =
+            match value with
+            | :? JsonValue as json -> json
+            | _ ->
+                let target = if root then typeof<obj> else valueType
+                let text = JsonValue.WriteRuntimeBuffer(target,value,false,false)
+                JsonValue.Parse(ReadOnlySpan(text.Array,text.Offset,text.Count))
+
+        static member Rows(value: obj, valueType: Type, missing: bool, ignoreDiscriminators: bool, knownOperand: bool) =
             let rows = ResizeArray<JsonValue>()
             let append path comparison =
                 let kind, value =
@@ -61,8 +69,6 @@ module internal EqualityRules =
                 rows.Add(JsonValue.List [|JsonValue.String(renderPath path); JsonValue.Number kind; value|])
             let json =
                 if missing then JsonValue.Null
-                elif knownOperand && not ignoreDiscriminators then
-                    match box value with :? JsonValue as json -> json | _ -> JsonValue.Serialize value
-                else JsonValue.Serialize value
+                else Arguments.StoredJson(value,valueType,knownOperand)
             JsonEquality.Walk(ignoreDiscriminators, [], json, append)
             JsonValue.List(rows).ToJsonString()

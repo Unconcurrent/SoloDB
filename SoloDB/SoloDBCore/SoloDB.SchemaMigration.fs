@@ -2,9 +2,8 @@ namespace SoloDatabase
 
 open System
 open System.Runtime.ExceptionServices
-open Microsoft.Data.Sqlite
 open SQLitePCL
-open SoloDatabase.SQLiteTools
+open SoloDatabase.NativeSQLiteTools
 
 /// <summary>
 /// The single owner of transactional schema migration execution.
@@ -92,10 +91,35 @@ module internal SchemaMigration =
     let private readDqsForDdl (handle: sqlite3) = configureDqsForDdl handle -1
 
     /// <summary>Is the connection free of an open transaction?</summary>
-    let private inAutocommit (connection: SqliteConnection) =
+    let private inAutocommit (connection: NativeSqliteConnection) =
         match connection.Handle with
         | null -> true
         | handle -> raw.sqlite3_get_autocommit handle <> 0
+
+    let internal readVersion (connection: NativeSqliteConnection) =
+        let mutable statement = connection.OpenStatement("PRAGMA user_version;")
+        try
+            if not (statement.Step()) then raise (InvalidOperationException("Schema version was not returned."))
+            let version = statement.Row.GetInt32(0)
+            statement.Dispose()
+            version
+        with error -> statement.Abort(error); reraise()
+
+    let private statementFailure label sql (error: NativeSqliteException) =
+        let statement =
+            match error.Data.["Statement"] with
+            | :? string as text -> text
+            | _ -> sql
+        NativeSqliteException($"Error: migration {label} failed on a statement.\nReason: {error.Message}\nStatement: {statement}\nFix: correct this statement or the schema it depends on.", error.SqliteErrorCode, error.SqliteExtendedErrorCode)
+
+    let private executeBoundary (connection: NativeSqliteConnection) label sql =
+        try
+            let mutable statement = connection.OpenStatement(sql)
+            try
+                statement.Step() |> ignore
+                statement.Dispose()
+            with error -> statement.Abort(error); reraise()
+        with :? NativeSqliteException as error -> raise (statementFailure label sql error)
 
     /// <summary>
     /// Executes every statement in <paramref name="sql"/>, in order, as separate statements.
@@ -103,53 +127,16 @@ module internal SchemaMigration =
     /// remainder is prepared again. Text the parser consumes without producing a statement is
     /// whitespace or comment and is skipped.
     /// </summary>
-    let private executeStatements (connection: SqliteConnection) (label: string) (sql: string) =
+    let private executeStatements (connection: NativeSqliteConnection) (label: string) (sql: string) =
         if not (String.IsNullOrWhiteSpace sql) then
-            let handle =
-                match connection.Handle with
-                | null -> raise (InvalidOperationException $"Error: the connection for migration {label} exposes no handle.\nReason: schema migration requires a live connection.\nFix: open the connection before migrating.")
-                | h -> h
-
-            let bytes = Text.Encoding.UTF8.GetBytes sql
-            let mutable offset = 0
-            let mutable finished = false
-
-            while not finished && offset < bytes.Length do
-                let remaining = ReadOnlySpan<byte>(bytes, offset, bytes.Length - offset)
-                let mutable statement = Unchecked.defaultof<sqlite3_stmt>
-                let mutable tail = ReadOnlySpan<byte>()
-                let prepareResult = raw.sqlite3_prepare_v2 (handle, remaining, &statement, &tail)
-
-                if prepareResult <> raw.SQLITE_OK then
-                    // A statement that will not parse has no parser-defined end, so the excerpt is
-                    // bounded text from the point of failure. Without it the report would name the
-                    // step but not the SQL, which is the gap this owner exists to close.
-                    let excerptLength = min 200 (bytes.Length - offset)
-                    let excerpt = Text.Encoding.UTF8.GetString(bytes, offset, excerptLength).Trim()
-                    let message = raw.sqlite3_errmsg(handle).utf8_to_string ()
-                    raise (SqliteException($"Error: migration {label} could not prepare a statement.\nReason: {message}\nStatement: {excerpt}\nFix: correct the migration SQL for this schema step.", prepareResult))
-
-                let consumed = remaining.Length - tail.Length
-                if consumed <= 0 then
-                    finished <- true
-                else
-                    if not (isNull (box statement)) && not statement.IsInvalid then
-                        try
-                            let mutable stepResult = raw.sqlite3_step statement
-                            while stepResult = raw.SQLITE_ROW do
-                                stepResult <- raw.sqlite3_step statement
-
-                            if stepResult <> raw.SQLITE_DONE then
-                                // The statement text is materialised only to describe a failure.
-                                // Building it for every successful statement would put the whole
-                                // migration script back on the allocation path of ordinary startup.
-                                let statementText = Text.Encoding.UTF8.GetString(bytes, offset, consumed).Trim()
-                                let message = raw.sqlite3_errmsg(handle).utf8_to_string ()
-                                raise (SqliteException($"Error: migration {label} failed on a statement.\nReason: {message}\nStatement: {statementText}\nFix: correct this statement or the schema it depends on.", stepResult))
-                        finally
-                            statement.Dispose()
-
-                    offset <- offset + consumed
+            try
+                let mutable script = connection.AcquireScript(NativeStatementSource.Text (sql), null)
+                try
+                    script.Consume() |> ignore
+                    script.Dispose()
+                with error -> script.Abort(error); reraise()
+            with :? NativeSqliteException as error ->
+                raise (statementFailure label (sql.Substring(0, min 200 sql.Length)) error)
 
     /// <summary>
     /// What an observed schema version means, relative to a step. There are three answers and the
@@ -205,7 +192,7 @@ module internal SchemaMigration =
     /// Takes the pooled connection itself rather than a callback. Declaring it unfit is a field set,
     /// which cannot fail, so there is no recovery path to model and none is pretended.
     /// </remarks>
-    let internal run (pooled: CachingDbConnection) (plan: Plan) =
+    let internal run (pooled: NativeCachingDbConnection) (plan: Plan) =
         let connection = pooled.Inner
         let handle =
             match connection.Handle with
@@ -237,19 +224,18 @@ module internal SchemaMigration =
 
         if primary.IsNone then
          try
-            executeStatements connection plan.Label "BEGIN EXCLUSIVE;"
+            executeBoundary connection plan.Label "BEGIN EXCLUSIVE;"
 
             // The caller read the version before taking this lock, so another process may have
             // applied this very step in between. Re-reading under the lock is what makes the step
             // idempotent; without it the second process runs the step's statements against a schema
             // that has already moved and fails on the first one.
             let versionUnderLock =
-                use command = new SqliteCommand("PRAGMA user_version;", connection)
-                Convert.ToInt32(command.ExecuteScalar())
+                readVersion connection
 
             if versionUnderLock = plan.FromVersion then
                 executeStatements connection plan.Label plan.Body
-                executeStatements connection plan.Label $"PRAGMA user_version = {plan.TargetVersion};"
+                executeBoundary connection plan.Label $"PRAGMA user_version = {plan.TargetVersion};"
             else
                 // Not our starting version. Only an advance a peer could legitimately have made is
                 // acceptable; anything else is state this build cannot explain and must not commit
@@ -261,7 +247,7 @@ module internal SchemaMigration =
                 | BeyondSupported ->
                     raise (NotSupportedException $"Error: Schema version {versionUnderLock} is not supported.\nReason: Current supported version is {plan.SupportedCeiling}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
 
-            executeStatements connection plan.Label "COMMIT TRANSACTION;"
+            executeBoundary connection plan.Label "COMMIT TRANSACTION;"
          with ex ->
             primary <- ValueSome ex
 
@@ -274,7 +260,7 @@ module internal SchemaMigration =
             if inAutocommit connection then ValueNone
             else
                 try
-                    executeStatements connection plan.Label "ROLLBACK;"
+                    executeBoundary connection plan.Label "ROLLBACK;"
                     if inAutocommit connection then ValueNone
                     else ValueSome "the connection is still inside a transaction after rolling back"
                 with rollbackError ->

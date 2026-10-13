@@ -1,6 +1,5 @@
 namespace SoloDatabase
 
-open Microsoft.Data.Sqlite
 open System
 open System.Collections.Generic
 open System.Linq.Expressions
@@ -8,30 +7,38 @@ open System.Text
 open SoloDatabase.Types
 open JsonFunctions
 open Utils
-open SQLiteTools
+open NativeSQLiteTools
 open SoloDatabase
 open SoloDatabase.SqlModel
 
-type private SoloIdWriteScanner(soloIdProp: System.Reflection.PropertyInfo) =
+type private SoloIdWriteScanner(soloIdProp: CustomIdMember) =
     inherit ExpressionVisitor()
-    let setterMethod = soloIdProp.GetSetMethod(true)
+    let matches (memberValue: System.Reflection.MemberInfo) =
+        memberValue.Name = soloIdProp.Name &&
+        (let owner = memberValue.DeclaringType
+         let expected = soloIdProp.DeclaringType
+         if isNull owner then isNull expected else owner.Equals(expected))
     let mutable found = false
     member _.Found = found
     override this.VisitBinary(node: BinaryExpression) =
         if node.NodeType = ExpressionType.Assign then
             match node.Left with
-            | :? MemberExpression as me when obj.Equals(me.Member, soloIdProp :> System.Reflection.MemberInfo) ->
+            | :? MemberExpression as me when matches me.Member ->
                 found <- true
             | _ -> ()
         base.VisitBinary(node)
     override this.VisitMethodCall(node: MethodCallExpression) =
-        if not (isNull setterMethod) && obj.Equals(node.Method, setterMethod) then
+        if node.Method.Name = "set_" + soloIdProp.Name &&
+           (let owner = node.Method.DeclaringType
+            let expected = soloIdProp.DeclaringType
+            if isNull owner then isNull expected else owner.Equals(expected)) &&
+           node.Arguments.Count = 1 && node.Arguments.[0].Type.Equals(soloIdProp.IdType) then
             found <- true
         elif node.Method.Name = "Set" && node.Method.IsStatic && node.Arguments.Count >= 1 then
             // Extensions.Set(<member>, value) — the UpdateMany DSL setter form. Treat as a
             // write to the first-argument member if it resolves to the [<SoloId>] property.
             match node.Arguments.[0] with
-            | :? MemberExpression as me when obj.Equals(me.Member, soloIdProp :> System.Reflection.MemberInfo) ->
+            | :? MemberExpression as me when matches me.Member ->
                 found <- true
             | _ -> ()
         base.VisitMethodCall(node)
@@ -45,12 +52,12 @@ type internal CollectionMutationOps<'T>() =
         match CustomTypeId<'T>.Get() with
         | Some custom ->
             for expression in transforms do
-                let scanner = SoloIdWriteScanner(custom.Property)
+                let scanner = SoloIdWriteScanner(custom.Member)
                 scanner.Visit(expression) |> ignore
                 if scanner.Found then
                     raise (InvalidOperationException(
                         sprintf "Error: Cannot use UpdateMany to write the [<SoloId>] field '%s.%s'.\nReason: The [<SoloId>] field is the type's identity and may not be mutated through UpdateMany. To re-identify a row, delete and re-insert the entity."
-                            typeof<'T>.FullName custom.Property.Name))
+                            typeof<'T>.FullName custom.Member.Name))
         | None -> ()
 
     /// SELECT-and-check variant for non-relation write paths that don't already load
@@ -59,10 +66,10 @@ type internal CollectionMutationOps<'T>() =
     /// helper below.
     static member private RejectEmptyMutationOfNonEmptySoloIdAgainstStored
             (opName: string)
-            (conn: SqliteConnection)
+            (conn: NativeSqliteConnection)
             (collectionName: string)
             (filterSql: string)
-            (variables: IDictionary<string, obj>)
+            (variables: Dictionary<string, obj>)
             (item: 'T) =
         match CustomTypeId<'T>.Get() with
         | Some custom ->
@@ -73,16 +80,23 @@ type internal CollectionMutationOps<'T>() =
                 | :? SoloDatabase.Attributes.IIdGenerator<'T> as g -> g.IsEmpty newId
                 | _ -> false
             if isNewEmpty then
-                let soloPath = "$." + custom.Property.Name
+                let soloPath = "$." + custom.Member.Name
                 let storedIdSql =
                     sprintf "SELECT jsonb_extract(Value, '%s') FROM \"%s\" WHERE (%s) LIMIT 1"
                         soloPath collectionName filterSql
-                let storedId = conn.QueryFirstOrDefault<obj>(storedIdSql, variables)
+                let storedId =
+                    let mutable statement = conn.OpenStatement(storedIdSql)
+                    try
+                        statement.BindValues(variables)
+                        let value = if statement.Step() && not (statement.Row.IsDBNull(0)) then statement.Row.GetValue(0) else null
+                        statement.Dispose()
+                        value
+                    with error -> statement.Abort(error); reraise()
                 if not (isNull storedId) then
                     // The SQLite reader returns numeric values as int64; normalize into
                     // the property's declared CLR type before equality / IsEmpty checks.
                     let normalizedStored =
-                        try System.Convert.ChangeType(storedId, custom.Property.PropertyType)
+                        try System.Convert.ChangeType(storedId, custom.Member.IdType)
                         with _ -> storedId
                     let equal =
                         if isNull normalizedStored && isNull newId then true
@@ -141,30 +155,32 @@ type internal CollectionMutationOps<'T>() =
         (item: 'T)
         (name: string)
         (hasRelations: bool)
-        (withTransaction: (SqliteConnection -> unit) -> unit)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
+        (withTransaction: (NativeSqliteConnection -> unit) -> unit)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
         (mkRelationPathSets: unit -> 'a * 'b)
         (setSerializedItem: IDictionary<string, obj> -> 'T -> unit) =
 
         if isNull (box item) then raise (ArgumentNullException(nameof(item)))
 
         let filterExpr, variables =
-            if HasTypeId<'T>.Value then
-                let id = HasTypeId<'T>.Read item
-                QueryTranslator.translateWhereExpr name (UtilsReflection.ExpressionHelper.get(fun (x: 'T) -> x.Dyn<int64>("Id") = id))
+            if EntityDocumentId<'T>.Value then
+                let id = EntityDocumentId<'T>.Read item
+                let variables = Dictionary<string,obj>()
+                variables.["_uid0"] <- box id
+                SqlExpr.Binary(SqlExpr.Column(None,"Id"), BinaryOperator.Eq, SqlExpr.Parameter "_uid0"), variables
             else
                 match CustomTypeId<'T>.Get() with
                 | Some customId ->
                     let id = customId.GetId (item |> box)
-                    let idProp = customId.Property
+                    let idProp = customId.Member
                     let customVariables = Dictionary<string, obj>()
                     let idParameter =
                         QueryableHelperBase.allocateNamedStoredValueParam
-                            customVariables "_cid0" idProp.PropertyType id
+                            customVariables "_cid0" idProp.IdType id
                     let predicate =
                         SqlExpr.Binary(
-                            SqlExpr.FunctionCall("jsonb_extract",
-                                [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + idProp.Name))]),
+                            StoredValueParameter.declaredExpression idProp.IdType
+                                (SqlExpr.JsonExtractExpr(None, "Value", SqlModel.JsonPathOps.ofList [idProp.Name])),
                             BinaryOperator.Eq,
                             idParameter)
                     predicate, customVariables
@@ -184,8 +200,8 @@ type internal CollectionMutationOps<'T>() =
                 // Build DU-based WHERE from entity Id (no raw SQL string surgery).
                 let manyVars = Dictionary<string, obj>()
                 let whereExpr =
-                    if HasTypeId<'T>.Value then
-                        let id = HasTypeId<'T>.Read item
+                    if EntityDocumentId<'T>.Value then
+                        let id = EntityDocumentId<'T>.Read item
                         manyVars.["_mid0"] <- box id
                         SqlExpr.Binary(SqlExpr.Column(Some "o", "Id"), BinaryOperator.Eq, SqlExpr.Parameter "_mid0")
                     else
@@ -194,16 +210,16 @@ type internal CollectionMutationOps<'T>() =
                             let id = customId.GetId(item |> box)
                             let idParameter =
                                 QueryableHelperBase.allocateNamedStoredValueParam
-                                    manyVars "_mid0" customId.Property.PropertyType id
+                                    manyVars "_mid0" customId.Member.IdType id
                             SqlExpr.Binary(
-                                SqlExpr.FunctionCall("jsonb_extract",
-                                    [SqlExpr.Column(Some "o", "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + customId.Property.Name))]),
+                                StoredValueParameter.declaredExpression customId.Member.IdType
+                                    (SqlExpr.JsonExtractExpr(Some "o", "Value", SqlModel.JsonPathOps.ofList [customId.Member.Name])),
                                 BinaryOperator.Eq,
                                 idParameter)
                         | None -> raise (InvalidOperationException("Update requires int64 Id or custom Id."))
                 let sql, manyHydrated =
                     HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> whereExpr manyVars true
-                let oldRow = conn.QueryFirstOrDefault<DbObjectRow>(sql, manyVars)
+                let oldRow = readHydratedDocument conn sql manyVars
                 if isNull oldRow then
                     raise (KeyNotFoundException "Could not Update any entities with specified Id.")
 
@@ -216,27 +232,44 @@ type internal CollectionMutationOps<'T>() =
                 let writePlan = RelationsPlan.prepareUpdate tx oldRow.Id.Value (box oldOwner) (box item)
 
                 setSerializedItem variables item
-                let count = conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {whereSql}", variables)
+                let count =
+                    let mutable statement = conn.OpenStatement($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {whereSql}")
+                    try
+                        statement.BindValues(variables)
+                        statement.Step() |> ignore
+                        let affected = statement.RecordsAffected
+                        statement.Dispose()
+                        affected
+                    with error -> statement.Abort(error); reraise()
                 if count <= 0 then
                     raise (KeyNotFoundException "Could not Update any entities with specified Id.")
 
                 RelationsSync.syncUpdate tx oldRow.Id.Value writePlan
+                RelationsGraphAdmission.validate tx
             )
         else
             withTransaction (fun conn ->
                 CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloIdAgainstStored "Update" conn name whereSql variables item
                 setSerializedItem variables item
-                let count = conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {whereSql}", variables)
+                let count =
+                    let mutable statement = conn.OpenStatement($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {whereSql}")
+                    try
+                        statement.BindValues(variables)
+                        statement.Step() |> ignore
+                        let affected = statement.RecordsAffected
+                        statement.Dispose()
+                        affected
+                    with error -> statement.Abort(error); reraise()
                 if count <= 0 then
                     raise (KeyNotFoundException "Could not Update any entities with specified Id."))
 
     static member DeleteMany
         (filter: Expression<Func<'T, bool>>)
         (name: string)
-        (withTransaction: (SqliteConnection -> int) -> int)
-        (requiresRelationDeleteHandling: SqliteConnection -> bool)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
-        (selectMutationRows: SqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array) =
+        (withTransaction: (NativeSqliteConnection -> int) -> int)
+        (requiresRelationDeleteHandling: NativeSqliteConnection -> bool)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
+        (selectMutationRows: NativeSqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array) =
 
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
 
@@ -256,30 +289,42 @@ type internal CollectionMutationOps<'T>() =
                         let deletePlan = RelationsPlan.prepareDeleteOwner tx ownerId (box owner)
                         RelationsSync.syncDeleteOwner tx deletePlan
 
-                    let deleteVars = Dictionary<string, obj>(rows.Length)
                     let ids = ResizeArray<string>(rows.Length)
                     for i in 0 .. rows.Length - 1 do
                         let key = $"id{i}"
                         ids.Add("@" + key)
-                        deleteVars.[key] <- rows.[i].Id.Value :> obj
 
                     let idList = String.Join(",", ids)
                     let sql = $"DELETE FROM \"{name}\" WHERE Id IN ({idList})"
-                    conn.Execute(sql, deleteVars)
+                    let mutable statement = conn.OpenStatement(sql)
+                    try
+                        for i = 0 to rows.Length - 1 do statement.BindInt64(i + 1, rows.[i].Id.Value)
+                        statement.Step() |> ignore
+                        let affected = statement.RecordsAffected
+                        statement.Dispose()
+                        affected
+                    with error -> statement.Abort(error); reraise()
             else
                 // translateWhereExpr + emitted WHERE for DeleteMany.
                 let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
                 let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
-                conn.Execute ($"DELETE FROM \"{name}\" WHERE {filterSql}", variables)
+                let mutable statement = conn.OpenStatement($"DELETE FROM \"{name}\" WHERE {filterSql}")
+                try
+                    statement.BindValues(variables)
+                    statement.Step() |> ignore
+                    let affected = statement.RecordsAffected
+                    statement.Dispose()
+                    affected
+                with error -> statement.Abort(error); reraise()
         )
 
     static member DeleteOne
         (filter: Expression<Func<'T, bool>>)
         (name: string)
-        (withTransaction: (SqliteConnection -> int) -> int)
-        (requiresRelationDeleteHandling: SqliteConnection -> bool)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
-        (selectMutationRows: SqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array) =
+        (withTransaction: (NativeSqliteConnection -> int) -> int)
+        (requiresRelationDeleteHandling: NativeSqliteConnection -> bool)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
+        (selectMutationRows: NativeSqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array) =
 
         if isNull filter then raise (ArgumentNullException(nameof(filter)))
 
@@ -297,12 +342,19 @@ type internal CollectionMutationOps<'T>() =
                     let owner = fromSQLite<'T> oldRow
                     let deletePlan = RelationsPlan.prepareDeleteOwner tx oldRow.Id.Value (box owner)
                     RelationsSync.syncDeleteOwner tx deletePlan
-                    conn.Execute ($"DELETE FROM \"{name}\" WHERE Id = @id", {| id = oldRow.Id.Value |})
+                    deleteDocumentById conn name oldRow.Id.Value
             else
                 // translateWhereExpr + emitted WHERE for DeleteOne no-rel.
                 let filterExpr, variables = QueryTranslator.translateWhereExpr name filter
                 let filterSql = HydrationSqlBuilder.emitExprToSql filterExpr
-                conn.Execute ($"DELETE FROM \"{name}\" WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filterSql}) LIMIT 1)", variables)
+                let mutable statement = conn.OpenStatement($"DELETE FROM \"{name}\" WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filterSql}) LIMIT 1)")
+                try
+                    statement.BindValues(variables)
+                    statement.Step() |> ignore
+                    let affected = statement.RecordsAffected
+                    statement.Dispose()
+                    affected
+                with error -> statement.Abort(error); reraise()
         )
 
     static member ReplaceMany
@@ -310,8 +362,8 @@ type internal CollectionMutationOps<'T>() =
         (filter: Expression<Func<'T, bool>>)
         (name: string)
         (hasRelations: bool)
-        (withTransaction: (SqliteConnection -> int) -> int)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
+        (withTransaction: (NativeSqliteConnection -> int) -> int)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
         (mkRelationPathSets: unit -> 'a * 'b)
         (setSerializedItem: IDictionary<string, obj> -> 'T -> unit) =
 
@@ -329,7 +381,15 @@ type internal CollectionMutationOps<'T>() =
                 // mutation-prep old-state read with DBRefMany-only hydration.
                 let sql, manyHydrated =
                     HydrationSqlBuilder.buildManyOnlyHydratedSqlWithRawWhere conn name typeof<'T> filterSql false
-                let oldRows = conn.Query<DbObjectRow>(sql, variables) |> Seq.toArray
+                let oldRows =
+                    let mutable statement = conn.OpenStatement(sql)
+                    try
+                        statement.BindValues(variables)
+                        let rows = ResizeArray<DbObjectRow>()
+                        while statement.Step() do rows.Add(SqlRowValue.Document(statement.Row))
+                        statement.Dispose()
+                        rows.ToArray()
+                    with error -> statement.Abort(error); reraise()
                 if oldRows.Length = 0 then
                     0
                 else
@@ -353,21 +413,39 @@ type internal CollectionMutationOps<'T>() =
                     | None -> ()
                     RelationsSync.syncReplaceMany tx (ownerIds :> seq<_>) (oldOwners :> seq<_>) (box item)
                     setSerializedItem variables item
-                    conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {filterSql}", variables)
+                    let affected =
+                        let mutable statement = conn.OpenStatement($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {filterSql}")
+                        try
+                            statement.BindValues(variables)
+                            statement.Step() |> ignore
+                            let affected = statement.RecordsAffected
+                            statement.Dispose()
+                            affected
+                        with error -> statement.Abort(error); reraise()
+                    RelationsEntitySync.refreshFileSystemSingles tx ownerIds
+                    RelationsGraphAdmission.validate tx
+                    affected
             )
         else
             withTransaction (fun conn ->
                 CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloIdAgainstStored "ReplaceMany" conn name filterSql variables item
                 setSerializedItem variables item
-                conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {filterSql}", variables))
+                let mutable statement = conn.OpenStatement($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE {filterSql}")
+                try
+                    statement.BindValues(variables)
+                    statement.Step() |> ignore
+                    let affected = statement.RecordsAffected
+                    statement.Dispose()
+                    affected
+                with error -> statement.Abort(error); reraise())
 
     static member ReplaceOne
         (item: 'T)
         (filter: Expression<Func<'T, bool>>)
         (name: string)
         (hasRelations: bool)
-        (withTransaction: (SqliteConnection -> int) -> int)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
+        (withTransaction: (NativeSqliteConnection -> int) -> int)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
         (mkRelationPathSets: unit -> 'a * 'b)
         (setSerializedItem: IDictionary<string, obj> -> 'T -> unit) =
 
@@ -384,7 +462,7 @@ type internal CollectionMutationOps<'T>() =
 
                 let sql, manyHydrated =
                     HydrationSqlBuilder.buildManyOnlyHydratedSqlWithRawWhere conn name typeof<'T> $"({filterSql})" true
-                let oldRow = conn.QueryFirstOrDefault<DbObjectRow>(sql, variables)
+                let oldRow = readHydratedDocument conn sql variables
                 if isNull oldRow then
                     0
                 else
@@ -396,13 +474,32 @@ type internal CollectionMutationOps<'T>() =
                     CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloId "ReplaceOne" oldOwner item
                     RelationsSync.syncReplaceOne tx oldRow.Id.Value (box oldOwner) (box item)
                     setSerializedItem variables item
-                    conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id = @id", {| item = variables.["item"]; id = oldRow.Id.Value |})
+                    let affected =
+                        let mutable statement = conn.OpenStatement($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id = @id")
+                        try
+                            statement.BindValue(1, variables.["item"])
+                            statement.BindInt64(2, oldRow.Id.Value)
+                            statement.Step() |> ignore
+                            let affected = statement.RecordsAffected
+                            statement.Dispose()
+                            affected
+                        with error -> statement.Abort(error); reraise()
+                    RelationsEntitySync.refreshFileSystemSingles tx [| oldRow.Id.Value |]
+                    RelationsGraphAdmission.validate tx
+                    affected
             )
         else
             withTransaction (fun conn ->
                 CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloIdAgainstStored "ReplaceOne" conn name filterSql variables item
                 setSerializedItem variables item
-                conn.Execute ($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filterSql}) LIMIT 1)", variables))
+                let mutable statement = conn.OpenStatement($"UPDATE \"{name}\" SET Value = jsonb(@item) WHERE Id in (SELECT Id FROM \"{name}\" WHERE ({filterSql}) LIMIT 1)")
+                try
+                    statement.BindValues(variables)
+                    statement.Step() |> ignore
+                    let affected = statement.RecordsAffected
+                    statement.Dispose()
+                    affected
+                with error -> statement.Abort(error); reraise())
 
     static member private ExpandUpdateTransforms (transforms: Expression<System.Action<'T>> array) =
         let expanded = ResizeArray<Expression<System.Action<'T>>>(transforms.Length)
@@ -419,11 +516,11 @@ type internal CollectionMutationOps<'T>() =
         (filter: Expression<Func<'T, bool>>)
         (name: string)
         (hasRelations: bool)
-        (getConnection: unit -> SqliteConnection)
-        (withTransaction: (SqliteConnection -> int) -> int)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
-        (selectMutationRows: SqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array)
-        (executeJsonUpdateManyByRows: SqliteConnection -> DbObjectRow array -> ResizeArray<Expression<System.Action<'T>>> -> int) =
+        (getConnection: unit -> NativeSqliteConnection)
+        (withTransaction: (NativeSqliteConnection -> int) -> int)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
+        (selectMutationRows: NativeSqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array)
+        (executeJsonUpdateManyByRows: NativeSqliteConnection -> DbObjectRow array -> ResizeArray<Expression<System.Action<'T>>> -> int) =
 
         let transform = nullArgCheck (nameof transform) transform
         let filter = nullArgCheck (nameof filter) filter
@@ -470,16 +567,11 @@ type internal CollectionMutationOps<'T>() =
                     else
                         selectMutationRows conn filter false
 
-                // Composition order: owner-side JSON transforms fire FIRST, then target-side
-                // chain mutations and link writes. Owner-row triggers — including event
-                // handler subscriptions watching the owner row — observe one consolidated
-                // mutation per row in the JSON pass, then any subsequent chain pass writes
-                // its own statements. Reversing this would fire the owner trigger twice
-                // per row (once from the chain executor's relation-version increment and
-                // once from the JSON pass), and a one-shot RemoveHandler would consume
-                // the first fire (pre-JSON state) and miss the user-observable post-JSON
-                // state. Snapshot anchoring on chain-side selectedRows is preserved
-                // because the snapshot is captured before either pass runs.
+                RelationsGraphAdmission.captureMany tx (selectedRows |> Seq.map (fun row -> row.Id.Value))
+
+                // Owner JSON callbacks precede target-side chain and link writes.
+                // Capture physical membership before either pass, and admit their
+                // combined final graph only after both passes and callbacks finish.
                 let mutable affected = executeJsonUpdateManyByRows conn selectedRows jsonTransforms
 
                 // Partition: B4 chain ops (depth >= 1) vs link-touching apply ops.
@@ -490,7 +582,8 @@ type internal CollectionMutationOps<'T>() =
                     | QueryTranslatorBaseTypes.MutateRefChainProperty _
                     | QueryTranslatorBaseTypes.RefChainManyAdd _
                     | QueryTranslatorBaseTypes.RefChainManyRemove _
-                    | QueryTranslatorBaseTypes.RefChainManyClear _ ->
+                    | QueryTranslatorBaseTypes.RefChainManyClear _
+                    | QueryTranslatorBaseTypes.MutateFileSystemRef _ ->
                         chainOps.Add op
                     | other -> applyOpsRaw.Add other
 
@@ -513,6 +606,7 @@ type internal CollectionMutationOps<'T>() =
                                 OwnerTable = Utils.formatName ownerType.Name
                                 OwnerType = ownerType
                                 InTransaction = tx.InTransaction
+                                Preparation = tx.Preparation
                                 CollectionFactory = tx.CollectionFactory
                             }
                             let d = RelationsSchemaValidator.buildRelationDescriptors hopTx ownerType
@@ -532,14 +626,14 @@ type internal CollectionMutationOps<'T>() =
                     // selectedRows ids. Returns (chainSelect, leafProjection) — leafProjection is
                     // the inner Projection record so callers can append a sibling column for
                     // INSERT … SELECT shapes that need (leafTargetId, savedTargetId).
-                    let buildChainSqlSelect (hops: QueryTranslatorBaseTypes.ChainHopSpec list) (vars: Dictionary<string, obj>) : SqlSelect * Projection =
+                    let buildChainSqlSelectForOwners (hops: QueryTranslatorBaseTypes.ChainHopSpec list) (vars: Dictionary<string, obj>) ownerOffset ownerCount : SqlSelect * Projection =
                         let descArr =
                             hops
                             |> List.map (fun h -> resolveHopDescriptor h.OwnerType h.RelationPropertyName)
                             |> List.toArray
                         let sourceColOf (d: RelationsTypes.RelationDescriptor) = if d.OwnerUsesSourceColumn then "SourceId" else "TargetId"
                         let targetColOf (d: RelationsTypes.RelationDescriptor) = if d.OwnerUsesSourceColumn then "TargetId" else "SourceId"
-                        let alias i = sprintf "l%d" i
+                        let alias (i: int) = "l" + i.ToString(System.Globalization.CultureInfo.InvariantCulture)
                         let leafIdx = descArr.Length - 1
 
                         let baseSource = BaseTable(descArr.[0].LinkTable, Some (alias 0))
@@ -557,10 +651,10 @@ type internal CollectionMutationOps<'T>() =
 
                         let entryColumn = Column(Some (alias 0), sourceColOf descArr.[0])
                         let idParams =
-                            [ for j in 0 .. selectedRows.Length - 1 ->
-                                let key = sprintf "muid%d" j
+                            [ for j in 0 .. ownerCount - 1 ->
+                                let key = "muid" + j.ToString(System.Globalization.CultureInfo.InvariantCulture)
                                 if not (vars.ContainsKey(key)) then
-                                    vars.[key] <- selectedRows.[j].Id.Value :> obj
+                                    vars.[key] <- selectedRows.[ownerOffset + j].Id.Value :> obj
                                 Parameter key ]
                         let whereExpr =
                             match idParams with
@@ -586,6 +680,9 @@ type internal CollectionMutationOps<'T>() =
 
                         { Ctes = []; Body = SingleSelect core }, leafProj
 
+                    let buildChainSqlSelect hops vars =
+                        buildChainSqlSelectForOwners hops vars 0 selectedRows.Length
+
                     // Emit and execute a SqlDu statement through the canonical executor.
                     //
                     // This corridor used to run the optimizer pipeline here, loading an index model
@@ -607,8 +704,61 @@ type internal CollectionMutationOps<'T>() =
                             FunctionCall("jsonb", [Parameter paramName])
                         ])
 
+                    let captureChainOwners hops leafTable leafType =
+                        let seen = HashSet<int64>()
+                        let leafTx = { tx with OwnerTable = leafTable; OwnerType = leafType }
+                        for offset in 0 .. 500 .. selectedRows.Length - 1 do
+                            let count = min 500 (selectedRows.Length - offset)
+                            let vars = Dictionary<string, obj>()
+                            let select, _ = buildChainSqlSelectForOwners hops vars offset count
+                            let mutable statement = conn.OpenStatement(StatementExecution.emit(SelectStmt select))
+                            try
+                                statement.BindValues(vars)
+                                while statement.Step() do
+                                    let id = statement.Row.GetInt64(0)
+                                    seen.Add(id) |> ignore
+                                statement.Dispose()
+                            with error -> statement.Abort(error); reraise()
+                        RelationsGraphAdmission.captureMany leafTx seen
+
                     for op in chainOps do
                         match op with
+                        | QueryTranslatorBaseTypes.MutateFileSystemRef(hops, property, mutation) ->
+                            let leafTable, leafType, ownerIds =
+                                match hops with
+                                | [] -> name, typeof<'T>, selectedRows |> Array.map (fun row -> row.Id.Value)
+                                | _ ->
+                                    let last = List.last hops
+                                    let descriptor = resolveHopDescriptor last.OwnerType last.RelationPropertyName
+                                    let ids = ResizeArray<int64>()
+                                    let seen = HashSet<int64>()
+                                    for offset in 0 .. 500 .. selectedRows.Length - 1 do
+                                        let count = min 500 (selectedRows.Length - offset)
+                                        let variables = Dictionary<string, obj>()
+                                        let select, _ = buildChainSqlSelectForOwners hops variables offset count
+                                        let sql = StatementExecution.emit(SelectStmt select)
+                                        let mutable statement = conn.OpenStatement(sql)
+                                        try
+                                            statement.BindValues(variables)
+                                            while statement.Step() do
+                                                let id = statement.Row.GetInt64(0)
+                                                if seen.Add(id) then ids.Add(id)
+                                            statement.Dispose()
+                                        with error -> statement.Abort(error); reraise()
+                                    descriptor.TargetTable, last.TargetType, ids.ToArray()
+                            let leafTx = { tx with OwnerTable = leafTable; OwnerType = leafType }
+                            RelationsCore.ensureSchemaForOwnerType leafTx leafType
+                            RelationsGraphAdmission.captureMany leafTx ownerIds
+                            let referenceOp =
+                                match mutation with
+                                | FileSystemRefMutation.Set id -> RelationsTypes.SetFileSystemRef(property, id)
+                                | FileSystemRefMutation.Add id -> RelationsTypes.AddFileSystemRef(property, id)
+                                | FileSystemRefMutation.Remove id -> RelationsTypes.RemoveFileSystemRef(property, id)
+                                | FileSystemRefMutation.Clear -> RelationsTypes.ClearFileSystemRefs property
+                            RelationsCore.withRelationSqliteWrap "sync" "UpdateMany.filesystem" (fun () ->
+                                RelationsEntitySync.applyFileSystemReferenceToOwners leafTx ownerIds referenceOp)
+                            if jsonTransforms.Count = 0 then affected <- selectedRows.Length
+
                         | QueryTranslatorBaseTypes.MutateRefChainProperty(hops, _leafTargetType, leafJsonPath, jsonLiteral) ->
                             let vars = Dictionary<string, obj>()
                             vars.["v"] <- jsonLiteral
@@ -624,6 +774,7 @@ type internal CollectionMutationOps<'T>() =
                         | QueryTranslatorBaseTypes.RefChainManyAdd(hops, leafManyName, _leafTargetType, savedTargetId) ->
                             let innerOwnerType = (List.last hops).TargetType
                             let leafDesc = resolveHopDescriptor innerOwnerType leafManyName
+                            captureChainOwners hops leafDesc.OwnerTable innerOwnerType
                             let leafSourceCol = if leafDesc.OwnerUsesSourceColumn then "SourceId" else "TargetId"
                             let leafTargetCol = if leafDesc.OwnerUsesSourceColumn then "TargetId" else "SourceId"
                             let vars = Dictionary<string, obj>()
@@ -649,6 +800,7 @@ type internal CollectionMutationOps<'T>() =
                         | QueryTranslatorBaseTypes.RefChainManyRemove(hops, leafManyName, _leafTargetType, savedTargetId) ->
                             let innerOwnerType = (List.last hops).TargetType
                             let leafDesc = resolveHopDescriptor innerOwnerType leafManyName
+                            captureChainOwners hops leafDesc.OwnerTable innerOwnerType
                             let leafSourceCol = if leafDesc.OwnerUsesSourceColumn then "SourceId" else "TargetId"
                             let leafTargetCol = if leafDesc.OwnerUsesSourceColumn then "TargetId" else "SourceId"
                             let vars = Dictionary<string, obj>()
@@ -667,6 +819,7 @@ type internal CollectionMutationOps<'T>() =
                         | QueryTranslatorBaseTypes.RefChainManyClear(hops, leafManyName, _leafTargetType) ->
                             let innerOwnerType = (List.last hops).TargetType
                             let leafDesc = resolveHopDescriptor innerOwnerType leafManyName
+                            captureChainOwners hops leafDesc.OwnerTable innerOwnerType
                             let leafSourceCol = if leafDesc.OwnerUsesSourceColumn then "SourceId" else "TargetId"
                             let vars = Dictionary<string, obj>()
                             let chainSelect, _ = buildChainSqlSelect hops vars
@@ -692,7 +845,8 @@ type internal CollectionMutationOps<'T>() =
                             | QueryTranslatorBaseTypes.MutateRefChainProperty _
                             | QueryTranslatorBaseTypes.RefChainManyAdd _
                             | QueryTranslatorBaseTypes.RefChainManyRemove _
-                            | QueryTranslatorBaseTypes.RefChainManyClear _ ->
+                            | QueryTranslatorBaseTypes.RefChainManyClear _
+                            | QueryTranslatorBaseTypes.MutateFileSystemRef _ ->
                                 failwith "Chain op leaked into applyOpsRaw partition; partitioning logic bug.")
                         |> Seq.toList
 
@@ -707,6 +861,7 @@ type internal CollectionMutationOps<'T>() =
                     if jsonTransforms.Count = 0 then
                         affected <- selectedRows.Length
 
+                RelationsGraphAdmission.validate tx
                 affected
             )
         else

@@ -1,184 +1,8 @@
 namespace SoloDatabase
 
 open System.Collections.Generic
-open SQLiteTools
+open NativeSQLiteTools
 open SoloDatabase.SqlModel
-
-/// Compilation owns value evaluation; the translator owns SQL semantics.
-type internal QueryValueBinder = {
-    IsValue: System.Linq.Expressions.Expression -> bool
-    Parameter: System.Linq.Expressions.Expression -> SqlExpr
-    Comparison: System.Linq.Expressions.Expression -> SqlExpr
-    Scalar: System.Linq.Expressions.Expression -> SqlExpr
-    Prefix: System.Linq.Expressions.Expression -> SqlExpr
-    Local: System.Linq.Expressions.Expression -> System.Linq.Expressions.Expression
-} with
-    member this.TryBind comparison expression =
-        if not (this.IsValue expression) then ValueNone
-        elif comparison then ValueSome(this.Comparison expression)
-        else ValueSome(this.Parameter expression)
-
-/// Loads relation metadata for exactly what a translation asks for, at the moment it asks.
-///
-/// The catalogs are read through their existing unique indexes -- SoloDBRelation has
-/// UNIQUE(OwnerCollection, PropertyName) and SoloDBTypeCollectionMap has UNIQUE(TypeKey,
-/// CollectionName) -- so a lookup is a single indexed statement rather than a scan of every
-/// relation in the database.
-///
-/// Resolution is deliberately lazy rather than preloaded: translation discovers additional query
-/// roots (Join, GroupJoin, SelectMany, nested builders) only while running, and resolves them
-/// against the outer context. Anything decided before translation therefore cannot know which
-/// collections will be consulted.
-///
-/// The instance lives for one translation. It is shared by reference into nested contexts, so a
-/// repeated lookup costs nothing, and it dies with the translation, so the next query observes
-/// current catalog state.
-/// Identity of one relation lookup. A struct key with ordinal equality, rather than a
-/// concatenated string, so a collection or property name containing the old separator cannot
-/// alias a different pair and produce a false hit or a false miss.
-[<Struct; CustomEquality; NoComparison>]
-type internal RelationCacheKey =
-    { Owner: string; Property: string }
-    override this.Equals(other: obj) =
-        match other with
-        | :? RelationCacheKey as o ->
-            System.String.Equals(this.Owner, o.Owner, System.StringComparison.Ordinal)
-            && System.String.Equals(this.Property, o.Property, System.StringComparison.Ordinal)
-        | _ -> false
-    override this.GetHashCode() =
-        let h1 = if isNull this.Owner then 0 else this.Owner.GetHashCode()
-        let h2 = if isNull this.Property then 0 else this.Property.GetHashCode()
-        (h1 * 397) ^^^ h2
-
-/// One resolved relation edge.
-[<Struct>]
-type internal ResolvedRelation =
-    { TargetCollection: string; LinkTable: string; OwnerUsesSource: bool }
-
-/// Loads relation metadata for exactly what a translation asks for, at the moment it asks.
-///
-/// The catalogs are read through their existing unique indexes -- SoloDBRelation has
-/// UNIQUE(OwnerCollection, PropertyName) and SoloDBTypeCollectionMap has UNIQUE(TypeKey,
-/// CollectionName) -- so a lookup is a single indexed statement rather than a scan of every
-/// relation in the database.
-///
-/// Resolution is deliberately lazy rather than preloaded: translation discovers additional query
-/// roots (Join, GroupJoin, SelectMany, nested builders) only while running, and resolves them
-/// against the outer context. Anything decided before translation therefore cannot know which
-/// collections will be consulted.
-///
-/// This object is the single authority for both the results and the fact that a lookup already
-/// happened. Contexts copy results out of it; they never record "already resolved" on their own,
-/// because a context that copied a marker without the matching result would silently answer a
-/// later question with a miss.
-///
-/// The instance lives for one translation, so the next query observes current catalog state.
-type internal RelationMetadataSource(connection: Microsoft.Data.Sqlite.SqliteConnection) =
-    let mutable relationCatalogChecked = false
-    let mutable relationCatalogExists = false
-    let mutable typeMapChecked = false
-    let mutable typeMapExists = false
-    // Authoritative results. ValueNone records a lookup that found nothing, so an absent
-    // relation is queried once rather than on every access.
-    let relations = Dictionary<RelationCacheKey, ResolvedRelation voption>(HashIdentity.Structural)
-    let typeMappings = Dictionary<string, string[]>(System.StringComparer.Ordinal)
-
-    let tableExists (name: string) =
-        connection.QueryFirst<int64>(
-            "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @name) THEN 1 ELSE 0 END",
-            {| name = name |}) = 1L
-
-    /// Canonical shared-many table name. Ordinal comparison, matching the single naming
-    /// authority used elsewhere; SQLite BINARY text ordering is not equivalent for non-ASCII
-    /// names and must not be substituted here.
-    let canonicalManyName (a: string) (b: string) =
-        if System.StringComparer.Ordinal.Compare(a, b) <= 0 then a + "_" + b else b + "_" + a
-
-    member _.Connection = connection
-
-    member _.RelationCatalogExists =
-        if not relationCatalogChecked then
-            relationCatalogExists <- tableExists "SoloDBRelation"
-            relationCatalogChecked <- true
-        relationCatalogExists
-
-    member _.TypeMapExists =
-        if not typeMapChecked then
-            typeMapExists <- tableExists "SoloDBTypeCollectionMap"
-            typeMapChecked <- true
-        typeMapExists
-
-    /// Resolves one owner/property edge, querying at most once per translation.
-    member this.GetRelation(ownerCollection: string, propertyName: string) : ResolvedRelation voption =
-        let key = { Owner = ownerCollection; Property = propertyName }
-        match relations.TryGetValue key with
-        | true, cached -> cached
-        | _ ->
-            let resolved =
-                if not this.RelationCatalogExists then ValueNone
-                else
-                // Served by UNIQUE(OwnerCollection, PropertyName). Rows with any null identity
-                // column are rejected here rather than used to construct a table name.
-                let row =
-                    connection.Query<{| Name: string; TargetCollection: string; RefKind: string |}>(
-                        "SELECT Name, TargetCollection, RefKind FROM SoloDBRelation
-                         WHERE OwnerCollection = @owner AND PropertyName = @property
-                           AND Name IS NOT NULL AND TargetCollection IS NOT NULL AND RefKind IS NOT NULL
-                         LIMIT 1",
-                        {| owner = ownerCollection; property = propertyName |})
-                    |> Seq.tryHead
-                match row with
-                | None -> ValueNone
-                | Some r when isNull r.Name || isNull r.TargetCollection || isNull r.RefKind -> ValueNone
-                | Some r ->
-                    let defaultLink = "SoloDBRelLink_" + r.Name
-                    let canonicalLink = "SoloDBRelLink_" + canonicalManyName ownerCollection r.TargetCollection
-                    // Both candidates are named in .NET and their existence decided in one
-                    // statement, so the per-row probe loop is gone without moving the naming
-                    // rule into SQLite's collation.
-                    let present =
-                        if r.RefKind <> "Many" then Set.empty
-                        else
-                            connection.Query<{| name: string |}>(
-                                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (@a, @b)",
-                                {| a = defaultLink; b = canonicalLink |})
-                            |> Seq.map _.name
-                            |> Set.ofSeq
-                    // Shared canonical table only when it exists and the default does not.
-                    let useSharedMany =
-                        r.RefKind = "Many" && present.Contains canonicalLink && not (present.Contains defaultLink)
-                    ValueSome {
-                        TargetCollection = r.TargetCollection
-                        LinkTable = if useSharedMany then canonicalLink else defaultLink
-                        OwnerUsesSource =
-                            if useSharedMany then System.StringComparer.Ordinal.Compare(ownerCollection, r.TargetCollection) <= 0
-                            else true
-                    }
-            relations.[key] <- resolved
-            resolved
-
-    /// Every collection registered for one type key. Keyed on the requested key and never
-    /// narrowed by owner, so ambiguity is observed exactly as under a full catalog load.
-    member this.GetTypeCollections(typeKey: string) : string[] =
-        match typeMappings.TryGetValue typeKey with
-        | true, cached -> cached
-        | _ ->
-            let names =
-                if System.String.IsNullOrWhiteSpace typeKey || not this.TypeMapExists then Array.empty
-                else
-                    // Served by UNIQUE(TypeKey, CollectionName).
-                    connection.Query<{| CollectionName: string |}>(
-                        "SELECT CollectionName FROM SoloDBTypeCollectionMap WHERE TypeKey = @typeKey AND CollectionName IS NOT NULL",
-                        {| typeKey = typeKey |})
-                    |> Seq.map _.CollectionName
-                    |> Seq.filter (isNull >> not)
-                    |> Seq.toArray
-            typeMappings.[typeKey] <- names
-            names
-
-type internal LayerPosition =
-| BaseLayer
-| OuterLayer
 
 /// Closed-enum kinds for translator-emitted runtime errors. The kind is encoded
 /// into the typed-payload JSON object on Id=NULL rows; the materializer dispatches
@@ -189,6 +13,30 @@ type internal RuntimeErrorKind =
     | CardinalityError
     | CastError
     | RangeError
+
+/// Layout constants are sampled once at their original producer position.
+type internal QueryPreparedConstant =
+    | PreparedConstant of obj
+    | DeferredConstant of complete: ((obj -> QueryProducedValue) -> QueryProducedValue)
+
+/// Compilation owns value evaluation; the translator owns SQL semantics.
+type internal QueryValueBinder = {
+    Order: QueryValueBindingOrder
+    PrepareConstant: System.Linq.Expressions.Expression -> System.Type -> QueryPreparedConstant
+    PrepareList: (System.Linq.Expressions.Expression -> ((obj -> SqlExpr list) -> SqlExpr)) voption
+    Produced: bool -> System.Linq.Expressions.Expression -> QueryProducedValue
+    IsValue: System.Linq.Expressions.Expression -> bool
+    Parameter: System.Linq.Expressions.Expression -> SqlExpr
+    Comparison: System.Linq.Expressions.Expression -> SqlExpr
+    Scalar: System.Linq.Expressions.Expression -> SqlExpr
+    PreparedScalar: System.Linq.Expressions.Expression -> SqlExpr
+    Prefix: System.Linq.Expressions.Expression -> SqlExpr
+    Local: System.Linq.Expressions.Expression -> System.Linq.Expressions.Expression
+} with
+    member this.TryBind comparison expression =
+        if not (this.IsValue expression) then ValueNone
+        else ValueSome(this.Produced comparison expression)
+
 
 /// Represents a named source root in a LINQ multi-source query graph.
 type internal QueryRootSource = {
@@ -223,7 +71,7 @@ type internal QueryRootGraph = {
         match this.Roots |> Seq.tryFind (fun r -> r.SourceKey = sourceKey) with
         | Some existing -> existing
         | None ->
-            let alias = sprintf "_src%d" this.SourceAliasCounter
+            let alias = "_src" + this.SourceAliasCounter.ToString(System.Globalization.CultureInfo.InvariantCulture)
             this.SourceAliasCounter <- this.SourceAliasCounter + 1
             let created = {
                 SourceKey = sourceKey
@@ -243,6 +91,12 @@ type internal JoinEdge = {
     TargetAlias: string
     /// Target collection table name (e.g., "Customers")
     TargetTable: string
+    /// Canonical target payload from its actual document or filesystem producer.
+    TargetValue: SqlExpr
+    /// The authored reference input carries its actual serialized child identity.
+    ReferenceValue: SqlExpr
+    ReferencePath: JsonSerializator.JsonEqualitySupport.PathSegment list
+    ReferenceOnOwnerRoot: bool
     /// JOIN kind (e.g., "LEFT JOIN")
     JoinKind: string
     /// Source table alias for the ON condition (e.g., Some "\"Orders\"")
@@ -260,6 +114,8 @@ type internal QueryContext = {
     RootTable: string
     /// Whether this context translates against a base table or an outer/subquery layer.
     LayerPosition: LayerPosition
+    /// Original writer input for this scope, independent of its SQL carrier.
+    SerializationInput: QuerySerializationInput
     /// Query source graph roots. Single-source queries keep exactly one root.
     RootGraph: QueryRootGraph
     /// Accumulated join edges (populated during expression translation)
@@ -302,6 +158,7 @@ type internal QueryContext = {
     static member SingleSource(tableName: string) =
         { RootTable = tableName
           LayerPosition = BaseLayer
+          SerializationInput = QuerySerializationInput.ForType null
           RootGraph = QueryRootGraph.Single(tableName)
           Joins = ResizeArray()
           AliasCounter = ref 0
@@ -326,6 +183,7 @@ type internal QueryContext = {
                 graph.ResolveRoot(sourceKey, tableName) |> ignore
         { RootTable = rootTable
           LayerPosition = BaseLayer
+          SerializationInput = QuerySerializationInput.ForType null
           RootGraph = graph
           Joins = ResizeArray()
           AliasCounter = ref 0
@@ -350,11 +208,7 @@ type internal QueryContext = {
     /// access of a cloned context.
     member this.NextAlias() =
         let n = System.Threading.Interlocked.Increment(this.AliasCounter) - 1
-        sprintf "_ref%d" n
-
-    /// Find existing join for a property path, or None (deduplication).
-    member this.FindJoin(propertyPath: string) =
-        this.Joins |> Seq.tryFind (fun j -> j.PropertyPath = propertyPath)
+        "_ref" + n.ToString(System.Globalization.CultureInfo.InvariantCulture)
 
     member this.TryFindJoinByAlias(alias: string) =
         this.Joins |> Seq.tryFind (fun j -> j.TargetAlias = alias)
@@ -461,3 +315,10 @@ type internal QueryContext = {
         | true, _ ->
             raise (System.InvalidOperationException(
                 $"Error: Ambiguous collection mapping for relation target type '{typeKey}'.\nReason: Multiple collections are registered for this type.\nFix: Register exactly one target collection for relation-backed queries."))
+
+    /// Query navigation retains one owner-qualified target and fallback policy.
+    member this.ResolveQueryRelationTarget(ownerCollection: string voption, propertyName: string, targetType: System.Type) =
+        let mapped = ownerCollection |> ValueOption.toOption |> Option.bind (fun owner -> this.TryResolveRelationTarget(owner, propertyName))
+        match mapped with
+        | Some mapped when not(System.String.IsNullOrWhiteSpace mapped) -> Utils.formatName mapped
+        | _ -> this.ResolveCollectionForType(TypeMetadata.typeIdentityKey targetType, Utils.formatName targetType.Name)

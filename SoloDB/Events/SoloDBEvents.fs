@@ -1,8 +1,6 @@
 namespace SoloDatabase
 
 open CowByteSpanMap
-open Microsoft.Data.Sqlite
-open System.Collections.Concurrent
 open System.Collections.Generic
 open System
 open SoloDatabase.Types
@@ -17,15 +15,8 @@ open SoloDBEventsHelpers
 // NativePtr operations for zero-copy JSON parsing from SQLite trigger callbacks
 #nowarn "9"
 
-type internal CollectionEventSystem<'T> internal (collectionName: string, eventSystem: EventSystem, createDb: SqliteConnection -> (unit -> unit) -> ISoloDB) =
-    let insertingHandlerMap = Dictionary<InsertingHandler<'T>, ResizeArray<InsertingHandlerSystem>>(HashIdentity.Reference)
-    let deletingHandlerMap = Dictionary<DeletingHandler<'T>, ResizeArray<DeletingHandlerSystem>>(HashIdentity.Reference)
-    let updatingHandlerMap = Dictionary<UpdatingHandler<'T>, ResizeArray<UpdatingHandlerSystem>>(HashIdentity.Reference)
-    let insertedHandlerMap = Dictionary<InsertedHandler<'T>, ResizeArray<InsertingHandlerSystem>>(HashIdentity.Reference)
-    let deletedHandlerMap = Dictionary<DeletedHandler<'T>, ResizeArray<DeletingHandlerSystem>>(HashIdentity.Reference)
-    let updatedHandlerMap = Dictionary<UpdatedHandler<'T>, ResizeArray<UpdatingHandlerSystem>>(HashIdentity.Reference)
-
-    let withHandlerFaultProtocol (conn: SqliteConnection) (f: unit -> SoloDBEventsResult) : SoloDBEventsResult =
+module internal SoloDBCollectionEventDispatch =
+    let inline withHandlerFaultProtocol (conn: NativeSqliteConnection) (f: unit -> SoloDBEventsResult) : SoloDBEventsResult =
         Connections.EnterEventHandlerScope(conn)
         try
             try
@@ -39,9 +30,8 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
         finally
             Connections.ExitEventHandlerScope(conn)
 
-    let withItemContext (ctxs: ConcurrentStack<SoloDBItemEventContext<'T>>) (conn: SqliteConnection) (session: int64) (json: ReadOnlySpan<byte>) (f: SoloDBItemEventContext<'T> -> SoloDBEventsResult) : SoloDBEventsResult =
-        let mutable ctx = Unchecked.defaultof<SoloDBItemEventContext<'T> | null>
-        if not (ctxs.TryPop(&ctx)) then ctx <- new SoloDBItemEventContext<'T>(collectionName, createDb)
+    let inline withItemContext (ctxs: CallbackSlots<SoloDBItemEventContext<'T>>) (conn: NativeSqliteConnection) (session: int64) (json: ReadOnlySpan<byte>) (f: SoloDBItemEventContext<'T> -> SoloDBEventsResult) : SoloDBEventsResult =
+        let ctx = ctxs.Borrow()
         let jsonPtr =
             if json.IsEmpty then NativePtr.nullPtr<byte>
             else NativePtr.ofVoidPtr (Unsafe.AsPointer(&MemoryMarshal.GetReference json))
@@ -50,25 +40,36 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
             f ctx
         finally
             ctx.MarkDisposed()
-            ctxs.Push ctx
+            ctxs.Return()
 
-    let withUpdatingContext (ctxs: ConcurrentStack<SoloDBUpdatingEventContext<'T>>) (conn: SqliteConnection) (session: int64) (jsonOld: nativeptr<byte>) (jsonOldSize: int) (jsonNew: nativeptr<byte>) (jsonNewSize: int) (f: SoloDBUpdatingEventContext<'T> -> SoloDBEventsResult) : SoloDBEventsResult =
-        let mutable ctx = Unchecked.defaultof<SoloDBUpdatingEventContext<'T> | null>
-        if not (ctxs.TryPop(&ctx)) then ctx <- new SoloDBUpdatingEventContext<'T>(collectionName, createDb)
+    let inline withUpdatingContext (ctxs: CallbackSlots<SoloDBUpdatingEventContext<'T>>) (conn: NativeSqliteConnection) (session: int64) (jsonOld: nativeptr<byte>) (jsonOldSize: int) (jsonNew: nativeptr<byte>) (jsonNewSize: int) (f: SoloDBUpdatingEventContext<'T> -> SoloDBEventsResult) : SoloDBEventsResult =
+        let ctx = ctxs.Borrow()
         try
             ctx.Reset(conn, session, jsonOld, jsonOldSize, jsonNew, jsonNewSize)
             f ctx
         finally
             ctx.MarkDisposed()
-            ctxs.Push ctx
+            ctxs.Return()
+
+open SoloDBCollectionEventDispatch
+
+type internal CollectionEventSystem<'T> internal (collectionName: string, eventSystem: EventSystem, createDb: NativeSqliteConnection -> (unit -> unit) -> ISoloDB) =
+    let insertingHandlerMap = Dictionary<InsertingHandler<'T>, ResizeArray<InsertingHandlerSystem>>(HashIdentity.Reference)
+    let deletingHandlerMap = Dictionary<DeletingHandler<'T>, ResizeArray<DeletingHandlerSystem>>(HashIdentity.Reference)
+    let updatingHandlerMap = Dictionary<UpdatingHandler<'T>, ResizeArray<UpdatingHandlerSystem>>(HashIdentity.Reference)
+    let insertedHandlerMap = Dictionary<InsertedHandler<'T>, ResizeArray<InsertingHandlerSystem>>(HashIdentity.Reference)
+    let deletedHandlerMap = Dictionary<DeletedHandler<'T>, ResizeArray<DeletingHandlerSystem>>(HashIdentity.Reference)
+    let updatedHandlerMap = Dictionary<UpdatedHandler<'T>, ResizeArray<UpdatingHandlerSystem>>(HashIdentity.Reference)
 
     interface ISoloDBCollectionEvents<'T> with
         member this.OnInserting(handler: InsertingHandler<'T>): unit =
             let collectionNameBytes = Encoding.UTF8.GetBytes collectionName
-            let list = eventSystem.InsertingHandlerMapping.GetOrAdd(collectionNameBytes, CowByteSpanMapValueFactory(fun _span -> ResizeArray()))
             try
                 eventSystem.GlobalLock.Enter()
-                let ctxs = ConcurrentStack<SoloDBItemEventContext<'T>>()
+                let entry = eventSystem.InsertingHandlerMapping.GetOrAdd(collectionNameBytes, CowByteSpanMapValueFactory(fun _span ->
+                    EventHandlerList(fun () -> eventSystem.InsertingHandlerMapping.Remove collectionNameBytes |> ignore)))
+                let list = entry.Handlers
+                let ctxs = CallbackSlots<SoloDBItemEventContext<'T>>(fun () -> new SoloDBItemEventContext<'T>(collectionName, createDb))
                 let mutable sysHandlerRef = Unchecked.defaultof<InsertingHandlerSystem>
                 let removeFromMap () =
                     match insertingHandlerMap.TryGetValue handler with
@@ -80,7 +81,8 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                     let result =
                         withItemContext ctxs conn session json (fun ctx ->
                             withHandlerFaultProtocol conn (fun () ->
-                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled))
+                                let result = handler.Invoke ctx
+                                if isNull (box result) then EventHandled else result))
                     if result = RemoveHandler then removeFromMap ()
                     result)
                 sysHandlerRef <- sysHandler
@@ -96,10 +98,12 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
 
         member this.OnDeleting(handler: DeletingHandler<'T>): unit =
             let collectionNameBytes = Encoding.UTF8.GetBytes collectionName
-            let list = eventSystem.DeletingHandlerMapping.GetOrAdd(collectionNameBytes, CowByteSpanMapValueFactory(fun _span -> ResizeArray()))
             try
                 eventSystem.GlobalLock.Enter()
-                let ctxs = ConcurrentStack<SoloDBItemEventContext<'T>>()
+                let entry = eventSystem.DeletingHandlerMapping.GetOrAdd(collectionNameBytes, CowByteSpanMapValueFactory(fun _span ->
+                    EventHandlerList(fun () -> eventSystem.DeletingHandlerMapping.Remove collectionNameBytes |> ignore)))
+                let list = entry.Handlers
+                let ctxs = CallbackSlots<SoloDBItemEventContext<'T>>(fun () -> new SoloDBItemEventContext<'T>(collectionName, createDb))
                 let mutable sysHandlerRef = Unchecked.defaultof<DeletingHandlerSystem>
                 let removeFromMap () =
                     match deletingHandlerMap.TryGetValue handler with
@@ -111,7 +115,8 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                     let result =
                         withItemContext ctxs conn session json (fun ctx ->
                             withHandlerFaultProtocol conn (fun () ->
-                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled))
+                                let result = handler.Invoke ctx
+                                if isNull (box result) then EventHandled else result))
                     if result = RemoveHandler then removeFromMap ()
                     result)
                 sysHandlerRef <- sysHandler
@@ -127,10 +132,12 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
 
         member this.OnUpdating(handler: UpdatingHandler<'T>): unit =
             let collectionNameBytes = Encoding.UTF8.GetBytes collectionName
-            let list = eventSystem.UpdatingHandlerMapping.GetOrAdd(collectionNameBytes, CowByteSpanMapValueFactory(fun _span -> ResizeArray()))
             try
                 eventSystem.GlobalLock.Enter()
-                let ctxs = ConcurrentStack<SoloDBUpdatingEventContext<'T>>()
+                let entry = eventSystem.UpdatingHandlerMapping.GetOrAdd(collectionNameBytes, CowByteSpanMapValueFactory(fun _span ->
+                    EventHandlerList(fun () -> eventSystem.UpdatingHandlerMapping.Remove collectionNameBytes |> ignore)))
+                let list = entry.Handlers
+                let ctxs = CallbackSlots<SoloDBUpdatingEventContext<'T>>(fun () -> new SoloDBUpdatingEventContext<'T>(collectionName, createDb))
                 let mutable sysHandlerRef = Unchecked.defaultof<UpdatingHandlerSystem>
                 let removeFromMap () =
                     match updatingHandlerMap.TryGetValue handler with
@@ -142,7 +149,8 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                     let result =
                         withUpdatingContext ctxs conn session jsonOld jsonOldSize jsonNew jsonNewSize (fun ctx ->
                             withHandlerFaultProtocol conn (fun () ->
-                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled))
+                                let result = handler.Invoke ctx
+                                if isNull (box result) then EventHandled else result))
                     if result = RemoveHandler then removeFromMap ()
                     result)
                 sysHandlerRef <- sysHandler
@@ -158,10 +166,12 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
 
         member this.OnInserted(handler: InsertedHandler<'T>): unit =
             let collectionNameBytes = Encoding.UTF8.GetBytes collectionName
-            let list = eventSystem.InsertedHandlerMapping.GetOrAdd(collectionNameBytes, CowByteSpanMapValueFactory(fun _span -> ResizeArray()))
             try
                 eventSystem.GlobalLock.Enter()
-                let ctxs = ConcurrentStack<SoloDBItemEventContext<'T>>()
+                let entry = eventSystem.InsertedHandlerMapping.GetOrAdd(collectionNameBytes, CowByteSpanMapValueFactory(fun _span ->
+                    EventHandlerList(fun () -> eventSystem.InsertedHandlerMapping.Remove collectionNameBytes |> ignore)))
+                let list = entry.Handlers
+                let ctxs = CallbackSlots<SoloDBItemEventContext<'T>>(fun () -> new SoloDBItemEventContext<'T>(collectionName, createDb))
                 let mutable sysHandlerRef = Unchecked.defaultof<InsertingHandlerSystem>
                 let removeFromMap () =
                     match insertedHandlerMap.TryGetValue handler with
@@ -173,7 +183,8 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                     let result =
                         withItemContext ctxs conn session json (fun ctx ->
                             withHandlerFaultProtocol conn (fun () ->
-                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled))
+                                let result = handler.Invoke ctx
+                                if isNull (box result) then EventHandled else result))
                     if result = RemoveHandler then removeFromMap ()
                     result)
                 sysHandlerRef <- sysHandler
@@ -189,10 +200,12 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
 
         member this.OnDeleted(handler: DeletedHandler<'T>): unit =
             let collectionNameBytes = Encoding.UTF8.GetBytes collectionName
-            let list = eventSystem.DeletedHandlerMapping.GetOrAdd(collectionNameBytes, CowByteSpanMapValueFactory(fun _span -> ResizeArray()))
             try
                 eventSystem.GlobalLock.Enter()
-                let ctxs = ConcurrentStack<SoloDBItemEventContext<'T>>()
+                let entry = eventSystem.DeletedHandlerMapping.GetOrAdd(collectionNameBytes, CowByteSpanMapValueFactory(fun _span ->
+                    EventHandlerList(fun () -> eventSystem.DeletedHandlerMapping.Remove collectionNameBytes |> ignore)))
+                let list = entry.Handlers
+                let ctxs = CallbackSlots<SoloDBItemEventContext<'T>>(fun () -> new SoloDBItemEventContext<'T>(collectionName, createDb))
                 let mutable sysHandlerRef = Unchecked.defaultof<DeletingHandlerSystem>
                 let removeFromMap () =
                     match deletedHandlerMap.TryGetValue handler with
@@ -204,7 +217,8 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                     let result =
                         withItemContext ctxs conn session json (fun ctx ->
                             withHandlerFaultProtocol conn (fun () ->
-                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled))
+                                let result = handler.Invoke ctx
+                                if isNull (box result) then EventHandled else result))
                     if result = RemoveHandler then removeFromMap ()
                     result)
                 sysHandlerRef <- sysHandler
@@ -220,10 +234,12 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
 
         member this.OnUpdated(handler: UpdatedHandler<'T>): unit =
             let collectionNameBytes = Encoding.UTF8.GetBytes collectionName
-            let list = eventSystem.UpdatedHandlerMapping.GetOrAdd(collectionNameBytes, CowByteSpanMapValueFactory(fun _span -> ResizeArray()))
             try
                 eventSystem.GlobalLock.Enter()
-                let ctxs = ConcurrentStack<SoloDBUpdatingEventContext<'T>>()
+                let entry = eventSystem.UpdatedHandlerMapping.GetOrAdd(collectionNameBytes, CowByteSpanMapValueFactory(fun _span ->
+                    EventHandlerList(fun () -> eventSystem.UpdatedHandlerMapping.Remove collectionNameBytes |> ignore)))
+                let list = entry.Handlers
+                let ctxs = CallbackSlots<SoloDBUpdatingEventContext<'T>>(fun () -> new SoloDBUpdatingEventContext<'T>(collectionName, createDb))
                 let mutable sysHandlerRef = Unchecked.defaultof<UpdatingHandlerSystem>
                 let removeFromMap () =
                     match updatedHandlerMap.TryGetValue handler with
@@ -235,7 +251,8 @@ type internal CollectionEventSystem<'T> internal (collectionName: string, eventS
                     let result =
                         withUpdatingContext ctxs conn session jsonOld jsonOldSize jsonNew jsonNewSize (fun ctx ->
                             withHandlerFaultProtocol conn (fun () ->
-                                handler.Invoke ctx |> Option.ofObj |> Option.defaultValue EventHandled))
+                                let result = handler.Invoke ctx
+                                if isNull (box result) then EventHandled else result))
                     if result = RemoveHandler then removeFromMap ()
                     result)
                 sysHandlerRef <- sysHandler

@@ -42,6 +42,14 @@ let private isSimpleProjectionExpr (expr: SqlExpr) : bool =
 let private hasSimpleOuterProjections (outer: SelectCore) : bool =
     outer.Projections |> ProjectionSetOps.toList |> List.forall (fun p -> isSimpleProjectionExpr p.Expr)
 
+/// Separate child optimization does not substitute a parent removed by flattening.
+let private outerExpressionsStayLocal (outer: SelectCore) =
+    let mutable local = true
+    mapCoreExpressions (fun expression ->
+        if hasCorrelatedRef expression then local <- false
+        expression) id outer |> ignore
+    local
+
 /// Determine if a DerivedTable's inner SelectCore can be safely flattened
 /// into the given outer SelectCore.
 let isFlattenSafe (outer: SelectCore) (innerCore: SelectCore) : bool =
@@ -59,11 +67,13 @@ let isFlattenSafe (outer: SelectCore) (innerCore: SelectCore) : bool =
     && not (innerCore.Projections |> ProjectionSetOps.toList |> List.exists (fun p -> hasAggregateCall p.Expr))
     // F8: Outer has no conflicting GROUP BY
     && outer.GroupBy.IsEmpty
+    && outer.Having.IsNone
     // F9: Outer joins remain fail-closed (join merge deferred)
     && outer.Joins.IsEmpty
     // Expression-complexity guard: outer projections must be simple (Column/JsonExtractExpr).
     // hasBaseTableInnerSource removed — provenance-backed resolution handles DerivedTable sources.
     && hasSimpleOuterProjections outer
+    && outerExpressionsStayLocal outer
 
 /// Check if a SqlSelect's body is a SingleSelect with a DerivedTable source,
 /// and if so, whether it's flatten-safe.

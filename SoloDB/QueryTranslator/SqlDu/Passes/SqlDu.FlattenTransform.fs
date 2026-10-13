@@ -18,26 +18,18 @@ open SoloDatabase.AliasRewrite
 // After flattening, those references must resolve to the inner's actual expressions.
 // ══════════════════════════════════════════════════════════════
 
-/// Strip embedded quotes from a source alias to normalize quoting.
-/// The LINQ translator generates Column(Some "\"Order\"", ...) with embedded quotes
-/// but BaseTable("Order", None) without. After flatten merge, expressions must use
-/// the same naming as the merged source.
-let private stripQuotes (s: string) : string =
-    if s.Length >= 2 && s.[0] = '"' && s.[s.Length - 1] = '"' then s.[1..s.Length - 2]
-    else s
-
 /// Normalize source alias quoting in an expression to match BaseTable naming.
 let internal normalizeExprQuoting (expr: SqlExpr) : SqlExpr =
     SqlExpr.map (fun node ->
         match node with
         | Column(Some src, col) ->
-            let norm = stripQuotes src
+            let norm = normalizeSourceAlias src
             if norm <> src then Column(Some norm, col) else node
         | JsonExtractExpr(Some src, col, path) ->
-            let norm = stripQuotes src
+            let norm = normalizeSourceAlias src
             if norm <> src then JsonExtractExpr(Some norm, col, path) else node
         | JsonRootExtract(Some src, col) ->
-            let norm = stripQuotes src
+            let norm = normalizeSourceAlias src
             if norm <> src then JsonRootExtract(Some norm, col) else node
         | _ -> node) expr
 
@@ -54,6 +46,7 @@ let private buildAliasMap (innerCore: SelectCore) : Map<string, SqlExpr> =
 let rec private rewriteExpr (changed: bool ref) (aliasMap: Map<string, SqlExpr>) (derivedAlias: string) (expr: SqlExpr) : SqlExpr =
     rewriteDerivedAliasExpr
         { MatchEmptyDerivedAlias = false
+          MatchUnqualifiedColumns = true
           OnSubquerySelect = flattenSelect changed }
         aliasMap
         derivedAlias
@@ -67,7 +60,13 @@ and private flattenCore (changed: bool ref) (outer: SelectCore) (innerCore: Sele
     let rewrittenProjections =
         outer.Projections
         |> ProjectionSetOps.map (fun p ->
-            { p with Expr = rewriteExpr changed aliasMap derivedAlias p.Expr })
+            let expression = rewriteExpr changed aliasMap derivedAlias p.Expr
+            let alias =
+                match p.Alias, projectionAlias p, expression with
+                | None, Some name, Column(_, selected) when name = selected -> None
+                | None, Some name, _ -> Some name
+                | _ -> p.Alias
+            { p with Expr = expression; Alias = alias })
 
     // Merge: take inner's source, joins, where, order, limit, offset
     // Outer's where (if any) gets AND'd with inner's where

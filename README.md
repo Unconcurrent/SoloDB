@@ -15,6 +15,8 @@ I wrote a detailed comparison with a popular alternative, [LiteDB](https://githu
 - [Core Features](#core-features)
 - [Why SoloDB?](#why-solodb)
 - [Installation](#installation)
+- [Generated Metadata Registration](#generated-metadata-registration)
+- [Direct Typed JSON](#direct-typed-json)
 - [Getting Started: A 60-Second Guide](#getting-started-a-60-second-guide)
 - [Usage and Examples](#usage-and-examples)
   - [Initializing the Database](#initializing-the-database)
@@ -64,6 +66,28 @@ Install SoloDB directly from the NuGet Package Manager.
 ```bash
 dotnet add package SoloDB
 ```
+
+## Generated Metadata Registration
+
+C# and F# projects can register build-generated operations for their original model types. See the [registration guide](docs/generated-metadata.md) for inferred roots, explicit registration, conditional activation and current NativeAOT validation limits.
+
+## Direct Typed JSON
+
+Write typed values to UTF-8 or UTF-16 storage and read them with `ParseInto<T>`:
+
+```csharp
+using System;
+using SoloDatabase.JsonSerializator;
+
+Span<byte> destination = Span<byte>.Empty;
+int written = JsonValue.WriteJson(new[] { 1, 2, 3 }, ref destination);
+ReadOnlySpan<byte> json = destination.Slice(0, written);
+int[] values = JsonValue.ParseInto<int[]>(json);
+```
+
+An empty span grows automatically; `written` counts bytes for UTF-8 and characters for UTF-16. Writable-list overloads append and return the added count. See the [direct JSON guide](docs/generated-metadata.md#direct-typed-json) for custom growth/release callbacks, final-buffer ownership and failure behavior. NativeAOT uses the generated registration described above. `Serialize<T>` and `Parse` remain available when you need a `JsonValue` tree.
+
+Direct floating-point conversion avoids the decimal-backed tree's rounding and range limits. Output for values previously rounded or rejected can differ. The forward typed-reader implementation passes current functional controls: setters and conversions run in input order, an invalid earlier duplicate fails, and user effects can remain after later malformed or trailing input. Exceptional late runtime-type selection can replay conversion and add effects. See the [direct JSON behavior and ownership guide](docs/generated-metadata.md#direct-typed-json). A single checked round-trip comparison reduced elapsed time and managed allocation for small and large integer arrays in both encodings; see the guide for exact scope. It establishes no general speedup, allocation-free behavior or competitor advantage.
 
 ## Getting Started: A 60-Second Guide
 
@@ -233,6 +257,9 @@ teams.Insert(team);
 Important constraints:
 
 - `OnOwnerDelete = Cascade` is rejected by schema/build guards.
+- Reference properties may use different policies and single-reference uniqueness settings for the same target, including mixtures of typed and untyped Single and Many references. Each property retains its own policy.
+- Independent linked `Restrict` policies are checked before the associated deletion effects. Inverse views of the same shared Many links retain their existing owner-unlink behavior. Owner deletion removes applicable links before deciding whether targets reached through `Deletion` references are orphaned. Surviving external references preserve a target; an `Unlink` reference alone does not request target deletion.
+- Multiple Many properties that resolve to the same shared relation remain invalid because their independent links cannot be distinguished.
 
 #### Loading Semantics
 
@@ -297,7 +324,8 @@ Key behavior:
 - Exclude is stricter than non-included: excluded relation `.Value` access is rejected.
 - Same path in Include and Exclude is rejected deterministically.
 - `DBRef<T>.Id` is always the persisted relation id (or `0` for empty).
-- `DBRef<T>.Value` requires materialization; excluded/unloaded access throws `InvalidOperationException`.
+- `DBRef<T>.Value` requires materialization; excluded/unloaded access throws `InvalidOperationException`. Selecting a reference alone can return an unloaded reference; check `IsLoaded` before accessing `Value`.
+- A loaded document target retains its physical row ID in its writable `long Id` property, so updating or reusing that target addresses the existing row. A typed reference also retains the target’s separate `[SoloId]` key.
 - `DBRefMany<T>` relation queries (`Any`, `Count`) are translated through relation metadata/link tables.
 
 #### UpdateMany and Relation Diffs
@@ -413,13 +441,15 @@ teamsR.Insert(teamR) |> ignore
 1. Unsupported relation query/update expression shapes are rejected with typed exceptions (`NotSupportedException`).
 2. Missing/inconsistent relation metadata is rejected where knowable (build/bootstrap), with translation-time safety net rejects for invalid metadata states.
 3. Reject paths are fail-closed: no owner/target/link/catalog mutation on rejected operations.
+4. Reference mutations that introduce a directed cycle or a path exceeding 10 reference hops throw `InvalidOperationException`. Admission checks the final stored graph, including bulk and callback effects, before the operation succeeds.
 
 **No silent fallback:** SoloDB does not silently downgrade unsupported relation operations to generic JSON scanning behavior.
 
 #### Compatibility and Migration Notes
 
 - Existing `DBRef<TTarget>` / `DBRefMany<TTarget>` persistence model remains relation-first (`SoloDBRelLink_*`, `SoloDBRelation`).
-- DBRef traversal depth is bounded: chains deeper than 10 relation hops are rejected during translation.
+- Relation query expressions support up to 10 reference hops. Write admission separately checks the final stored paths affected by newly introduced edges: a document starts at depth zero, 10 hops are allowed, and an 11th hop or directed cycle is rejected. Existing-ID `To` references count, including paths through previously stored ancestors. Shared targets and repeated CLR types on distinct rows are permitted when those paths remain within the limit and acyclic.
+- Existing deep or cyclic data remains readable with bounded loading; default `GetById` and ordinary query loading retain their existing 11-hop boundary. Saves that leave final reference adjacency unchanged or only remove edges remain permitted, allowing incremental repair. Opening a database does not scan or repair its graph. New reciprocal navigable Many links are rejected when their forward and inverse references form a cycle.
 - `DBRefMany<T>` item ordering is not a stable ordering contract unless your query/project explicitly orders results.
 - Nested DBRefMany relation predicates (e.g. `Items.Any(i => i.SubItems.Any(...))`) are supported up to 10 relation hops.
 - `option<DBRef<_>>` / `option<DBRefMany<_>>` relation-property shapes are not supported; use `DBRef<_>.None` for empty single refs.
@@ -671,7 +701,13 @@ bool exists = fs.Exists("/reports/report-2024.txt"); // true
 fs.DeleteFileAt("/reports/report-2024.txt");
 ```
 
+### Filesystem references
+
+Documents can protect existing files and directories with Single and Many references. See [Filesystem references](docs/filesystem-references.md) for C# and F# examples, loading and mutation behavior.
+
 ### Events API
+
+Filesystem changes are available through `db.FileSystem.Events`, including typed header, metadata and logical byte-range callbacks. See [Filesystem events](docs/filesystem-events.md) for examples and callback semantics.
 
 SoloDB provides a powerful event system for reacting to collection changes. Events are implemented via SQLite triggers, ensuring they participate in the same transaction as the triggering operation.
 
@@ -797,3 +833,7 @@ This project is licensed under the GNU Lesser General Public License v3.0 (LGPL-
 In addition, special permission is granted to distribute applications that incorporate an unmodified DLL of this library in Single-file deployments, Native AOT builds, and other bundling technologies that embed the library directly into the executable file. This ensures you can use modern .NET deployment strategies without violating the license.
 
 Full license details are available [here](https://solodb.org/legal.html).
+
+### Direct SQL
+
+See [Direct SQL connections](docs/native-sql.md) for named SQL execution, typed rows, parameter plans and transactions.

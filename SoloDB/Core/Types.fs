@@ -122,7 +122,8 @@ type internal SoloDBFileChunk = {
 
 type internal SoloDBConfiguration = {
     /// The general switch to enable or disable caching.
-    /// By disabling it, any cached data will be automatically cleared.
+    /// Disabling prevents subsequent prepared-statement reuse and caching.
+    /// Existing entries remain available after re-enabling; ClearCache retires them explicitly.
     mutable CachingEnabled: bool
 }
 

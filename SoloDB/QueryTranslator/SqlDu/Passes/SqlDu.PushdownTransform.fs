@@ -35,6 +35,7 @@ let private buildAliasMap (innerCore: SelectCore) : Map<string, SqlExpr> =
 let private rewriteExpr (aliasMap: Map<string, SqlExpr>) (derivedAlias: string) (expr: SqlExpr) : SqlExpr =
     rewriteDerivedAliasExpr
         { MatchEmptyDerivedAlias = true
+          MatchUnqualifiedColumns = true
           OnSubquerySelect = id }
         aliasMap
         derivedAlias

@@ -26,6 +26,7 @@ let private emitBinaryOp (op: BinaryOperator) : string =
     | In -> "IN"
     | NotInOp -> "NOT IN"
     | BitwiseAnd -> "&"
+    | JsonText -> "->"
 
 /// Emit a SQL literal value.
 /// When ctx.InlineLiterals is true, Integer/Float/String are emitted inline (product behavior).
@@ -66,6 +67,7 @@ let private emitAggregateKind (kind: AggregateKind) : string =
     | Max -> "MAX"
     | GroupConcat -> "GROUP_CONCAT"
     | JsonGroupArray -> "jsonb_group_array"
+    | ExactNumeric(kind, domain) -> SoloDatabase.Numerics.ExactNumericNames.aggregate kind domain
 
 /// Emit a SqlExpr to SQL text with parameters.
 /// Exhaustive pattern match over every SqlExpr case.
@@ -118,6 +120,11 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
     // Case 6: JSON array expression — json_array(e1, e2, ...)
     | JsonArrayExpr elements ->
         EmitJson.emitJsonArray ctx emitE elements
+
+    | RowValueExpr elements ->
+        let values = elements |> List.map (emitE ctx)
+        { Sql = "(" + (values |> List.map _.Sql |> String.concat ", ") + ")"
+          Parameters = Emitted.collectParameters values }
 
     // Case 7: JSON object expression — jsonb_object('k1', v1, 'k2', v2, ...)
     | JsonObjectExpr properties ->
@@ -260,4 +267,3 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
         | None ->
             { Sql = "CASE " + branchSql + " END"
               Parameters = branchParams }
-

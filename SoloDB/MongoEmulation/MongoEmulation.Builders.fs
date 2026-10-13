@@ -73,25 +73,25 @@ type FilterDefinitionBuilder<'T> () =
     /// Adds an equality filter using a string field name.
     /// </summary>
     member this.Eq<'TField>(field: string, value: 'TField) : FilterDefinitionBuilder<'T> =
-        this.Eq<'TField>(Helper.getPropertyExpression (field), value)
+        this.Eq<'TField>(SoloDatabase.MongoModelExpressions.Property<'T,'TField>(field), value)
 
     /// <summary>
     /// Adds a greater-than filter using a string field name.
     /// </summary>
     member this.Gt<'TField when 'TField :> IComparable>(field: string, value: 'TField) : FilterDefinitionBuilder<'T> =
-        this.Gt<'TField>(Helper.getPropertyExpression (field), value)
+        this.Gt<'TField>(SoloDatabase.MongoModelExpressions.Property<'T,'TField>(field), value)
 
     /// <summary>
     /// Adds a less-than filter using a string field name.
     /// </summary>
     member this.Lt<'TField when 'TField :> IComparable>(field: string, value: 'TField) : FilterDefinitionBuilder<'T> =
-        this.Lt<'TField>(Helper.getPropertyExpression (field), value)
+        this.Lt<'TField>(SoloDatabase.MongoModelExpressions.Property<'T,'TField>(field), value)
 
     /// <summary>
     /// Adds an "in" filter using a string field name.
     /// </summary>
     member this.In<'TField>(field: string, values: IEnumerable<'TField>) : FilterDefinitionBuilder<'T> =
-        this.In<'TField>(Helper.getPropertyExpression (field), values)
+        this.In<'TField>(SoloDatabase.MongoModelExpressions.Property<'T,'TField>(field), values)
 
     /// <summary>
     /// Combines all registered filters into a single LINQ expression using 'AndAlso'.

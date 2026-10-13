@@ -8,8 +8,7 @@ open System.Linq.Expressions
 open System.Reflection
 open System.Text
 open System.Runtime.CompilerServices
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open Utils
 open JsonFunctions
 open Connections
@@ -36,6 +35,7 @@ module internal QueryableBuildQueryMain =
         statements.Add (emptySQLStatement () |> Simple)
 
         let mutable tableName = ""
+        let mutable rootElementType: Type = null
         let mutable pendingDistinctByScalarReuse : LoweredKeySelector option = None
         // Set when Select consumes a carried scalar slot (SupportedLinqMethods.DistinctBy → Select reuse path).
         // Terminal zero-arg aggregates use this to consume Value directly instead of retranslating.
@@ -46,34 +46,47 @@ module internal QueryableBuildQueryMain =
         // Process in expression-tree order: root → Include → ThenInclude → ThenExclude
         // to accumulate dotted chain paths for ThenInclude/ThenExclude.
         let mutable chainPath = ""
-        for q in preprocessed do
-            match q with
-            | Method m when m.Value = SupportedLinqMethods.Include ->
-                let path = extractRelationPathOrThrow "Include" m.Expressions
+        let registerRelation operation expressions =
+            match operation with
+            | SupportedLinqMethods.Include ->
+                let path = extractRelationPathOrThrow "Include" expressions
                 chainPath <- path
                 registerIncludePath sourceCtx path
-            | Method m when m.Value = SupportedLinqMethods.ThenInclude ->
-                let hop = extractRelationPathOrThrow "ThenInclude" m.Expressions
+            | SupportedLinqMethods.ThenInclude ->
+                let hop = extractRelationPathOrThrow "ThenInclude" expressions
                 chainPath <- if chainPath = "" then hop else chainPath + "." + hop
                 registerIncludePath sourceCtx chainPath
-            | Method m when m.Value = SupportedLinqMethods.ThenExclude ->
-                let hop = extractRelationPathOrThrow "ThenExclude" m.Expressions
+            | SupportedLinqMethods.ThenExclude ->
+                let hop = extractRelationPathOrThrow "ThenExclude" expressions
                 let excludePath = if chainPath = "" then hop else chainPath + "." + hop
                 registerExcludePath sourceCtx excludePath
                 // ThenExclude does NOT advance chainPath — it stays at the parent level
-            | Method m when m.Value = SupportedLinqMethods.Exclude && m.Expressions.Length > 0 ->
-                let path = extractRelationPathOrThrow "Exclude" m.Expressions
+            | SupportedLinqMethods.Exclude when expressions.Length > 0 ->
+                let path = extractRelationPathOrThrow "Exclude" expressions
                 chainPath <- ""
                 registerExcludePath sourceCtx path
-            | Method m when m.Value = SupportedLinqMethods.Exclude && m.Expressions.Length = 0 ->
+            | SupportedLinqMethods.Exclude ->
                 // Parameterless Exclude() — whitelist mode
                 sourceCtx.WhitelistMode <- true
+            | _ -> ()
+        for q in preprocessed do
+            match q with
+            | Method m -> registerRelation m.Value m.Expressions
+            | Relation directive ->
+                let operation =
+                    match directive.Operation with
+                    | RelationQueryOperation.Include -> SupportedLinqMethods.Include
+                    | RelationQueryOperation.ThenInclude -> SupportedLinqMethods.ThenInclude
+                    | RelationQueryOperation.Exclude -> SupportedLinqMethods.Exclude
+                    | RelationQueryOperation.ThenExclude -> SupportedLinqMethods.ThenExclude
+                let expressions = if isNull directive.Selector then Array.empty else [|directive.Selector :> Expression|]
+                registerRelation operation expressions
             | _ -> ()
 
         validateIncludeExcludeConflicts sourceCtx
 
         let reversed = preprocessed
-        let mutable pendingGroupByExprs : Expression array option = None
+        let mutable pendingGroupByExprs : struct(Expression array * Type) option = None
         let mutable pendingGroupByHavingPreds : Expression list = []
         let mutable pendingGroupByOrders : (Expression * bool) list = []
         let mutable idx = 0
@@ -99,7 +112,10 @@ module internal QueryableBuildQueryMain =
                     | _ -> ()
             let q = reversed.[idx]
             match q with
-            | RootQuery rq -> tableName <- rq.SourceTableName
+            | RootQuery rq ->
+                tableName <- rq.SourceTableName
+                rootElementType <- QueryRootFacts.elementType rq
+            | Relation _ -> ()
             | Method m ->
                 let inline simpleCurrent() = simpleCurrent statements
                 let inline installTerminalOrdering (ordering: Expression) (descending: bool) (rawExpr: SqlExpr option) =
@@ -108,7 +124,7 @@ module internal QueryableBuildQueryMain =
                     current.Orders.Clear()
                     current.Orders.Add({ OrderingRule = ordering; Descending = descending; RawExpr = rawExpr })
                     if List.isEmpty existingOrders then
-                        current.Orders.Add({ OrderingRule = UtilsReflection.ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id")); Descending = false; RawExpr = None })
+                        current.Orders.Add({ OrderingRule = TypeMetadata.ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id")); Descending = false; RawExpr = None })
                     else
                         for order in existingOrders do
                             current.Orders.Add(order)
@@ -132,24 +148,24 @@ module internal QueryableBuildQueryMain =
                         pendingGroupByOrders <- pendingGroupByOrders @ [m.Expressions.[0], (m.Value = SupportedLinqMethods.OrderByDescending || m.Value = SupportedLinqMethods.ThenByDescending)]
                         pendingGroupByHandled <- true
                     | SupportedLinqMethods.Select ->
-                        let groupByExprs = pendingGroupByExprs.Value
+                        let struct(groupByExprs, groupType) = pendingGroupByExprs.Value
                         let havingPreds = pendingGroupByHavingPreds |> List.rev
                         let groupOrders = pendingGroupByOrders
                         pendingGroupByExprs <- None
                         pendingGroupByHavingPreds <- []
                         pendingGroupByOrders <- []
                         QueryableBuildQueryGroupByOps.applyGroupBySelect<'T>
-                            sourceCtx tableName statements groupByExprs havingPreds groupOrders m.Expressions
+                            sourceCtx tableName statements groupByExprs havingPreds groupOrders m.Expressions groupType
                         pendingGroupByHandled <- true
                     | _ ->
-                        let groupByExprs = pendingGroupByExprs.Value
+                        let struct(groupByExprs, groupType) = pendingGroupByExprs.Value
                         pendingGroupByExprs <- None
                         let havingPreds = pendingGroupByHavingPreds |> List.rev
                         let groupOrders = pendingGroupByOrders
                         pendingGroupByHavingPreds <- []
                         pendingGroupByOrders <- []
                         QueryableBuildQueryGroupByOps.flushGroupByAsJsonGroupArray<'T>
-                            sourceCtx tableName statements groupByExprs havingPreds groupOrders
+                            sourceCtx tableName statements groupByExprs havingPreds groupOrders groupType
 
                 if not pendingGroupByHandled then
                     match m.Value with
@@ -186,11 +202,12 @@ module internal QueryableBuildQueryMain =
                     | SupportedLinqMethods.GroupBy ->
                         let last = m.OriginalMethod.GetParameters() |> Array.last
                         if last.ParameterType.IsGenericType
-                           && last.ParameterType.GetGenericTypeDefinition() = typedefof<System.Collections.Generic.IEqualityComparer<_>> then
+                           && typedefof<System.Collections.Generic.IEqualityComparer<_>>.Equals(last.ParameterType.GetGenericTypeDefinition()) then
                             ChainExpr.validateGroupingComparer "GroupBy" (m.OriginalMethod.GetGenericArguments().[1]) (Array.last m.Expressions)
                         QueryableBuildQueryGroupByOps.applyGroupByKeyOnly<'T>
                             sourceCtx tableName statements m.Expressions
-                        pendingGroupByExprs <- Some m.Expressions
+                        let groupType = m.OriginalMethod.ReturnType.GetGenericArguments()[0]
+                        pendingGroupByExprs <- Some(struct(m.Expressions, groupType))
                     | SupportedLinqMethods.Count
                     | SupportedLinqMethods.LongCount
                     | SupportedLinqMethods.SelectMany
@@ -210,12 +227,13 @@ module internal QueryableBuildQueryMain =
                             tableName
                             statements
                             (fun innerCtx vars expression -> translateQuery<'T> translationStepCounter innerCtx vars expression)
-                            m
+                            m |> ignore
                     | SupportedLinqMethods.All
                     | SupportedLinqMethods.Any
                     | SupportedLinqMethods.Contains
                     | SupportedLinqMethods.Append
                     | SupportedLinqMethods.Concat
+                    | SupportedLinqMethods.Union
                     | SupportedLinqMethods.Except
                     | SupportedLinqMethods.Intersect
                     | SupportedLinqMethods.ExceptBy
@@ -233,29 +251,31 @@ module internal QueryableBuildQueryMain =
                             tableName
                             statements
                             (fun innerCtx vars expression -> translateQuery<'T> translationStepCounter innerCtx vars expression)
-                            m
+                            m |> ignore
 
             idx <- idx + 1
 
         // Flush any trailing pending GroupBy.
         if pendingGroupByExprs.IsSome then
-            let groupByExprs = pendingGroupByExprs.Value
+            let struct(groupByExprs, groupType) = pendingGroupByExprs.Value
             let havingPreds = pendingGroupByHavingPreds |> List.rev
             let groupOrders = pendingGroupByOrders
             pendingGroupByExprs <- None
             pendingGroupByHavingPreds <- []
             pendingGroupByOrders <- []
             QueryableBuildQueryGroupByOps.flushGroupByAsJsonGroupArray<'T>
-                sourceCtx tableName statements groupByExprs havingPreds groupOrders
+                sourceCtx tableName statements groupByExprs havingPreds groupOrders groupType
 
         match statements.[0] with
         | Simple s ->
             statements.[0] <- Simple {s with TableName = tableName}
         | ComplexDu _ ->
             ()
+        if isNull rootElementType then
+            raise (NotSupportedException("The query must contain a typed collection root."))
+        rootElementType
 
-    and internal translateQuery<'T> (translationStepCounter: int ref) (sourceCtx: QueryContext) (vars: Dictionary<string, obj>) (expression: Expression) : SqlSelect =
+    and internal translateQuery<'T> (translationStepCounter: int ref) (sourceCtx: QueryContext) (vars: Dictionary<string, obj>) (expression: Expression) : TranslatedQuery =
         let statements = ResizeArray<SQLSubquery>()
-        buildQuery<'T> translationStepCounter sourceCtx statements expression
-        buildLayersDu<'T> sourceCtx vars statements
-    
+        let rootElementType = buildQuery<'T> translationStepCounter sourceCtx statements expression
+        buildLayersDu rootElementType sourceCtx vars statements

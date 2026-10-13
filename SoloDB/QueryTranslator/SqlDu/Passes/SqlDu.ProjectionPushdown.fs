@@ -3,6 +3,7 @@ module internal SoloDatabase.ProjectionPushdown
 open SoloDatabase.SqlModel
 open SoloDatabase.ProjectionLiveness
 open SoloDatabase.ExpressionPredicates
+open SoloDatabase.AliasRewrite
 
 // ══════════════════════════════════════════════════════════════
 // Projection Pushdown Transform

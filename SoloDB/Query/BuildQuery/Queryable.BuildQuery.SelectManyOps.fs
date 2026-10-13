@@ -9,8 +9,7 @@ open System.Threading
 open System.Reflection
 open System.Text
 open System.Runtime.CompilerServices
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open Utils
 open JsonFunctions
 open Connections
@@ -23,6 +22,7 @@ open SoloDatabase.SqlModel
 module internal QueryableBuildQuerySelectManyOps =
     open QueryableHelperState
     open QueryableHelperJoin
+    open QueryableHelperJoinBindings
     open QueryableHelperPreprocess
     open QueryableLayerBuild
     open QueryableHelperBase
@@ -31,9 +31,10 @@ module internal QueryableBuildQuerySelectManyOps =
         (sourceCtx: QueryContext)
         (tableName: string)
         (statements: ResizeArray<SQLSubquery>)
-        (translateQueryFn: QueryContext -> Dictionary<string, obj> -> Expression -> SqlSelect)
+        (translateQueryFn: QueryContext -> Dictionary<string, obj> -> Expression -> TranslatedQuery)
         (expressions: Expression array)
         (originalMethod: MethodInfo) =
+                    let elementType = ModelMetadata.SequenceElement originalMethod.ReturnType
                     match tryMatchCanonicalLeftJoinComposite expressions with
                     | Some composite ->
                         if composite.ResultSelector.Parameters.Count <> 2 then
@@ -53,8 +54,8 @@ Fix: Join on a single scalar key or move the query after AsEnumerable()."))
                             | Some source -> source
                             | None ->
                                 let innerExpression = readSoloDBQueryableUntyped composite.InnerExpression
-                                match tryGetJoinRootSourceTable innerExpression with
-                                | Some tableName -> { TableName = tableName; WherePredicates = [] }
+                                match tryGetJoinRootSource innerExpression with
+                                | Some struct(tableName, originalType) -> { TableName = tableName; SerializationType = originalType; WherePredicates = [] }
                                 | None ->
                                     raise (NotSupportedException(
                                         "Error: Left-join inner source is not supported.
@@ -77,9 +78,10 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                         addComplexFinal statements (fun ctx ->
                             let outerAlias = "o"
                             let innerAlias = "j"
-                            let innerCtx = QueryContext.ChildOf(sourceCtx, innerRootTable)
+                            let outerCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input; Joins = ResizeArray() }
+                            let innerCtx = { QueryContext.ChildOf(sourceCtx, innerRootTable) with SerializationInput = QueryTranslatorPhysicalSource.ownerInput sourceCtx innerSource.SerializationType innerRootTable (SqlExpr.Column(Some innerAlias, "Id")) }
                             let outerKeyExpr =
-                                translateJoinSingleSourceExpression sourceCtx outerAlias ctx.Vars (Some composite.OuterKeySelector.Parameters.[0]) composite.OuterKeySelector.Body
+                                translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars (Some composite.OuterKeySelector.Parameters.[0]) composite.OuterKeySelector.Body
                             let innerKeyExpr =
                                 translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some composite.InnerKeySelector.Parameters.[0]) composite.InnerKeySelector.Body
 
@@ -93,21 +95,21 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                             translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some lambda.Parameters.[0]) lambda.Body)
                                     translatedPredicates |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) keyEq
 
-                            let resultExpr =
-                                translateJoinResultSelectorExpression
-                                    sourceCtx
+                            let result =
+                                translateJoinResultSelectorProduced
+                                    outerCtx
                                     innerCtx
                                     ctx.Vars
                                     outerAlias
                                     innerAlias
                                     composite.OuterKeySelector.Parameters.[0]
                                     innerResultParam
-                                    rewrittenResultBody
+                                    rewrittenResultBody ValueNone
 
                             let core =
                                 { mkCore
                                     [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some outerAlias, "Id") }
-                                     { Alias = Some "Value"; Expr = resultExpr }]
+                                     { Alias = Some "Value"; Expr = SqlExpr.Literal SqlLiteral.Null }]
                                     (Some (DerivedTable(ctx.Inner, outerAlias)))
                                   with
                                       Joins =
@@ -115,7 +117,8 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                               JoinKind.Left,
                                               BaseTable(innerRootTable, Some innerAlias),
                                               joinCondition)] }
-                            wrapCore core
+                            let struct(query, input) = QueryProduced.publishCore sourceCtx.NextAlias core result false
+                            { Query = query; SerializationInput = input; KeyInput = ValueNone }
                         )
                     | None ->
                         // Check for DBRefMany SelectMany using JOIN-based flattening.
@@ -125,8 +128,8 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                 match expressions.[0] with
                                 | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
                                     let lambda = ue.Operand :?> LambdaExpression
-                                    match lambda.Body with
-                                    | :? MemberExpression as me when DBRefTypeHelpers.isDBRefManyType me.Type ->
+                                    match QueryTranslatorBaseHelpers.normalizeStoredConstruction lambda.Body with
+                                    | :? MemberExpression as me when DBRefTypeHelpers.isManyReferenceType me.Type ->
                                         // Restrict this path to direct owner-parameter member access.
                                         // Reject member chains (o.Ref.Value.Tags) and non-parameter bases.
                                         match me.Expression with
@@ -140,141 +143,60 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                             | _ -> None
 
                         match tryMatchDBRefManySelectMany () with
-                        | Some (_selectorLambda, memberExpr, argCount) ->
-                            // DBRefMany SelectMany lowers to owner, link, and target joins.
-                            let propName = memberExpr.Member.Name
-                            let targetType = memberExpr.Type.GetGenericArguments().[0]
+                        | Some (selectorLambda, memberExpr, argCount) ->
                             addComplexFinal statements (fun ctx ->
-                                let innerSourceName = Utils.getVarName (Interlocked.Increment(sourceCtx.AliasCounter))
-                                let lnkAlias = "_lnk"
-                                let tgtAlias = "_tgt"
-
-                                // Resolve link table and target table from relation metadata.
-                                let linkTable =
-                                    match sourceCtx.TryResolveRelationLink(tableName, propName) with
-                                    | Some mapped when not (System.String.IsNullOrWhiteSpace mapped) -> formatName mapped
-                                    | _ ->
-                                        raise (InvalidOperationException(
-                                            sprintf "Error: Relation metadata not found for property %s on collection %s.\nReason: The link table for this relation could not be resolved.\nFix: Ensure the collection is initialized with Insert or GetCollection before querying, or call AsEnumerable() before accessing this relation." propName tableName))
-                                let ownerUsesSource =
-                                    match sourceCtx.TryResolveRelationOwnerUsesSource(tableName, propName) with
-                                    | Some v -> v
-                                    | None ->
-                                        raise (InvalidOperationException(
-                                            sprintf "Error: Relation metadata not found for property %s on collection %s.\nReason: The owner-source direction for this relation could not be determined.\nFix: Ensure the collection is initialized with Insert or GetCollection before querying, or call AsEnumerable() before accessing this relation." propName tableName))
-                                let ownerColumn = if ownerUsesSource then "SourceId" else "TargetId"
-                                let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
-                                let targetTable =
-                                    let defaultTable = formatName targetType.Name
-                                    match sourceCtx.TryResolveRelationTarget(tableName, propName) with
-                                    | Some mapped when not (System.String.IsNullOrWhiteSpace mapped) -> formatName mapped
-                                    | _ -> sourceCtx.ResolveCollectionForType(UtilsReflection.typeIdentityKey targetType, defaultTable)
-
-                                // JOIN: owner → link (on owner.Id = link.ownerCol) → target (on target.Id = link.targetCol)
-                                let linkJoinOn =
-                                    SqlExpr.Binary(
-                                        SqlExpr.Column(Some innerSourceName, "Id"),
-                                        BinaryOperator.Eq,
-                                        SqlExpr.Column(Some lnkAlias, ownerColumn))
-                                let targetJoinOn =
-                                    SqlExpr.Binary(
-                                        SqlExpr.Column(Some tgtAlias, "Id"),
-                                        BinaryOperator.Eq,
-                                        SqlExpr.Column(Some lnkAlias, targetColumn))
-
-                                // Wrap owner query to project only Id (strip Value to prevent ambiguity with target).
-                                let ownerAlias = "_ow"
-                                let ownerIdCore =
-                                    mkCore
-                                        [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some ownerAlias, "Id") }]
-                                        (Some (DerivedTable(ctx.Inner, ownerAlias)))
-                                let ownerIdSel = wrapCore ownerIdCore
-                                let ownerIdName = Utils.getVarName (Interlocked.Increment(sourceCtx.AliasCounter))
-
-                                // Re-bind link JOIN to use the Id-only owner source.
-                                let linkJoinOnIdOnly =
-                                    SqlExpr.Binary(
-                                        SqlExpr.Column(Some ownerIdName, "Id"),
-                                        BinaryOperator.Eq,
-                                        SqlExpr.Column(Some lnkAlias, ownerColumn))
-
-                                if argCount = 1 then
-                                    // Case A: bare SelectMany — return target entities.
-                                    let core =
-                                        { mkCore
-                                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some tgtAlias, "Id") }
-                                             { Alias = Some "Value"; Expr = SqlExpr.Column(Some tgtAlias, "Value") }]
-                                            (Some (DerivedTable(ownerIdSel, ownerIdName)))
-                                          with
-                                              Joins =
-                                                  [ConditionedJoin(Inner, BaseTable(linkTable, Some lnkAlias), linkJoinOnIdOnly)
-                                                   ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), targetJoinOn)] }
-                                    wrapCore core
-                                else
-                                    // Case C: SelectMany with result selector (2 args).
-                                    let resultSelectorExpr = expressions.[1]
-                                    match resultSelectorExpr with
-                                    | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
-                                        let resultLambda = ue.Operand :?> LambdaExpression
+                                let ownerAlias = sourceCtx.NextAlias()
+                                let ownerCtx = { sourceCtx.CloneForSubquery() with LayerPosition = OuterLayer; SerializationInput = ctx.Input }
+                                let builder = QueryBuilder.New (StringBuilder()) ctx.Vars false ownerAlias selectorLambda -1 (ValueSome ownerCtx)
+                                let ownerRef = QueryTranslatorVisitDbRefPeelers.tryGetDBRefManyOwnerRef builder memberExpr
+                                               |> ValueOption.defaultWith (fun () -> invalidOp "A relation source requires its physical owner input.")
+                                let struct(core, target) = DBRefManyBuilderCore.buildFlattenedRelationSource builder ownerRef (DerivedTable(ctx.Inner, ownerAlias))
+                                let result =
+                                    if argCount = 1 then target
+                                    else
+                                        let resultLambda = unwrapLambdaExpressionOrThrow "SelectMany result selector" expressions[1]
                                         if resultLambda.Parameters.Count <> 2 then
-                                            raise (NotSupportedException(
-                                                "Error: SelectMany result selector must have exactly 2 parameters (owner, target).\nFix: Use (o, t) => new { ... } pattern."))
-                                        let outerParam = resultLambda.Parameters.[0]
-                                        let innerParam = resultLambda.Parameters.[1]
-                                        let innerCtx = QueryContext.ChildOf(sourceCtx, targetTable)
-                                        let resultExpr =
-                                            translateJoinResultSelectorExpression
-                                                sourceCtx
-                                                innerCtx
-                                                ctx.Vars
-                                                innerSourceName
-                                                tgtAlias
-                                                outerParam
-                                                innerParam
-                                                resultLambda.Body
-                                        // Case C needs owner Value for result selector — use full owner DerivedTable.
-                                        let core =
-                                            { mkCore
-                                                [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some innerSourceName, "Id") }
-                                                 { Alias = Some "Value"; Expr = resultExpr }]
-                                                (Some (DerivedTable(ctx.Inner, innerSourceName)))
-                                              with
-                                                  Joins =
-                                                      [ConditionedJoin(Inner, BaseTable(linkTable, Some lnkAlias), linkJoinOn)
-                                                       ConditionedJoin(Inner, BaseTable(targetTable, Some tgtAlias), targetJoinOn)] }
-                                        wrapCore core
-                                    | _ ->
-                                        raise (NotSupportedException(
-                                            "Error: Invalid SelectMany result selector.\nFix: Use a lambda expression."))
-                            )
+                                            raise(NotSupportedException("Error: SelectMany result selector must have exactly 2 parameters (owner, target).\nFix: Use (o, t) => new { ... } pattern."))
+                                        let targetCtx = { ownerCtx with SerializationInput = target.Input; Joins = ResizeArray() }
+                                        let owner = QueryTranslatorVisitCore.visitProduced selectorLambda.Parameters[0] builder
+                                        translateJoinResultSelectorProduced ownerCtx targetCtx ctx.Vars ownerAlias ownerAlias
+                                            resultLambda.Parameters[0] resultLambda.Parameters[1] resultLambda.Body (ValueSome(owner, target))
+                                let edges = QueryTranslatorReferenceJoin.preparedJoinClauses ownerCtx.Joins
+                                let core = { core with Joins = edges @ core.Joins }
+                                let struct(query, input) = QueryProduced.publishCore sourceCtx.NextAlias core result false
+                                { Query = query; SerializationInput = input; KeyInput = ValueNone })
                         | None ->
                             // Fallback: json_each SelectMany.
                             addComplexFinal statements (fun ctx ->
                                 match expressions.Length with
                                 | 1 ->
-                                    let generics = UtilsReflection.GenericMethodArgCache.Get originalMethod
-                                    if generics.[1] (*output*) = typeof<byte> then
+                                    let generics = TypeMetadata.GenericMethodArgCache.Get originalMethod
+                                    if typeof<byte>.Equals(generics.[1]) then
                                         raise (InvalidOperationException "Cannot use SelectMany() on byte arrays, as they are stored as base64 strings in SQLite. To process the array anyway, first exit the SQLite context with .AsEnumerable().")
                                     // Use a stable inner source alias based on the inner select structure
                                     let innerSourceName = Utils.getVarName (Interlocked.Increment(sourceCtx.AliasCounter))
+                                    let selectorCtx = { sourceCtx.CloneForSubquery() with LayerPosition = OuterLayer; SerializationInput = ctx.Input }
                                     // Build the json_each join source expression
-                                    let jsonEachExpr =
+                                    let collection =
                                         match expressions.[0] with
                                         | :? UnaryExpression as ue when (ue.Operand :? LambdaExpression) ->
                                             let lambda = ue.Operand :?> LambdaExpression
-                                            match lambda.Body with
-                                            | :? MemberExpression as me ->
+                                            let body = QueryTranslatorBaseHelpers.normalizeStoredConstruction lambda.Body
+                                            let memberAccess =
+                                                match body with
+                                                | :? MemberExpression -> true
+                                                | :? BoundValueAccessExpression as access -> not(String.IsNullOrEmpty access.MemberName)
+                                                | _ -> false
+                                            match body with
+                                            | body when memberAccess ->
                                                 // Reject DBRefMany-typed members here; they must go through
                                                 // the link-table JOIN path, not json_each on embedded JSON.
-                                                if DBRefTypeHelpers.isDBRefManyType me.Type || DBRefTypeHelpers.isDBRefType me.Type then
+                                                if DBRefTypeHelpers.isManyReferenceType body.Type || DBRefTypeHelpers.isSingleReferenceType body.Type then
                                                     raise (NotSupportedException(
                                                         "Error: SelectMany on a relation-backed property requires direct owner-parameter access.\nReason: Non-direct member access (projected alias, computed selector) is not supported.\nFix: Use .SelectMany(o => o.RelationProperty) directly on the owner collection."))
-                                                SqlExpr.FunctionCall("jsonb_extract", [
-                                                    SqlExpr.Column(Some innerSourceName, "Value")
-                                                    SqlExpr.Literal(SqlLiteral.String ("$." + me.Member.Name))
-                                                ])
+                                                QueryTranslator.translateProduced selectorCtx innerSourceName lambda ctx.Vars
                                             | :? ParameterExpression ->
-                                                SqlExpr.Column(Some innerSourceName, "Value")
+                                                QueryTranslator.translateProduced selectorCtx innerSourceName lambda ctx.Vars
                                             | _ ->
                                                 raise (NotSupportedException(
                                                     "Error: Unsupported SelectMany selector structure.
@@ -285,13 +207,36 @@ Fix: Simplify the selector or move SelectMany after AsEnumerable()."))
                                                 "Error: Invalid SelectMany structure.
 Reason: The SelectMany arguments are not a supported query pattern.
 Fix: Rewrite the query or move SelectMany after AsEnumerable()."))
-                                    // SELECT innerSource.Id AS Id, json_each.Value as Value FROM (inner) AS innerSource JOIN json_each(expr)
+                                    let relationJoins = QueryTranslatorReferenceJoin.preparedJoinClauses selectorCtx.Joins
+                                    let resultType = TypeMetadata.GenericMethodArgCache.Get(originalMethod).[1]
+                                    let collectionAlias = sourceCtx.NextAlias()
+                                    let collectionSource, collectionInput =
+                                        match collection with
+                                        | DirectValue(value, input) -> DerivedTable(ctx.Inner, innerSourceName), (value, input)
+                                        | PackedValue _ ->
+                                            let collectionCore = mkCore [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some innerSourceName, "Id") }
+                                                                         { Alias = Some "Value"; Expr = SqlExpr.Literal SqlLiteral.Null }]
+                                                                        (Some(DerivedTable(ctx.Inner, innerSourceName)))
+                                            let collectionCore = { collectionCore with Joins = relationJoins }
+                                            let struct(query, input) = QueryProduced.publishCore sourceCtx.NextAlias collectionCore collection false
+                                            DerivedTable(query, collectionAlias), (SqlExpr.Column(Some collectionAlias, "Value"), QueryTranslatorSerialization.scopeSerializationInput (Some collectionAlias) OuterLayer input)
+                                    let jsonEachExpr, collectionInput = collectionInput
+                                    let elementAlias = sourceCtx.NextAlias()
+                                    let fullkey = SqlExpr.Column(Some elementAlias, "fullkey")
+                                    let token = SqlExpr.FunctionCall("jsonb", [SqlExpr.Binary(jsonEachExpr, BinaryOperator.JsonText, fullkey)])
+                                    let produced = QueryTranslatorSerialization.elementInput collectionInput (SqlExpr.Column(Some elementAlias, "key")) token
+                                    let produced = { produced with Carrier = if isSqlScalarResult resultType then SqlScalar else CanonicalToken }
+                                    let value = QueryProduced.scalarValue resultType token { produced with Carrier = CanonicalToken }
+                                    let packed = match collection with PackedValue _ -> true | _ -> false
+                                    let ownerAlias = if packed then collectionAlias else innerSourceName
                                     let core =
                                         { mkCore
-                                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some innerSourceName, "Id") }
-                                             { Alias = Some "Value"; Expr = SqlExpr.Column(Some "json_each", "Value") }]
-                                            (Some (DerivedTable(ctx.Inner, innerSourceName)))
-                                          with Joins = [CrossJoin(FromJsonEach(jsonEachExpr, None))] }
-                                    wrapCore core
+                                            [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some ownerAlias, "Id") }
+                                             { Alias = Some "Value"; Expr = value }]
+                                            (Some collectionSource)
+                                          with Joins = (if packed then [] else relationJoins) @ [CrossJoin(FromJsonEach(jsonEachExpr, Some elementAlias))] }
+                                    let struct(query, input) = QueryProduced.publishCore sourceCtx.NextAlias core (DirectValue(value, produced)) false
+                                    { Query = query; SerializationInput = input; KeyInput = ValueNone }
                                 | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" originalMethod.Name other))
                             )
+                    ()

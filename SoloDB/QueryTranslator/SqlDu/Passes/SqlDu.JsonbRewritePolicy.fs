@@ -37,37 +37,27 @@ open SoloDatabase.SelectCoreBoundary
 //   protect index visibility (PRESERVED_FOR_PLAN / IndexVisibilityRisk).
 // ══════════════════════════════════════════════════════════════
 
-/// Check if an expression matches a specific index entry.
-/// Ignores table qualifier during matching (indexes are stored unqualified).
-let private exprMatchesIndexEntry (indexExpr: SqlExpr) (expr: SqlExpr) : bool =
-    match indexExpr, expr with
-    | JsonExtractExpr(None, c1, p1), JsonExtractExpr(_, c2, p2) ->
-        c1 = c2 && p1 = p2
-    | Cast(JsonExtractExpr(None, c1, p1), t1), Cast(JsonExtractExpr(_, c2, p2), t2) ->
-        c1 = c2 && p1 = p2 && t1 = t2
-    | _ -> indexExpr = expr
-
-let rec private termsContain (node: SqlExpr) (terms: IndexTerm list) =
-    match terms with
-    | [] -> false
-    | term :: rest -> exprMatchesIndexEntry term.Expression node || termsContain node rest
-
-let rec private indexesContain (indexes: IndexEntry list) (node: SqlExpr) =
-    match indexes with
-    | [] -> false
-    | index :: rest -> termsContain node index.Terms || indexesContain rest node
+let private containsIndexedForm model sources expression =
+    not model.Indexes.IsEmpty &&
+    SqlExpr.exists (fun node ->
+        model.Indexes |> List.exists (fun index ->
+            sources |> List.exists (fun (table, alias) ->
+                table = index.TableName &&
+                let node = ExpressionMatcher.forSource table alias node
+                index.Terms |> List.exists (fun term ->
+                    ExpressionMatcher.expressionMatchesIndex table node term.Expression)))) expression
 
 /// Check if an expression or any sub-expression matches any known index entry.
 /// Used as a guard to prevent rewrites that would break index visibility.
 let exprContainsIndexedForm (model: IndexModel) (expr: SqlExpr) : bool =
-    not model.Indexes.IsEmpty && SqlExpr.exists (indexesContain model.Indexes) expr
+    containsIndexedForm model (model.Indexes |> List.map (fun index -> index.TableName, index.TableName) |> List.distinct) expr
 
 /// Apply path-canonicalization and set-chain rewrites to a single expression.
 /// Extract-wrapper normalization is disabled due to return-type change risk.
 /// Skips rewrite if expression contains an indexed form (index visibility guard).
-let private rewriteExpr (model: IndexModel) (expr: SqlExpr) : SqlExpr =
+let private rewriteExpr preservesIndex (expr: SqlExpr) : SqlExpr =
     // Index visibility guard: if any sub-expression matches an index, preserve
-    if exprContainsIndexedForm model expr then expr
+    if preservesIndex expr then expr
     else
         // First try set-chain flattening
         let afterChain =
@@ -80,18 +70,18 @@ let private rewriteExpr (model: IndexModel) (expr: SqlExpr) : SqlExpr =
         | None -> afterChain
 
 /// Apply rewrites to a predicate tree (walks AND/OR).
-let rec private rewritePredicate (model: IndexModel) (expr: SqlExpr) : SqlExpr =
+let rec private rewritePredicate preservesIndex (expr: SqlExpr) : SqlExpr =
     match expr with
     | Binary(l, (And as op), r)
     | Binary(l, (Or as op), r) ->
-        let left = rewritePredicate model l
-        let right = rewritePredicate model r
+        let left = rewritePredicate preservesIndex l
+        let right = rewritePredicate preservesIndex r
         if obj.ReferenceEquals(l, left) && obj.ReferenceEquals(r, right) then expr
         else Binary(left, op, right)
     | Unary(Not, e) ->
-        let inner = rewritePredicate model e
+        let inner = rewritePredicate preservesIndex e
         if obj.ReferenceEquals(e, inner) then expr else Unary(Not, inner)
-    | _ -> rewriteExpr model expr
+    | _ -> rewriteExpr preservesIndex expr
 
 /// Apply the JSONB rewrite policy to a single SelectCore.
 let private rewriteInCore (model: IndexModel) (changed: bool ref) (core: SelectCore) : SelectCore =
@@ -105,12 +95,20 @@ let private rewriteInCore (model: IndexModel) (changed: bool ref) (core: SelectC
         elif coreHasGroupMaterialization core then core
         else
             let mutable shaped = core
+            let source = function
+                | BaseTable(table, alias) -> Some(table, defaultArg alias table)
+                | _ -> None
+            let sources =
+                (core.Source |> Option.bind source |> Option.toList) @
+                (core.Joins |> List.choose (function
+                    | ConditionedJoin(_, table, _) | CrossJoin table -> source table))
+            let preservesIndex = containsIndexedForm model sources
 
             // Rewrite WHERE predicate (with index guard)
             shaped <-
                 match shaped.Where with
                 | Some where ->
-                    let rewritten = rewritePredicate model where
+                    let rewritten = rewritePredicate preservesIndex where
                     if rewritten = where then shaped
                     else changed.Value <- true; { shaped with Where = Some rewritten }
                 | None -> shaped
@@ -121,7 +119,7 @@ let private rewriteInCore (model: IndexModel) (changed: bool ref) (core: SelectC
                     shaped.Joins |> mapList (fun j ->
                         match j with
                         | ConditionedJoin(kind, source, onExpr) ->
-                            let rewritten = rewritePredicate model onExpr
+                            let rewritten = rewritePredicate preservesIndex onExpr
                             if rewritten = onExpr then j
                             else changed.Value <- true; ConditionedJoin(kind, source, rewritten)
                         | CrossJoin _ -> j)
@@ -134,7 +132,7 @@ let private rewriteInCore (model: IndexModel) (changed: bool ref) (core: SelectC
                 else
                     let newOrderBy =
                         shaped.OrderBy |> mapList (fun ob ->
-                            let rewritten = rewriteExpr model ob.Expr
+                            let rewritten = rewriteExpr preservesIndex ob.Expr
                             if rewritten = ob.Expr then ob
                             else changed.Value <- true; { ob with Expr = rewritten })
                     if newOrderBy = shaped.OrderBy then shaped
@@ -153,7 +151,7 @@ let private rewriteInCore (model: IndexModel) (changed: bool ref) (core: SelectC
                             match flattenIdentityAssignments p.Expr with
                             | Some flattened -> changed.Value <- true; { p with Expr = flattened }
                             | None ->
-                                let rewritten = rewriteExpr model p.Expr
+                                let rewritten = rewriteExpr preservesIndex p.Expr
                                 if rewritten = p.Expr then p
                                 else changed.Value <- true; { p with Expr = rewritten })
                 if newProjs = (shaped.Projections |> ProjectionSetOps.toList) then shaped

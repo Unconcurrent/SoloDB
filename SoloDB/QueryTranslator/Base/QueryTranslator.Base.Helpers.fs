@@ -10,8 +10,87 @@ open JsonFunctions
 open Utils
 open QueryTranslatorBaseTypes
 open SoloDatabase.SqlModel
+open SoloDatabase.JsonSerializator.JsonEqualitySupport
+open SoloDatabase.Metadata.Generation
 
 module internal QueryTranslatorBaseHelpers =
+    /// Carry the separately stored physical identity into an admitted entity payload.
+    let withRowIdentity value identity =
+        SqlExpr.FunctionCall("jsonb_set", [value; SqlExpr.Literal(SqlLiteral.String "$.Id"); identity])
+
+    /// Native tree publication shares the materializer's full ordinal Id finishing.
+    let withTreeRowIdentity value identity =
+        SqlExpr.FunctionCall("jsonb", [SqlExpr.FunctionCall(JsonFunctions.treeValueFunction,
+            [SqlExpr.FunctionCall("json", [value]); identity; SqlExpr.Literal(SqlLiteral.Integer(int64 TreeValueFormat.Subject))])])
+
+    let hasPhysicalRowIdentity target =
+        if isSqlScalarResult target || TypeSupport.IsScalar target.FullName then false
+        else
+            match JsonSerializator.JsonValue.SerializedValueFacts target with
+            | JsonSerializator.JsonSerializationShape.ObjectMembers _
+            | JsonSerializator.JsonSerializationShape.DeclaredMembers _ -> EntityIdentity.hasWritableInt64Id target
+            | _ -> false
+
+    let groupedRowValue target alias =
+        let value = SqlExpr.Column(Some alias, "Value")
+        if hasPhysicalRowIdentity target then withRowIdentity value (SqlExpr.Column(Some alias, "Id"))
+        else jsonToken value
+
+    /// Typed tuple members use the serializer's positional layout, including Rest.
+    let internal serializedMemberStep offset target name =
+        if isTuple target then
+            match JsonSerializator.JsonValue.SerializationShape target with
+            | JsonSerializator.JsonSerializationShape.ArrayMembers members ->
+                if name = "Rest" then [], offset + 7
+                else
+                    match members |> Array.tryFindIndex (fun memberInfo -> memberInfo.ClrName = name) with
+                    | Some index -> [Index(offset + index)], 0
+                    | None -> [Member name], 0
+            | _ -> [Member name], 0
+        else [Member name], 0
+
+    let internal serializedMemberPath (parts: (Type * string) list) =
+        let rec collect offset parts =
+            match parts with
+            | (target, "Rest") :: [] when isTuple target -> [Member "Rest"]
+            | (target, name) :: tail ->
+                let segments, next = serializedMemberStep offset target name
+                segments @ collect next tail
+            | [] -> []
+        collect 0 parts
+
+    /// The declared eighth Rest is the only tuple input flattened into its parent.
+    let internal tupleElements constructed retained element (expression: Expression) =
+        let arguments: IReadOnlyList<Expression> =
+            match expression with
+            | :? BoundValueCallExpression as call -> call.Inputs
+            | :? NewExpression as constructor -> constructor.Arguments
+            | _ -> invalidArg "expression" "A tuple constructor is required."
+        let types = TypeMetadata.GenericTypeArgCache.Get expression.Type
+        [for index in 0 .. arguments.Count - 1 do
+            let argument = arguments.[index]
+            let isRest = index = 7 && types.Length = 8 && argument.Type.Equals(types.[7]) && isTuple argument.Type
+            if isRest then
+                match argument with
+                | :? BoundValueCallExpression | :? NewExpression -> yield! constructed argument
+                | _ -> yield! retained argument
+            else yield element argument]
+
+    let internal tupleLeafToken source position =
+        let path = JsonPathOps.text [JsonSerializator.JsonEqualitySupport.Index position]
+        SqlExpr.FunctionCall("jsonb", [SqlExpr.Binary(source, BinaryOperator.JsonText, SqlExpr.Literal(SqlLiteral.String path))])
+
+    let internal tupleProjection (visit: Expression -> SqlExpr) (expression: Expression) =
+        let retained argument =
+            let source = visit argument
+            match JsonSerializator.JsonValue.SerializationShape argument.Type with
+            | JsonSerializator.JsonSerializationShape.ArrayMembers members ->
+                [for position in 0 .. members.Length - 1 do
+                    yield tupleLeafToken source position]
+            | _ -> raise(NotSupportedException("A tuple Rest operand requires its declared array layout."))
+        let rec elements expression = tupleElements elements retained visit expression
+        SqlExpr.JsonArrayExpr(elements expression)
+
     /// <summary>
     /// A private dictionary mapping .NET Math method names and arities to their corresponding SQLite function formats.
     /// $N, where N is 1-based, represents the arguments.
@@ -83,21 +162,6 @@ module internal QueryTranslatorBaseHelpers =
         |> readOnlyDict
 
     /// <summary>
-    /// Evaluates a LINQ expression that is expected to be constant, returning its value.
-    /// It first tries a direct cast for ConstantExpression and falls back to compiling and invoking for others.
-    /// </summary>
-    /// <typeparam name="'O">The expected return type.</typeparam>
-    /// <param name="e">The expression to evaluate.</param>
-    /// <returns>The result of the expression evaluation.</returns>
-    let internal evaluateExpr<'O> (e: Expression) =
-        match e with
-        | :? ConstantExpression as ce ->
-            ce.Value :?> 'O
-        | _other ->
-        let exprFunc = Expression.Lambda<Func<'O>>(UnaryExpression.Convert(e, typeof<'O>)).Compile(true)
-        exprFunc.Invoke()
-
-    /// <summary>
     /// Recursively checks if an expression originates from a root ParameterExpression.
     /// </summary>
     /// <param name="expr">The expression to check.</param>
@@ -106,6 +170,7 @@ module internal QueryTranslatorBaseHelpers =
         match expr with
         | :? ParameterExpression -> true
         | :? MemberExpression as inner -> isRootParameter inner.Expression
+        | :? BoundValueAccessExpression as inner when not(isNull inner.MemberName) -> isRootParameter inner.Parent
         | _ -> false
 
     /// <summary>
@@ -142,6 +207,8 @@ module internal QueryTranslatorBaseHelpers =
             invocationExpr.Arguments |> Seq.forall isFullyConstant && isFullyConstant invocationExpr.Expression
         | :? LambdaExpression as lambdaExpr ->
             lambdaExpr.Body |> isFullyConstant
+        | :? BoundValueCallExpression as call -> call.Inputs |> Array.forall isFullyConstant
+        | :? BoundValueAccessExpression as access -> isFullyConstant access.Parent
         | :? NewExpression as ne ->
             ne.Arguments |> Seq.forall isFullyConstant
         | :? NewArrayExpression as na ->
@@ -201,9 +268,46 @@ module internal QueryTranslatorBaseHelpers =
                 body <- visitor.Visit(body)
             body
 
+    let internal tryStoredLocal (block: BlockExpression) =
+        let rec storedAccess (local: ParameterExpression) (value: Expression) =
+            match value with
+            | :? ParameterExpression as parameter when obj.ReferenceEquals(parameter, local) ->
+                raise(ArgumentException("A stored-value binding cannot depend on its own local.", "exp"))
+            | :? ParameterExpression -> true
+            | :? MemberExpression as memberValue when not(isNull memberValue.Expression) -> storedAccess local memberValue.Expression
+            | :? BoundValueAccessExpression as memberValue when not(String.IsNullOrEmpty memberValue.MemberName) -> storedAccess local memberValue.Parent
+            | :? UnaryExpression as conversion when conversion.NodeType = ExpressionType.Convert -> storedAccess local conversion.Operand
+            | _ -> false
+        if block.Variables.Count = 1 && block.Expressions.Count = 2 then
+            match block.Expressions.[0] with
+            | :? BinaryExpression as assignment when assignment.NodeType = ExpressionType.Assign &&
+                                                     obj.ReferenceEquals(assignment.Left,block.Variables.[0]) && storedAccess block.Variables.[0] assignment.Right ->
+                Some(inlineLambdaInvocation (Expression.Lambda(block.Expressions.[1],block.Variables.[0])) [|assignment.Right|])
+            | _ -> None
+        else None
 
-    /// F# copies a struct receiver into a local before reading a member. This
-    /// single-read form can be reduced without duplicating receiver evaluation.
+    let internal isReferenceUpcast (conversion: UnaryExpression) =
+        conversion.NodeType = ExpressionType.Convert && isNull conversion.Method &&
+        not conversion.Operand.Type.IsValueType && conversion.Type.IsAssignableFrom(conversion.Operand.Type)
+
+    let rec internal normalizeStoredConstruction (value: Expression) : Expression =
+        match value with
+        | :? UnaryExpression as conversion when isReferenceUpcast conversion -> normalizeStoredConstruction conversion.Operand
+        | :? MethodCallExpression as call when call.Method.Name = "Invoke" && not(isNull call.Object) ->
+            match normalizeStoredConstruction call.Object with
+            | :? LambdaExpression as lambda -> inlineLambdaInvocation lambda call.Arguments |> normalizeStoredConstruction
+            | _ -> value
+        | :? InvocationExpression as call ->
+            match normalizeStoredConstruction call.Expression with
+            | :? LambdaExpression as lambda -> inlineLambdaInvocation lambda call.Arguments |> normalizeStoredConstruction
+            | _ -> value
+        | :? BlockExpression as block ->
+            match tryStoredLocal block with
+            | Some body -> normalizeStoredConstruction body
+            | None -> value
+        | _ -> value
+
+
     let internal unwrapStructCopy (expr: Expression) =
         match expr with
         | :? BlockExpression as block when block.Variables.Count = 1 && block.Expressions.Count = 2
@@ -233,9 +337,31 @@ module internal QueryTranslatorBaseHelpers =
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> unwrapStructCopy ue.Operand
         | e -> unwrapStructCopy e
 
-    /// Returns true if the expression is a DBRef<T>.Value member access boundary.
+    /// Reference equality uses the scalar identity even when projections carry a loaded snapshot.
+    let internal fileSystemReferenceIdentity (visit: Expression -> QueryBuilder -> SqlExpr) (qb: QueryBuilder) (value: Expression) =
+        let value = if DBRefTypeHelpers.isFileRefType value.Type then value else unwrapConvert value
+        let identity = Expression.Property(value, "Id")
+        visit identity qb
+
+    /// Header JSON for reference projections; native columns and indexed metadata share the filesystem projection authority.
+    let internal fileSystemHeaderValueExpr (headerType: Type) (alias: string) =
+        let isFile = typeof<SoloDatabase.Types.SoloDBFileHeader>.Equals(headerType)
+        let fields = if isFile then FileStorageCore.fileHeaderProjectionFields else FileStorageCore.directoryHeaderProjectionFields
+        let table = if isFile then "SoloDBFileMetadata" else "SoloDBDirectoryMetadata"
+        let ownerColumn = if isFile then "FileId" else "DirectoryId"
+        let metadata =
+            let source = BaseTable(table, Some "_fsmeta")
+            let aggregate = SqlExpr.FunctionCall("jsonb_group_object", [SqlExpr.Column(Some "_fsmeta", "Key"); SqlExpr.Column(Some "_fsmeta", "Value")])
+            let core: SelectCore = {
+                Source = Some source; Joins = []; Projections = Explicit({ Alias = None; Expr = aggregate }, [])
+                Where = Some(SqlExpr.Binary(SqlExpr.Column(Some "_fsmeta", ownerColumn), BinaryOperator.Eq, SqlExpr.Column(Some alias, "Id")))
+                GroupBy = []; Having = None; OrderBy = []; Limit = None; Offset = None; Distinct = false }
+            SqlExpr.ScalarSubquery({ Ctes = []; Body = SingleSelect core })
+        SqlExpr.JsonObjectExpr([ for name in fields -> name, SqlExpr.Column(Some alias, name) ] @ ["Metadata", metadata])
+
+    /// Returns true if the expression is a Single reference Value member access boundary.
     let internal isDBRefValueBoundary (expr: MemberExpression) =
-        expr.Member.Name = "Value" && not (isNull expr.Expression) && DBRefTypeHelpers.isDBRefType (unwrapConvert expr.Expression).Type
+        expr.Member.Name = "Value" && not (isNull expr.Expression) && DBRefTypeHelpers.isSingleReferenceType (unwrapConvert expr.Expression).Type
 
     /// Returns true if the expression traverses through DBRef<T>.Value,
     /// indicating a LEFT JOIN that may produce NULL for None-ref rows.

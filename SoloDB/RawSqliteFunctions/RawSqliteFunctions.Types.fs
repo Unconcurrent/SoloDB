@@ -17,10 +17,10 @@ open SQLitePCL
 /// </summary>
 [<Struct; IsReadOnly>]
 type internal SqliteRawValue =
-    internal { Value: sqlite3_value }
+    internal { Value: sqlite3_value; NativeValue: nativeint }
 
     /// <summary>Returns the SQLite type of this value.</summary>
-    member this.SqliteType: int = raw.sqlite3_value_type(this.Value)
+    member this.SqliteType: int = (if this.NativeValue <> 0n then NativeSqlite.sqlite3_value_type(this.NativeValue) else raw.sqlite3_value_type(this.Value))
 
     /// <summary>Returns true if the value is NULL.</summary>
     member this.IsNull = this.SqliteType = raw.SQLITE_NULL
@@ -41,46 +41,52 @@ type internal SqliteRawValue =
     /// Gets the value as a 64-bit integer.
     /// </summary>
     member this.GetInt64() : int64 =
-        raw.sqlite3_value_int64(this.Value)
+        (if this.NativeValue <> 0n then NativeSqlite.sqlite3_value_int64(this.NativeValue) else raw.sqlite3_value_int64(this.Value))
 
     /// <summary>
     /// Gets the value as a 32-bit integer.
     /// </summary>
     member this.GetInt32() : int32 =
-        raw.sqlite3_value_int(this.Value)
+        (if this.NativeValue <> 0n then NativeSqlite.sqlite3_value_int(this.NativeValue) else raw.sqlite3_value_int(this.Value))
 
     /// <summary>
     /// Gets the value as a double-precision float.
     /// </summary>
     member this.GetDouble() : float =
-        raw.sqlite3_value_double(this.Value)
+        (if this.NativeValue <> 0n then NativeSqlite.sqlite3_value_double(this.NativeValue) else raw.sqlite3_value_double(this.Value))
 
     /// <summary>
     /// Gets the value as a zero-copy ReadOnlySpan of bytes.
     /// WARNING: Only valid during the callback! Do not store the span.
     /// </summary>
     member this.GetBlobSpan() : ReadOnlySpan<byte> =
-        raw.sqlite3_value_blob(this.Value)
+        if this.NativeValue <> 0n then
+            let ptr = NativeSqlite.sqlite3_value_blob(this.NativeValue)
+            ReadOnlySpan<byte>(ptr.ToPointer(), NativeSqlite.sqlite3_value_bytes(this.NativeValue))
+        else raw.sqlite3_value_blob(this.Value)
 
     /// <summary>
     /// Gets the value as a zero-copy UTF-8 ReadOnlySpan.
     /// WARNING: Only valid during the callback! Do not store the span.
     /// </summary>
     member this.GetTextSpan() : ReadOnlySpan<byte> =
-        raw.sqlite3_value_blob(this.Value)
+        if this.NativeValue <> 0n then
+            let ptr = NativeSqlite.sqlite3_value_blob(this.NativeValue)
+            ReadOnlySpan<byte>(ptr.ToPointer(), NativeSqlite.sqlite3_value_bytes(this.NativeValue))
+        else raw.sqlite3_value_blob(this.Value)
 
     /// <summary>
     /// Gets the byte length of a BLOB or TEXT value.
     /// </summary>
     member this.GetByteCount() : int =
-        raw.sqlite3_value_bytes(this.Value)
+        (if this.NativeValue <> 0n then NativeSqlite.sqlite3_value_bytes(this.NativeValue) else raw.sqlite3_value_bytes(this.Value))
 
     /// <summary>
-    /// Gets the value as a UTF-8 string (allocates a new string).
+    /// Gets an owned string, copying the borrowed native value before callback return.
     /// </summary>
     member this.CopyToString() : string =
-        let utf8z = raw.sqlite3_value_text(this.Value)
-        utf8z.utf8_to_string()
+        if this.NativeValue <> 0n then NativeSqlite.ValueText(this.NativeValue)
+        else SoloDatabase.NativeTextEncoding.copyConfiguredUtf8(raw.sqlite3_value_text(this.Value), raw.sqlite3_value_bytes(this.Value))
 
     /// <summary>
     /// Gets the value as a zero-copy UTF-8 ReadOnlySpan.
@@ -88,7 +94,10 @@ type internal SqliteRawValue =
     /// </summary>
     member this.GetBlobPointer() : nativeptr<byte> =
         // sqlite3_value_text returns utf8` which wraps a pointer
-        Unsafe.AsPointer(&Unsafe.AsRef(&raw.sqlite3_value_blob(this.Value).GetPinnableReference())) |> NativeInterop.NativePtr.ofVoidPtr
+        if this.NativeValue <> 0n then
+            NativeSqlite.sqlite3_value_blob(this.NativeValue) |> NativeInterop.NativePtr.ofNativeInt<byte>
+        else
+            Unsafe.AsPointer(&Unsafe.AsRef(&raw.sqlite3_value_blob(this.Value).GetPinnableReference())) |> NativeInterop.NativePtr.ofVoidPtr
 
     /// <summary>
     /// Gets the value as a byte array (copies the data).
@@ -103,65 +112,77 @@ type internal SqliteRawValue =
 /// </summary>
 [<Struct; IsReadOnly>]
 type internal SqliteRawContext =
-    internal { Context: sqlite3_context }
+    internal { Context: sqlite3_context; NativeContext: nativeint }
 
     /// <summary>Sets the result to NULL.</summary>
     member this.SetNull() =
-        raw.sqlite3_result_null(this.Context)
+        if this.NativeContext <> 0n then NativeSqlite.sqlite3_result_null(this.NativeContext)
+        else raw.sqlite3_result_null(this.Context)
 
     /// <summary>Sets the result to a 64-bit integer.</summary>
     member this.SetInt64(value: int64) =
-        raw.sqlite3_result_int64(this.Context, value)
+        if this.NativeContext <> 0n then NativeSqlite.sqlite3_result_int64(this.NativeContext, value)
+        else raw.sqlite3_result_int64(this.Context, value)
 
     /// <summary>Sets the result to a 32-bit integer.</summary>
     member this.SetInt32(value: int32) =
-        raw.sqlite3_result_int(this.Context, value)
+        if this.NativeContext <> 0n then NativeSqlite.sqlite3_result_int(this.NativeContext, value)
+        else raw.sqlite3_result_int(this.Context, value)
 
     /// <summary>Sets the result to a double-precision float.</summary>
     member this.SetDouble(value: float) =
-        raw.sqlite3_result_double(this.Context, value)
+        if this.NativeContext <> 0n then NativeSqlite.sqlite3_result_double(this.NativeContext, value)
+        else raw.sqlite3_result_double(this.Context, value)
 
     /// <summary>
     /// Sets the result to a BLOB (copies the data).
     /// </summary>
     member this.SetBlob(value: ReadOnlySpan<byte>) =
-        raw.sqlite3_result_blob(this.Context, value)
+        if this.NativeContext <> 0n then NativeSqlite.SetBlob(this.NativeContext, value)
+        else raw.sqlite3_result_blob(this.Context, value)
 
     /// <summary>
     /// Sets the result to a BLOB from a byte array.
     /// </summary>
     member this.SetBlob(value: byte[]) =
-        raw.sqlite3_result_blob(this.Context, ReadOnlySpan(value))
+        this.SetBlob(ReadOnlySpan(value))
 
     /// <summary>
     /// Sets the result to a UTF-8 text string.
     /// </summary>
     member this.SetText(value: string) =
-        raw.sqlite3_result_text(this.Context, value)
+        if this.NativeContext <> 0n then NativeSqlite.SetText(this.NativeContext, value)
+        elif isNull value then raw.sqlite3_result_null(this.Context)
+        elif value.Length = 0 then raw.sqlite3_result_text(this.Context, utf8z.FromSpan(ReadOnlySpan(SoloDatabase.NativeTextEncoding.emptyText)))
+        else raw.sqlite3_result_text(this.Context, ReadOnlySpan(System.Text.Encoding.UTF8.GetBytes(value)))
 
     /// <summary>
     /// Sets the result to an error message.
     /// </summary>
     member this.SetError(message: string) =
-        raw.sqlite3_result_error(this.Context, message)
+        if this.NativeContext <> 0n then NativeSqlite.SetError(this.NativeContext, message)
+        else raw.sqlite3_result_error(this.Context, message)
 
     /// <summary>
     /// Sets a "too big" error result.
     /// </summary>
     member this.SetErrorTooBig() =
-        raw.sqlite3_result_error_toobig(this.Context)
+        if this.NativeContext <> 0n then NativeSqlite.sqlite3_result_error_toobig(this.NativeContext)
+        else raw.sqlite3_result_error_toobig(this.Context)
 
     /// <summary>
     /// Sets a "no memory" error result.
     /// </summary>
     member this.SetErrorNoMem() =
-        raw.sqlite3_result_error_nomem(this.Context)
+        if this.NativeContext <> 0n then NativeSqlite.sqlite3_result_error_nomem(this.NativeContext)
+        else raw.sqlite3_result_error_nomem(this.Context)
 
     /// <summary>
     /// Allocates a zero-filled blob of the specified size.
     /// </summary>
     member this.SetZeroBlob(size: int) =
-        raw.sqlite3_result_zeroblob(this.Context, size)
+        if this.NativeContext <> 0n then NativeSqlite.sqlite3_result_zeroblob(this.NativeContext, size)
+        else raw.sqlite3_result_zeroblob(this.Context, size)
 
 
 // ============================================================================

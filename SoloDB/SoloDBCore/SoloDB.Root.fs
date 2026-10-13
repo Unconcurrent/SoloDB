@@ -1,7 +1,6 @@
-﻿namespace SoloDatabase
+namespace SoloDatabase
 
 open SoloDatabase.JsonSerializator
-open Microsoft.Data.Sqlite
 open System.Linq.Expressions
 open System
 open System.Collections.Generic
@@ -9,7 +8,7 @@ open System.Collections
 open SoloDatabase.Types
 open System.IO
 open System.Text
-open SQLiteTools
+open NativeSQLiteTools
 open JsonFunctions
 open FileStorage
 open Connections
@@ -28,7 +27,7 @@ open System.Collections.Concurrent
 type SoloDB private (connectionManager: ConnectionManager, connectionString: string, location: SoloDBLocation, config: SoloDBConfiguration, eventSystem: EventSystem) =
     let mutable disposed = false
     // Serializes DDL operations (InitializeCollection, DropCollectionIfExists) to prevent
-    // concurrent sqlite3_prepare_v2 calls from racing with schema changes in the ADO.NET layer.
+    // collection initialization and removal from observing incomplete schema changes.
     // Static because multiple SoloDB instances on the same shared-cache database share the
     // same sqlite3 schema state.
     static let ddlLock = obj()
@@ -45,12 +44,22 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         let eventSystem = EventSystem ()
         let setup = Bootstrap.createSetup eventSystem
         let defaultConfig: SoloDBConfiguration = { CachingEnabled = true }
-        let manager = new ConnectionManager(connectionString, setup, defaultConfig)
-        manager.SetHandlerDispatchGuard(fun () -> eventSystem.GlobalLock.IsHeldByCurrentThread)
+        let struct (releaseIndexOwner, beginIndexTransaction) = RuntimeIndexModelCache.acquireOwner connectionString
+        let manager =
+            try new ConnectionManager(connectionString, setup, defaultConfig, releaseIndexOwner, beginIndexTransaction)
+            with _ ->
+                releaseIndexOwner ()
+                reraise ()
 
         do
-            use dbConnection = manager.Borrow()
-            Bootstrap.initializeSchema dbConnection
+            try
+                manager.SetHandlerDispatchGuard(fun () -> eventSystem.GlobalLock.IsHeldByCurrentThread)
+                use dbConnection = manager.BorrowNative()
+                Bootstrap.initializeSchema dbConnection
+            with error ->
+                try (manager :> IDisposable).Dispose() with cleanup ->
+                    error.Data.["SoloDB.InitializationCleanupException"] <- cleanup
+                reraise ()
 
         new SoloDB(manager, connectionString, location, defaultConfig, eventSystem)
 
@@ -73,12 +82,15 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <summary>
     /// Gets an API for interacting with the virtual file system within the database.
     /// </summary>
-    member val FileSystem: IFileSystem = FileSystem (Connection.Pooled connectionManager) :> IFileSystem
+    member val FileSystem: IFileSystem = FileSystem(NativeConnection.NativePooled connectionManager, fun () ->
+        let parentData = { ClearCacheFunction = ignore; EventSystem = eventSystem }
+        FileSystemEventRegistration.get eventSystem
+            (Collection<JsonValue>.CreateEventDatabase(connectionString, parentData, None))) :> IFileSystem
 
     /// <summary>Gets the internal event system for this database instance.</summary>
     member val internal Events = eventSystem
 
-    member private this.GetNewConnection() = connectionManager.Borrow()
+    member private this.GetNewConnection() = connectionManager.BorrowNative()
     member private this.CheckDisposed() =
         if System.Threading.Volatile.Read(&disposed) then
             raise (ObjectDisposedException(nameof(SoloDB)))
@@ -97,7 +109,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// Gets a collection of a specified type, using the type's name as the collection name. Creates the collection if it doesn't exist.
     /// </summary>
     /// <typeparam name="'T">The type of the documents in the collection.</typeparam>
-    /// <returns>An <c>ISoloDBCollection<'T></c> instance.</returns>
+    /// <returns>An <c>ISoloDBCollection&lt;'T&gt;</c> instance.</returns>
     member this.GetCollection<'T>() =
         // CustomTypeId<'T>.Get() touches the static once and unwraps the
         // TypeInitializationException that F# wraps a `static member val`
@@ -113,7 +125,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// </summary>
     /// <typeparam name="'T">The type of the documents in the collection.</typeparam>
     /// <param name="name">The custom name for the collection.</param>
-    /// <returns>An <c>ISoloDBCollection<'T></c> instance.</returns>
+    /// <returns>An <c>ISoloDBCollection&lt;'T&gt;</c> instance.</returns>
     member this.GetCollection<'T>(name) =       
         this.InitializeCollection<'T>(Helper.validateUserCollectionName name)
 
@@ -121,7 +133,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// Gets a collection that stores untyped JSON data.
     /// </summary>
     /// <param name="name">The name for the collection.</param>
-    /// <returns>An <c>ISoloDBCollection<JsonValue></c> instance.</returns>
+    /// <returns>An <c>ISoloDBCollection&lt;JsonValue&gt;</c> instance.</returns>
     member this.GetUntypedCollection(name: string) =
         let name = name |> Helper.validateUserCollectionName
         
@@ -135,7 +147,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     member this.CollectionExists name =
         this.CheckDisposed()
         let name = Helper.validateUserCollectionName name
-        use dbConnection = connectionManager.Borrow()
+        use dbConnection = connectionManager.BorrowNative()
         Helper.existsCollection name dbConnection
 
     /// <summary>
@@ -146,7 +158,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     member this.CollectionExists<'T>() =
         this.CheckDisposed()
         let name = Helper.collectionNameOf<'T>
-        use dbConnection = connectionManager.Borrow()
+        use dbConnection = connectionManager.BorrowNative()
         Helper.existsCollection name dbConnection
 
     /// <summary>
@@ -203,7 +215,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <returns>A sequence of collection names.</returns>
     member this.ListCollectionNames() =
         this.CheckDisposed()
-        use dbConnection = connectionManager.Borrow()
+        use dbConnection = connectionManager.BorrowNative()
         Helper.listCollectionNamesSnapshot dbConnection
 
     /// <summary>
@@ -212,7 +224,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// <param name="otherDb">The destination database instance.</param>
     member this.BackupTo(otherDb: SoloDB) =
         this.CheckDisposed()
-        use dbConnection = connectionManager.Borrow()
+        use dbConnection = connectionManager.BorrowNative()
         use otherConnection = otherDb.GetNewConnection()
         dbConnection.Inner.BackupDatabase otherConnection.Inner
 
@@ -230,9 +242,15 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         let location = Path.GetFullPath location
         if File.Exists location then File.Delete location
 
-        use dbConnection = connectionManager.Borrow()
-        let escapedLocation = QueryTranslatorBaseTypes.escapeSQLiteString location
-        dbConnection.Execute($"VACUUM INTO '{escapedLocation}'")
+        use dbConnection = connectionManager.BorrowNative()
+        let mutable statement = dbConnection.OpenStatement("VACUUM INTO @location")
+        try
+            statement.BindText(1, location)
+            statement.Step() |> ignore
+            let affected = statement.RecordsAffected
+            statement.Dispose()
+            affected
+        with error -> statement.Abort(error); reraise()
 
     /// <summary>
     /// Rebuilds the database file in-place to defragment it and reclaim free space.
@@ -244,8 +262,14 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         | Memory _ -> (raise << InvalidOperationException) "Cannot vacuum memory databases."
         | other ->
 
-        use dbConnection = connectionManager.Borrow()
-        dbConnection.Execute($"VACUUM;")
+        use dbConnection = connectionManager.BorrowNative()
+        let mutable statement = dbConnection.OpenStatement("VACUUM;")
+        try
+            statement.Step() |> ignore
+            let affected = statement.RecordsAffected
+            statement.Dispose()
+            affected
+        with error -> statement.Abort(error); reraise()
 
     /// <summary>
     /// Executes a series of database operations within a single atomic transaction.
@@ -295,15 +319,19 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// </summary>
     member this.Optimize() =
         this.CheckDisposed()
-        use dbConnection = connectionManager.Borrow()
-        dbConnection.Execute "PRAGMA optimize;" |> ignore
+        use dbConnection = connectionManager.BorrowNative()
+        let mutable statement = dbConnection.OpenStatement("PRAGMA optimize;")
+        try
+            while statement.Step() do ()
+            statement.Dispose()
+        with error -> statement.Abort(error); reraise()
 
     /// <summary>
     /// Disables the in-memory cache of prepared SQL commands for all connections.
     /// </summary>
     member this.DisableCaching() =
         this.CheckDisposed()
-        config.CachingEnabled <- false
+        System.Threading.Volatile.Write(&config.CachingEnabled, false)
 
     /// <summary>
     /// Clears the in-memory cache of prepared SQL commands across all connections without disabling it.
@@ -317,7 +345,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     /// </summary>
     member this.EnableCaching() =
         this.CheckDisposed()
-        config.CachingEnabled <- true
+        System.Threading.Volatile.Write(&config.CachingEnabled, true)
 
     /// <summary>
     /// Disposes the database instance, closing all connections and releasing resources.

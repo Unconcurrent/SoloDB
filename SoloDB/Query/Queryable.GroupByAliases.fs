@@ -33,12 +33,12 @@ let internal syntheticGroupKeyAlias : string = "__solodb_group_key"
 /// scalar component projections on the inner derived table:
 /// "__solodb_group_key0", "__solodb_group_key1", ...
 let internal syntheticGroupKeySlotAlias (i: int) : string =
-    sprintf "%s%d" syntheticGroupKeyAlias i
+    syntheticGroupKeyAlias + i.ToString(System.Globalization.CultureInfo.InvariantCulture)
 
 /// Canonical alias family for SequenceOps-style scalar-slot projection
 /// materialization: "__solodb_scalar_slot0", "__solodb_scalar_slot1", ...
 let internal syntheticScalarSlotAlias (i: int) : string =
-    sprintf "__solodb_scalar_slot%d" i
+    "__solodb_scalar_slot" + i.ToString(System.Globalization.CultureInfo.InvariantCulture)
 
 /// SqlExpr.FunctionCall constructor name for TEXT-JSON object construction.
 /// Writer-side FunctionCall construction MUST use this constant; the

@@ -1,4 +1,4 @@
-﻿namespace SoloDatabase
+namespace SoloDatabase
 
 open System.Data
 
@@ -6,8 +6,7 @@ open System.Data
 /// Contains types related to database connection management, pooling, and transactions.
 /// </summary>
 module Connections =
-    open Microsoft.Data.Sqlite
-    open SQLiteTools
+    open NativeSQLiteTools
     open ConnectionsTransactionHelpers
     open System
     open System.Collections.Concurrent
@@ -29,19 +28,20 @@ module Connections =
     let private resolveTxOutcome = ConnectionsTransactionHelpers.resolveTxOutcome
 
     /// <summary>
-    /// Manages a pool of reusable <see cref="CachingDbConnection"/> objects to reduce the overhead
+    /// Manages a pool of reusable <see cref="NativeCachingDbConnection"/> objects to reduce the overhead
     /// of opening and closing database connections. It also provides transaction management.
     /// </summary>
     /// <param name="connectionStr">The database connection string.</param>
     /// <param name="setup">An action to perform initial setup on a newly created connection.</param>
     /// <param name="config">The database configuration settings.</param>
-    type ConnectionManager internal (connectionStr: string, setup: SqliteConnection -> unit, config: Types.SoloDBConfiguration) =
+    type ConnectionManager internal (connectionStr: string, setup: NativeSqliteConnection -> unit, config: Types.SoloDBConfiguration, releaseIndexOwner: unit -> unit, beginIndexTransaction: unit -> IDisposable) =
         /// <summary>A collection of all connections ever created by this manager, for disposal purposes.</summary>
-        let all = ConcurrentStack<CachingDbConnection>()
+        let all = ConcurrentStack<NativeCachingDbConnection>()
         /// <summary>The pool of available, ready-to-use connections.</summary>
-        let pool = ConcurrentStack<CachingDbConnection>()
+        let pool = ConcurrentStack<NativeCachingDbConnection>()
         /// <summary>A flag indicating whether the manager has been disposed.</summary>
         let mutable disposed = false
+        let mutable disposeStarted = 0
         let mutable activeEventHandlerScopes = 0
         let mutable isCurrentThreadInHandlerDispatch = (fun () -> false)
 
@@ -51,13 +51,16 @@ module Connections =
         let checkDisposed () =
             if Volatile.Read(&disposed) then raise (ObjectDisposedException(nameof(ConnectionManager)))
 
+        internal new(connectionStr: string, setup: NativeSqliteConnection -> unit, config: Types.SoloDBConfiguration) =
+            new ConnectionManager(connectionStr, setup, config, ignore, fun () -> null)
+
         /// <summary>
         /// Returns a used connection to the pool. Before returning, it verifies that any
         /// explicit transactions on the connection have been completed.
         /// </summary>
         /// <param name="pooledConn">The connection to return to the pool.</param>
         /// <exception cref="InvalidOperationException">Thrown if the connection is still inside a transaction.</exception>
-        member internal this.TakeBack(pooledConn: CachingDbConnection) =
+        member internal this.TakeBack(pooledConn: NativeCachingDbConnection) =
             // A connection already known to be unfit is disposed without being probed. Probing it
             // would raise, and this runs from Dispose, so that exception would replace whatever
             // failure made the connection unusable in the first place.
@@ -67,10 +70,10 @@ module Connections =
 
                 // Inspect SQLite's actual state without starting a transaction just
                 // to prove that none exists. This also detects raw-SQL transactions.
-                if pooledConn.State <> ConnectionState.Open then
+                if pooledConn.State <> SqliteConnectionState.Open then
                     pooledConn.DisposeReal()
                 elif pooledConn.HasManagedTransaction then
-                    // ADO owns this transaction; disposing rolls it back. Raw BEGIN
+                    // Explicit transaction ownership rolls back on disposal. Raw BEGIN
                     // has no managed owner and must still be completed by its caller.
                     try pooledConn.DisposeReal() with _ -> ()
                 elif SQLitePCL.raw.sqlite3_get_autocommit(pooledConn.Handle) = 0 then
@@ -83,8 +86,8 @@ module Connections =
         /// <summary>
         /// Borrows a connection from the pool. If the pool is empty, a new connection is created.
         /// </summary>
-        /// <returns>A ready-to-use <see cref="CachingDbConnection"/>.</returns>
-        member this.Borrow() =
+        /// <returns>A ready-to-use <see cref="NativeCachingDbConnection"/>.</returns>
+        member internal this.BorrowNative() =
             checkDisposed()
             match pool.TryPop() with
             | true, c -> 
@@ -92,12 +95,13 @@ module Connections =
                     c.ResetEventDispatchState()
                     raise (InvalidOperationException("Borrowed pooled connection had residual event dispatch state."))
 
-                if c.Inner.State <> ConnectionState.Open then
+                if c.Inner.State <> SqliteConnectionState.Open then
                     c.Inner.Open()
+                c.RenewAcquisition()
                 c
             | false, _ ->
                 let createAndSetup () =
-                    let c = new CachingDbConnection(connectionStr, this.TakeBack, config, this.EnterEventHandlerScope, this.ExitEventHandlerScope)
+                    let c = new NativeCachingDbConnection(connectionStr, this.TakeBack, config, this.EnterEventHandlerScope, this.ExitEventHandlerScope)
                     let mutable primaryEx: exn option = None
                     let mutable cleanupEx: exn option = None
                     try
@@ -111,32 +115,15 @@ module Connections =
                         match resolveTxOutcome primaryEx cleanupEx with
                         | Some resolved -> reraiseAnywhere resolved
                         | None -> raise (InvalidOperationException("Connection setup failed."))
-                // SQLITE_SCHEMA compensation: concurrent DDL can invalidate the schema cache
-                // during connection setup (Open/PRAGMA/CreateFunction). Microsoft.Data.Sqlite
-                // surfaces this as ArgumentOutOfRangeException or SqliteException with schema-churn
-                // messages. Retry with backoff, matching beginImmediateWithRetry pattern.
-                let isTransientSetupRace (ex: exn) =
-                    match ex with
-                    | :? ArgumentOutOfRangeException -> true
-                    | :? SqliteException as se ->
-                        se.SqliteErrorCode = 1
-                        && (se.Message.IndexOf("no such", StringComparison.OrdinalIgnoreCase) >= 0
-                            || se.Message.IndexOf("database schema has changed", StringComparison.OrdinalIgnoreCase) >= 0)
-                    | _ -> false
-                let mutable attempt = 0
-                let mutable conn = Unchecked.defaultof<CachingDbConnection>
-                while isNull (box conn) && attempt < 5 do
-                    try conn <- createAndSetup()
-                    with ex when isTransientSetupRace ex && attempt < 4 ->
-                        attempt <- attempt + 1
-                        Thread.Sleep(25 * attempt)
-                conn
+                createAndSetup()
 
         /// <summary>
         /// Gets a collection of all connections (both in-pool and in-use) created by this manager.
         /// Used for final disposal.
         /// </summary>
         member internal this.All = all
+
+        member this.Borrow() = new SQLiteTools.CachingDbConnection(this.BorrowNative(), false, ignore)
 
         /// <summary>
         /// Creates a caching connection dedicated to a single explicit transaction. It is never
@@ -147,7 +134,7 @@ module Connections =
         /// </summary>
         member internal this.CreateDedicatedTransactionConnection() =
             checkDisposed()
-            let c = new CachingDbConnection(connectionStr, ignore, config, this.EnterEventHandlerScope, this.ExitEventHandlerScope)
+            let c = new NativeCachingDbConnection(connectionStr, ignore, config, this.EnterEventHandlerScope, this.ExitEventHandlerScope)
             let mutable primaryEx: exn option = None
             let mutable cleanupEx: exn option = None
             try
@@ -167,7 +154,8 @@ module Connections =
         /// </summary>
         /// <param name="f">The function to execute within the transaction.</param>
         /// <returns>The result of the function <paramref name="f"/>.</returns>
-        member private this.RunTransaction(acquire: unit -> CachingDbConnection, release: CachingDbConnection -> exn option ref -> unit, f: CachingDbConnection -> 'T) =
+        member private this.RunTransaction(acquire: unit -> NativeCachingDbConnection, release: NativeCachingDbConnection -> exn option ref -> unit, f: NativeCachingDbConnection -> 'T) =
+            use indexLifetime = beginIndexTransaction ()
             let conn = acquire ()
             let primaryEx = ref None
             let cleanupEx = ref None
@@ -187,15 +175,16 @@ module Connections =
             | Some ex -> raise ex
             | None -> result
 
-        member private this.WithTransactionBorrowed(f: CachingDbConnection -> 'T) =
-            this.RunTransaction(this.Borrow, cleanupBorrowedTransaction, f)
+        member private this.WithTransactionBorrowed(f: NativeCachingDbConnection -> 'T) =
+            this.RunTransaction(this.BorrowNative, cleanupBorrowedTransaction, f)
 
         /// <summary>
         /// The core implementation for executing an asynchronous function within a database transaction.
         /// </summary>
         /// <param name="f">The asynchronous function to execute within the transaction.</param>
         /// <returns>A task that represents the asynchronous operation, containing the result of the function <paramref name="f"/>.</returns>
-        member private this.RunTransactionAsync(acquire: unit -> CachingDbConnection, release: CachingDbConnection -> exn option ref -> unit, f: CachingDbConnection -> Task<'T>) = task {
+        member private this.RunTransactionAsync(acquire: unit -> NativeCachingDbConnection, release: NativeCachingDbConnection -> exn option ref -> unit, f: NativeCachingDbConnection -> Task<'T>) = task {
+            use indexLifetime = beginIndexTransaction ()
             let conn = acquire ()
             let primaryEx = ref None
             let cleanupEx = ref None
@@ -217,28 +206,28 @@ module Connections =
             | None -> return result
         }
 
-        member private this.WithTransactionBorrowedAsync(f: CachingDbConnection -> Task<'T>) =
-            this.RunTransactionAsync(this.Borrow, cleanupBorrowedTransaction, f)
+        member private this.WithTransactionBorrowedAsync(f: NativeCachingDbConnection -> Task<'T>) =
+            this.RunTransactionAsync(this.BorrowNative, cleanupBorrowedTransaction, f)
 
         /// <summary>
         /// Executes a synchronous function within a database transaction using a pooled connection.
         /// </summary>
         /// <param name="f">The function to execute.</param>
         /// <returns>The result of the function.</returns>
-        member internal this.WithTransaction(f: CachingDbConnection -> 'T) =
+        member internal this.WithTransaction(f: NativeCachingDbConnection -> 'T) =
             this.WithTransactionBorrowed f
 
         /// <summary>
         /// Runs an explicit user transaction on a dedicated caching connection that is destroyed
         /// when the scope ends, so no reference captured during the callback stays usable.
         /// </summary>
-        member internal this.WithDedicatedTransaction(f: CachingDbConnection -> 'T) =
+        member internal this.WithDedicatedTransaction(f: NativeCachingDbConnection -> 'T) =
             this.RunTransaction(this.CreateDedicatedTransactionConnection, cleanupDedicatedTransaction, f)
 
         /// <summary>
         /// Asynchronous counterpart of <see cref="WithDedicatedTransaction"/>.
         /// </summary>
-        member internal this.WithDedicatedAsyncTransaction(f: CachingDbConnection -> Task<'T>) =
+        member internal this.WithDedicatedAsyncTransaction(f: NativeCachingDbConnection -> Task<'T>) =
             this.RunTransactionAsync(this.CreateDedicatedTransactionConnection, cleanupDedicatedTransaction, f)
 
         /// <summary>
@@ -246,7 +235,7 @@ module Connections =
         /// </summary>
         /// <param name="f">The asynchronous function to execute.</param>
         /// <returns>A task representing the asynchronous transactional operation.</returns>
-        member internal this.WithAsyncTransaction(f: CachingDbConnection -> Task<'T>) = task {
+        member internal this.WithAsyncTransaction(f: NativeCachingDbConnection -> Task<'T>) = task {
             return! this.WithTransactionBorrowedAsync f
         }
 
@@ -279,83 +268,153 @@ module Connections =
         /// </summary>
         interface IDisposable with
             override this.Dispose() =
-                Volatile.Write(&disposed, true)
-                for c in all do
-                    c.DisposeReal()
-                all.Clear()
-                pool.Clear()
-                ()
+                if Interlocked.Exchange(&disposeStarted, 1) = 0 then
+                    Volatile.Write(&disposed, true)
+                    try
+                        let mutable failure = None
+                        for c in all do
+                            try c.DisposeReal() with error ->
+                                if failure.IsNone then failure <- Some error
+                        all.Clear()
+                        pool.Clear()
+                        match failure with
+                        | Some error -> reraiseAnywhere error
+                        | None -> ()
+                    finally
+                        releaseIndexOwner ()
 
     
     /// <summary>
     /// A discriminated union that represents the different types of database connections available within the system.
     /// This allows for abstracting over whether a connection is from a pool or part of an explicit transaction.
     /// </summary>
-    and Connection =
+    and internal NativeConnection =
         /// <summary>A connection sourced from a connection pool.</summary>
-        | Pooled of pool: ConnectionManager
+        | NativePooled of pool: ConnectionManager
         /// <summary>A dedicated, non-disposing connection for an ongoing transaction.</summary>
-        | Transactional of conn: SqliteConnection
+        | NativeTransactional of conn: NativeSqliteConnection
         /// <summary>A connection guarded by a validity check.</summary>
-        | Guarded of guard: (unit -> unit) * inner: Connection
+        | NativeGuarded of guard: (unit -> unit) * inner: NativeConnection
 
         /// <summary>
-        /// Gets an active <see cref="SqliteConnection"/> based on the connection type.
-        /// If Pooled, it borrows a connection. Otherwise, it returns the existing connection.
+        /// Gets an active <see cref="NativeSqliteConnection"/> based on the connection type.
+        /// If NativePooled, it borrows a connection. Otherwise, it returns the existing connection.
         /// </summary>
-        /// <returns>An active <see cref="SqliteConnection"/>.</returns>
-        member this.Get() : SqliteConnection =
+        /// <returns>An active <see cref="NativeSqliteConnection"/>.</returns>
+        member internal this.IsEventHandlerScope =
             match this with
-            | Pooled pool ->
+            | NativeTransactional connection -> SQLiteToolsHandlerFaultState.isInEventHandlerScope connection
+            | NativeGuarded(guard, inner) -> guard(); inner.IsEventHandlerScope
+            | NativePooled _ -> false
+
+        member internal this.CheckAccess() =
+            match this with
+            | NativeGuarded(guard, inner) -> guard(); inner.CheckAccess()
+            | _ -> ()
+
+        member this.Get() : NativeSqliteConnection =
+            match this with
+            | NativePooled pool ->
                 if pool.IsCurrentThreadInEventHandlerScope then
                     ThrowOutsideEventContextUsage()
-                pool.Borrow()
-            | Transactional conn -> conn
-            | Guarded (guard, inner) ->
+                pool.BorrowNative()
+            | NativeTransactional conn -> conn
+            | NativeGuarded (guard, inner) ->
                 guard()
                 inner.Get()
 
+        member this.GetPresentation() : SoloDatabase.Data.Sqlite.SqliteConnection =
+            let native = this.Get()
+            let leaveOpen =
+                let rec borrowed source =
+                    match source with
+                    | NativePooled _ -> false
+                    | NativeTransactional _ -> true
+                    | NativeGuarded(_, inner) -> borrowed inner
+                borrowed this
+            ConnectionPresentation.create native leaveOpen this.CheckAccess
+
         /// <summary>
         /// Executes a synchronous function within a transaction. The behavior depends on the connection type.
-        /// Pooled: BEGIN IMMEDIATE (top-level). Transactional: SAVEPOINT (nested).
+        /// NativePooled: BEGIN IMMEDIATE (top-level). NativeTransactional: SAVEPOINT (nested).
         /// </summary>
         /// <param name="f">The function to execute within the transaction.</param>
         /// <returns>The result of the function.</returns>
-        member this.WithTransaction(f: SqliteConnection -> 'T) =
+        member this.WithTransaction(f: NativeSqliteConnection -> 'T) =
             match this with
-            | Pooled pool -> withPooledTransactionCore (fun () -> pool.IsCurrentThreadInEventHandlerScope) pool.WithTransaction f
-            | Transactional conn when shouldSuppressSavepointInHandler conn -> f conn
-            | Transactional conn -> ConnectionsTransactionHelpers.withSavepoint conn f
-            | Guarded (guard, inner) ->
+            | NativePooled pool -> withPooledTransactionCore (fun () -> pool.IsCurrentThreadInEventHandlerScope) pool.WithTransaction f
+            | NativeTransactional conn when shouldSuppressSavepointInHandler conn ->
+                try
+                    let result = f conn
+                    SQLiteToolsHandlerFaultState.raiseIfHandlerFaultRecorded conn
+                    result
+                with error ->
+                    SQLiteToolsHandlerFaultState.tryRecordHandlerFault conn error
+                    reraise()
+            | NativeTransactional conn -> ConnectionsTransactionHelpers.withSavepoint conn f
+            | NativeGuarded (guard, inner) ->
                 guard()
                 inner.WithTransaction f
 
         /// <summary>
         /// Executes an asynchronous function within a transaction. The behavior depends on the connection type.
-        /// Pooled: BEGIN IMMEDIATE (top-level). Transactional: SAVEPOINT (nested).
+        /// NativePooled: BEGIN IMMEDIATE (top-level). NativeTransactional: SAVEPOINT (nested).
         /// </summary>
         /// <param name="f">The asynchronous function to execute.</param>
         /// <returns>A task representing the asynchronous operation.</returns>
-        member this.WithAsyncTransaction(f: SqliteConnection -> Task<'T>) =
+        member this.WithAsyncTransaction(f: NativeSqliteConnection -> Task<'T>) =
             match this with
-            | Pooled pool -> withPooledTransactionCore (fun () -> pool.IsCurrentThreadInEventHandlerScope) pool.WithAsyncTransaction f
-            | Transactional conn when shouldSuppressSavepointInHandler conn -> f conn
-            | Transactional conn -> ConnectionsTransactionHelpers.withSavepointAsync conn f
-            | Guarded (guard, inner) ->
+            | NativePooled pool -> withPooledTransactionCore (fun () -> pool.IsCurrentThreadInEventHandlerScope) pool.WithAsyncTransaction f
+            | NativeTransactional conn when shouldSuppressSavepointInHandler conn -> task {
+                try
+                    let! result = f conn
+                    SQLiteToolsHandlerFaultState.raiseIfHandlerFaultRecorded conn
+                    return result
+                with error ->
+                    SQLiteToolsHandlerFaultState.tryRecordHandlerFault conn error
+                    return reraiseAnywhere error
+              }
+            | NativeTransactional conn -> ConnectionsTransactionHelpers.withSavepointAsync conn f
+            | NativeGuarded (guard, inner) ->
                 guard()
                 inner.WithAsyncTransaction f
 
-    let internal EnterEventHandlerScope(connection: SqliteConnection) =
+    /// Public connection sources retain the documented provider-shaped callback surface.
+    type Connection =
+        | Pooled of pool: ConnectionManager
+        | Transactional of conn: SoloDatabase.Data.Sqlite.SqliteConnection
+        | Guarded of guard: (unit -> unit) * inner: Connection
+        member private this.NativeSource =
+            let rec source value =
+                match value with
+                | Pooled pool -> NativePooled pool
+                | Transactional connection -> NativeGuarded(connection.Session.Check, NativeTransactional connection.NativeConnection)
+                | Guarded(guard, inner) -> NativeGuarded(guard, source inner)
+            source this
+        member this.Get() = this.NativeSource.GetPresentation()
+        member this.WithTransaction(f: SoloDatabase.Data.Sqlite.SqliteConnection -> 'T) =
+            let source = this.NativeSource
+            source.WithTransaction(fun native ->
+                use presentation = ConnectionPresentation.create native true source.CheckAccess
+                f presentation)
+        member this.WithAsyncTransaction(f: SoloDatabase.Data.Sqlite.SqliteConnection -> Task<'T>) =
+            let source = this.NativeSource
+            source.WithAsyncTransaction(fun native -> task {
+                use presentation = ConnectionPresentation.create native true source.CheckAccess
+                return! f presentation
+            })
+
+    let internal EnterEventHandlerScope(connection: NativeSqliteConnection) =
         match connection with
-        | :? CachingDbConnection as c -> c.EnterEventHandlerScope()
+        | :? NativeCachingDbConnection as c -> c.EnterEventHandlerScope()
         | _ -> enterStandaloneEventHandlerScope connection
 
-    let internal ExitEventHandlerScope(connection: SqliteConnection) =
+    let internal ExitEventHandlerScope(connection: NativeSqliteConnection) =
         let mutable primaryEx: exn option = None
 
         try
             match connection with
-            | :? CachingDbConnection as c -> c.ExitEventHandlerScope()
+            | :? NativeCachingDbConnection as c -> c.ExitEventHandlerScope()
             | _ -> exitStandaloneEventHandlerScopeOrFail connection
         with ex ->
             primaryEx <- Some ex

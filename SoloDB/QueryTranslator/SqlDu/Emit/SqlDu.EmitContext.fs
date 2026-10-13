@@ -29,14 +29,8 @@ type internal EmitContext() =
     /// Format a JSON path for use in json_extract/jsonb_extract.
     /// JsonPath is a list of path segments; result is '$.<seg1>.<seg2>...'
     /// Handles array-index bracket notation and escapes single quotes.
-    member _.FormatJsonPath(segments: string list) : string =
-        match segments with
-        | [] -> "'$'"
-        | segs ->
-            let path = System.String.Join(".", segs)
-            let path = path.Replace(".[", "[")
-            let escaped = path.Replace("'", "''").Replace("\0", "")
-            "'$." + escaped + "'"
+    member _.FormatJsonPath(segments: SoloDatabase.JsonSerializator.JsonEqualitySupport.PathSegment list) : string =
+        "'" + SoloDatabase.SqlModel.JsonPathOps.text(segments).Replace("'","''") + "'"
 
     /// Current parameter count (for determinism verification).
     member _.ParamCount = paramCounter

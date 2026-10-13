@@ -6,7 +6,6 @@ open System.Collections.Generic
 open SoloDatabase
 open SoloDatabase.JsonSerializator
 open System.Runtime.CompilerServices
-open System.Reflection
 open System.Linq
 
 /// <summary>
@@ -108,41 +107,3 @@ type CollectionExtensions =
     [<Extension>]
     static member DeleteMany<'a>(collection: SoloDatabase.ISoloDBCollection<'a>, filter: Expression<Func<'a, bool>>) =
         collection.DeleteMany(filter)
-
-/// <summary>
-/// A private module containing helper functions for building expressions.
-/// </summary>
-module private Helper =
-    /// <summary>
-    /// Creates a property access expression from a string field path (e.g., "Customer.Address.Street").
-    /// </summary>
-    let internal getPropertyExpression (fieldPath: string) : Expression<Func<'T, 'TField>> =
-        let parameter = Expression.Parameter(typeof<'T>, "x")
-        let fields = fieldPath.Split('.')
-
-        let rec buildExpression (expr: Expression) (fields: string list) : Expression =
-            match fields with
-            | [] -> expr
-            | field :: rest ->
-                let field =
-                    if field = "_id" then "Id"
-                    else field
-
-                let propertyOrField =
-                    if expr.Type.GetField(field) <> null || expr.Type.GetProperty(field) <> null then
-                        Expression.PropertyOrField(expr, field) :> Expression
-                    else
-                        let indexExpr =
-                            Expression.MakeIndex(expr, expr.Type.GetProperty "Item", [Expression.Constant field]) :> Expression
-
-                        if rest.IsEmpty && field <> "Id" && (expr.Type = typeof<BsonDocument> || expr.Type = typeof<JsonValue>) then
-                            Expression.Call(indexExpr, expr.Type.GetMethod("ToObject").MakeGenericMethod(typeof<'TField>))
-                        elif field = "Id" then
-                            Expression.Convert(Expression.Convert(indexExpr, typeof<obj>), typeof<'TField>)
-                        else
-                            indexExpr
-
-                buildExpression propertyOrField rest
-
-        let finalExpr = buildExpression (parameter :> Expression) (fields |> List.ofArray)
-        Expression.Lambda<Func<'T, 'TField>>(finalExpr, parameter)

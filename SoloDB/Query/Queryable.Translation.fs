@@ -8,8 +8,7 @@ open System.Linq.Expressions
 open System.Reflection
 open System.Text
 open System.Runtime.CompilerServices
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open Utils
 open JsonFunctions
 open Connections
@@ -78,6 +77,7 @@ module internal QueryableTranslationCore =
             | SupportedLinqMethods.SingleOrDefault
             | SupportedLinqMethods.Append
             | SupportedLinqMethods.Concat
+            | SupportedLinqMethods.Union
             | SupportedLinqMethods.GroupBy
             | SupportedLinqMethods.Except
             | SupportedLinqMethods.ExceptBy
@@ -102,6 +102,7 @@ module internal QueryableTranslationCore =
         let expression = stripConvert expression
         match expression with
         | :? ConstantExpression -> true
+        | :? RelationQueryExpression as directive -> isIdentityOwnerRowsetExpr directive.Source
         | :? MethodCallExpression as mce ->
             let source =
                 if not (isNull mce.Object) then mce.Object
@@ -134,6 +135,11 @@ module internal QueryableTranslationCore =
         ManyRelationsHydrated: bool
     }
 
+    /// Each delivered row selects one of its actual authored physical sources.
+    type internal BatchLoadPlan = {
+        Owners: BatchLoadContext array
+    }
+
     // Shared hydration SQL builders and metadata preloader are in HydrationSqlBuilder module.
 
     // Shared hydration builders are in HydrationSqlBuilder module.
@@ -145,12 +151,12 @@ module internal QueryableTranslationCore =
     /// <param name="source">The source collection of the query.</param>
     /// <param name="expression">The LINQ expression to translate.</param>
     /// <returns>A tuple containing the generated SQL string and the dictionary of parameters.</returns>
-    let private translateWithBindings bindQueryValue generalPrefixMatch (metadataConnection: SqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
+    let private translateWithBindings (bindQueryValue: QueryValueBinder voption) generalPrefixMatch (metadataConnection: NativeSqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
         let variables = Dictionary<string, obj>(16)
 
         let valueDecodedType =
             if typedefof<IQueryable>.IsAssignableFrom expression.Type then
-                UtilsReflection.GenericTypeArgCache.Get expression.Type |> Array.head
+                TypeMetadata.GenericTypeArgCache.Get expression.Type |> Array.head
             else
                 expression.Type
 
@@ -158,7 +164,14 @@ module internal QueryableTranslationCore =
         // SelectMany, nested builders) while running and resolves them against this context,
         // so the root type does not bound which collections will be consulted. The resolver
         // costs nothing until something is actually asked for.
-        let ctx = { QueryContext.SingleSource(source.Name) with MetadataSource = ValueSome (RelationMetadataSource metadataConnection); BindQueryValue = bindQueryValue; GeneralPrefixMatch = generalPrefixMatch }
+        let ordinaryBindings = bindQueryValue.IsNone
+        let bindQueryValue, acquire =
+            match bindQueryValue with
+            | ValueSome binder -> ValueSome binder, id
+            | ValueNone ->
+                let binder, acquire = QueryableValueBindings.create variables
+                ValueSome binder, acquire
+        let ctx = { QueryContext.SingleSource(source.Name) with MetadataSource = ValueSome (RelationMetadataSource metadataConnection); BindQueryValue = bindQueryValue; GeneralPrefixMatch = generalPrefixMatch || ordinaryBindings }
         // Mark this as the OUTERMOST translation context. Cleared in CloneForSubquery
         // so nested cardinality emit sites can detect they are nested and emit bare
         // scalars (default(T) propagation) rather than typed exceptions.
@@ -171,8 +184,9 @@ module internal QueryableTranslationCore =
                 OwnerType = typeof<'T>
                 InTransaction =
                     match metadataConnection with
-                    | :? CachingDbConnection as cc -> cc.InsideTransaction
+                    | :? NativeCachingDbConnection as cc -> cc.InsideTransaction
                     | _ -> false
+                Preparation = RelationsTypes.RelationPreparation()
                 CollectionFactory = None
             }
             RelationsCore.withRelationSqliteWrap "build" "startTranslation.ensureSchemaForOwnerType" (fun () ->
@@ -180,51 +194,48 @@ module internal QueryableTranslationCore =
             )
 
         // Build the inner query as a SqlSelect DU.
-        let innerSelect = translateQuery<'T> (ref 0) ctx variables expression
-
-        let shape = HydrationSqlMetadata.getRelationShape typeof<'T>
-        let hasSingleRelations = hasRelations && shape.HasSingle
-        let hasManyRelations = hasRelations && shape.HasMany
-
-        // Build hydrated value expression for DBRef single-relation properties.
-        // Correlated subqueries embed target entity data directly in the Value column,
-        // eliminating N+1 batch-load queries for DBRef relations on the queryable path.
+        let completed = translateQuery<'T> (ref 0) ctx variables expression
+        let innerSelect = completed.Query |> acquire
+        let ownerInput = QueryTranslatorSerialization.scopeSerializationInput (Some "o") OuterLayer completed.SerializationInput
+        let owner = ownerInput.PhysicalOwner
+        let ownerSources = owner |> ValueOption.map _.Sources |> ValueOption.defaultValue Array.empty
+        let selectedOwner source =
+            owner |> ValueOption.map (fun owner -> QueryTranslatorPhysicalSource.selectsSource owner source)
+                  |> ValueOption.defaultValue (SqlExpr.Literal(SqlLiteral.Integer 0L))
         let mutable hydrationAliasCounter = 0
-        let singleRelationsHydrated =
-            hasSingleRelations && not (QueryTranslatorBaseTypes.isPrimitiveSQLiteType valueDecodedType)
-
-        let effectiveValueDecodedExpr =
-            if singleRelationsHydrated then
-                let ownerValueExpr = SqlExpr.Column(Some "o", "Value")
-                let hydratedValue =
-                    HydrationSqlBuilder.buildHydrationValueExpr metadataConnection ctx typeof<'T> (source.Name)
-                        ownerValueExpr 0 "" &hydrationAliasCounter
-                if hydrationAliasCounter = 0 then
-                    // No hydration happened (all excluded or no matching props).
-                    extractValueAsJsonDu valueDecodedType
-                else
-                    // Wrap hydrated value with json_extract for ValueJSON output.
-                    SqlExpr.FunctionCall("json_extract",
-                        [hydratedValue; SqlExpr.Literal(SqlLiteral.String "$")])
-            else
-                extractValueAsJsonDu valueDecodedType
-
-        // Inline DBRefMany hydration is only admitted for identity owner rowsets.
-        // Ordered/filtered owner queries stay on the batch-load path to preserve the
-        // non-cartesian root SQL contract required by relation tests.
+        let ownerContexts = ownerSources |> Array.map (fun source ->
+            let shape = HydrationSqlMetadata.getRelationShape source.OwnerType
+            { OwnerTable = source.TableName; OwnerType = source.OwnerType
+              ExcludedPaths = new HashSet<string>(source.Loading.Excluded, StringComparer.Ordinal)
+              IncludedPaths = new HashSet<string>(source.Loading.Included, StringComparer.Ordinal)
+              WhitelistMode = source.Loading.Whitelist; HasSingleRelations = shape.HasSingle; HasManyRelations = shape.HasMany
+              SingleRelationsHydrated = false; ManyRelationsHydrated = false })
+        let mutable effectiveValueDecodedExpr = extractValueAsJsonDu valueDecodedType
+        for index = ownerContexts.Length - 1 downto 0 do
+            let context = ownerContexts[index]
+            if context.HasSingleRelations && not (QueryTranslatorBaseTypes.isPrimitiveSQLiteType valueDecodedType) && not (DBRefTypeHelpers.isFileRefType valueDecodedType) then
+                let before = hydrationAliasCounter
+                let ownerContext = { ctx with ExcludedPaths = context.ExcludedPaths; IncludedPaths = context.IncludedPaths; WhitelistMode = context.WhitelistMode }
+                let hydrated = HydrationSqlBuilder.buildHydrationValueExpr metadataConnection ownerContext context.OwnerType context.OwnerTable
+                                   (SqlExpr.Column(Some "o", "Value")) 0 "" &hydrationAliasCounter
+                if before <> hydrationAliasCounter then
+                    effectiveValueDecodedExpr <- SqlExpr.CaseExpr((selectedOwner ownerSources[index], SqlExpr.FunctionCall("json", [hydrated])), [], Some effectiveValueDecodedExpr)
+                    ownerContexts[index] <- { context with SingleRelationsHydrated = true }
         let mutable manyAliasCounter = hydrationAliasCounter
-        let manyRelationsHydrated =
-            hasManyRelations
-            && not (QueryTranslatorBaseTypes.isPrimitiveSQLiteType valueDecodedType)
-            && valueDecodedType = typeof<'T>
-            && isIdentityOwnerRowsetExpr expression
         let manyHydrationProjection =
-            if manyRelationsHydrated then
-                let ownerIdExpr = SqlExpr.Column(Some "o", "Id")
-                HydrationSqlBuilder.buildManyHydrationProjection metadataConnection ctx typeof<'T> (source.Name)
-                    ownerIdExpr &manyAliasCounter
-            else
-                None
+            if ownerContexts.Length = 1 && ownerContexts[0].HasManyRelations && ownerContexts[0].OwnerType.Equals(valueDecodedType)
+               && not(QueryTranslatorBaseTypes.isPrimitiveSQLiteType valueDecodedType) && isIdentityOwnerRowsetExpr expression then
+                let context = ownerContexts[0]
+                let ownerContext = { ctx with ExcludedPaths = context.ExcludedPaths; IncludedPaths = context.IncludedPaths; WhitelistMode = context.WhitelistMode }
+                let projection = HydrationSqlBuilder.buildManyHydrationProjection metadataConnection ownerContext context.OwnerType context.OwnerTable
+                                     (SqlExpr.Column(Some "o", "Id")) &manyAliasCounter
+                if projection.IsSome then ownerContexts[0] <- { context with ManyRelationsHydrated = true }
+                projection
+            else None
+        let ownerPosition =
+            Array.foldBack (fun (index, source) otherwise ->
+                SqlExpr.CaseExpr((selectedOwner source, SqlExpr.Literal(SqlLiteral.Integer(int64 index))), [], Some otherwise))
+                (Array.indexed ownerSources) (SqlExpr.Literal(SqlLiteral.Integer -1L))
 
         // Outer (Id, Value) projection. Translator emit sites for typed runtime
         // errors (Cast / cardinality / out-of-range) build their own complete
@@ -253,11 +264,10 @@ module internal QueryableTranslationCore =
                  { Alias = Some "ValueJSON"; Expr = effectiveValueDecodedExpr }]
 
         let outerProjections =
-            match manyHydrationProjection with
-            | Some hydExpr ->
-                baseProjections @ [{ Alias = Some "HydrationJSON"; Expr = hydExpr }]
-            | None ->
-                baseProjections
+            if ownerSources.Length = 0 then baseProjections
+            else baseProjections @
+                    [{ Alias = Some "HydrationJSON"; Expr = manyHydrationProjection |> Option.defaultValue (SqlExpr.Literal SqlLiteral.Null) }
+                     { Alias = Some "_owner"; Expr = ownerPosition }]
 
         let outerCore = mkCore outerProjections (Some (DerivedTable(innerSelect, "o")))
         let outerSelect = wrapCore outerCore
@@ -273,24 +283,10 @@ module internal QueryableTranslationCore =
             QueryReadPlanning.plan indexModel estimates counted
         let sql = emitSelectSql variables indexModel retainedPlan outerSelect
 
-        let actuallyHydrated = singleRelationsHydrated && hydrationAliasCounter > 0
-        let actuallyManyHydrated = manyRelationsHydrated && manyHydrationProjection.IsSome
-
         let batchLoadContext =
-            if hasSingleRelations || hasManyRelations then
-                ValueSome {
-                    OwnerTable = source.Name
-                    OwnerType = typeof<'T>
-                    ExcludedPaths = new HashSet<string>(ctx.ExcludedPaths, StringComparer.Ordinal)
-                    IncludedPaths = new HashSet<string>(ctx.IncludedPaths, StringComparer.Ordinal)
-                    WhitelistMode = ctx.WhitelistMode
-                    HasSingleRelations = hasSingleRelations
-                    HasManyRelations = hasManyRelations
-                    SingleRelationsHydrated = actuallyHydrated
-                    ManyRelationsHydrated = actuallyManyHydrated
-                }
-            else
-                ValueNone
+            if ownerContexts |> Array.exists (fun context -> context.HasSingleRelations || context.HasManyRelations) then
+                ValueSome { Owners = ownerContexts }
+            else ValueNone
 
         // The pre-optimizer SqlSelect is returned alongside the emitted text so callers can
         // inspect the structure the translator actually produced, before any pass rewrites it.
@@ -303,8 +299,8 @@ module internal QueryableTranslationCore =
         translateWithBindings (ValueSome bindQueryValue) generalPrefixMatch connection source expression
 
     let internal startTranslation (source: ISoloDBCollection<'T>) (expression: Expression) =
-        use metadataConnection = source.GetInternalConnection()
+        use metadataConnection = (source :?> INativeConnectionSource).AcquireNativeConnection()
         startTranslationCore metadataConnection source expression
 
-    let internal startTranslationWithConnection (metadataConnection: SqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
+    let internal startTranslationWithConnection (metadataConnection: NativeSqliteConnection) (source: ISoloDBCollection<'T>) (expression: Expression) =
         startTranslationCore metadataConnection source expression

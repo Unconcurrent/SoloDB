@@ -15,7 +15,7 @@ open System.Reflection
 [<Extension; AbstractClass; Sealed>]
 type Extensions =
     /// <summary>
-    /// Returns all elements contained in the specified IGrouping<'Key, 'T> as an array.
+    /// Returns all elements contained in the specified IGrouping&lt;'Key, 'T&gt; as an array.
     /// Useful for materializing grouped query results into a concrete collection.
     /// </summary>
     [<Extension>]
@@ -38,8 +38,11 @@ type Extensions =
     /// </remarks>
     [<Extension>]
     static member Any<'T>(this: ICollection<'T>, condition: Expression<Func<'T, bool>>) =
-        let f = condition.Compile false
-        this |> Seq.exists f.Invoke
+        if isNull condition then nullArg "condition"
+        let variables = Dictionary<ParameterExpression,int>()
+        variables.Add(condition.Parameters.[0],0)
+        let run = QueryValuePlan.bind variables (fun _ -> None) condition.Body
+        this |> Seq.exists (fun value -> unbox<bool>(run [|box value|]))
 
     /// <summary>
     /// Dynamically retrieves a property value from an object and casts it to the specified generic type, to be used in queries.
@@ -49,9 +52,9 @@ type Extensions =
     /// <returns>The value of the property cast to type 'T.</returns>
     [<Extension>]
     static member Dyn<'T>(this: obj, propertyName: string) : 'T =
-        let prop = this.GetType().GetProperty(propertyName, BindingFlags.Public ||| BindingFlags.Instance)
-        if prop <> null && prop.CanRead then
-            prop.GetValue(this) :?> 'T
+        let prop = ModelMetadata.PropertyReader(this.GetType(),propertyName)
+        if prop.IsSome then
+            ModelMetadata.ReadProperty(prop.Value,this) :?> 'T
         else
             let msg = sprintf "Property '%s' not found on type '%s' or is not readable." propertyName (this.GetType().FullName)
             raise (ArgumentException(msg))
@@ -65,7 +68,7 @@ type Extensions =
     [<Extension>]
     static member Dyn<'T>(this: obj, property: PropertyInfo) : 'T =
         try
-            property.GetValue(this) :?> 'T
+            ModelMetadata.ReadProperty(property,this) :?> 'T
         with
         | :? InvalidCastException as ex ->
             let msg = sprintf "Cannot cast property '%s' value to type '%s'." property.Name (typeof<'T>.FullName)
@@ -79,9 +82,9 @@ type Extensions =
     /// <returns>The value of the property as an obj.</returns>
     [<Extension>]
     static member Dyn(this: obj, propertyName: string) : obj =
-        let prop = this.GetType().GetProperty(propertyName, BindingFlags.Public ||| BindingFlags.Instance)
-        if prop <> null && prop.CanRead then
-            prop.GetValue(this)
+        let prop = ModelMetadata.PropertyReader(this.GetType(),propertyName)
+        if prop.IsSome then
+            ModelMetadata.ReadProperty(prop.Value,this)
         else
             let msg = sprintf "Property '%s' not found on type '%s' or is not readable." propertyName (this.GetType().FullName)
             raise (ArgumentException(msg))

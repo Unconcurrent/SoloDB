@@ -24,9 +24,11 @@ module internal QueryReadPlanning =
     let private fromSource source (qualifier: string option) = qualifier.IsNone || qualifier = Some source
 
     let private simplePath path =
-        JsonPathOps.toList path |> List.forall (fun segment ->
-            not (String.IsNullOrEmpty segment)
-            && (segment |> Seq.forall (fun c -> Char.IsLetterOrDigit c || c = '_' || c = '$')))
+        JsonPathOps.toList path |> List.forall (function
+            | JsonSerializator.JsonEqualitySupport.Member segment ->
+                not (String.IsNullOrEmpty segment)
+                && (segment |> Seq.forall (fun c -> Char.IsLetterOrDigit c || c = '_' || c = '$'))
+            | JsonSerializator.JsonEqualitySupport.Index _ -> false)
 
     let private readsDocument source expression =
         match FlattenTransform.normalizeExprQuoting expression with
@@ -84,6 +86,7 @@ module internal QueryReadPlanning =
             not (SqlExpr.exists (function
                 | ScalarSubquery _ | Exists _ | InSubquery _ | WindowCall _ -> true
                 | AggregateCall((AggregateKind.Count | AggregateKind.Min | AggregateKind.Max), _, _, _) -> false
+                | AggregateCall(AggregateKind.ExactNumeric((Numerics.DecimalAggregateKind.Minimum | Numerics.DecimalAggregateKind.Maximum), _), _, _, _) -> false
                 | AggregateCall _ -> true // Floating sums and ordered aggregates depend on input order.
                 | FunctionCall(name, _) ->
                     match name.ToUpperInvariant() with

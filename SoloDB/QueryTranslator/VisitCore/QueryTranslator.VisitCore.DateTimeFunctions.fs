@@ -40,14 +40,14 @@ module internal DateTimeFunctions =
 
     /// Convert raw stored SqlExpr to canonical unix-milliseconds.
     let internal toUnixMs (raw: SqlExpr) (clrType: Type) : SqlExpr =
-        if clrType = typeof<DateTime> then
+        if typeof<DateTime>.Equals(clrType) then
             // ToBinary: ((raw & 0x3FFFFFFFFFFFFFFF) - 621355968000000000) / 10000
             SqlExpr.Binary(
                 SqlExpr.Binary(
                     SqlExpr.Binary(raw, BinaryOperator.BitwiseAnd, mask),
                     BinaryOperator.Sub, epochTk),
                 BinaryOperator.Div, ticksMs)
-        elif clrType = typeof<DateTimeOffset> then
+        elif typeof<DateTimeOffset>.Equals(clrType) then
             raw  // identity: ToUnixTimeMilliseconds() is the stored value
         else
             raise (NotSupportedException $"toUnixMs: unsupported type {clrType.FullName}")
@@ -108,7 +108,7 @@ module internal DateTimeFunctions =
 
     let internal supportsTemporalToStringTranslationType (t: Type) =
         let u = unwrapNullable t
-        u = typeof<DateTime> || u = typeof<DateTimeOffset> || u = typeof<DateOnly> || u = typeof<TimeOnly>
+        typeof<DateTime>.Equals(u) || typeof<DateTimeOffset>.Equals(u) || typeof<DateOnly>.Equals(u) || typeof<TimeOnly>.Equals(u)
 
     let private daysBeforeMonth (month: SqlExpr) =
         let branch m days = eq month (intLit m), intLit days
@@ -167,7 +167,7 @@ module internal DateTimeFunctions =
 
     let internal canonicalizeForCompareOrOrder (clrType: Type) (expr: SqlExpr) =
         let u = unwrapNullable clrType
-        if u = typeof<DateTime> then
+        if typeof<DateTime>.Equals(u) then
             SqlExpr.Binary(expr, BinaryOperator.BitwiseAnd, mask)
         elif isDateTimeLikeType u then
             expr
@@ -178,11 +178,11 @@ module internal DateTimeFunctions =
         let l = unwrapNullable leftType
         let r = unwrapNullable rightType
         if isDateTimeLikeType l || isDateTimeLikeType r then
-            if l <> r then
+            if not (l.Equals(r)) then
                 raise (NotSupportedException($"Cannot compare date/time values of different CLR types: {l.FullName} and {r.FullName}."))
 
     let private tryEval<'T> (expr: Expression) =
-        if isFullyConstant expr then Some(evaluateExpr<'T> expr) else None
+        if isFullyConstant expr then Some(ExpressionEvaluation.evaluateExpr<'T> expr) else None
 
     let private unsupported (typeName: string) (argCount: int) =
         raise (NotSupportedException($"new {typeName} with signature of {argCount} argument(s) is not supported in SQL translation."))
@@ -220,22 +220,22 @@ module internal DateTimeFunctions =
         match ne.Arguments.Count with
         | 1 ->
             arg 0
-        | 2 when ne.Arguments.[0].Type = typeof<DateOnly> && ne.Arguments.[1].Type = typeof<TimeOnly> ->
+        | 2 when typeof<DateOnly>.Equals(ne.Arguments.[0].Type) && typeof<TimeOnly>.Equals(ne.Arguments.[1].Type) ->
             add (mul (arg 0) ticksDay) (mul (arg 1) ticksMs)
-        | 2 when ne.Arguments.[0].Type = typeof<int64> || ne.Arguments.[0].Type = typeof<int64> ->
+        | 2 when typeof<int64>.Equals(ne.Arguments.[0].Type) || typeof<int64>.Equals(ne.Arguments.[0].Type) ->
             add (arg 0) (intLit (kindFlag (constKind ne.Arguments.[1])))
-        | 3 when ne.Arguments.[0].Type = typeof<DateOnly> && ne.Arguments.[1].Type = typeof<TimeOnly> && ne.Arguments.[2].Type = typeof<DateTimeKind> ->
+        | 3 when typeof<DateOnly>.Equals(ne.Arguments.[0].Type) && typeof<TimeOnly>.Equals(ne.Arguments.[1].Type) && typeof<DateTimeKind>.Equals(ne.Arguments.[2].Type) ->
             add (add (mul (arg 0) ticksDay) (mul (arg 1) ticksMs)) (intLit (kindFlag (constKind ne.Arguments.[2])))
         | 3 ->
             // new DateTime(y,m,d) has Kind=Unspecified, so the high Kind bits are zero and the mask is identity.
             ymdTime (arg 0) (arg 1) (arg 2) zero zero zero zero DateTimeKind.Unspecified
         | 6 ->
             ymdTime (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5) zero DateTimeKind.Unspecified
-        | 7 when ne.Arguments.[6].Type = typeof<DateTimeKind> ->
+        | 7 when typeof<DateTimeKind>.Equals(ne.Arguments.[6].Type) ->
             ymdTime (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5) zero (constKind ne.Arguments.[6])
         | 7 ->
             ymdTime (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5) (arg 6) DateTimeKind.Unspecified
-        | 8 when ne.Arguments.[7].Type = typeof<DateTimeKind> ->
+        | 8 when typeof<DateTimeKind>.Equals(ne.Arguments.[7].Type) ->
             ymdTime (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5) (arg 6) (constKind ne.Arguments.[7])
         | n -> unsupported "DateTime" n
 
@@ -253,9 +253,9 @@ module internal DateTimeFunctions =
             whenValid (all [ validDate y m d; validTimeOfDay h mi s ms; validOffsetMs offsetMs ]) (sub (unixMsFromDateTimeTicks dtTicks) offsetMs)
         let dtoFromDateTimeArg (dtArg: Expression) (offsetArg: Expression option) =
             match dtArg with
-            | :? NewExpression as dtNe when dtNe.Type = typeof<DateTime> ->
+            | :? NewExpression as dtNe when typeof<DateTime>.Equals(dtNe.Type) ->
                 let explicitKind =
-                    if dtNe.Arguments.Count >= 2 && dtNe.Arguments.[dtNe.Arguments.Count - 1].Type = typeof<DateTimeKind> then
+                    if dtNe.Arguments.Count >= 2 && typeof<DateTimeKind>.Equals(dtNe.Arguments.[dtNe.Arguments.Count - 1].Type) then
                         Some (constKind dtNe.Arguments.[dtNe.Arguments.Count - 1])
                     else None
                 match explicitKind with
@@ -276,9 +276,9 @@ module internal DateTimeFunctions =
                     raise (NotSupportedException(dtoDateTimeMessage))
 
         match ne.Arguments.Count with
-        | 1 when ne.Arguments.[0].Type = typeof<DateTime> -> dtoFromDateTimeArg ne.Arguments.[0] None
-        | 2 when ne.Arguments.[0].Type = typeof<DateTime> -> dtoFromDateTimeArg ne.Arguments.[0] (Some ne.Arguments.[1])
-        | 2 when ne.Arguments.[0].Type = typeof<int64> ->
+        | 1 when typeof<DateTime>.Equals(ne.Arguments.[0].Type) -> dtoFromDateTimeArg ne.Arguments.[0] None
+        | 2 when typeof<DateTime>.Equals(ne.Arguments.[0].Type) -> dtoFromDateTimeArg ne.Arguments.[0] (Some ne.Arguments.[1])
+        | 2 when typeof<int64>.Equals(ne.Arguments.[0].Type) ->
             let offsetMs = offsetMsFromTimeSpanExpr ne.Arguments.[1] visitArg
             whenValid (validOffsetMs offsetMs) (sub (unixMsFromDateTimeTicks (arg 0)) offsetMs)
         | 7 -> dtoFromParts (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5) zero ne.Arguments.[6]
@@ -308,9 +308,9 @@ module internal DateTimeFunctions =
             whenValid (all [ validDate y m d; validTimeOfDay h mi s ms; validOffsetMs offsetMs ]) (fromLocalTicks localTicks)
         let fromDateTimeArg (dtArg: Expression) (offsetArg: Expression option) =
             match dtArg with
-            | :? NewExpression as dtNe when dtNe.Type = typeof<DateTime> ->
+            | :? NewExpression as dtNe when typeof<DateTime>.Equals(dtNe.Type) ->
                 let explicitKind =
-                    if dtNe.Arguments.Count >= 2 && dtNe.Arguments.[dtNe.Arguments.Count - 1].Type = typeof<DateTimeKind> then
+                    if dtNe.Arguments.Count >= 2 && typeof<DateTimeKind>.Equals(dtNe.Arguments.[dtNe.Arguments.Count - 1].Type) then
                         Some (constKind dtNe.Arguments.[dtNe.Arguments.Count - 1])
                     else None
                 match explicitKind with
@@ -329,9 +329,9 @@ module internal DateTimeFunctions =
                 | _ -> raise (NotSupportedException(dtoDateTimeMessage))
 
         match ne.Arguments.Count with
-        | 1 when ne.Arguments.[0].Type = typeof<DateTime> -> Some (fromDateTimeArg ne.Arguments.[0] None)
-        | 2 when ne.Arguments.[0].Type = typeof<DateTime> -> Some (fromDateTimeArg ne.Arguments.[0] (Some ne.Arguments.[1]))
-        | 2 when ne.Arguments.[0].Type = typeof<int64> ->
+        | 1 when typeof<DateTime>.Equals(ne.Arguments.[0].Type) -> Some (fromDateTimeArg ne.Arguments.[0] None)
+        | 2 when typeof<DateTime>.Equals(ne.Arguments.[0].Type) -> Some (fromDateTimeArg ne.Arguments.[0] (Some ne.Arguments.[1]))
+        | 2 when typeof<int64>.Equals(ne.Arguments.[0].Type) ->
             let offsetMs = offsetMsFromTimeSpanExpr ne.Arguments.[1] visitArg
             Some (whenValid (validOffsetMs offsetMs) (fromLocalTicks (arg 0)))
         | 7 -> Some (fromDateParts (arg 0) (arg 1) (arg 2) (arg 3) (arg 4) (arg 5) zero ne.Arguments.[6])
@@ -353,7 +353,7 @@ module internal DateTimeFunctions =
         let hms h m s ms =
             whenValid (validTimeOfDay h m s ms) (add (add (add (mul h ms3600000) (mul m ms60000)) (mul s ms1000)) ms)
         match ne.Arguments.Count with
-        | 1 when ne.Arguments.[0].Type = typeof<int64> -> div (arg 0) ticksMs
+        | 1 when typeof<int64>.Equals(ne.Arguments.[0].Type) -> div (arg 0) ticksMs
         | 2 -> hms (arg 0) (arg 1) zero zero
         | 3 -> hms (arg 0) (arg 1) (arg 2) zero
         | 4 -> hms (arg 0) (arg 1) (arg 2) (arg 3)
@@ -363,18 +363,18 @@ module internal DateTimeFunctions =
         let arg i = visitArg ne.Arguments.[i]
         // TimeSpan has no row-dependent invalid component domain under supported overloads; storage is total milliseconds.
         match ne.Arguments.Count with
-        | 1 when ne.Arguments.[0].Type = typeof<int64> -> div (arg 0) ticksMs
+        | 1 when typeof<int64>.Equals(ne.Arguments.[0].Type) -> div (arg 0) ticksMs
         | 3 -> add (add (mul (arg 0) ms3600000) (mul (arg 1) ms60000)) (mul (arg 2) ms1000)
         | 4 -> add (mul (arg 0) ms86400000) (add (add (mul (arg 1) ms3600000) (mul (arg 2) ms60000)) (mul (arg 3) ms1000))
         | 5 -> add (add (mul (arg 0) ms86400000) (add (add (mul (arg 1) ms3600000) (mul (arg 2) ms60000)) (mul (arg 3) ms1000))) (arg 4)
         | n -> unsupported "TimeSpan" n
 
     let internal translateDateTimeLikeConstructor (ne: NewExpression) (visitArg: Expression -> SqlExpr) : SqlExpr option =
-        if ne.Type = typeof<DateTime> then Some (translateDateTimeConstructorToTicks ne visitArg)
-        elif ne.Type = typeof<DateTimeOffset> then Some (translateDateTimeOffsetConstructor ne visitArg)
-        elif ne.Type = typeof<DateOnly> then Some (translateDateOnlyConstructor ne visitArg)
-        elif ne.Type = typeof<TimeOnly> then Some (translateTimeOnlyConstructor ne visitArg)
-        elif ne.Type = typeof<TimeSpan> then Some (translateTimeSpanConstructor ne visitArg)
+        if typeof<DateTime>.Equals(ne.Type) then Some (translateDateTimeConstructorToTicks ne visitArg)
+        elif typeof<DateTimeOffset>.Equals(ne.Type) then Some (translateDateTimeOffsetConstructor ne visitArg)
+        elif typeof<DateOnly>.Equals(ne.Type) then Some (translateDateOnlyConstructor ne visitArg)
+        elif typeof<TimeOnly>.Equals(ne.Type) then Some (translateTimeOnlyConstructor ne visitArg)
+        elif typeof<TimeSpan>.Equals(ne.Type) then Some (translateTimeSpanConstructor ne visitArg)
         else None
 
     // ─── Member access ────────────────────────────────────────────────────────────
@@ -461,18 +461,18 @@ module internal DateTimeFunctions =
     /// Route group-key member access to the correct type-specific translator.
     /// For Nullable<T> keys, ".Value" is a pass-through (null rows pre-filtered by caller).
     let internal translateGroupKeyMemberAccess (keyExpr: SqlExpr) (keyType: Type) (memberName: string) : SqlExpr =
-        let isNullable = keyType.IsGenericType && keyType.GetGenericTypeDefinition() = typedefof<Nullable<_>>
+        let isNullable = keyType.IsGenericType && typedefof<Nullable<_>>.Equals(keyType.GetGenericTypeDefinition())
         if isNullable && memberName = "Value" then
             keyExpr
         else
             let underlying = unwrapNullable keyType
-            if underlying = typeof<DateTime> || underlying = typeof<DateTimeOffset> then
+            if typeof<DateTime>.Equals(underlying) || typeof<DateTimeOffset>.Equals(underlying) then
                 translateDateTimeMember memberName keyExpr underlying
-            elif underlying = typeof<DateOnly> then
+            elif typeof<DateOnly>.Equals(underlying) then
                 translateDateOnlyMember memberName keyExpr
-            elif underlying = typeof<TimeOnly> then
+            elif typeof<TimeOnly>.Equals(underlying) then
                 translateTimeOnlyMember memberName keyExpr
-            elif underlying = typeof<TimeSpan> then
+            elif typeof<TimeSpan>.Equals(underlying) then
                 translateTimeSpanMember memberName keyExpr
             else
                 SqlExpr.FunctionCall("json_extract", [keyExpr; SqlExpr.Literal(SqlLiteral.String ("$." + memberName))])
@@ -600,7 +600,7 @@ module internal DateTimeFunctions =
         | Specifier(ch, count) -> new String(ch, count)
 
     let private receiverTypeName = function
-        | FromEpoch clrType when clrType = typeof<DateTimeOffset> -> "DateTimeOffset"
+        | FromEpoch clrType when typeof<DateTimeOffset>.Equals(clrType) -> "DateTimeOffset"
         | FromEpoch _ -> "DateTime"
         | FromDayNumber -> "DateOnly"
         | FromMillisecondsSinceMidnight -> "TimeOnly"
@@ -726,7 +726,7 @@ module internal DateTimeFunctions =
         | Specifier('K', _) ->
             // DateTime → "Z" (DateTimeKind.Utc stored); DateTimeOffset → "+00:00" (UTC+0 offset notation)
             match mode with
-            | FromEpoch clrType when clrType = typeof<DateTimeOffset> -> SqlExpr.Literal(SqlLiteral.String "+00:00")
+            | FromEpoch clrType when typeof<DateTimeOffset>.Equals(clrType) -> SqlExpr.Literal(SqlLiteral.String "+00:00")
             | _ -> SqlExpr.Literal(SqlLiteral.String "Z")
 
         | Specifier('g', _) -> SqlExpr.Literal(SqlLiteral.String "A.D.")  // all stored dates are CE
@@ -772,7 +772,7 @@ module internal DateTimeFunctions =
     /// Returns None if the expression depends on a row parameter (non-constant) — caller throws Error #4.
     let internal tryExtractConstantFormat (fmtExpr: Expression) : string option =
         if isFullyConstant fmtExpr then
-            Some(evaluateExpr<string> fmtExpr)
+            Some(ExpressionEvaluation.evaluateExpr<string> fmtExpr)
         else
             None
 
@@ -793,7 +793,7 @@ module internal DateTimeFunctions =
                         "Use a string literal, or call AsEnumerable() before ToString to evaluate client-side."))
         let mode =
             match unwrapNullable objExpr.Type with
-            | t when t = typeof<DateOnly> -> DateTimeTranslationMode.FromDayNumber
-            | t when t = typeof<TimeOnly> -> DateTimeTranslationMode.FromMillisecondsSinceMidnight
+            | t when typeof<DateOnly>.Equals(t) -> DateTimeTranslationMode.FromDayNumber
+            | t when typeof<TimeOnly>.Equals(t) -> DateTimeTranslationMode.FromMillisecondsSinceMidnight
             | _ -> DateTimeTranslationMode.FromEpoch objExpr.Type
         translateDateTimeToString rawExpr mode fmtStr

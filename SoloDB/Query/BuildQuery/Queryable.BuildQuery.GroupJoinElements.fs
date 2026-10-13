@@ -8,11 +8,19 @@ open SoloDatabase
 open SoloDatabase.SqlModel
 open SoloDatabase.GroupJoinRuntimeTypes
 open SoloDatabase.GroupJoinChainParts
-open SoloDatabase.QueryableBuildQueryGroupJoinChain
 open SoloDatabase.DBRefManyDescriptor
 
 module internal QueryableBuildQueryGroupJoinElements =
     open QueryableHelperBase
+
+    /// Correlation filters the finished input before local position is assigned.
+    let groupRows (rt: GroupJoinRuntime) alias =
+        { mkCore ([{ Alias = Some "Id"; Expr = SqlExpr.Column(Some alias, "Id") }
+                   { Alias = Some "Value"; Expr = SqlExpr.Column(Some alias, "Value") }]
+                  @ QueryTranslatorSerialization.companionProjections (Some alias) rt.InnerCtx.SerializationInput)
+                 (Some(DerivedTable(rt.InnerSelect, alias))) with
+            Where = Some(SqlExpr.Binary(rt.OuterKeyExpr, BinaryOperator.Eq, SqlExpr.Column(Some alias, rt.InnerKeyName))) }
+        |> QueryProduced.withPosition "__ord"
 
     let tryMatchGroupElementCall (rt: GroupJoinRuntime) (expr: Expression) =
         match expr with
@@ -40,64 +48,60 @@ module internal QueryableBuildQueryGroupJoinElements =
         | _ -> false
 
     /// Bare-group scalar element access (no chain ops): translates the projection body
-    /// directly against the inner select, without going through the rowset builder.
+    /// against the completed group rows, with its original scalar projection policy.
     /// Used for patterns like matches.FirstOrDefault().Region where the caller
     /// accesses a member on the element result.
     let buildBareGroupElementScalar (rt: GroupJoinRuntime) (groupCall: GroupJoinElementCall) (projectionBody: Expression) =
-        let scalarAlias = sprintf "gjf%d" (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1)
+        let scalarAlias = "gjf" + (Interlocked.Increment(rt.InnerCtx.AliasCounter) - 1).ToString(System.Globalization.CultureInfo.InvariantCulture)
         let freshInnerCtx =
             { rt.InnerCtx with
                 Joins = ResizeArray() }
-        let innerParam = rt.InnerKeySelector.Parameters.[0]
+        let innerParam = rt.InnerParameter
         let rewrittenProjection = rt.ReplaceExpression (groupCall.Call :> Expression) (innerParam :> Expression) projectionBody
-        let freshInnerKeyExpr =
-            match rt.TryTranslateDbRefValueIdKey innerParam scalarAlias rt.InnerKeySelector.Body with
-            | Some translated -> translated
-            | None -> rt.TranslateJoinExpr freshInnerCtx scalarAlias rt.Vars (Some innerParam) rt.InnerKeySelector.Body
-        let projectedExpr =
-            rt.TranslateJoinExpr freshInnerCtx scalarAlias rt.Vars (Some innerParam) rewrittenProjection
+        let rows = groupRows rt scalarAlias |> wrapCore
+        let produced = QueryableHelperJoinBindings.translateJoinSingleSourceProduced freshInnerCtx scalarAlias rt.Vars (Some innerParam) rewrittenProjection
+        let descriptor = QuerySerializationSql.inputDescriptor produced.Input
+        let packed = produced.Input.PhysicalOwner.IsSome || not(QuerySerializationSql.isConstantDescriptor descriptor) || (match produced with PackedValue _ -> true | _ -> false)
+        let projectedExpr = if packed then QueryProduced.packet produced else QueryProduced.value freshInnerCtx.NextAlias produced
         let baseScalarCore =
-            { mkCore [{ Alias = None; Expr = projectedExpr }] (Some (DerivedTable(rt.InnerSelect, scalarAlias)))
-                with
-                    Joins = rt.MaterializeDiscoveredJoins freshInnerCtx.Joins None None
-                    Where = Some (SqlExpr.Binary(rt.OuterKeyExpr, BinaryOperator.Eq, freshInnerKeyExpr)) }
-        let ascIdOrder = [{ Expr = SqlExpr.Column(Some scalarAlias, "Id"); Direction = SortDirection.Asc }]
-        let descIdOrder = [{ Expr = SqlExpr.Column(Some scalarAlias, "Id"); Direction = SortDirection.Desc }]
-        let mkValue core = SqlExpr.ScalarSubquery (wrapCore core)
-        let nullLit = SqlExpr.Literal(SqlLiteral.Null)
+            { mkCore [{ Alias = None; Expr = projectedExpr }] (Some (DerivedTable(rows, scalarAlias)))
+                with Joins = QueryTranslatorReferenceJoin.preparedJoinClauses freshInnerCtx.Joins }
+        let ascPosition = [{ Expr = SqlExpr.Column(Some scalarAlias, "__ord"); Direction = SortDirection.Asc }]
+        let descPosition = [{ Expr = SqlExpr.Column(Some scalarAlias, "__ord"); Direction = SortDirection.Desc }]
+        let mkValue core =
+            let value = SqlExpr.ScalarSubquery (wrapCore core)
+            if packed then PackedValue(value, QueryTranslatorSerialization.rebaseSerializationInput produced.Input)
+            else DirectValue(value, QueryTranslatorSerialization.rebaseSerializationInput produced.Input)
+        let nullLit = QueryProduced.typed projectionBody.Type (SqlExpr.Literal(SqlLiteral.Null))
         match groupCall.Kind with
         | FirstLike _ ->
-            mkValue { baseScalarCore with Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
+            mkValue { baseScalarCore with OrderBy = ascPosition; Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
         | LastLike _ ->
             mkValue
                 { baseScalarCore with
-                    OrderBy = descIdOrder
+                    OrderBy = descPosition
                     Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
         | SingleLike orDefault ->
             let valueCore =
                 { baseScalarCore with
-                    OrderBy = ascIdOrder
+                    OrderBy = ascPosition
                     Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
-            let countExpr = buildCountSubquery rt { baseScalarCore with OrderBy = ascIdOrder } (Some 2)
+            let countExpr = buildCountSubquery rt { baseScalarCore with OrderBy = ascPosition } (Some 2)
             let baseValue = mkValue valueCore
             if orDefault then
-                SqlExpr.CaseExpr(
-                    (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), nullLit),
-                    [],
-                    Some baseValue)
+                QueryProduced.choose projectionBody.Type (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L))) nullLit baseValue
             else
-                SqlExpr.CaseExpr(
-                    (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), nullLit),
-                    [ (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)), nullLit) ],
-                    Some baseValue)
+                let invalid = SqlExpr.Binary(SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), BinaryOperator.Or,
+                                            SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)))
+                QueryProduced.choose projectionBody.Type invalid nullLit baseValue
         | ElementAtLike(indexExpr, _orDefault) ->
-            let idx = Convert.ToInt64(QueryTranslatorBaseHelpers.evaluateExpr<obj> indexExpr)
+            let idx = Convert.ToInt64(ExpressionEvaluation.evaluateExpr<obj> indexExpr)
             if idx < 0L then
                 nullLit
             else
                 mkValue
                     { baseScalarCore with
-                        OrderBy = ascIdOrder
+                        OrderBy = ascPosition
                         Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L))
                         Offset = Some (SqlExpr.Literal(SqlLiteral.Integer idx)) }
 
@@ -113,7 +117,7 @@ module internal QueryableBuildQueryGroupJoinElements =
                     | FirstLike _
                     | LastLike _
                     | ElementAtLike(_, true) ->
-                        match buildGroupElementDispatch rt groupCall (Expression.Constant(1L) :> Expression) with
+                        match buildGroupElementDispatch rt groupCall (Expression.Constant(1L) :> Expression) |> QueryProduced.value rt.InnerCtx.NextAlias with
                         | SqlExpr.ScalarSubquery select -> Some (SqlExpr.Exists select)
                         | _ -> failwith "internal invariant violation: expected scalar subquery"
                     | _ -> None

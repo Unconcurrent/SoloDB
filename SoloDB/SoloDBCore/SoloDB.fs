@@ -1,7 +1,6 @@
-﻿namespace SoloDatabase
+namespace SoloDatabase
 
 open SoloDatabase.JsonSerializator
-open Microsoft.Data.Sqlite
 open System.Linq.Expressions
 open System
 open System.Collections.Generic
@@ -9,7 +8,7 @@ open System.Collections
 open SoloDatabase.Types
 open System.IO
 open System.Text
-open SQLiteTools
+open NativeSQLiteTools
 open JsonFunctions
 open FileStorage
 open SoloDatabase.SqlModel
@@ -29,15 +28,13 @@ open System.Collections.Concurrent
 /// <param name="name">The name of the collection (table name).</param>
 /// <param name="connectionString">The database connection string.</param>
 /// <param name="parentData">Data from the parent SoloDB instance.</param>
-type internal Collection<'T>(connection: Connection, name: string, connectionString: string, parentData: SoloDBToCollectionData) as this =
-    let hasRelations =
-        typeof<'T>.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-        |> Array.exists (fun p -> DBRefTypeHelpers.isAnyRelationRefType p.PropertyType)
-    let relationCollectionFactory (conn: SqliteConnection) =
+type internal Collection<'T>(connection: NativeConnection, name: string, connectionString: string, parentData: SoloDBToCollectionData) as this =
+    let hasRelations = RelationsSchemaValidator.getReferenceMembers typeof<'T> |> Array.exists(fun property -> DBRefTypeHelpers.isAnyRelationRefType property.ReferenceType)
+    let relationCollectionFactory (conn: NativeSqliteConnection) =
         let rec onActiveConnection source =
             match source with
-            | Guarded (guard, inner) -> Guarded(guard, onActiveConnection inner)
-            | _ -> Transactional conn
+            | NativeGuarded (guard, inner) -> NativeGuarded(guard, onActiveConnection inner)
+            | _ -> NativeTransactional conn
         let targetConnection = onActiveConnection connection
         // One target collection per type and table for this transaction-scoped factory.
         let collections = Dictionary<struct (Type * string), obj>()
@@ -64,32 +61,39 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     /// <summary>Gets a value indicating whether the collection is operating within a transaction.</summary>
     member val InTransaction =
         match connection with
-        | Transactional _ -> true
-        | Guarded (_, inner) ->
+        | NativeTransactional _ -> true
+        | NativeGuarded (_, inner) ->
             match inner with
-            | Transactional _ -> true
+            | NativeTransactional _ -> true
             | _ -> false
-        | Pooled _ -> false
+        | NativePooled _ -> false
     /// <summary>Gets a value indicating whether type information should be included during serialization for documents in this collection.</summary>
-    member val IncludeType = mustIncludeTypeInformationInSerialization<'T>
+    member val IncludeType = TypeMetadata.requiresTypeInformationFor<'T>
     /// <summary>True when the document type declares DBRef/DBRefMany properties.</summary>
     member val internal HasRelations = hasRelations
 
-    member private this.HasIncomingRelations(connection: SqliteConnection) =
+    member private this.HasIncomingRelations(connection: NativeSqliteConnection) =
         scaffold.HasIncomingRelations(connection)
 
-    member internal this.RequiresRelationDeleteHandling(connection: SqliteConnection) =
+    member internal this.RequiresRelationDeleteHandling(connection: NativeSqliteConnection) =
         scaffold.RequiresRelationDeleteHandling(connection)
 
-    member internal this.SelectMutationRows(connection: SqliteConnection, filter: Expression<Func<'T, bool>>, takeOne: bool) =
+    member internal this.SelectMutationRows(connection: NativeSqliteConnection, filter: Expression<Func<'T, bool>>, takeOne: bool) =
         let filtered = Queryable.Where(this.SoloDBQueryable, filter)
         let expression =
             if takeOne then Queryable.Take(filtered, 1).Expression
             else filtered.Expression
         let query, variables = QueryableTranslation.startFilterTranslationWithConnection connection this expression
-        connection.Query<DbObjectRow>(query, variables) |> Seq.toArray
+        let mutable statement = connection.OpenStatement(query)
+        try
+            statement.BindValues(variables)
+            let rows = ResizeArray<DbObjectRow>()
+            while statement.Step() do rows.Add(SqlRowValue.Document(statement.Row))
+            statement.Dispose()
+            rows.ToArray()
+        with error -> statement.Abort(error); reraise()
 
-    member internal this.ExecuteJsonUpdateManyByRows(connection: SqliteConnection, rows: DbObjectRow array, expressions: ResizeArray<Expression<System.Action<'T>>>) =
+    member internal this.ExecuteJsonUpdateManyByRows(connection: NativeSqliteConnection, rows: DbObjectRow array, expressions: ResizeArray<Expression<System.Action<'T>>>) =
         // No expressions or no selected rows means there is nothing to update, and the corridor
         // emits no statement at all rather than one with an empty id list.
         if expressions.Count = 0 || rows.Length = 0 then
@@ -131,64 +135,24 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
 
     /// <summary>Gets the event registration API for this collection.</summary>
     member val internal Events: ISoloDBCollectionEvents<'T> =
-        let createDb (directConnection: SqliteConnection) (guard: unit -> unit) : ISoloDB =
-            let guardedConnection = Guarded(guard, Transactional directConnection)
-            let collectionFactory =
-                { new IEventDbCollectionFactory with
-                    member _.CreateCollection<'U>(collectionName: string) =
-                        Collection<'U>(guardedConnection, collectionName, connectionString, parentData) :> ISoloDBCollection<'U> }
-            let cache = EventDbCache(connectionString, directConnection, guardedConnection, parentData, name, collectionFactory)
-            let throwNestedTxInEventContext () =
-                raise (NotSupportedException(
-                    "Error: Nested transactions are not supported inside event handler contexts.\n" +
-                    "Reason: Event handlers execute during active SQL statements where SQLite cannot open SAVEPOINTs.\n" +
-                    "Fix: Perform transactional work outside event handlers, or use the event context directly without nesting."))
-
-            { new ISoloDB with
-                member _.ConnectionString = connectionString
-                member _.FileSystem = cache.FileSystem
-                member _.GetCollection<'U>() =
-                    cache.GetCollection<'U>(Helper.collectionNameOf<'U>)
-                member _.GetCollection<'U>(collectionName: string) =
-                    cache.GetCollection<'U>(collectionName)
-                member _.GetUntypedCollection(collectionName: string) =
-                    cache.GetCollection<JsonSerializator.JsonValue>(collectionName)
-                member _.CollectionExists(collectionName: string) =
-                    cache.CollectionExists(collectionName)
-                member _.CollectionExists<'U>() =
-                    cache.CollectionExists(Helper.collectionNameOf<'U>)
-                member _.DropCollectionIfExists(collectionName: string) =
-                    cache.DropCollectionIfExists(collectionName)
-                member _.DropCollectionIfExists<'U>() =
-                    cache.DropCollectionIfExists(Helper.collectionNameOf<'U>)
-                member _.DropCollection(collectionName: string) =
-                    cache.DropCollection(collectionName)
-                member _.DropCollection<'U>() =
-                    cache.DropCollection(Helper.collectionNameOf<'U>)
-                member _.ListCollectionNames() =
-                    Helper.listCollectionNamesSnapshot directConnection :> seq<string>
-                member _.Optimize() =
-                    directConnection.Execute "PRAGMA optimize;" |> ignore
-                member _.WithTransaction<'R>(_func: Func<ISoloDB, 'R>) : 'R =
-                    throwNestedTxInEventContext()
-                member _.WithTransaction(_func: Action<ISoloDB>) : unit =
-                    throwNestedTxInEventContext()
-                member _.WithTransactionAsync<'R>(_func: Func<ISoloDB, Threading.Tasks.Task<'R>>) : Threading.Tasks.Task<'R> =
-                    throwNestedTxInEventContext()
-                member _.WithTransactionAsync(_func: Func<ISoloDB, Threading.Tasks.Task>) : Threading.Tasks.Task =
-                    throwNestedTxInEventContext()
-                member _.Dispose() = ()
-            }
+        let createDb = Collection<'T>.CreateEventDatabase(connectionString, parentData, Some name)
 
         CollectionEventSystem<'T>(
             name,
             parentData.EventSystem,
             createDb)
 
+    static member internal CreateEventDatabase(connectionString, parentData, knownCollectionName) =
+        let factory guardedConnection =
+            { new IEventDbCollectionFactory with
+                member _.CreateCollection<'U>(collectionName: string) =
+                    Collection<'U>(guardedConnection, collectionName, connectionString, parentData) :> ISoloDBCollection<'U> }
+        EventContextDatabase.create connectionString parentData knownCollectionName factory
+
     /// <summary>Gets the internal connection provider for this collection.</summary>
     member val internal Connection = connection
 
-    member internal this.RefreshIndexModelSnapshot(conn: SqliteConnection) =
+    member internal this.RefreshIndexModelSnapshot(conn: NativeSqliteConnection) =
         scaffold.RefreshIndexModelSnapshot(conn)
 
     member internal this.InvalidateIndexModelSnapshot() =
@@ -202,31 +166,31 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     /// Used by Insert, Update, Replace, and batch methods that need relation atomicity.
     member internal this.WithRelationAutoTx (f: Collection<'T> -> 'R) : 'R =
         connection.WithTransaction(fun conn ->
-            let directConnection = Transactional conn
+            let directConnection = NativeTransactional conn
             let transientCollection = Collection<'T>(directConnection, name, connectionString, parentData)
             f transientCollection)
 
-    member private this.mkRelationTx (conn: SqliteConnection) : RelationsTypes.RelationTxContext =
+    member private this.mkRelationTx (conn: NativeSqliteConnection) : RelationsTypes.RelationTxContext =
         scaffold.MkRelationTx(conn)
 
     static member internal mkRelationPathSets() =
         CollectionScaffold<'T>.MkRelationPathSets()
 
-    member internal this.ensureRelationTx (conn: SqliteConnection) : RelationsTypes.RelationTxContext =
+    member internal this.ensureRelationTx (conn: NativeSqliteConnection) : RelationsTypes.RelationTxContext =
         scaffold.EnsureRelationTx(conn)
 
-    member internal this.tryEnsureRelationTx (conn: SqliteConnection) : RelationsTypes.RelationTxContext voption =
+    member internal this.tryEnsureRelationTx (conn: NativeSqliteConnection) : RelationsTypes.RelationTxContext voption =
         scaffold.TryEnsureRelationTx(conn)
 
     member internal this.setSerializedItem (variables: IDictionary<string, obj>) (item: 'T) =
-        variables.["item"] <- if this.IncludeType then toTypedJson item else toJson item
+        variables.["item"] <- box (toDocument this.IncludeType item)
 
-    member internal this.tryLoadExistingOwnerForUpsert (conn: SqliteConnection) (item: 'T) : obj voption * int64 voption =
+    member internal this.tryLoadExistingOwnerForUpsert (conn: NativeSqliteConnection) (item: 'T) : obj voption * int64 voption =
         let oldRow =
-            if HasTypeId<'T>.Value then
-                let id = HasTypeId<'T>.Read item
+            if EntityDocumentId<'T>.Value then
+                let id = EntityDocumentId<'T>.Read item
                 if id > 0L then
-                    match conn.QueryFirstOrDefault<DbObjectRow>($"SELECT Id, json_quote(Value) as ValueJSON FROM \"{name}\" WHERE Id = @id LIMIT 1", {| id = id |}) with
+                    match readDocumentById conn name id with
                     | row when Object.ReferenceEquals(row, null) -> ValueNone
                     | row -> ValueSome row
                 else
@@ -236,20 +200,20 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
                 | Some customId ->
                     // DU-built SELECT for upsert existence check.
                     let idValue = customId.GetId(item |> box)
-                    let idProp = customId.Property
+                    let idProp = customId.Member
                     let vars = System.Collections.Generic.Dictionary<string, obj>()
                     let idParameter =
                         QueryableHelperBase.allocateNamedStoredValueParam
-                            vars "_cid0" idProp.PropertyType idValue
+                            vars "_cid0" idProp.IdType idValue
                     let whereExpr =
                         SoloDatabase.SqlModel.SqlExpr.Binary(
-                            SoloDatabase.SqlModel.SqlExpr.FunctionCall("jsonb_extract",
-                                [SoloDatabase.SqlModel.SqlExpr.Column(Some "o", "Value"); SoloDatabase.SqlModel.SqlExpr.Literal(SoloDatabase.SqlModel.SqlLiteral.String ("$." + idProp.Name))]),
+                            StoredValueParameter.declaredExpression idProp.IdType
+                                (SoloDatabase.SqlModel.SqlExpr.JsonExtractExpr(Some "o", "Value", SoloDatabase.SqlModel.JsonPathOps.ofList [idProp.Name])),
                             SoloDatabase.SqlModel.BinaryOperator.Eq,
                             idParameter)
                     let sql, _ =
                         HydrationSqlBuilder.buildManyOnlyHydratedSql conn name typeof<'T> whereExpr vars true
-                    match conn.QueryFirstOrDefault<DbObjectRow>(sql, vars) with
+                    match readHydratedDocument conn sql vars with
                     | row when Object.ReferenceEquals(row, null) -> ValueNone
                     | row -> ValueSome row
                 | None -> ValueNone
@@ -283,26 +247,35 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         CollectionInstanceCrud.tryGetByIdInt64<'T> id name this.HasRelations (fun () -> connection.Get()) (fun conn entityId entity ->
             let excludedPaths, includedPaths = Collection<'T>.mkRelationPathSets()
             RelationsSync.batchLoadDBRefProperties conn name typeof<'T> excludedPaths includedPaths false [| (entityId, entity) |] this.InTransaction
-            RelationsSync.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths false [| (entityId, entity) |] this.InTransaction
-            RelationsSync.captureRelationVersionForEntities conn name [| (entityId, entity) |])
+            RelationsSync.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths false [| (entityId, entity) |] this.InTransaction)
     member this.GetById(id: int64) =
-        CollectionInstanceCrud.requireByIdInt64<'T> id name (this.TryGetById id)
+        match this.TryGetById id with
+        | Some value -> value
+        | None ->
+            use native = connection.Get()
+            try CollectionInstanceCrud.requireByIdInt64<'T> id name None
+            with error ->
+                SQLiteToolsHandlerFaultState.tryRecordHandlerFault native error
+                reraise()
     member this.DeleteById(id: int64) =
         CollectionInstanceCrud.deleteByIdInt64<'T> id name connection.WithTransaction this.RequiresRelationDeleteHandling this.ensureRelationTx (fun tx ownerId owner ->
             let deletePlan = RelationsPlan.prepareDeleteOwner tx ownerId owner
             RelationsSync.syncDeleteOwner tx deletePlan)
     member this.TryGetById<'IdType when 'IdType : equality>(id: 'IdType) : 'T option =
-        let hydrateRelations (conn: SqliteConnection) (entityId: int64) (entity: obj) =
+        let hydrateRelations (conn: NativeSqliteConnection) (entityId: int64) (entity: obj) =
             let excludedPaths, includedPaths = Collection<'T>.mkRelationPathSets()
             RelationsSync.batchLoadDBRefProperties conn name typeof<'T> excludedPaths includedPaths false [| (entityId, entity) |] this.InTransaction
             RelationsSync.batchLoadDBRefManyProperties conn name typeof<'T> excludedPaths includedPaths false [| (entityId, entity) |] this.InTransaction
-            RelationsSync.captureRelationVersionForEntities conn name [| (entityId, entity) |]
         let tryGetByCustomId () =
             CollectionInstanceCrud.tryGetByCustomId<'T, 'IdType> id name this.HasRelations (fun () -> connection.Get()) hydrateRelations
         CollectionInstanceCrud.tryGetByIdWithFallback<'T, 'IdType> id (fun (id64: int64) -> this.TryGetById(id64)) tryGetByCustomId
     member this.GetById<'IdType when 'IdType : equality>(id: 'IdType) : 'T =
         match this.TryGetById id with
-        | None -> raise (KeyNotFoundException(sprintf "There is no element with id '%A' inside collection '%s'" id name))
+        | None ->
+            use native = connection.Get()
+            let error = KeyNotFoundException(sprintf "There is no element with id '%A' inside collection '%s'" id name)
+            SQLiteToolsHandlerFaultState.tryRecordHandlerFault native error
+            raise error
         | Some x -> x
     member this.DeleteById<'IdType when 'IdType : equality>(id: 'IdType) : int =
         let deleteByCustomId () =
@@ -366,6 +339,9 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
     interface IEnumerable with
         member this.GetEnumerator() =
             (this :> IEnumerable<'T>).GetEnumerator() :> IEnumerator
+    interface INativeConnectionSource with
+        member this.AcquireNativeConnection() = this.Connection.Get()
+
     interface ISoloDBCollection<'T> with
         member this.Compile(query: Expression<Func<IQueryable<'T>, IQueryable<'R>>>) : Func<IEnumerable<'R>> =
             let argument = Expression.Parameter(typeof<unit>, "args")
@@ -392,35 +368,77 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
             let run = CompiledQueries.compileResult<'T, 'A, 'R> (this :> ISoloDBCollection<'T>) query argument [|argument|]
             Func<'A, 'R>(run)
         member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, IQueryable<'R>>>) : Func<'A, 'B, IEnumerable<'R>> =
-            let argument = Expression.Parameter(typeof<struct ('A * 'B)>, "args")
-            let values = [| Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression |]
+            let struct(argument, values) = CompiledQueryArguments.pairArguments<'A, 'B>()
             let run = CompiledQueries.compile<'T, struct ('A * 'B), 'R> (this :> ISoloDBCollection<'T>) query argument values
             Func<'A, 'B, IEnumerable<'R>>(fun a b -> run (struct (a, b)))
         member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, IOrderedQueryable<'R>>>) : Func<'A, 'B, IEnumerable<'R>> =
-            let argument = Expression.Parameter(typeof<struct ('A * 'B)>, "args")
-            let values = [| Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression |]
+            let struct(argument, values) = CompiledQueryArguments.pairArguments<'A, 'B>()
             let run = CompiledQueries.compile<'T, struct ('A * 'B), 'R> (this :> ISoloDBCollection<'T>) query argument values
             Func<'A, 'B, IEnumerable<'R>>(fun a b -> run (struct (a, b)))
         member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, 'R>>, _marker: CompileOptions) : Func<'A, 'B, 'R> =
-            let argument = Expression.Parameter(typeof<struct ('A * 'B)>, "args")
-            let values = [| Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression |]
+            let struct(argument, values) = CompiledQueryArguments.pairArguments<'A, 'B>()
             let run = CompiledQueries.compileResult<'T, struct ('A * 'B), 'R> (this :> ISoloDBCollection<'T>) query argument values
             Func<'A, 'B, 'R>(fun a b -> run (struct (a, b)))
         member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, IQueryable<'R>>>) : Func<'A, 'B, 'C, IEnumerable<'R>> =
-            let argument = Expression.Parameter(typeof<struct ('A * 'B * 'C)>, "args")
-            let values = [| Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression; Expression.Field(argument, "Item3") :> Expression |]
+            let struct(argument, values) = CompiledQueryArguments.tripleArguments<'A, 'B, 'C>()
             let run = CompiledQueries.compile<'T, struct ('A * 'B * 'C), 'R> (this :> ISoloDBCollection<'T>) query argument values
             Func<'A, 'B, 'C, IEnumerable<'R>>(fun a b c -> run (struct (a, b, c)))
         member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, IOrderedQueryable<'R>>>) : Func<'A, 'B, 'C, IEnumerable<'R>> =
-            let argument = Expression.Parameter(typeof<struct ('A * 'B * 'C)>, "args")
-            let values = [| Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression; Expression.Field(argument, "Item3") :> Expression |]
+            let struct(argument, values) = CompiledQueryArguments.tripleArguments<'A, 'B, 'C>()
             let run = CompiledQueries.compile<'T, struct ('A * 'B * 'C), 'R> (this :> ISoloDBCollection<'T>) query argument values
             Func<'A, 'B, 'C, IEnumerable<'R>>(fun a b c -> run (struct (a, b, c)))
         member this.Compile(query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, 'R>>, _marker: CompileOptions) : Func<'A, 'B, 'C, 'R> =
-            let argument = Expression.Parameter(typeof<struct ('A * 'B * 'C)>, "args")
-            let values = [| Expression.Field(argument, "Item1") :> Expression; Expression.Field(argument, "Item2") :> Expression; Expression.Field(argument, "Item3") :> Expression |]
+            let struct(argument, values) = CompiledQueryArguments.tripleArguments<'A, 'B, 'C>()
             let run = CompiledQueries.compileResult<'T, struct ('A * 'B * 'C), 'R> (this :> ISoloDBCollection<'T>) query argument values
             Func<'A, 'B, 'C, 'R>(fun a b c -> run (struct (a, b, c)))
+        member this.CompileQuotation(query: Microsoft.FSharp.Quotations.Expr<IQueryable<'T> -> IQueryable<'R>>) : Func<IEnumerable<'R>> =
+            let query = QueryQuotationSyntax.expression<Func<IQueryable<'T>, IQueryable<'R>>> query
+            (this :> ISoloDBCollection<'T>).Compile(query)
+
+        member this.CompileQuotation(query: Microsoft.FSharp.Quotations.Expr<IQueryable<'T> -> IOrderedQueryable<'R>>) : Func<IEnumerable<'R>> =
+            let query = QueryQuotationSyntax.expression<Func<IQueryable<'T>, IOrderedQueryable<'R>>> query
+            (this :> ISoloDBCollection<'T>).Compile(query)
+
+        member this.CompileQuotation(query: Microsoft.FSharp.Quotations.Expr<IQueryable<'T> -> 'R>, _marker: CompileQuotationOptions) : Func<'R> =
+            let query = QueryQuotationSyntax.expression<Func<IQueryable<'T>, 'R>> query
+            (this :> ISoloDBCollection<'T>).Compile(query, null)
+
+        member this.CompileQuotation(query: Microsoft.FSharp.Quotations.Expr<IQueryable<'T> -> 'A -> IQueryable<'R>>) : Func<'A, IEnumerable<'R>> =
+            let query = QueryQuotationSyntax.expression<Func<IQueryable<'T>, 'A, IQueryable<'R>>> query
+            (this :> ISoloDBCollection<'T>).Compile(query)
+
+        member this.CompileQuotation(query: Microsoft.FSharp.Quotations.Expr<IQueryable<'T> -> 'A -> IOrderedQueryable<'R>>) : Func<'A, IEnumerable<'R>> =
+            let query = QueryQuotationSyntax.expression<Func<IQueryable<'T>, 'A, IOrderedQueryable<'R>>> query
+            (this :> ISoloDBCollection<'T>).Compile(query)
+
+        member this.CompileQuotation(query: Microsoft.FSharp.Quotations.Expr<IQueryable<'T> -> 'A -> 'R>, _marker: CompileQuotationOptions1) : Func<'A, 'R> =
+            let query = QueryQuotationSyntax.expression<Func<IQueryable<'T>, 'A, 'R>> query
+            (this :> ISoloDBCollection<'T>).Compile(query, null)
+
+        member this.CompileQuotation(query: Microsoft.FSharp.Quotations.Expr<IQueryable<'T> -> 'A -> 'B -> IQueryable<'R>>) : Func<'A, 'B, IEnumerable<'R>> =
+            let query = QueryQuotationSyntax.expression<Func<IQueryable<'T>, 'A, 'B, IQueryable<'R>>> query
+            (this :> ISoloDBCollection<'T>).Compile(query)
+
+        member this.CompileQuotation(query: Microsoft.FSharp.Quotations.Expr<IQueryable<'T> -> 'A -> 'B -> IOrderedQueryable<'R>>) : Func<'A, 'B, IEnumerable<'R>> =
+            let query = QueryQuotationSyntax.expression<Func<IQueryable<'T>, 'A, 'B, IOrderedQueryable<'R>>> query
+            (this :> ISoloDBCollection<'T>).Compile(query)
+
+        member this.CompileQuotation(query: Microsoft.FSharp.Quotations.Expr<IQueryable<'T> -> 'A -> 'B -> 'R>, _marker: CompileQuotationOptions2) : Func<'A, 'B, 'R> =
+            let query = QueryQuotationSyntax.expression<Func<IQueryable<'T>, 'A, 'B, 'R>> query
+            (this :> ISoloDBCollection<'T>).Compile(query, null)
+
+        member this.CompileQuotation(query: Microsoft.FSharp.Quotations.Expr<IQueryable<'T> -> 'A -> 'B -> 'C -> IQueryable<'R>>) : Func<'A, 'B, 'C, IEnumerable<'R>> =
+            let query = QueryQuotationSyntax.expression<Func<IQueryable<'T>, 'A, 'B, 'C, IQueryable<'R>>> query
+            (this :> ISoloDBCollection<'T>).Compile(query)
+
+        member this.CompileQuotation(query: Microsoft.FSharp.Quotations.Expr<IQueryable<'T> -> 'A -> 'B -> 'C -> IOrderedQueryable<'R>>) : Func<'A, 'B, 'C, IEnumerable<'R>> =
+            let query = QueryQuotationSyntax.expression<Func<IQueryable<'T>, 'A, 'B, 'C, IOrderedQueryable<'R>>> query
+            (this :> ISoloDBCollection<'T>).Compile(query)
+
+        member this.CompileQuotation(query: Microsoft.FSharp.Quotations.Expr<IQueryable<'T> -> 'A -> 'B -> 'C -> 'R>, _marker: CompileQuotationOptions3) : Func<'A, 'B, 'C, 'R> =
+            let query = QueryQuotationSyntax.expression<Func<IQueryable<'T>, 'A, 'B, 'C, 'R>> query
+            (this :> ISoloDBCollection<'T>).Compile(query, null)
+
         member this.InTransaction = this.InTransaction
         member this.IncludeType = this.IncludeType 
         member this.Name = this.Name
@@ -436,7 +454,7 @@ type internal Collection<'T>(connection: Connection, name: string, connectionStr
         member this.InsertOrReplaceBatch(items) = this.InsertOrReplaceBatch(items)
         member this.TryGetById(id: int64) : 'T option = this.TryGetById(id)
         member this.TryGetById<'IdType when 'IdType : equality>(id: 'IdType) : 'T option = this.TryGetById<'IdType>(id)
-        member this.GetInternalConnection () = this.Connection.Get()
+        member this.GetInternalConnection () = this.Connection.GetPresentation()
         member this.Delete<'IdType when 'IdType : equality>(id: 'IdType) : int = this.DeleteById<'IdType>(id)
         member this.Delete(id: int64) : int = this.DeleteById(id)
         member this.Update(item) = this.Update(item)

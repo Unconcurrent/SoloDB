@@ -27,38 +27,62 @@ let private unquoteAlias (alias: string) : string =
     else
         alias
 
+let private columnMatchesIndex tableName alias (column: string) indexAlias indexColumn =
+    column = indexColumn &&
+    match alias, indexAlias with
+    | Some value, None -> unquoteAlias value = tableName
+    | None, None -> true
+    | Some value, Some indexed -> unquoteAlias value = unquoteAlias indexed
+    | _ -> false
+
+/// Normalize only the source alias supplied by the owning SELECT scope.
+let forSource tableName sourceAlias expression =
+    expression |> SqlExpr.map (function
+        | Column(Some alias, column) when unquoteAlias alias = unquoteAlias sourceAlias -> Column(Some tableName, column)
+        | JsonExtractExpr(Some alias, column, path) when unquoteAlias alias = unquoteAlias sourceAlias -> JsonExtractExpr(Some tableName, column, path)
+        | JsonRootExtract(Some alias, column) when unquoteAlias alias = unquoteAlias sourceAlias -> JsonRootExtract(Some tableName, column)
+        | node -> node)
+
 /// Check if two SqlExpr nodes are structurally equivalent for index matching,
 /// with alias normalization: a qualified reference to tableName matches
 /// the unqualified form in the index expression.
 let rec expressionMatchesIndex (tableName: string) (expr: SqlExpr) (indexExpr: SqlExpr) : bool =
     match expr, indexExpr with
-    // JsonExtractExpr: qualified expr matches unqualified index when alias resolves to tableName
-    | JsonExtractExpr(Some alias, col, path), JsonExtractExpr(None, iCol, iPath) ->
-        unquoteAlias alias = tableName && col = iCol && path = iPath
-    // JsonExtractExpr: both unqualified — exact match
-    | JsonExtractExpr(None, col, path), JsonExtractExpr(None, iCol, iPath) ->
-        col = iCol && path = iPath
-    // JsonExtractExpr: both qualified — exact alias match
-    | JsonExtractExpr(Some a1, col, path), JsonExtractExpr(Some a2, iCol, iPath) ->
-        unquoteAlias a1 = unquoteAlias a2 && col = iCol && path = iPath
+    | JsonRootExtract(alias, col), indexed ->
+        expressionMatchesIndex tableName (FunctionCall("jsonb_extract", [Column(alias, col); Literal(String "$")])) indexed
+    | value, JsonRootExtract(alias, col) ->
+        expressionMatchesIndex tableName value (FunctionCall("jsonb_extract", [Column(alias, col); Literal(String "$")]))
+    | JsonArrayExpr values, indexed ->
+        expressionMatchesIndex tableName (FunctionCall("jsonb_array", values)) indexed
+    | value, JsonArrayExpr values ->
+        expressionMatchesIndex tableName value (FunctionCall("jsonb_array", values))
+    // Runtime index facts retain the produced path literal rather than parsing member names.
+    | JsonExtractExpr(alias, col, path), FunctionCall("jsonb_extract", [Column(iAlias, iCol); Literal(String literal)]) ->
+        columnMatchesIndex tableName alias col iAlias iCol
+        && JsonPathOps.text(JsonPathOps.toList path) = literal
+    | FunctionCall("jsonb_extract", [Column(alias, col); Literal(String literal)]), JsonExtractExpr(iAlias, iCol, iPath) ->
+        columnMatchesIndex tableName alias col iAlias iCol
+        && literal = JsonPathOps.text(JsonPathOps.toList iPath)
+    | JsonExtractExpr(alias, col, path), JsonExtractExpr(iAlias, iCol, iPath) ->
+        columnMatchesIndex tableName alias col iAlias iCol && path = iPath
     // CAST: both must have CAST with matching type, and inner expressions must match
     | Cast(inner, sqlType), Cast(iInner, iSqlType) ->
         sqlType.ToUpperInvariant() = iSqlType.ToUpperInvariant()
         && expressionMatchesIndex tableName inner iInner
-    // Column: qualified expr matches unqualified index when alias resolves to tableName
-    | Column(Some alias, col), Column(None, iCol) ->
-        unquoteAlias alias = tableName && col = iCol
-    // Column: both unqualified
-    | Column(None, col), Column(None, iCol) ->
-        col = iCol
-    // Column: both qualified
-    | Column(Some a1, col), Column(Some a2, iCol) ->
-        unquoteAlias a1 = unquoteAlias a2 && col = iCol
+    | Column(alias, col), Column(iAlias, iCol) ->
+        columnMatchesIndex tableName alias col iAlias iCol
     // FunctionCall: name + arg count + recursive match
     | FunctionCall(name, args), FunctionCall(iName, iArgs) ->
         name = iName
         && args.Length = iArgs.Length
         && List.forall2 (expressionMatchesIndex tableName) args iArgs
+    | Literal value, Literal indexed -> value = indexed
+    | Binary(left, operator, right), Binary(iLeft, iOperator, iRight) ->
+        operator = iOperator
+        && expressionMatchesIndex tableName left iLeft
+        && expressionMatchesIndex tableName right iRight
+    | Unary(operator, value), Unary(iOperator, iValue) ->
+        operator = iOperator && expressionMatchesIndex tableName value iValue
     // Everything else: no match
     | _ -> false
 
@@ -224,19 +248,12 @@ let removeFixedOrdering tableName predicate (ordering: OrderBy list) =
 
 /// Strip table qualification from an expression to match the index form.
 /// Only normalizes alias references; never adds or removes CAST or other operations.
-let rec private stripQualificationToMatch (tableName: string) (expr: SqlExpr) (indexExpr: SqlExpr) : SqlExpr =
-    match expr, indexExpr with
-    | JsonExtractExpr(Some alias, col, path), JsonExtractExpr(None, _, _)
-        when unquoteAlias alias = tableName ->
-        JsonExtractExpr(None, col, path)
-    | Cast(inner, sqlType), Cast(iInner, _) ->
-        Cast(stripQualificationToMatch tableName inner iInner, sqlType)
-    | Column(Some alias, col), Column(None, _)
-        when unquoteAlias alias = tableName ->
-        Column(None, col)
-    | FunctionCall(name, args), FunctionCall(_, iArgs) when args.Length = iArgs.Length ->
-        FunctionCall(name, List.map2 (stripQualificationToMatch tableName) args iArgs)
-    | _ -> expr
+let private stripQualificationToMatch tableName expression =
+    expression |> SqlExpr.map (function
+        | JsonExtractExpr(Some alias, col, path) when unquoteAlias alias = tableName -> JsonExtractExpr(None, col, path)
+        | JsonRootExtract(Some alias, col) when unquoteAlias alias = tableName -> JsonRootExtract(None, col)
+        | Column(Some alias, col) when unquoteAlias alias = tableName -> Column(None, col)
+        | node -> node)
 
 /// Canonicalize an expression to match an index form.
 /// If the expression matches an index (modulo alias qualification),
@@ -249,11 +266,6 @@ let canonicalizeForIndex (model: IndexModel) (tableName: string) (expr: SqlExpr)
     match findMatchingIndex model tableName expr with
     | None -> None
     | Some { Terms = [term] } ->
-        // Check if the expression already matches the index form exactly (no change needed)
-        if expr = term.Expression then None
-        else
-            // The expression matches modulo alias normalization.
-            // Produce the canonical form by stripping table qualification
-            // to match the unqualified index expression.
-            Some (stripQualificationToMatch tableName expr term.Expression)
+        let canonical = stripQualificationToMatch tableName expr
+        if canonical = expr then None else Some canonical
     | Some _ -> None

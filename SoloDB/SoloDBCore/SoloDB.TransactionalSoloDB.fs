@@ -1,7 +1,6 @@
-﻿namespace SoloDatabase
+namespace SoloDatabase
 
 open SoloDatabase.JsonSerializator
-open Microsoft.Data.Sqlite
 open System.Linq.Expressions
 open System
 open System.Collections.Generic
@@ -9,7 +8,7 @@ open System.Collections
 open SoloDatabase.Types
 open System.IO
 open System.Text
-open SQLiteTools
+open NativeSQLiteTools
 open JsonFunctions
 open FileStorage
 open Connections
@@ -25,12 +24,12 @@ open System.Collections.Concurrent
 /// Represents a database context within an explicit transaction. All operations are part of the same transaction.
 /// </summary>
 /// <param name="connection">The transactional connection.</param>
-type TransactionalSoloDB internal (connection: CachingDbConnection, parentData: SoloDBToCollectionData) =
+type TransactionalSoloDB internal (connection: NativeCachingDbConnection, parentData: SoloDBToCollectionData) =
     let connectionString = connection.ConnectionString
 
-    // The transaction owns its connection only for the duration of the callback. Afterwards the
-    // connection returns to the pool and may serve unrelated work, so a context that outlives the
-    // callback must fail closed rather than write through a connection it no longer owns.
+    // The transaction owns a dedicated connection for the callback. Transaction completion
+    // destroys that connection; it is not returned to the pool. An escaped context must
+    // fail closed rather than use a connection it no longer owns.
     // Written once by ExitScope and read by arbitrary later callers, possibly on another thread
     // after an async callback. Volatile so callback exit happens-before every later scope check.
     let mutable scopeActive = 1
@@ -42,7 +41,7 @@ type TransactionalSoloDB internal (connection: CachingDbConnection, parentData: 
                 "Reason: The transaction callback has already completed, and its connection was released.\n" +
                 "Fix: Do not store or reuse the transactional instance outside the WithTransaction callback."))
 
-    let guardedConnection = Connection.Guarded(checkScope, Connection.Transactional connection)
+    let guardedConnection = NativeConnection.NativeGuarded(checkScope, NativeConnection.NativeTransactional connection)
 
     /// <summary>
     /// Ends the transactional scope. After this call every operation on this instance fails closed.
@@ -55,7 +54,7 @@ type TransactionalSoloDB internal (connection: CachingDbConnection, parentData: 
     /// </summary>
     member _.Connection =
         checkScope ()
-        connection
+        new SQLiteTools.CachingDbConnection(connection, true, checkScope)
     /// <summary>
     /// Gets the SQLite connection string used by this transactional context.
     /// </summary>
@@ -63,36 +62,46 @@ type TransactionalSoloDB internal (connection: CachingDbConnection, parentData: 
     /// <summary>
     /// Gets a file system instance that operates within the current transaction.
     /// </summary>
-    member val FileSystem: IFileSystem = FileSystem guardedConnection :> IFileSystem
+    member val FileSystem: IFileSystem = FileSystem(guardedConnection, fun () ->
+        checkScope()
+        FileSystemEventRegistration.get parentData.EventSystem
+            (Collection<JsonValue>.CreateEventDatabase(connectionString, parentData, None))) :> IFileSystem
 
     member private this.InitializeCollection<'T> name =
         checkScope ()
         if not (Helper.existsCollection name connection) then
             Helper.createTableInner<'T> name connection
+        elif connection.EventDispatchState.Depth<>0 then
+            NumericMigration.requireCurrent connection name typeof<'T>
+        elif NumericMigration.sample connection name typeof<'T> |> NumericMigration.legacy then
+            NumericMigration.migrate connection name typeof<'T>
+
+        if HelperSchema.hasUnsignedIndexes<'T>() then
+            HelperSchema.ensureUnsignedIndexes<'T> name connection
 
         Helper.registerTypeCollection<'T> name connection
 
         // Validate relation topology after table creation.
-        let hasRelations = RelationsSchemaValidator.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
+        let hasRelations = RelationsSchemaValidator.hasReferenceProperties typeof<'T>
         if hasRelations then
             let relationTx: RelationsTypes.RelationTxContext = {
                 Connection = connection
                 OwnerTable = name
                 OwnerType = typeof<'T>
                 InTransaction = true // TransactionalSoloDB is always inside a transaction.
+                Preparation = RelationsTypes.RelationPreparation()
                 CollectionFactory = None
             }
             RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
 
         let collection = Collection<'T>(guardedConnection, name, connectionString, { ClearCacheFunction = ignore; EventSystem = parentData.EventSystem })
-        collection.RefreshIndexModelSnapshot(connection)
         collection :> ISoloDBCollection<'T>
 
     /// <summary>
     /// Gets a collection of a specified type, using the type's name as the collection name. Creates the collection if it doesn't exist.
     /// </summary>
     /// <typeparam name="'T">The type of the documents in the collection.</typeparam>
-    /// <returns>An <c>ISoloDBCollection<'T></c> instance.</returns>
+    /// <returns>An <c>ISoloDBCollection&lt;'T&gt;</c> instance.</returns>
     member this.GetCollection<'T>() =
         let name = Helper.collectionNameOf<'T>
         
@@ -103,7 +112,7 @@ type TransactionalSoloDB internal (connection: CachingDbConnection, parentData: 
     /// </summary>
     /// <typeparam name="'T">The type of the documents in the collection.</typeparam>
     /// <param name="name">The custom name for the collection.</param>
-    /// <returns>An <c>ISoloDBCollection<'T></c> instance.</returns>
+    /// <returns>An <c>ISoloDBCollection&lt;'T&gt;</c> instance.</returns>
     member this.GetCollection<'T>(name) =       
         this.InitializeCollection<'T>(Helper.validateUserCollectionName name)
 
@@ -111,7 +120,7 @@ type TransactionalSoloDB internal (connection: CachingDbConnection, parentData: 
     /// Gets a collection that stores untyped JSON data.
     /// </summary>
     /// <param name="name">The name for the collection.</param>
-    /// <returns>An <c>ISoloDBCollection<JsonValue></c> instance.</returns>
+    /// <returns>An <c>ISoloDBCollection&lt;JsonValue&gt;</c> instance.</returns>
     member this.GetUntypedCollection(name: string) =
         let name = name |> Helper.validateUserCollectionName
         
@@ -193,7 +202,11 @@ type TransactionalSoloDB internal (connection: CachingDbConnection, parentData: 
     /// </summary>
     member this.Optimize() =
         checkScope ()
-        connection.Execute "PRAGMA optimize;" |> ignore
+        let mutable statement = connection.OpenStatement("PRAGMA optimize;")
+        try
+            while statement.Step() do ()
+            statement.Dispose()
+        with error -> statement.Abort(error); reraise()
 
     /// <summary>
     /// Executes a series of database operations within a nested savepoint.

@@ -8,8 +8,7 @@ open System.Linq.Expressions
 open System.Reflection
 open System.Text
 open System.Runtime.CompilerServices
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open Utils
 open JsonFunctions
 open Connections
@@ -83,11 +82,11 @@ module internal QueryableHelperState =
     let addTake (statements: ResizeArray<SQLSubquery>) (e: Expression) =
         let current = simpleCurrent statements
         match current.Take with
-        | Some e2 -> current.Take <- Some (UtilsReflection.ExpressionHelper.min e2 e)
+        | Some e2 -> current.Take <- Some (TypeMetadata.ExpressionHelper.min e2 e)
         | None   -> current.Take <- Some e
 
-    /// The ComplexDu subquery will be the last subquery processed. It receives the inner SqlSelect and returns a new SqlSelect.
-    let addComplexFinal (statements: ResizeArray<SQLSubquery>) (buildFunc: struct {|Vars: Dictionary<string, obj>; Inner: SqlSelect; TableName: string|} -> SqlSelect) =
+    // The ComplexDu subquery will be the last subquery processed. It receives the inner SqlSelect and returns a new SqlSelect.
+    let addComplexFinal (statements: ResizeArray<SQLSubquery>) (buildFunc: struct {|Vars: Dictionary<string, obj>; Inner: SqlSelect; Input: QuerySerializationInput; KeyInput: QuerySerializationInput voption; TableName: string|} -> TranslatedQuery) =
         statements.Add (ComplexDu buildFunc)
 
     /// <summary>
@@ -97,32 +96,36 @@ module internal QueryableHelperState =
     /// <param name="builder">The query builder instance that accumulates the SQL and parameters.</param>
     /// <param name="expression">The expression to translate.</param>
     let internal aggregateTranslator (sourceCtx: QueryContext) (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) =
-        addSelector queries (DuSelector (fun tableName vars ->
+        addSelector queries (DuSelector (fun currentCtx _input tableName vars ->
             let innerExpr =
                 match args.Length with
-                | 0 -> translateExprDu sourceCtx tableName (method.ReturnType |> UtilsReflection.ExpressionHelper.id) vars
-                | 1 -> translateExprDu sourceCtx tableName args.[0] vars
+                | 0 -> translateExprDu currentCtx tableName (QueryTranslatorNumeric.aggregateInput method |> Expression.Parameter) vars
+                | 1 -> translateExprDu currentCtx tableName args.[0] vars
                 | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" method.Name other))
-            [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-             { Alias = Some "Value"; Expr = SqlExpr.FunctionCall(fnName, [innerExpr]) }]
+            let value = QueryTranslatorNumeric.aggregate method (QueryTranslatorNumeric.aggregateInput method) (QueryTranslatorNumeric.kind fnName) innerExpr false
+            let produced = QueryProduced.typed method.ReturnType value
+            struct([{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                    { Alias = Some "Value"; Expr = value }], produced.Input)
         ))
 
     let internal zeroIfNullAggregateTranslator (sourceCtx: QueryContext) (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) =
-        addSelector queries (DuSelector (fun tableName vars ->
+        addSelector queries (DuSelector (fun currentCtx _input tableName vars ->
             let innerExpr =
                 match args.Length with
-                | 0 -> translateExprDu sourceCtx tableName (method.ReturnType |> UtilsReflection.ExpressionHelper.id) vars
-                | 1 -> translateExprDu sourceCtx tableName args.[0] vars
+                | 0 -> translateExprDu currentCtx tableName (QueryTranslatorNumeric.aggregateInput method |> Expression.Parameter) vars
+                | 1 -> translateExprDu currentCtx tableName args.[0] vars
                 | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %s: %A" method.Name other))
-            [{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
-             { Alias = Some "Value"; Expr = SqlExpr.Coalesce(SqlExpr.FunctionCall(fnName, [innerExpr]), [SqlExpr.Literal(SqlLiteral.Integer 0L)]) }]
+            let value = SqlExpr.Coalesce(QueryTranslatorNumeric.aggregate method (QueryTranslatorNumeric.aggregateInput method) (QueryTranslatorNumeric.kind fnName) innerExpr false, [QueryTranslatorNumeric.zero method.ReturnType])
+            let produced = QueryProduced.typed method.ReturnType value
+            struct([{ Alias = Some "Id"; Expr = SqlExpr.Literal(SqlLiteral.Integer -1L) }
+                    { Alias = Some "Value"; Expr = value }], produced.Input)
         ))
 
     let internal isDecimalOrNullableDecimal (t: Type) =
-        t = typeof<decimal> ||
+        typeof<decimal>.Equals(t) ||
         (t.IsGenericType &&
-         t.GetGenericTypeDefinition() = typedefof<Nullable<_>> &&
-         t.GetGenericArguments().[0] = typeof<decimal>)
+         typedefof<Nullable<_>>.Equals(t.GetGenericTypeDefinition()) &&
+         typeof<decimal>.Equals(t.GetGenericArguments().[0]))
 
     /// <summary>
     /// Extracts the expression for a collection that is an argument to a set-based method like Concat or Except.

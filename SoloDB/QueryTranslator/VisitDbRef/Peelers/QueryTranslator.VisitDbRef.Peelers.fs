@@ -23,7 +23,8 @@ open SoloDatabase.DBRefManyDescriptor
 /// Relation-source resolution and validation for DBRefMany query translation.
 module internal QueryTranslatorVisitDbRefPeelers =
     let internal nestedDbRefManyNotSupportedMessage =
-        sprintf "Error: Deeply nested DBRefMany query exceeds maximum depth (%d).\nReason: Queries with more than %d levels of nested DBRefMany relations are not supported.\nFix: Reduce nesting depth or move deeper traversal after AsEnumerable()." maxRelationDepth maxRelationDepth
+        let depth = maxRelationDepth.ToString(Globalization.CultureInfo.InvariantCulture)
+        "Error: Deeply nested DBRefMany query exceeds maximum depth (" + depth + ").\nReason: Queries with more than " + depth + " levels of nested DBRefMany relations are not supported.\nFix: Reduce nesting depth or move deeper traversal after AsEnumerable()."
 
     [<Literal>]
     let internal filteredWhereUnsupportedTerminalMessage =
@@ -43,9 +44,9 @@ module internal QueryTranslatorVisitDbRefPeelers =
             | :? MethodCallExpression as mc ->
                 let sourceIsDbRefMany =
                     if not (isNull mc.Object) then
-                        isDBRefManyType (unwrapConvert mc.Object).Type
+                        isManyReferenceType (unwrapConvert mc.Object).Type
                     elif mc.Arguments.Count > 0 then
-                        isDBRefManyType (unwrapConvert mc.Arguments.[0]).Type
+                        isManyReferenceType (unwrapConvert mc.Arguments.[0]).Type
                     else
                         false
                 let childMax =
@@ -71,81 +72,19 @@ module internal QueryTranslatorVisitDbRefPeelers =
             | _ -> 0
         visitExpr expr
 
-    /// Synthesize a MemberExpression for DBRef<T>.Value from an Invoke arg that is a DBRef property.
-    /// F# expression trees emit Invoke(closure, dbrefPropExpr) instead of MemberAccess(Value, dbrefPropExpr).
-    let internal tryMakeValueMemberFromInvoke (invokeExpr: MethodCallExpression) : MemberExpression voption =
-        if invokeExpr.Arguments.Count <> 1 then ValueNone
-        else
-            match unwrapConvert invokeExpr.Arguments.[0] with
-            | :? MemberExpression as dbrefPropExpr when isDBRefType dbrefPropExpr.Type ->
-                let valueProp = dbrefPropExpr.Type.GetProperty("Value", BindingFlags.Public ||| BindingFlags.Instance)
-                if isNull valueProp then ValueNone
-                else ValueSome (Expression.MakeMemberAccess(dbrefPropExpr, valueProp))
-            | _ -> ValueNone
-
-    /// Extract DBRefMany source with owner resolution for both root and nested (through DBRef.Value) paths.
-    /// Handles both C# MemberExpression chains and F# MethodCallExpression(Invoke) wrappers.
+    /// Relation membership consumes the original authored reference occurrence.
     let internal tryGetDBRefManyOwnerRef (qb: QueryBuilder) (arg: Expression) : DBRefManyOwnerRef voption =
-        let arg = unwrapConvert arg
-        match arg with
-        | :? MemberExpression as me when not (isNull me.Expression) && isDBRefManyType me.Type ->
-            match unwrapConvert me.Expression with
-            | :? ParameterExpression as pe ->
-                let sourceAlias =
-                    match qb.SourceAlias with
-                    | Some alias -> alias
-                    | None -> "\"" + qb.SourceContext.RootTable + "\""
-                // Detect subquery context: if sourceAlias differs from root alias,
-                // resolve owner collection from parameter type (e.g. ChainMid in inner Any).
-                let rootAlias = "\"" + qb.SourceContext.RootTable + "\""
-                let ownerCollection =
-                    if StringComparer.Ordinal.Equals(sourceAlias, rootAlias) then
-                        qb.SourceContext.RootTable
-                    else
-                        qb.SourceContext.ResolveCollectionForType(UtilsReflection.typeIdentityKey pe.Type, formatName pe.Type.Name)
-                ValueSome {
-                    OwnerCollection = ownerCollection
-                    OwnerAliasSql = sourceAlias
-                    OwnerIdExpr = None
-                    PropertyExpr = me
-                }
-            | :? MemberExpression as valueMe when isDBRefValueBoundary valueMe ->
-                // Nested C#: o.Ref.Value.Items — resolve via DBRef JOIN chain.
-                let alias = ensureDBRefJoin qb valueMe
-                let parentDbRefExpr = unwrapConvert valueMe.Expression :?> MemberExpression
-                let struct(_, _) = resolveDBRefOwnerCollectionAndProperty qb parentDbRefExpr
-                let joinedOwnerCollection =
-                    match qb.SourceContext.TryFindJoinByAlias(alias) with
-                    | Some join -> join.TargetTable
-                    | None -> qb.SourceContext.RootTable
-                ValueSome { OwnerCollection = joinedOwnerCollection; OwnerAliasSql = alias; OwnerIdExpr = None; PropertyExpr = me }
-            // F# expression tree: Items member on Invoke(closure, Ref) — synthesize .Value access.
-            | :? MethodCallExpression as mc when mc.Method.Name = "Invoke" ->
-                match tryMakeValueMemberFromInvoke mc with
-                | ValueSome valueMe ->
-                    let alias = ensureDBRefJoin qb valueMe
-                    let parentDbRefExpr = unwrapConvert valueMe.Expression :?> MemberExpression
-                    let struct(_, _) = resolveDBRefOwnerCollectionAndProperty qb parentDbRefExpr
-                    let joinedOwnerCollection =
-                        match qb.SourceContext.TryFindJoinByAlias(alias) with
-                        | Some join -> join.TargetTable
-                        | None -> qb.SourceContext.RootTable
-                    ValueSome { OwnerCollection = joinedOwnerCollection; OwnerAliasSql = alias; OwnerIdExpr = None; PropertyExpr = me }
-                | ValueNone -> ValueNone
-            | :? MethodCallExpression as ownerCall ->
-                let ownerCollection =
-                    qb.SourceContext.ResolveCollectionForType(UtilsReflection.typeIdentityKey ownerCall.Type, formatName ownerCall.Type.Name)
-                let ownerExprDu = visitDu ownerCall qb
-                let ownerIdExprDu =
-                    SqlExpr.FunctionCall("jsonb_extract", [
-                        ownerExprDu
-                        SqlExpr.Literal(SqlLiteral.String "$.Id")
-                    ])
-                ValueSome {
-                    OwnerCollection = ownerCollection
-                    OwnerAliasSql = ""
-                    OwnerIdExpr = Some ownerIdExprDu
-                    PropertyExpr = me
-                }
-            | _ -> ValueNone
-        | _ -> ValueNone
+        let arg = normalizeStoredConstruction arg
+        if not(isManyReferenceType arg.Type) then ValueNone else
+            let produced =
+                match arg with
+                | :? MemberExpression as memberValue when not(isNull memberValue.Expression) ->
+                    let struct(produced, _, _) = QueryTranslatorVisitCoreMemberAccess.referenceInput visitProduced memberValue qb
+                    ValueSome produced
+                | :? ParameterExpression -> ValueSome(visitProduced arg qb)
+                | _ -> ValueNone
+            produced |> ValueOption.bind (fun reference ->
+                match reference.Input.ReferenceOwner with
+                | ValueSome owner when owner.Sources |> Array.exists (fun source -> source.Owner.IsSome) ->
+                    ValueSome { Reference = reference; ReferenceType = arg.Type }
+                | _ -> ValueNone)

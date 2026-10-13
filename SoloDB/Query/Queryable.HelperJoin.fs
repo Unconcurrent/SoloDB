@@ -8,8 +8,7 @@ open System.Linq.Expressions
 open System.Reflection
 open System.Text
 open System.Runtime.CompilerServices
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open Utils
 open JsonFunctions
 open Connections
@@ -23,14 +22,16 @@ open SoloDatabase.SqlModel
 module internal QueryableHelperJoin =
     open QueryableHelperState
     open QueryableHelperBase
+    open QueryableHelperJoinBindings
     let rec internal readSoloDBQueryable<'T> (methodArg: Expression) =
         let unsupportedConcatMessage = "Cannot concat with an IEnumerable other than another SoloDB IQueryable on the same connection. To do this anyway, use AsEnumerable()."
         match methodArg with
+        | :? UnaryExpression as convert when QueryTranslatorBaseHelpers.isReferenceUpcast convert -> readSoloDBQueryable<'T> convert.Operand
         | :? MemberExpression when typeof<IQueryable>.IsAssignableFrom(methodArg.Type) && QueryTranslatorBaseHelpers.isFullyConstant methodArg ->
-            let query = QueryTranslatorBaseHelpers.evaluateExpr<IQueryable> methodArg
+            let query = ExpressionEvaluation.evaluateExpr<IQueryable> methodArg
             readSoloDBQueryable<'T> (Expression.Constant(query, typeof<IQueryable>))
         | :? ConstantExpression as ce -> 
-            match QueryTranslatorBaseHelpers.evaluateExpr<IEnumerable> ce with
+            match ExpressionEvaluation.evaluateExpr<IEnumerable> ce with
             | :? IQueryable as appendingQuery when (match appendingQuery.Provider with :? SoloDBQueryProvider -> true | _other -> false) ->
                 appendingQuery.Expression
             | :? IRootQueryable as rq ->
@@ -38,6 +39,7 @@ module internal QueryableHelperJoin =
             | _other -> raise (NotSupportedException(unsupportedConcatMessage))
         | :? MethodCallExpression as mcl ->
             mcl
+        | :? RelationQueryExpression -> methodArg
         | _other -> raise (NotSupportedException(unsupportedConcatMessage))
 
     let rec internal readSoloDBQueryableUntyped (methodArg: Expression) =
@@ -45,6 +47,7 @@ module internal QueryableHelperJoin =
 
         let rec isSoloDBQueryableExpression (expr: Expression) =
             match expr with
+            | :? UnaryExpression as convert when QueryTranslatorBaseHelpers.isReferenceUpcast convert -> isSoloDBQueryableExpression convert.Operand
             | :? ConstantExpression as ce ->
                 match ce.Value with
                 | :? IQueryable as q -> q.Provider :? SoloDBQueryProvider
@@ -52,11 +55,13 @@ module internal QueryableHelperJoin =
                 | _ -> false
             | :? MethodCallExpression as mce when mce.Arguments.Count > 0 ->
                 isSoloDBQueryableExpression mce.Arguments.[0]
+            | :? RelationQueryExpression as directive -> isSoloDBQueryableExpression directive.Source
             | _ -> false
 
         match methodArg with
+        | :? UnaryExpression as convert when QueryTranslatorBaseHelpers.isReferenceUpcast convert -> readSoloDBQueryableUntyped convert.Operand
         | :? MemberExpression when typeof<IQueryable>.IsAssignableFrom(methodArg.Type) && QueryTranslatorBaseHelpers.isFullyConstant methodArg ->
-            let query = QueryTranslatorBaseHelpers.evaluateExpr<IQueryable> methodArg
+            let query = ExpressionEvaluation.evaluateExpr<IQueryable> methodArg
             readSoloDBQueryableUntyped (Expression.Constant(query, typeof<IQueryable>))
         | :? ConstantExpression as ce ->
             match ce.Value with
@@ -68,144 +73,9 @@ module internal QueryableHelperJoin =
                 raise (NotSupportedException(unsupportedJoinMessage))
         | :? MethodCallExpression as mcl when isSoloDBQueryableExpression mcl ->
             mcl
+        | :? RelationQueryExpression when isSoloDBQueryableExpression methodArg -> methodArg
         | _ ->
             raise (NotSupportedException(unsupportedJoinMessage))
-
-    type internal JoinSourceBinding =
-    | NoJoinSource
-    | OuterJoinSource
-    | InnerJoinSource
-    | MixedJoinSource
-
-    let internal combineJoinSourceBinding left right =
-        match left, right with
-        | MixedJoinSource, _
-        | _, MixedJoinSource -> MixedJoinSource
-        | NoJoinSource, other
-        | other, NoJoinSource -> other
-        | OuterJoinSource, OuterJoinSource -> OuterJoinSource
-        | InnerJoinSource, InnerJoinSource -> InnerJoinSource
-        | _ -> MixedJoinSource
-
-    let internal unwrapLambdaExpressionOrThrow (operationName: string) (expr: Expression) =
-        match unwrapQuotedLambda expr with
-        | :? LambdaExpression as lambda -> lambda
-        | _ ->
-            raise (NotSupportedException(
-                $"Error: {operationName} is not supported.
-Reason: Expected a quoted lambda expression.
-Fix: Rewrite the query to use direct lambda arguments or move it after AsEnumerable()."))
-
-    let rec internal referencesParam (param: ParameterExpression) (expr: Expression) =
-        if isNull expr then
-            false
-        elif obj.ReferenceEquals(expr, param) then
-            true
-        else
-            match expr with
-            | :? MethodCallExpression as mc ->
-                (not (isNull mc.Object) && referencesParam param mc.Object)
-                || (mc.Arguments |> Seq.exists (referencesParam param))
-            | :? MemberExpression as me ->
-                not (isNull me.Expression) && referencesParam param me.Expression
-            | :? UnaryExpression as ue ->
-                referencesParam param ue.Operand
-            | :? BinaryExpression as be ->
-                referencesParam param be.Left || referencesParam param be.Right
-            | :? ConditionalExpression as ce ->
-                referencesParam param ce.Test || referencesParam param ce.IfTrue || referencesParam param ce.IfFalse
-            | :? NewExpression as ne ->
-                ne.Arguments |> Seq.exists (referencesParam param)
-            | :? MemberInitExpression as mi ->
-                referencesParam param mi.NewExpression
-                || (mi.Bindings
-                    |> Seq.exists (fun binding ->
-                        match binding with
-                        | :? MemberAssignment as ma -> referencesParam param ma.Expression
-                        | _ -> false))
-            | :? NewArrayExpression as na ->
-                na.Expressions |> Seq.exists (referencesParam param)
-            | :? InvocationExpression as ie ->
-                referencesParam param ie.Expression
-                || (ie.Arguments |> Seq.exists (referencesParam param))
-            | :? ListInitExpression as li ->
-                referencesParam param li.NewExpression
-                || (li.Initializers |> Seq.collect (fun init -> init.Arguments) |> Seq.exists (referencesParam param))
-            | _ ->
-                false
-
-    let internal isCompositeJoinKeyBody (expr: Expression) =
-        match expr with
-        | :? NewExpression
-        | :? MemberInitExpression
-        | :? NewArrayExpression -> true
-        | _ -> false
-
-    let rec internal classifyJoinResultExpression (outerParam: ParameterExpression) (innerParam: ParameterExpression) (expr: Expression) =
-        if isNull expr then
-            NoJoinSource
-        else
-            match expr with
-            | :? ParameterExpression as p ->
-                if Object.ReferenceEquals(p, outerParam) then OuterJoinSource
-                elif Object.ReferenceEquals(p, innerParam) then InnerJoinSource
-                else NoJoinSource
-            | :? MemberExpression as m ->
-                classifyJoinResultExpression outerParam innerParam m.Expression
-            | :? UnaryExpression as u ->
-                classifyJoinResultExpression outerParam innerParam u.Operand
-            | :? BinaryExpression as b ->
-                combineJoinSourceBinding
-                    (classifyJoinResultExpression outerParam innerParam b.Left)
-                    (classifyJoinResultExpression outerParam innerParam b.Right)
-            | :? ConditionalExpression as c ->
-                [ classifyJoinResultExpression outerParam innerParam c.Test
-                  classifyJoinResultExpression outerParam innerParam c.IfTrue
-                  classifyJoinResultExpression outerParam innerParam c.IfFalse ]
-                |> List.reduce combineJoinSourceBinding
-            | :? MethodCallExpression as m ->
-                let objectBinding =
-                    if isNull m.Object then NoJoinSource
-                    else classifyJoinResultExpression outerParam innerParam m.Object
-                m.Arguments
-                |> Seq.map (classifyJoinResultExpression outerParam innerParam)
-                |> Seq.fold combineJoinSourceBinding objectBinding
-            | :? NewExpression as n ->
-                n.Arguments
-                |> Seq.map (classifyJoinResultExpression outerParam innerParam)
-                |> Seq.fold combineJoinSourceBinding NoJoinSource
-            | :? MemberInitExpression as mi ->
-                let start = classifyJoinResultExpression outerParam innerParam mi.NewExpression
-                mi.Bindings
-                |> Seq.fold (fun acc binding ->
-                    match binding with
-                    | :? MemberAssignment as ma ->
-                        combineJoinSourceBinding acc (classifyJoinResultExpression outerParam innerParam ma.Expression)
-                    | _ -> MixedJoinSource) start
-            | :? NewArrayExpression as na ->
-                na.Expressions
-                |> Seq.map (classifyJoinResultExpression outerParam innerParam)
-                |> Seq.fold combineJoinSourceBinding NoJoinSource
-            | :? InvocationExpression as i ->
-                let exprBinding = classifyJoinResultExpression outerParam innerParam i.Expression
-                i.Arguments
-                |> Seq.map (classifyJoinResultExpression outerParam innerParam)
-                |> Seq.fold combineJoinSourceBinding exprBinding
-            | :? ListInitExpression as li ->
-                let start = classifyJoinResultExpression outerParam innerParam li.NewExpression
-                li.Initializers
-                |> Seq.collect (fun init -> init.Arguments)
-                |> Seq.map (classifyJoinResultExpression outerParam innerParam)
-                |> Seq.fold combineJoinSourceBinding start
-            | :? ConstantExpression -> NoJoinSource
-            | _ -> MixedJoinSource
-
-    let internal translateJoinSingleSourceExpression (ctx: QueryContext) (tableAlias: string) (vars: Dictionary<string, obj>) (parameter: ParameterExpression option) (expr: Expression) =
-        let lambdaExpr =
-            match parameter with
-            | Some p -> Expression.Lambda(expr, p) :> Expression
-            | None -> Expression.Lambda(expr) :> Expression
-        translateExprDu ctx tableAlias lambdaExpr vars
 
     let internal normalizeUnionArm
         (aliasFactory: unit -> string)
@@ -230,92 +100,25 @@ Fix: Rewrite the query to use direct lambda arguments or move it after AsEnumera
         else
             core
 
-    let rec internal translateJoinResultSelectorExpression
-        (outerCtx: QueryContext)
-        (innerCtx: QueryContext)
-        (vars: Dictionary<string, obj>)
-        (outerAlias: string)
-        (innerAlias: string)
-        (outerParam: ParameterExpression)
-        (innerParam: ParameterExpression)
-        (expr: Expression) =
-
-        // F# may wrap record construction in literal lambda invocations to
-        // preserve field evaluation order. Reduce those before classifying which
-        // join source supplies each constructor argument.
-        let rec normalizeInvocation (value: Expression) =
-            match value with
-            | :? MethodCallExpression as call when call.Method.Name = "Invoke" ->
-                match call.Object with
-                | :? LambdaExpression as lambda ->
-                    QueryTranslatorBaseHelpers.inlineLambdaInvocation lambda call.Arguments |> normalizeInvocation
-                | _ -> value
-            | :? InvocationExpression as call ->
-                match call.Expression with
-                | :? LambdaExpression as lambda ->
-                    QueryTranslatorBaseHelpers.inlineLambdaInvocation lambda call.Arguments |> normalizeInvocation
-                | _ -> value
-            | :? NewExpression as constructor when isNull constructor.Members && FSharp.Reflection.FSharpType.IsRecord constructor.Type ->
-                let members = FSharp.Reflection.FSharpType.GetRecordFields constructor.Type |> Array.map (fun field -> field :> MemberInfo)
-                Expression.New(constructor.Constructor, constructor.Arguments, members) :> Expression
-            | _ -> value
-        let expr = normalizeInvocation expr
-        match classifyJoinResultExpression outerParam innerParam expr with
-        | NoJoinSource ->
-            translateJoinSingleSourceExpression outerCtx outerAlias vars None expr
-        | OuterJoinSource ->
-            translateJoinSingleSourceExpression outerCtx outerAlias vars (Some outerParam) expr
-        | InnerJoinSource ->
-            translateJoinSingleSourceExpression innerCtx innerAlias vars (Some innerParam) expr
-        | MixedJoinSource ->
-            match expr with
-            | :? NewExpression as n ->
-                let memberNames =
-                    if isNull n.Members then
-                        [| for i in 0 .. n.Arguments.Count - 1 -> $"Item{i + 1}" |]
-                    else
-                        n.Members |> Seq.map (fun m -> m.Name) |> Seq.toArray
-                // Use json_object (not jsonb_object via JsonObjectExpr) so downstream jsonb_extract returns typed SQL values.
-                let pairs =
-                    [ for i in 0 .. n.Arguments.Count - 1 ->
-                        memberNames.[i],
-                        translateJoinResultSelectorExpression outerCtx innerCtx vars outerAlias innerAlias outerParam innerParam n.Arguments.[i] ]
-                let args = pairs |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
-                SqlExpr.FunctionCall(jsonObjectFn, args)
-            | :? MemberInitExpression as mi ->
-                let pairs =
-                    [ for binding in mi.Bindings do
-                        match binding with
-                        | :? MemberAssignment as ma ->
-                            yield ma.Member.Name,
-                                  translateJoinResultSelectorExpression outerCtx innerCtx vars outerAlias innerAlias outerParam innerParam ma.Expression
-                        | _ ->
-                            raise (NotSupportedException(
-                                "Error: Join result selector is not supported.
-Reason: Only direct member assignments are supported for mixed-source object initialization.
-Fix: Use an anonymous object, tuple, or move the projection after AsEnumerable().")) ]
-                let args = pairs |> List.collect (fun (name, expr) -> [SqlExpr.Literal(SqlLiteral.String name); expr])
-                SqlExpr.FunctionCall(jsonObjectFn, args)
-            | _ ->
-                raise (NotSupportedException(
-                    "Error: Join result selector is not supported.
-Reason: Mixed-source selector expressions are limited to object and tuple construction here.
-Fix: Project outer and inner members into an anonymous object or move the projection after AsEnumerable()."))
-
-    let internal tryGetJoinRootSourceTable (expression: Expression) =
+    let internal tryGetJoinRootSource (expression: Expression) =
         let rec loop (expr: Expression) =
             match expr with
             | :? ConstantExpression as ce ->
                 match ce.Value with
-                | :? IRootQueryable as rq -> Some rq.SourceTableName
+                | :? IRootQueryable as rq -> Some(struct(rq.SourceTableName, QueryRootFacts.elementType rq))
                 | _ -> None
             | :? MethodCallExpression as mce when mce.Arguments.Count > 0 ->
                 loop mce.Arguments.[0]
+            | :? RelationQueryExpression as directive -> loop directive.Source
             | _ -> None
         loop expression
 
+    let internal tryGetJoinRootSourceTable expression =
+        tryGetJoinRootSource expression |> Option.map (fun struct(table, _) -> table)
+
     type internal InnerJoinSource = {
         TableName: string
+        SerializationType: Type
         WherePredicates: LambdaExpression list
     }
 
@@ -325,11 +128,11 @@ Fix: Project outer and inner members into an anonymous object or move the projec
             | :? ConstantExpression as ce ->
                 match ce.Value with
                 | :? IQueryable as q when (q.Provider :? SoloDBQueryProvider) ->
-                    match tryGetJoinRootSourceTable q.Expression with
-                    | Some tableName -> Some { TableName = tableName; WherePredicates = List.rev predicates }
+                    match tryGetJoinRootSource q.Expression with
+                    | Some struct(tableName, originalType) -> Some { TableName = tableName; SerializationType = originalType; WherePredicates = List.rev predicates }
                     | None -> None
                 | :? IRootQueryable as rq ->
-                    Some { TableName = rq.SourceTableName; WherePredicates = List.rev predicates }
+                    Some { TableName = rq.SourceTableName; SerializationType = QueryRootFacts.elementType rq; WherePredicates = List.rev predicates }
                 | _ -> None
             | :? MethodCallExpression as mce when mce.Method.Name = "Where" && mce.Arguments.Count = 2 ->
                 match unwrapQuotedLambda mce.Arguments.[1] with
@@ -477,20 +280,27 @@ Fix: Project outer and inner members into an anonymous object or move the projec
     /// <param name="builder">The query builder instance.</param>
     /// <param name="expression">The LINQ method call expression for the aggregate.</param>
     /// <param name="errorMsg">The error message to return if the aggregation result is NULL.</param>
-    let internal raiseIfNullAggregateTranslator (sourceCtx: QueryContext) (fnName: string) (queries: SQLSubquery ResizeArray) (method: MethodInfo) (args: Expression array) (errorMsg: string) =
+    let internal checkEmptyAggregate (queries: SQLSubquery ResizeArray) (method: MethodInfo) (errorMsg: string) =
+        if QueryTranslatorNumeric.rejectsEmpty method.ReturnType then
+            let value=SqlExpr.Column(None,"Value")
+            let jsonExtractValue =
+                if JsonFunctions.consumesSqlScalar method.ReturnType then value
+                else SqlExpr.FunctionCall("jsonb_extract", [value; SqlExpr.Literal(SqlLiteral.String "$")])
+            let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, jsonExtractValue)
+            addSelector queries (DuSelector (fun _currentCtx input _tableName _vars ->
+                // Top-level aggregate-over-empty raises CardinalityError via the unforgeable
+                // Id=NULL channel: when the aggregate result is NULL (empty source), the row
+                // emits Id=NULL and Value=typed-payload JSON object {"kind":"CardinalityError",
+                // "msg":errorMsg}. JsonFunctions.fromSQLite dispatches by kind to
+                // InvalidOperationException matching .NET LINQ Min/Max/Avg-on-empty contract.
+                let typedPayload = QueryableHelperBase.runtimeErrorPayload RuntimeErrorKind.CardinalityError errorMsg
+                struct([{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.Null)), [], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
+                        { Alias = Some "Value"; Expr = SqlExpr.CaseExpr((isNullCheck, typedPayload), [], Some(SqlExpr.Column(None, "Value"))) }], input.SerializationInput)
+            ))
+
+    let internal raiseIfNullAggregateTranslator sourceCtx fnName queries method args errorMsg =
         aggregateTranslator sourceCtx fnName queries method args
-        let jsonExtractValue = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")])
-        let isNullCheck = SqlExpr.Unary(UnaryOperator.IsNull, jsonExtractValue)
-        addSelector queries (DuSelector (fun _tableName _vars ->
-            // Top-level aggregate-over-empty raises CardinalityError via the unforgeable
-            // Id=NULL channel: when the aggregate result is NULL (empty source), the row
-            // emits Id=NULL and Value=typed-payload JSON object {"kind":"CardinalityError",
-            // "msg":errorMsg}. JsonFunctions.fromSQLite dispatches by kind to
-            // InvalidOperationException matching .NET LINQ Min/Max/Avg-on-empty contract.
-            let typedPayload = QueryableHelperBase.runtimeErrorPayload RuntimeErrorKind.CardinalityError errorMsg
-            [{ Alias = Some "Id"; Expr = SqlExpr.CaseExpr((isNullCheck, SqlExpr.Literal(SqlLiteral.Null)), [], Some(SqlExpr.Literal(SqlLiteral.Integer -1L))) }
-             { Alias = Some "Value"; Expr = SqlExpr.CaseExpr((isNullCheck, typedPayload), [], Some(SqlExpr.Column(None, "Value"))) }]
-        ))
+        checkEmptyAggregate queries method errorMsg
 
     /// <summary>
     /// Preprocesses an expression tree into a <see cref="PreprocessedQuery"/> structure,

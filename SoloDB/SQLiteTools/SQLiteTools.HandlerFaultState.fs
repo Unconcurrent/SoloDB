@@ -2,17 +2,17 @@ namespace SoloDatabase
 
 open System
 open System.Collections.Generic
-open System.Data
 open System.Runtime.CompilerServices
 open System.Runtime.InteropServices
-open Microsoft.Data.Sqlite
-open System.Data.Common
-open SQLiteToolsParams
+open SQLiteToolsRowConversions
 open SQLiteToolsMapper
 
 
 [<AutoOpen>]
 module internal SQLiteToolsHandlerFaultState =
+    type internal IEventHandlerScopeState =
+        abstract EventHandlerDepth: int
+
     type private EventScopeCounter() =
         member val Depth = 0 with get, set
 
@@ -100,43 +100,36 @@ module internal SQLiteToolsHandlerFaultState =
             lock gate (fun () ->
                 recorded.Clear())
 
-    let private standaloneEventScopes = ConditionalWeakTable<SqliteConnection, EventScopeCounter>()
-    let private handlerFaults = ConditionalWeakTable<SqliteConnection, HandlerFaultState>()
+    let private standaloneEventScopes = ConditionalWeakTable<NativeDatabase, EventScopeCounter>()
+    let private handlerFaults = ConditionalWeakTable<NativeDatabase, HandlerFaultState>()
 
-    let private tryGetConnectionEventHandlerDepth (connection: SqliteConnection) =
-        let property = connection.GetType().GetProperty("EventHandlerDepth", System.Reflection.BindingFlags.Instance ||| System.Reflection.BindingFlags.NonPublic ||| System.Reflection.BindingFlags.Public)
-        if not (isNull property) && property.PropertyType = typeof<int> then
-            Some (unbox<int>(property.GetValue(connection)))
-        else None
-
-    let internal enterStandaloneEventHandlerScope (connection: SqliteConnection) =
-        let counter = standaloneEventScopes.GetOrCreateValue(connection)
+    let internal enterStandaloneEventHandlerScope (connection: NativeSqliteConnection) =
+        let counter = standaloneEventScopes.GetOrCreateValue(connection.DatabaseOwner)
         counter.Depth <- counter.Depth + 1
 
-    let internal exitStandaloneEventHandlerScopeOrFail (connection: SqliteConnection) =
+    let internal exitStandaloneEventHandlerScopeOrFail (connection: NativeSqliteConnection) =
         let mutable counter = Unchecked.defaultof<EventScopeCounter>
-        if not (standaloneEventScopes.TryGetValue(connection, &counter)) || isNull (box counter) || counter.Depth <= 0 then
+        if not (standaloneEventScopes.TryGetValue(connection.DatabaseOwner, &counter)) || isNull (box counter) || counter.Depth <= 0 then
             raise (InvalidOperationException("Event handler scope underflow detected. ExitEventHandlerScope was called without a matching EnterEventHandlerScope."))
         counter.Depth <- counter.Depth - 1
 
-    let internal getEventHandlerDepth (connection: SqliteConnection) =
-        match tryGetConnectionEventHandlerDepth connection with
-        | Some depth -> depth
-        | None ->
-            match standaloneEventScopes.TryGetValue(connection) with
-            | true, counter when not (isNull (box counter)) -> counter.Depth
-            | _ -> 0
+    let internal getEventHandlerDepth (connection: NativeSqliteConnection) =
+        match connection :> obj with
+        | :? IEventHandlerScopeState as state -> state.EventHandlerDepth
+        | _ ->
+            let mutable counter = Unchecked.defaultof<EventScopeCounter>
+            if standaloneEventScopes.TryGetValue(connection.DatabaseOwner, &counter) then counter.Depth else 0
 
-    let internal isInEventHandlerScope (connection: SqliteConnection) =
+    let internal isInEventHandlerScope (connection: NativeSqliteConnection) =
         getEventHandlerDepth connection > 0
 
-    let internal captureCurrentHandlerFaultDepth (connection: SqliteConnection) =
+    let internal captureCurrentHandlerFaultDepth (connection: NativeSqliteConnection) =
         let depth = getEventHandlerDepth connection
         if depth > 0 then
-            handlerFaults.GetOrCreateValue(connection).PushPendingDepth(depth)
+            handlerFaults.GetOrCreateValue(connection.DatabaseOwner).PushPendingDepth(depth)
 
-    let internal tryRecordHandlerFault (connection: SqliteConnection) (ex: exn) =
-        let state = handlerFaults.GetOrCreateValue(connection)
+    let internal tryRecordHandlerFault (connection: NativeSqliteConnection) (ex: exn) =
+        let state = handlerFaults.GetOrCreateValue(connection.DatabaseOwner)
         let depth =
             match state.TryTakePendingDepth() with
             | Some capturedDepth -> capturedDepth
@@ -144,69 +137,47 @@ module internal SQLiteToolsHandlerFaultState =
         if depth > 0 then
             state.Record(depth, ex)
 
-    /// Record enumeration failures without a sequence try/with generator per row.
-    /// The source keeps ownership of its command, reader and completion checks.
-    let internal recordEnumerationFaults (connection: SqliteConnection) (source: seq<'T>) : seq<'T> =
-        { new System.Collections.Generic.IEnumerable<'T> with
-            member _.GetEnumerator() =
-                let inner = source.GetEnumerator()
-                { new System.Collections.Generic.IEnumerator<'T> with
-                    member _.Current = inner.Current
-                  interface System.Collections.IEnumerator with
-                    member _.Current = box inner.Current
-                    member _.MoveNext() =
-                        try inner.MoveNext()
-                        with ex ->
-                            tryRecordHandlerFault connection ex
-                            reraise()
-                    member _.Reset() = (inner :> System.Collections.IEnumerator).Reset()
-                  interface IDisposable with
-                    member _.Dispose() = inner.Dispose() }
-          interface System.Collections.IEnumerable with
-            member this.GetEnumerator() =
-                (this :?> System.Collections.Generic.IEnumerable<'T>).GetEnumerator() :> System.Collections.IEnumerator }
-
-    let internal takeHandlerFault (connection: SqliteConnection) =
+    let internal takeHandlerFault (connection: NativeSqliteConnection) =
         let mutable state = Unchecked.defaultof<HandlerFaultState>
-        if handlerFaults.TryGetValue(connection, &state) && not (isNull (box state)) then
+        if handlerFaults.TryGetValue(connection.DatabaseOwner, &state) && not (isNull (box state)) then
             state.Take()
         else None
 
-    let internal clearHandlerFault (connection: SqliteConnection) =
+    let internal clearHandlerFault (connection: NativeSqliteConnection) =
         let mutable state = Unchecked.defaultof<HandlerFaultState>
-        if handlerFaults.TryGetValue(connection, &state) && not (isNull (box state)) then
+        if handlerFaults.TryGetValue(connection.DatabaseOwner, &state) && not (isNull (box state)) then
             state.Clear()
 
-    let internal markCurrentHandlerFaultsAsSwallowed (connection: SqliteConnection) =
+    let internal markCurrentHandlerFaultsAsSwallowed (connection: NativeSqliteConnection) =
         let depth = getEventHandlerDepth connection
         if depth > 0 then
             let mutable state = Unchecked.defaultof<HandlerFaultState>
-            if handlerFaults.TryGetValue(connection, &state) && not (isNull (box state)) then
+            if handlerFaults.TryGetValue(connection.DatabaseOwner, &state) && not (isNull (box state)) then
                 state.MarkDepthAsSwallowed(depth)
 
-    let internal clearNonSwallowedHandlerFaultsDeeperThanCurrent (connection: SqliteConnection) =
+    let internal clearNonSwallowedHandlerFaultsDeeperThanCurrent (connection: NativeSqliteConnection) =
         let depth = getEventHandlerDepth connection
         if depth > 0 then
             let mutable state = Unchecked.defaultof<HandlerFaultState>
-            if handlerFaults.TryGetValue(connection, &state) && not (isNull (box state)) then
+            if handlerFaults.TryGetValue(connection.DatabaseOwner, &state) && not (isNull (box state)) then
                 state.ClearNonSwallowedDeeperThan(depth)
 
-    let internal tryGetRecordedHandlerFaultDepth (connection: SqliteConnection) (ex: exn) =
+    let internal tryGetRecordedHandlerFaultDepth (connection: NativeSqliteConnection) (ex: exn) =
         let mutable state = Unchecked.defaultof<HandlerFaultState>
-        if handlerFaults.TryGetValue(connection, &state) && not (isNull (box state)) then
+        if handlerFaults.TryGetValue(connection.DatabaseOwner, &state) && not (isNull (box state)) then
             state.TryGetRecordedDepth(ex)
         else None
 
-    let internal clearNonSwallowedHandlerFaultsAtDepth (connection: SqliteConnection) (depth: int) =
+    let internal clearNonSwallowedHandlerFaultsAtDepth (connection: NativeSqliteConnection) (depth: int) =
         if depth > 0 then
             let mutable state = Unchecked.defaultof<HandlerFaultState>
-            if handlerFaults.TryGetValue(connection, &state) && not (isNull (box state)) then
+            if handlerFaults.TryGetValue(connection.DatabaseOwner, &state) && not (isNull (box state)) then
                 state.ClearNonSwallowedAtDepth(depth)
 
-    let internal raiseIfHandlerFaultRecorded (connection: SqliteConnection) =
+    let internal raiseIfHandlerFaultRecorded (connection: NativeSqliteConnection) =
         let depth = getEventHandlerDepth connection
         let mutable state = Unchecked.defaultof<HandlerFaultState>
-        if handlerFaults.TryGetValue(connection, &state) && not (isNull (box state)) then
+        if handlerFaults.TryGetValue(connection.DatabaseOwner, &state) && not (isNull (box state)) then
             match state.TryGetBlocking(depth) with
             | Some handlerEx ->
                 let commitEx = InvalidOperationException(
@@ -218,11 +189,16 @@ Fix: Let handler-side database faults abort the outer operation, or avoid swallo
                 raise commitEx
             | None -> ()
 
-    let internal withHandlerFaultWrap<'T> (connection: SqliteConnection) (body: unit -> 'T) : 'T =
+    // A public presentation may be replaced during a callback. Faults belong only to
+    // the physical owner admitted by that operation. Native callers retain their owner.
+    let inline internal withHandlerFaultWrapWhen (connection: NativeSqliteConnection) isCurrent body =
         try
             let result = body()
-            raiseIfHandlerFaultRecorded connection
+            if isCurrent() then raiseIfHandlerFaultRecorded connection
             result
         with ex ->
-            tryRecordHandlerFault connection ex
+            if isCurrent() then tryRecordHandlerFault connection ex
             reraise()
+
+    let internal withHandlerFaultWrap<'T> (connection: NativeSqliteConnection) (body: unit -> 'T) : 'T =
+        withHandlerFaultWrapWhen connection (fun () -> true) body

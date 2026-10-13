@@ -1,4 +1,4 @@
-﻿namespace SoloDatabase
+namespace SoloDatabase
 
 open System.Linq
 open System.Collections
@@ -7,7 +7,7 @@ open System.Linq.Expressions
 open System
 open SoloDatabase
 open System.Runtime.CompilerServices
-open SQLiteTools
+open NativeSQLiteTools
 open System.Reflection
 open System.Text
 open JsonFunctions
@@ -15,7 +15,6 @@ open Utils
 open Connections
 open SoloDatabase.RelationsTypes
 open SoloDatabase.JsonSerializator
-open Microsoft.Data.Sqlite
 open SoloDatabase.SqlModel
 open SoloDatabase.QueryTranslatorBaseTypes
 
@@ -69,6 +68,7 @@ type internal SupportedLinqMethods =
 | ExceptBy
 | Intersect
 | IntersectBy
+| Union
 | UnionBy
 | Cast
 | OfType
@@ -86,6 +86,12 @@ type internal IRootQueryable =
     /// <summary>Gets the name of the source database table for the query.</summary>
     abstract member SourceTableName: string
 
+module internal QueryRootFacts =
+    let elementType (root: IRootQueryable) =
+        match root with
+        | :? IQueryable as query -> query.ElementType
+        | _ -> raise (NotSupportedException("The query root must expose its declared element type."))
+
 /// <summary>
 /// Represents a preprocessed query where the expression tree has been flattened
 /// into a simple chain of method calls starting at the root queryable.
@@ -96,6 +102,7 @@ type internal PreprocessedQuery =
     OriginalMethod: MethodInfo;
     Expressions: Expression array |}
 | RootQuery of IRootQueryable
+| Relation of RelationQueryExpression
 
 /// <summary>
 /// Represents an ORDER BY statement captured during preprocessing.
@@ -107,10 +114,17 @@ type internal PreprocessedOrder = {
     RawExpr: SqlExpr option
 }
 
+/// Completed query output comes from its actual payload and key producers.
+type internal TranslatedQuery = {
+    Query: SqlSelect
+    SerializationInput: QuerySerializationInput
+    KeyInput: QuerySerializationInput voption
+}
+
 type internal SQLSelector =
 | Expression of Expression
 | KeyProjection of Expression
-| DuSelector of (string -> Dictionary<string, obj> -> Projection list)
+| DuSelector of (QueryContext -> TranslatedQuery -> string -> Dictionary<string, obj> -> struct(Projection list * QuerySerializationInput))
 
 type internal UsedSQLStatements = 
     {
@@ -135,7 +149,7 @@ type internal UsedSQLStatements =
 
 type internal SQLSubquery =
     | Simple of UsedSQLStatements
-    | ComplexDu of (struct {|Vars: Dictionary<string, obj>; Inner: SqlSelect; TableName: string|} -> SqlSelect)
+    | ComplexDu of (struct {|Vars: Dictionary<string, obj>; Inner: SqlSelect; Input: QuerySerializationInput; KeyInput: QuerySerializationInput voption; TableName: string|} -> TranslatedQuery)
 
 type internal RelationAccessKind =
 | NoRelationAccess

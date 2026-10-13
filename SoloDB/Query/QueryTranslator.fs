@@ -53,11 +53,76 @@ module internal QueryTranslator =
     /// Returns a SqlExpr DU node for an expression without emitting to any StringBuilder.
     /// Used by the Queryable DU construction path to build SqlSelect trees.
     /// Side effects: allocates parameters in the provided Variables dict; may populate sourceContext.Joins.
-    let internal translateToSqlExpr (sourceContext: QueryContext) (tableName: string) (expression: Expression) (variables: Dictionary<string, obj>) : SqlExpr =
+    let private translateOperand visit (sourceContext: QueryContext) (tableName: string) (expression: Expression) (variables: Dictionary<string, obj>) : QueryProducedValue =
         ensureDbRefHandlersInitialized()
         let sb = StringBuilder()
         let builder = QueryBuilder.New sb variables false tableName expression -1 (ValueSome sourceContext)
-        visitDu expression builder
+        visit expression builder
+
+    let internal translateProduced sourceContext tableName expression variables =
+        translateOperand visitProduced sourceContext tableName expression variables
+
+    /// A completed selector owns both its paired output and its discovered reference clauses.
+    let internal publishSelector (sourceContext: QueryContext) tableName expression variables name (core: SelectCore) =
+        let local = { sourceContext with LayerPosition = OuterLayer; Joins = ResizeArray<JoinEdge>() }
+        let produced = translateProduced local tableName expression variables
+        let core = { core with Joins = core.Joins @ QueryTranslatorReferenceJoin.preparedJoinClauses local.Joins }
+        QueryProduced.publishSlot sourceContext.NextAlias name core produced false
+
+    let internal translateComparisonProduced sourceContext tableName expression variables =
+        translateOperand visitComparisonProduced sourceContext tableName expression variables
+
+    /// Root complex value membership retains its established known/bound matcher.
+    let internal translateValueMembership sourceContext tableName targetType value (argument: Expression) variables =
+        ensureDbRefHandlersInitialized()
+        let builder = QueryBuilder.New (StringBuilder()) variables false tableName argument -1 (ValueSome sourceContext)
+        match argument with
+        | :? ConstantExpression as literal when isNull literal.Value -> SqlExpr.Unary(UnaryOperator.IsNull, nullCarrier CanonicalToken value)
+        | _ ->
+            match sourceContext.BindQueryValue with
+            | ValueSome binder when binder.IsValue argument -> EqualityComparison.bound builder binder value argument
+            | _ -> EqualityComparison.known builder value targetType (ExpressionEvaluation.evaluateExpr<obj> argument)
+
+    let internal translateToSqlExpr sourceContext tableName expression variables : SqlExpr =
+        translateProduced sourceContext tableName expression variables
+        |> QueryProduced.value sourceContext.NextAlias
+
+    /// Translate a body with its existing parameter scope, without constructing a delegate type.
+    let private translateScopedOperand visit (sourceContext: QueryContext) (tableName: string)
+        (body: Expression) (parameters: System.Collections.ObjectModel.ReadOnlyCollection<ParameterExpression>)
+        (captures: Dictionary<ParameterExpression, ParameterSource> voption)
+        (producer: (Expression -> QueryProducedValue voption) voption)
+        (allowStringFormat: bool)
+        (variables: Dictionary<string, obj>) : QueryProducedValue =
+        ensureDbRefHandlersInitialized()
+        let builder =
+            { QueryBuilder.New (StringBuilder()) variables false tableName body -1 (ValueSome sourceContext)
+              with Parameters = parameters; ProducedHandler = producer; AllowStringFormat = allowStringFormat }
+        let sources =
+            match captures with
+            | ValueSome captures -> Dictionary<ParameterExpression, ParameterSource>(captures)
+            | ValueNone -> builder.ParameterSources
+        for parameter in parameters do
+            if not(sources.ContainsKey parameter) then
+                sources[parameter] <- { Alias = builder.SourceAlias; Context = sourceContext; Value = SourceParameter }
+        let builder = { builder with ParameterSources = sources }
+        visit body builder
+
+    let internal translateScopedBody sourceContext tableName body parameters captures producer allowStringFormat variables =
+        translateScopedOperand visitProduced sourceContext tableName body parameters captures producer allowStringFormat variables
+
+    let internal translateComparisonScopedBody sourceContext tableName body parameters captures producer allowStringFormat variables =
+        translateScopedOperand visitComparisonProduced sourceContext tableName body parameters captures producer allowStringFormat variables
+
+    let internal translateCapturedBody sourceContext tableName body parameters captures variables =
+        translateScopedBody sourceContext tableName body parameters captures ValueNone false variables
+
+    let internal translateBodyToProduced sourceContext tableName body parameters variables =
+        translateCapturedBody sourceContext tableName body parameters ValueNone variables
+
+    let internal translateBodyToSqlExpr sourceContext tableName body parameters variables : SqlExpr =
+        translateBodyToProduced sourceContext tableName body parameters variables
+        |> QueryProduced.value sourceContext.NextAlias
 
     /// Translate an expression in predicate context (WHERE clause).
     /// Min/Max aggregates skip the CASE WHEN sentinel, allowing SQL-native NULL propagation.

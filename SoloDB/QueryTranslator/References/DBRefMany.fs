@@ -23,7 +23,7 @@ type internal IDBRefManyInternal =
     /// Ids present at the last load/reset checkpoint (snapshot before user mutations).
     abstract OriginalIds: IReadOnlyCollection<int64>
 
-    /// Current items as boxed objects. RelationsSync uses HasTypeId to extract Ids.
+    /// Current items as boxed objects. RelationsSync uses EntityDocumentId to extract Ids.
     abstract GetCurrentItemsBoxed: unit -> obj seq
 
     /// Reset change tracking after Insert or Update commits.

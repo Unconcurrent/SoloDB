@@ -122,7 +122,7 @@ let rec private isPureScalarComponent (scope: RowScope) (expr: SqlExpr) : bool =
     | WindowCall _ -> false
     | Exists _ -> false
     | ScalarSubquery _ -> false
-    | InSubquery _ -> false
+    | InSubquery _ | RowValueExpr _ -> false
     | Parameter _ -> false
     | Column(Some q, _) -> scope.Scope.Contains q
     | Column(None, _) -> scope.AllowUnqualified

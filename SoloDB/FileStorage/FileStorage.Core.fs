@@ -2,8 +2,7 @@ namespace SoloDatabase
 
 open System
 open System.IO
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open SoloDatabase.Types
 open NativeArray
 open Snappier
@@ -16,28 +15,36 @@ open FileStorageCoreChunks
 #nowarn "9"
 
 module FileStorageCoreStream =
+    let private validateBufferArguments (buffer: byte[]) offset count =
+        if isNull buffer then raise (ArgumentNullException(nameof buffer))
+        if offset < 0 then raise (ArgumentOutOfRangeException(nameof offset))
+        if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
+        if buffer.Length - offset < count then raise (ArgumentException("Invalid offset and length."))
+
     /// <summary>
     /// Provides a stream-based interface for reading from and writing to a file stored inside the SQLite database.
     /// File data is broken into fixed-size chunks compressed with Snappy. All write operations are transactional.
     /// </summary>
-    type DbFileStream internal (db: Connection, fileId: int64, directoryId: int64, fullPath: string) =
+    type DbFileStream internal (db: NativeConnection, fileId: int64, fullPath: string) =
         inherit Stream()
 
         let mutable position = 0L
         let mutable disposed = false
         let mutable dirty = false
 
-        let checkDisposed() = if disposed then raise (ObjectDisposedException(nameof(DbFileStream)))
+        let checkDisposed() =
+            db.CheckAccess()
+            if disposed then raise (ObjectDisposedException(nameof(DbFileStream)))
 
         member internal this.UpdateModified() =
             if dirty then
                 db.WithTransaction(fun conn ->
-                    ignore (conn.Execute (updateModifiedTimestampSQL, {|FileId = fileId; DirId = directoryId|}))
+                    updateModifiedTimestamp conn fileId
                 )
 
-        override _.CanRead = not disposed
-        override _.CanSeek = not disposed
-        override _.CanWrite = not disposed
+        override _.CanRead = db.CheckAccess(); not disposed
+        override _.CanSeek = db.CheckAccess(); not disposed
+        override _.CanWrite = db.CheckAccess(); not disposed
 
         override _.Length =
             checkDisposed()
@@ -55,13 +62,13 @@ module FileStorageCoreStream =
         /// <summary>
         /// Returns the FullPath of the file at the moment of opening of the stream.
         /// </summary>
-        member this.FullPath = fullPath
+        member this.FullPath = db.CheckAccess(); fullPath
 
         override this.Flush() =
             checkDisposed()
             this.UpdateModified()
 
-        #if NETSTANDARD2_1_OR_GREATER
+        #if NETSTANDARD2_1_OR_GREATER || NET6_0_OR_GREATER
         override this.Read(buffer: Span<byte>) =
         #else
         member this.Read(buffer: Span<byte>) =
@@ -124,38 +131,64 @@ module FileStorageCoreStream =
             bytesWrittenToBuffer
 
         override this.Read(buffer: byte[], offset: int, count: int) : int =
-            if buffer = null then raise (ArgumentNullException(nameof buffer))
-            if offset < 0 then raise (ArgumentOutOfRangeException(nameof offset))
-            if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
-            if buffer.Length - offset < count then raise (ArgumentException("Invalid offset and length."))
+            validateBufferArguments buffer offset count
             this.Read(Span<byte>(buffer, offset, count))
 
-        #if NETSTANDARD2_1_OR_GREATER
+        // Native statements and callback dispatch remain owned by the invoking thread.
+        // Outside handlers the standard asynchronous stream behavior is preserved.
+        override this.ReadAsync(buffer: byte[], offset: int, count: int, cancellationToken) =
+            if not db.IsEventHandlerScope then base.ReadAsync(buffer, offset, count, cancellationToken)
+            else
+                validateBufferArguments buffer offset count
+                if not this.CanRead then raise (NotSupportedException("Stream does not support reading."))
+                if cancellationToken.IsCancellationRequested then Threading.Tasks.Task.FromCanceled<int>(cancellationToken)
+                else
+                    try Threading.Tasks.Task.FromResult(this.Read(buffer, offset, count))
+                    with ex -> Threading.Tasks.Task.FromException<int>(ex)
+
+        #if NETSTANDARD2_1_OR_GREATER || NET6_0_OR_GREATER
+        override this.ReadAsync(buffer: Memory<byte>, [<Optional>] cancellationToken: Threading.CancellationToken) =
+            if not db.IsEventHandlerScope then base.ReadAsync(buffer, cancellationToken)
+            else
+                if not this.CanRead then raise (NotSupportedException("Stream does not support reading."))
+                if cancellationToken.IsCancellationRequested then
+                    Threading.Tasks.ValueTask<int>(Threading.Tasks.Task.FromCanceled<int>(cancellationToken))
+                else
+                    try Threading.Tasks.ValueTask<int>(this.Read(buffer.Span))
+                    with ex -> Threading.Tasks.ValueTask<int>(Threading.Tasks.Task.FromException<int>(ex))
+        #endif
+
+        #if NETSTANDARD2_1_OR_GREATER || NET6_0_OR_GREATER
         override
         #else
         member
         #endif
             this.Write(buffer: ReadOnlySpan<byte>) =
+            db.CheckAccess()
             if buffer.IsEmpty then () else
+            checkDisposed()
+            let startPosition = position
             let bufferLen = buffer.Length
+            if startPosition > Int64.MaxValue - int64 bufferLen then
+                raise (IOException("The write exceeds the supported file range."))
+            let newPosition = startPosition + int64 bufferLen
             use buffer = fixed buffer
-
             db.WithTransaction(fun db ->
-                let buffer = ReadOnlySpan<byte>(NativeInterop.NativePtr.toVoidPtr buffer, bufferLen)
-                let newPosition = writeChunkedData db fileId position buffer
-
-                if newPosition > getFileLengthById db fileId then
-                    updateLenById db fileId newPosition
-
-                this.Position <- newPosition
-            )
+                let oldLength = getFileLengthById db fileId
+                let facts = FileStorageContentEvents.prepare db {
+                    FileId = fileId; Offset = startPosition; Length = int64 bufferLen
+                    OldLength = oldLength; NewLength = max oldLength newPosition
+                    Kind = FileContentChangeKind.Write }
+                checkDisposed()
+                let data = ReadOnlySpan<byte>(NativeInterop.NativePtr.toVoidPtr buffer, bufferLen)
+                writeChunkedData db fileId startPosition data |> ignore
+                if facts.NewLength > facts.OldLength then updateLenById db fileId facts.NewLength
+                FileStorageContentEvents.completed db facts)
+            position <- newPosition
             dirty <- true
 
         override this.Write(buffer: byte[], offset: int, count: int) =
-            if buffer = null then raise (ArgumentNullException(nameof buffer))
-            if offset < 0 then raise (ArgumentOutOfRangeException(nameof offset))
-            if count < 0 then raise (ArgumentOutOfRangeException(nameof count))
-            if buffer.Length - offset < count then raise (ArgumentException("Invalid offset and length."))
+            validateBufferArguments buffer offset count
             this.Write(buffer.AsSpan(offset, count))
 
         override this.WriteAsync(buffer: byte[], offset: int, count: int, ct) =
@@ -172,22 +205,26 @@ module FileStorageCoreStream =
             let mutable shouldClampPosition = false
 
             db.WithTransaction(fun db ->
-                let len = getFileLengthById db fileId
-                if len = value then
-                    ()
-                elif len < value then
-                    shouldMarkDirty <- true
-                    let chunkOffset = len % chunkSize
-                    let fillSize = int (chunkSize - chunkOffset)
-                    use mem = NativeArray.NativeArray.Alloc fillSize
-                    let mem = mem.Span
-                    mem.Clear()
-                    ignore (writeChunkedData db fileId len (Span.op_Implicit mem))
-                    updateLenById db fileId value
-                else
-                    shouldMarkDirty <- true
-                    downsetFileLength db fileId value
+                let originalLength = getFileLengthById db fileId
+                if originalLength <> value then
+                    let facts = FileStorageContentEvents.prepare db {
+                        FileId = fileId; Offset = min originalLength value
+                        Length = abs (originalLength - value); OldLength = originalLength
+                        NewLength = value; Kind = FileContentChangeKind.Resize }
+                    checkDisposed()
+                    let len = facts.OldLength
+                    if len < value then
+                        let chunkOffset = len % chunkSize
+                        let fillSize = int (chunkSize - chunkOffset)
+                        use mem = NativeArray.NativeArray.Alloc fillSize
+                        let mem = mem.Span
+                        mem.Clear()
+                        writeChunkedData db fileId len (Span.op_Implicit mem) |> ignore
+                        updateLenById db fileId value
+                    elif len > value then downsetFileLength db fileId value
+                    shouldMarkDirty <- len <> value
                     shouldClampPosition <- position > value
+                    FileStorageContentEvents.completed db facts
             )
 
             if shouldClampPosition then position <- value

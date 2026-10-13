@@ -4,6 +4,12 @@ open System
 open System.Collections
 open System.Collections.Generic
 
+type internal IDocumentReference =
+    abstract Id: int64
+    abstract PendingEntity: obj voption
+    abstract PendingTypedId: obj voption
+    abstract TypedId: obj voption
+
 /// <summary>
 /// A typed reference to a single entity of type 'T in another collection.
 /// Serialized as the target Id (integer) or null in JSON. Backed by a link table with FK RESTRICT.
@@ -89,6 +95,12 @@ type DBRef<'T> =
 
     /// <summary>Empty reference. Serializes as null in JSON. HasValue is false.</summary>
     static member None = DBRef<'T>(0L, Unchecked.defaultof<'T>, false)
+
+    interface IDocumentReference with
+        member this.Id = this._id
+        member this.PendingEntity = this.PendingEntity |> ValueOption.map box
+        member _.PendingTypedId = ValueNone
+        member _.TypedId = ValueNone
 
     // ─── Equality by Id ───────────────────────────────────────────────────────
 
@@ -245,6 +257,12 @@ type DBRef<'TTarget, 'TId> =
     /// <summary>An empty reference with no target entity.</summary>
     static member None = DBRef<'TTarget, 'TId>(0L, Unchecked.defaultof<'TId>, false, Unchecked.defaultof<'TTarget>, false)
 
+    interface IDocumentReference with
+        member this.Id = this._id
+        member this.PendingEntity = this.PendingEntity |> ValueOption.map box
+        member this.PendingTypedId = if this.HasPendingTypedId then ValueSome(box this._typedId) else ValueNone
+        member this.TypedId = if this._hasTypedId then ValueSome(box this._typedId) else ValueNone
+
     override this.Equals(other: obj) =
         match other with
         | :? DBRef<'TTarget, 'TId> as o ->
@@ -286,81 +304,32 @@ type DBRef<'TTarget, 'TId> =
             sprintf "DBRef<%s,%s>.To(%d)" typeof<'TTarget>.Name typeof<'TId>.Name this._id
 
 
-namespace SoloDatabase.Attributes
+module internal DocumentReferenceConstruction =
+    type Factories = ReferenceFactories
+    let RegisterSingle<'T>() =
+        let factories = {
+            ToOrResolved = Func<int64,obj>(fun id -> box(DBRef<'T>.To id))
+            Loaded = Func<int64,obj,obj>(fun id entity -> box(DBRef<'T>.Loaded(id, unbox<'T> entity)))
+            ResolvedTyped = null
+            LoadedTyped = null
+        }
+        let loaded = Func<obj,obj>(fun reference -> box((unbox<DBRef<'T>> reference).IsLoaded))
+        let value = Func<obj,obj>(fun reference -> box((unbox<DBRef<'T>> reference).Value))
+        TypeMetadataCache.Register(typeof<DBRef<'T>>, fun metadata ->
+            { metadata with
+                ReferenceFactories = MetadataValue.generated factories
+                NamedGetters = metadata.NamedGetters |> MetadataMap.set "IsLoaded" { Generated = true; Value = ValueSome loaded } |> MetadataMap.set "Value" { Generated = true; Value = ValueSome value } })
 
-open System
-
-/// <summary>
-/// Specifies the delete policy for relation references.
-/// </summary>
-type DeletePolicy =
-    /// <summary>Block the operation if references exist. Throws a descriptive error.</summary>
-    | Restrict = 0
-    /// <summary>
-    /// Cascade the delete to referencing entities (OnDelete only).
-    /// Not valid for OnOwnerDelete — use Deletion instead.
-    /// </summary>
-    | Cascade = 1
-    /// <summary>Remove references (set DBRef to None, remove link rows). Entities survive.</summary>
-    | Unlink = 2
-    /// <summary>
-    /// For OnOwnerDelete only: unlink first, then delete target entities that have
-    /// zero remaining references across all link tables (column-aware global ref count).
-    /// Entities still referenced elsewhere survive.
-    /// </summary>
-    | Deletion = 3
-
-
-/// <summary>
-/// Controls the load-time ordering of DBRefMany items.
-/// </summary>
-type DBRefOrder =
-    /// <summary>No ordering guarantee (default). Matches current behavior.</summary>
-    | Undefined = 0
-    /// <summary>Order loaded items by target entity Id ascending.</summary>
-    | TargetId = 1
-
-/// <summary>
-/// Configures relation behavior on a <see cref="DBRef{T}"/> or <see cref="DBRefMany{T}"/> property.
-/// </summary>
-/// <remarks>
-/// <list type="bullet">
-/// <item><description><c>OnDelete</c>: what happens when the REFERENCED (target) entity is deleted.</description></item>
-/// <item><description><c>OnOwnerDelete</c>: what happens to linked entities when the OWNER is deleted.</description></item>
-/// <item><description><c>Unique</c>: enforce 1:1 cardinality on DBRef (UNIQUE on both SourceId and TargetId).</description></item>
-/// </list>
-/// </remarks>
-[<AttributeUsage(AttributeTargets.Property, AllowMultiple = false)>]
-[<Sealed>]
-type SoloRefAttribute() =
-    inherit Attribute()
-
-    /// <summary>
-    /// What happens when the REFERENCED entity (target) is deleted.
-    /// <para>Restrict (default): block the delete if references exist.</para>
-    /// <para>Cascade: also delete the entity that holds this reference.</para>
-    /// <para>Unlink: remove the reference (set DBRef to None, remove from DBRefMany).</para>
-    /// </summary>
-    member val OnDelete: DeletePolicy = DeletePolicy.Restrict with get, set
-
-    /// <summary>
-    /// What happens to referenced entities when the OWNER is deleted.
-    /// <para>Deletion (default): unlink first, then delete each formerly-linked target entity
-    /// ONLY IF its global reference count across all link tables is zero.</para>
-    /// <para>Unlink: just remove link rows, referenced entities always survive.</para>
-    /// <para>Restrict: block owner deletion if any links exist.</para>
-    /// <para>NOTE: Cascade is NOT valid for OnOwnerDelete. Use Deletion instead.</para>
-    /// </summary>
-    member val OnOwnerDelete: DeletePolicy = DeletePolicy.Deletion with get, set
-
-    /// <summary>
-    /// If true, enforce OneToOne cardinality (UNIQUE on both SourceId and TargetId in the link table).
-    /// Only valid on <see cref="DBRef{T}"/>. Default is false (ManyToOne).
-    /// </summary>
-    member val Unique: bool = false with get, set
-
-    /// <summary>
-    /// Controls the load-time ordering of DBRefMany items.
-    /// Undefined (default): no ordering guarantee. TargetId: order by target entity Id ascending.
-    /// </summary>
-    member val OrderBy: DBRefOrder = DBRefOrder.Undefined with get, set
+    let RegisterTyped<'T,'Id>() =
+        let factories = {
+            ToOrResolved = null
+            Loaded = Func<int64,obj,obj>(fun id entity -> box(DBRef<'T,'Id>.Loaded(id, unbox<'T> entity)))
+            ResolvedTyped = Func<int64,obj,obj>(fun id typedId -> box(DBRef<'T,'Id>.Resolved(id, unbox<'Id> typedId)))
+            LoadedTyped = Func<int64,obj,obj,obj>(fun id typedId entity -> box(DBRef<'T,'Id>.Loaded(id, unbox<'Id> typedId, unbox<'T> entity)))
+        }
+        let loaded = Func<obj,obj>(fun reference -> box((unbox<DBRef<'T,'Id>> reference).IsLoaded))
+        let value = Func<obj,obj>(fun reference -> box((unbox<DBRef<'T,'Id>> reference).Value))
+        TypeMetadataCache.Register(typeof<DBRef<'T,'Id>>, fun metadata ->
+            { metadata with
+                ReferenceFactories = MetadataValue.generated factories
+                NamedGetters = metadata.NamedGetters |> MetadataMap.set "IsLoaded" { Generated = true; Value = ValueSome loaded } |> MetadataMap.set "Value" { Generated = true; Value = ValueSome value } })

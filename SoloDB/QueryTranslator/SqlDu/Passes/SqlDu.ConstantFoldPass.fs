@@ -150,72 +150,10 @@ let rec private foldExpr (changed: bool ref) (expr: SqlExpr) : SqlExpr =
     loop expr
 
 and private foldCore changed (core: SelectCore) =
-    let projection (original: Projection) =
-        let expression = foldExpr changed original.Expr
-        if same expression original.Expr then original else { original with Expr = expression }
-    let projections =
-        match core.Projections with
-        | AllColumns -> core.Projections
-        | Explicit(head, tail) ->
-            let mappedHead = projection head
-            let mappedTail = SqlExprCombinators.mapList projection tail
-            if same head mappedHead && same tail mappedTail then core.Projections
-            else Explicit(mappedHead, mappedTail)
-    let where = SqlExprCombinators.mapOption (foldExpr changed) core.Where
-    let having = SqlExprCombinators.mapOption (foldExpr changed) core.Having
-    let groupBy = SqlExprCombinators.mapList (foldExpr changed) core.GroupBy
-    let orderBy = SqlExprCombinators.mapList (fun original ->
-        let expression = foldExpr changed original.Expr
-        if same expression original.Expr then original else { original with Expr = expression }) core.OrderBy
-    let limit = SqlExprCombinators.mapOption (foldExpr changed) core.Limit
-    let offset = SqlExprCombinators.mapOption (foldExpr changed) core.Offset
-    let source = SqlExprCombinators.mapOption (foldTableSource changed) core.Source
-    let joins = SqlExprCombinators.mapList (foldJoin changed) core.Joins
-    if same projections core.Projections && same where core.Where && same having core.Having
-       && same groupBy core.GroupBy && same orderBy core.OrderBy && same limit core.Limit
-       && same offset core.Offset && same source core.Source && same joins core.Joins then core
-    else
-        { core with Projections = projections; Where = where; Having = having
-                    GroupBy = groupBy; OrderBy = orderBy; Limit = limit; Offset = offset
-                    Source = source; Joins = joins }
-
-and private foldTableSource changed source =
-    match source with
-    | BaseTable _ -> source
-    | DerivedTable(query, alias) ->
-        let mapped = foldSelect changed query
-        if same query mapped then source else DerivedTable(mapped, alias)
-    | FromJsonEach(expression, alias) ->
-        let mapped = foldExpr changed expression
-        if same expression mapped then source else FromJsonEach(mapped, alias)
-
-and private foldJoin changed join =
-    match join with
-    | CrossJoin source ->
-        let mapped = foldTableSource changed source
-        if same source mapped then join else CrossJoin mapped
-    | ConditionedJoin(kind, source, condition) ->
-        let mappedSource = foldTableSource changed source
-        let mappedCondition = foldExpr changed condition
-        if same source mappedSource && same condition mappedCondition then join
-        else ConditionedJoin(kind, mappedSource, mappedCondition)
+    mapCoreExpressions (foldExpr changed) (foldSelect changed) core
 
 and private foldSelect changed (query: SqlSelect) =
-    let body =
-        match query.Body with
-        | SingleSelect core ->
-            let mapped = foldCore changed core
-            if same core mapped then query.Body else SingleSelect mapped
-        | UnionAllSelect(head, tail) ->
-            let mappedHead = foldCore changed head
-            let mappedTail = SqlExprCombinators.mapList (foldCore changed) tail
-            if same head mappedHead && same tail mappedTail then query.Body
-            else UnionAllSelect(mappedHead, mappedTail)
-    let ctes = SqlExprCombinators.mapList (fun original ->
-        let mapped = foldSelect changed original.Query
-        if same mapped original.Query then original else { original with Query = mapped }) query.Ctes
-    if same body query.Body && same ctes query.Ctes then query
-    else { Ctes = ctes; Body = body }
+    mapSelectParts (mapCores (foldCore changed)) (foldSelect changed) query
 
 /// Fold constants in a statement without copying unchanged containers.
 let private foldStatement (statement: SqlStatement) : struct(SqlStatement * bool) =

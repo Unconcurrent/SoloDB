@@ -20,22 +20,19 @@ module internal OrderedChainRows =
           Where = None; GroupBy = []; Having = None; OrderBy = []; Limit = None; Offset = None }
     let private ordered a = [{ Expr = col a "__ord"; Direction = SortDirection.Asc }]
     let rootValue a = SqlExpr.JsonRootExtract(Some a, "Value")
-    let private encode e = SqlExpr.FunctionCall("jsonb", [SqlExpr.FunctionCall("json_quote", [e])])
-    let private jsonEachValue alias =
-        let structured = SqlExpr.InList(col alias "type", SqlExpr.Literal(SqlLiteral.String "object"), [SqlExpr.Literal(SqlLiteral.String "array")])
-        SqlExpr.CaseExpr((structured, SqlExpr.FunctionCall("jsonb", [col alias "value"])), [], Some(encode (col alias "value")))
     let hasId (t: Type) =
         // Only the Int64 Id convention denotes the separately carried rowid.
         // A Guid or string property with the same name remains document data.
-        let property = t.GetProperty("Id")
-        if not (isNull property) then property.PropertyType = typeof<int64>
-        else
-            let field = t.GetField("Id")
-            not (isNull field) && field.FieldType = typeof<int64>
-    let entityValue a = SqlExpr.FunctionCall("jsonb_set",[col a "Value";SqlExpr.Literal(SqlLiteral.String "$.Id");col a "Id"])
+        match ModelMetadata.MemberType(t,"Id",false) with
+        | Some valueType -> typeof<int64>.Equals(valueType)
+        | None ->
+            match ModelMetadata.MemberType(t,"Id",true) with
+            | Some valueType -> typeof<int64>.Equals(valueType)
+            | None -> false
     let private rowNumber order =
-        SqlExpr.WindowCall { Kind = NamedWindowFunction "ROW_NUMBER"; Arguments = []; PartitionBy = []; OrderBy = order }
-    let private fields a = [proj "Id" (col a "Id"); proj "Value" (col a "Value"); proj "__ord" (col a "__ord")]
+        QueryableBuildQueryWindowHelpers.rowNumberOver order
+    let private payloadFields a = [proj "Id" (col a "Id"); proj "Value" (col a "Value"); proj "__ord" (col a "__ord")]
+    let private fields input a = payloadFields a @ QueryTranslatorSerialization.companionProjections (Some a) input
     let private nonnegative v =
         match v with
         | SqlExpr.Literal(SqlLiteral.Integer n) -> integer (max 0L n)
@@ -50,17 +47,15 @@ module internal OrderedChainRows =
                 valid && match node with ScalarSubquery _ | Exists _ | InSubquery _ -> false | _ -> true) true expression
             if expressions |> List.forall local then
                 let rewrite = AliasRewrite.rewriteDerivedAliasExpr
-                                  { MatchEmptyDerivedAlias = false; OnSubquerySelect = id }
+                                  { MatchEmptyDerivedAlias = false; MatchUnqualifiedColumns = true; OnSubquerySelect = id }
                                   (AliasRewrite.buildProjectionAliasMap row) alias
                 Some(row, rewrite)
             else None
         | _ -> None
     let rec build (adapter: Adapter) columns (plan: Plan) =
         adapter.Validate plan
-        let start = adapter.Source columns plan.Root
-        let sourceElementType = sequenceElementType plan.Root.Type
-        let isSourceEntity elementType = hasId elementType && sourceElementType.IsAssignableFrom elementType
-        let bound source fallback limit offset =
+        let struct(start, sourceInput) = adapter.Source columns plan.Root
+        let bound (source: SqlSelect) fallback limit offset =
             // Raw payload columns do not parse discarded rows. Internal row numbers
             // and order keys are computed before LIMIT in either placement; other
             // computed projections and existing bounds retain their boundary.
@@ -70,41 +65,38 @@ module internal OrderedChainRows =
                                     && (ProjectionSetOps.toList row.Projections |> List.forall (fun p ->
                                         match p.Alias, p.Expr with
                                         | _, Column _ -> true
-                                        | Some "__ord", WindowCall { Kind = NamedWindowFunction "ROW_NUMBER" } -> true
+                                        | Some "__ord", WindowCall { Kind = WindowFunctionKind.RowNumber } -> true
                                         | Some key, expression when key.StartsWith("__key", StringComparison.Ordinal) ->
                                             row.OrderBy |> List.exists (fun ordering -> ordering.Expr = expression)
                                         | _ -> false)) ->
                 select { row with Limit = limit; Offset = offset }
             | _ -> select { fallback with Limit = limit; Offset = offset }
-        let rec lower (source: SqlSelect) keys stages =
+        let value expression = adapter.Value expression |> QueryProduced.value adapter.Alias
+        let translate root input alias selector =
+            let produced, joins = adapter.Translate root input alias selector
+            QueryProduced.value adapter.Alias produced, joins
+        let rec lower (source: SqlSelect) input keys stages =
             match stages with
-            | [] -> source
+            | [] -> struct(source, input)
             | Skip skip :: Take take :: rest ->
                 let a=adapter.Alias()
-                let ps=fields a @ (keys |> List.mapi (fun i _ -> proj ("__key"+string i) (col a ("__key"+string i))))
+                let ps=fields input a @ (keys |> List.mapi (fun i _ -> proj ("__key"+string i) (col a ("__key"+string i))))
                 let fallback = {core (Some(DerivedTable(source,a))) ps with OrderBy=ordered a}
-                let bounded = bound source fallback (Some(nonnegative(adapter.Value take))) (Some(nonnegative(adapter.Value skip)))
-                lower bounded keys rest
+                let bounded = bound source fallback (Some(nonnegative(value take))) (Some(nonnegative(value skip)))
+                lower bounded input keys rest
             | stage :: rest ->
                 let a = adapter.Alias()
                 let from = Some(DerivedTable(source, a))
-                let pass = fields a @ (keys |> List.mapi (fun i _ -> proj ("__key" + string i) (col a ("__key" + string i))))
+                let pass = fields input a @ (keys |> List.mapi (fun i _ -> proj ("__key" + string i) (col a ("__key" + string i))))
                 let baseCore = { core from pass with OrderBy = ordered a }
-                let next c k = lower (select c) k rest
+                let nextWith output c k = lower (select c) output k rest
+                let next c k = nextWith input c k
                 let distinctOn key joins =
-                    let rank = SqlExpr.WindowCall {
-                        Kind = NamedWindowFunction "ROW_NUMBER"; Arguments = []
-                        PartitionBy = [key]; OrderBy = [col a "__ord", SortDirection.Asc] }
-                    let marked = select { baseCore with
-                                            Joins = joins
-                                            Projections = ProjectionSetOps.ofList (pass @ [proj "__rank" rank]) }
-                    let da = adapter.Alias()
-                    lower (select { core (Some(DerivedTable(marked, da))) (fields da) with
-                                        Where = Some(SqlExpr.Binary(col da "__rank", BinaryOperator.Eq, integer 1L))
-                                        OrderBy = ordered da }) [] rest
+                    let ranked = QueryDefaultEquality.firstRows adapter.Alias { baseCore with Joins = joins } key [col a "__ord", SortDirection.Asc]
+                    lower ranked input [] rest
                 match stage with
                 | Filter l ->
-                    let pred, joins = adapter.Translate plan.Root a l
+                    let pred, joins = translate plan.Root input a l
                     let pred = FlattenTransform.normalizeExprQuoting pred
                     let filtered = select { baseCore with Where = Some pred; Joins = joins }
                     let filtered =
@@ -114,23 +106,30 @@ module internal OrderedChainRows =
                             let condition = match row.Where with None -> predicate | Some previous -> SqlExpr.Binary(previous, BinaryOperator.And, predicate)
                             select { row with Where = Some condition }
                         | _ -> filtered
-                    lower filtered keys rest
+                    lower filtered input keys rest
                 | Project l ->
-                    let value, joins = adapter.Translate plan.Root a l
-                    let value = FlattenTransform.normalizeExprQuoting value
-                    let value = if obj.ReferenceEquals(l.Body,l.Parameters.[0]) && hasId l.ReturnType then entityValue a else encode value
-                    let ps = pass |> List.map (fun p ->
-                        if p.Alias = Some "Value" then proj "Value" value
-                        elif p.Alias = Some "Id" && hasId l.ReturnType then
-                            proj "Id" (SqlExpr.FunctionCall("jsonb_extract",[value;SqlExpr.Literal(SqlLiteral.String "$.Id")]))
-                        else p)
+                    let produced, joins = adapter.Translate plan.Root input a l
+                    let produced =
+                        if obj.ReferenceEquals(l.Body, l.Parameters[0]) then
+                            let input = QueryTranslatorSerialization.scopeSerializationInput (Some a) BaseLayer produced.Input
+                            let value, input = QueryProduced.embedded (col a "Value", input)
+                            DirectValue(value, { input with Carrier = CanonicalToken })
+                        else QueryProduced.canonical adapter.Alias produced
+                    let ps = payloadFields a @ (keys |> List.mapi (fun index _ -> proj ("__key" + string index) (col a ("__key" + string index))))
+                    let struct(projected, output) = QueryProduced.publishCore adapter.Alias { baseCore with Projections = ProjectionSetOps.ofList ps; Joins = joins } produced false
                     let projected =
-                        match inlineRow source a joins (ps |> List.map _.Expr) with
-                        | Some(row, rewrite) ->
-                            { row with Projections = ps |> List.map (fun p -> { p with Expr = rewrite p.Expr }) |> ProjectionSetOps.ofList
-                                       OrderBy = baseCore.OrderBy |> List.map (fun order -> { order with Expr = rewrite order.Expr }) }
-                        | None -> { baseCore with Projections = ProjectionSetOps.ofList ps; Joins = joins }
-                    next projected keys
+                        if hasId l.ReturnType && output.PhysicalOwner.IsNone then
+                            match projected.Body with
+                            | SingleSelect row ->
+                                let value = ProjectionSetOps.toList row.Projections |> List.find (fun projection -> projection.Alias = Some "Value") |> _.Expr
+                                let projections =
+                                    row.Projections |> ProjectionSetOps.toList |> List.map (fun projection ->
+                                        if projection.Alias = Some "Id" then { projection with Expr = SqlExpr.FunctionCall("jsonb_extract", [value; SqlExpr.Literal(SqlLiteral.String "$.Id")]) } else projection)
+                                    |> ProjectionSetOps.ofList
+                                { projected with Body = SingleSelect { row with Projections = projections } }
+                            | _ -> projected
+                        else projected
+                    lower projected output keys rest
                 | OfType(_, targetType) ->
                     let typeName = Utils.typeToName targetType
                     let condition =
@@ -152,21 +151,35 @@ module internal OrderedChainRows =
                 | Expand selector ->
                     let selector =
                         match selector.Body with
-                        | :? MethodCallExpression as call when call.Method.DeclaringType = typeof<Enumerable> || call.Method.DeclaringType = typeof<Queryable> ->
+                        | :? MethodCallExpression as call when typeof<Enumerable>.Equals(call.Method.DeclaringType) || typeof<Queryable>.Equals(call.Method.DeclaringType) ->
                             let items = Expression.Call(typeof<Enumerable>, "ToArray", [|sequenceElementType selector.ReturnType|], selector.Body)
-                            Expression.Lambda(items, selector.Parameters)
+                            { selector with Body = items }
                         | _ -> selector
-                    let collection, joins = adapter.Translate plan.Root a selector
+                    let collectionProduced, joins = adapter.Translate plan.Root input a selector
+                    let from, collection, collectionInput, ownerAlias, joins =
+                        match collectionProduced with
+                        | DirectValue(collection, collectionInput) -> from, collection, collectionInput, a, joins
+                        | PackedValue _ ->
+                            let struct(selected, selectedInput) = QueryProduced.publishCore adapter.Alias { baseCore with Joins = joins } collectionProduced false
+                            let selectedAlias = adapter.Alias()
+                            Some(DerivedTable(selected, selectedAlias)), col selectedAlias "Value",
+                            QueryTranslatorSerialization.scopeSerializationInput (Some selectedAlias) OuterLayer selectedInput, selectedAlias, []
                     let itemAlias = adapter.Alias()
-                    let value = jsonEachValue itemAlias
+                    let token = SqlExpr.FunctionCall("jsonb", [SqlExpr.Binary(collection, BinaryOperator.JsonText, col itemAlias "fullkey")])
+                    let elementInput = QueryTranslatorSerialization.elementInput collectionInput (col itemAlias "key") token
+                    let value = QueryProduced.scalarValue (sequenceElementType selector.ReturnType) token { elementInput with Carrier = CanonicalToken }
                     let id =
                         if hasId (sequenceElementType selector.ReturnType) then
                             SqlExpr.FunctionCall("jsonb_extract", [value; SqlExpr.Literal(SqlLiteral.String "$.Id")])
                         else col itemAlias "key"
-                    let order = [col a "__ord", SortDirection.Asc; col itemAlias "key", SortDirection.Asc]
-                    next { core from [proj "Id" id; proj "Value" value; proj "__ord" (rowNumber order)] with
-                               Joins = joins @ [CrossJoin(FromJsonEach(collection, Some itemAlias))]
-                               OrderBy = order |> List.map (fun (expression, direction) -> { Expr = expression; Direction = direction }) } []
+                    let order = [col ownerAlias "__ord", SortDirection.Asc; col itemAlias "key", SortDirection.Asc]
+                    let produced = QueryProduced.canonical adapter.Alias (DirectValue(value, elementInput))
+                    let expanded =
+                        { core from [proj "Id" id; proj "Value" (SqlExpr.Literal SqlLiteral.Null); proj "__ord" (rowNumber order)] with
+                            Joins = joins @ [CrossJoin(FromJsonEach(collection, Some itemAlias))]
+                            OrderBy = order |> List.map (fun (expression, direction) -> { Expr = expression; Direction = direction }) }
+                    let struct(expanded, output) = QueryProduced.publishCore adapter.Alias expanded produced false
+                    lower expanded output [] rest
                 | Order(l, direction, append) ->
                     let rec collect terms preceding remaining =
                         match remaining with
@@ -176,7 +189,7 @@ module internal OrderedChainRows =
                         | _ -> List.rev terms @ preceding, remaining
                     let terms, remaining = collect [l, direction] [] rest
                     let translated = terms |> List.map (fun (selector, direction) ->
-                        let expression, joins = adapter.Translate plan.Root a selector
+                        let expression, joins = translate plan.Root input a selector
                         (expression, direction), joins)
                     let prior = if append then keys else []
                     let exprs = prior |> List.mapi (fun i d -> col a ("__key" + string i), d)
@@ -185,122 +198,158 @@ module internal OrderedChainRows =
                     let ps = [proj "Id" (col a "Id"); proj "Value" (col a "Value")
                               proj "__ord" (rowNumber (order @ [col a "__ord", SortDirection.Asc]))]
                              @ (order |> List.mapi (fun i (e, _) -> proj ("__key" + string i) e))
+                             @ QueryTranslatorSerialization.companionProjections (Some a) input
                     lower (select { baseCore with Projections = ProjectionSetOps.ofList ps; Joins = joins
                                                   OrderBy = order |> List.map (fun (e,d) -> { Expr = e; Direction = d }) })
-                          (prior @ (terms |> List.map snd)) remaining
-                | Skip n -> lower (bound source baseCore (Some(integer -1L)) (Some(nonnegative (adapter.Value n)))) keys rest
-                | Take n -> lower (bound source baseCore (Some(nonnegative (adapter.Value n))) None) keys rest
-                | Distinct elementType when isSourceEntity elementType ->
-                    distinctOn (col a "Id") []
+                          input (prior @ (terms |> List.map snd)) remaining
+                | Skip n -> lower (bound source baseCore (Some(integer -1L)) (Some(nonnegative (value n)))) input keys rest
+                | Take n -> lower (bound source baseCore (Some(nonnegative (value n))) None) input keys rest
                 | Distinct elementType ->
-                    // Stored document payload excludes Id; equality observes the
-                    // complete value, including that separately carried identity.
-                    let value = if hasId elementType then entityValue a else rootValue a
-                    let ps = [proj "Id" (SqlExpr.AggregateCall(AggregateKind.Min, Some(col a "Id"), false, None))
-                              proj "Value" (encode value)
-                              proj "__ord" (SqlExpr.AggregateCall(AggregateKind.Min, Some(col a "__ord"), false, None))]
-                    let d = { core from ps with GroupBy = [value] }
-                    let da = adapter.Alias()
-                    lower (select { core (Some(DerivedTable(select d, da))) (fields da) with OrderBy = ordered da }) [] rest
+                    let scoped = QueryTranslatorSerialization.scopeSerializationInput (Some a) BaseLayer input
+                    distinctOn (QueryDefaultEquality.key adapter.Alias elementType (col a "Value") scoped) []
                 | DistinctBy selector ->
-                    let key, joins = adapter.Translate plan.Root a selector
-                    distinctOn key joins
-                | Group(selector, countOnly) ->
-                    let key, joins = adapter.Translate plan.Root a selector
+                    let produced, joins = adapter.Translate plan.Root input a selector
+                    let name = "_distinct_key" + adapter.Alias()
+                    let keyCore = { baseCore with Joins = joins; Projections = ProjectionSetOps.ofList(pass @ [proj name (SqlExpr.Literal SqlLiteral.Null)]) }
+                    let struct(prepared, keyInput) = QueryProduced.publishSlot adapter.Alias name keyCore produced false
+                    let alias = adapter.Alias()
+                    let keyInput = QueryTranslatorSerialization.scopeSerializationInput (Some alias) OuterLayer keyInput
+                    let key = QueryDefaultEquality.key adapter.Alias selector.ReturnType (col alias name) keyInput
+                    let ranked = QueryDefaultEquality.firstRows adapter.Alias
+                                     { core (Some(DerivedTable(prepared, alias))) (fields input alias) with OrderBy = ordered alias }
+                                     key [col alias "__ord", SortDirection.Asc]
+                    lower ranked input [] rest
+                | Group(selector, countOnly, producedType) ->
+                    let keyProduced, joins = adapter.Translate plan.Root input a selector
+                    let keyName = "_key" + adapter.Alias()
+                    let keyCore = { baseCore with Joins = joins
+                                                  Projections = ProjectionSetOps.ofList(pass @ [proj keyName (SqlExpr.Literal SqlLiteral.Null)]) }
+                    let struct(keyRows, keyInput) = QueryProduced.publishSlot adapter.Alias keyName keyCore keyProduced false
+                    let struct(keyRows, keyInput, equalityName) = QueryDefaultEquality.prepareGroups adapter.Alias keyName selector.ReturnType keyRows input keyInput "__ord"
+                    let a = adapter.Alias()
+                    let from = Some(DerivedTable(keyRows, a))
+                    let input = QueryTranslatorSerialization.scopeSerializationInput (Some a) BaseLayer input
+                    let key = col a keyName
+                    let keyInput = QueryTranslatorSerialization.scopeSerializationInput (Some a) OuterLayer
+                                       { keyInput with Source = ValueSome(QueryTranslatorBaseTypes.jsonToken key) }
                     let items =
                         if countOnly then SqlExpr.AggregateCall(AggregateKind.Count, None, false, None)
                         else
-                            let item = if hasId selector.Parameters.[0].Type then entityValue a else col a "Value"
-                            SqlExpr.FunctionCall("jsonb_group_array", [SqlExpr.FunctionCall("json", [item])])
-                    let value = SqlExpr.JsonObjectExpr ["Key", key; (if countOnly then "Value" else "Items"), items]
+                            let item, _ = QueryProduced.embedded (col a "Value", input)
+                            SqlExpr.FunctionCall("jsonb_group_array", [QueryTranslatorBaseTypes.jsonToken item])
+                    let keyValue, keyInput = QueryProduced.embedded (key, keyInput)
+                    let value = SqlExpr.JsonObjectExpr ["Key", keyValue; (if countOnly then "Value" else "Items"), items]
                     let first = SqlExpr.AggregateCall(AggregateKind.Min, Some(col a "__ord"), false, None)
-                    let predicateJoins = ResizeArray<JoinShape>()
-                    let translateSelector lambda =
-                        let expression, discovered = adapter.Translate plan.Root a lambda
-                        predicateJoins.AddRange discovered
-                        expression
-                    let rec predicates having remaining =
-                        match remaining with
-                        | Filter predicate :: tail when not countOnly ->
-                            let keyRead = lazy (
-                                let memberRead = Expression.Property(predicate.Parameters.[0], "Key")
-                                adapter.Translate plan.Root a (Expression.Lambda(memberRead, predicate.Parameters)) |> fst)
-                            let translateValue value =
-                                let translated, discovered = adapter.Translate plan.Root a (Expression.Lambda(value, predicate.Parameters))
-                                predicateJoins.AddRange discovered
-                                SqlExpr.map (fun node -> if node = keyRead.Value then key else node) translated
-                            let expression = DBRefManyHelpers.translateGroupingExpression translateValue translateSelector key predicate.Parameters.[0] predicate.Body
-                            let combined = match having with None -> expression | Some previous -> SqlExpr.Binary(previous, BinaryOperator.And, expression)
-                            predicates (Some combined) tail
-                        | _ -> having, remaining
-                    let having, remaining = predicates None rest
-                    lower (select { core from [proj "Id" (integer -1L); proj "Value" value; proj "__ord" first] with
-                                      Joins = joins @ List.ofSeq predicateJoins; GroupBy = [key]; Having = having
-                                      OrderBy = [{ Expr = first; Direction = SortDirection.Asc }] }) [] remaining
+                    let rowInput = input
+                    let itemsType = rowInput.OriginalType.MakeArrayType()
+                    let itemsInput = { QuerySerializationInput.Sequence(itemsType, rowInput) with
+                                        Operand = ValueSome { Descriptor = QuerySerializationSql.sequenceDescriptor itemsType rowInput; Accesses = Array.empty } }
+                    let producedInput = QuerySerializationInput.Members(producedType,
+                                            [|"Key"; if countOnly then "Value" else "Items"|],
+                                            [|selector.ReturnType; if countOnly then typeof<int> else itemsType|],
+                                            [|keyInput; if countOnly then (QueryProduced.typed typeof<int> items).Input else itemsInput|])
+                    let groupCore = { core from [proj "Id" (integer -1L); proj "Value" value; proj "__ord" first] with
+                                        GroupBy = equalityName |> List.map (col a); OrderBy = [{ Expr = first; Direction = SortDirection.Asc }] }
+                    let struct(grouped, output) = QueryProduced.publishCore adapter.Alias groupCore (DirectValue(value, producedInput)) false
+                    lower grouped output [] rest
                 | While(l,take) ->
-                    let pred,joins=adapter.Translate plan.Root a l
+                    let pred,joins=translate plan.Root input a l
                     let failed=SqlExpr.CaseExpr((pred,integer 0L),[],Some(integer 1L))
                     let count=SqlExpr.WindowCall {Kind=NamedWindowFunction "SUM";Arguments=[failed];PartitionBy=[];OrderBy=[col a "__ord",SortDirection.Asc]}
                     let marked=select {baseCore with Joins=joins;Projections=ProjectionSetOps.ofList(pass @ [proj "__failed" count])}
                     let wa=adapter.Alias()
-                    let ps=fields wa @ (keys |> List.mapi (fun i _ -> proj ("__key"+string i) (col wa ("__key"+string i))))
+                    let ps=fields input wa @ (keys |> List.mapi (fun i _ -> proj ("__key"+string i) (col wa ("__key"+string i))))
                     let condition=SqlExpr.Binary(col wa "__failed",(if take then BinaryOperator.Eq else BinaryOperator.Gt),integer 0L)
-                    lower (select {core (Some(DerivedTable(marked,wa))) ps with Where=Some condition;OrderBy=ordered wa}) keys rest
+                    lower (select {core (Some(DerivedTable(marked,wa))) ps with Where=Some condition;OrderBy=ordered wa}) input keys rest
                 | Set(name, right, keySelector) ->
-                    let r =
+                    let struct(r, rightInput) =
                         match parse adapter.IsRoot right with
                         | Some p -> build adapter FullValue p
                         | None ->
                             let ra = adapter.Alias()
-                            let payload = jsonEachValue ra
-                            let id =
-                                if hasId (sequenceElementType right.Type) then
-                                    SqlExpr.FunctionCall("jsonb_extract", [payload; SqlExpr.Literal(SqlLiteral.String "$.Id")])
-                                else col ra "key"
-                            select {core (Some(FromJsonEach(adapter.Value right,Some ra)))
-                                        [proj "Id" id;proj "Value" payload;proj "__ord" (col ra "key")]
-                                    with OrderBy=[{Expr=col ra "key";Direction=SortDirection.Asc}]}
+                            let produced = adapter.Value right
+                            let collectionCore = core None [proj "Value" (SqlExpr.Literal SqlLiteral.Null)]
+                            let struct(bound, collectionInput) = QueryProduced.publishCore adapter.Alias collectionCore produced false
+                            let ownerAlias = adapter.Alias()
+                            let collection = col ownerAlias "Value"
+                            let collectionInput = QueryTranslatorSerialization.scopeSerializationInput (Some ownerAlias) OuterLayer collectionInput
+                            let token = SqlExpr.FunctionCall("jsonb", [SqlExpr.Binary(collection, BinaryOperator.JsonText, col ra "fullkey")])
+                            let element = QueryTranslatorSerialization.elementInput collectionInput (col ra "key") token
+                            let payload = QueryProduced.scalarValue (sequenceElementType right.Type) token { element with Carrier = CanonicalToken }
+                            let id = if hasId (sequenceElementType right.Type) then
+                                         SqlExpr.FunctionCall("jsonb_extract", [payload; SqlExpr.Literal(SqlLiteral.String "$.Id")])
+                                     else col ra "key"
+                            let produced = QueryProduced.canonical adapter.Alias (DirectValue(payload, element))
+                            let rightCore =
+                                { core (Some(DerivedTable(bound, ownerAlias)))
+                                       [proj "Id" id; proj "Value" (SqlExpr.Literal SqlLiteral.Null); proj "__ord" (col ra "key")] with
+                                    Joins = [CrossJoin(FromJsonEach(collection, Some ra))]
+                                    OrderBy = [{Expr = col ra "key"; Direction = SortDirection.Asc}] }
+                            QueryProduced.publishCore adapter.Alias rightCore produced false
                     if name = "Concat" || name = "Union" || name = "UnionBy" then
                         let ra = adapter.Alias()
-                        let arm src alias branch =
-                            core (Some(DerivedTable(src, alias))) (fields alias @ [proj "__branch" (integer branch)])
-                        let union = { Ctes = []; Body = UnionAllSelect(arm source a 0L, [arm r ra 1L]) }
+                        let inputName = "_input" + adapter.Alias()
+                        let produced = QueryTranslatorSerialization.fromDescriptor (SqlExpr.Column(None, inputName))
+                                           (QueryTranslatorSerialization.mergeInputs (sequenceElementType right.Type) [|input; rightInput|])
+                        let arm src fact alias branch =
+                            let fact = QueryTranslatorSerialization.scopeSerializationInput (Some alias) BaseLayer fact
+                            core (Some(DerivedTable(src, alias)))
+                                (payloadFields alias @ [proj "__branch" (integer branch); proj inputName (QuerySerializationSql.inputDescriptor fact)])
+                        let union = { Ctes = []; Body = UnionAllSelect(arm source input a 0L, [arm r rightInput ra 1L]) }
                         let ua = adapter.Alias()
                         let merged = select { core (Some(DerivedTable(union, ua)))
                                                 [proj "Id" (col ua "Id"); proj "Value" (col ua "Value")
-                                                 proj "__ord" (rowNumber [col ua "__branch", SortDirection.Asc; col ua "__ord", SortDirection.Asc])]
+                                                 proj "__ord" (rowNumber [col ua "__branch", SortDirection.Asc; col ua "__ord", SortDirection.Asc]); proj inputName (col ua inputName)]
                                               with OrderBy = [{Expr=col ua "__branch";Direction=SortDirection.Asc};{Expr=col ua "__ord";Direction=SortDirection.Asc}] }
                         let remaining =
                             match name, keySelector with
                             | "UnionBy", Some key -> DistinctBy key :: rest
                             | "Union", _ -> Distinct(sequenceElementType right.Type) :: rest
                             | _ -> rest
-                        lower merged [] remaining
+                        lower merged produced [] remaining
                     else
-                        let ra = adapter.Alias()
-                        let key, joins =
+                        let keyType = keySelector |> Option.map _.ReturnType |> Option.defaultValue (sequenceElementType right.Type)
+                        let produced, joins =
                             match keySelector with
-                            | Some key -> adapter.Translate plan.Root a key
-                            | None when isSourceEntity (sequenceElementType right.Type) -> col a "Id", []
-                            | None -> (if hasId (sequenceElementType right.Type) then entityValue a else rootValue a), []
-                        let rightKey =
-                            if keySelector.IsNone && isSourceEntity (sequenceElementType right.Type) then col ra "Id"
-                            elif keySelector.IsNone && hasId (sequenceElementType right.Type) then entityValue ra
-                            else rootValue ra
-                        let check = select { core (Some(DerivedTable(r, ra))) [proj "v" (integer 1L)] with
-                                               Where = Some(SqlExpr.Binary(key, BinaryOperator.Is, rightKey)) }
-                        let exists = SqlExpr.Exists check
-                        let pred = if name = "Except" || name = "ExceptBy" then SqlExpr.Unary(UnaryOperator.Not, exists) else exists
-                        let distinct = keySelector |> Option.map DistinctBy |> Option.defaultValue (Distinct(sequenceElementType right.Type))
-                        lower (select { baseCore with Where = Some pred; Joins = joins }) keys (distinct :: rest)
+                            | Some selector -> adapter.Translate plan.Root input a selector
+                            | None -> DirectValue(col a "Value", QueryTranslatorSerialization.scopeSerializationInput (Some a) BaseLayer input), []
+                        let keyName = "_set_key" + adapter.Alias()
+                        let struct(prepared, keyInput) = QueryProduced.publishSlot adapter.Alias keyName
+                                                           { baseCore with Joins = joins; Projections = ProjectionSetOps.ofList(pass @ [proj keyName (SqlExpr.Literal SqlLiteral.Null)]) } produced false
+                        let leftAlias = adapter.Alias()
+                        let rightAlias = adapter.Alias()
+                        let keyInput = QueryTranslatorSerialization.scopeSerializationInput (Some leftAlias) OuterLayer keyInput
+                        let equality = QueryDefaultEquality.key adapter.Alias keyType (col leftAlias keyName) keyInput
+                        let rightInput = QueryTranslatorSerialization.scopeSerializationInput (Some rightAlias) BaseLayer rightInput
+                        let context = if keySelector.IsNone then adapter.MembershipContext else DefaultMembership
+                        let struct(left, rightKey) = QueryDefaultEquality.membershipKeys adapter.Alias keyType context (adapter.IsValue right)
+                                                        (col leftAlias keyName, keyInput) (col rightAlias "Value", rightInput)
+                                                        (fun () -> col rightAlias "Id")
+                        let matches = QueryDefaultEquality.membership left rightKey (core (Some(DerivedTable(r, rightAlias))) [proj "Value" rightKey.Value])
+                        let predicate = if name = "Except" || name = "ExceptBy" then SqlExpr.Unary(UnaryOperator.Not, matches) else matches
+                        let filtered = { core (Some(DerivedTable(prepared, leftAlias))) (fields input leftAlias) with Where = Some predicate }
+                        let rows = QueryDefaultEquality.firstRows adapter.Alias filtered equality [col leftAlias "__ord", SortDirection.Asc]
+                        lower rows input [] rest
                 | Default value ->
-                    let fallback = value |> Option.map adapter.Value |> Option.defaultValue (SqlExpr.Literal SqlLiteral.Null)
-                    let exists = SqlExpr.Exists(select { core from [proj "v" (integer 1L)] with Limit=Some(integer 1L) })
-                    let id =
-                        if value |> Option.exists (fun expression -> hasId expression.Type) then
-                            SqlExpr.FunctionCall("jsonb_extract", [fallback; SqlExpr.Literal(SqlLiteral.String "$.Id")])
-                        else integer -1L
-                    let empty = { core None [proj "Id" id;proj "Value" (encode fallback);proj "__ord" (integer 0L)] with Where=Some(SqlExpr.Unary(UnaryOperator.Not,exists)) }
-                    let main = core from (fields a)
-                    lower { Ctes=[];Body=UnionAllSelect(main,[empty]) } [] rest
-        lower start [] plan.Stages
+                    let fallback = value |> Option.map adapter.Value |> Option.defaultWith (fun () -> QueryProduced.typed input.OriginalType (SqlExpr.Literal SqlLiteral.Null))
+                    let fallback = QueryProduced.canonical adapter.Alias fallback
+                    let exists = SqlExpr.Exists(select { core from [proj "v" (integer 1L)] with Limit = Some(integer 1L) })
+                    let fallbackCore =
+                        { core None [proj "Id" (integer -1L); proj "Value" (SqlExpr.Literal SqlLiteral.Null); proj "__ord" (integer 0L)] with
+                            Where = Some(SqlExpr.Unary(UnaryOperator.Not, exists)) }
+                    let struct(empty, emptyInput) = QueryProduced.publishCore adapter.Alias fallbackCore fallback false
+                    let empty =
+                        if hasId input.OriginalType then
+                            let alias = adapter.Alias()
+                            let id = SqlExpr.FunctionCall("jsonb_extract", [col alias "Value"; SqlExpr.Literal(SqlLiteral.String "$.Id")])
+                            select (core (Some(DerivedTable(empty, alias)))
+                                (proj "Id" id :: (fields emptyInput alias |> List.filter (fun projection -> projection.Alias <> Some "Id"))))
+                        else empty
+                    let name = "_input" + adapter.Alias()
+                    let arm source fact alias =
+                        let fact = QueryTranslatorSerialization.scopeSerializationInput (Some alias) BaseLayer fact
+                        core (Some(DerivedTable(source, alias))) (payloadFields alias @ [proj name (QuerySerializationSql.inputDescriptor fact)])
+                    let produced = QueryTranslatorSerialization.fromDescriptor (SqlExpr.Column(None, name)) (QueryTranslatorSerialization.mergeInputs input.OriginalType [|input; emptyInput|])
+                    let emptyAlias = adapter.Alias()
+                    lower { Ctes = []; Body = UnionAllSelect(arm source input a, [arm empty emptyInput emptyAlias]) } produced [] rest
+        lower start sourceInput [] plan.Stages

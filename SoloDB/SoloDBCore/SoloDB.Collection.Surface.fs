@@ -1,14 +1,13 @@
 namespace SoloDatabase
 
-open Microsoft.Data.Sqlite
 open System
 open System.Linq.Expressions
-open SQLiteTools
+open NativeSQLiteTools
 
 module internal CollectionSurfaceOps =
     let ensureIndex<'T, 'R>
         (name: string)
-        (getConnection: unit -> SqliteConnection)
+        (getConnection: unit -> NativeSqliteConnection)
         (invalidate: unit -> unit)
         (expression: Expression<Func<'T, 'R>>) =
         use connection = getConnection()
@@ -18,7 +17,7 @@ module internal CollectionSurfaceOps =
 
     let ensureUniqueAndIndex<'T, 'R>
         (name: string)
-        (getConnection: unit -> SqliteConnection)
+        (getConnection: unit -> NativeSqliteConnection)
         (invalidate: unit -> unit)
         (expression: Expression<Func<'T, 'R>>) =
         use connection = getConnection()
@@ -28,7 +27,7 @@ module internal CollectionSurfaceOps =
 
     let dropIndexIfExists<'T, 'R>
         (name: string)
-        (getConnection: unit -> SqliteConnection)
+        (getConnection: unit -> NativeSqliteConnection)
         (invalidate: unit -> unit)
         (expression: Expression<Func<'T, 'R>>) =
         if isNull expression then raise (ArgumentNullException(nameof(expression)))
@@ -36,13 +35,20 @@ module internal CollectionSurfaceOps =
         let indexSQL = $"DROP INDEX IF EXISTS \"{indexName}\""
 
         use connection = getConnection()
-        let result = connection.Execute(indexSQL)
+        let result =
+            let mutable statement = connection.OpenStatement(indexSQL)
+            try
+                statement.Step() |> ignore
+                let affected = statement.RecordsAffected
+                statement.Dispose()
+                affected
+            with error -> statement.Abort(error); reraise()
         invalidate()
         result
 
     let ensureAddedAttributeIndexes<'T>
         (name: string)
-        (getConnection: unit -> SqliteConnection)
+        (getConnection: unit -> NativeSqliteConnection)
         (invalidate: unit -> unit) =
         if not (typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T>) then
             use connection = getConnection()

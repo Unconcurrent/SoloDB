@@ -13,6 +13,3 @@ module internal QueryableBuildQueryWindowHelpers =
 
     let rowNumberOver (orderBy: (SqlExpr * SortDirection) list) =
         rowNumberExpr [] orderBy
-
-    let rowNumberByKey (keyExpr: SqlExpr) (orderBy: (SqlExpr * SortDirection) list) =
-        rowNumberExpr [keyExpr] orderBy

@@ -2,8 +2,7 @@ namespace SoloDatabase
 
 open System.Collections.Generic
 open System
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open SoloDatabase.Types
 open FileStorageCore
 open FileStorageHelpers
@@ -11,8 +10,7 @@ open FileStorageHelpers
 module internal FileStorageListing =
     /// Fetches one page of files for an already-resolved directory id. Split out so a caller that
     /// has already resolved the directory and counted its children does not repeat either.
-    let internal listFilesPageByDirId (db: SqliteConnection) (directoryId: int64) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
-        let dir = {| Id = directoryId |}
+    let internal listFilesPageByDirId (db: NativeSqliteConnection) (directoryId: int64) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
         let orderBy = getFileOrderBy "fh" sortBy sortDir
         let query =
             $"""
@@ -23,56 +21,53 @@ module internal FileStorageListing =
                 ORDER BY {orderBy}
                 LIMIT @Limit OFFSET @Offset
             )
-            SELECT fh.*, fm.Key as MetaKey, fm.Value as MetaValue
+            SELECT fh.Id, fh.Name, fh.FullPath, fh.DirectoryId, fh.Length, fh.Created, fh.Modified, fm.Key, fm.Value
             FROM PagedFiles fh
             LEFT JOIN SoloDBFileMetadata fm ON fh.Id = fm.FileId
             ORDER BY {orderBy}
             """
-        let files =
-            db.Query<{|
-                Id: int64
-                Name: string
-                FullPath: string
-                DirectoryId: int64
-                Length: int64
-                Created: DateTimeOffset
-                Modified: DateTimeOffset
-                MetaKey: string
-                MetaValue: string
-            |}>(query, {|DirectoryId = dir.Id; Limit = limit; Offset = offset|})
-            |> UtilsReflection.SeqExt.sequentialGroupBy(fun e -> e.Id)
-            |> Seq.map(fun fileAndDatas ->
-                let allMetadata =
-                    fileAndDatas
-                    |> Seq.filter(fun fileAndData -> fileAndData.MetaKey <> null)
-                    |> Seq.map(fun fileAndData -> (fileAndData.MetaKey, fileAndData.MetaValue))
-                    |> readOnlyDict
-                let file = fileAndDatas.[0]
-                {
-                    Id = file.Id
-                    Name = file.Name
-                    FullPath = file.FullPath
-                    DirectoryId = file.DirectoryId
-                    Length = file.Length
-                    Created = file.Created
-                    Modified = file.Modified
-                    Metadata = allMetadata
-                }
-            )
-            |> ResizeArray
-        files :> IList<SoloDBFileHeader>
+        let mutable statement = db.OpenStatement(query)
+        try
+            statement.BindInt64(1, directoryId)
+            statement.BindInt64(2, int64 limit)
+            statement.BindInt64(3, int64 offset)
+            let files = ResizeArray<SoloDBFileHeader>()
+            statement.Step() |> ignore
+            while statement.HasRow do files.Add(readFileWithMetadata &statement)
+            statement.Dispose()
+            files :> IList<SoloDBFileHeader>
+        with error -> statement.Abort(error); reraise()
+
+    let private countFiles (db: NativeSqliteConnection) directoryId =
+        let mutable statement = db.OpenStatement("SELECT COUNT(*) FROM SoloDBFileHeader WHERE DirectoryId = @DirectoryId")
+        try
+            statement.BindInt64(1, directoryId)
+            if not (statement.Step()) then Seq.head (Seq.empty<unit>)
+            let count = statement.Row.GetInt64(0)
+            statement.Dispose()
+            count
+        with error -> statement.Abort(error); reraise()
+
+    let private countDirectories (db: NativeSqliteConnection) parentId =
+        let mutable statement = db.OpenStatement("SELECT COUNT(*) FROM SoloDBDirectoryHeader WHERE ParentId = @ParentId")
+        try
+            statement.BindInt64(1, parentId)
+            if not (statement.Step()) then Seq.head (Seq.empty<unit>)
+            let count = statement.Row.GetInt64(0)
+            statement.Dispose()
+            count
+        with error -> statement.Abort(error); reraise()
 
     /// Public paginated file listing: resolves the directory, counts, then pages.
-    let internal listFilesAtPaginated (db: SqliteConnection) (path: string) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
+    let internal listFilesAtPaginated (db: NativeSqliteConnection) (path: string) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
         match tryGetDirIdAt db (formatPath path) with
         | ValueNone -> (ResizeArray<SoloDBFileHeader>() :> IList<SoloDBFileHeader>, 0L)
         | ValueSome dirId ->
-        let count = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBFileHeader WHERE DirectoryId = @DirectoryId", {|DirectoryId = dirId|})
+        let count = countFiles db dirId
         (listFilesPageByDirId db dirId sortBy sortDir limit offset, count)
 
     /// Fetches one page of directories for an already-resolved parent id.
-    let internal listDirectoriesPageByDirId (db: SqliteConnection) (directoryId: int64) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
-        let dir = {| Id = directoryId |}
+    let internal listDirectoriesPageByDirId (db: NativeSqliteConnection) (directoryId: int64) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
         let orderBy = getDirectoryOrderBy "dh" sortBy sortDir
         let query =
             $"""
@@ -83,53 +78,50 @@ module internal FileStorageListing =
                 ORDER BY {orderBy}
                 LIMIT @Limit OFFSET @Offset
             )
-            SELECT dh.*, dm.Key, dm.Value
+            SELECT dh.Id, dh.Name, dh.FullPath, dh.ParentId, dh.Created, dh.Modified, dm.Key, dm.Value
             FROM PagedDirectories dh
             LEFT JOIN SoloDBDirectoryMetadata dm ON dh.Id = dm.DirectoryId
             ORDER BY {orderBy}
             """
-        let directoryDictionary = new Dictionary<int64, SoloDBDirectoryHeader>()
-        let directories = ResizeArray<SoloDBDirectoryHeader>()
-        let isNull x = Object.ReferenceEquals(x, null)
-        db.Query<SoloDBDirectoryHeader, Metadata, unit>(
-            query,
-            (fun directory metadata ->
-                let dir =
-                    match directoryDictionary.TryGetValue(directory.Id) with
-                    | true, dir -> dir
-                    | false, _ ->
-                        let dir =
-                            if isNull directory.Metadata then
-                                {directory with Metadata = Dictionary()}
-                            else directory
-                        directoryDictionary.Add(dir.Id, dir)
-                        directories.Add(dir)
-                        dir
-                if not (isNull metadata) then
-                    (dir.Metadata :?> IDictionary<string, string>).Add(metadata.Key, metadata.Value)
-                ()
-            ),
-            {|ParentId = dir.Id; Limit = limit; Offset = offset|},
-            splitOn = "Key"
-        ) |> Seq.iter ignore
-        directories :> IList<SoloDBDirectoryHeader>
+        let mutable statement = db.OpenStatement(query)
+        try
+            statement.BindInt64(1, directoryId)
+            statement.BindInt64(2, int64 limit)
+            statement.BindInt64(3, int64 offset)
+            let directoryDictionary = Dictionary<int64, SoloDBDirectoryHeader>()
+            let directories = ResizeArray<SoloDBDirectoryHeader>()
+            while statement.Step() do
+                let row = statement.Row
+                let directory =
+                    match directoryDictionary.TryGetValue(row.GetInt64(0)) with
+                    | true, directory -> directory
+                    | _ ->
+                        let directory = readDirectoryHeader row (Dictionary<string, string>())
+                        directoryDictionary.Add(directory.Id, directory)
+                        directories.Add(directory)
+                        directory
+                if not (row.IsDBNull(6)) then
+                    (directory.Metadata :?> Dictionary<string, string>).Add(row.GetString(6), row.GetString(7))
+            statement.Dispose()
+            directories :> IList<SoloDBDirectoryHeader>
+        with error -> statement.Abort(error); reraise()
 
     /// Public paginated directory listing: resolves the directory, counts, then pages.
-    let internal listDirectoriesAtPaginated (db: SqliteConnection) (path: string) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
+    let internal listDirectoriesAtPaginated (db: NativeSqliteConnection) (path: string) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
         match tryGetDirIdAt db (formatPath path) with
         | ValueNone -> (ResizeArray<SoloDBDirectoryHeader>() :> IList<SoloDBDirectoryHeader>, 0L)
         | ValueSome dirId ->
-        let count = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBDirectoryHeader WHERE ParentId = @ParentId", {|ParentId = dirId|})
+        let count = countDirectories db dirId
         (listDirectoriesPageByDirId db dirId sortBy sortDir limit offset, count)
 
-    let internal listEntriesAtPaginated (db: SqliteConnection) (path: string) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
+    let internal listEntriesAtPaginated (db: NativeSqliteConnection) (path: string) (sortBy: SortField) (sortDir: SortDirection) (limit: int) (offset: int) =
         // Resolve the directory once and count each side once. The page primitives take the
         // resolved id, so a boundary-crossing page no longer repeats the lookup or the counts.
         match tryGetDirIdAt db (formatPath path) with
         | ValueNone -> (ResizeArray<SoloDBEntryHeader>() :> IList<SoloDBEntryHeader>, 0L, 0L)
         | ValueSome dirId ->
-        let dirCount = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBDirectoryHeader WHERE ParentId = @ParentId", {|ParentId = dirId|})
-        let fileCount = db.QueryFirst<int64>("SELECT COUNT(*) FROM SoloDBFileHeader WHERE DirectoryId = @DirectoryId", {|DirectoryId = dirId|})
+        let dirCount = countDirectories db dirId
+        let fileCount = countFiles db dirId
         let result = ResizeArray<SoloDBEntryHeader>(min limit (int (dirCount + fileCount)))
         if int64 offset < dirCount then
             let dirsToFetch = min limit (int dirCount - offset)

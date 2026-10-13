@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><DefineConstants>$(DefineConstants);METADATA_TOOLING</DefineConstants><TargetFramework>netstandard2.0</TargetFramework><GenerateDocumentationFile>true</GenerateDocumentationFile><TreatWarningsAsErrors>true</TreatWarningsAsErrors><NuGetAudit>true</NuGetAudit></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Update="FSharp.Core" Version="10.0.100" />
+    <Compile Include="AssemblyInfo.fs" />
+    <Compile Include="../SoloDB/Json/JsonStringLiteral.fs" Link="JsonStringLiteral.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecModel.fs" Link="CodecModel.fs" />
+    <Compile Include="../SoloDB/Metadata/TypeSupport.fs" Link="TypeSupport.fs" />
+    <Compile Include="../SoloDB/Metadata/QueryOperationEmitter.fs" Link="QueryOperationEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecEmitter.fs" Link="CodecEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecNumberEmitter.fs" Link="CodecNumberEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecMagnitudeEmitter.fs" Link="CodecMagnitudeEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecBigIntegerEmitter.fs" Link="CodecBigIntegerEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecIntegerEmitter.fs" Link="CodecIntegerEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecNumericTextEmitter.fs" Link="CodecNumericTextEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecNumericBooleanEmitter.fs" Link="CodecNumericBooleanEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecQuotedIntegerEmitter.fs" Link="CodecQuotedIntegerEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecQuotedNumberEmitter.fs" Link="CodecQuotedNumberEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecFloatingEmitter.fs" Link="CodecFloatingEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecFloatingReadEmitter.fs" Link="CodecFloatingReadEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecDecimalArithmeticEmitter.fs" Link="CodecDecimalArithmeticEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecDecimalEmitter.fs" Link="CodecDecimalEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecDynamicNumberEmitter.fs" Link="CodecDynamicNumberEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecNumericDriverEmitter.fs" Link="CodecNumericDriverEmitter.fs" />
+    <Compile Include="../SoloDB/Json/JsonIdentifierSyntax.fs" Link="JsonIdentifierSyntax.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecStringEmitter.fs" Link="CodecStringEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecFormattedReaderEmitter.fs" Link="CodecFormattedReaderEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecScalarAdapterEmitter.fs" Link="CodecScalarAdapterEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecNameEmitter.fs" Link="CodecNameEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecFiniteCaptureEmitter.fs" Link="CodecFiniteCaptureEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecOptionalEmitter.fs" Link="CodecOptionalEmitter.fs" />
+        <Compile Include="../SoloDB/Metadata/CodecOutputEmitter.fs" Link="CodecOutputEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecStoredNumericEmitter.fs" Link="CodecStoredNumericEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecStringWriterEmitter.fs" Link="CodecStringWriterEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecScalarWriterEmitter.fs" Link="CodecScalarWriterEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecDigitWriterEmitter.fs" Link="CodecDigitWriterEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecIntegerWriterEmitter.fs" Link="CodecIntegerWriterEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecBigIntegerWriterEmitter.fs" Link="CodecBigIntegerWriterEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecDecimalWriterEmitter.fs" Link="CodecDecimalWriterEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecFloatingWriterEmitter.fs" Link="CodecFloatingWriterEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecGuidWriterEmitter.fs" Link="CodecGuidWriterEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecBase64VectorEmitter.fs" Link="CodecBase64VectorEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecBase64WriterEmitter.fs" Link="CodecBase64WriterEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecPolymorphicEmitter.fs" Link="CodecPolymorphicEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecRawEmitter.fs" Link="CodecRawEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecUnionEmitter.fs" Link="CodecUnionEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecArrayEmitter.fs" Link="CodecArrayEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecSequenceEmitter.fs" Link="CodecSequenceEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecDictionaryEmitter.fs" Link="CodecDictionaryEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecTupleEmitter.fs" Link="CodecTupleEmitter.fs" />
+  </ItemGroup>
+</Project>

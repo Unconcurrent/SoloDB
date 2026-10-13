@@ -48,6 +48,7 @@ let rec private exprMetric (expr: SqlExpr) =
             assignments
             |> List.fold (fun acc (_, valueExpr) -> addMetric acc (exprMetric valueExpr)) (exprMetric target)
         | JsonArrayExpr elements
+        | RowValueExpr elements
         | FunctionCall(_, elements) ->
             recurseList elements
         | JsonObjectExpr properties ->

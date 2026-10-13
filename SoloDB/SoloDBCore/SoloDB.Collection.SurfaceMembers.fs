@@ -2,33 +2,32 @@ namespace SoloDatabase
 
 open System
 open System.Linq.Expressions
-open Microsoft.Data.Sqlite
 
 module internal CollectionInstanceSurface =
     let ensureIndex<'T, 'R>
         (name: string)
-        (getConnection: unit -> SqliteConnection)
+        (getConnection: unit -> NativeSqliteConnection)
         (invalidate: unit -> unit)
         (expression: Expression<Func<'T, 'R>>) =
         CollectionSurfaceOps.ensureIndex<'T, 'R> name getConnection invalidate expression
 
     let ensureUniqueAndIndex<'T, 'R>
         (name: string)
-        (getConnection: unit -> SqliteConnection)
+        (getConnection: unit -> NativeSqliteConnection)
         (invalidate: unit -> unit)
         (expression: Expression<Func<'T, 'R>>) =
         CollectionSurfaceOps.ensureUniqueAndIndex<'T, 'R> name getConnection invalidate expression
 
     let dropIndexIfExists<'T, 'R>
         (name: string)
-        (getConnection: unit -> SqliteConnection)
+        (getConnection: unit -> NativeSqliteConnection)
         (invalidate: unit -> unit)
         (expression: Expression<Func<'T, 'R>>) =
         CollectionSurfaceOps.dropIndexIfExists<'T, 'R> name getConnection invalidate expression
 
     let ensureAddedAttributeIndexes<'T>
         (name: string)
-        (getConnection: unit -> SqliteConnection)
+        (getConnection: unit -> NativeSqliteConnection)
         (invalidate: unit -> unit) =
         CollectionSurfaceOps.ensureAddedAttributeIndexes<'T> name getConnection invalidate
 

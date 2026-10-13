@@ -1,11 +1,12 @@
 module internal SoloDatabase.IndexModel
 
+open SoloDatabase
 open SoloDatabase.SqlModel
-open Microsoft.Data.Sqlite
+open SoloDatabase.NativeSQLiteTools
 open System
 open System.Collections.Generic
-open System.Text
-open System.Text.RegularExpressions
+open SoloDatabase.IndexExpression
+open SoloDatabase.Metadata.Generation
 
 // ══════════════════════════════════════════════════════════════
 // Index Knowledge Model
@@ -63,244 +64,73 @@ type private IndexXInfoRow = {
     Key: int
 }
 
-let private toInt (value: obj) : int =
-    Convert.ToInt32(value, Globalization.CultureInfo.InvariantCulture)
+type private IndexSqlLookup =
+    | MissingIndex
+    | ExistingIndex of sql: string option
 
-let private toBoolFromInt (value: obj) : bool =
-    toInt value <> 0
-
-let private readStringOption (reader: SqliteDataReader) (ordinal: int) : string option =
+let private readStringOption (reader: SqlRow) (ordinal: int) : string option =
     if reader.IsDBNull ordinal then None
     else Some(reader.GetString ordinal)
 
-let private isTransientMetadataRace (ex: SqliteException) =
+let private isTransientMetadataRace (ex: NativeSqliteException) =
     ex.SqliteErrorCode = 1
     && (ex.Message.IndexOf("no such index", StringComparison.OrdinalIgnoreCase) >= 0
         || ex.Message.IndexOf("no such table", StringComparison.OrdinalIgnoreCase) >= 0
         || ex.Message.IndexOf("database schema has changed", StringComparison.OrdinalIgnoreCase) >= 0)
 
-let private readIndexList (connection: SqliteConnection) (tableName: string) : IndexListRow list =
+let private readIndexList strict (connection: NativeSqliteConnection) (tableName: string) : IndexListRow list =
     try
-        use cmd = connection.CreateCommand()
-        cmd.CommandText <- "SELECT name, \"unique\", partial FROM pragma_index_list(@tableName);"
-        cmd.Parameters.AddWithValue("@tableName", tableName) |> ignore
-        use reader = cmd.ExecuteReader()
-        let rows = ResizeArray<IndexListRow>()
-        while reader.Read() do
-            rows.Add({
-                Name = reader.GetString 0
-                IsUnique = toBoolFromInt (reader.GetValue 1)
-                IsPartial = toBoolFromInt (reader.GetValue 2)
-            })
-        rows |> Seq.toList
+        let mutable statement = connection.OpenStatement("SELECT name, \"unique\", partial FROM pragma_index_list(@tableName);")
+        try
+            statement.BindText(1, tableName)
+            let rows = ResizeArray<IndexListRow>()
+            while statement.Step() do
+                rows.Add({ Name = statement.Row.GetString 0; IsUnique = statement.Row.GetBoolean 1; IsPartial = statement.Row.GetBoolean 2 })
+            statement.Dispose()
+            rows |> Seq.toList
+        with error -> statement.Abort(error); reraise()
     with
-    | :? ArgumentOutOfRangeException -> []
-    | :? SqliteException as ex when isTransientMetadataRace ex -> []
+    | :? ArgumentOutOfRangeException when not strict -> []
+    | :? NativeSqliteException as ex when not strict && isTransientMetadataRace ex -> []
 
-let private readIndexXInfo (connection: SqliteConnection) (indexName: string) : IndexXInfoRow list =
+let private readIndexXInfo strict (connection: NativeSqliteConnection) (indexName: string) : IndexXInfoRow list =
     try
-        use cmd = connection.CreateCommand()
-        cmd.CommandText <- "SELECT cid, name, \"desc\", coll, key FROM pragma_index_xinfo(@indexName) ORDER BY seqno;"
-        cmd.Parameters.AddWithValue("@indexName", indexName) |> ignore
-        use reader = cmd.ExecuteReader()
-        let rows = ResizeArray<IndexXInfoRow>()
-        while reader.Read() do
-            rows.Add({
-                Cid = toInt (reader.GetValue 0)
-                Name = readStringOption reader 1
-                Desc = toInt (reader.GetValue 2)
-                Collation = readStringOption reader 3
-                Key = toInt (reader.GetValue 4)
-            })
-        rows |> Seq.toList
+        let mutable statement = connection.OpenStatement("SELECT cid, name, \"desc\", coll, key FROM pragma_index_xinfo(@indexName) ORDER BY seqno;")
+        try
+            statement.BindText(1, indexName)
+            let rows = ResizeArray<IndexXInfoRow>()
+            while statement.Step() do
+                rows.Add({
+                    Cid = statement.Row.GetInt32 0
+                    Name = readStringOption statement.Row 1
+                    Desc = statement.Row.GetInt32 2
+                    Collation = readStringOption statement.Row 3
+                    Key = statement.Row.GetInt32 4
+                })
+            statement.Dispose()
+            rows |> Seq.toList
+        with error -> statement.Abort(error); reraise()
     with
-    | :? ArgumentOutOfRangeException ->
-        // Microsoft.Data.Sqlite can surface this during concurrent schema changes while preparing pragma_index_xinfo.
-        // Fail closed the same way as "no such index/table": omit unstable index metadata for this snapshot.
-        []
-    | :? SqliteException as ex when isTransientMetadataRace ex -> []
+    | :? NativeSqliteException as ex when not strict && isTransientMetadataRace ex -> []
 
-let private readIndexSql (connection: SqliteConnection) (tableName: string) (indexName: string) : string option =
+let private readIndexSql strict (connection: NativeSqliteConnection) (tableName: string) (indexName: string) : IndexSqlLookup =
     try
-        use cmd = connection.CreateCommand()
-        cmd.CommandText <- "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = @tableName AND name = @indexName LIMIT 1;"
-        cmd.Parameters.AddWithValue("@tableName", tableName) |> ignore
-        cmd.Parameters.AddWithValue("@indexName", indexName) |> ignore
-        let sql = cmd.ExecuteScalar()
-        match sql with
-        | :? string as text when not (String.IsNullOrWhiteSpace text) -> Some text
-        | _ -> None
-    with
-    | :? ArgumentOutOfRangeException -> None
-    | :? SqliteException as ex when isTransientMetadataRace ex -> None
-
-let private recIsWrappedByOuterParens (s: string) : bool =
-    if String.IsNullOrWhiteSpace s then false
-    else
-        let t = s.Trim()
-        if t.Length < 2 || t.[0] <> '(' || t.[t.Length - 1] <> ')' then
-            false
-        else
-            let mutable depth = 0
-            let mutable inSingle = false
-            let mutable inDouble = false
-            let mutable wraps = true
-            let mutable i = 0
-            while i < t.Length && wraps do
-                let c = t.[i]
-                if inSingle then
-                    if c = '\'' then inSingle <- false
-                elif inDouble then
-                    if c = '"' then inDouble <- false
+        let mutable statement = connection.OpenStatement("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = @tableName AND name = @indexName LIMIT 1;")
+        try
+            statement.BindText(1, tableName)
+            statement.BindText(2, indexName)
+            let result =
+                if not (statement.Step()) then MissingIndex
+                elif statement.Row.IsDBNull 0 then ExistingIndex None
                 else
-                    if c = '\'' then inSingle <- true
-                    elif c = '"' then inDouble <- true
-                    elif c = '(' then depth <- depth + 1
-                    elif c = ')' then
-                        depth <- depth - 1
-                        if depth = 0 && i <> t.Length - 1 then
-                            wraps <- false
-                i <- i + 1
-            wraps && depth = 0 && not inSingle && not inDouble
-
-let private stripOuterParens (s: string) : string =
-    let mutable current = s.Trim()
-    let mutable changed = true
-    while changed do
-        if recIsWrappedByOuterParens current then
-            current <- current.Substring(1, current.Length - 2).Trim()
-        else
-            changed <- false
-    current
-
-let private splitTopLevelCommaTerms (s: string) : string list =
-    let result = ResizeArray<string>()
-    let mutable depth = 0
-    let mutable inSingle = false
-    let mutable inDouble = false
-    let current = StringBuilder()
-
-    let flush () =
-        let term = current.ToString().Trim()
-        current.Clear() |> ignore
-        if term <> "" then result.Add term
-
-    for c in s do
-        if inSingle then
-            current.Append(c) |> ignore
-            if c = '\'' then inSingle <- false
-        elif inDouble then
-            current.Append(c) |> ignore
-            if c = '"' then inDouble <- false
-        else
-            match c with
-            | '\'' ->
-                inSingle <- true
-                current.Append(c) |> ignore
-            | '"' ->
-                inDouble <- true
-                current.Append(c) |> ignore
-            | '(' ->
-                depth <- depth + 1
-                current.Append(c) |> ignore
-            | ')' ->
-                depth <- depth - 1
-                current.Append(c) |> ignore
-            | ',' when depth = 0 ->
-                flush ()
-            | _ ->
-                current.Append(c) |> ignore
-
-    flush ()
-    result |> Seq.toList
-
-let private tryExtractIndexTerms (indexSql: string) : string list option =
-    let sql = indexSql.Trim()
-    let openParen = sql.IndexOf '('
-    if openParen < 0 then None
-    else
-        let mutable depth = 0
-        let mutable inSingle = false
-        let mutable inDouble = false
-        let mutable closeParen = -1
-        let mutable i = openParen
-        while i < sql.Length && closeParen < 0 do
-            let c = sql.[i]
-            if inSingle then
-                if c = '\'' then inSingle <- false
-            elif inDouble then
-                if c = '"' then inDouble <- false
-            else
-                if c = '\'' then inSingle <- true
-                elif c = '"' then inDouble <- true
-                elif c = '(' then depth <- depth + 1
-                elif c = ')' then
-                    depth <- depth - 1
-                    if depth = 0 then closeParen <- i
-            i <- i + 1
-
-        if closeParen < 0 then None
-        else
-            let inner = sql.Substring(openParen + 1, closeParen - openParen - 1).Trim()
-            match splitTopLevelCommaTerms inner with
-            | [] -> None
-            | terms -> Some terms
-
-let private columnIdentifierRegex = Regex(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.Compiled)
-let private jsonExtractRegex =
-    Regex(
-        @"^\s*jsonb_extract\s*\(\s*(?:""Value""|Value)\s*,\s*'(?<path>\$\.[A-Za-z0-9_\.]+)'\s*\)\s*$",
-        RegexOptions.Compiled ||| RegexOptions.IgnoreCase)
-let private castRegex =
-    Regex(
-        @"^\s*cast\s*\(\s*(?<inner>.+)\s+as\s+(?<type>[A-Za-z0-9_]+)\s*\)\s*$",
-        RegexOptions.Compiled ||| RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
-
-let private unquoteIdentifier (identifier: string) : string =
-    let t = identifier.Trim()
-    if t.Length >= 2 && ((t.[0] = '"' && t.[t.Length - 1] = '"') || (t.[0] = '`' && t.[t.Length - 1] = '`') || (t.[0] = '[' && t.[t.Length - 1] = ']')) then
-        t.Substring(1, t.Length - 2)
-    else t
-
-let private tryNormalizeSingleKeyColumnExpr (columnName: string) : SqlExpr option =
-    let normalized = unquoteIdentifier columnName
-    if columnIdentifierRegex.IsMatch normalized then
-        Some(Column(None, normalized))
-    else
-        None
-
-let private tryNormalizeJsonExtractExpr (expr: string) : SqlExpr option =
-    let m = jsonExtractRegex.Match(stripOuterParens expr)
-    if not m.Success then None
-    else
-        let path = m.Groups.["path"].Value
-        if not (path.StartsWith "$.") then None
-        else
-            let segments =
-                path.Substring(2).Split('.')
-                |> Array.toList
-            if segments.IsEmpty || segments |> List.exists String.IsNullOrWhiteSpace then None
-            else Some(JsonExtractExpr(None, "Value", JsonPathOps.ofList segments))
-
-let private tryNormalizeCastJsonExtractExpr (expr: string) : SqlExpr option =
-    let m = castRegex.Match(stripOuterParens expr)
-    if not m.Success then None
-    else
-        match tryNormalizeJsonExtractExpr (m.Groups.["inner"].Value) with
-        | Some inner ->
-            let sqlType = m.Groups.["type"].Value.ToUpperInvariant()
-            Some(Cast(inner, sqlType))
-        | None -> None
-
-let private termDirectionRegex = Regex(@"\s+(?:ASC|DESC)\s*$", RegexOptions.IgnoreCase)
-let private termCollationRegex =
-    Regex(@"\s+COLLATE\s+(?:""[^""]+""|[A-Za-z_][A-Za-z0-9_]*)\s*$", RegexOptions.IgnoreCase)
-
-let private tryNormalizeIndexExpression (term: string) : SqlExpr option =
-    let expression = termCollationRegex.Replace(termDirectionRegex.Replace(term, ""), "")
-    match tryNormalizeJsonExtractExpr expression with
-    | Some expr -> Some expr
-    | None -> tryNormalizeCastJsonExtractExpr expression
+                    let sql = statement.Row.GetString 0
+                    ExistingIndex (if String.IsNullOrWhiteSpace sql then None else Some sql)
+            statement.Dispose()
+            result
+        with error -> statement.Abort(error); reraise()
+    with
+    | :? ArgumentOutOfRangeException when not strict -> MissingIndex
+    | :? NativeSqliteException as ex when not strict && isTransientMetadataRace ex -> MissingIndex
 
 let private tryBuildIndexEntry (tableName: string) (row: IndexListRow) (xinfo: IndexXInfoRow list) (indexSql: string option) : IndexEntry option =
     if row.IsPartial then None
@@ -332,20 +162,31 @@ let private tryBuildIndexEntry (tableName: string) (row: IndexListRow) (xinfo: I
                     IsUnique = row.IsUnique
                 }
 
+/// Schema mutation distinguishes absence, unsupported definitions and failed reads.
+let readIndexForSchema (connection: NativeSqliteConnection) tableName indexName =
+    readIndexList true connection tableName
+    |> List.tryFind(fun row -> row.Name = indexName)
+    |> Option.map(fun row ->
+        let xinfo = readIndexXInfo true connection row.Name
+        match readIndexSql true connection tableName row.Name with
+        | MissingIndex -> raise(InvalidOperationException("The index disappeared while reading its schema definition."))
+        | ExistingIndex sql -> tryBuildIndexEntry tableName row xinfo sql)
+
 /// Load index entries for a single table from runtime SQLite metadata.
 /// Fail-closed on concurrent schema changes: return empty list on any exception.
 /// An omitted index model is always safe (conservative query plan).
-let loadTableIndexes (connection: SqliteConnection) (tableName: string) : IndexEntry list =
+let loadTableIndexes (connection: NativeSqliteConnection) (tableName: string) : IndexEntry list =
     try
-        readIndexList connection tableName
+        readIndexList false connection tableName
         |> List.choose (fun row ->
-            let xinfo = readIndexXInfo connection row.Name
-            let indexSql = readIndexSql connection tableName row.Name
-            tryBuildIndexEntry tableName row xinfo indexSql)
+            let xinfo = readIndexXInfo false connection row.Name
+            match readIndexSql false connection tableName row.Name with
+            | MissingIndex -> None
+            | ExistingIndex indexSql -> tryBuildIndexEntry tableName row xinfo indexSql)
     with _ -> []
 
 /// Load an index model for multiple tables from runtime SQLite metadata.
-let loadModelForTables (connection: SqliteConnection) (tableNames: string seq) : IndexModel =
+let loadModelForTables (connection: NativeSqliteConnection) (tableNames: string seq) : IndexModel =
     let indexes =
         tableNames
         |> Seq.distinct
@@ -360,53 +201,66 @@ type TableEstimate = {
     PayloadBytes: Lazy<float option>
 }
 
-let private samplePayloadBytes (connection: SqliteConnection) (table: string) =
+let private samplePayloadBytes (connection: NativeSqliteConnection) (table: string) =
     try
         let quoted = "\"" + table.Replace("\"", "\"\"") + "\""
-        use bounds = connection.CreateCommand()
-        bounds.CommandText <- "SELECT MIN(Id) FROM " + quoted
-        let first = bounds.ExecuteScalar()
-        bounds.CommandText <- "SELECT MAX(Id) FROM " + quoted
-        let last = bounds.ExecuteScalar()
-        if isNull first || Convert.IsDBNull first || isNull last || Convert.IsDBNull last then None else
-        let low, high = Convert.ToDecimal(first), Convert.ToDecimal(last)
-        use command = connection.CreateCommand()
-        command.CommandText <- "SELECT length(Value) FROM " + quoted + " WHERE Id >= @start ORDER BY Id LIMIT 4;"
-        let start = command.Parameters.Add("@start", SqliteType.Integer)
+        let mutable range = connection.OpenStatement("SELECT (SELECT MIN(Id) FROM " + quoted + "), (SELECT MAX(Id) FROM " + quoted + ")")
+        let first, last =
+            try
+                if not (range.Step()) then Seq.head (Seq.empty<unit>)
+                let row = range.Row
+                let first = if row.IsDBNull(0) then Nullable() else Nullable(row.GetInt64(0))
+                let last = if row.IsDBNull(1) then Nullable() else Nullable(row.GetInt64(1))
+                range.Dispose()
+                first, last
+            with error -> range.Abort(error); reraise()
+
+        if not first.HasValue || not last.HasValue then None else
+        let low, high = decimal first.Value, decimal last.Value
+        let sql = "SELECT length(Value) FROM " + quoted + " WHERE Id >= @start ORDER BY Id LIMIT 4;"
         let mutable bytes, count = 0.0, 0
         // Bounded primary-key seeks sample across the identifier range rather
         // than assuming the oldest or newest documents represent the table.
         for i in 0 .. 7 do
-            start.Value <- int64 (low + (high - low) * decimal i / 7M)
-            use reader = command.ExecuteReader()
-            while reader.Read() do
-                if not (reader.IsDBNull 0) then
-                    bytes <- bytes + float (reader.GetInt64 0)
-                    count <- count + 1
+            let mutable statement = connection.OpenStatement(sql)
+            try
+                statement.BindInt64(1, int64 (low + (high - low) * decimal i / 7M))
+                while statement.Step() do
+                    if not (statement.Row.IsDBNull 0) then
+                        bytes <- bytes + float (statement.Row.GetInt64 0)
+                        count <- count + 1
+                statement.Dispose()
+            with error -> statement.Abort(error); reraise()
         if count = 0 then None else Some(max 1.0 (bytes / float count))
-    with :? SqliteException -> None
+    with :? NativeSqliteException -> None
 
 /// Read current ANALYZE estimates once at compilation, independently of the
 /// cached index definitions. Missing or malformed estimates disable costing.
-let loadTableEstimates (connection: SqliteConnection) (tableNames: string seq) : Map<string, TableEstimate> =
+let loadTableEstimates (connection: NativeSqliteConnection) (tableNames: string seq) : Map<string, TableEstimate> =
     try
-        use exists = connection.CreateCommand()
-        exists.CommandText <- "SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1' AND type = 'table';"
-        if isNull (exists.ExecuteScalar()) then Map.empty else
-        use command = connection.CreateCommand()
-        command.CommandText <- "SELECT stat FROM sqlite_stat1 WHERE tbl = @tableName;"
-        let tableParameter = command.Parameters.Add("@tableName", SqliteType.Text)
+        let mutable exists = connection.OpenStatement("SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1' AND type = 'table';")
+        let hasStatistics =
+            try
+                let found = exists.Step()
+                exists.Dispose()
+                found
+            with error -> exists.Abort(error); reraise()
+        if not hasStatistics then Map.empty else
+        let sql = "SELECT stat FROM sqlite_stat1 WHERE tbl = @tableName;"
         tableNames |> Seq.distinct |> Seq.choose (fun table ->
-            tableParameter.Value <- table
-            use reader = command.ExecuteReader()
-            let mutable estimate = 0L
-            while reader.Read() do
-                if not (reader.IsDBNull 0) then
-                    let stat = reader.GetString 0
-                    let endOfCount = stat.IndexOf(' ')
-                    let first = if endOfCount < 0 then stat else stat.Substring(0, endOfCount)
-                    match Int64.TryParse(first, Globalization.NumberStyles.None, Globalization.CultureInfo.InvariantCulture) with
-                    | true, count when count > estimate -> estimate <- count
-                    | _ -> ()
-            if estimate > 0L then Some(table, { Rows = estimate; PayloadBytes = lazy (samplePayloadBytes connection table) }) else None) |> Map.ofSeq
-    with :? SqliteException -> Map.empty
+            let mutable statement = connection.OpenStatement(sql)
+            try
+                statement.BindText(1, table)
+                let mutable estimate = 0L
+                while statement.Step() do
+                    if not (statement.Row.IsDBNull 0) then
+                        let stat = statement.Row.GetString 0
+                        let endOfCount = stat.IndexOf(' ')
+                        let first = if endOfCount < 0 then stat else stat.Substring(0, endOfCount)
+                        match Int64.TryParse(first, Globalization.NumberStyles.None, Globalization.CultureInfo.InvariantCulture) with
+                        | true, count when count > estimate -> estimate <- count
+                        | _ -> ()
+                statement.Dispose()
+                if estimate > 0L then Some(table, { Rows = estimate; PayloadBytes = lazy (samplePayloadBytes connection table) }) else None
+            with error -> statement.Abort(error); reraise()) |> Map.ofSeq
+    with :? NativeSqliteException -> Map.empty

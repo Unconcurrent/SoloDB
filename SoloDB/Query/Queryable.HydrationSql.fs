@@ -5,8 +5,7 @@ open System.Collections.Generic
 open System.Linq.Expressions
 open System.Reflection
 open System.Text
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open Utils
 open SoloDatabase
 open SoloDatabase.RelationsTypes
@@ -15,6 +14,7 @@ open SoloDatabase.RelationsSchemaValidator
 open SoloDatabase.RelationsSchemaLinkTableDDL
 open SoloDatabase.QueryableGroupByAliases
 open SoloDatabase.SqlModel
+open SoloDatabase.JsonSerializator.JsonEqualitySupport
 
 /// Shared hydration SQL builders for both queryable and non-queryable paths.
 /// Single canonical typed DU generator — no duplicated SQL string templates.
@@ -32,7 +32,7 @@ module internal HydrationSqlBuilder =
     /// Multi-hop: recursive — the target's Value is itself hydrated for its own DBRef properties.
     /// Edge case SA-05: stops recursion at maxHydrationDepth.
     let rec buildHydrationValueExpr
-        (connection: SqliteConnection)
+        (connection: NativeSqliteConnection)
         (ctx: QueryContext)
         (ownerType: Type)
         (ownerTable: string)
@@ -61,7 +61,7 @@ module internal HydrationSqlBuilder =
             let path = if prefix = "" then prop.Name else prefix + "." + prop.Name
 
             if shouldLoadRelationPath ctx path then
-                let targetType = (UtilsReflection.GenericTypeArgCache.Get prop.PropertyType).[0]
+                let targetType = DBRefTypeHelpers.referenceTargetType prop.ReferenceType
                 match ctx.TryResolveRelationTarget(ownerTable, prop.Name) with
                 | None ->
                     // Read-path hydration must not explode when downstream metadata
@@ -69,16 +69,19 @@ module internal HydrationSqlBuilder =
                     ()
                 | Some targetTable ->
                     aliasCounter <- aliasCounter + 1
-                    let tAlias = sprintf "_ht%d" aliasCounter
+                    let tAlias = "_ht" + aliasCounter.ToString(System.Globalization.CultureInfo.InvariantCulture)
 
                     let fkExpr =
                         SqlExpr.FunctionCall("jsonb_extract",
-                            [ownerValueExpr; SqlExpr.Literal(SqlLiteral.String ("$." + prop.Name))])
+                            [ownerValueExpr; SqlExpr.Literal(SqlLiteral.String (JsonPathOps.text [PathSegment.Member prop.Name]))])
 
                     let targetValueExpr =
-                        buildHydrationValueExpr connection ctx targetType targetTable
-                            (SqlExpr.Column(Some tAlias, "Value"))
-                            (depth + 1) path &aliasCounter
+                        if DBRefTypeHelpers.isFileRefType prop.ReferenceType then
+                            QueryTranslatorBaseHelpers.fileSystemHeaderValueExpr targetType tAlias
+                        else
+                            buildHydrationValueExpr connection ctx targetType targetTable
+                                (SqlExpr.Column(Some tAlias, "Value"))
+                                (depth + 1) path &aliasCounter
 
                     let subqueryProjection =
                         SqlExpr.FunctionCall("jsonb_array",
@@ -102,7 +105,7 @@ module internal HydrationSqlBuilder =
                             SqlExpr.ScalarSubquery subquerySelect,
                             [fkExpr])
 
-                    args.Add(SqlExpr.Literal(SqlLiteral.String ("$." + prop.Name)))
+                    args.Add(SqlExpr.Literal(SqlLiteral.String (JsonPathOps.text [PathSegment.Member prop.Name])))
                     args.Add(coalesceExpr)
 
         if args.Count <= 1 then
@@ -112,7 +115,7 @@ module internal HydrationSqlBuilder =
 
     /// Build a HydrationJSON projection expression for DBRefMany properties.
     let buildManyHydrationProjection
-        (connection: SqliteConnection)
+        (connection: NativeSqliteConnection)
         (ctx: QueryContext)
         (ownerType: Type)
         (ownerTable: string)
@@ -130,7 +133,7 @@ module internal HydrationSqlBuilder =
         for manyIndex in 0 .. descriptor.ManyCount - 1 do
             let prop = (descriptor.Many manyIndex).Property
             if shouldLoadRelationPath ctx prop.Name then
-                let targetType = (UtilsReflection.GenericTypeArgCache.Get prop.PropertyType).[0]
+                let targetType = DBRefTypeHelpers.referenceTargetType prop.ReferenceType
                 let linkTableOpt = ctx.TryResolveRelationLink(ownerTable, prop.Name)
                 let targetTableOpt = ctx.TryResolveRelationTarget(ownerTable, prop.Name)
                 match linkTableOpt, targetTableOpt with
@@ -144,9 +147,9 @@ module internal HydrationSqlBuilder =
                     let targetColumn = if ownerUsesSource then "TargetId" else "SourceId"
 
                     aliasCounter <- aliasCounter + 1
-                    let lnkAlias = sprintf "_hlnk%d" aliasCounter
+                    let lnkAlias = "_hlnk" + aliasCounter.ToString(System.Globalization.CultureInfo.InvariantCulture)
                     aliasCounter <- aliasCounter + 1
-                    let tAlias = sprintf "_ht%d" aliasCounter
+                    let tAlias = "_ht" + aliasCounter.ToString(System.Globalization.CultureInfo.InvariantCulture)
 
                     let subqueryProjection =
                         SqlExpr.FunctionCall("jsonb_group_array",
@@ -196,7 +199,7 @@ module internal HydrationSqlBuilder =
     /// Build a complete hydrated SELECT as SqlSelect DU for non-queryable GetById-style reads.
     /// Returns (sqlString, variables, hasSingleHydration, hasManyHydration).
     let buildHydratedGetByIdSql
-        (connection: SqliteConnection)
+        (connection: NativeSqliteConnection)
         (tableName: string)
         (ownerType: Type)
         (whereExpr: SqlExpr)
@@ -206,7 +209,7 @@ module internal HydrationSqlBuilder =
 
         // Shape is computed first so a type that cannot hydrate any relation never allocates a
         // metadata source and never reaches the catalogs.
-        let shape : HydrationSqlMetadata.RelationShapeInfo = HydrationSqlMetadata.getRelationShape ownerType
+        let shape : RelationHydrationShape = HydrationSqlMetadata.getRelationShape ownerType
         let ctx =
             if shape.HasAny then
                 { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }
@@ -269,7 +272,7 @@ module internal HydrationSqlBuilder =
     /// Build a mutation-prep SELECT with DBRefMany-only HydrationJSON (no DBRef enrichment).
     /// Returns (sqlString, hasManyHydration).
     let buildManyOnlyHydratedSql
-        (connection: SqliteConnection)
+        (connection: NativeSqliteConnection)
         (tableName: string)
         (ownerType: Type)
         (whereExpr: SqlExpr)
@@ -279,7 +282,7 @@ module internal HydrationSqlBuilder =
 
         // Many-only builder: a type with no DBRefMany property cannot hydrate here, so it
         // neither allocates a metadata source nor reaches the catalogs.
-        let shape : HydrationSqlMetadata.RelationShapeInfo = HydrationSqlMetadata.getRelationShape ownerType
+        let shape : RelationHydrationShape = HydrationSqlMetadata.getRelationShape ownerType
         let ctx =
             if shape.HasMany then
                 { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }
@@ -334,7 +337,7 @@ module internal HydrationSqlBuilder =
     /// (standard composition, not post-emission string surgery).
     /// Returns (sqlString, hasManyHydration).
     let buildManyOnlyHydratedSqlWithRawWhere
-        (connection: SqliteConnection)
+        (connection: NativeSqliteConnection)
         (tableName: string)
         (ownerType: Type)
         (rawFilterSql: string)
@@ -343,7 +346,7 @@ module internal HydrationSqlBuilder =
 
         // Many-only builder: a type with no DBRefMany property cannot hydrate here, so it
         // neither allocates a metadata source nor reaches the catalogs.
-        let shape : HydrationSqlMetadata.RelationShapeInfo = HydrationSqlMetadata.getRelationShape ownerType
+        let shape : RelationHydrationShape = HydrationSqlMetadata.getRelationShape ownerType
         let ctx =
             if shape.HasMany then
                 { QueryContext.SingleSource(tableName) with MetadataSource = ValueSome (RelationMetadataSource connection) }

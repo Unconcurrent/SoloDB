@@ -8,8 +8,7 @@ open System.Linq.Expressions
 open System.Reflection
 open System.Text
 open System.Runtime.CompilerServices
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open Utils
 open JsonFunctions
 open Connections
@@ -32,6 +31,13 @@ module internal QueryableHelperPreprocess =
 
         while expression <> null do
             match expression with
+            | :? RelationQueryExpression as directive ->
+                queries.Add(Relation directive)
+                expression <- directive.Source
+            | :? UnaryExpression as conversion when QueryTranslatorBaseHelpers.isReferenceUpcast conversion &&
+                typeof<IQueryable>.IsAssignableFrom(conversion.Type) ->
+                // F# inserts the ordered-query upcast when supplying a query to a terminal operator.
+                expression <- conversion.Operand
             | :? MethodCallExpression as mce ->
                 match parseSupportedMethod mce.Method.Name with
                 | Some SupportedLinqMethods.SelectMany when mce.Arguments.Count = 3 ->
@@ -155,6 +161,7 @@ module internal QueryableHelperPreprocess =
             BindQueryValue = sourceCtx.BindQueryValue
             GeneralPrefixMatch = sourceCtx.GeneralPrefixMatch
             LayerPosition = OuterLayer
+            SerializationInput = sourceCtx.SerializationInput
             RootGraph =
                 {
                     Roots = ResizeArray(sourceCtx.RootGraph.Roots |> Seq.map id)
@@ -173,11 +180,11 @@ module internal QueryableHelperPreprocess =
             IsAtTopLevel = sourceCtx.IsAtTopLevel
         }
 
-    let internal serializeForCollection (value: 'T) =
-        match typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T> with
-        | true -> JsonSerializator.JsonValue.SerializeWithType value
-        | false -> JsonSerializator.JsonValue.Serialize value
-        |> _.ToJsonString()
+    let internal serializeForCollection (valueType: Type) (value: obj) =
+        let includeType = typeof<JsonSerializator.JsonValue>.IsAssignableFrom valueType
+        if includeType then value.GetType() |> ignore
+        let text = JsonSerializator.JsonValue.WriteRuntimeBuffer(valueType,value,includeType,false)
+        System.String(text.Array,text.Offset,text.Count)
 
     /// Build WHERE, ORDER BY, LIMIT, OFFSET, UnionAll from a UsedSQLStatements layer as DU values.
     /// Returns (where, orderBy, limit, offset, unionAlls).
@@ -212,8 +219,8 @@ module internal QueryableHelperPreprocess =
 
         let bindBound bound =
             match sourceCtx.BindQueryValue |> ValueOption.bind (fun bind -> bind.TryBind false bound) with
-            | ValueSome parameter -> parameter
-            | ValueNone -> allocateParam vars (QueryTranslatorBaseHelpers.evaluateExpr<obj> bound)
+            | ValueSome parameter -> QueryProduced.value sourceCtx.NextAlias parameter
+            | ValueNone -> allocateParam vars (ExpressionEvaluation.evaluateExpr<obj> bound)
 
         let limit =
             match statement.Take with
@@ -230,24 +237,16 @@ module internal QueryableHelperPreprocess =
 
         struct (where, orderBy, limit, offset, unionAlls)
 
-    /// Parse a JoinKind string from the handler mechanism into a DU JoinKind.
-    let internal parseJoinKind (kind: string) =
-        match kind.Trim().ToUpperInvariant() with
-        | s when s.Contains("LEFT") -> JoinKind.Left
-        | s when s.Contains("INNER") -> JoinKind.Inner
-        | s when s.Contains("CROSS") ->
-            raise (InvalidOperationException("CROSS JOIN must use the CrossJoin DU constructor directly."))
-        | other ->
-            raise (NotSupportedException(sprintf "Error: Unrecognized join kind '%s'.\nFix: Use LEFT, INNER, or CROSS join." other))
-
     /// Build materialized Value projection (jsonb_set with JOIN data) for relation materialization.
     let internal buildMaterializedValueExpr (ctx: QueryContext) (effectiveTableName: string) (valueColumnExpr: SqlExpr) =
         let materializedJoins =
             ctx.Joins
-            |> Seq.filter (fun j -> shouldLoadRelationPath ctx j.PropertyPath)
+            |> Seq.filter (fun j ->
+                let ownSource = j.OnSourceAlias |> Option.forall (fun alias -> AliasRewrite.normalizeSourceAlias alias = AliasRewrite.normalizeSourceAlias effectiveTableName)
+                shouldLoadRelationPath ctx j.PropertyPath && j.ReferenceOnOwnerRoot && ownSource)
             |> Seq.toList
         if materializedJoins.IsEmpty then
-            // All joins are excluded — no materialization needed, keep original qualified Value
+            // This root has no admitted materialized reference; retain its original value.
             valueColumnExpr
         else
             // jsonb_set("Table".Value, '$.Prop1', CASE WHEN a1.Id IS NOT NULL THEN jsonb_array(a1.Id, a1.Value) ELSE jsonb_extract("Table".Value, '$.Prop1') END, ...)
@@ -255,12 +254,12 @@ module internal QueryableHelperPreprocess =
             args.Add(SqlExpr.Column(Some effectiveTableName, "Value"))
             for j in materializedJoins do
                 ctx.MaterializedPaths.Add(j.PropertyPath) |> ignore
-                args.Add(SqlExpr.Literal(SqlLiteral.String ("$." + j.PropertyPath)))
+                args.Add(SqlExpr.Literal(SqlLiteral.String (JsonPathOps.text j.ReferencePath)))
                 args.Add(SqlExpr.CaseExpr(
                     (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some j.TargetAlias, "Id")),
-                     SqlExpr.FunctionCall("jsonb_array", [SqlExpr.Column(Some j.TargetAlias, "Id"); SqlExpr.Column(Some j.TargetAlias, "Value")])),
+                     SqlExpr.FunctionCall("jsonb_array", [SqlExpr.Column(Some j.TargetAlias, "Id"); j.TargetValue])),
                     [],
-                    Some (SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(Some effectiveTableName, "Value"); SqlExpr.Literal(SqlLiteral.String ("$." + j.PropertyPath))]))))
+                    Some (SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(Some effectiveTableName, "Value"); SqlExpr.Literal(SqlLiteral.String (JsonPathOps.text j.ReferencePath))]))))
             SqlExpr.FunctionCall("jsonb_set", args |> Seq.toList)
 
     /// Wrap a SelectBody with optional ORDER BY, LIMIT, OFFSET.
@@ -272,90 +271,14 @@ module internal QueryableHelperPreprocess =
     let rec internal stripSourceAlias (expr: SqlExpr) : SqlExpr =
         match expr with
         | SqlExpr.Column(Some _, col) -> SqlExpr.Column(None, col)
-        | SqlExpr.Column(None, _) -> expr
-        | SqlExpr.Literal _ -> expr
-        | SqlExpr.Parameter _ -> expr
         | SqlExpr.JsonExtractExpr(Some _, col, path) -> SqlExpr.JsonExtractExpr(None, col, path)
-        | SqlExpr.JsonExtractExpr(None, _, _) -> expr
         | SqlExpr.JsonRootExtract(Some _, col) -> SqlExpr.JsonRootExtract(None, col)
-        | SqlExpr.JsonRootExtract(None, _) -> expr
-        | SqlExpr.JsonSetExpr(target, assignments) ->
-            SqlExpr.JsonSetExpr(
-                stripSourceAlias target,
-                assignments |> List.map (fun (path, value) -> path, stripSourceAlias value))
-        | SqlExpr.JsonArrayExpr elements ->
-            SqlExpr.JsonArrayExpr(elements |> List.map stripSourceAlias)
-        | SqlExpr.JsonObjectExpr properties ->
-            SqlExpr.JsonObjectExpr(properties |> List.map (fun (name, value) -> name, stripSourceAlias value))
-        | SqlExpr.FunctionCall(name, args) ->
-            SqlExpr.FunctionCall(name, args |> List.map stripSourceAlias)
-        | SqlExpr.AggregateCall(kind, argument, distinct, separator) ->
-            SqlExpr.AggregateCall(kind, argument |> Option.map stripSourceAlias, distinct, separator |> Option.map stripSourceAlias)
-        | SqlExpr.WindowCall spec ->
-            SqlExpr.WindowCall {
-                spec with
-                    Arguments = spec.Arguments |> List.map stripSourceAlias
-                    PartitionBy = spec.PartitionBy |> List.map stripSourceAlias
-                    OrderBy = spec.OrderBy |> List.map (fun (e, d) -> stripSourceAlias e, d)
-            }
-        | SqlExpr.Unary(op, inner) -> SqlExpr.Unary(op, stripSourceAlias inner)
-        | SqlExpr.Binary(l, op, r) -> SqlExpr.Binary(stripSourceAlias l, op, stripSourceAlias r)
-        | SqlExpr.Between(e, lower, upper) -> SqlExpr.Between(stripSourceAlias e, stripSourceAlias lower, stripSourceAlias upper)
-        | SqlExpr.InList(e, head, tail) -> SqlExpr.InList(stripSourceAlias e, stripSourceAlias head, tail |> List.map stripSourceAlias)
-        | SqlExpr.InSubquery(e, subquery) -> SqlExpr.InSubquery(stripSourceAlias e, stripSourceAliasInSelect subquery)
-        | SqlExpr.Cast(inner, ty) -> SqlExpr.Cast(stripSourceAlias inner, ty)
-        | SqlExpr.Coalesce(head, tail) -> SqlExpr.Coalesce(stripSourceAlias head, tail |> List.map stripSourceAlias)
-        | SqlExpr.Exists subquery -> SqlExpr.Exists(stripSourceAliasInSelect subquery)
-        | SqlExpr.ScalarSubquery subquery -> SqlExpr.ScalarSubquery(stripSourceAliasInSelect subquery)
-        | SqlExpr.CaseExpr(firstBranch, restBranches, elseExpr) ->
-            SqlExpr.CaseExpr(
-                let mapBranch (w, t) = stripSourceAlias w, stripSourceAlias t
-                mapBranch firstBranch,
-                restBranches |> List.map mapBranch,
-                elseExpr |> Option.map stripSourceAlias)
+        | _ -> mapChildren stripSourceAlias stripSourceAliasInSelect expr
 
-    and internal stripSourceAliasInTableSource (source: TableSource) : TableSource =
-        match source with
-        | BaseTable _ -> source
-        | DerivedTable(query, alias) -> DerivedTable(stripSourceAliasInSelect query, alias)
-        | FromJsonEach(valueExpr, alias) -> FromJsonEach(stripSourceAlias valueExpr, alias)
-
-    and internal stripSourceAliasInJoin (join: JoinShape) : JoinShape =
-        match join with
-        | CrossJoin source ->
-            CrossJoin(stripSourceAliasInTableSource source)
-        | ConditionedJoin(kind, source, onExpr) ->
-            ConditionedJoin(kind, stripSourceAliasInTableSource source, stripSourceAlias onExpr)
-
-    and internal stripSourceAliasInProjection (projection: Projection) : Projection =
-        { projection with Expr = stripSourceAlias projection.Expr }
-
-    and internal stripSourceAliasInOrderBy (orderBy: OrderBy) : OrderBy =
-        { orderBy with Expr = stripSourceAlias orderBy.Expr }
-
-    and internal stripSourceAliasInCore (core: SelectCore) : SelectCore =
-        {
-            core with
-                Source = core.Source |> Option.map stripSourceAliasInTableSource
-                Joins = core.Joins |> List.map stripSourceAliasInJoin
-                Projections = core.Projections |> ProjectionSetOps.map stripSourceAliasInProjection
-                Where = core.Where |> Option.map stripSourceAlias
-                GroupBy = core.GroupBy |> List.map stripSourceAlias
-                Having = core.Having |> Option.map stripSourceAlias
-                OrderBy = core.OrderBy |> List.map stripSourceAliasInOrderBy
-                Limit = core.Limit |> Option.map stripSourceAlias
-                Offset = core.Offset |> Option.map stripSourceAlias
-        }
-
-    and internal stripSourceAliasInSelect (select: SqlSelect) : SqlSelect =
-        {
-            select with
-                Ctes = select.Ctes |> List.map (fun cte -> { cte with Query = stripSourceAliasInSelect cte.Query })
-                Body =
-                    match select.Body with
-                    | SingleSelect core -> SingleSelect(stripSourceAliasInCore core)
-                    | UnionAllSelect(head, tail) -> UnionAllSelect(stripSourceAliasInCore head, tail |> List.map stripSourceAliasInCore)
-        }
+    and private stripSourceAliasInSelect (select: SqlSelect) : SqlSelect =
+        mapSelectParts
+            (mapCores (mapCoreExpressions stripSourceAlias stripSourceAliasInSelect))
+            stripSourceAliasInSelect select
 
     let internal wrapCoreBody (body: SelectBody) (orderBy: OrderBy list) (limit: SqlExpr option) (offset: SqlExpr option) : SqlSelect =
         match body with

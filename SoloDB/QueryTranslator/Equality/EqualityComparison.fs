@@ -20,9 +20,7 @@ module internal EqualityComparison =
             SqlExpr.Binary(target, BinaryOperator.Is, qb.AllocateComparisonParamExpr value)
         else
             let ignoreDiscriminators = ignoresDiscriminators target
-            let json =
-                if ignoreDiscriminators then JsonValue.Serialize value
-                else match value with :? JsonValue as json -> json | _ -> JsonValue.Serialize value
+            let json = Arguments.StoredJson(value,targetType,true)
             let comparisons = ResizeArray<SqlExpr>()
             let emit segments comparison =
                 let path = renderPath segments
@@ -38,10 +36,9 @@ module internal EqualityComparison =
             JsonEquality.Walk(ignoreDiscriminators, [], json, emit)
             conjunction (List.ofSeq comparisons)
 
-    let private rowsMethod = typeof<Arguments>.GetMethod("Rows", Reflection.BindingFlags.Static ||| Reflection.BindingFlags.Public ||| Reflection.BindingFlags.NonPublic)
-
     let private dynamic (qb: QueryBuilder) (binder: QueryValueBinder) target (value: Expression) (missing: Expression) ignoreDiscriminators knownOperand =
-        let rows = binder.Parameter(Expression.Call(rowsMethod.MakeGenericMethod(value.Type), value, missing, Expression.Constant(ignoreDiscriminators), Expression.Constant(knownOperand)))
+        let rows = binder.Parameter(BoundValueCallExpression([|value;missing|],typeof<string>,
+            Func<obj array,obj>(fun inputs -> box (Arguments.Rows(inputs.[0],value.Type,unbox<bool> inputs.[1],ignoreDiscriminators,knownOperand)))))
         let iterator = qb.SourceContext.NextAlias()
         let name = qb.SourceContext.NextAlias()
         let item path = extract (SqlExpr.Column(Some iterator, "value")) (pathLiteral path)
@@ -71,18 +68,9 @@ module internal EqualityComparison =
                 Source = Some(BaseTable(name, None))
                 Where = Some(SqlExpr.Unary(UnaryOperator.Not, comparison)) }
         let query =
-            { Ctes = [{ Name = name; Materialized = true; Query = { Ctes = []; Body = SingleSelect rowSource } }]
+            { Ctes = [{ Name = name; Query = { Ctes = []; Body = SingleSelect rowSource } }]
               Body = SingleSelect core }
         SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists query)
-
-    let private serializeMethod = typeof<JsonValue>.GetMethod("Serialize")
-    let private scalarMethod = typeof<Arguments>.GetMethod("Scalar", Reflection.BindingFlags.Static ||| Reflection.BindingFlags.Public ||| Reflection.BindingFlags.NonPublic)
-
-    let rec private scalarShape valueType =
-        match JsonValue.SerializationShape valueType with
-        | JsonSerializationShape.Scalar -> true
-        | JsonSerializationShape.NullableValue underlying -> scalarShape underlying
-        | _ -> false
 
     let bound (qb: QueryBuilder) (binder: QueryValueBinder) target (value: Expression) =
         let ancestors = Collections.Generic.HashSet<Type>()
@@ -99,7 +87,7 @@ module internal EqualityComparison =
         let rec fields path (expression: Expression) (parentNull: Expression) includeType =
             let valueType = expression.Type
             let shape =
-                if valueType.IsSealed && not (JsonFunctions.mustIncludeTypeInformationInSerializationFn valueType)
+                if valueType.IsSealed && not (TypeMetadata.requiresTypeInformation valueType)
                    && not (ancestors.Contains valueType) then JsonValue.SerializationShape valueType
                 else JsonSerializationShape.Dynamic
             let members, arrayShape =
@@ -135,16 +123,20 @@ module internal EqualityComparison =
                 let typeName = if includeType && not ignoreDiscriminators && not arrayShape then Utils.typeToName valueType else None
                 for i = 0 to members.Length - 1 do
                     let memberInfo = members.[i]
-                    let access = Expression.MakeMemberAccess(local, memberInfo)
-                    let memberPath = if arrayShape then sprintf "%s[%d]" path i else appendMember path memberInfo.Name
-                    if memberInfo.Name = "$type" && (typeName.IsSome || ignoreDiscriminators) then
+                    let access = memberInfo.Access(local)
+                    let memberPath = if arrayShape then path + "[" + i.ToString(Globalization.CultureInfo.InvariantCulture) + "]" else appendMember path memberInfo.StoredName
+                    if memberInfo.StoredName = "$type" && (typeName.IsSome || ignoreDiscriminators) then
                         // SerializeWithType evaluates the member, then replaces its value.
-                        binder.Local(guarded missing (Expression.Call(serializeMethod.MakeGenericMethod(access.Type), access))) |> ignore
-                    elif scalarShape access.Type then
-                        let scalarValue = Expression.Call(scalarMethod.MakeGenericMethod(access.Type), access) :> Expression
-                        let scalarValue = if isFalse missing then scalarValue else Expression.Condition(missing, nullValue, scalarValue) :> Expression
+                        binder.Local(guarded missing (BoundValueAccessExpression(access,typeof<JsonValue>,
+                            Func<obj,obj>(fun value -> box (JsonValue.SerializeRuntime(access.Type,value,false)))))) |> ignore
+                    elif JsonValue.HasScalarCarrier access.Type then
+                        let scalarValue = BoundValueAccessExpression(access,typeof<obj * bool>,
+                            Func<obj,obj>(fun value -> box(Arguments.Scalar(value,access.Type)))) :> Expression
+                        let scalarValue =
+                            if isFalse missing then scalarValue
+                            else Expression.Condition(missing,Expression.Constant(((null:obj),false),typeof<obj * bool>),scalarValue) :> Expression
                         let discriminator = SqlExpr.Literal(SqlLiteral.Boolean(memberPath.EndsWith ".$type"))
-                        comparisons.Add(scalar (extract target (pathLiteral memberPath)) (binder.Scalar scalarValue) discriminator)
+                        comparisons.Add(scalar (extract target (pathLiteral memberPath)) (binder.PreparedScalar scalarValue) discriminator)
                     else comparisons.Add(fields memberPath access missing false)
                 match typeName with
                 | Some name ->

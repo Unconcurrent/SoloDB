@@ -1,9 +1,8 @@
 namespace SoloDatabase
 
-open Microsoft.Data.Sqlite
 open System
 open System.Globalization
-open SQLiteTools
+open NativeSQLiteTools
 open SoloDatabase.Types
 open SoloDatabase.RelationsSharedSql
 
@@ -12,53 +11,6 @@ open SoloDatabase.RelationsSharedSql
 /// These functions preserve the exact order and side effects of the original constructor code.
 /// </summary>
 module internal Bootstrap =
-    [<Struct>]
-    type private DecimalParseResult =
-        val HasValue: bool
-        val Value: decimal
-        new (hasValue, value) = { HasValue = hasValue; Value = value }
-
-    let private tryReadDecimal (culture: CultureInfo) (value: obj) =
-        match value with
-        | null -> DecimalParseResult(false, decimal 0)
-        | :? decimal as d -> DecimalParseResult(true, d)
-        | :? string as s ->
-            match Decimal.TryParse(s, Globalization.NumberStyles.Float, culture) with
-            | true, d -> DecimalParseResult(true, d)
-            | _ -> DecimalParseResult(false, decimal 0)
-        | :? int8 as n -> DecimalParseResult(true, decimal n)
-        | :? uint8 as n -> DecimalParseResult(true, decimal n)
-        | :? int16 as n -> DecimalParseResult(true, decimal n)
-        | :? uint16 as n -> DecimalParseResult(true, decimal n)
-        | :? int as n -> DecimalParseResult(true, decimal n)
-        | :? uint32 as n -> DecimalParseResult(true, decimal n)
-        | :? int64 as n -> DecimalParseResult(true, decimal n)
-        | :? uint64 as n -> DecimalParseResult(true, decimal n)
-        | :? single as n -> DecimalParseResult(true, decimal n)
-        | :? double as n -> DecimalParseResult(true, decimal n)
-        | _ ->
-            match Decimal.TryParse(Convert.ToString(value, culture), Globalization.NumberStyles.Float, culture) with
-            | true, d -> DecimalParseResult(true, d)
-            | _ -> DecimalParseResult(false, decimal 0)
-
-    let private divideDecimalString (culture: CultureInfo) (sumValue: obj) (countValue: obj) =
-        let sum = tryReadDecimal culture sumValue
-        let count =
-            match countValue with
-            | null -> 0L
-            | _ -> Convert.ToInt64(countValue, culture)
-        if not sum.HasValue || count <= 0L then
-            null
-        else
-            box ((sum.Value / decimal count).ToString(culture))
-
-    let private formatDecimalString (culture: CultureInfo) (value: obj) =
-        let parsed = tryReadDecimal culture value
-        if parsed.HasValue then
-            box (parsed.Value.ToString(culture))
-        else
-            null
-
     let private parseVersionError (input: string) (detail: string) =
         FormatException($"Invalid sqlite_version value '{input}'. {detail}")
 
@@ -85,17 +37,32 @@ module internal Bootstrap =
     /// Creates the SQLite connection setup function that registers custom functions and pragmas.
     /// </summary>
     /// <param name="eventSystem">The event system to register functions on each connection.</param>
-    /// <returns>A setup function for SqliteConnection.</returns>
+    /// <returns>A setup function for NativeSqliteConnection.</returns>
     let createSetup (eventSystem: EventSystem) =
         let usCultureInfo = CultureInfo.GetCultureInfo("en-us")
+        let lower (value: string) = value.ToLower(usCultureInfo)
         let regexpTimeout = TimeSpan.FromMilliseconds(100)
-        fun (connection: SqliteConnection) ->
+        fun (connection: NativeSqliteConnection) ->
+            NumericalFunctions.register connection
+            QueryTranslatorCharacters.register lower connection
+            connection.RegisterScalar(JsonFunctions.treeValueFunction, 3,
+                RawSqliteFunctions.RawScalarFunc(fun context arguments ->
+                    if arguments[0].IsNull then context.SetNull()
+                    else
+                        let text = arguments[0].CopyToString()
+                        let identity = if arguments[1].IsNull then -1L else arguments[1].GetInt64()
+                        match enum<TreeValueFormat>(arguments[2].GetInt32()) with
+                        | TreeValueFormat.Subject -> context.SetText(JsonFunctions.physicalTreeSubject identity text)
+                        | TreeValueFormat.EqualityKey ->
+                            let subject = JsonFunctions.withPhysicalId identity (JsonSerializator.JsonValue.Parse text)
+                            let key = subject.EqualityKey()
+                            context.SetBlob(System.Runtime.InteropServices.MemoryMarshal.AsBytes(key.AsSpan()))
+                        | _ -> invalidArg "format" "The native tree result format is not supported."),
+                RawSqliteFunctions.SqliteFunctionFlags.Deterministic)
             connection.CreateFunction("UNIXTIMESTAMP", Func<int64>(fun () -> DateTimeOffset.Now.ToUnixTimeMilliseconds()), false)
             connection.CreateFunction("SHA_HASH", Func<byte array, obj>(fun o -> Utils.shaHash o), true)
-            connection.CreateFunction("TO_LOWER", Func<string, string>(_.ToLower(usCultureInfo)), true)
+            connection.CreateFunction("TO_LOWER", Func<string, string>(lower), true)
             connection.CreateFunction("TO_UPPER", Func<string, string>(_.ToUpper(usCultureInfo)), true)
-            connection.CreateFunction("DECIMAL_DIV", Func<obj, obj, obj>(fun sumValue countValue -> divideDecimalString usCultureInfo sumValue countValue), true)
-            connection.CreateFunction("DECIMAL_TEXT", Func<obj, obj>(fun value -> formatDecimalString usCultureInfo value), true)
             connection.CreateFunction("REGEXP", Func<string, string, bool>(fun pattern input ->
                 if isNull pattern || isNull input then
                     false
@@ -106,7 +73,13 @@ module internal Bootstrap =
                         false), true)
             eventSystem.CreateFunctions(connection)
             connection.CreateFunction("base64", Func<obj, obj>(Utils.sqlBase64), true) // https://www.sqlite.org/base64.html
-            connection.Execute "PRAGMA recursive_triggers = ON; PRAGMA foreign_keys = on; PRAGMA busy_timeout = 5000; PRAGMA cache_size = -65536;" |> ignore // This must be enabled on every connection separately.
+            // These settings belong to each physical connection. Lock waiting remains
+            // owned by the native execution budget; do not install a second busy timer.
+            let mutable setup = connection.AcquireScript(NativeStatementSource.Text ("PRAGMA recursive_triggers = ON; PRAGMA foreign_keys = on; PRAGMA cache_size = -65536;"), null)
+            try
+                setup.Consume() |> ignore
+                setup.Dispose()
+            with error -> setup.Abort(error); reraise()
 
     /// <summary>
     /// Parses the SQLite version string and returns a comparable Version value.
@@ -305,16 +278,32 @@ module internal Bootstrap =
     /// Preserves the exact order and side effects of the original constructor code.
     /// </summary>
     /// <param name="dbConnection">A borrowed connection from the connection manager.</param>
-    let initializeSchema (dbConnection: CachingDbConnection) =
+    let private collectionNames (connection: NativeSqliteConnection) =
+        let mutable statement = connection.OpenStatement("SELECT Name FROM SoloDBCollections")
+        try
+            let names = ResizeArray<string>()
+            while statement.Step() do names.Add(statement.Row.GetString(0))
+            statement.Dispose()
+            names.ToArray()
+        with error -> statement.Abort(error); reraise()
+
+    let initializeSchema (dbConnection: NativeCachingDbConnection) =
         // Edge case 1: SQLite version too old
-        let sqliteVersionText = dbConnection.QueryFirst<string> "SELECT sqlite_version();"
+        let sqliteVersionText =
+            let mutable statement = dbConnection.OpenStatement("SELECT sqlite_version();")
+            try
+                if not (statement.Step()) then raise (InvalidOperationException("SQLite version was not returned."))
+                let version = statement.Row.GetString(0)
+                statement.Dispose()
+                version
+            with error -> statement.Abort(error); reraise()
         let sqliteVersion = parseSqliteVersion sqliteVersionText
 
         if sqliteVersion < minimumSqliteVersion then
             raise (NotSupportedException
-                $"Error: SQLite version {sqliteVersionText} is too old.\nReason: SoloDB requires SQLite 3.47.0+ (JSONB + trigger RAISE() expressions).\nFix: Upgrade SQLite to 3.47.0 or newer.")
+                $"Error: SQLite version {sqliteVersionText} does not support the required features.\nReason: SoloDB requires JSONB and trigger RAISE() message expressions (SQLite 3.47.0+).\nFix: Use an engine that supports these features.")
 
-        let mutable dbSchemaVersion = dbConnection.QueryFirst<int> "PRAGMA user_version;";
+        let mutable dbSchemaVersion = SchemaMigration.readVersion dbConnection;
 
         // Edge case 2: future schema version
         if dbSchemaVersion > currentSupportedSchemaVersion then
@@ -326,7 +315,7 @@ module internal Bootstrap =
             SchemaMigration.run dbConnection
                 { Label = "v0->v1"; Setup = initialSchemaSetup; Body = initialSchema; FromVersion = 0; TargetVersion = 1; SupportedCeiling = currentSupportedSchemaVersion
                   LegacyTextPolicy = SchemaMigration.Strict }
-            dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
+            dbSchemaVersion <- SchemaMigration.readVersion dbConnection
             match SchemaMigration.classifyVersion dbSchemaVersion 1 currentSupportedSchemaVersion with
                 | SchemaMigration.Established -> ()
                 | SchemaMigration.NotApplied -> raise (migrationVerificationError "v0->v1" 1 dbSchemaVersion)
@@ -350,7 +339,7 @@ module internal Bootstrap =
                   // The only step that re-renders schema a previous release wrote, so the only one
                   // that can meet the historical double-quoted spelling.
                   LegacyTextPolicy = SchemaMigration.TolerateHistoricalText }
-            dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
+            dbSchemaVersion <- SchemaMigration.readVersion dbConnection
             match SchemaMigration.classifyVersion dbSchemaVersion 2 currentSupportedSchemaVersion with
                 | SchemaMigration.Established -> ()
                 | SchemaMigration.NotApplied -> raise (migrationVerificationError "v1->v2" 2 dbSchemaVersion)
@@ -361,7 +350,7 @@ module internal Bootstrap =
         // Migration: version 2 -> 3
         if dbSchemaVersion = 2 then
             let triggerSql =
-                dbConnection.Query<string>("SELECT Name FROM SoloDBCollections")
+                collectionNames dbConnection
                 |> Seq.map (fun name ->
                     $"DROP TRIGGER IF EXISTS \"SoloDB_Update_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Insert_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Delete_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Updated_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Inserted_{name}\";\nDROP TRIGGER IF EXISTS \"SoloDB_Deleted_{name}\";\n{Helper.getSQLForTriggersForTable name}")
                 |> String.concat "\n"
@@ -369,7 +358,7 @@ module internal Bootstrap =
             SchemaMigration.run dbConnection
                 { Label = "v2->v3"; Setup = ""; Body = triggerSql; FromVersion = 2; TargetVersion = 3; SupportedCeiling = currentSupportedSchemaVersion
                   LegacyTextPolicy = SchemaMigration.Strict }
-            dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
+            dbSchemaVersion <- SchemaMigration.readVersion dbConnection
             match SchemaMigration.classifyVersion dbSchemaVersion 3 currentSupportedSchemaVersion with
                 | SchemaMigration.Established -> ()
                 | SchemaMigration.NotApplied -> raise (migrationVerificationError "v2->v3" 3 dbSchemaVersion)
@@ -382,17 +371,21 @@ module internal Bootstrap =
         // Ensure SoloDBTypeCollectionMap exists and add Metadata column to existing collections.
         if dbSchemaVersion = 3 then
             let collectionNames =
-                dbConnection.Query<string>("SELECT Name FROM SoloDBCollections")
-                |> Seq.toArray
+                collectionNames dbConnection
 
             let addMetadataColumnSql =
                 collectionNames
                 |> Array.choose (fun name ->
                     let normalized = Helper.normalizeCatalogNameOrThrow "v3->v4 catalog-name validation" name
-                    let tableLit = Helper.sqlLiteralEscape normalized
                     let hasMetadata =
-                        dbConnection.QueryFirst<int64>(
-                            $"SELECT CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('{tableLit}') WHERE name = 'Metadata') THEN 1 ELSE 0 END") = 1L
+                        let mutable statement = dbConnection.OpenStatement("SELECT EXISTS (SELECT 1 FROM pragma_table_info(@table) WHERE name = 'Metadata')")
+                        try
+                            statement.BindText(1, normalized)
+                            if not (statement.Step()) then raise (InvalidOperationException("Table metadata was not returned."))
+                            let exists = statement.Row.GetBoolean(0)
+                            statement.Dispose()
+                            exists
+                        with error -> statement.Abort(error); reraise()
                     if hasMetadata then None
                     else Some ($"ALTER TABLE \"{normalized}\" ADD COLUMN Metadata JSONB NOT NULL DEFAULT '{{}}';"))
                 |> String.concat "\n"
@@ -407,7 +400,7 @@ module internal Bootstrap =
                   "
                   FromVersion = 3; TargetVersion = 4; SupportedCeiling = currentSupportedSchemaVersion
                   LegacyTextPolicy = SchemaMigration.Strict }
-            dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
+            dbSchemaVersion <- SchemaMigration.readVersion dbConnection
             match SchemaMigration.classifyVersion dbSchemaVersion 4 currentSupportedSchemaVersion with
                 | SchemaMigration.Established -> ()
                 | SchemaMigration.NotApplied -> raise (migrationVerificationError "v3->v4" 4 dbSchemaVersion)
@@ -432,7 +425,7 @@ module internal Bootstrap =
                   "
                   FromVersion = 4; TargetVersion = 5; SupportedCeiling = currentSupportedSchemaVersion
                   LegacyTextPolicy = SchemaMigration.Strict }
-            dbSchemaVersion <- dbConnection.QueryFirst<int> "PRAGMA user_version;"
+            dbSchemaVersion <- SchemaMigration.readVersion dbConnection
             match SchemaMigration.classifyVersion dbSchemaVersion 5 currentSupportedSchemaVersion with
                 | SchemaMigration.Established -> ()
                 | SchemaMigration.NotApplied -> raise (migrationVerificationError "v4->v5" 5 dbSchemaVersion)
@@ -440,6 +433,19 @@ module internal Bootstrap =
                     raise (NotSupportedException
                         $"Error: Schema version {dbSchemaVersion} is not supported.\nReason: Current supported version is {currentSupportedSchemaVersion}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
 
+        let fileSystemEvents = FileSystemEventSchema.forExistingTables dbConnection
+        if fileSystemEvents.Length <> 0 then
+            SchemaMigration.run dbConnection
+                { Label = "filesystem event initialization"
+                  Setup = ""; Body = fileSystemEvents
+                  FromVersion = currentSupportedSchemaVersion
+                  TargetVersion = currentSupportedSchemaVersion
+                  SupportedCeiling = currentSupportedSchemaVersion
+                  LegacyTextPolicy = SchemaMigration.Strict }
+
         // https://www.sqlite.org/pragma.html#pragma_optimize
-        let _rez = dbConnection.Execute("PRAGMA optimize=0x10002;")
-        ()
+        let mutable statement = dbConnection.OpenStatement("PRAGMA optimize=0x10002;")
+        try
+            while statement.Step() do ()
+            statement.Dispose()
+        with error -> statement.Abort(error); reraise()

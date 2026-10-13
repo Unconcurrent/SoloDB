@@ -1,7 +1,6 @@
-﻿namespace SoloDatabase
+namespace SoloDatabase
 
 open SoloDatabase.JsonSerializator
-open Microsoft.Data.Sqlite
 open System.Linq.Expressions
 open System
 open System.Collections.Generic
@@ -9,7 +8,7 @@ open System.Collections
 open SoloDatabase.Types
 open System.IO
 open System.Text
-open SQLiteTools
+open NativeSQLiteTools
 open JsonFunctions
 open FileStorage
 open Connections
@@ -21,62 +20,18 @@ open System.Globalization
 open System.Linq
 open SoloDatabase.Attributes
 
-[<AbstractClass; Sealed>]
-type internal CustomIdRunner =
-
-    /// Insert / cascade-write entry. IsEmpty gate, then GenerateId + SetId. Idempotent on
-    /// already-set ids.
-    static member RunIfEmpty<'T when 'T :> obj> (item: 'T, collection: ISoloDBCollection<'T>) : unit =
-        match CustomTypeId<'T>.Get() with
-        | Some x ->
-            let boxedItem = box item
-            let oldId = x.GetId boxedItem
-            match x.Generator with
-            | :? SoloDatabase.Attributes.IIdGenerator as generator ->
-                if generator.IsEmpty oldId then
-                    let id = generator.GenerateId (box collection) boxedItem
-                    x.SetId id boxedItem
-            | :? SoloDatabase.Attributes.IIdGenerator<'T> as generator ->
-                if generator.IsEmpty oldId then
-                    let id = generator.GenerateId collection item
-                    x.SetId id boxedItem
-            | other -> raise (System.InvalidOperationException(
-                sprintf "Error: Invalid Id generator type.\nReason: Type '%s' is not supported.\nFix: Use a supported Id generator or configure a custom Id strategy." (other.GetType().ToString())))
-        | None -> ()
-
-    static let runMiCache = System.Collections.Concurrent.ConcurrentDictionary<System.Type, System.Reflection.MethodInfo>()
-
-    static let runOpenMethod =
-        typeof<CustomIdRunner>.GetMethods(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Static)
-        |> Array.tryFind (fun m -> m.Name = "RunCascadeIfEmpty" && m.IsGenericMethodDefinition)
-        |> Option.defaultWith (fun () ->
-            raise (System.InvalidOperationException("CustomIdRunner.RunCascadeIfEmpty<'T> not found via reflection — internal SoloDB defect.")))
-
-    static member private RunCascadeIfEmpty<'T when 'T :> obj> (item: 'T, collectionName: string, tx: RelationsTypes.RelationTxContext) =
-        match CustomTypeId<'T>.Get(), tx.CollectionFactory with
-        | None, _ -> ()
-        | Some _, Some factory ->
-            let collection = factory.CreateCollection<'T>(collectionName)
-            CustomIdRunner.RunIfEmpty(item, collection)
-        | Some _, None ->
-            raise (InvalidOperationException("A cascade ID generator requires a transactional collection factory."))
-
-    /// Reflection trampoline for cascade context: boxed entity, runtime Type. Calls RunIfEmpty
-    /// via MakeGenericMethod (cached per Type).
-    static member RunBoxedIfEmpty (targetType: System.Type, item: obj, collectionName: string, tx: RelationsTypes.RelationTxContext) : unit =
-        let mi = runMiCache.GetOrAdd(targetType, fun (t: System.Type) -> runOpenMethod.MakeGenericMethod(t))
-        try
-            mi.Invoke(null, [| item; collectionName; tx |]) |> ignore
-        with
-        | :? System.Reflection.TargetInvocationException as tie when not (isNull tie.InnerException) ->
-            raise tie.InnerException
-
 /// <summary>
 /// Contains internal helper functions for database and collection management.
 /// </summary>
 module internal Helper =
-    let internal listCollectionNamesSnapshot (connection: SqliteConnection) : string array =
-        connection.Query<string>("SELECT Name FROM SoloDBCollections") |> Seq.toArray
+    let internal listCollectionNamesSnapshot (connection: NativeSqliteConnection) : string array =
+        let mutable statement = connection.OpenStatement("SELECT Name FROM SoloDBCollections")
+        try
+            let names = ResizeArray<string>()
+            while statement.Step() do names.Add(statement.Row.GetString(0))
+            statement.Dispose()
+            names.ToArray()
+        with error -> statement.Abort(error); reraise()
 
     let internal sqlLiteralEscape (value: string) =
         value.Replace("'", "''")
@@ -93,96 +48,156 @@ module internal Helper =
     /// <param name="name">The name of the collection.</param>
     /// <param name="connection">The active SQLite connection.</param>
     /// <returns>True if the collection exists, otherwise false.</returns>
-    let internal existsCollection (name: string) (connection: SqliteConnection) =
-        connection.QueryFirstOrDefault<string>("SELECT Name FROM SoloDBCollections WHERE Name = @name LIMIT 1", {|name = name|}) <> null
+    let internal existsCollection (name: string) (connection: NativeSqliteConnection) =
+        let mutable statement = connection.OpenStatement("SELECT Name FROM SoloDBCollections WHERE Name = @name LIMIT 1")
+        try
+            statement.BindText(1, name)
+            let exists = statement.Step() && not (statement.Row.IsDBNull(0))
+            statement.Dispose()
+            exists
+        with error -> statement.Abort(error); reraise()
 
-    let internal registerTypeCollection<'T> (collectionName: string) (connection: SqliteConnection) =
+    let internal registerTypeCollection<'T> (collectionName: string) (connection: NativeSqliteConnection) =
+        CustomIdRunner.Register<'T>()
         if not (typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T>) then
-            connection.Execute(
-                "INSERT INTO SoloDBTypeCollectionMap(TypeKey, CollectionName) VALUES(@typeKey, @collectionName) ON CONFLICT(TypeKey, CollectionName) DO NOTHING;",
-                {| typeKey = UtilsReflection.typeIdentityKey typeof<'T>; collectionName = collectionName |}) |> ignore
+            let mutable statement = connection.OpenStatement("INSERT INTO SoloDBTypeCollectionMap(TypeKey, CollectionName) VALUES(@typeKey, @collectionName) ON CONFLICT(TypeKey, CollectionName) DO NOTHING;")
+            try
+                statement.BindText(1, TypeMetadata.typeIdentityKey typeof<'T>)
+                statement.BindText(2, collectionName)
+                statement.Step() |> ignore
+                statement.Dispose()
+            with error -> statement.Abort(error); reraise()
 
     /// <summary>
     /// Drops all event triggers associated with a collection table, if they exist.
     /// </summary>
     /// <param name="name">The name of the collection whose trigger should be dropped.</param>
     /// <param name="conn">The active SQLite connection.</param>
-    let internal dropTriggersForTable (name: string) (conn: SqliteConnection) =
-        let updateTriggerName = $"SoloDB_Update_{name}"
-        let insertTriggerName = $"SoloDB_Insert_{name}"
-        let deleteTriggerName = $"SoloDB_Delete_{name}"
-        let updatedTriggerName = $"SoloDB_Updated_{name}"
-        let insertedTriggerName = $"SoloDB_Inserted_{name}"
-        let deletedTriggerName = $"SoloDB_Deleted_{name}"
-
-        conn.Execute($"DROP TRIGGER IF EXISTS \"{updateTriggerName}\"") |> ignore
-        conn.Execute($"DROP TRIGGER IF EXISTS \"{insertTriggerName}\"") |> ignore
-        conn.Execute($"DROP TRIGGER IF EXISTS \"{deleteTriggerName}\"") |> ignore
-        conn.Execute($"DROP TRIGGER IF EXISTS \"{updatedTriggerName}\"") |> ignore
-        conn.Execute($"DROP TRIGGER IF EXISTS \"{insertedTriggerName}\"") |> ignore
-        conn.Execute($"DROP TRIGGER IF EXISTS \"{deletedTriggerName}\"") |> ignore
+    let internal dropTriggersForTable (name: string) (conn: NativeSqliteConnection) =
+        for prefix in [| "Update"; "Insert"; "Delete"; "Updated"; "Inserted"; "Deleted" |] do
+            let mutable statement = conn.OpenStatement($"DROP TRIGGER IF EXISTS \"SoloDB_{prefix}_{name}\"")
+            try
+                statement.Step() |> ignore
+                statement.Dispose()
+            with error -> statement.Abort(error); reraise()
 
     /// <summary>
     /// Drops a collection's table and removes its metadata entry.
     /// </summary>
     /// <param name="name">The name of the collection to drop.</param>
     /// <param name="connection">The active SQLite connection.</param>
-    let internal dropCollection (name: string) (connection: SqliteConnection) =
-        // Relation-aware drop: check SoloDBRelation for inbound/outbound references before dropping.
+    let internal dropCollection (name: string) (connection: NativeSqliteConnection) =
         let relationCatalogExists =
-            connection.QueryFirst<int64>(
-                "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelation') THEN 1 ELSE 0 END") = 1L
+            let mutable statement = connection.OpenStatement("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelation')")
+            try
+                statement.Step() |> ignore
+                let exists = statement.Row.GetBoolean(0)
+                statement.Dispose()
+                exists
+            with error -> statement.Abort(error); reraise()
 
         if relationCatalogExists then
-            // Edge case 1: inbound references — other collections reference this one as target.
             let inboundCount =
-                connection.QueryFirst<int64>(
-                    "SELECT COUNT(*) FROM SoloDBRelation WHERE TargetCollection = @name AND OwnerCollection <> @name",
-                    {| name = name |})
+                let mutable statement = connection.OpenStatement("SELECT COUNT(*) FROM SoloDBRelation WHERE TargetCollection = @name AND OwnerCollection <> @name")
+                try
+                    statement.BindText(1, name)
+                    statement.Step() |> ignore
+                    let count = statement.Row.GetInt64(0)
+                    statement.Dispose()
+                    count
+                with error -> statement.Abort(error); reraise()
             if inboundCount > 0L then
                 raise (InvalidOperationException(
                     sprintf "Error: Cannot drop collection '%s'.\nReason: It is referenced by active relations.\nFix: Remove relations first, then drop the collection." name))
 
-            // Edge case 2: outbound-only references — this collection owns relations. Clean up link tables + catalog rows.
+            let hasFileSystemRefs =
+                let mutable statement = connection.OpenStatement("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='SoloDBFileSystemReference')")
+                try
+                    statement.Step() |> ignore
+                    let exists = statement.Row.GetBoolean(0)
+                    statement.Dispose()
+                    exists
+                with error -> statement.Abort(error); reraise()
+            if hasFileSystemRefs then
+                let mutable statement = connection.OpenStatement("DELETE FROM SoloDBFileSystemReference WHERE OwnerCollection=@name")
+                try
+                    statement.BindText(1, name)
+                    statement.Step() |> ignore
+                    statement.Dispose()
+                with error -> statement.Abort(error); reraise()
+            // Snapshot the owned catalog rows before dropping their physical tables.
             let outboundRows =
-                connection.Query<{| Name: string; TargetCollection: string; RefKind: string |}>(
-                    "SELECT Name, TargetCollection, RefKind FROM SoloDBRelation WHERE OwnerCollection = @name",
-                    {| name = name |})
-                |> Seq.toArray
-            for row in outboundRows do
+                let mutable statement = connection.OpenStatement("SELECT Name, TargetCollection, RefKind FROM SoloDBRelation WHERE OwnerCollection = @name AND TargetCollection NOT IN ('SoloDBFileHeader','SoloDBDirectoryHeader')")
+                try
+                    statement.BindText(1, name)
+                    let rows = ResizeArray<struct (string * string * string)>()
+                    while statement.Step() do
+                        let row = statement.Row
+                        rows.Add(struct (row.GetString(0), row.GetString(1), row.GetString(2)))
+                    statement.Dispose()
+                    rows
+                with error -> statement.Abort(error); reraise()
+            for struct (relationName, targetCollection, refKind) in outboundRows do
                 let canonicalLinkTable =
-                    RelationsTypes.canonicalManyRelationName name row.TargetCollection
+                    RelationsTypes.canonicalManyRelationName name targetCollection
                     |> RelationsTypes.linkTableFromRelationName
                 let useSharedManyLinkTable =
-                    row.RefKind = RelationsTypes.relationKindToString RelationsTypes.Many
-                    && (StringComparer.Ordinal.Equals(name, row.TargetCollection)
-                        || connection.QueryFirst<int64>(
-                            "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @name) THEN 1 ELSE 0 END",
-                            {| name = canonicalLinkTable |}) = 1L)
+                    refKind = RelationsTypes.relationKindToString RelationKind.Many
+                    && (StringComparer.Ordinal.Equals(name, targetCollection)
+                        || (let mutable statement = connection.OpenStatement("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = @name)")
+                            try
+                                statement.BindText(1, canonicalLinkTable)
+                                statement.Step() |> ignore
+                                let exists = statement.Row.GetBoolean(0)
+                                statement.Dispose()
+                                exists
+                            with error -> statement.Abort(error); reraise()))
                 let linkTable =
                     if useSharedManyLinkTable then canonicalLinkTable
-                    else "SoloDBRelLink_" + row.Name
-                connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" linkTable) |> ignore
-            if outboundRows.Length > 0 then
-                connection.Execute("DELETE FROM SoloDBRelation WHERE OwnerCollection = @name", {| name = name |}) |> ignore
+                    else "SoloDBRelLink_" + relationName
+                let mutable statement = connection.OpenStatement(sprintf "DROP TABLE IF EXISTS \"%s\"" linkTable)
+                try
+                    statement.Step() |> ignore
+                    statement.Dispose()
+                with error -> statement.Abort(error); reraise()
+            let mutable statement = connection.OpenStatement("DELETE FROM SoloDBRelation WHERE OwnerCollection = @name")
+            try
+                statement.BindText(1, name)
+                statement.Step() |> ignore
+                statement.Dispose()
+            with error -> statement.Abort(error); reraise()
 
         dropTriggersForTable name connection
-        connection.Execute(sprintf "DROP TABLE IF EXISTS \"%s\"" name) |> ignore
-        connection.Execute("DELETE FROM SoloDBTypeCollectionMap WHERE CollectionName = @name", {|name = name|}) |> ignore
-        connection.Execute("DELETE FROM SoloDBCollections Where Name = @name", {|name = name|}) |> ignore
+        let mutable table = connection.OpenStatement(sprintf "DROP TABLE IF EXISTS \"%s\"" name)
+        try
+            table.Step() |> ignore
+            table.Dispose()
+        with error -> table.Abort(error); reraise()
+        let mutable mapping = connection.OpenStatement("DELETE FROM SoloDBTypeCollectionMap WHERE CollectionName = @name")
+        try
+            mapping.BindText(1, name)
+            mapping.Step() |> ignore
+            mapping.Dispose()
+        with error -> mapping.Abort(error); reraise()
+        let mutable catalog = connection.OpenStatement("DELETE FROM SoloDBCollections Where Name = @name")
+        try
+            catalog.BindText(1, name)
+            catalog.Step() |> ignore
+            catalog.Dispose()
+        with error -> catalog.Abort(error); reraise()
         // Drop/recreate must rebuild relation descriptors from a clean cache snapshot.
-        RelationsTypes.relationSpecsCache.Clear()
+        TypeMetadataCache.ClearReferenceSpecs()
 
     /// <summary>
-    /// Inserts a JSON string into a specified table, with options for replacement and explicit ID.
+    /// Inserts serialized JSON into a specified table, with options for replacement and explicit ID.
     /// </summary>
     /// <param name="orReplace">If true, uses 'INSERT OR REPLACE'.</param>
     /// <param name="id">An optional ID to insert. If None, an ID is generated by SQLite.</param>
     /// <param name="name">The name of the target table (collection).</param>
-    /// <param name="json">The JSON string to insert.</param>
+    /// <param name="json">The owned JSON character range to insert.</param>
     /// <param name="connection">The active SQLite connection.</param>
     /// <returns>The ID of the inserted row.</returns>
-    let private insertJson (orReplace: bool) (id: int64 option) (name: string) (json: string) (connection: SqliteConnection) =
+    let private insertJson (orReplace: bool) (id: int64 option) (name: string) (json: ArraySegment<char>) (connection: NativeSqliteConnection) =
         let includeId = id.IsSome
 
         let queryStringBuilder = StringBuilder(64 + name.Length + (if orReplace then 11 else 0) + (if includeId then 7 else 0))
@@ -200,18 +215,15 @@ module internal Helper =
                 .Append("jsonb(@jsonText)) RETURNING Id;")
                 .ToString()
 
-        let parameters: obj = 
-            if includeId then {|
-                name = name
-                jsonText = json
-                id = id.Value
-            |}
-            else {|
-                name = name
-                jsonText = json
-            |}
-
-        connection.QueryFirst<int64>(queryString, parameters)
+        let mutable statement = connection.OpenStatement(queryString)
+        try
+            if includeId then statement.BindInt64(1, id.Value)
+            statement.BindTextBuffer((if includeId then 2 else 1), json)
+            if not (statement.Step()) then Seq.head (Seq.empty<unit>)
+            let insertedId = statement.Row.GetInt64(0)
+            statement.Dispose()
+            insertedId
+        with error -> statement.Abort(error); reraise()
 
     /// <summary>
     /// Core implementation for inserting an item into a collection. Handles ID generation and serialization.
@@ -223,42 +235,42 @@ module internal Helper =
     /// <param name="orReplace">If true, performs an 'INSERT OR REPLACE' operation.</param>
     /// <param name="collection">The collection instance, used for ID generation context.</param>
     /// <returns>The ID of the inserted item.</returns>
-    let private insertImpl<'T when 'T :> obj> (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) (orReplace: bool) (collection: ISoloDBCollection<'T>) =
+    let private insertImpl<'T when 'T :> obj> (typed: bool) (item: 'T) (connection: NativeSqliteConnection) (name: string) (orReplace: bool) (collection: ISoloDBCollection<'T>) =
         let customIdGen = CustomTypeId<'T>.Get()
-        let existsWritebleDirectId = HasTypeId<'T>.Value
+        let existsWritebleDirectId = EntityDocumentId<'T>.Value
 
 
         CustomIdRunner.RunIfEmpty(item, collection)
-        
-        let json = if typed then toTypedJson item else toJson item
-        
+
+        let json = toDocument typed item
+
 
         let id =
-            if existsWritebleDirectId && -1L >= HasTypeId<'T>.Read item then 
+            if existsWritebleDirectId && -1L >= EntityDocumentId<'T>.Read item then
                 raise (InvalidOperationException
                     "Error: Invalid Id value.\nReason: Id must be 0 for auto-generated ids or > 0 for explicit ids.\nFix: Use Id=0 for new entities or a positive Id for explicit insert.")
-            elif existsWritebleDirectId && 0L <> HasTypeId<'T>.Read item then 
+            elif existsWritebleDirectId && 0L <> EntityDocumentId<'T>.Read item then
                 // Inserting with Id
-                insertJson orReplace (Some (HasTypeId<'T>.Read item)) name json connection
+                insertJson orReplace (Some (EntityDocumentId<'T>.Read item)) name json connection
             else
                 // Inserting without Id
                 insertJson orReplace None name json connection
 
         if existsWritebleDirectId then
-            HasTypeId<'T>.Write item id
+            EntityDocumentId<'T>.Write item id
 
         id
 
     /// <summary>
     /// Inserts an item into a collection.
     /// </summary>
-    let internal insertInner (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) (collection: ISoloDBCollection<'T>) =
+    let internal insertInner (typed: bool) (item: 'T) (connection: NativeSqliteConnection) (name: string) (collection: ISoloDBCollection<'T>) =
         insertImpl typed item connection name false collection
 
     /// <summary>
     /// Inserts or replaces an item in a collection.
     /// </summary>
-    let internal insertOrReplaceInner (typed: bool) (item: 'T) (connection: SqliteConnection) (name: string) (collection: ISoloDBCollection<'T>) =
+    let internal insertOrReplaceInner (typed: bool) (item: 'T) (connection: NativeSqliteConnection) (name: string) (collection: ISoloDBCollection<'T>) =
         insertImpl typed item connection name true collection
 
     /// <summary>
@@ -277,7 +289,7 @@ module internal Helper =
     /// </summary>
     let internal createDict(items: KeyValuePair<'a, 'b> seq) =
         let dic = new Dictionary<'a, 'b>()
-        
+
         for kvp in items do
             dic.Add(kvp.Key, kvp.Value)
 
@@ -288,7 +300,7 @@ module internal Helper =
     /// Delegates to the canonical shared implementation in HelperSchema.
     /// </summary>
     let internal getIndexesFields<'a>() =
-        HelperSchema.getIndexesFieldsShared<'a>()
+        IndexMetadata.fields<'a>()
 
     /// <summary>
     /// Translates a LINQ expression into an SQL index definition and a sanitized index name.
@@ -300,49 +312,48 @@ module internal Helper =
     /// <summary>
     /// Ensures a non-unique index exists for the given expression.
     /// </summary>
-    let internal ensureIndex<'T, 'R> (collectionName: string) (conn: SqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
+    let internal ensureIndex<'T, 'R> (collectionName: string) (conn: NativeSqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
         let indexName, whereSQL = getIndexWhereAndName<'T,'R> collectionName expression
 
         let indexSQL = $"CREATE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
 
-        conn.Execute(indexSQL)
+        let mutable statement = conn.OpenStatement(indexSQL)
+        try
+            statement.Step() |> ignore
+            let affected = statement.RecordsAffected
+            statement.Dispose()
+            affected
+        with error -> statement.Abort(error); reraise()
 
     /// <summary>
     /// Ensures a unique index exists for the given expression.
     /// </summary>
-    let internal ensureUniqueAndIndex<'T,'R> (collectionName: string) (conn: SqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
+    let internal ensureUniqueAndIndex<'T,'R> (collectionName: string) (conn: NativeSqliteConnection) (expression: Expression<System.Func<'T, 'R>>) =
         let indexName, whereSQL = getIndexWhereAndName<'T,'R> collectionName expression
 
         let indexSQL = $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON \"{collectionName}\"{whereSQL}"
 
-        conn.Execute(indexSQL)
+        let mutable statement = conn.OpenStatement(indexSQL)
+        try
+            statement.Step() |> ignore
+            let affected = statement.RecordsAffected
+            statement.Dispose()
+            affected
+        with error -> statement.Abort(error); reraise()
 
     /// <summary>
     /// Ensures that all indexes declared via the [Indexed] attribute on the type 'T exist.
     /// </summary>
-    let internal ensureDeclaredIndexesFields<'T> (name: string) (conn: SqliteConnection) =
-        for (pi, indexed) in getIndexesFields<'T>() do
-            let isSoloId = not (isNull (pi.GetCustomAttribute<SoloDatabase.Attributes.SoloId>(true)))
-            if isSoloId then
-                let indexName, whereSQL = HelperSchema.getIndexWhereAndNameForPropertyShared name typeof<'T> pi
-                let indexSQL =
-                    if indexed.Unique then
-                        $"CREATE UNIQUE INDEX IF NOT EXISTS {indexName} ON \"{name}\"{whereSQL}"
-                    else
-                        $"CREATE INDEX IF NOT EXISTS {indexName} ON \"{name}\"{whereSQL}"
-                conn.Execute(indexSQL) |> ignore
-            else
-                let ensureIndexesFn = if indexed.Unique then ensureUniqueAndIndex else ensureIndex
-                let _code = ensureIndexesFn name conn (UtilsReflection.ExpressionHelper.get<obj, obj>(fun row -> row.Dyn<obj>(pi.Name)))
-                ()
+    let internal ensureDeclaredIndexesFields<'T> (name: string) (conn: NativeSqliteConnection) =
+        for index in getIndexesFields<'T>() do HelperSchema.ensureDeclaredIndex name conn false index
 
     let internal getSQLForTriggersForTable (name: string) =
         HelperSchema.getSQLForTriggersForTable name
 
-    let internal createTriggersForTable (name: string) (conn: SqliteConnection) =
+    let internal createTriggersForTable (name: string) (conn: NativeSqliteConnection) =
         HelperSchema.createTriggersForTable name conn
 
-    let internal createTableInner<'T> (name: string) (conn: SqliteConnection) =
+    let internal createTableInner<'T> (name: string) (conn: NativeSqliteConnection) =
         HelperSchema.createTableInner<'T> name conn
 
     /// <summary>

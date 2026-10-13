@@ -4,6 +4,7 @@ open SoloDatabase.SqlModel
 open SoloDatabase.IndexModel
 open SoloDatabase.ExpressionMatcher
 open SoloDatabase.SelectCoreBoundary
+open SoloDatabase.Numerics
 
 // ══════════════════════════════════════════════════════════════
 // Index plan shaping transform.
@@ -68,21 +69,77 @@ let private canonicalizeOrderBy (model: IndexModel) (tableName: string) (orderBy
     orderBy |> List.map (fun ob ->
         { ob with Expr = canonicalizeExpr model tableName ob.Expr })
 
-/// Rewrite alias references in an expression to use the table name instead.
-let rec private rewriteAliasToTable (alias: string) (tableName: string) (expr: SqlExpr) : SqlExpr =
-    match expr with
-    | JsonExtractExpr(Some src, col, path) when src = alias ->
-        JsonExtractExpr(Some (sprintf "\"%s\"" tableName), col, path)
-    | Cast(inner, sqlType) ->
-        Cast(rewriteAliasToTable alias tableName inner, sqlType)
-    | Binary(l, op, r) ->
-        Binary(rewriteAliasToTable alias tableName l, op, rewriteAliasToTable alias tableName r)
-    | Column(Some src, col) when src = alias ->
-        Column(Some (sprintf "\"%s\"" tableName), col)
-    | FunctionCall(name, args) ->
-        FunctionCall(name, args |> List.map (rewriteAliasToTable alias tableName))
-    | _ -> expr
+/// Preserve decoding while exposing the native storage range to an existing index.
+let private partitionNativePredicate model tableName sourceAlias predicate =
+    let indexed expression =
+        let expression = forSource tableName sourceAlias expression
+        indexesForTable model tableName |> List.exists (fun entry ->
+            match entry.Terms with
+            | term :: _ ->
+                System.String.Equals(term.Collation, "BINARY", System.StringComparison.OrdinalIgnoreCase)
+                && expressionMatchesIndex tableName expression term.Expression
+            | [] -> false)
+    let nativeOperand = function
+        | FunctionCall("DECIMAL", [Literal(Integer operation); Literal(Integer target); raw]) as operand
+            when operation = int64(int ExactNumericOperation.NativeValue)
+                 && target >= 0L && target <= int64 System.Int32.MaxValue && not(indexed operand) ->
+            let target = enum<ExactNumericOperation>(int target)
+            let native =
+                match target with
+                | ExactNumericOperation.ToDouble | ExactNumericOperation.ToSingle
+                | ExactNumericOperation.ToInt64 | ExactNumericOperation.ToInt32
+                | ExactNumericOperation.ToInt16 | ExactNumericOperation.ToSByte
+                | ExactNumericOperation.ToUInt32 | ExactNumericOperation.ToUInt16
+                | ExactNumericOperation.ToByte -> true
+                | _ -> false
+            let extraction =
+                match raw with
+                | JsonExtractExpr(_, "Value", _) | JsonRootExtract(_, "Value")
+                | FunctionCall("jsonb_extract", [Column(_, "Value"); Literal(String _)]) -> true
+                | _ -> false
+            if native && extraction && indexed raw then Some raw else None
+        | _ -> None
+    let direct = function Literal _ | Parameter _ -> true | _ -> false
+    let withCandidates raw native original =
+        let boundary = Literal(String "")
+        Binary(Binary(Binary(raw, Lt, boundary), And, native), Or,
+               Binary(Binary(raw, Ge, boundary), And, original))
+    let rec rewrite original =
+        match original with
+        | Binary(left, And, right) ->
+            let l, r = rewrite left, rewrite right
+            if obj.ReferenceEquals(l, left) && obj.ReferenceEquals(r, right) then original
+            else Binary(l, And, r)
+        | Binary(operand, Eq, value) when direct value ->
+            match nativeOperand operand with
+            | Some raw -> withCandidates raw (Binary(raw, Eq, value)) original
+            | None -> original
+        | Binary(value, Eq, operand) when direct value ->
+            match nativeOperand operand with
+            | Some raw -> withCandidates raw (Binary(value, Eq, raw)) original
+            | None -> original
+        | InList(operand, head, tail) when direct head && List.forall direct tail ->
+            match nativeOperand operand with
+            | Some raw -> withCandidates raw (InList(raw, head, tail)) original
+            | None -> original
+        | _ -> original
+    rewrite predicate
 
+/// A protected consumer also protects its otherwise simple derived input.
+let private allowsNativePartition (core: SelectCore) =
+    if not core.Joins.IsEmpty || hasMustNotBoundary core
+       || not core.OrderBy.IsEmpty || core.Limit.IsSome || core.Offset.IsSome then false
+    else
+        let mutable protectedExpression = false
+        core |> mapCoreExpressions (fun expression ->
+            protectedExpression <- protectedExpression || SqlExpr.exists (function
+                | InSubquery _ | Exists _ | ScalarSubquery _ | AggregateCall _ | WindowCall _
+                | FunctionCall("COUNT", [_]) -> true
+                | _ -> false) expression
+            expression) id |> ignore
+        not protectedExpression
+
+/// Rewrite alias references in an expression to use the table name instead.
 /// Check if an expression (or any sub-expression) matches an index,
 /// trying both the table name and an optional alias as the qualifier.
 let rec private expressionMatchesIndexWithAlias (model: IndexModel) (tableName: string) (alias: string option) (expr: SqlExpr) : bool =
@@ -93,7 +150,7 @@ let rec private expressionMatchesIndexWithAlias (model: IndexModel) (tableName: 
         let aliasMatch =
             match alias with
             | Some a when a <> tableName ->
-                let rewritten = rewriteAliasToTable a tableName expr
+                let rewritten = forSource tableName a expr
                 if rewritten <> expr then hasMatchingIndex model tableName rewritten
                 else false
             | _ -> false
@@ -138,7 +195,7 @@ let private reshapeJoinsForIndex (model: IndexModel) (core: SelectCore) : Select
         else { core with Joins = sorted }
 
 /// Apply index plan shaping to a single SelectCore.
-let private shapeInCore (model: IndexModel) (changed: bool ref) (core: SelectCore) : SelectCore =
+let private shapeInCore (model: IndexModel) (changed: bool ref) allowPartition (core: SelectCore) : SelectCore =
     // Refuse at must-not-shape boundaries
     if hasMustNotBoundary core then core
     elif hasAggregateOrWindowProjections core then core
@@ -163,6 +220,11 @@ let private shapeInCore (model: IndexModel) (changed: bool ref) (core: SelectCor
                     match shaped.Where with
                     | Some where ->
                         let canonical = canonicalizePredicate model tName where
+                        let canonical =
+                            if allowPartition then
+                                let alias = match shaped.Source with Some(BaseTable(_, Some alias)) -> alias | _ -> tName
+                                partitionNativePredicate model tName alias canonical
+                            else canonical
                         if canonical = where then shaped
                         else changed.Value <- true; { shaped with Where = Some canonical }
                     | None -> shaped
@@ -203,10 +265,15 @@ let private shapeInCore (model: IndexModel) (changed: bool ref) (core: SelectCor
             shaped
 
 /// Recursively apply index plan shaping to a SqlSelect.
-let rec shapeIndexSelect (model: IndexModel) (changed: bool ref) (sel: SqlSelect) : SqlSelect =
-    let recurse = shapeIndexSelect model changed
-    let core = mapDerivedSources recurse >> shapeInCore model changed
-    mapSelectParts (mapSingleCore core) recurse sel
+let rec private shapeSelect (model: IndexModel) (changed: bool ref) allowPartition (sel: SqlSelect) : SqlSelect =
+    let allowPartition = allowPartition && sel.Ctes.IsEmpty
+    let core original =
+        let allowed = allowPartition && allowsNativePartition original
+        original |> mapDerivedSources (shapeSelect model changed allowed)
+                 |> shapeInCore model changed allowed
+    mapSelectParts (mapSingleCore core) (shapeSelect model changed false) sel
+
+let shapeIndexSelect model changed sel = shapeSelect model changed true sel
 
 /// Apply index plan shaping to a SqlStatement.
 let shapeIndexStatement (model: IndexModel) (stmt: SqlStatement) : struct(SqlStatement * bool) =
@@ -226,6 +293,6 @@ let shapeIndexStatement (model: IndexModel) (stmt: SqlStatement) : struct(SqlSta
         | InsertValues _ -> struct(stmt, false)
         | InsertSelect sel ->
             let changed = ref false
-            let shaped = shapeIndexSelect model changed sel
+            let shaped = shapeSelect model changed false sel
             struct((if obj.ReferenceEquals(sel, shaped) then stmt else InsertStmt { ins with Source = InsertSelect shaped }), changed.Value)
     | UpdateStmt _ | DeleteStmt _ -> struct(stmt, false)

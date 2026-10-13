@@ -11,23 +11,12 @@ open SoloDatabase.SqlModel
 open SoloDatabase.DBRefManyDescriptor
 open SoloDatabase.GroupJoinRuntimeTypes
 
-/// Small shared pieces of GroupJoin chain emission: materialising discovered joins onto an inner
-/// row, the exact-decimal average expression, the count subqueries, and the entity JSON shape.
+/// Bounded grouped element counts share the original source and count projection.
 module internal GroupJoinChainParts =
     open QueryableHelperJoin
     open QueryableHelperState
     open QueryableHelperPreprocess
     open QueryableHelperBase
-    let materializeInnerRowJoins (rt: GroupJoinRuntime) (alias: string) (joins: ResizeArray<JoinEdge>) =
-        let innerMaterializedPaths =
-            if rt.InnerCtx.MaterializedPaths.Count > 0 then Some rt.InnerCtx.MaterializedPaths else None
-        rt.MaterializeDiscoveredJoins joins (Some ("\"" + alias + "\"")) innerMaterializedPaths
-    let internal buildExactDecimalAverageExpr (argExpr: SqlExpr) =
-        let countExpr = SqlExpr.AggregateCall(AggregateKind.Count, Some argExpr, false, None)
-        SqlExpr.CaseExpr(
-            (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), SqlExpr.Literal(SqlLiteral.Null)),
-            [],
-            Some(SqlExpr.FunctionCall("DECIMAL_DIV", [SqlExpr.AggregateCall(AggregateKind.Sum, Some argExpr, false, None); countExpr])))
     let buildCountSubquery (rt: GroupJoinRuntime) (baseCore: SelectCore) (limit: int option) =
         let countSourceCore =
             { baseCore with

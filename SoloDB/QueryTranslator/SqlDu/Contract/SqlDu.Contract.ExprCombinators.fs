@@ -30,6 +30,55 @@ module internal SqlExprCombinators =
             let mapped = mapper original
             if same original mapped then value else Some mapped
 
+    /// Map expressions in one SELECT scope; callers own nested-query policy.
+    let mapCoreExpressions mapExpr mapQuery (core: SelectCore) =
+        let projection (original: Projection) =
+            let expression = mapExpr original.Expr
+            if same expression original.Expr then original else { original with Expr = expression }
+        let projections =
+            match core.Projections with
+            | AllColumns -> core.Projections
+            | Explicit(head, tail) ->
+                let mappedHead = projection head
+                let mappedTail = mapList projection tail
+                if same head mappedHead && same tail mappedTail then core.Projections
+                else Explicit(mappedHead, mappedTail)
+        let where = mapOption mapExpr core.Where
+        let having = mapOption mapExpr core.Having
+        let groupBy = mapList mapExpr core.GroupBy
+        let orderBy = mapList (fun original ->
+            let expression = mapExpr original.Expr
+            if same expression original.Expr then original else { original with Expr = expression }) core.OrderBy
+        let limit = mapOption mapExpr core.Limit
+        let offset = mapOption mapExpr core.Offset
+        let tableSource source =
+            match source with
+            | BaseTable _ -> source
+            | DerivedTable(query, alias) ->
+                let mapped = mapQuery query
+                if same query mapped then source else DerivedTable(mapped, alias)
+            | FromJsonEach(expression, alias) ->
+                let mapped = mapExpr expression
+                if same expression mapped then source else FromJsonEach(mapped, alias)
+        let source = mapOption tableSource core.Source
+        let joins = mapList (fun join ->
+            match join with
+            | CrossJoin source ->
+                let mapped = tableSource source
+                if same source mapped then join else CrossJoin mapped
+            | ConditionedJoin(kind, source, condition) ->
+                let mappedSource = tableSource source
+                let mappedCondition = mapExpr condition
+                if same source mappedSource && same condition mappedCondition then join
+                else ConditionedJoin(kind, mappedSource, mappedCondition)) core.Joins
+        if same projections core.Projections && same where core.Where && same having core.Having
+           && same groupBy core.GroupBy && same orderBy core.OrderBy && same limit core.Limit
+           && same offset core.Offset && same source core.Source && same joins core.Joins then core
+        else
+            { core with Projections = projections; Where = where; Having = having
+                        GroupBy = groupBy; OrderBy = orderBy; Limit = limit; Offset = offset
+                        Source = source; Joins = joins }
+
     /// Map derived source queries only; expression scopes belong to the caller.
     let mapDerivedSources (mapQuery: SqlSelect -> SqlSelect) (core: SelectCore) =
         let source (original: TableSource) =
@@ -92,6 +141,9 @@ module internal SqlExprCombinators =
         | JsonArrayExpr elements ->
             let mapped = mapList map elements
             if same elements mapped then node else JsonArrayExpr mapped
+        | RowValueExpr elements ->
+            let mapped = mapList map elements
+            if same elements mapped then node else RowValueExpr mapped
         | JsonObjectExpr properties ->
             let mapped = mapList valuePair properties
             if same properties mapped then node else JsonObjectExpr mapped
@@ -172,7 +224,7 @@ module internal SqlExprCombinators =
                 | JsonSetExpr(target, assignments) ->
                     let acc = loop acc target
                     assignments |> List.fold (fun s (_, value) -> loop s value) acc
-                | JsonArrayExpr(elements) ->
+                | JsonArrayExpr(elements) | RowValueExpr(elements) ->
                     elements |> List.fold loop acc
                 | JsonObjectExpr(properties) ->
                     properties |> List.fold (fun s (_, value) -> loop s value) acc
@@ -239,7 +291,7 @@ module internal SqlExprCombinators =
                     | JsonRootExtract _ -> false
                     | JsonSetExpr(target, assignments) ->
                         loop target || (assignments |> List.exists (fun (_, value) -> loop value))
-                    | JsonArrayExpr(elements) ->
+                    | JsonArrayExpr(elements) | RowValueExpr(elements) ->
                         elements |> List.exists loop
                     | JsonObjectExpr(properties) ->
                         properties |> List.exists (fun (_, value) -> loop value)

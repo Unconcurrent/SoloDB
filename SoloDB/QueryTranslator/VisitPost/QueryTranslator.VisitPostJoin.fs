@@ -12,111 +12,60 @@ open SoloDatabase.SqlModel
 open DBRefTypeHelpers
 
 module internal QueryTranslatorVisitPostJoin =
-    /// Compute a stable path key for a member expression chain from root parameter.
-    let rec private computePathKey (expr: Expression) : string =
-        match expr with
-        | :? MemberExpression as me when not (isNull me.Expression) ->
-            let parent = computePathKey me.Expression
-            if parent = "" then me.Member.Name else parent + "." + me.Member.Name
-        | :? ParameterExpression -> ""
-        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> computePathKey ue.Operand
-        | _ ->
-            raise (NotSupportedException(
-                sprintf "Unsupported relation path expression node: %A. Rewrite the query to use direct member access from the query root." expr.NodeType))
+    /// The actual produced reference retains its original logical admission scopes.
+    let internal validateReferenceNavigation (reference: QueryProducedValue) =
+        for scope in reference.Input.Navigation do
+            if scope.Depth > maxRelationDepth then
+                raise (NotSupportedException(
+                    sprintf "Error: Relation chain is too deep or circular (depth > %d).\nReason: The query exceeds the supported relation traversal depth.\nFix: Reduce relation depth or split the query into multiple steps." maxRelationDepth))
+            let path = String.Join(".", scope.Path)
+            if scope.Loading.Excluded |> Array.contains path then
+                raise (InvalidOperationException(
+                    sprintf "Error: Cannot access excluded relation property '%s.Value'.\nReason: The property was excluded from the query.\nFix: Remove the Exclude call or use .Id instead." path))
+        reference.Input.Navigation |> Array.tryHead |> Option.map (fun scope -> String.Join(".", scope.Path)) |> Option.defaultValue ""
 
-    // Count DBRef chain depth by relation hops, not by total JOIN count.
-    // This avoids false positives when a predicate touches many independent DBRefs.
-    let rec private dbRefChainDepth (expr: Expression) =
-        match unwrapConvert expr with
-        | :? MemberExpression as me when isDBRefType me.Type ->
-            1 + dbRefOwnerDepth me.Expression
-        | _ ->
-            0
+    let internal referenceSnapshotIncluded (reference: QueryProducedValue) =
+        reference.Input.Navigation |> Array.forall (fun scope ->
+            let path = String.Join(".", scope.Path)
+            not(Array.contains path scope.Loading.Excluded) &&
+            (not scope.Loading.Whitelist || Array.contains path scope.Loading.Included))
 
-    and private dbRefOwnerDepth (expr: Expression) =
-        match unwrapConvert expr with
-        | :? MemberExpression as me when isDBRefValueBoundary me ->
-            dbRefChainDepth (unwrapConvert me.Expression)
-        | _ ->
-            0
-
-    /// Given a MemberExpression for a DBRef property (e.g., o.Customer or o.Author.Value.Publisher),
-    /// resolve the source alias and property name for JSON extraction.
-    let rec internal resolveDBRefPropertyLocation (qb: QueryBuilder) (dbrefPropExpr: MemberExpression) : struct(string option * string) =
-        match dbrefPropExpr.Expression with
-        | :? ParameterExpression ->
-            struct(qb.SourceAlias, dbrefPropExpr.Member.Name)
-        | :? MemberExpression as parentMe when isDBRefValueBoundary parentMe ->
-            let parentAlias = ensureDBRefJoin qb parentMe
-            struct(Some parentAlias, dbrefPropExpr.Member.Name)
-        | _ ->
-            let fullPath = computePathKey dbrefPropExpr
-            struct(qb.SourceAlias, fullPath)
-
-    and internal resolveDBRefOwnerCollectionAndProperty (qb: QueryBuilder) (dbrefPropExpr: MemberExpression) : struct(string * string) =
-        match dbrefPropExpr.Expression with
-        | :? ParameterExpression ->
-            struct(qb.SourceContext.RootTable, dbrefPropExpr.Member.Name)
-        | :? MemberExpression as parentMe when isDBRefValueBoundary parentMe ->
-            let parentDbRefExpr = unwrapConvert parentMe.Expression
-            let parentPath = computePathKey parentDbRefExpr
-            ensureDBRefJoin qb parentMe |> ignore
-            let ownerCollection =
-                match qb.SourceContext.FindJoin(parentPath) with
-                | Some join -> join.TargetTable
-                | None -> qb.SourceContext.RootTable
-            struct(ownerCollection, dbrefPropExpr.Member.Name)
-        | _ ->
-            struct(qb.SourceContext.RootTable, dbrefPropExpr.Member.Name)
-
-    and internal resolveTargetCollectionForRelation (ctx: QueryContext) (ownerCollection: string) (propertyName: string) (targetType: Type) =
-        let defaultTable = formatName targetType.Name
-        match ctx.TryResolveRelationTarget(ownerCollection, propertyName) with
-        | Some mapped when not (String.IsNullOrWhiteSpace mapped) -> formatName mapped
-        | _ -> ctx.ResolveCollectionForType(UtilsReflection.typeIdentityKey targetType, defaultTable)
-
-    /// Ensure a LEFT JOIN exists for a DBRef<T>.Value access. Returns the alias.
-    and internal ensureDBRefJoin (qb: QueryBuilder) (valueMemberExpr: MemberExpression) : string =
+    /// Indexed placement consumes the already prepared owner/property occurrence.
+    let internal ensurePreparedDBRefJoin (qb: QueryBuilder) (referenceExpr: Expression) pathKey
+        (prepared: struct(QueryProducedValue * JsonSerializator.JsonEqualitySupport.PathSegment list * bool)) : JoinEdge =
         qb.StepTranslation()
-        let dbrefExpr = unwrapConvert valueMemberExpr.Expression
-        let targetType = valueMemberExpr.Type
-        let ctx = qb.SourceContext
-
-        // DBRef chain depth is counted directly (no off-by-one), so > is correct here.
-        // DBRefMany guards use >= because the outer level is excluded from the predicate body count.
-        if dbRefChainDepth dbrefExpr > maxRelationDepth then
-            raise (NotSupportedException(
-                sprintf "Error: Relation chain is too deep or circular (depth > %d).\nReason: The query exceeds the supported relation traversal depth.\nFix: Reduce relation depth or split the query into multiple steps." maxRelationDepth))
-
-        let pathKey = computePathKey dbrefExpr
-
-        if ctx.ExcludedPaths.Contains(pathKey) then
-            raise (InvalidOperationException(
-                sprintf "Error: Cannot access excluded relation property '%s.Value'.\nReason: The property was excluded from the query.\nFix: Remove the Exclude call or use .Id instead." pathKey))
-
-        match ctx.FindJoin(pathKey) with
-        | Some existing -> existing.TargetAlias
+        let targetType = referenceTargetType referenceExpr.Type
+        let struct(reference, referencePath, onOwnerRoot) = prepared
+        let relation = reference.Input.ReferenceOwner.Value
+        let source = relation.Sources[0]
+        let owner = QueryTranslatorPhysicalSource.referenceOwner relation
+        let sourceAlias =
+            match owner.Identity with
+            | SqlExpr.Column(alias, _) -> alias
+            | _ -> None
+        let context = qb.SourceContext
+        let targetTable = context.ResolveQueryRelationTarget(source.Owner |> ValueOption.map _.TableName, source.PropertyName, targetType)
+        let referenceValue =
+            reference |> QueryProduced.consume qb.SourceContext.NextAlias (fun value input ->
+                input.Source |> ValueOption.defaultWith (fun () -> jsonToken value))
+        match QueryTranslatorReferenceJoin.tryFindEdge qb.SourceContext pathKey sourceAlias targetTable referenceValue with
+        | Some edge -> edge
         | None ->
-            let alias = ctx.NextAlias()
-
-            let struct(sourceAlias, propName) =
-                match dbrefExpr with
-                | :? MemberExpression as me -> resolveDBRefPropertyLocation qb me
-                | _ -> struct(qb.SourceAlias, computePathKey dbrefExpr)
-
-            let struct(ownerCollection, relationPropertyName) =
-                match dbrefExpr with
-                | :? MemberExpression as me -> resolveDBRefOwnerCollectionAndProperty qb me
-                | _ -> struct(qb.SourceContext.RootTable, propName)
-
-            let targetTable = resolveTargetCollectionForRelation ctx ownerCollection relationPropertyName targetType
-
-            ctx.Joins.Add({
+            let alias = qb.SourceContext.NextAlias()
+            let targetValue =
+                if isFileRefType referenceExpr.Type then fileSystemHeaderValueExpr targetType alias
+                else SqlExpr.Column(Some alias, "Value")
+            let edge = {
                 TargetAlias = alias
                 TargetTable = targetTable
+                TargetValue = targetValue
+                ReferenceValue = referenceValue
+                ReferencePath = referencePath
+                ReferenceOnOwnerRoot = onOwnerRoot && sourceAlias.IsSome
                 JoinKind = "LEFT JOIN"
                 OnSourceAlias = sourceAlias
-                OnPropertyName = propName
+                OnPropertyName = source.PropertyName
                 PropertyPath = pathKey
-            })
-            alias
+            }
+            qb.SourceContext.Joins.Add(edge)
+            edge

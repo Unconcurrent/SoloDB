@@ -9,7 +9,7 @@ module internal CompiledPage =
     let private binary op left right = Binary(left, op, right)
     let private project name expr = { Alias = Some name; Expr = expr }
     let private select core = { Ctes = []; Body = SingleSelect core }
-    let private materialized name core = { Name = name; Materialized = true; Query = select core }
+    let private cte name core = { Name = name; Query = select core }
 
     let private qualify source =
         SqlExpr.map (function
@@ -225,7 +225,7 @@ module internal CompiledPage =
                         // Id is non-null, so NOT IN over these disjoint ranges
                         // preserves membership while building a smaller lookup.
                         let negative = Unary(UnaryOperator.Not, InSubquery(column orderedAlias "Id", excludedIds))
-                        [materialized excludedName excludedCount], [smaller, negative; binary BinaryOperator.And broad (Unary(UnaryOperator.Not, smaller)), ordinary]
+                        [cte excludedName excludedCount], [smaller, negative; binary BinaryOperator.And broad (Unary(UnaryOperator.Not, smaller)), ordinary]
                     | _ -> [], [broad, ordinary]
                 let orderedPages =
                     membershipPredicates |> List.map (fun (enabled, predicate) ->
@@ -236,7 +236,7 @@ module internal CompiledPage =
                                      // Choose the statement arm once, before the scan,
                                      // instead of evaluating strategy CASE for every row.
                                      Limit = Some(CaseExpr((enabled, limit), [], Some(integer 0L))) })
-                [materialized sizeName size; materialized retryName retry] @ complementCtes, orderedPages, retryName
+                [cte sizeName size; cte retryName retry] @ complementCtes, orderedPages, retryName
         let success =
             { core with Source = Some(BaseTable(hitsName, None)); Joins = [CrossJoin(BaseTable(stateName, None))]
                         Projections = projected hitsName; Where = Some(column stateName "enough"); OrderBy = ordering hitsName }
@@ -270,7 +270,7 @@ module internal CompiledPage =
         let membershipArms = membership |> List.map (arm (table + "_page_membership"))
         let union = { Ctes = []; Body = UnionAllSelect(arm (table + "_page_success") success, membershipArms @ [arm (table + "_page_retry") fallbackRows]) }
         let pageAlias = table + "_page_result"
-        { Ctes = [materialized windowName window; materialized hitsName hits; materialized stateName state; materialized fallbackName fallbackGate] @ costCtes
+        { Ctes = [cte windowName window; cte hitsName hits; cte stateName state; cte fallbackName fallbackGate] @ costCtes
           Body = SingleSelect { empty with Source = Some(DerivedTable(union, pageAlias))
                                            Projections = projected pageAlias
                                            OrderBy = ordering pageAlias } }

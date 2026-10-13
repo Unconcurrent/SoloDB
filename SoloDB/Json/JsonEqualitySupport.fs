@@ -18,12 +18,12 @@ module internal JsonEqualitySupport =
     let appendMember (path: string) (key: string) =
         if key.Length = 0 || key |> Seq.exists (fun c -> not (Char.IsLetterOrDigit c || c = '_' || c = '$')) then
             let escaped = key.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\000", "\\u0000")
-            sprintf "%s.\"%s\"" path escaped
-        else sprintf "%s.%s" path key
+            path + ".\"" + escaped + "\""
+        else path + "." + key
 
     // Traversal prepends segments; rendering applies them from the root outwards.
     let renderPath segments =
         List.foldBack (fun segment path ->
             match segment with
             | Member key -> appendMember path key
-            | Index index -> sprintf "%s[%d]" path index) segments "$"
+            | Index index -> path + "[" + index.ToString(Globalization.CultureInfo.InvariantCulture) + "]") segments "$"

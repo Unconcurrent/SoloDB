@@ -3,34 +3,33 @@ namespace SoloDatabase
 open System
 open System.Collections.Generic
 open System.Linq.Expressions
-open Microsoft.Data.Sqlite
 open SoloDatabase.Types
 
 module internal CollectionInstanceCrud =
     let insert<'T>
         (item: 'T)
         (hasRelations: bool)
-        (withTransaction: (SqliteConnection -> int64) -> int64)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
-        (insertInner: SqliteConnection -> int64) =
+        (withTransaction: (NativeSqliteConnection -> int64) -> int64)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
+        (insertInner: NativeSqliteConnection -> int64) =
         CollectionInsertOps<'T>.Insert item hasRelations withTransaction ensureRelationTx insertInner
 
     let insertOrReplace<'T>
         (item: 'T)
         (hasRelations: bool)
         (name: string)
-        (withTransaction: (SqliteConnection -> int64) -> int64)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
-        (tryLoadExistingOwnerForUpsert: SqliteConnection -> obj voption * int64 voption)
-        (insertOrReplaceInner: SqliteConnection -> int64) =
+        (withTransaction: (NativeSqliteConnection -> int64) -> int64)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
+        (tryLoadExistingOwnerForUpsert: NativeSqliteConnection -> obj voption * int64 voption)
+        (insertOrReplaceInner: NativeSqliteConnection -> int64) =
         CollectionInsertOps<'T>.InsertOrReplace item hasRelations name withTransaction ensureRelationTx tryLoadExistingOwnerForUpsert insertOrReplaceInner
 
     let tryGetByIdInt64<'T>
         (id: int64)
         (name: string)
         (hasRelations: bool)
-        (getConnection: unit -> SqliteConnection)
-        (hydrateRelations: SqliteConnection -> int64 -> obj -> unit) =
+        (getConnection: unit -> NativeSqliteConnection)
+        (hydrateRelations: NativeSqliteConnection -> int64 -> obj -> unit) =
         CollectionReadDeleteOps<'T>.TryGetByIdInt64 id name hasRelations getConnection hydrateRelations
 
     let requireByIdInt64<'T> (id: int64) (name: string) (value: 'T option) =
@@ -39,9 +38,9 @@ module internal CollectionInstanceCrud =
     let deleteByIdInt64<'T>
         (id: int64)
         (name: string)
-        (withTransaction: (SqliteConnection -> int) -> int)
-        (requiresRelationDeleteHandling: SqliteConnection -> bool)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
+        (withTransaction: (NativeSqliteConnection -> int) -> int)
+        (requiresRelationDeleteHandling: NativeSqliteConnection -> bool)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
         (syncDeleteOwner: RelationsTypes.RelationTxContext -> int64 -> obj -> unit) =
         CollectionReadDeleteOps<'T>.DeleteByIdInt64 id name withTransaction requiresRelationDeleteHandling ensureRelationTx syncDeleteOwner
 
@@ -49,8 +48,8 @@ module internal CollectionInstanceCrud =
         (id: 'IdType)
         (name: string)
         (hasRelations: bool)
-        (getConnection: unit -> SqliteConnection)
-        (hydrateRelations: SqliteConnection -> int64 -> obj -> unit) =
+        (getConnection: unit -> NativeSqliteConnection)
+        (hydrateRelations: NativeSqliteConnection -> int64 -> obj -> unit) =
         CollectionReadDeleteOps<'T>.TryGetByCustomId id name hasRelations getConnection hydrateRelations
 
     let tryGetByIdWithFallback<'T, 'IdType when 'IdType : equality>
@@ -62,9 +61,9 @@ module internal CollectionInstanceCrud =
     let deleteByCustomId<'T, 'IdType when 'IdType : equality>
         (id: 'IdType)
         (name: string)
-        (withTransaction: (SqliteConnection -> int) -> int)
-        (requiresRelationDeleteHandling: SqliteConnection -> bool)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
+        (withTransaction: (NativeSqliteConnection -> int) -> int)
+        (requiresRelationDeleteHandling: NativeSqliteConnection -> bool)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
         (syncDeleteOwner: RelationsTypes.RelationTxContext -> int64 -> obj -> unit) =
         CollectionReadDeleteOps<'T>.DeleteByCustomId id name withTransaction requiresRelationDeleteHandling ensureRelationTx syncDeleteOwner
 
@@ -78,8 +77,8 @@ module internal CollectionInstanceCrud =
         (item: 'T)
         (name: string)
         (hasRelations: bool)
-        (withTransaction: (SqliteConnection -> unit) -> unit)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
+        (withTransaction: (NativeSqliteConnection -> unit) -> unit)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
         (mkRelationPathSets: unit -> HashSet<string> * HashSet<string>)
         (setSerializedItem: IDictionary<string, obj> -> 'T -> unit) =
         CollectionMutationOps<'T>.Update item name hasRelations withTransaction ensureRelationTx mkRelationPathSets setSerializedItem
@@ -87,19 +86,19 @@ module internal CollectionInstanceCrud =
     let deleteMany<'T>
         (filter: Expression<Func<'T, bool>>)
         (name: string)
-        (withTransaction: (SqliteConnection -> int) -> int)
-        (requiresRelationDeleteHandling: SqliteConnection -> bool)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
-        (selectMutationRows: SqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array) =
+        (withTransaction: (NativeSqliteConnection -> int) -> int)
+        (requiresRelationDeleteHandling: NativeSqliteConnection -> bool)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
+        (selectMutationRows: NativeSqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array) =
         CollectionMutationOps<'T>.DeleteMany filter name withTransaction requiresRelationDeleteHandling ensureRelationTx selectMutationRows
 
     let deleteOne<'T>
         (filter: Expression<Func<'T, bool>>)
         (name: string)
-        (withTransaction: (SqliteConnection -> int) -> int)
-        (requiresRelationDeleteHandling: SqliteConnection -> bool)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
-        (selectMutationRows: SqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array) =
+        (withTransaction: (NativeSqliteConnection -> int) -> int)
+        (requiresRelationDeleteHandling: NativeSqliteConnection -> bool)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
+        (selectMutationRows: NativeSqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array) =
         CollectionMutationOps<'T>.DeleteOne filter name withTransaction requiresRelationDeleteHandling ensureRelationTx selectMutationRows
 
     let replaceMany<'T>
@@ -107,8 +106,8 @@ module internal CollectionInstanceCrud =
         (filter: Expression<Func<'T, bool>>)
         (name: string)
         (hasRelations: bool)
-        (withTransaction: (SqliteConnection -> int) -> int)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
+        (withTransaction: (NativeSqliteConnection -> int) -> int)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
         (mkRelationPathSets: unit -> HashSet<string> * HashSet<string>)
         (setSerializedItem: IDictionary<string, obj> -> 'T -> unit) =
         CollectionMutationOps<'T>.ReplaceMany item filter name hasRelations withTransaction ensureRelationTx mkRelationPathSets setSerializedItem
@@ -118,8 +117,8 @@ module internal CollectionInstanceCrud =
         (filter: Expression<Func<'T, bool>>)
         (name: string)
         (hasRelations: bool)
-        (withTransaction: (SqliteConnection -> int) -> int)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
+        (withTransaction: (NativeSqliteConnection -> int) -> int)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
         (mkRelationPathSets: unit -> HashSet<string> * HashSet<string>)
         (setSerializedItem: IDictionary<string, obj> -> 'T -> unit) =
         CollectionMutationOps<'T>.ReplaceOne item filter name hasRelations withTransaction ensureRelationTx mkRelationPathSets setSerializedItem
@@ -129,9 +128,9 @@ module internal CollectionInstanceCrud =
         (filter: Expression<Func<'T, bool>>)
         (name: string)
         (hasRelations: bool)
-        (getConnection: unit -> SqliteConnection)
-        (withTransaction: (SqliteConnection -> int) -> int)
-        (ensureRelationTx: SqliteConnection -> RelationsTypes.RelationTxContext)
-        (selectMutationRows: SqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array)
-        (executeJsonUpdateManyByRows: SqliteConnection -> DbObjectRow array -> ResizeArray<Expression<Action<'T>>> -> int) =
+        (getConnection: unit -> NativeSqliteConnection)
+        (withTransaction: (NativeSqliteConnection -> int) -> int)
+        (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
+        (selectMutationRows: NativeSqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array)
+        (executeJsonUpdateManyByRows: NativeSqliteConnection -> DbObjectRow array -> ResizeArray<Expression<Action<'T>>> -> int) =
         CollectionMutationOps<'T>.UpdateMany transform filter name hasRelations getConnection withTransaction ensureRelationTx selectMutationRows executeJsonUpdateManyByRows

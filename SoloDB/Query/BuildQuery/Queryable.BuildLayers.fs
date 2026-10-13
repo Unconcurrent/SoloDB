@@ -8,8 +8,7 @@ open System.Linq.Expressions
 open System.Reflection
 open System.Text
 open System.Runtime.CompilerServices
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open Utils
 open JsonFunctions
 open Connections
@@ -57,13 +56,13 @@ module internal QueryableLayerBuild =
                     match j.OnSourceAlias with
                     | None when not isBaseTable -> Some "\"o\""
                     | existing -> existing
-                ConditionedJoin(
-                    parseJoinKind j.JoinKind,
-                    BaseTable(j.TargetTable, Some j.TargetAlias),
-                    SqlExpr.Binary(
-                        SqlExpr.Column(Some j.TargetAlias, "Id"),
-                        BinaryOperator.Eq,
-                        SqlExpr.JsonExtractExpr(onSourceAlias, "Value", JsonPath(j.OnPropertyName, [])))))
+                let representation =
+                    let derivedOwner =
+                        not isBaseTable &&
+                        (j.OnSourceAlias |> Option.forall (fun alias -> AliasRewrite.normalizeSourceAlias alias = "o"))
+                    if derivedOwner then QueryTranslatorReferenceJoin.StoredOrHydratedId
+                    else QueryTranslatorReferenceJoin.StoredId
+                QueryTranslatorReferenceJoin.joinEdgeToClause (QueryTranslatorReferenceJoin.parseJoinKind j.JoinKind) onSourceAlias representation j)
             |> Seq.toList
 
         // A non-base layer selects from a derived source aliased "o" and now also has a
@@ -90,11 +89,11 @@ module internal QueryableLayerBuild =
 
         struct(finalProjections, joins, boundWhere, boundOrderBy)
 
-    let internal buildLayersDu<'T>
+    let internal buildLayersDu (rootElementType: Type)
         (sourceCtx: QueryContext)
         (vars: Dictionary<string, obj>)
         (layers: SQLSubquery ResizeArray)
-        : SqlSelect =
+        : TranslatedQuery =
 
         let layerCount = layers.Count
 
@@ -112,34 +111,25 @@ module internal QueryableLayerBuild =
         // edges that are still unemitted, and records them here so a shared edge is emitted once.
         let materializedJoinAliases = System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal)
 
-        let rec buildLayer (i: int) : SqlSelect =
+        let rec buildLayer (i: int) : TranslatedQuery =
             let layer = layers.[i]
             match layer with
-            // Edge case 1: Empty query (root table only)
-            | Simple layer when layer.IsEmptyWithTableName ->
-                let isTypePrimitive = QueryTranslatorBaseTypes.isPrimitiveSQLiteType typeof<'T>
-                if isTypePrimitive then
-                    // Edge case 2: Primitive type extraction — jsonb_extract(Value, '$')
-                    wrapCore (mkCore
-                        [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
-                         { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$")]) }]
-                        (Some (BaseTable(layer.TableName, None))))
-                else
-                    // Non-primitive: bare table reference (Id and Value are columns)
-                    wrapCore (mkCore
-                        [{ Alias = None; Expr = SqlExpr.Column(None, "Id") }
-                         { Alias = None; Expr = SqlExpr.Column(None, "Value") }]
-                        (Some (BaseTable(layer.TableName, None))))
-
             | Simple layer ->
-                let isLocalKeyProjection =
-                    match layer.Selector with
-                    | Some (KeyProjection _) -> true
-                    | _ -> false
+                let isBaseTable = i = 0
+                let projectionOrder = sourceCtx.BindQueryValue |> ValueOption.map (fun binder -> binder.Order.ReserveProjection())
+                let input =
+                    if isBaseTable then
+                        { Query = wrapCore(mkCore [] None)
+                          SerializationInput = QueryTranslatorPhysicalSource.ownerInput sourceCtx rootElementType layer.TableName (SqlExpr.Column(None, "Id"))
+                          KeyInput = ValueNone }
+                    else buildLayer(i - 1)
+                let isLocalKeyProjection = layer.Selector |> Option.exists (function KeyProjection _ -> true | _ -> false)
                 let currentCtx =
-                    if isLocalKeyProjection then cloneQueryContext sourceCtx
-                    else sourceCtx
-                let effectiveTableName = layer.TableName
+                    if isLocalKeyProjection then { cloneQueryContext sourceCtx with AliasCounter = sourceCtx.AliasCounter }
+                    else { sourceCtx with Joins = ResizeArray() }
+                let currentCtx = { currentCtx with LayerPosition = (if isBaseTable then BaseLayer else OuterLayer)
+                                                   SerializationInput = input.SerializationInput }
+                let effectiveTableName = if isBaseTable then layer.TableName else "o"
                 let hasTableName = not (String.IsNullOrEmpty effectiveTableName)
                 let quotedTableName = "\"" + effectiveTableName + "\""
                 let idColumnExpr = if hasTableName then SqlExpr.Column(Some quotedTableName, "Id") else SqlExpr.Column(None, "Id")
@@ -148,60 +138,62 @@ module internal QueryableLayerBuild =
                 // Track whether the Value projection can be rewritten for JOIN materialization.
                 let mutable needsValueMaterialization = false
 
-                // Edges discovered while translating THIS layer belong to THIS layer. Layers are
-                // built outer-projection first, then inner layers by recursion, then outer
-                // clauses, so a shared counter would attach an outer edge to an inner layer.
                 let joinsBeforeProjections = currentCtx.Joins.Count
-
-                // Build projections based on selector.
-                let projections =
+                let mutable outputInput = input.SerializationInput
+                let mutable keyInput = input.KeyInput
+                let mutable producedValue = ValueNone
+                let mutable producedKey = ValueNone
+                let mutable companions = []
+                let value =
+                    if isBaseTable then rootValue rootElementType BaseLayer (if hasTableName then Some quotedTableName else None) "Value"
+                    else valueColumnExpr
+                let valueInput =
+                    if isBaseTable then { input.SerializationInput with Carrier = if isSqlScalarResult rootElementType then SqlScalar else CanonicalToken }
+                    else input.SerializationInput
+                let buildProjections () =
                     match layer.Selector with
-                    | Some (Expression selector) ->
-                        let selectorExpr = translateExprDu sourceCtx layer.TableName selector vars
-                        [{ Alias = None; Expr = idColumnExpr }
-                         { Alias = Some "Value"; Expr = selectorExpr }]
-                    | Some (KeyProjection selector) ->
-                        let isTypePrimitive = QueryTranslatorBaseTypes.isPrimitiveSQLiteType typeof<'T>
-                        let keyExpr = translateExprDu currentCtx effectiveTableName selector vars
-                        if isTypePrimitive then
-                            [{ Alias = None; Expr = idColumnExpr }
-                             { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("jsonb_extract", [valueColumnExpr; SqlExpr.Literal(SqlLiteral.String "$")]) }
-                             { Alias = Some syntheticGroupKeyAlias; Expr = keyExpr }]
-                        else
-                            needsValueMaterialization <- true
-                            [{ Alias = None; Expr = idColumnExpr }
-                             { Alias = Some "Value"; Expr = valueColumnExpr }
-                             { Alias = Some syntheticGroupKeyAlias; Expr = keyExpr }]
-                    | Some (DuSelector buildProjections) ->
-                        buildProjections layer.TableName vars
+                    | Some(Expression selector) ->
+                        let produced = QueryTranslator.translateProduced currentCtx effectiveTableName selector vars
+                        producedValue <- ValueSome produced
+                        [{ Alias = None; Expr = idColumnExpr }; { Alias = Some "Value"; Expr = SqlExpr.Literal SqlLiteral.Null }]
+                    | Some(KeyProjection selector) ->
+                        let produced = QueryTranslator.translateProduced currentCtx effectiveTableName selector vars
+                        producedKey <- ValueSome produced
+                        let key = SqlExpr.Literal SqlLiteral.Null
+                        outputInput <- valueInput
+                        needsValueMaterialization <- not(isSqlScalarResult rootElementType)
+                        companions <- QueryTranslatorSerialization.companionProjections (if hasTableName then Some quotedTableName else None) input.SerializationInput
+                        [{ Alias = None; Expr = idColumnExpr }; { Alias = Some "Value"; Expr = value }
+                         { Alias = Some syntheticGroupKeyAlias; Expr = key }]
+                    | Some(DuSelector buildProjections) ->
+                        let struct(projections, producedInput) = buildProjections currentCtx input effectiveTableName vars
+                        let value = projections |> List.find (fun projection -> projection.Alias = Some "Value") |> _.Expr
+                        producedValue <- ValueSome(DirectValue(value, producedInput))
+                        projections
                     | None ->
-                        let isTypePrimitive = QueryTranslatorBaseTypes.isPrimitiveSQLiteType typeof<'T>
-                        if isTypePrimitive then
-                            [{ Alias = None; Expr = idColumnExpr }
-                             { Alias = Some "Value"; Expr = SqlExpr.FunctionCall("jsonb_extract", [valueColumnExpr; SqlExpr.Literal(SqlLiteral.String "$")]) }]
-                        else
-                            needsValueMaterialization <- true
-                            [{ Alias = None; Expr = idColumnExpr }
-                             { Alias = None; Expr = valueColumnExpr }]
+                        outputInput <- valueInput
+                        needsValueMaterialization <- not(isSqlScalarResult rootElementType)
+                        companions <- QueryTranslatorSerialization.companionProjections (if hasTableName then Some quotedTableName else None) input.SerializationInput
+                        [{ Alias = None; Expr = idColumnExpr }; { Alias = Some "Value"; Expr = value }]
+
+                let projections =
+                    match sourceCtx.BindQueryValue, projectionOrder with
+                    | ValueSome binder, ValueSome group -> binder.Order.Within(group, buildProjections)
+                    | _ -> buildProjections()
 
                 let projectionDiscoveredJoins =
                     if currentCtx.Joins.Count > joinsBeforeProjections then
                         currentCtx.Joins |> Seq.skip joinsBeforeProjections |> Seq.toList
                     else []
 
-                // Build source.
-                let isBaseTable = (i = 0)
                 let source =
-                    if isBaseTable then
-                        Some (BaseTable(layer.TableName, None))
-                    else
-                        let innerSel = buildLayer (i - 1)
-                        Some (DerivedTable(innerSel, "o"))
+                    if isBaseTable then Some(BaseTable(layer.TableName, None))
+                    else Some(DerivedTable(input.Query, "o"))
 
                 // Build clauses (WHERE, ORDER BY, LIMIT, OFFSET, UNION ALL).
                 // Side effect: expression translation discovers JOINs via QueryContext.
-                let clauseCtx = if isLocalKeyProjection then currentCtx else sourceCtx
-                let clauseTable = if isLocalKeyProjection then effectiveTableName else layer.TableName
+                let clauseCtx = currentCtx
+                let clauseTable = effectiveTableName
                 let joinsBeforeClauses = currentCtx.Joins.Count
                 let struct (where, orderBy, limit, offset, unionAlls) =
                     buildClausesDu clauseCtx vars layer clauseTable
@@ -211,15 +203,7 @@ module internal QueryableLayerBuild =
                     else []
 
                 // Edge case 8: JOIN materialization (DBRef) — discovered during clause translation.
-                let mutable finalProjections = projections
-                match layer.Selector, source with
-                | Some(Expression _), Some(DerivedTable(inner, _)) when canExposeNullId inner ->
-                    finalProjections <-
-                        projections |> List.map (fun projection ->
-                            if projection.Alias = Some "Value" then
-                                { projection with Expr = preserveRuntimeErrorValue idColumnExpr valueColumnExpr projection.Expr }
-                            else projection)
-                | _ -> ()
+                let mutable finalProjections = projections @ companions
                 let mutable joins = []
                 let mutable boundWhere = where
                 let mutable boundOrderBy = orderBy
@@ -258,17 +242,40 @@ module internal QueryableLayerBuild =
                                 Where = boundWhere }
                         UnionAllSelect(headCore, unionAlls)
 
-                wrapCoreBody body orderBy limit offset
+                let query = wrapCoreBody body orderBy limit offset
+                match producedValue, query.Body with
+                | ValueSome produced, SingleSelect core ->
+                    let preserveErrors = not isBaseTable && canExposeNullId input.Query
+                    let produced =
+                        if preserveErrors then
+                            let missing = SqlExpr.Unary(UnaryOperator.IsNull, idColumnExpr)
+                            match produced with
+                            | DirectValue(value, facts) -> DirectValue(SqlExpr.CaseExpr((missing, valueColumnExpr), [], Some value), facts)
+                            | PackedValue(packet, facts) ->
+                                let error = SqlExpr.JsonArrayExpr [jsonToken valueColumnExpr; SqlExpr.Literal SqlLiteral.Null]
+                                PackedValue(SqlExpr.CaseExpr((missing, error), [], Some packet), facts)
+                        else produced
+                    let struct(query, output) = QueryProduced.publishCore currentCtx.NextAlias core produced preserveErrors
+                    { Query = query; SerializationInput = output; KeyInput = ValueNone }
+                | ValueSome _, _ -> invalidOp "A scalar projection requires a completed select core."
+                | ValueNone, SingleSelect core when producedKey.IsSome ->
+                    let preserveErrors = not isBaseTable && canExposeNullId input.Query
+                    let key =
+                        if preserveErrors then
+                            let absent = QueryProduced.typed producedKey.Value.Input.OriginalType (SqlExpr.Literal SqlLiteral.Null)
+                            QueryProduced.choose producedKey.Value.Input.OriginalType (SqlExpr.Unary(UnaryOperator.IsNull, idColumnExpr)) absent producedKey.Value
+                        else producedKey.Value
+                    let struct(query, key) = QueryProduced.publishSlot currentCtx.NextAlias syntheticGroupKeyAlias core key preserveErrors
+                    { Query = query; SerializationInput = outputInput; KeyInput = ValueSome key }
+                | ValueNone, _ -> { Query = query; SerializationInput = outputInput; KeyInput = keyInput }
 
             | ComplexDu buildFunc ->
                 let tn =
                     if i = 0 then tableName
                     else ""
-                let innerSel =
-                    if i > 0 then buildLayer (i - 1)
-                    else
-                        // No inner layers — provide an empty select (shouldn't happen in practice)
-                        wrapCore (mkCore [] None)
-                buildFunc {| Vars = vars; Inner = innerSel; TableName = tn |}
+                let inner =
+                    if i > 0 then buildLayer(i - 1)
+                    else { Query = wrapCore(mkCore [] None); SerializationInput = QueryTranslatorPhysicalSource.ownerInput sourceCtx rootElementType tableName (SqlExpr.Column(None, "Id")); KeyInput = ValueNone }
+                buildFunc {| Vars = vars; Inner = inner.Query; Input = inner.SerializationInput; KeyInput = inner.KeyInput; TableName = tn |}
 
         buildLayer (layerCount - 1)

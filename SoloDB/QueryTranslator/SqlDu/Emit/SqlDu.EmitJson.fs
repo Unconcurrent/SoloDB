@@ -44,10 +44,8 @@ let emitJsonArray (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emit
     let parms = Emitted.collectParameters parts
     { Sql = "jsonb_array(" + sql + ")"; Parameters = parms }
 
-/// Emit a JSON object expression: json_object('key1', val1, 'key2', val2, ...)
-/// Uses json_object (TEXT JSON) so that downstream jsonb_extract returns typed SQL values
-/// (integer, real) instead of binary JSON blobs. This ensures correct numeric ordering
-/// and comparison in OrderBy, Where, TakeWhile, and GroupJoin key extraction.
+/// Emit a binary JSON object, preserving its structural carrier across derived tables.
+/// Component extraction still returns native SQL integers, reals and text.
 let emitJsonObject (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emitted) (properties: (string * SqlExpr) list) : Emitted =
     let parts =
         properties
@@ -57,4 +55,4 @@ let emitJsonObject (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emi
               valueEmitted ])
     let sql = parts |> List.map (fun p -> p.Sql) |> String.concat ", "
     let parms = Emitted.collectParameters parts
-    { Sql = jsonObjectFn + "(" + sql + ")"; Parameters = parms }
+    { Sql = jsonbObjectFn + "(" + sql + ")"; Parameters = parms }

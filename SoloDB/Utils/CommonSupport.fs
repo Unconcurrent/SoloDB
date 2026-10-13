@@ -37,15 +37,24 @@ module internal Utils =
         not t.IsArray &&
         (typeof<Tuple>.IsAssignableFrom t || typeof<ValueTuple>.IsAssignableFrom t || t.Name.StartsWith "Tuple`" || t.Name.StartsWith "ValueTuple`")
 
+    let internal isOptionType (t: Type) =
+        SoloDatabase.Metadata.Generation.TypeSupport.IsOption t
+
     let internal unwrapNullableType (t: Type) =
-        if t.IsGenericType && t.GetGenericTypeDefinition() = typedefof<Nullable<_>> then
+        if t.IsGenericType && (typedefof<Nullable<_>>.Equals(t.GetGenericTypeDefinition()) || isOptionType t) then
             t.GetGenericArguments().[0]
         else
             t
 
+    /// Terminal payload of nested optional carriers; one-step unwrapping remains separate.
+    let rec internal optionalPayloadType (target: Type) =
+        let payload = unwrapNullableType target
+        if (if isNull payload then isNull target else payload.Equals(target)) then target
+        else optionalPayloadType payload
+
     let internal isDateTimeLikeType (t: Type) =
         let u = unwrapNullableType t
-        u = typeof<DateTime> || u = typeof<DateTimeOffset> || u = typeof<DateOnly> || u = typeof<TimeOnly> || u = typeof<TimeSpan>
+        typeof<DateTime>.Equals(u) || typeof<DateTimeOffset>.Equals(u) || typeof<DateOnly>.Equals(u) || typeof<TimeOnly>.Equals(u) || typeof<TimeSpan>.Equals(u)
 
     type System.Char with
         static member IsAsciiLetterOrDigit this =
@@ -119,10 +128,7 @@ module internal Utils =
         | _other -> false
 
     let internal typeToName (t: Type) = 
-        let fullname = t.FullName
-        if fullname.Length > 0 && Char.IsAsciiLetter fullname.[0] // To not insert auto generated classes.
-        then Some fullname
-        else None
+        SoloDatabase.Metadata.Generation.TypeSupport.StoredTypeName t.FullName
 
     let internal sanitizeName (name: string) =
         let inline charOk (c: char) = Char.IsLetterOrDigit c || c = '_'
@@ -163,56 +169,6 @@ module internal Utils =
     let internal collectionNameOfBytes<'T> =
         let formattedName = collectionNameOf<'T>() |> Encoding.UTF8.GetBytes
         fun () -> formattedName
-
-    let private nameToTypeCache = ConcurrentDictionary<string, Type>()
-
-    let internal nameToType (typeName: string) = 
-        nameToTypeCache.GetOrAdd(typeName, fun typeName -> 
-                                            match typeName with
-                                            | "Double" | "double" -> typeof<double>
-                                            | "Single" | "float" -> typeof<float>
-                                            | "Byte" | "byte" -> typeof<byte>
-                                            | "SByte" | "sbyte" -> typeof<sbyte>
-                                            | "Int16" | "short" -> typeof<Int16>
-                                            | "UInt16" | "ushort" -> typeof<UInt16>
-                                            | "Int32" | "int" -> typeof<int>
-                                            | "UInt32" | "uint" -> typeof<uint>
-                                            | "Int64" | "long" -> typeof<Int64>
-                                            | "UInt64" | "ulong" -> typeof<UInt64>
-                                            | "Char" | "char" -> typeof<char>
-                                            | "Boolean" | "bool" -> typeof<bool>
-                                            | "Object" | "object" -> typeof<obj>
-                                            | "String" | "string" -> typeof<string>
-                                            | "Decimal" | "decimal" -> typeof<decimal>
-                                            | "DateTime" -> typeof<DateTime>
-                                            | "Guid" -> typeof<Guid>
-                                            | "TimeSpan" -> typeof<TimeSpan>
-                                            | "IntPtr" -> typeof<IntPtr>
-                                            | "UIntPtr" -> typeof<UIntPtr>
-                                            | "Array" -> typeof<Array>
-                                            | "Delegate" -> typeof<Delegate>
-                                            | "MulticastDelegate" -> typeof<MulticastDelegate>
-                                            | "IDisposable" -> typeof<System.IDisposable>
-                                            | "Stream" -> typeof<System.IO.Stream>
-                                            | "Exception" -> typeof<System.Exception>
-                                            | "Thread" -> typeof<System.Threading.Thread>
-                                            | typeName ->
-
-                                            match Type.GetType(typeName) with
-                                            | null -> 
-                                                match Type.GetType("System." + typeName) with
-                                                | null ->
-                                                    AppDomain.CurrentDomain.GetAssemblies()
-                                                        |> Seq.collect (fun a ->
-                                                            try
-                                                                a.GetTypes() :> seq<Type>
-                                                            with :? System.Reflection.ReflectionTypeLoadException as rtl ->
-                                                                rtl.Types |> Seq.choose (fun t -> if isNull t then None else Some t))
-                                                        |> Seq.tryFind (fun t -> t.FullName = typeName)
-                                                        |> Option.toObj
-                                                | fastType -> fastType
-                                            | fastType -> fastType
-                                            )
 
     // LEGACY: File hashing was removed in schema version 2.
     // These functions remain for backward compatibility with v1 databases during migration.

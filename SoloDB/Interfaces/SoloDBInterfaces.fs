@@ -1,4 +1,4 @@
-﻿namespace SoloDatabase
+namespace SoloDatabase
 
 open System.Linq.Expressions
 open System.Runtime.CompilerServices
@@ -10,13 +10,29 @@ open System.Runtime.InteropServices
 open System.Threading.Tasks
 open SoloDatabase.Types
 open System
-open Microsoft.Data.Sqlite
+open Microsoft.FSharp.Quotations
 
 /// <summary>Reserved options for result compilation. No execution settings are defined.</summary>
 /// <remarks>The nullable optional parameter distinguishes result overloads from sequence
 /// overloads during F# overload resolution. Callers normally omit it.</remarks>
 [<AllowNullLiteral; Sealed>]
 type CompileOptions() = class end
+
+/// <summary>Reserved overload metadata. Omit the optional parameter when compiling quotations.</summary>
+[<AllowNullLiteral; System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>]
+type CompileQuotationOptions internal () = class end
+
+/// <summary>Reserved overload metadata for quotations with one argument.</summary>
+[<AllowNullLiteral; System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>]
+type CompileQuotationOptions1 internal () = inherit CompileQuotationOptions()
+
+/// <summary>Reserved overload metadata for quotations with two arguments.</summary>
+[<AllowNullLiteral; System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>]
+type CompileQuotationOptions2 internal () = inherit CompileQuotationOptions1()
+
+/// <summary>Reserved overload metadata for quotations with three arguments.</summary>
+[<AllowNullLiteral; Sealed; System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>]
+type CompileQuotationOptions3 internal () = inherit CompileQuotationOptions2()
 
 /// <summary>
 /// Represents the outcome of an event handler invocation.
@@ -32,6 +48,10 @@ type SoloDBEventsResult =
 /// <summary>
 /// Provides access to the old and new versions of an item during an update event.
 /// </summary>
+/// <remarks>
+/// The context is borrowed for the callback and may be reused. Do not retain it.
+/// Collections, filesystems and streams obtained through it are valid only during that callback.
+/// </remarks>
 type ISoloDBUpdatingEventContext<'T> =
     inherit ISoloDB
 
@@ -51,6 +71,10 @@ type ISoloDBUpdatingEventContext<'T> =
 /// <summary>
 /// Provides access to the item during a single-item event (insert/delete).
 /// </summary>
+/// <remarks>
+/// The context is borrowed for the callback and may be reused. Do not retain it.
+/// Collections, filesystems and streams obtained through it are valid only during that callback.
+/// </remarks>
 and ISoloDBItemEventContext<'T> =
     inherit ISoloDB
 
@@ -63,12 +87,125 @@ and ISoloDBItemEventContext<'T> =
     /// </summary>
     abstract member Item: 'T with get
 
+/// Filesystem contexts are borrowed for one callback. Do not retain the context.
+/// Returned database resources are valid only during that invocation.
+and ISoloDBFileEventContext =
+    inherit ISoloDB
+    abstract Path: string
+    abstract Name: string
+    abstract Length: int64
+    abstract Created: DateTimeOffset
+    abstract Modified: DateTimeOffset
+
+and ISoloDBFileUpdatingEventContext =
+    inherit ISoloDBFileEventContext
+    abstract OldPath: string
+    abstract OldName: string
+    abstract OldLength: int64
+    abstract OldCreated: DateTimeOffset
+    abstract OldModified: DateTimeOffset
+
+and ISoloDBDirectoryEventContext =
+    inherit ISoloDB
+    abstract Path: string
+    abstract Name: string
+    abstract Created: DateTimeOffset
+    abstract Modified: DateTimeOffset
+
+and ISoloDBDirectoryUpdatingEventContext =
+    inherit ISoloDBDirectoryEventContext
+    abstract OldPath: string
+    abstract OldName: string
+    abstract OldCreated: DateTimeOffset
+    abstract OldModified: DateTimeOffset
+
+and ISoloDBFileSystemMetadataEventContext =
+    inherit ISoloDB
+    abstract Path: string
+    abstract Key: string
+    abstract Kind: FileMetadataChangeKind
+    /// Null means the value is absent; stored metadata values are non-null.
+    abstract OldValue: string
+    /// Null means the value is absent; stored metadata values are non-null.
+    abstract NewValue: string
+
+and ISoloDBFileContentEventContext =
+    inherit ISoloDB
+    abstract Path: string
+    /// Offset and Length describe a half-open logical byte range.
+    abstract Offset: int64
+    abstract Length: int64
+    abstract OldLength: int64
+    abstract NewLength: int64
+    abstract Kind: FileContentChangeKind
+
+and FileCreatingHandler = delegate of ctx: ISoloDBFileEventContext -> SoloDBEventsResult
+and FileCreatedHandler = delegate of ctx: ISoloDBFileEventContext -> SoloDBEventsResult
+and FileDeletingHandler = delegate of ctx: ISoloDBFileEventContext -> SoloDBEventsResult
+and FileDeletedHandler = delegate of ctx: ISoloDBFileEventContext -> SoloDBEventsResult
+and FileUpdatingHandler = delegate of ctx: ISoloDBFileUpdatingEventContext -> SoloDBEventsResult
+and FileUpdatedHandler = delegate of ctx: ISoloDBFileUpdatingEventContext -> SoloDBEventsResult
+and DirectoryCreatingHandler = delegate of ctx: ISoloDBDirectoryEventContext -> SoloDBEventsResult
+and DirectoryCreatedHandler = delegate of ctx: ISoloDBDirectoryEventContext -> SoloDBEventsResult
+and DirectoryDeletingHandler = delegate of ctx: ISoloDBDirectoryEventContext -> SoloDBEventsResult
+and DirectoryDeletedHandler = delegate of ctx: ISoloDBDirectoryEventContext -> SoloDBEventsResult
+and DirectoryUpdatingHandler = delegate of ctx: ISoloDBDirectoryUpdatingEventContext -> SoloDBEventsResult
+and DirectoryUpdatedHandler = delegate of ctx: ISoloDBDirectoryUpdatingEventContext -> SoloDBEventsResult
+and FileMetadataChangingHandler = delegate of ctx: ISoloDBFileSystemMetadataEventContext -> SoloDBEventsResult
+and FileMetadataChangedHandler = delegate of ctx: ISoloDBFileSystemMetadataEventContext -> SoloDBEventsResult
+and DirectoryMetadataChangingHandler = delegate of ctx: ISoloDBFileSystemMetadataEventContext -> SoloDBEventsResult
+and DirectoryMetadataChangedHandler = delegate of ctx: ISoloDBFileSystemMetadataEventContext -> SoloDBEventsResult
+and FileContentChangingHandler = delegate of ctx: ISoloDBFileContentEventContext -> SoloDBEventsResult
+and FileContentChangedHandler = delegate of ctx: ISoloDBFileContentEventContext -> SoloDBEventsResult
+
+/// Synchronous before/after notifications inside the mutation transaction.
+/// After callbacks can still be followed by rollback. Read paths and values lazily.
+and ISoloDBFileSystemEvents =
+    abstract OnFileCreating: handler: FileCreatingHandler -> unit
+    abstract Unregister: handler: FileCreatingHandler -> unit
+    abstract OnFileCreated: handler: FileCreatedHandler -> unit
+    abstract Unregister: handler: FileCreatedHandler -> unit
+    abstract OnFileDeleting: handler: FileDeletingHandler -> unit
+    abstract Unregister: handler: FileDeletingHandler -> unit
+    abstract OnFileDeleted: handler: FileDeletedHandler -> unit
+    abstract Unregister: handler: FileDeletedHandler -> unit
+    abstract OnFileUpdating: handler: FileUpdatingHandler -> unit
+    abstract Unregister: handler: FileUpdatingHandler -> unit
+    abstract OnFileUpdated: handler: FileUpdatedHandler -> unit
+    abstract Unregister: handler: FileUpdatedHandler -> unit
+    abstract OnDirectoryCreating: handler: DirectoryCreatingHandler -> unit
+    abstract Unregister: handler: DirectoryCreatingHandler -> unit
+    abstract OnDirectoryCreated: handler: DirectoryCreatedHandler -> unit
+    abstract Unregister: handler: DirectoryCreatedHandler -> unit
+    abstract OnDirectoryDeleting: handler: DirectoryDeletingHandler -> unit
+    abstract Unregister: handler: DirectoryDeletingHandler -> unit
+    abstract OnDirectoryDeleted: handler: DirectoryDeletedHandler -> unit
+    abstract Unregister: handler: DirectoryDeletedHandler -> unit
+    abstract OnDirectoryUpdating: handler: DirectoryUpdatingHandler -> unit
+    abstract Unregister: handler: DirectoryUpdatingHandler -> unit
+    abstract OnDirectoryUpdated: handler: DirectoryUpdatedHandler -> unit
+    abstract Unregister: handler: DirectoryUpdatedHandler -> unit
+    abstract OnFileMetadataChanging: handler: FileMetadataChangingHandler -> unit
+    abstract Unregister: handler: FileMetadataChangingHandler -> unit
+    abstract OnFileMetadataChanged: handler: FileMetadataChangedHandler -> unit
+    abstract Unregister: handler: FileMetadataChangedHandler -> unit
+    abstract OnDirectoryMetadataChanging: handler: DirectoryMetadataChangingHandler -> unit
+    abstract Unregister: handler: DirectoryMetadataChangingHandler -> unit
+    abstract OnDirectoryMetadataChanged: handler: DirectoryMetadataChangedHandler -> unit
+    abstract Unregister: handler: DirectoryMetadataChangedHandler -> unit
+    abstract OnFileContentChanging: handler: FileContentChangingHandler -> unit
+    abstract Unregister: handler: FileContentChangingHandler -> unit
+    abstract OnFileContentChanged: handler: FileContentChangedHandler -> unit
+    abstract Unregister: handler: FileContentChangedHandler -> unit
+
 /// <summary>Internal delegate for insert events.</summary>
-and internal InsertingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * json: ReadOnlySpan<byte> -> SoloDBEventsResult
+and internal FileSystemHandlerSystem = delegate of NativeSqliteConnection * int64 * FileSystemChange -> SoloDBEventsResult
+
+and internal InsertingHandlerSystem = delegate of conn: NativeSqliteConnection * session: int64 * json: ReadOnlySpan<byte> -> SoloDBEventsResult
 /// <summary>Internal delegate for delete events.</summary>
-and internal DeletingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * json: ReadOnlySpan<byte> -> SoloDBEventsResult
+and internal DeletingHandlerSystem = delegate of conn: NativeSqliteConnection * session: int64 * json: ReadOnlySpan<byte> -> SoloDBEventsResult
 /// <summary>Internal delegate for update events.</summary>
-and internal UpdatingHandlerSystem = delegate of conn: SqliteConnection * session: int64 * jsonOld: nativeptr<byte> * jsonOldSize: int * jsonNew: nativeptr<byte> * jsonNewSize: int -> SoloDBEventsResult
+and internal UpdatingHandlerSystem = delegate of conn: NativeSqliteConnection * session: int64 * jsonOld: nativeptr<byte> * jsonOldSize: int * jsonNew: nativeptr<byte> * jsonNewSize: int -> SoloDBEventsResult
 
 
 /// <summary>Handler delegate for insert events.</summary>
@@ -157,64 +294,157 @@ and ISoloDBCollection<'T> =
     // Separate ordered signatures prevent a lambda ending in OrderBy/ThenBy from
     // selecting the generic-result overload and exposing IQueryable as its result.
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
-    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    /// <remarks>
+    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
+    /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
+    /// </remarks>
     abstract member Compile<'R> : query: Expression<Func<IQueryable<'T>, IQueryable<'R>>> -> Func<IEnumerable<'R>>
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
-    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    /// <remarks>
+    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
+    /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
+    /// </remarks>
     abstract member Compile<'R> : query: Expression<Func<IQueryable<'T>, IOrderedQueryable<'R>>> -> Func<IEnumerable<'R>>
 
     /// <summary>Compiles a read result, retaining translation and binding values on invocation.</summary>
     /// <param name="query">The read expression rooted in the supplied collection.</param>
     /// <param name="_marker">Omit this parameter. Its optional position makes F# prefer
     /// the sequence overload when applicable; it does not alter query execution.</param>
-    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    /// <remarks>
+    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
+    /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
+    /// </remarks>
     abstract member Compile<'R> : query: Expression<Func<IQueryable<'T>, 'R>> * [<Optional; DefaultParameterValue(null: CompileOptions)>] _marker: CompileOptions -> Func<'R>
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
-    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    /// <remarks>
+    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
+    /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
+    /// </remarks>
     abstract member Compile<'A, 'R> : query: Expression<Func<IQueryable<'T>, 'A, IQueryable<'R>>> -> Func<'A, IEnumerable<'R>>
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
-    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    /// <remarks>
+    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
+    /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
+    /// </remarks>
     abstract member Compile<'A, 'R> : query: Expression<Func<IQueryable<'T>, 'A, IOrderedQueryable<'R>>> -> Func<'A, IEnumerable<'R>>
 
     /// <summary>Compiles a read result, retaining translation and binding values on invocation.</summary>
     /// <param name="query">The read expression rooted in the supplied collection.</param>
     /// <param name="_marker">Omit this parameter. Its optional position makes F# prefer
     /// the sequence overload when applicable; it does not alter query execution.</param>
-    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    /// <remarks>
+    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
+    /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
+    /// </remarks>
     abstract member Compile<'A, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'R>> * [<Optional; DefaultParameterValue(null: CompileOptions)>] _marker: CompileOptions -> Func<'A, 'R>
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
-    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    /// <remarks>
+    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
+    /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
+    /// </remarks>
     abstract member Compile<'A, 'B, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, IQueryable<'R>>> -> Func<'A, 'B, IEnumerable<'R>>
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
-    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    /// <remarks>
+    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
+    /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
+    /// </remarks>
     abstract member Compile<'A, 'B, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, IOrderedQueryable<'R>>> -> Func<'A, 'B, IEnumerable<'R>>
 
     /// <summary>Compiles a read result, retaining translation and binding values on invocation.</summary>
     /// <param name="query">The read expression rooted in the supplied collection.</param>
     /// <param name="_marker">Omit this parameter. Its optional position makes F# prefer
     /// the sequence overload when applicable; it does not alter query execution.</param>
-    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    /// <remarks>
+    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
+    /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
+    /// </remarks>
     abstract member Compile<'A, 'B, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, 'R>> * [<Optional; DefaultParameterValue(null: CompileOptions)>] _marker: CompileOptions -> Func<'A, 'B, 'R>
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
-    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    /// <remarks>
+    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
+    /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
+    /// </remarks>
     abstract member Compile<'A, 'B, 'C, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, IQueryable<'R>>> -> Func<'A, 'B, 'C, IEnumerable<'R>>
 
     /// <summary>Optimizes and retains a read sequence. Values bind on invocation and enumeration reads fresh rows.</summary>
-    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    /// <remarks>
+    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
+    /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
+    /// </remarks>
     abstract member Compile<'A, 'B, 'C, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, IOrderedQueryable<'R>>> -> Func<'A, 'B, 'C, IEnumerable<'R>>
 
     /// <summary>Compiles a read result, retaining translation and binding values on invocation.</summary>
     /// <param name="query">The read expression rooted in the supplied collection.</param>
     /// <param name="_marker">Omit this parameter. Its optional position makes F# prefer
     /// the sequence overload when applicable; it does not alter query execution.</param>
-    /// <remarks>Recompile after model or index changes. Transactional collections cannot compile queries.</remarks>
+    /// <remarks>
+    /// Recompile after model or index changes. Transactional collections cannot compile queries.
+    /// In F# NativeAOT applications, use CompileQuotation with the whole query lambda instead:
+    /// FSharp.Core conversion of ordinary lambdas to LINQ expressions is unsupported under NativeAOT.
+    /// </remarks>
     abstract member Compile<'A, 'B, 'C, 'R> : query: Expression<Func<IQueryable<'T>, 'A, 'B, 'C, 'R>> * [<Optional; DefaultParameterValue(null: CompileOptions)>] _marker: CompileOptions -> Func<'A, 'B, 'C, 'R>
+
+    /// <summary>Retains a read query captured directly as an F# quotation, including under NativeAOT.</summary>
+    /// <remarks>Pass an ordinary lambda. Values bind on invocation and enumeration reads fresh rows.</remarks>
+    abstract member CompileQuotation<'R> : [<ReflectedDefinition(false)>] query: Expr<IQueryable<'T> -> IQueryable<'R>> -> Func<IEnumerable<'R>>
+
+    /// <summary>Retains an ordered read query captured directly as an F# quotation.</summary>
+    abstract member CompileQuotation<'R> : [<ReflectedDefinition(false)>] query: Expr<IQueryable<'T> -> IOrderedQueryable<'R>> -> Func<IEnumerable<'R>>
+
+    /// <summary>Retains a read result captured directly as an F# quotation.</summary>
+    /// <param name="query">The read lambda rooted in the supplied collection.</param>
+    /// <param name="_marker">Omit this parameter. It distinguishes result overloads during F# overload resolution.</param>
+    abstract member CompileQuotation<'R> : [<ReflectedDefinition(false)>] query: Expr<IQueryable<'T> -> 'R> * [<Optional; DefaultParameterValue(null: CompileQuotationOptions)>] _marker: CompileQuotationOptions -> Func<'R>
+
+    /// <summary>Retains a parameterized read query captured directly as an F# quotation.</summary>
+    abstract member CompileQuotation<'A, 'R> : [<ReflectedDefinition(false)>] query: Expr<IQueryable<'T> -> 'A -> IQueryable<'R>> -> Func<'A, IEnumerable<'R>>
+
+    /// <summary>Retains a parameterized ordered read query captured directly as an F# quotation.</summary>
+    abstract member CompileQuotation<'A, 'R> : [<ReflectedDefinition(false)>] query: Expr<IQueryable<'T> -> 'A -> IOrderedQueryable<'R>> -> Func<'A, IEnumerable<'R>>
+
+    /// <summary>Retains a parameterized read result captured directly as an F# quotation.</summary>
+    /// <param name="query">The read lambda rooted in the supplied collection.</param>
+    /// <param name="_marker">Omit this parameter. It distinguishes result overloads during F# overload resolution.</param>
+    abstract member CompileQuotation<'A, 'R> : [<ReflectedDefinition(false)>] query: Expr<IQueryable<'T> -> 'A -> 'R> * [<Optional; DefaultParameterValue(null: CompileQuotationOptions1)>] _marker: CompileQuotationOptions1 -> Func<'A, 'R>
+
+    /// <summary>Retains a read query with two arguments captured directly as an F# quotation.</summary>
+    abstract member CompileQuotation<'A, 'B, 'R> : [<ReflectedDefinition(false)>] query: Expr<IQueryable<'T> -> 'A -> 'B -> IQueryable<'R>> -> Func<'A, 'B, IEnumerable<'R>>
+
+    /// <summary>Retains an ordered read query with two arguments captured directly as an F# quotation.</summary>
+    abstract member CompileQuotation<'A, 'B, 'R> : [<ReflectedDefinition(false)>] query: Expr<IQueryable<'T> -> 'A -> 'B -> IOrderedQueryable<'R>> -> Func<'A, 'B, IEnumerable<'R>>
+
+    /// <summary>Retains a read result with two arguments captured directly as an F# quotation.</summary>
+    /// <param name="query">The read lambda rooted in the supplied collection.</param>
+    /// <param name="_marker">Omit this parameter. It distinguishes result overloads during F# overload resolution.</param>
+    abstract member CompileQuotation<'A, 'B, 'R> : [<ReflectedDefinition(false)>] query: Expr<IQueryable<'T> -> 'A -> 'B -> 'R> * [<Optional; DefaultParameterValue(null: CompileQuotationOptions2)>] _marker: CompileQuotationOptions2 -> Func<'A, 'B, 'R>
+
+    /// <summary>Retains a read query with three arguments captured directly as an F# quotation.</summary>
+    abstract member CompileQuotation<'A, 'B, 'C, 'R> : [<ReflectedDefinition(false)>] query: Expr<IQueryable<'T> -> 'A -> 'B -> 'C -> IQueryable<'R>> -> Func<'A, 'B, 'C, IEnumerable<'R>>
+
+    /// <summary>Retains an ordered read query with three arguments captured directly as an F# quotation.</summary>
+    abstract member CompileQuotation<'A, 'B, 'C, 'R> : [<ReflectedDefinition(false)>] query: Expr<IQueryable<'T> -> 'A -> 'B -> 'C -> IOrderedQueryable<'R>> -> Func<'A, 'B, 'C, IEnumerable<'R>>
+
+    /// <summary>Retains a read result with three arguments captured directly as an F# quotation.</summary>
+    /// <param name="query">The read lambda rooted in the supplied collection.</param>
+    /// <param name="_marker">Omit this parameter. It distinguishes result overloads during F# overload resolution.</param>
+    abstract member CompileQuotation<'A, 'B, 'C, 'R> : [<ReflectedDefinition(false)>] query: Expr<IQueryable<'T> -> 'A -> 'B -> 'C -> 'R> * [<Optional; DefaultParameterValue(null: CompileQuotationOptions3)>] _marker: CompileQuotationOptions3 -> Func<'A, 'B, 'C, 'R>
 
     /// <summary>
     /// Gets the name of the collection within the database.
@@ -276,7 +506,7 @@ and ISoloDBCollection<'T> =
     /// The auto-generated unique identifier assigned to the inserted entity.
     /// </returns>
     /// <exception cref="System.InvalidOperationException">Thrown when item has an invalid Id value or generator.</exception>
-    /// <exception cref="Microsoft.Data.Sqlite.SqliteException">Thrown when the item would violate constraints.</exception>
+    /// <exception cref="SoloDatabase.NativeSqliteException">Thrown when the item would violate constraints.</exception>
     /// <remarks>
     /// <para>Uses custom ID generators specified by <c>SoloIdAttribute</c> or defaults to <c>int64</c> auto-increment. </para>
     /// <para>Automatically creates indexes for properties marked with indexing attributes.</para>
@@ -303,7 +533,7 @@ and ISoloDBCollection<'T> =
     /// <returns>
     /// The unique identifier of the inserted or replaced entity.
     /// </returns>
-    /// <exception cref="Microsoft.Data.Sqlite.SqliteException">Thrown when the item would violate constraints.</exception>
+    /// <exception cref="SoloDatabase.NativeSqliteException">Thrown when the item would violate constraints.</exception>
     /// <remarks>
     /// <para>Replacement occurs when the entity matches an existing record on any unique index.</para>
     /// <para>If no match is found, performs a standard insert operation.</para>
@@ -338,7 +568,7 @@ and ISoloDBCollection<'T> =
     /// </returns>
     /// <exception cref="System.ArgumentNullException">Thrown when <paramref name="items"/> is <c>null</c>.</exception>
     /// <exception cref="System.InvalidOperationException">Thrown when item has an invalid Id value or generator.</exception>
-    /// <exception cref="Microsoft.Data.Sqlite.SqliteException">Thrown when any item would violate constraints.</exception>
+    /// <exception cref="SoloDatabase.NativeSqliteException">Thrown when any item would violate constraints.</exception>
     /// <remarks>
     /// <para>All insertions occur within a single transaction - if any insertion fails, all are rolled back.</para>
     /// <para>Significantly more efficient than multiple individual <see cref="Insert"/> calls.</para>
@@ -372,7 +602,7 @@ and ISoloDBCollection<'T> =
     /// </returns>
     /// <exception cref="System.ArgumentNullException">Thrown when <paramref name="items"/> is <c>null</c>.</exception>
     /// <exception cref="System.InvalidOperationException">Thrown when item has an invalid Id value or generator.</exception>
-    /// <exception cref="Microsoft.Data.Sqlite.SqliteException">Thrown when any item would violate constraints.</exception>
+    /// <exception cref="SoloDatabase.NativeSqliteException">Thrown when any item would violate constraints.</exception>
     /// <remarks>
     /// <para>Combines the efficiency of batch operations with upsert semantics.</para>
     /// <para>All operations occur within a single transaction for consistency.</para>
@@ -635,13 +865,13 @@ and ISoloDBCollection<'T> =
     /// Returns the internal SQLite connection object for advanced operations.
     /// </summary>
     /// <returns>
-    /// The underlying <see cref="IDbConnection"/> instance.
+    /// A public <see cref="SoloDatabase.Data.Sqlite.SqliteConnection"/> presentation over the underlying connection.
     /// </returns>
     /// <remarks>
     /// <para><strong>WARNING:</strong> This method is not intended for public usage and should be avoided.</para>
     /// </remarks>
     [<System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)>]
-    abstract member GetInternalConnection: unit -> Microsoft.Data.Sqlite.SqliteConnection
+    abstract member GetInternalConnection: unit -> SoloDatabase.Data.Sqlite.SqliteConnection
 
     /// <summary>
     /// Updates an existing entity in the database based on its identifier.
@@ -649,7 +879,7 @@ and ISoloDBCollection<'T> =
     /// <param name="item">The entity to update, which must have a valid non-zero identifier.</param>
     /// <exception cref="System.InvalidOperationException">Thrown when the entity has a bad identifier.</exception>
     /// <exception cref="System.Collections.Generic.KeyNotFoundException">Thrown when no entity with the specified ID exists.</exception>
-    /// <exception cref="Microsoft.Data.Sqlite.SqliteException">Thrown when the item would violate constraints.</exception>
+    /// <exception cref="SoloDatabase.NativeSqliteException">Thrown when the item would violate constraints.</exception>
     /// <remarks>
     /// <para>Replaces the entire entity in the database with the provided instance.</para>
     /// <para>The entity's identifier must be populated and match an existing record.</para>
@@ -823,7 +1053,7 @@ and ISoloDBCollection<'T> =
     /// <returns>
     /// The number of entities that were replaced.
     /// </returns>
-    /// <exception cref="Microsoft.Data.Sqlite.SqliteException">Thrown when the replacement would violate constraints.</exception>
+    /// <exception cref="SoloDatabase.NativeSqliteException">Thrown when the replacement would violate constraints.</exception>
     /// <remarks>
     /// <para>Each matching entity is completely replaced with the provided item data. </para>
     /// <para>The replacement item's ID is ignored - each replaced entity retains its original ID. </para>
@@ -856,7 +1086,7 @@ and ISoloDBCollection<'T> =
     /// <returns>
     /// The number of entities replaced (0 if no match found, 1 if successfully replaced).
     /// </returns>
-    /// <exception cref="Microsoft.Data.Sqlite.SqliteException">Thrown when the replacement would violate constraints.</exception>
+    /// <exception cref="SoloDatabase.NativeSqliteException">Thrown when the replacement would violate constraints.</exception>
     /// <remarks>
     /// <para>Replaces only the first matching entity, preserving its original ID. </para>
     /// <para>The replacement item's ID field is ignored during the operation. </para>
@@ -896,7 +1126,7 @@ and ISoloDBCollection<'T> =
     /// The number of entities that were updated.
     /// </returns>
     /// <exception cref="System.ArgumentNullException">Thrown when <paramref name="transform"/> or <paramref name="filter"/> is <c>null</c>.</exception>
-    /// <exception cref="Microsoft.Data.Sqlite.SqliteException">Thrown when the update would violate a database constraint (e.g., a unique index).</exception>
+    /// <exception cref="SoloDatabase.NativeSqliteException">Thrown when the update would violate a database constraint (e.g., a unique index).</exception>
     /// <remarks>
     /// <para>It is required to perform only one update per expression. </para>
     /// <para>This method provides a efficient way to perform bulk partial updates. </para>
@@ -912,6 +1142,9 @@ and ISoloDBCollection<'T> =
 /// Defines the public API for the SoloDB virtual file system.
 /// </summary>
 and IFileSystem =
+    /// Gets filesystem event registration for this database instance.
+    abstract Events: ISoloDBFileSystemEvents
+
     /// <summary>
     /// Uploads a stream to a file at the specified path. If the file exists, it is overwritten. If it does not exist, it is created.
     /// </summary>
@@ -1451,6 +1684,24 @@ type UntypedCollectionExt =
 type IIncludableQueryable<'T, 'TProperty> =
     inherit IQueryable<'T>
 
+/// Relation loading is query syntax; it does not require discovering an extension method.
+[<RequireQualifiedAccess>]
+type internal RelationQueryOperation = Include | ThenInclude | Exclude | ThenExclude
+
+[<Sealed>]
+type internal RelationQueryExpression(resultType: Type, source: Expression, selector: LambdaExpression, operation: RelationQueryOperation) =
+    inherit Expression()
+    member _.Source = source
+    member _.Selector = selector
+    member _.Operation = operation
+    override _.NodeType = ExpressionType.Extension
+    override _.Type = resultType
+    override this.VisitChildren(visitor) =
+        let nextSource = visitor.Visit source
+        let nextSelector = visitor.Visit selector :?> LambdaExpression
+        if obj.ReferenceEquals(nextSource,source) && obj.ReferenceEquals(nextSelector,selector) then this :> Expression
+        else RelationQueryExpression(resultType,nextSource,nextSelector,operation) :> Expression
+
 /// <summary>
 /// Internal wrapper that carries the dotted include-chain path alongside the inner IQueryable.
 /// </summary>
@@ -1482,23 +1733,12 @@ type RelationQueryExt =
         if isNull selector then raise (ArgumentNullException(nameof(selector)))
         // Validate selector targets a relation member (DBRef<T> or DBRefMany<T>)
         let relationType = typeof<'TRelation>
-        let isDbRef =
-            relationType.IsGenericType
-            && (relationType.GetGenericTypeDefinition() = typedefof<DBRef<_>>
-                || relationType.GetGenericTypeDefinition() = typedefof<DBRef<_,_>>)
-        let isDbRefMany =
-            relationType.IsGenericType
-            && (relationType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
-                || relationType.GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
+        let isDbRef = DBRefTypeHelpers.isSingleReferenceType relationType
+        let isDbRefMany = DBRefTypeHelpers.isManyReferenceType relationType
         if not isDbRef && not isDbRefMany then
             raise (NotSupportedException(
-                $"Error: Include selector must target a relation property (DBRef<T> or DBRefMany<T>).\nReason: '{relationType.Name}' is not a relation type.\nFix: Use Include(x => x.RelationProperty) where the property is DBRef<T> or DBRefMany<T>."))
-        // Produce a MethodCallExpression so the query pipeline can detect Include and populate IncludedPaths.
-        let method =
-            typeof<RelationQueryExt>
-                .GetMethod("Include", Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
-                .MakeGenericMethod(typeof<'T>, typeof<'TRelation>)
-        let callExpr = Expression.Call(method, query.Expression, selector)
+                $"Error: Include selector must target a document or filesystem reference property.\nReason: '{relationType.Name}' is not a relation type.\nFix: Use Include(x => x.RelationProperty) where the property is a document or filesystem reference."))
+        let callExpr = RelationQueryExpression(typeof<IIncludableQueryable<'T, 'TRelation>>, query.Expression, selector :> LambdaExpression, RelationQueryOperation.Include)
         let resultQuery = query.Provider.CreateQuery<'T>(callExpr)
         // Extract property name from selector for chain path
         let propName =
@@ -1514,15 +1754,10 @@ type RelationQueryExt =
         if isNull selector then raise (ArgumentNullException(nameof(selector)))
         // TX-08: Validate selector targets a relation member
         let nextType = typeof<'TNext>
-        let isRelation =
-            nextType.IsGenericType
-            && (nextType.GetGenericTypeDefinition() = typedefof<DBRef<_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRef<_,_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
+        let isRelation = DBRefTypeHelpers.isAnyRelationRefType nextType
         if not isRelation then
             raise (NotSupportedException(
-                $"Error: ThenInclude selector must target a relation property (DBRef<T> or DBRefMany<T>).\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenInclude(x => x.RelationProperty) where the property is DBRef<T> or DBRefMany<T>."))
+                $"Error: ThenInclude selector must target a document or filesystem reference property.\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenInclude(x => x.RelationProperty) where the property is a document or filesystem reference."))
         let parentPath =
             match query with
             | :? IncludableQueryable<'T, DBRef<'TPrev>> as iq -> iq.ChainPath
@@ -1533,12 +1768,7 @@ type RelationQueryExt =
             | _ -> raise (NotSupportedException("ThenInclude selector must be a direct member access."))
         let chainPath = if parentPath = "" then propName else parentPath + "." + propName
         // Produce a ThenInclude MethodCallExpression for the query pipeline
-        let method =
-            typeof<RelationQueryExt>
-                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
-                |> Array.find (fun m -> m.Name = "ThenInclude" && m.GetParameters().[0].ParameterType.GenericTypeArguments.[1].GetGenericTypeDefinition() = typedefof<DBRef<_>>)
-        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TPrev>, typeof<'TNext>)
-        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let callExpr = RelationQueryExpression(typeof<IIncludableQueryable<'T, 'TNext>>, (query :> IQueryable<'T>).Expression, selector :> LambdaExpression, RelationQueryOperation.ThenInclude)
         let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
         IncludableQueryable<'T, 'TNext>(resultQuery, chainPath) :> IIncludableQueryable<'T, 'TNext>
 
@@ -1548,15 +1778,10 @@ type RelationQueryExt =
         if isNull query then raise (ArgumentNullException(nameof(query)))
         if isNull selector then raise (ArgumentNullException(nameof(selector)))
         let nextType = typeof<'TNext>
-        let isRelation =
-            nextType.IsGenericType
-            && (nextType.GetGenericTypeDefinition() = typedefof<DBRef<_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRef<_,_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
+        let isRelation = DBRefTypeHelpers.isAnyRelationRefType nextType
         if not isRelation then
             raise (NotSupportedException(
-                $"Error: ThenInclude selector must target a relation property (DBRef<T> or DBRefMany<T>).\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenInclude(x => x.RelationProperty) where the property is DBRef<T> or DBRefMany<T>."))
+                $"Error: ThenInclude selector must target a document or filesystem reference property.\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenInclude(x => x.RelationProperty) where the property is a document or filesystem reference."))
         let parentPath =
             match query with
             | :? IncludableQueryable<'T, DBRefMany<'TElem>> as iq -> iq.ChainPath
@@ -1567,12 +1792,7 @@ type RelationQueryExt =
             | _ -> raise (NotSupportedException("ThenInclude selector must be a direct member access."))
         let chainPath = if parentPath = "" then propName else parentPath + "." + propName
         // Produce a ThenInclude MethodCallExpression for the query pipeline
-        let method =
-            typeof<RelationQueryExt>
-                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
-                |> Array.find (fun m -> m.Name = "ThenInclude" && m.GetParameters().[0].ParameterType.GenericTypeArguments.[1].GetGenericTypeDefinition() = typedefof<DBRefMany<_>>)
-        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TElem>, typeof<'TNext>)
-        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let callExpr = RelationQueryExpression(typeof<IIncludableQueryable<'T, 'TNext>>, (query :> IQueryable<'T>).Expression, selector :> LambdaExpression, RelationQueryOperation.ThenInclude)
         let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
         IncludableQueryable<'T, 'TNext>(resultQuery, chainPath) :> IIncludableQueryable<'T, 'TNext>
 
@@ -1590,12 +1810,7 @@ type RelationQueryExt =
             | :? MemberExpression as me -> me.Member.Name
             | _ -> raise (NotSupportedException("ThenInclude selector must be a direct member access."))
         let chainPath = if parentPath = "" then propName else parentPath + "." + propName
-        let method =
-            typeof<RelationQueryExt>
-                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
-                |> Array.find (fun m -> m.Name = "ThenInclude" && m.GetParameters().Length = 2 && m.GetGenericArguments().Length = 4)
-        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TPrev>, typeof<'TId>, typeof<'TNext>)
-        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let callExpr = RelationQueryExpression(typeof<IIncludableQueryable<'T, 'TNext>>, (query :> IQueryable<'T>).Expression, selector :> LambdaExpression, RelationQueryOperation.ThenInclude)
         let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
         IncludableQueryable<'T, 'TNext>(resultQuery, chainPath) :> IIncludableQueryable<'T, 'TNext>
 
@@ -1613,13 +1828,7 @@ type RelationQueryExt =
             | :? MemberExpression as me -> me.Member.Name
             | _ -> raise (NotSupportedException("ThenInclude selector must be a direct member access."))
         let chainPath = if parentPath = "" then propName else parentPath + "." + propName
-        let method =
-            typeof<RelationQueryExt>
-                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
-                |> Array.find (fun m -> m.Name = "ThenInclude" && m.GetParameters().Length = 2 && m.GetGenericArguments().Length = 4
-                                        && m.GetParameters().[0].ParameterType.GenericTypeArguments.[1].GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
-        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TElem>, typeof<'TId>, typeof<'TNext>)
-        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let callExpr = RelationQueryExpression(typeof<IIncludableQueryable<'T, 'TNext>>, (query :> IQueryable<'T>).Expression, selector :> LambdaExpression, RelationQueryOperation.ThenInclude)
         let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
         IncludableQueryable<'T, 'TNext>(resultQuery, chainPath) :> IIncludableQueryable<'T, 'TNext>
 
@@ -1629,15 +1838,10 @@ type RelationQueryExt =
         if isNull query then raise (ArgumentNullException(nameof(query)))
         if isNull selector then raise (ArgumentNullException(nameof(selector)))
         let nextType = typeof<'TNext>
-        let isRelation =
-            nextType.IsGenericType
-            && (nextType.GetGenericTypeDefinition() = typedefof<DBRef<_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRef<_,_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
+        let isRelation = DBRefTypeHelpers.isAnyRelationRefType nextType
         if not isRelation then
             raise (NotSupportedException(
-                $"Error: ThenExclude selector must target a relation property (DBRef<T> or DBRefMany<T>).\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenExclude(x => x.RelationProperty) where the property is DBRef<T> or DBRefMany<T>."))
+                $"Error: ThenExclude selector must target a document or filesystem reference property.\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenExclude(x => x.RelationProperty) where the property is a document or filesystem reference."))
         let parentPath =
             match query with
             | :? IncludableQueryable<'T, DBRef<'TPrev>> as iq -> iq.ChainPath
@@ -1647,12 +1851,7 @@ type RelationQueryExt =
             | :? MemberExpression as me -> me.Member.Name
             | _ -> raise (NotSupportedException("ThenExclude selector must be a direct member access."))
         let chainPath = if parentPath = "" then propName else parentPath + "." + propName
-        let method =
-            typeof<RelationQueryExt>
-                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
-                |> Array.find (fun m -> m.Name = "ThenExclude" && m.GetParameters().[0].ParameterType.GenericTypeArguments.[1].GetGenericTypeDefinition() = typedefof<DBRef<_>> && m.GetGenericArguments().Length = 3)
-        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TPrev>, typeof<'TNext>)
-        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let callExpr = RelationQueryExpression(typeof<IIncludableQueryable<'T, DBRef<'TPrev>>>, (query :> IQueryable<'T>).Expression, selector :> LambdaExpression, RelationQueryOperation.ThenExclude)
         let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
         IncludableQueryable<'T, DBRef<'TPrev>>(resultQuery, parentPath) :> IIncludableQueryable<'T, DBRef<'TPrev>>
 
@@ -1662,15 +1861,10 @@ type RelationQueryExt =
         if isNull query then raise (ArgumentNullException(nameof(query)))
         if isNull selector then raise (ArgumentNullException(nameof(selector)))
         let nextType = typeof<'TNext>
-        let isRelation =
-            nextType.IsGenericType
-            && (nextType.GetGenericTypeDefinition() = typedefof<DBRef<_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRef<_,_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
+        let isRelation = DBRefTypeHelpers.isAnyRelationRefType nextType
         if not isRelation then
             raise (NotSupportedException(
-                $"Error: ThenExclude selector must target a relation property (DBRef<T> or DBRefMany<T>).\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenExclude(x => x.RelationProperty) where the property is DBRef<T> or DBRefMany<T>."))
+                $"Error: ThenExclude selector must target a document or filesystem reference property.\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenExclude(x => x.RelationProperty) where the property is a document or filesystem reference."))
         let parentPath =
             match query with
             | :? IncludableQueryable<'T, DBRefMany<'TElem>> as iq -> iq.ChainPath
@@ -1680,12 +1874,7 @@ type RelationQueryExt =
             | :? MemberExpression as me -> me.Member.Name
             | _ -> raise (NotSupportedException("ThenExclude selector must be a direct member access."))
         let chainPath = if parentPath = "" then propName else parentPath + "." + propName
-        let method =
-            typeof<RelationQueryExt>
-                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
-                |> Array.find (fun m -> m.Name = "ThenExclude" && m.GetParameters().[0].ParameterType.GenericTypeArguments.[1].GetGenericTypeDefinition() = typedefof<DBRefMany<_>> && m.GetGenericArguments().Length = 3)
-        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TElem>, typeof<'TNext>)
-        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let callExpr = RelationQueryExpression(typeof<IIncludableQueryable<'T, DBRefMany<'TElem>>>, (query :> IQueryable<'T>).Expression, selector :> LambdaExpression, RelationQueryOperation.ThenExclude)
         let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
         IncludableQueryable<'T, DBRefMany<'TElem>>(resultQuery, parentPath) :> IIncludableQueryable<'T, DBRefMany<'TElem>>
 
@@ -1695,15 +1884,10 @@ type RelationQueryExt =
         if isNull query then raise (ArgumentNullException(nameof(query)))
         if isNull selector then raise (ArgumentNullException(nameof(selector)))
         let nextType = typeof<'TNext>
-        let isRelation =
-            nextType.IsGenericType
-            && (nextType.GetGenericTypeDefinition() = typedefof<DBRef<_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRef<_,_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
+        let isRelation = DBRefTypeHelpers.isAnyRelationRefType nextType
         if not isRelation then
             raise (NotSupportedException(
-                $"Error: ThenExclude selector must target a relation property (DBRef<T> or DBRefMany<T>).\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenExclude(x => x.RelationProperty) where the property is DBRef<T> or DBRefMany<T>."))
+                $"Error: ThenExclude selector must target a document or filesystem reference property.\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenExclude(x => x.RelationProperty) where the property is a document or filesystem reference."))
         let parentPath =
             match query with
             | :? IncludableQueryable<'T, DBRef<'TPrev, 'TId>> as iq -> iq.ChainPath
@@ -1713,13 +1897,7 @@ type RelationQueryExt =
             | :? MemberExpression as me -> me.Member.Name
             | _ -> raise (NotSupportedException("ThenExclude selector must be a direct member access."))
         let chainPath = if parentPath = "" then propName else parentPath + "." + propName
-        let method =
-            typeof<RelationQueryExt>
-                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
-                |> Array.find (fun m -> m.Name = "ThenExclude" && m.GetParameters().Length = 2 && m.GetGenericArguments().Length = 4
-                                        && m.GetParameters().[0].ParameterType.GenericTypeArguments.[1].GetGenericTypeDefinition() = typedefof<DBRef<_,_>>)
-        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TPrev>, typeof<'TId>, typeof<'TNext>)
-        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let callExpr = RelationQueryExpression(typeof<IIncludableQueryable<'T, DBRef<'TPrev, 'TId>>>, (query :> IQueryable<'T>).Expression, selector :> LambdaExpression, RelationQueryOperation.ThenExclude)
         let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
         IncludableQueryable<'T, DBRef<'TPrev, 'TId>>(resultQuery, parentPath) :> IIncludableQueryable<'T, DBRef<'TPrev, 'TId>>
 
@@ -1729,15 +1907,10 @@ type RelationQueryExt =
         if isNull query then raise (ArgumentNullException(nameof(query)))
         if isNull selector then raise (ArgumentNullException(nameof(selector)))
         let nextType = typeof<'TNext>
-        let isRelation =
-            nextType.IsGenericType
-            && (nextType.GetGenericTypeDefinition() = typedefof<DBRef<_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRef<_,_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
-                || nextType.GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
+        let isRelation = DBRefTypeHelpers.isAnyRelationRefType nextType
         if not isRelation then
             raise (NotSupportedException(
-                $"Error: ThenExclude selector must target a relation property (DBRef<T> or DBRefMany<T>).\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenExclude(x => x.RelationProperty) where the property is DBRef<T> or DBRefMany<T>."))
+                $"Error: ThenExclude selector must target a document or filesystem reference property.\nReason: '{nextType.Name}' is not a relation type.\nFix: Use ThenExclude(x => x.RelationProperty) where the property is a document or filesystem reference."))
         let parentPath =
             match query with
             | :? IncludableQueryable<'T, DBRefMany<'TElem, 'TId>> as iq -> iq.ChainPath
@@ -1747,13 +1920,7 @@ type RelationQueryExt =
             | :? MemberExpression as me -> me.Member.Name
             | _ -> raise (NotSupportedException("ThenExclude selector must be a direct member access."))
         let chainPath = if parentPath = "" then propName else parentPath + "." + propName
-        let method =
-            typeof<RelationQueryExt>
-                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
-                |> Array.find (fun m -> m.Name = "ThenExclude" && m.GetParameters().Length = 2 && m.GetGenericArguments().Length = 4
-                                        && m.GetParameters().[0].ParameterType.GenericTypeArguments.[1].GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
-        let gmethod = method.MakeGenericMethod(typeof<'T>, typeof<'TElem>, typeof<'TId>, typeof<'TNext>)
-        let callExpr = Expression.Call(gmethod, (query :> IQueryable<'T>).Expression, selector)
+        let callExpr = RelationQueryExpression(typeof<IIncludableQueryable<'T, DBRefMany<'TElem, 'TId>>>, (query :> IQueryable<'T>).Expression, selector :> LambdaExpression, RelationQueryOperation.ThenExclude)
         let resultQuery = (query :> IQueryable<'T>).Provider.CreateQuery<'T>(callExpr)
         IncludableQueryable<'T, DBRefMany<'TElem, 'TId>>(resultQuery, parentPath) :> IIncludableQueryable<'T, DBRefMany<'TElem, 'TId>>
 
@@ -1763,36 +1930,17 @@ type RelationQueryExt =
         if isNull selector then raise (ArgumentNullException(nameof(selector)))
         // Validate selector targets a relation member (DBRef<T> or DBRefMany<T>)
         let relationType = typeof<'TRelation>
-        let isDbRef =
-            relationType.IsGenericType
-            && (relationType.GetGenericTypeDefinition() = typedefof<DBRef<_>>
-                || relationType.GetGenericTypeDefinition() = typedefof<DBRef<_,_>>)
-        let isDbRefMany =
-            relationType.IsGenericType
-            && (relationType.GetGenericTypeDefinition() = typedefof<DBRefMany<_>>
-                || relationType.GetGenericTypeDefinition() = typedefof<DBRefMany<_,_>>)
+        let isDbRef = DBRefTypeHelpers.isSingleReferenceType relationType
+        let isDbRefMany = DBRefTypeHelpers.isManyReferenceType relationType
         if not isDbRef && not isDbRefMany then
             raise (NotSupportedException(
-                $"Error: Exclude selector must target a relation property (DBRef<T> or DBRefMany<T>).\nReason: '{relationType.Name}' is not a relation type.\nFix: Use Exclude(x => x.RelationProperty) where the property is DBRef<T> or DBRefMany<T>."))
-        // Produce a MethodCallExpression so the query pipeline can detect Exclude and populate ExcludedPaths.
-        let method =
-            typeof<RelationQueryExt>
-                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
-                |> Array.find (fun m -> m.Name = "Exclude" && m.GetGenericArguments().Length = 2)
-            |> fun m -> m.MakeGenericMethod(typeof<'T>, typeof<'TRelation>)
-        let callExpr = Expression.Call(method, query.Expression, selector)
+                $"Error: Exclude selector must target a document or filesystem reference property.\nReason: '{relationType.Name}' is not a relation type.\nFix: Use Exclude(x => x.RelationProperty) where the property is a document or filesystem reference."))
+        let callExpr = RelationQueryExpression(typeof<IQueryable<'T>>, query.Expression, selector :> LambdaExpression, RelationQueryOperation.Exclude)
         query.Provider.CreateQuery<'T>(callExpr)
 
     /// <summary>Parameterless Exclude: switches to whitelist mode where no relations load unless explicitly Included.</summary>
     [<Extension>]
     static member Exclude<'T>(query: IQueryable<'T>) : IQueryable<'T> =
         if isNull query then raise (ArgumentNullException(nameof(query)))
-        // Emit MethodCallExpression with this exact 1-generic-arg Exclude overload.
-        // Pipeline distinguishes from 2-generic-arg Exclude(selector) by generic arg count.
-        let method =
-            typeof<RelationQueryExt>
-                .GetMethods(Reflection.BindingFlags.Public ||| Reflection.BindingFlags.Static)
-                |> Array.find (fun m -> m.Name = "Exclude" && m.GetGenericArguments().Length = 1)
-            |> fun m -> m.MakeGenericMethod(typeof<'T>)
-        let callExpr = Expression.Call(method, query.Expression)
+        let callExpr = RelationQueryExpression(typeof<IQueryable<'T>>, query.Expression, null, RelationQueryOperation.Exclude)
         query.Provider.CreateQuery<'T>(callExpr)

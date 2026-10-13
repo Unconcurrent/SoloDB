@@ -1,6 +1,7 @@
 namespace SoloDatabase
 
 open System
+open SoloDatabase.Metadata.Generation
 open System.Collections
 open System.Collections.Generic
 open System.Collections.ObjectModel
@@ -12,265 +13,168 @@ open JsonFunctions
 open Utils
 open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryTranslatorBaseHelpers
+open SoloDatabase.QueryTranslatorExpressionAdmission
 open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.SqlModel
+open SoloDatabase.JsonSerializator.JsonEqualitySupport
+open SoloDatabase.QueryTranslatorSerialization
+open SoloDatabase.QuerySerializationSql
 
 module internal QueryTranslatorVisitCore =
-    type private ValueUse = Value | Comparison | Stored
-
-    let private isByRefLikeType (t: Type) =
-#if NETSTANDARD2_1
-        t.IsByRefLike
-#else
-        t.IsValueType &&
-        t.CustomAttributes
-        |> Seq.exists (fun attr -> attr.AttributeType.FullName = "System.Runtime.CompilerServices.IsByRefLikeAttribute")
-#endif
+    type private ValueUse = Value | Comparison | Stored | Presence
 
     let rec private emitStringOperandDu (qb: QueryBuilder) (ignoreCase: bool) (expr: Expression) : SqlExpr =
         if ignoreCase then SqlExpr.FunctionCall("TO_LOWER", [visitDu expr qb])
         else visitDu expr qb
 
-    and private castToDu (qb: QueryBuilder) (castToType: Type) (o: Expression) : SqlExpr =
-        QueryTranslatorVisitCoreCastAggregate.castToDu visitDu qb castToType o
+    and private castToDu (qb: QueryBuilder) (castToType: Type) (o: Expression) : QueryProducedValue =
+        QueryTranslatorVisitCoreCastAggregate.castToDu visitProduced qb castToType o false
 
     and private visitMathMethodDu (m: MethodCallExpression) (qb: QueryBuilder) : SqlExpr voption =
-        QueryTranslatorVisitCoreCastAggregate.visitMathMethodDu visitDu m qb
+        QueryTranslatorVisitCoreCastAggregate.visitMathMethodDu visitDu visitComparisonDu m qb
 
-    and private arrayIndexDu (array: Expression) (index: Expression) (qb: QueryBuilder) : SqlExpr =
+    and private arrayIndexDu (array: Expression) (index: Expression) (resultType: Type) (qb: QueryBuilder) : QueryProducedValue =
         match index with
         | :? ConstantExpression as ce when ce.Type.IsPrimitive ->
-            SqlExpr.FunctionCall("jsonb_extract", [visitDu array qb; SqlExpr.Literal(SqlLiteral.String(sprintf "$[%O]" ce.Value))])
+            visitAccessDu array (StoredLabel(box(Convert.ToInt32 ce.Value))) resultType qb
         | _ -> raise (NotSupportedException("The index of the array must always be a constant value."))
 
-    /// Resolve the correct SQL alias for a ParameterExpression.
-    /// If the parameter belongs to the current scope, use qb.SourceAlias.
-    /// If it's an outer-captured parameter, look up OuterParameterAliases.
+    /// Member paths and root consumption use the same original parameter binding.
     and private resolveAliasForParameter (paramExpr: ParameterExpression) (qb: QueryBuilder) : string option =
-        if qb.Parameters |> Seq.exists (fun p -> obj.ReferenceEquals(p, paramExpr)) then
-            // Current scope parameter
-            qb.SourceAlias
-        else
-            // Outer scope parameter — check dictionary
-            match qb.OuterParameterAliases.TryGetValue(paramExpr) with
-            | true, outerAlias -> Some outerAlias
-            | false, _ ->
-                // Fallback: use current scope (pre-existing behavior for edge cases)
-                qb.SourceAlias
+        (qb.ResolveParameterSource paramExpr).Alias
 
-    and private visitPropertyDu (o: Expression) (property: obj) (m: Expression) (qb: QueryBuilder) : SqlExpr =
+    and private propertyProduced (o: Expression) (property: obj) (m: Expression) (qb: QueryBuilder) (receiver: QueryProducedValue) =
         match property with
-        | :? string as property ->
-            let alias =
-                match o with
-                | :? ParameterExpression as pe -> resolveAliasForParameter pe qb
-                | _ -> qb.SourceAlias
-            if property = "Id" && o.NodeType = ExpressionType.Parameter && (m.Type = typeof<int64> || m.Type = typeof<int32>) then
-                SqlExpr.Column(alias, "Id")
-            else
-                visitMemberAccessDu { Expression = o; MemberName = property; InputType = m.Type; ReturnType = typeof<obj>; OriginalExpression = None } qb
-        | :? int as index ->
-            visitMemberAccessDu { Expression = o; MemberName = $"[{index}]"; InputType = m.Type; ReturnType = typeof<obj>; OriginalExpression = None } qb
-        | _ -> raise (NotSupportedException("Unable to translate property access."))
+        | :? string as property when property = "Id" && isRootParameter o && (typeof<int64>.Equals(m.Type) || typeof<int32>.Equals(m.Type)) ->
+            if not qb.UpdateMode && receiver.Input.PhysicalOwner.IsSome then
+                QueryTranslatorVisitCoreMemberAccess.accessValue qb.SourceContext.NextAlias false (StoredLabel(box property)) m.Type receiver
+            else QueryProduced.typed m.Type (SqlExpr.Column(resolveAliasForParameter (unwrapConvert o :?> ParameterExpression) qb, "Id"))
+        | :? string as property -> QueryTranslatorVisitCoreMemberAccess.accessValue qb.SourceContext.NextAlias qb.UpdateMode (StoredLabel(box property)) m.Type receiver
+        | :? int as index -> QueryTranslatorVisitCoreMemberAccess.accessValue qb.SourceContext.NextAlias qb.UpdateMode (StoredLabel(box index)) m.Type receiver
+        | _ -> raise(NotSupportedException("Unable to translate property access."))
 
-    and private newObjectDu (members: struct(string * SqlExpr) array) : SqlExpr =
-        SqlExpr.JsonObjectExpr([for struct(name, expr) in members -> (name, expr)])
+    and private visitPropertyDu o property m qb = propertyProduced o property m qb (visitProduced o qb)
 
-    and private visitParameterDu (m: ParameterExpression) (qb: QueryBuilder) : SqlExpr =
-        let alias = resolveAliasForParameter m qb
-        if m.Type = typeof<int64>
-            && ((qb.Parameters.IndexOf m = 0 && qb.Parameters.Count = 2)
-                || qb.IdParameterIndex = qb.Parameters.IndexOf m) then
-            SqlExpr.Column(alias, "Id")
-        elif qb.UpdateMode then
-            SqlExpr.Literal(SqlLiteral.String "$")
-        elif qb.JsonExtractSelfValue && ((not << isPrimitiveSQLiteType) m.Type || qb.SourceAlias.IsSome) then
-            SqlExpr.JsonRootExtract(alias, "Value")
-        else
-            SqlExpr.Column(alias, "Value")
+    and private visitPreparedPropertyDu o (property: Expression) normalize (m: Expression) (qb: QueryBuilder) =
+        let prepared =
+            match qb.SourceContext.BindQueryValue with
+            | ValueSome binder -> binder.PrepareConstant property m.Type
+            | ValueNone -> PreparedConstant(ExpressionEvaluation.evaluateExpr<obj> property)
+        let receiver = visitProduced o qb
+        let produce value = propertyProduced o (normalize value) m qb receiver
+        match prepared with PreparedConstant value -> produce value | DeferredConstant complete -> complete produce
 
-    and private visitMemberAccessDu (m: MemberAccess) (qb: QueryBuilder) : SqlExpr =
-        let alias =
-            match m.Expression with
-            | :? ParameterExpression as pe -> resolveAliasForParameter pe qb
-            | _ -> qb.SourceAlias
-        let isNullableValueType =
-            m.InputType.IsGenericType && m.InputType.GetGenericTypeDefinition() = typedefof<Nullable<_>>
-        if m.MemberName = "Length" && m.InputType.GetInterface(typeof<IEnumerable>.FullName) <> null then
-            if m.InputType = typeof<string> then SqlExpr.FunctionCall("length", [visitDu m.Expression qb])
-            elif m.InputType = typeof<byte array> then SqlExpr.FunctionCall("length", [SqlExpr.FunctionCall("base64", [visitDu m.Expression qb])])
-            else SqlExpr.FunctionCall("json_array_length", [visitDu m.Expression qb])
-        elif m.MemberName = "Count" && m.InputType.GetInterface(typeof<IEnumerable>.FullName) <> null then
-            SqlExpr.FunctionCall("json_array_length", [visitDu m.Expression qb])
-        elif isNullableValueType && m.MemberName = "HasValue" then
-            SqlExpr.Unary(UnaryOperator.IsNotNull, visitDu m.Expression qb)
-        elif isNullableValueType && m.MemberName = "Value" then
-            visitDu m.Expression qb
-        elif typedefof<System.Linq.IGrouping<_,_>>.IsAssignableFrom(m.InputType) then
-            match m.MemberName with
-            | "Key" -> SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String "$.Key")])
-            | other ->
-                let esc = escapeSQLiteString other
-                SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(None, "Value"); SqlExpr.Literal(SqlLiteral.String $"$.Items.{esc}")])
-        elif m.InputType = typeof<DateTimeOffset> then
-            match m.Expression with
-            | :? NewExpression as ne ->
-                match DateTimeFunctions.tryTranslateDateTimeOffsetConstructorMember m.MemberName ne (fun expr -> visitDu expr qb) with
-                | Some translated -> translated
-                | None -> DateTimeFunctions.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
-            | _ -> DateTimeFunctions.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
-        elif m.InputType = typeof<DateTime> then
-            DateTimeFunctions.translateDateTimeMember m.MemberName (visitDu m.Expression qb) m.InputType
-        elif m.InputType = typeof<DateOnly> then
-            DateTimeFunctions.translateDateOnlyMember m.MemberName (visitDu m.Expression qb)
-        elif m.InputType = typeof<TimeOnly> then
-            DateTimeFunctions.translateTimeOnlyMember m.MemberName (visitDu m.Expression qb)
-        elif m.InputType = typeof<TimeSpan> then
-            DateTimeFunctions.translateTimeSpanMember m.MemberName (visitDu m.Expression qb)
-        elif (m.ReturnType = typeof<int64> && m.MemberName = "Id")
-              || (m.MemberName = "Id" && m.Expression.NodeType = ExpressionType.Parameter && m.Expression.Type.FullName = "SoloDatabase.JsonSerializator.JsonValue") then
-            SqlExpr.Column(alias, "Id")
-        elif m.Expression <> null && isRootParameter m.Expression then
-            let rec buildPath (expr: Expression) (accum: string list) : string list =
-                match expr with
-                | :? MemberExpression as inner -> buildPath inner.Expression (inner.Member.Name :: accum)
-                | _ -> accum
-            let pathParts = buildPath m.Expression [m.MemberName]
-            match pathParts with
-            | [] -> SqlExpr.Literal(SqlLiteral.Null)
-            | parts ->
-                if qb.UpdateMode then
-                    let pathStr = (String.concat "." parts).Replace(".[", "[") |> escapeSQLiteString
-                    SqlExpr.Literal(SqlLiteral.String $"$.{pathStr}")
-                else SqlExpr.JsonExtractExpr(alias, "Value", JsonPathOps.ofList parts)
-        else
-            match m.OriginalExpression with
-            | None ->
-                let esc = escapeSQLiteString m.MemberName
-                SqlExpr.FunctionCall("jsonb_extract", [visitDu m.Expression qb; SqlExpr.Literal(SqlLiteral.String $"$.{esc}")])
-            | Some originalExpr ->
-                if originalExpr.Expression = null then
-                    qb.AllocateParamExpr((originalExpr.Member :?> PropertyInfo).GetValue null)
-                elif isFullyConstant originalExpr then
-                    qb.AllocateParamExpr(evaluateExpr originalExpr)
-                elif (not (isPrimitiveSQLiteType m.InputType)) || typeof<JsonSerializator.JsonValue>.IsAssignableFrom m.InputType then
-                    let esc = escapeSQLiteString m.MemberName
-                    SqlExpr.FunctionCall("jsonb_extract", [visitDu originalExpr.Expression qb; SqlExpr.Literal(SqlLiteral.String $"$.{esc}")])
-                else
-                    raise (NotSupportedException(
-                        sprintf "Error: Member access '%O' is not supported.\nReason: The member cannot be translated to SQL in this context.\nFix: Simplify the expression or move it after AsEnumerable()." originalExpr.Member.Name))
+    and private visitParameterDu valueUse (m: ParameterExpression) (qb: QueryBuilder) : QueryProducedValue =
+        let source = qb.ResolveParameterSource m
+        match source.Value with
+        | ProducedParameter produced -> produced
+        | DeferredParameter produced -> produced.Value
+        | IdentityParameter -> QueryProduced.typed m.Type (SqlExpr.Column(source.Alias, "Id"))
+        | SourceParameter ->
+            let value =
+                if qb.UpdateMode then SqlExpr.Literal(SqlLiteral.String "$")
+                elif qb.JsonExtractSelfValue then
+                    if valueUse = Presence then rootInput source.Position source.Alias "Value"
+                    else rootValue m.Type source.Position source.Alias "Value"
+                else SqlExpr.Column(source.Alias, "Value")
+            let input =
+                let original = source.SerializationInput
+                let original = if isNull original.OriginalType then QuerySerializationInput.ForType m.Type else original
+                scopeSerializationInput source.Alias source.Position original
+            let carrier =
+                if qb.UpdateMode then SqlScalar
+                elif not qb.JsonExtractSelfValue then input.Carrier
+                elif source.Position = OuterLayer then input.Carrier
+                elif valueUse = Presence || isSqlScalarResult m.Type then SqlScalar else CanonicalToken
+            DirectValue(value, { input with Carrier = carrier })
 
-    and private containsImplDu (qb: QueryBuilder) (array: Expression) (value: Expression) : SqlExpr =
-        let rec normalizeContainsSource (expr: Expression) =
-            match unwrapConvert expr with
-            | :? MethodCallExpression as mc when isByRefLikeType mc.Type && mc.Type.Name = "ReadOnlySpan`1" && mc.Arguments.Count >= 1 ->
-                match mc.Method.Name with
-                | "AsSpan"
-                | "op_Implicit" -> normalizeContainsSource mc.Arguments.[0]
-                | _ -> expr
-            | :? NewExpression as ne when isByRefLikeType ne.Type && ne.Type.Name = "ReadOnlySpan`1" && ne.Arguments.Count >= 1 ->
-                normalizeContainsSource ne.Arguments.[0]
-            | other -> other
-        let tryIntegerLiteral (value: obj) =
-            match value with
-            | null -> None
-            | :? int8 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
-            | :? uint8 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
-            | :? int16 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
-            | :? uint16 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
-            | :? int32 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
-            | :? uint32 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
-            | :? int64 as v -> Some(SqlExpr.Literal(SqlLiteral.Integer v))
-            | :? uint64 as v when v <= uint64 Int64.MaxValue -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
-            | :? nativeint as v -> Some(SqlExpr.Literal(SqlLiteral.Integer(int64 v)))
-            | _ -> None
-        let tryConstantIntegerInList (source: Expression) =
-            if isFullyConstant source && isRootParameter value && Utils.isIntegerBasedType value.Type then
-                let sourceValue = evaluateExpr<obj> source
-                match sourceValue with
-                | :? IEnumerable as items when not (sourceValue :? string) ->
-                    let literals =
-                        items
-                        |> Seq.cast<obj>
-                        |> Seq.map tryIntegerLiteral
-                        |> Seq.toList
-                    if literals |> List.forall Option.isSome then
-                        match literals |> List.choose id with
-                        | [] ->
-                            Some(SqlExpr.Binary(
-                                SqlExpr.Literal(SqlLiteral.Integer 1L),
-                                BinaryOperator.Eq,
-                                SqlExpr.Literal(SqlLiteral.Integer 0L)))
-                        | head :: tail -> Some(SqlExpr.InList(visitComparisonDu value qb, head, tail))
-                    else None
-                | _ -> None
-            else None
-        let normalizedArray = normalizeContainsSource array
-        match tryConstantIntegerInList normalizedArray with
-        | Some expr -> expr
-        | None ->
-        let arrayQb = if qb.SourceAlias.IsNone then {qb with SourceAlias = Some "o"} else qb
-        let arrayExpr = visitDu normalizedArray arrayQb
-        let whereExpr =
-            if isPrimitiveSQLiteType value.Type then
-                SqlExpr.Binary(SqlExpr.Column(Some "json_each", "Value"), BinaryOperator.Eq, visitComparisonDu value qb)
-            else
-                let target = SqlExpr.Column(Some "json_each", "Value")
-                match qb.SourceContext.BindQueryValue with
-                | ValueSome binder when binder.IsValue value -> EqualityComparison.bound qb binder target value
-                | _ ->
-                    if not (isFullyConstant value) then
-                        raise (ArgumentException $"Cannot translate contains with this type of expression: {value.Type}")
-                    EqualityComparison.known qb target value.Type (evaluateExpr<obj> value)
-        SqlExpr.Exists({ Ctes = []; Body = SelectBody.SingleSelect {
-            Distinct = false; Projections = Explicit({ Expr = SqlExpr.Literal(SqlLiteral.Integer 1L); Alias = None }, [])
-            Source = Some(TableSource.FromJsonEach(arrayExpr, None)); Joins = []
-            Where = Some whereExpr; GroupBy = []; Having = None; OrderBy = []; Limit = None; Offset = None } })
+    and private visitAccessDu parent access resultType qb =
+        QueryTranslatorVisitCoreMemberAccess.access visitProduced parent access resultType qb
 
-    and private visitNestedArrayPredicateDu (qb: QueryBuilder) (array: Expression) (whereFuncExpr: Expression) (isAll: bool) : SqlExpr =
-        let expr =
-            match whereFuncExpr with
-            | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote -> ue.Operand
-            | :? LambdaExpression as le -> le :> Expression
-            | _ -> let exprFunc = Expression.Lambda<Func<Expression>>(whereFuncExpr).Compile(true) in exprFunc.Invoke()
-        let arrayQb = if qb.SourceAlias.IsNone then {qb with SourceAlias = Some "o"} else qb
-        let arrayExpr = visitDu array arrayQb
-        let innerQb = {qb with SourceAlias = Some "json_each"; JsonExtractSelfValue = false}
-        let predicateExpr = visitDu expr innerQb
-        let whereExpr = if isAll then SqlExpr.Unary(UnaryOperator.Not, predicateExpr) else predicateExpr
-        let existsExpr = SqlExpr.Exists({ Ctes = []; Body = SelectBody.SingleSelect {
-            Distinct = false; Projections = Explicit({ Expr = SqlExpr.Literal(SqlLiteral.Integer 1L); Alias = None }, [])
-            Source = Some(TableSource.FromJsonEach(arrayExpr, None)); Joins = []
-            Where = Some whereExpr; GroupBy = []; Having = None; OrderBy = []; Limit = None; Offset = None } })
-        if isAll then SqlExpr.Unary(UnaryOperator.Not, existsExpr) else existsExpr
+    and private visitMemberAccessDu valueUse memberAccess qb =
+        QueryTranslatorVisitCoreMemberAccess.memberAccess visitProduced visitDu visitPresenceDu (visitValueDu valueUse) memberAccess qb
+
+    and private containsImplDu qb array value =
+        QueryTranslatorVisitCoreArrayPredicates.contains isByRefLikeType visitProduced visitComparisonDu qb array value
+
+    and private visitNestedArrayPredicateDu qb array predicate isAll =
+        QueryTranslatorVisitCoreArrayPredicates.nested visitProduced visitDu qb array predicate isAll
 
     and private visitBinaryDu (b: BinaryExpression) (qb: QueryBuilder) : SqlExpr =
-        QueryTranslatorVisitCoreBinary.visitBinaryDu visitDu visitComparisonDu visitStoredValueDu b qb
+        QueryTranslatorVisitCoreBinary.visitBinaryDu visitDu visitComparisonDu visitStoredValueDu visitPresenceDu b qb
 
-    and private visitMethodCallDu (m: MethodCallExpression) (qb: QueryBuilder) : SqlExpr =
-        QueryTranslatorVisitCoreMethodCall.visitMethodCallDu visitDu visitStoredValueDu visitMathMethodDu arrayIndexDu visitPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu newObjectDu emitStringOperandDu m qb
+    and private visitMethodCallDu valueUse (m: MethodCallExpression) (qb: QueryBuilder) : QueryProducedValue =
+        QueryTranslatorVisitCoreMethodCall.visitMethodCallDu visitProduced visitTextProduced (visitValueDu valueUse) visitComparisonProduced visitDu visitStoredValueDu visitPresenceDu visitMathMethodDu arrayIndexDu visitPropertyDu visitPreparedPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu membersProduced emitStringOperandDu m qb
 
-    /// DU-constructing visitor: builds SqlExpr tree from expression tree.
-    /// ALL expression families return proper SqlExpr DU nodes.
-    /// Pre-expression handlers return DU via qb.DuHandlerResult.
+    /// Scalar consumers project the value from the canonical paired lowerer.
     and internal visitDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
+        visitProduced exp qb |> QueryProduced.value qb.SourceContext.NextAlias
+
+    and internal visitProduced (exp: Expression) (qb: QueryBuilder) : QueryProducedValue =
         visitValueDu Value exp qb
 
-    and private visitComparisonDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
+    and private visitPresenceDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
+        visitValueCoreDu Presence exp qb |> QueryProduced.presence qb.SourceContext.NextAlias
+
+    and internal visitComparisonProduced (exp: Expression) (qb: QueryBuilder) : QueryProducedValue =
         visitValueDu Comparison exp qb
 
+    and private visitTextProduced (exp: Expression) (qb: QueryBuilder) =
+        let original =
+            match exp with
+            | :? UnaryExpression as boxing when boxing.NodeType = ExpressionType.Convert && typeof<obj>.Equals boxing.Type -> boxing.Operand
+            | _ -> exp
+        if typeof<char>.Equals original.Type then visitComparisonProduced original qb else visitProduced exp qb
+
+    and private visitComparisonDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
+        visitComparisonProduced exp qb
+        |> QueryProduced.consume qb.SourceContext.NextAlias (QueryTranslatorCharacters.comparable exp.Type)
+
     and private visitStoredValueDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
+        let rec withoutBoxing (value: Expression) =
+            match value with
+            | :? UnaryExpression as conversion when conversion.NodeType=ExpressionType.Convert &&
+                                                    typeof<obj>.Equals(conversion.Type) && conversion.Operand.Type.IsValueType ->
+                withoutBoxing conversion.Operand
+            | _ -> value
+        let exp=withoutBoxing exp
         match unwrapConvert exp with
         // A bare entity assignment retains the update root-path representation.
         // Computed values read their operands before writing the result.
-        | :? ParameterExpression -> visitValueDu Stored exp qb
-        | _ -> visitValueDu Stored exp { qb with UpdateMode = false }
+        | :? ParameterExpression -> visitValueDu Stored exp qb |> QueryProduced.value qb.SourceContext.NextAlias
+        | _ -> visitValueDu Stored exp { qb with UpdateMode = false } |> QueryProduced.value qb.SourceContext.NextAlias
 
     // Comparison mode belongs to this operand only. Recursive expression visits
     // use visitDu, preserving the released kinds inside arithmetic and functions.
-    and private visitValueDu valueUse (exp: Expression) (qb: QueryBuilder) : SqlExpr =
+    and private visitValueDu valueUse (exp: Expression) (qb: QueryBuilder) : QueryProducedValue =
+        let produced = visitValueCoreDu valueUse exp qb
+        if qb.UpdateMode || valueUse = Presence then produced
+        else
+            let produced =
+                if produced.Input.Carrier = CanonicalToken && isSqlScalarResult exp.Type then
+                    QueryProduced.bind qb.SourceContext.NextAlias (fun value input ->
+                        DirectValue(QueryProduced.scalarValue exp.Type value input, { input with Carrier = SqlScalar })) produced
+                else produced
+            QueryProduced.map qb.SourceContext.NextAlias (fun value ->
+                let value = QueryProduced.scalarValue exp.Type value produced.Input
+                if valueUse = Stored && QueryTranslatorNumeric.unsigned64 exp.Type && not(isFullyConstant exp) then
+                    QueryTranslatorNumeric.storedUnsigned exp.Type value
+                else value) produced
+
+    and private membersProduced target names expressions qb =
+        QueryTranslatorVisitCoreConstruction.members visitProduced target names expressions qb
+
+    and private tupleProduced expression qb =
+        QueryTranslatorVisitCoreConstruction.tuple visitProduced expression qb
+
+    and private visitValueCoreDu valueUse (exp: Expression) (qb: QueryBuilder) : QueryProducedValue =
         qb.StepTranslation()
         let exp = unwrapStructCopy exp
+        match qb.ProducedHandler |> ValueOption.bind (fun handler -> handler exp) with
+        | ValueSome produced -> produced
+        | ValueNone -> visitUnhandledCoreDu valueUse exp qb
+
+    and private visitUnhandledCoreDu valueUse (exp: Expression) (qb: QueryBuilder) : QueryProducedValue =
         // Pre-expression handlers (DBRef etc.) — return DU directly via DuHandlerResult
         qb.DuHandlerResult.Value <- ValueNone
         if runHandler preExpressionHandler qb exp then
@@ -284,115 +188,152 @@ module internal QueryTranslatorVisitCore =
         | ValueNone ->
 
         // Fully-constant early-out
-        if exp.NodeType <> ExpressionType.Lambda
-            && exp.NodeType <> ExpressionType.Quote
-            && not (isByRefLikeType exp.Type)
-            && isFullyConstant exp
-            && (match exp with :? NewExpression as ne when DateTimeFunctions.isDateTimeLikeType ne.Type -> false | _ -> true)
-            && (match exp with :? ConstantExpression as ce when ce.Value = null -> false | _ -> true) then
-            let value = evaluateExpr<obj> exp
-            match valueUse with
-            | Comparison -> qb.AllocateComparisonParamExpr value
-            | Stored -> qb.AllocateStoredParamExpr value
-            | Value -> qb.AllocateParamExpr value
+        if isConstantParameter exp then
+            let value = ExpressionEvaluation.evaluateExpr<obj> exp
+            let struct(value, writerType) = StoredValueParameter.allocateProduced (valueUse = Comparison) qb.Variables exp.Type value
+            QueryProduced.typed writerType value
         else
 
         match exp.NodeType with
+        | ExpressionType.Add when
+            let binary = exp :?> BinaryExpression
+            typeof<string>.Equals binary.Left.Type || typeof<string>.Equals binary.Right.Type ->
+            QueryTranslatorVisitCoreStringFormatting.binaryProduced visitTextProduced (exp :?> BinaryExpression) qb
         | ExpressionType.And | ExpressionType.AndAlso | ExpressionType.Or | ExpressionType.OrElse
         | ExpressionType.Equal | ExpressionType.NotEqual | ExpressionType.LessThan | ExpressionType.LessThanOrEqual
         | ExpressionType.GreaterThan | ExpressionType.GreaterThanOrEqual
         | ExpressionType.Add | ExpressionType.Subtract | ExpressionType.Multiply | ExpressionType.Divide | ExpressionType.Modulo
+        | ExpressionType.AddChecked | ExpressionType.SubtractChecked | ExpressionType.MultiplyChecked
         | ExpressionType.Assign ->
-            visitBinaryDu (exp :?> BinaryExpression) qb
+            visitBinaryDu (exp :?> BinaryExpression) qb |> QueryProduced.typed exp.Type
         | ExpressionType.Coalesce ->
             let b = exp :?> BinaryExpression
-            SqlExpr.Coalesce(visitDu b.Left qb, [visitDu b.Right qb])
+            let left = visitProduced b.Left qb
+            let right = visitProduced b.Right qb
+            QueryProduced.coalesce qb.SourceContext.NextAlias exp.Type left right
         | ExpressionType.Not ->
             // SARGABLE form: NOT(expr) → (expr = 0) for boolean operands.
             // LINQ only generates NOT on boolean expressions, so this is safe.
             // Enables index utilization on boolean fields.
             let operand = visitDu (exp :?> UnaryExpression).Operand qb
-            SqlExpr.Binary(operand, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
-        | ExpressionType.Negate | ExpressionType.NegateChecked -> SqlExpr.Unary(UnaryOperator.Neg, visitDu (exp :?> UnaryExpression).Operand qb)
-        | ExpressionType.Lambda -> visitDu (exp :?> LambdaExpression).Body qb
-        | ExpressionType.Call -> visitMethodCallDu (exp :?> MethodCallExpression) qb
+            SqlExpr.Binary(operand, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)) |> QueryProduced.typed exp.Type
+        | ExpressionType.Negate | ExpressionType.NegateChecked -> QueryTranslatorNumeric.negate exp.Type (visitDu (exp :?> UnaryExpression).Operand qb) |> QueryProduced.typed exp.Type
+        | ExpressionType.Lambda -> visitValueDu valueUse (exp :?> LambdaExpression).Body qb
+        | ExpressionType.Call -> visitMethodCallDu valueUse (exp :?> MethodCallExpression) qb
         | ExpressionType.Constant ->
             let c = exp :?> ConstantExpression
-            match c.Value with null -> SqlExpr.Literal(SqlLiteral.Null) | _ -> qb.AllocateParamExpr(c.Value)
-        | ExpressionType.MemberAccess -> visitMemberAccessDu (exp :?> MemberExpression |> MemberAccess.From) qb
-        | ExpressionType.Convert ->
+            (match c.Value with null -> SqlExpr.Literal(SqlLiteral.Null) | _ -> qb.AllocateParamExpr(c.Value)) |> QueryProduced.typed c.Type
+        | ExpressionType.MemberAccess -> visitMemberAccessDu valueUse (exp :?> MemberExpression |> MemberAccess.From) qb
+        | ExpressionType.Extension when (match exp with :? BoundValueAccessExpression as access -> not(isNull access.MemberName) | _ -> false) ->
+            let access = exp :?> BoundValueAccessExpression
+            visitMemberAccessDu valueUse { Expression = access.Parent; MemberName = access.MemberName; InputType = access.Parent.Type;
+                                  ReturnType = access.Type; OriginalExpression = None } qb
+        | ExpressionType.Extension when (match exp with :? BoundValueCallExpression as call -> isTuple call.Type | _ -> false) ->
+            tupleProduced exp qb
+        | ExpressionType.Extension when (match exp with :? BoundValueCallExpression as call -> not(isNull call.ProjectionNames) | _ -> false) ->
+            let call = exp :?> BoundValueCallExpression
+            membersProduced call.Type call.ProjectionNames call.Inputs qb
+        | ExpressionType.Convert | ExpressionType.ConvertChecked | ExpressionType.TypeAs ->
             let m = exp :?> UnaryExpression
-            if m.Type = typeof<obj> || m.Operand.Type = typeof<obj> then visitDu m.Operand qb
-            else castToDu qb m.Type m.Operand
+            if typeof<obj>.Equals(m.Type) || typeof<obj>.Equals(m.Operand.Type) then
+                visitValueDu valueUse m.Operand qb
+            elif isReferenceUpcast m then visitValueDu valueUse m.Operand qb
+            else QueryTranslatorVisitCoreCastAggregate.castToDu visitProduced qb m.Type m.Operand (m.NodeType = ExpressionType.ConvertChecked)
         | ExpressionType.NewArrayInit ->
             let array = exp :?> NewArrayExpression
-            let items =
-                [for item in array.Expressions do
-                    let value = visitDu item qb
-                    match item with
-                    | :? ParameterExpression as parameter when not (isNull (parameter.Type.GetProperty("Id")))
-                                                              && parameter.Type.GetProperty("Id").PropertyType = typeof<int64> ->
-                        // The rowid is stored beside the document and must accompany
-                        // an entity embedded in a constructed sequence.
-                        yield SqlExpr.FunctionCall("jsonb_set", [value; SqlExpr.Literal(SqlLiteral.String "$.Id");
-                                                                SqlExpr.Column(resolveAliasForParameter parameter qb, "Id")])
-                    | _ -> yield value]
-            SqlExpr.JsonArrayExpr items
+            let expressions = array.Expressions |> Seq.toArray
+            let components = expressions |> Array.map (fun item -> visitProduced item qb)
+            QueryProduced.construct qb.SourceContext.NextAlias (fun components ->
+                let components = components |> Array.map QueryProduced.embedded
+                DirectValue(SqlExpr.JsonArrayExpr(components |> Array.map fst |> Array.toList),
+                            QuerySerializationInput.Positions(array.Type, components |> Array.map snd))) components
         | ExpressionType.New ->
             let m = exp :?> NewExpression
             match DateTimeFunctions.translateDateTimeLikeConstructor m (fun arg -> visitDu arg qb) with
-            | Some translated -> translated
-            | None when isTuple m.Type -> SqlExpr.JsonArrayExpr([for arg in m.Arguments -> visitDu arg qb])
-            | None when m.Members.Count = m.Arguments.Count ->
-                let fieldQb = { qb with InsideJsonObjectProjection = true }
-                newObjectDu [|for membr, expr in m.Arguments |> Seq.zip m.Members -> struct(membr.Name, visitDu expr fieldQb)|]
+            | Some translated -> QueryProduced.typed m.Type translated
+            | None when isTuple m.Type -> tupleProduced m qb
+            | None when not (isNull m.Members) && m.Members.Count = m.Arguments.Count ->
+                membersProduced m.Type (m.Members |> Seq.map _.Name |> Seq.toArray) (m.Arguments |> Seq.toArray) qb
+            | None when isNull m.Members ->
+                match TypeMetadata.recordFields m.Type with
+                | ValueSome fields when fields.Length = m.Arguments.Count &&
+                                        (fields |> Array.mapi (fun index name ->
+                                            let memberType = ModelMetadata.MemberType(m.Type, name, false)
+                                            let argumentType = m.Arguments.[index].Type
+                                            match memberType with
+                                            | Some valueType -> if isNull valueType then isNull argumentType else valueType.Equals(argumentType)
+                                            | None -> false) |> Array.forall id) ->
+                    membersProduced m.Type fields (m.Arguments |> Seq.toArray) qb
+                | _ -> raise (NotSupportedException(sprintf "Cannot construct new in SQL query %A" m.Type))
             | None -> raise (NotSupportedException(sprintf "Cannot construct new in SQL query %A" m.Type))
-        | ExpressionType.Parameter -> visitParameterDu (exp :?> ParameterExpression) qb
+        | ExpressionType.Parameter -> visitParameterDu valueUse (exp :?> ParameterExpression) qb
         | ExpressionType.ArrayIndex ->
             match exp with
-            | :? ParameterExpression as pe -> visitParameterDu pe qb
-            | :? BinaryExpression as be -> arrayIndexDu be.Left be.Right qb
+            | :? ParameterExpression as pe -> visitParameterDu valueUse pe qb
+            | :? BinaryExpression as be -> arrayIndexDu be.Left be.Right be.Type qb
             | other -> raise (NotSupportedException(sprintf "Unknown array index expression of: %A" other))
         | ExpressionType.Index ->
             let indexExp = exp :?> IndexExpression
             if indexExp.Arguments.Count <> 1 then raise (NotSupportedException("The SQL translator does not support multiple args indexes."))
             let arge = indexExp.Arguments.[0]
             if not (isFullyConstant arge) then raise (NotSupportedException("The SQL translator does not support non constant index arg."))
-            if arge.Type = typeof<string> then
-                let arg = evaluateExpr<string> arge
-                match arg with
-                | "Id" when isRootParameter indexExp.Object ->
-                    let alias = qb.SourceAlias
-                    SqlExpr.Column(alias, "Id")
-                | arg -> visitPropertyDu indexExp.Object arg ({new Expression() with member this.Type = indexExp.Object.Type}) qb
-            else arrayIndexDu indexExp.Object arge qb
-        | ExpressionType.Quote -> visitDu (exp :?> UnaryExpression).Operand qb
+            if typeof<string>.Equals(arge.Type) then
+                let prepared =
+                    match qb.SourceContext.BindQueryValue with
+                    | ValueSome binder -> binder.PrepareConstant arge indexExp.Type
+                    | ValueNone -> PreparedConstant(ExpressionEvaluation.evaluateExpr<obj> arge)
+                let receiver = visitProduced indexExp.Object qb
+                let produce argument = propertyProduced indexExp.Object argument indexExp qb receiver
+                match prepared with
+                | PreparedConstant value -> produce value
+                | DeferredConstant complete -> complete produce
+            else arrayIndexDu indexExp.Object arge indexExp.Type qb
+        | ExpressionType.Quote -> visitValueDu valueUse (exp :?> UnaryExpression).Operand qb
         | ExpressionType.Invoke ->
             let invocation = exp :?> InvocationExpression
-            match invocation.Expression with
-            | :? LambdaExpression as le when le.Parameters.Count = invocation.Arguments.Count ->
-                visitDu (inlineLambdaInvocation le invocation.Arguments) qb
-            | _ when invocation.CanReduce -> visitDu (invocation.Reduce()) qb
-            | _ when isFullyConstant exp -> qb.AllocateParamExpr(evaluateExpr<obj> exp)
+            let body = normalizeStoredConstruction invocation
+            match body with
+            | _ when not(obj.ReferenceEquals(body, invocation)) -> visitValueDu valueUse body qb
+            | _ when invocation.CanReduce ->
+                let body = invocation.Reduce()
+                visitValueDu valueUse body qb
+            | _ when isFullyConstant exp -> qb.AllocateParamExpr(ExpressionEvaluation.evaluateExpr<obj> exp) |> QueryProduced.typed exp.Type
             | _ -> raise (NotSupportedException("Error: Invoke expression is not reducible.\nReason: The invoked expression cannot be inlined or treated as a constant for SQL translation.\nFix: Inline the lambda or move the invocation after AsEnumerable()."))
+        | ExpressionType.Block ->
+            let block = exp :?> BlockExpression
+            // Quotation pattern matching first binds the stored value to a local.
+            // Only stored accesses can be substituted; executable client bindings
+            // retain their evaluation and storage owner.
+            match tryStoredLocal block with
+            | Some body -> visitValueDu valueUse body qb
+            | None -> raise(NotSupportedException("Only local bindings of stored values can be translated to SQL. Move executable bindings after AsEnumerable()."))
         | ExpressionType.Conditional ->
             let c = exp :?> ConditionalExpression
-            SqlExpr.CaseExpr((visitDu c.Test qb, visitDu c.IfTrue qb), [], Some(visitDu c.IfFalse qb))
+            let condition = visitDu c.Test qb
+            let whenTrue = visitValueDu valueUse c.IfTrue qb
+            let whenFalse = visitValueDu valueUse c.IfFalse qb
+            QueryProduced.choose c.Type condition whenTrue whenFalse
         | ExpressionType.TypeIs ->
             let typeIsExp = exp :?> TypeBinaryExpression
-            if not (mustIncludeTypeInformationInSerializationFn typeIsExp.Expression.Type) then
+            if not (TypeMetadata.requiresTypeInformation typeIsExp.Expression.Type) then
                 raise (NotSupportedException(sprintf "Cannot translate TypeIs expression, because the DB will not store its type information for %A" typeIsExp.Type))
             let typeExpr = SqlExpr.FunctionCall("jsonb_extract", [visitDu typeIsExp.Expression qb; SqlExpr.Literal(SqlLiteral.String "$.$type")])
             match typeIsExp.TypeOperand |> typeToName with
             | None -> raise (NotSupportedException(sprintf "Cannot translate TypeIs expression with the TypeOperand: %A" typeIsExp.TypeOperand))
-            | Some typeName -> SqlExpr.Binary(typeExpr, BinaryOperator.Eq, qb.AllocateParamExpr typeName)
+            | Some typeName -> SqlExpr.Binary(typeExpr, BinaryOperator.Eq, qb.AllocateParamExpr typeName) |> QueryProduced.typed exp.Type
         | ExpressionType.MemberInit ->
             let m = exp :?> MemberInitExpression
-            let fieldQb = { qb with InsideJsonObjectProjection = true }
-            newObjectDu [|for binding in m.Bindings |> Seq.cast<MemberAssignment> -> struct(binding.Member.Name, visitDu binding.Expression fieldQb)|]
+            let bindings = m.Bindings |> Seq.cast<MemberAssignment> |> Seq.toArray
+            membersProduced m.Type (bindings |> Array.map (fun binding -> binding.Member.Name))
+                (bindings |> Array.map _.Expression) qb
         | ExpressionType.ListInit ->
             let listExp = exp :?> ListInitExpression
-            SqlExpr.FunctionCall("jsonb_array", [for item in listExp.Initializers -> visitDu (item.Arguments |> Seq.exactlyOne) qb])
+            let components = listExp.Initializers |> Seq.map (fun item -> visitProduced (item.Arguments |> Seq.exactlyOne) qb) |> Seq.toArray
+            QueryProduced.construct qb.SourceContext.NextAlias (fun components ->
+                let components = components |> Array.map QueryProduced.embedded
+                let elementType = ModelMetadata.SequenceElement listExp.Type
+                let input = { QuerySerializationInput.Positions(elementType.MakeArrayType(), components |> Array.map snd) with OriginalType = listExp.Type }
+                DirectValue(SqlExpr.FunctionCall("jsonb_array", components |> Array.map fst |> Array.toList), input)) components
         // Unknown handler fallback — returns DU via DuHandlerResult
         | _ ->
             qb.DuHandlerResult.Value <- ValueNone

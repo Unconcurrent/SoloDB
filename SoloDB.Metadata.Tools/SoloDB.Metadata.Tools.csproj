@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SoloDB.Metadata.Codecs/SoloDB.Metadata.Codecs.fsproj" />
+    <Compile Include="../SoloDB.Metadata.Generation/Model.cs" Link="Generation/Model.cs" />
+    <PackageReference Include="Mono.Cecil" Version="0.11.6" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Build.Framework" Version="17.11.4" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

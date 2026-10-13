@@ -1,0 +1,25 @@
+<Project>
+  <UsingTask TaskName="SoloDatabase.Metadata.Tools.PrepareNativeUnionMetadata" AssemblyFile="$(SoloDBMetadataToolsPath)" />
+  <Target Name="SoloDBPrepareNativeUnionMetadata" BeforeTargets="WriteIlcRspFileForCompilation"
+          Condition="'$(PublishAot)' == 'true' and '$(DesignTimeBuild)' != 'true'">
+    <ItemGroup>
+      <_SoloDBOriginalNativeInputs Include="@(ManagedBinary)" />
+    </ItemGroup>
+    <SoloDatabase.Metadata.Tools.PrepareNativeUnionMetadata References="@(IlcReference)" Inputs="@(ManagedBinary)"
+        OutputDirectory="$(IntermediateOutputPath)SoloDB.Generated/native-models">
+      <Output TaskParameter="NativeReferences" ItemName="_SoloDBNativeReferences" />
+      <Output TaskParameter="NativeInputs" ItemName="_SoloDBNativeInputs" />
+    </SoloDatabase.Metadata.Tools.PrepareNativeUnionMetadata>
+    <ItemGroup>
+      <IlcReference Remove="@(IlcReference)" />
+      <IlcReference Include="@(_SoloDBNativeReferences)" />
+      <IlcCompileInput Remove="@(_SoloDBOriginalNativeInputs)" />
+      <ManagedBinary Remove="@(ManagedBinary)" />
+      <ManagedBinary Include="@(_SoloDBNativeInputs)">
+        <IlcRspFile>$(NativeIntermediateOutputPath)%(Filename).ilc.rsp</IlcRspFile>
+        <IlcOutputFile>$(NativeIntermediateOutputPath)%(Filename)$(IlcOutputFileExt)</IlcOutputFile>
+      </ManagedBinary>
+      <IlcCompileInput Include="@(_SoloDBNativeInputs)" />
+    </ItemGroup>
+  </Target>
+</Project>

@@ -1,9 +1,8 @@
 namespace SoloDatabase
 
-open Microsoft.Data.Sqlite
 open System
 open Connections
-open SQLiteTools
+open NativeSQLiteTools
 open Utils
 
 module internal SoloDBRootOps =
@@ -20,10 +19,22 @@ module internal SoloDBRootOps =
         if name.StartsWith "SoloDB" then raise (ArgumentException $"The SoloDB* prefix is forbidden in Collection names.")
 
         let existsAlready =
-            use connection = connectionManager.Borrow()
+            use connection = connectionManager.BorrowNative()
             Helper.existsCollection name connection
 
-        let hasRelations = RelationsSchemaValidator.getRelationSpecs typeof<'T> |> Array.isEmpty |> not
+        if existsAlready then
+            let needsMigration,needsIndexes =
+                use connection=connectionManager.BorrowNative()
+                (NumericMigration.sample connection name typeof<'T> |> NumericMigration.legacy),
+                HelperSchema.hasUnsignedIndexes<'T>()
+            if needsMigration || needsIndexes then
+                lock ddlLock (fun () ->
+                    connectionManager.WithTransaction(fun connection ->
+                        if NumericMigration.sample connection name typeof<'T> |> NumericMigration.legacy then
+                            NumericMigration.migrate connection name typeof<'T>
+                        if needsIndexes then HelperSchema.ensureUnsignedIndexes<'T> name connection))
+
+        let hasRelations = RelationsSchemaValidator.hasReferenceProperties typeof<'T>
 
         if not existsAlready then
             lock ddlLock (fun () ->
@@ -31,6 +42,10 @@ module internal SoloDBRootOps =
                     let shouldCreate = not (Helper.existsCollection name connection)
                     if shouldCreate then
                         Helper.createTableInner<'T> name connection
+                    else
+                        if NumericMigration.sample connection name typeof<'T> |> NumericMigration.legacy then
+                            NumericMigration.migrate connection name typeof<'T>
+                        HelperSchema.ensureUnsignedIndexes<'T> name connection
 
                     Helper.registerTypeCollection<'T> name connection
 
@@ -40,6 +55,7 @@ module internal SoloDBRootOps =
                             OwnerTable = name
                             OwnerType = typeof<'T>
                             InTransaction = true
+                            Preparation = RelationsTypes.RelationPreparation()
                             CollectionFactory = None
                         }
                         RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
@@ -47,7 +63,7 @@ module internal SoloDBRootOps =
             )
         elif hasRelations then
             let needsEnsure =
-                use conn = connectionManager.Borrow()
+                use conn = connectionManager.BorrowNative()
                 RelationsSchemaLinkTableDDL.relationSchemaRequiresEnsure conn name typeof<'T>
             if needsEnsure then
                 lock ddlLock (fun () ->
@@ -59,15 +75,16 @@ module internal SoloDBRootOps =
                             OwnerTable = name
                             OwnerType = typeof<'T>
                             InTransaction = true
+                            Preparation = RelationsTypes.RelationPreparation()
                             CollectionFactory = None
                         }
                         RelationsCore.ensureSchemaForOwnerType relationTx typeof<'T>
                     )
                 )
 
-        let collection = Collection<'T>(Pooled connectionManager, name, connectionString, { ClearCacheFunction = clearCache; EventSystem = events })
+        let collection = Collection<'T>(NativePooled connectionManager, name, connectionString, { ClearCacheFunction = clearCache; EventSystem = events })
 
-        use snapshotConnection = connectionManager.Borrow()
+        use snapshotConnection = connectionManager.BorrowNative()
         collection.RefreshIndexModelSnapshot(snapshotConnection)
         collection :> ISoloDBCollection<'T>
 

@@ -1,0 +1,78 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using Mono.Cecil;
+using Microsoft.FSharp.Core;
+using SoloDatabase.Metadata.CodecGeneration;
+using SoloDatabase.Metadata.Generation;
+
+namespace SoloDatabase.Metadata.Tools;
+
+// One helper generation owns these definitions; no table is emitted into the product.
+internal sealed class GeneratedJsonDefinitions
+{
+    private readonly Dictionary<(string Role,string Target,string Representation,string Policy),MethodDefinition> methods;
+    private readonly GeneratedJsonDefinitions? native;
+    private readonly string[] references;
+    private bool utf8VectorPrepared;
+    private bool utf16VectorPrepared;
+    private FSharpOption<CodecBase64VectorApi<TypeReference,MethodReference>> utf8Vector = null!;
+    private FSharpOption<CodecBase64VectorApi<TypeReference,MethodReference>> utf16Vector = null!;
+
+    internal GeneratedJsonDefinitions(string[]? references = null)
+    { this.references = references ?? Array.Empty<string>(); methods = new(); }
+    private GeneratedJsonDefinitions(GeneratedJsonDefinitions native)
+    { this.native = native; references = native.references; methods = native.methods; Stored = true; }
+    internal bool Stored { get; }
+    internal string MethodName(string name) => Stored ? name + "Stored" : name;
+    internal GeneratedJsonDefinitions NativeView => native ?? this;
+    internal GeneratedJsonDefinitions StoredView() => new(this);
+    private string Role(string role) => Stored && (role is "numeric-read" or "array-read" or "array-write" or "optional-read" or "optional-write"
+        or "tuple-read" or "tuple-write" or "grouping-read" or "dictionary-read" or "dictionary-write"
+        or "reference-sequence-read" or "custom-sequence-read" or "non-generic-sequence-write" or "raw-model-body"
+        or "raw-read" or "raw-write" or "raw-abstract-write" || role.StartsWith("sequence-read:",StringComparison.Ordinal)
+        || role is "sequence-write" or "sequence-binary-write") ? TypeSupport.StoredRole(role) : role;
+
+    internal FSharpOption<CodecBase64VectorApi<TypeReference,MethodReference>> Base64Vector(ModuleDefinition module,bool utf16)
+    {
+        if(native != null) return native.Base64Vector(module,utf16);
+        if(utf16) {
+            if(!utf16VectorPrepared) {
+                utf16Vector=GeneratedBase64Vector.Read(module,references,true);
+                utf16VectorPrepared=true;
+            }
+            return utf16Vector;
+        }
+        if(!utf8VectorPrepared) {
+            utf8Vector=GeneratedBase64Vector.Read(module,references,false);
+            utf8VectorPrepared=true;
+        }
+        return utf8Vector;
+    }
+
+    internal static string Identity(TypeReference type)
+    {
+        if (type is GenericInstanceType generic)
+            return "G" + Identity(generic.ElementType) + string.Concat(generic.GenericArguments.Select(value => Part(Identity(value))));
+        if (type is ArrayType array)
+            return "A" + (array.IsVector ? "vector" : array.Rank.ToString(System.Globalization.CultureInfo.InvariantCulture)) + Part(Identity(array.ElementType));
+        if (type is RequiredModifierType required) return "Q" + Part(Identity(required.ModifierType)) + Part(Identity(required.ElementType));
+        if (type is OptionalModifierType optional) return "O" + Part(Identity(optional.ModifierType)) + Part(Identity(optional.ElementType));
+        if (type is TypeSpecification specification)
+            return type.MetadataType.ToString() + Part(Identity(specification.ElementType));
+        if (type is GenericParameter parameter)
+            return "P" + parameter.Type + ":" + parameter.Position + ":" + parameter.Owner;
+        var scope = type.Scope is AssemblyNameReference assembly ? assembly.FullName
+            : type.Scope is ModuleDefinition module ? module.Assembly.Name.FullName : type.Scope.Name;
+        return "N" + Part(scope) + Part(type.FullName);
+    }
+    private static string Part(string value) => value.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + value;
+
+    internal static bool SameType(TypeReference left,TypeReference right) => Identity(left) == Identity(right);
+
+    internal bool TryGet(string role,TypeReference target,TypeReference representation,string policy,out MethodDefinition method)
+        => methods.TryGetValue((Role(role),Identity(target),Identity(representation),policy),out method!);
+
+    internal void Add(string role,TypeReference target,TypeReference representation,string policy,MethodDefinition method)
+        => methods.Add((Role(role),Identity(target),Identity(representation),policy),method);
+}

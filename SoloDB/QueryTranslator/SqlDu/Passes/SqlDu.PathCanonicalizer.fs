@@ -32,13 +32,12 @@ let mergeNestedExtract (expr: SqlExpr) : SqlExpr option =
         // FunctionCall("jsonb_extract", [inner_extract, path_literal])
         // Merge: jsonb_extract(jsonb_extract(alias.col, '$.inner'), '$.outer')
         // -> jsonb_extract(alias.col, '$.inner.outer')
-        // Quoted labels may contain dot-bracket text. The segment formatter
-        // treats that spelling as an array boundary, so retain the safe nesting.
-        if pathStr.StartsWith("$.") && pathStr.IndexOf('"') < 0 then
-            let outerSegs = pathStr.Substring(2).Split('.') |> Array.toList
-            Some(JsonExtractExpr(alias, col, JsonPathOps.ofList (JsonPathOps.toList innerPath @ outerSegs)))
-        else
-            None
+        // Only simple member literals have proven segment identity here.
+        match JsonPathOps.trySimpleMembers pathStr with
+        | Some outerSegs ->
+            let outerPath = JsonPathOps.ofList outerSegs
+            Some(JsonExtractExpr(alias, col, JsonPathOps.ofSegments (JsonPathOps.toList innerPath @ JsonPathOps.toList outerPath)))
+        | None -> None
     | _ -> None
 
 /// Attempt to simplify redundant json_extract wrapper around jsonb_extract.

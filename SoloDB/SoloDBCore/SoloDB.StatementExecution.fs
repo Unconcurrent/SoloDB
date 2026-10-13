@@ -1,25 +1,11 @@
 namespace SoloDatabase
 
 open System.Collections.Generic
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open SoloDatabase.SqlModel
 
-/// Canonical execution of a typed SQL statement.
-///
-/// Statement building and statement execution used to be separated only inside one mutation branch,
-/// where the executor was a local closure over the connections it happened to have. That left every
-/// other corridor assembling SQL as text. This module is the single owner: it takes the connection
-/// explicitly, emits canonically, reports the SQL, and executes.
-///
-/// This corridor used to run the optimizer pipeline as well, choosing between canonical emission and
-/// an index-shaped pipeline, discovering the tables a statement touches and loading an index model
-/// for them from a second connection. All of that is gone, and deliberately so: measured across the
-/// whole Release suite, the pipeline changed **no** statement that reached here, and bypassing it
-/// failed no test. It was cost and machinery on a write path with no observable effect, and it made
-/// this module carry an index-model connection that the transactional callers did not want. If a
-/// mutation shape is ever found that the optimizer genuinely improves, this is the place to
-/// reintroduce it, with that shape as the test that justifies it.
+/// Emits typed SQL through the canonical emitter and executes it on the supplied connection.
+/// The owning native statement scope retains binding, fault and cleanup authority.
 module internal StatementExecution =
 
     /// Emit a statement to SQL, reporting it to the capture boundary.
@@ -30,7 +16,14 @@ module internal StatementExecution =
 
     /// Emit and execute, returning the affected row count.
     let execute
-        (executionConnection: SqliteConnection)
+        (executionConnection: NativeSqliteConnection)
         (stmt: SqlStatement)
         (variables: Dictionary<string, obj>) : int =
-        executionConnection.Execute(emit stmt, variables)
+        let mutable statement = executionConnection.OpenStatement(emit stmt)
+        try
+            statement.BindValues(variables)
+            while statement.Step() do ()
+            let affected = statement.RecordsAffected
+            statement.Dispose()
+            affected
+        with error -> statement.Abort(error); reraise()

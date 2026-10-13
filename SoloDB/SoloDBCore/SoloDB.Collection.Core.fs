@@ -1,23 +1,22 @@
 namespace SoloDatabase
 
-open Microsoft.Data.Sqlite
 open System
 open System.Collections.Generic
 open Connections
-open SQLiteTools
+open NativeSQLiteTools
 
 /// Non-recursive collection scaffold helper:
 /// relation-tx bootstrap, relation delete checks, and index snapshot cache operations.
-type internal CollectionScaffold<'T>(connection: Connection, connectionString: string, name: string, hasRelations: bool, collectionFactory: SqliteConnection -> RelationsTypes.IRelationCollectionFactory) =
-    // Transactional collections can serve several cascade calls on the same connection.
+type internal CollectionScaffold<'T>(connection: NativeConnection, connectionString: string, name: string, hasRelations: bool, collectionFactory: NativeSqliteConnection -> RelationsTypes.IRelationCollectionFactory) =
+    // NativeTransactional collections can serve several cascade calls on the same connection.
     let transactionalFactory =
         match connection with
-        | Transactional _
-        | Guarded (_, Transactional _) when hasRelations ->
+        | NativeTransactional _
+        | NativeGuarded (_, NativeTransactional _) when hasRelations ->
             Some (lazy (collectionFactory (connection.Get())))
         | _ -> None
 
-    member _.RefreshIndexModelSnapshot(conn: SqliteConnection) =
+    member _.RefreshIndexModelSnapshot(conn: NativeSqliteConnection) =
         RuntimeIndexModelCache.loadAndStore conn connectionString name |> ignore
 
     member _.InvalidateIndexModelSnapshot() =
@@ -27,11 +26,12 @@ type internal CollectionScaffold<'T>(connection: Connection, connectionString: s
         use conn = connection.Get()
         RuntimeIndexModelCache.loadModelForTables conn [name]
 
-    member _.MkRelationTx(conn: SqliteConnection) : RelationsTypes.RelationTxContext = {
+    member _.MkRelationTx(conn: NativeSqliteConnection) : RelationsTypes.RelationTxContext = {
         Connection = conn
         OwnerTable = name
         OwnerType = typeof<'T>
         InTransaction = true
+        Preparation = RelationsTypes.RelationPreparation()
         CollectionFactory =
             match transactionalFactory with
             | Some cached -> Some cached.Value
@@ -42,27 +42,37 @@ type internal CollectionScaffold<'T>(connection: Connection, connectionString: s
         HashSet<string>(StringComparer.Ordinal),
         HashSet<string>(StringComparer.Ordinal)
 
-    member this.EnsureRelationTx(conn: SqliteConnection) : RelationsTypes.RelationTxContext =
+    member this.EnsureRelationTx(conn: NativeSqliteConnection) : RelationsTypes.RelationTxContext =
         let tx = this.MkRelationTx conn
         RelationsCore.ensureSchemaForOwnerType tx typeof<'T>
         this.InvalidateIndexModelSnapshot()
         tx
 
-    member this.TryEnsureRelationTx(conn: SqliteConnection) : RelationsTypes.RelationTxContext voption =
+    member this.TryEnsureRelationTx(conn: NativeSqliteConnection) : RelationsTypes.RelationTxContext voption =
         if hasRelations then
             ValueSome (this.EnsureRelationTx conn)
         else
             ValueNone
 
-    member _.HasIncomingRelations(connection: SqliteConnection) =
+    member _.HasIncomingRelations(connection: NativeSqliteConnection) =
+        let mutable catalog = connection.OpenStatement("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelation')")
         let relationCatalogExists =
-            connection.QueryFirst<int64>(
-                "SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SoloDBRelation') THEN 1 ELSE 0 END") = 1L
+            try
+                if not (catalog.Step()) then raise (InvalidOperationException("Relation catalog existence was not returned."))
+                let exists = catalog.Row.GetBoolean(0)
+                catalog.Dispose()
+                exists
+            with error -> catalog.Abort(error); reraise()
+        if not relationCatalogExists then false
+        else
+            let mutable statement = connection.OpenStatement("SELECT EXISTS (SELECT 1 FROM SoloDBRelation WHERE TargetCollection = @name LIMIT 1)")
+            try
+                statement.BindText(1, name)
+                if not (statement.Step()) then raise (InvalidOperationException("Incoming relation existence was not returned."))
+                let exists = statement.Row.GetBoolean(0)
+                statement.Dispose()
+                exists
+            with error -> statement.Abort(error); reraise()
 
-        relationCatalogExists &&
-            connection.QueryFirst<int64>(
-                "SELECT CASE WHEN EXISTS (SELECT 1 FROM SoloDBRelation WHERE TargetCollection = @name LIMIT 1) THEN 1 ELSE 0 END",
-                {| name = name |}) = 1L
-
-    member this.RequiresRelationDeleteHandling(connection: SqliteConnection) =
+    member this.RequiresRelationDeleteHandling(connection: NativeSqliteConnection) =
         hasRelations || this.HasIncomingRelations(connection)

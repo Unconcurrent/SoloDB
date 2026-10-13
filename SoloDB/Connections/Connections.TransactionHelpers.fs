@@ -4,8 +4,7 @@ open System
 open System.IO
 open System.Threading
 open System.Threading.Tasks
-open Microsoft.Data.Sqlite
-open SQLiteTools
+open NativeSQLiteTools
 open Utils
 
 module internal ConnectionsTransactionHelpers =
@@ -18,7 +17,7 @@ module internal ConnectionsTransactionHelpers =
 
     let mutable private savepointCounter = 0L
 
-    let internal takeHandlerFaultCommitException (connection: SqliteConnection) : exn option =
+    let internal takeHandlerFaultCommitException (connection: NativeSqliteConnection) : exn option =
         match takeHandlerFault connection with
         | Some handlerEx ->
             let commitEx = InvalidOperationException(
@@ -30,12 +29,19 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
             Some commitEx
         | None -> None
 
-    let cleanupSavepointRollback (conn: SqliteConnection) (sp: string) (ex: exn) =
+    let private executeBoundary (connection: NativeSqliteConnection) sql =
+        let mutable statement = connection.OpenStatement(sql)
+        try
+            statement.StepTransactionBoundary() |> ignore
+            statement.Dispose()
+        with error -> statement.Abort(error); reraise()
+
+    let cleanupSavepointRollback (conn: NativeSqliteConnection) (sp: string) (ex: exn) =
         let faultDepth = tryGetRecordedHandlerFaultDepth conn ex
         let mutable rollbackFailure: exn option = None
         let mutable releaseFailure: exn option = None
-        try conn.Execute(sprintf "ROLLBACK TO \"%s\";" sp) |> ignore with rb -> rollbackFailure <- Some rb
-        try conn.Execute(sprintf "RELEASE \"%s\";" sp) |> ignore with rel -> releaseFailure <- Some rel
+        try executeBoundary conn (sprintf "ROLLBACK TO \"%s\";" sp) with rb -> rollbackFailure <- Some rb
+        try executeBoundary conn (sprintf "RELEASE \"%s\";" sp) with rel -> releaseFailure <- Some rel
         match rollbackFailure, releaseFailure with
         | None, None ->
             match faultDepth with
@@ -55,16 +61,16 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
             wrapped.Data["SoloDB.PrimaryException"] <- ex
             raise wrapped
 
-    let rollbackBorrowedTransaction (conn: CachingDbConnection) (primaryEx: exn option ref) (cleanupEx: exn option ref) (ex: exn) =
+    let rollbackBorrowedTransaction (conn: NativeCachingDbConnection) (primaryEx: exn option ref) (cleanupEx: exn option ref) (ex: exn) =
         primaryEx := Some ex
-        try conn.Execute "ROLLBACK;" |> ignore with rb -> cleanupEx := Some rb
+        try executeBoundary conn "ROLLBACK;" with rb -> cleanupEx := Some rb
 
-    let commitOrRollbackBorrowedTransaction (conn: CachingDbConnection) (primaryEx: exn option ref) (cleanupEx: exn option ref) =
+    let commitOrRollbackBorrowedTransaction (conn: NativeCachingDbConnection) (primaryEx: exn option ref) (cleanupEx: exn option ref) =
         match takeHandlerFaultCommitException conn with
         | Some ex -> rollbackBorrowedTransaction conn primaryEx cleanupEx ex
-        | None -> conn.Execute "COMMIT;" |> ignore
+        | None -> executeBoundary conn "COMMIT;"
 
-    let cleanupBorrowedTransaction (conn: CachingDbConnection) (cleanupEx: exn option ref) =
+    let cleanupBorrowedTransaction (conn: NativeCachingDbConnection) (cleanupEx: exn option ref) =
         conn.InsideTransaction <- false
         clearHandlerFault conn
         try (conn :> IDisposable).Dispose() with ex ->
@@ -75,7 +81,7 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
     /// Ends a dedicated (non-pooled) transaction connection. The connection is destroyed rather
     /// than returned to any pool, so any reference captured during the callback becomes unusable
     /// the moment the scope ends and can never serve unrelated work.
-    let cleanupDedicatedTransaction (conn: CachingDbConnection) (cleanupEx: exn option ref) =
+    let cleanupDedicatedTransaction (conn: NativeCachingDbConnection) (cleanupEx: exn option ref) =
         conn.InsideTransaction <- false
         clearHandlerFault conn
         try conn.DisposeReal() with ex ->
@@ -88,43 +94,35 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
             ThrowOutsideEventContextUsage()
         runner f
 
-    let internal withSavepoint (conn: SqliteConnection) (f: SqliteConnection -> 'T) =
+    let internal withSavepoint (conn: NativeSqliteConnection) (f: NativeSqliteConnection -> 'T) =
         let sp = $"sp_{Interlocked.Increment(&savepointCounter)}"
-        conn.Execute(sprintf "SAVEPOINT \"%s\";" sp) |> ignore
+        executeBoundary conn (sprintf "SAVEPOINT \"%s\";" sp)
         try
             let ret = f conn
-            conn.Execute(sprintf "RELEASE \"%s\";" sp) |> ignore
+            executeBoundary conn (sprintf "RELEASE \"%s\";" sp)
             ret
         with ex ->
             cleanupSavepointRollback conn sp ex
             reraise()
 
-    let internal withSavepointAsync (conn: SqliteConnection) (f: SqliteConnection -> Task<'T>) = task {
+    let internal withSavepointAsync (conn: NativeSqliteConnection) (f: NativeSqliteConnection -> Task<'T>) = task {
         let sp = $"sp_{Interlocked.Increment(&savepointCounter)}"
-        conn.Execute(sprintf "SAVEPOINT \"%s\";" sp) |> ignore
+        executeBoundary conn (sprintf "SAVEPOINT \"%s\";" sp)
         try
             let! ret = f conn
-            conn.Execute(sprintf "RELEASE \"%s\";" sp) |> ignore
+            executeBoundary conn (sprintf "RELEASE \"%s\";" sp)
             return ret
         with ex ->
             cleanupSavepointRollback conn sp ex
             return reraiseAnywhere ex
     }
 
-    let shouldSuppressSavepointInHandler (conn: SqliteConnection) =
+    let shouldSuppressSavepointInHandler (conn: NativeSqliteConnection) =
         isInEventHandlerScope conn
 
-    let internal beginImmediateWithRetry (connection: SqliteConnection) =
+    let internal beginImmediateWithRetry (connection: NativeSqliteConnection) =
         clearHandlerFault connection
-        let mutable attempt = 0
-        let mutable started = false
-        while not started && attempt < 5 do
-            try
-                connection.Execute("BEGIN IMMEDIATE;") |> ignore
-                started <- true
-            with :? SqliteException as se when (se.SqliteErrorCode = 5 || se.SqliteErrorCode = 6) && attempt < 4 ->
-                attempt <- attempt + 1
-                Thread.Sleep(25 * attempt)
+        executeBoundary connection "BEGIN IMMEDIATE;"
 
     let internal resolveTxOutcome (primaryEx: exn option) (cleanupEx: exn option) : exn option =
         match primaryEx, cleanupEx with

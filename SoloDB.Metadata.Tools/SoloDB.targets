@@ -1,0 +1,11 @@
+<Project>
+  <Import Project="$(MSBuildThisFileDirectory)SoloDB.Metadata.targets" Condition="'$(MSBuildProjectExtension)' == '.csproj'" />
+  <ItemGroup Condition="'$(MSBuildProjectExtension)' == '.fsproj'">
+    <Reference Include="SoloDB.Metadata.FSharp">
+      <HintPath>$(MSBuildThisFileDirectory)../tools/netstandard2.0/SoloDB.Metadata.FSharp.dll</HintPath>
+      <Private>false</Private>
+      <ExternallyResolved>true</ExternallyResolved>
+    </Reference>
+  </ItemGroup>
+  <Import Project="$(MSBuildThisFileDirectory)SoloDB.FSharp.Context.targets" Condition="'$(MSBuildProjectExtension)' == '.fsproj'" />
+</Project>

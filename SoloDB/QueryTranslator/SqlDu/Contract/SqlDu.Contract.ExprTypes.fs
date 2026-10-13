@@ -7,6 +7,7 @@ type internal SqlExpr =
     | JsonRootExtract of sourceAlias: string option * column: string
     | JsonSetExpr of target: SqlExpr * assignments: (JsonPath * SqlExpr) list
     | JsonArrayExpr of elements: SqlExpr list
+    | RowValueExpr of elements: SqlExpr list
     | JsonObjectExpr of properties: (string * SqlExpr) list
     | FunctionCall of name: string * arguments: SqlExpr list
     | AggregateCall of kind: AggregateKind * argument: SqlExpr option * distinct: bool * separator: SqlExpr option
@@ -62,7 +63,6 @@ and internal SelectBody =
     | UnionAllSelect of head: SelectCore * tail: SelectCore list
 and internal CteBinding = {
     Name: string
-    Materialized: bool
     Query: SqlSelect
 }
 and internal SqlSelect = {

@@ -4,11 +4,10 @@ open System
 open System.Reflection
 open System.Runtime.Serialization
 open System.Collections.Generic
-open Microsoft.Data.Sqlite
 open SoloDatabase
 open SoloDatabase.Attributes
 open SoloDatabase.Utils
-open SQLiteTools
+open NativeSQLiteTools
 open RelationsTypes
 open RelationsSchemaBuilder
 open RelationsSchemaValidator
@@ -32,14 +31,10 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
                     $"Error: Unknown relation property path '{propertyPath}' for owner type '{tx.OwnerType.FullName}'.\nReason: The path does not match any relation on the type.\nFix: Use a valid relation property path."))
 
     let deleteSingleLink (descriptor: RelationDescriptor) =
-        let stmt, variables =
-            RelationMutationStatements.linkDeleteByOwner descriptor.LinkTable "SourceId" ownerId
-        RelationMutationStatements.execute tx.Connection stmt variables |> ignore
+        RelationMutationStatements.linkDeleteByOwner tx.Connection descriptor.LinkTable "SourceId" ownerId |> ignore
 
     let insertSingleLink (descriptor: RelationDescriptor) (targetId: int64) =
-        let stmt, variables =
-            RelationMutationStatements.linkInsertPlain descriptor.LinkTable ownerId targetId
-        RelationMutationStatements.execute tx.Connection stmt variables |> ignore
+        RelationMutationStatements.linkInsertPlain tx.Connection descriptor.LinkTable ownerId targetId |> ignore
 
     let applySingleSetAndSync (descriptor: RelationDescriptor) (targetId: int64) =
         deleteSingleLink descriptor
@@ -58,7 +53,7 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
             if descriptor.Kind <> Single then
                 raise (InvalidOperationException(
                     $"Error: Relation '{propertyPath}' is not DBRef<T>.\nReason: The relation type does not match the expected DBRef.\nFix: Use a DBRef<T> relation or correct the property path."))
-            if descriptor.TargetType <> targetType then
+            if not (let expected = descriptor.TargetType in if isNull expected then isNull targetType else expected.Equals(targetType)) then
                 raise (InvalidOperationException(
                     $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             ensureTargetExists tx descriptor.TargetTable targetId
@@ -69,11 +64,11 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
             if descriptor.Kind <> Single then
                 raise (InvalidOperationException(
                     $"Error: Relation '{propertyPath}' is not DBRef<T>.\nReason: The relation type does not match the expected DBRef.\nFix: Use a DBRef<T> relation or correct the property path."))
-            if descriptor.TargetType <> targetType then
+            if not (let expected = descriptor.TargetType in if isNull expected then isNull targetType else expected.Equals(targetType)) then
                 raise (InvalidOperationException(
                     $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             match descriptor.TypedIdType with
-            | ValueSome configured when configured = targetIdType -> ()
+            | ValueSome configured when (if isNull configured then isNull targetIdType else configured.Equals(targetIdType)) -> ()
             | ValueSome configured ->
                 raise (InvalidOperationException(
                     $"Error: Typed id type mismatch on '{propertyPath}'.\nReason: Expected {configured.FullName}, got {targetIdType.FullName}.\nFix: Use the correct typed id type for this relation."))
@@ -88,7 +83,7 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
             if descriptor.Kind <> Single then
                 raise (InvalidOperationException(
                     $"Error: Relation '{propertyPath}' is not DBRef<T>.\nReason: The relation type does not match the expected DBRef.\nFix: Use a DBRef<T> relation or correct the property path."))
-            if descriptor.TargetType <> targetType then
+            if not (let expected = descriptor.TargetType in if isNull expected then isNull targetType else expected.Equals(targetType)) then
                 raise (InvalidOperationException(
                     $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             deleteSingleLink descriptor
@@ -100,7 +95,7 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
             if descriptor.Kind <> Many then
                 raise (InvalidOperationException(
                     $"Error: Relation '{propertyPath}' is not DBRefMany<T>.\nReason: The relation type does not match the expected DBRefMany.\nFix: Use a DBRefMany<T> relation or correct the property path."))
-            if descriptor.TargetType <> targetType then
+            if not (let expected = descriptor.TargetType in if isNull expected then isNull targetType else expected.Equals(targetType)) then
                 raise (InvalidOperationException(
                     $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             ensureTargetExists tx descriptor.TargetTable targetId
@@ -108,9 +103,7 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
                 if descriptor.OwnerUsesSourceColumn then ownerId, targetId
                 else targetId, ownerId
             let rowsAffected =
-                let stmt, variables =
-                    RelationMutationStatements.linkInsertIgnoringConflict descriptor.LinkTable sourceId targetIdValue
-                RelationMutationStatements.execute tx.Connection stmt variables
+                RelationMutationStatements.linkInsertIgnoringConflict tx.Connection descriptor.LinkTable sourceId targetIdValue
             ensureLinkWriteApplied tx descriptor.LinkTable sourceId targetIdValue "INSERT OR IGNORE" rowsAffected
 
         | RemoveDBRefMany(propertyPath, targetType, targetId) ->
@@ -118,24 +111,22 @@ let internal applyOps (tx: RelationTxContext) (ownerId: int64) (plan: RelationWr
             if descriptor.Kind <> Many then
                 raise (InvalidOperationException(
                     $"Error: Relation '{propertyPath}' is not DBRefMany<T>.\nReason: The relation type does not match the expected DBRefMany.\nFix: Use a DBRefMany<T> relation or correct the property path."))
-            if descriptor.TargetType <> targetType then
+            if not (let expected = descriptor.TargetType in if isNull expected then isNull targetType else expected.Equals(targetType)) then
                 raise (InvalidOperationException(
                     $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             let ownerColumn, targetColumn = manyColumns descriptor
-            let stmt, variables =
-                RelationMutationStatements.linkDeleteByOwnerAndTarget
-                    descriptor.LinkTable ownerColumn ownerId targetColumn targetId
-            RelationMutationStatements.execute tx.Connection stmt variables |> ignore
+            RelationMutationStatements.linkDeleteByOwnerAndTarget tx.Connection descriptor.LinkTable ownerColumn ownerId targetColumn targetId |> ignore
 
         | ClearDBRefMany(propertyPath, targetType) ->
             let descriptor = resolveDescriptor propertyPath
             if descriptor.Kind <> Many then
                 raise (InvalidOperationException(
                     $"Error: Relation '{propertyPath}' is not DBRefMany<T>.\nReason: The relation type does not match the expected DBRefMany.\nFix: Use a DBRefMany<T> relation or correct the property path."))
-            if descriptor.TargetType <> targetType then
+            if not (let expected = descriptor.TargetType in if isNull expected then isNull targetType else expected.Equals(targetType)) then
                 raise (InvalidOperationException(
                     $"Error: Relation target type mismatch on '{propertyPath}'.\nReason: Expected {descriptor.TargetType.FullName}, got {targetType.FullName}.\nFix: Use the correct target type for this relation."))
             let ownerColumn, _ = manyColumns descriptor
-            let stmt, variables =
-                RelationMutationStatements.linkDeleteByOwner descriptor.LinkTable ownerColumn ownerId
-            RelationMutationStatements.execute tx.Connection stmt variables |> ignore
+            RelationMutationStatements.linkDeleteByOwner tx.Connection descriptor.LinkTable ownerColumn ownerId |> ignore
+
+        | RefreshFileSystemRef _ | SetFileSystemRef _ | AddFileSystemRef _ | RemoveFileSystemRef _ | ClearFileSystemRefs _ | AcceptFileSystemRefChanges _ ->
+            applyFileSystemReferenceOp tx ownerId updateOwnerJson op

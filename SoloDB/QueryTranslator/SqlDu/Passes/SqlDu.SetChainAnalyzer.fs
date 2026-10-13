@@ -62,10 +62,10 @@ let flattenSetChain (expr: SqlExpr) : SqlExpr option =
     // Collect nested jsonb_set calls: jsonb_set(jsonb_set(target, p1, v1), p2, v2)
     let rec collect (e: SqlExpr) (acc: (JsonPath * SqlExpr) list) : (SqlExpr * (JsonPath * SqlExpr) list) option =
         match e with
-        | FunctionCall("jsonb_set", [inner; Literal(String pathStr); value]) when pathStr.StartsWith("$.") ->
-            let segs = pathStr.Substring(2).Split('.') |> Array.toList
-            let path = JsonPathOps.ofList segs
-            collect inner ((path, value) :: acc)
+        | FunctionCall("jsonb_set", [inner; Literal(String pathStr); value]) ->
+            match JsonPathOps.trySimpleMembers pathStr with
+            | Some members -> collect inner ((JsonPathOps.ofList members, value) :: acc)
+            | None -> None
         | JsonSetExpr(target, existingAssigns) ->
             // Already a JsonSetExpr — extend with accumulated assignments
             Some(target, existingAssigns @ acc)

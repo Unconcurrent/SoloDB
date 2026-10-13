@@ -9,7 +9,7 @@ open System.Threading
 /// difference is a compatibility constraint on existing SQL, not an oversight.
 module internal GroupJoinAliases =
     let private next (ctx: QueryContext) (prefix: string) =
-        sprintf "%s%d" prefix (Interlocked.Increment(ctx.AliasCounter) - 1)
+        prefix + (Interlocked.Increment(ctx.AliasCounter) - 1).ToString(System.Globalization.CultureInfo.InvariantCulture)
 
     let nextRowset (ctx: QueryContext) = next ctx "gjr"
     let nextCountRow (ctx: QueryContext) = next ctx "gjn"

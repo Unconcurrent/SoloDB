@@ -3,26 +3,17 @@ module internal SoloDatabase.RelationsTypes
 
 open System
 open System.Reflection
+open System.Collections.Generic
 open System.Collections.Concurrent
-open System.Runtime.CompilerServices
-open Microsoft.Data.Sqlite
 open SoloDatabase
 open SoloDatabase.Attributes
 open SoloDatabase.Utils
 open SoloDatabase.JsonSerializator
-open SQLiteTools
+open NativeSQLiteTools
 open JsonFunctions
 
 type internal IRelationCollectionFactory =
     abstract CreateCollection<'T> : collectionName: string -> ISoloDBCollection<'T>
-
-type internal RelationTxContext = {
-    Connection: Microsoft.Data.Sqlite.SqliteConnection
-    OwnerTable: string
-    OwnerType: Type
-    InTransaction: bool
-    CollectionFactory: IRelationCollectionFactory option
-}
 
 type internal RelationUpdateManyOp =
     | SetDBRefToId of PropertyPath: string * TargetType: Type * TargetId: int64
@@ -31,6 +22,12 @@ type internal RelationUpdateManyOp =
     | AddDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
     | RemoveDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
     | ClearDBRefMany of PropertyPath: string * TargetType: Type
+    | SetFileSystemRef of PropertyPath: string * TargetId: int64
+    | RefreshFileSystemRef of PropertyPath: string
+    | AddFileSystemRef of PropertyPath: string * TargetId: int64
+    | RemoveFileSystemRef of PropertyPath: string * TargetId: int64
+    | ClearFileSystemRefs of PropertyPath: string
+    | AcceptFileSystemRefChanges of Tracker: IFileSystemRefMany * IsLoaded: bool
 
 type internal RelationPlanKind =
     | Insert
@@ -49,14 +46,10 @@ type internal RelationDeletePlan = {
     OwnerType: Type
 }
 
-type internal RelationKind =
-    | Single
-    | Many
-
 type internal RelationDescriptor = {
     OwnerTable: string
     OwnerType: Type
-    Property: PropertyInfo
+    Property: RelationMember
     PropertyPath: string
     Kind: RelationKind
     TargetType: Type
@@ -71,7 +64,54 @@ type internal RelationDescriptor = {
     IsUnique: bool
     OrderBy: DBRefOrder
     TypedIdType: Type voption
-    TargetSoloIdProperty: PropertyInfo voption
+    TargetSoloIdProperty: CustomIdMember voption
+}
+
+/// Resolved facts live only inside one public operation, never on a pooled collection.
+type internal RelationPreparationEntry() =
+    member val Descriptors: RelationDescriptor array voption = ValueNone with get, set
+    member val DescriptorMap: Dictionary<string, RelationDescriptor> voption = ValueNone with get, set
+    member val SchemaReady = false with get, set
+
+type internal RelationPreparation() =
+    let mutable allowReuse = true
+    let entries = Dictionary<struct(string * Type), RelationPreparationEntry>()
+    let targetTables = HashSet<string>(StringComparer.Ordinal)
+    let mutable callbackVersion = -1L
+    let graphInitial = Dictionary<struct(string * int64), HashSet<struct(string * int64)>>()
+    member _.GraphInitial = graphInitial
+    member _.AllowReuse = allowReuse
+    member this.DisableReuse() =
+        allowReuse <- false
+        this.Invalidate()
+    member _.Invalidate() =
+        entries.Clear()
+        targetTables.Clear()
+    member this.Refresh(connection: NativeSqliteConnection) =
+        let version =
+            match connection with
+            | :? NativeCachingDbConnection as cached -> cached.EventHandlerInvocationVersion
+            | _ -> -1L
+        if version <> callbackVersion then
+            this.Invalidate()
+            callbackVersion <- version
+    member this.Entry(connection, table, ownerType) =
+        this.Refresh(connection)
+        let key = struct(table, ownerType)
+        match entries.TryGetValue key with
+        | true, entry -> entry
+        | _ -> let entry = RelationPreparationEntry() in entries.Add(key, entry); entry
+    member this.TargetTables(connection) =
+        this.Refresh(connection)
+        targetTables
+
+type internal RelationTxContext = {
+    Connection: SoloDatabase.NativeSqliteConnection
+    OwnerTable: string
+    OwnerType: Type
+    InTransaction: bool
+    Preparation: RelationPreparation
+    CollectionFactory: IRelationCollectionFactory option
 }
 
 [<CLIMutable>]
@@ -109,8 +149,6 @@ let internal emptyPlan (kind: RelationPlanKind) ownerType =
     { Kind = kind
       OwnerType = ownerType
       Ops = [] }
-
-let internal relationSpecsCache = ConcurrentDictionary<Type, (PropertyInfo * RelationKind * Type * Type voption * DeletePolicy * DeletePolicy * bool * DBRefOrder) array>()
 
 type internal DeleteTraversalContext =
     { GuardSet: System.Collections.Generic.HashSet<string> }
@@ -204,17 +242,8 @@ let internal parseOnOwnerDeletePolicy (value: string) =
         raise (InvalidOperationException(
             $"Error: Invalid owner-delete policy '{policy}'.\nReason: The policy value is unsupported.\nFix: Use Restrict, Unlink, or Deletion for OnOwnerDelete."))
 
-let internal tryGetWritableInt64IdProperty (t: Type) =
-    let prop = t.GetProperty("Id", BindingFlags.Public ||| BindingFlags.Instance)
-    if isNull prop || not prop.CanRead || not prop.CanWrite || prop.PropertyType <> typeof<int64> then
-        ValueNone
-    else
-        ValueSome prop
-
-let internal getWritableInt64IdPropertyOrThrow (t: Type) =
-    match tryGetWritableInt64IdProperty t with
-    | ValueSome prop -> prop
-    | ValueNone ->
+let internal requireWritableInt64Id (t: Type) =
+    if not (EntityIdentity.hasWritableInt64Id t) then
         raise (InvalidOperationException(
             $"Error: Relation target type '{t.FullName}' does not expose a writable int64 Id.\nReason: DBRef/DBRefMany requires an int64 Id.\nFix: Add an int64 Id property or use supported relation types."))
 
@@ -224,60 +253,11 @@ let internal readEntityIdOrZero (targetType: Type) (entity: obj) =
         raise (InvalidOperationException(
             $"Error: Invalid relation target instance type.\nReason: Expected assignable to {targetType.FullName}, got {entity.GetType().FullName}.\nFix: Use the correct target type for this relation."))
     else
-        RelationsAccessorCache.compiledInt64IdReader(targetType).Invoke(entity)
+        EntityIdentity.compiledInt64IdReader(targetType).Invoke(entity)
 
 let internal writeEntityId (targetType: Type) (entity: obj) (id: int64) =
-    RelationsAccessorCache.compiledInt64IdWriter(targetType).Invoke(entity, id)
-
-let internal jsonSerializeMethod =
-    typeof<JsonValue>.GetMethods(BindingFlags.Public ||| BindingFlags.Static)
-    |> Array.find (fun m -> m.Name = "Serialize" && m.IsGenericMethodDefinition && m.GetParameters().Length = 1)
-
-let internal jsonSerializeWithTypeMethod =
-    typeof<JsonValue>.GetMethods(BindingFlags.Public ||| BindingFlags.Static)
-    |> Array.find (fun m -> m.Name = "SerializeWithType" && m.IsGenericMethodDefinition && m.GetParameters().Length = 1)
+    EntityIdentity.compiledInt64IdWriter(targetType).Invoke(entity, id)
 
 let internal serializeEntityForStorage (targetType: Type) (entity: obj) =
-    let includeType = mustIncludeTypeInformationInSerializationFn targetType
-    let baseMethod = if includeType then jsonSerializeWithTypeMethod else jsonSerializeMethod
-    let serializer = RelationsAccessorCache.compiledSerializer targetType includeType baseMethod
-    let json = serializer.Invoke(entity) :?> JsonValue
-    match json with
-    | JsonValue.Object objMap when (tryGetWritableInt64IdProperty targetType).IsSome ->
-        objMap.Remove("Id") |> ignore
-    | _ -> ()
-    json.ToJsonString()
-
-// ─── Per-owner RelationVersion baseline tracking ─────────────────────────────
-
-/// Weak table mapping entity instances to their loaded RelationVersion.
-/// Entries are collected when the entity instance is GC'd.
-let internal relationVersionBaseline = ConditionalWeakTable<obj, obj>()
-
-/// Record the RelationVersion that was current when this entity was loaded.
-let internal captureRelationVersion (entity: obj) (version: int64) =
-    // ConditionalWeakTable.AddOrUpdate is not available on netstandard2.0.
-    // Remove first if present, then add.
-    relationVersionBaseline.Remove(entity) |> ignore
-    relationVersionBaseline.Add(entity, box version)
-
-/// Retrieve the RelationVersion captured at load time for this entity, or 0L if not tracked.
-let internal getLoadedRelationVersion (entity: obj) =
-    match relationVersionBaseline.TryGetValue(entity) with
-    | true, v -> unbox<int64> v
-    | _ -> 0L
-
-let [<Literal>] internal relationVersionMetadataPath = "$.RelationVersion"
-
-/// Increment the RelationVersion in the Metadata column for a given owner table and entity id.
-/// Shared by RelationsSync (sync paths) and Relations.Delete.fs (delete traversal).
-let internal incrementRelationVersionForTable (connection: SqliteConnection) (ownerTable: string) (ownerId: int64) =
-    let stmt, variables = RelationMutationStatements.ownerRelationVersionIncrement ownerTable ownerId
-    RelationMutationStatements.execute connection stmt variables |> ignore
-
-/// Read the current persisted RelationVersion from the Metadata column. Returns 0 if not set.
-let internal readPersistedRelationVersion (connection: SqliteConnection) (ownerTable: string) (ownerId: int64) =
-    let qOwner = quoteIdentifier ownerTable
-    connection.QueryFirstOrDefault<int64>(
-        $"SELECT COALESCE(CAST(jsonb_extract(Metadata, @path) AS INTEGER), 0) FROM {qOwner} WHERE Id = @id;",
-        {| path = relationVersionMetadataPath; id = ownerId |})
+    let includeType = TypeMetadata.requiresTypeInformation targetType
+    JsonValue.WriteRuntimeBuffer(targetType,entity,includeType,EntityIdentity.hasWritableInt64Id targetType)

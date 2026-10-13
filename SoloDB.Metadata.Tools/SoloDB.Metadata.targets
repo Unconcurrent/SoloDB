@@ -1,0 +1,47 @@
+<Project>
+  <PropertyGroup Condition="'$(MSBuildProjectExtension)' == '.csproj'">
+    <SoloDBGeneratedHelper>true</SoloDBGeneratedHelper>
+    <SoloDBGeneratedHelperIdentity>$(AssemblyName).SoloDB.Generated</SoloDBGeneratedHelperIdentity>
+    <SoloDBMetadataToolsPath Condition="'$(SoloDBMetadataToolsPath)' == ''">$(MSBuildThisFileDirectory)../tools/netstandard2.0/SoloDB.Metadata.Tools.dll</SoloDBMetadataToolsPath>
+  </PropertyGroup>
+  <UsingTask TaskName="SoloDatabase.Metadata.Tools.GenerateHelper" AssemblyFile="$(SoloDBMetadataToolsPath)" />
+  <ItemGroup Condition="'$(SoloDBGeneratedHelper)' == 'true'">
+    <CompilerVisibleProperty Include="SoloDBGeneratedHelper" />
+    <RuntimeHostConfigurationOption Include="SoloDB.Metadata.DynamicDiscovery" Value="false" Trim="true" Condition="'$(PublishAot)' == 'true'" />
+  </ItemGroup>
+  <Target Name="SoloDBGenerateHelperContract" AfterTargets="ResolveAssemblyReferences" BeforeTargets="CoreCompile" Condition="'$(SoloDBGeneratedHelper)' == 'true'">
+    <PropertyGroup>
+      <SoloDBGeneratedHelperRoot>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', 'SoloDB.Generated'))</SoloDBGeneratedHelperRoot>
+      <SoloDBGeneratedContract>$(SoloDBGeneratedHelperRoot)/contract/$(SoloDBGeneratedHelperIdentity).dll</SoloDBGeneratedContract>
+      <SoloDBGeneratedImplementation>$(SoloDBGeneratedHelperRoot)/implementation/$(SoloDBGeneratedHelperIdentity).dll</SoloDBGeneratedImplementation>
+      <_SoloDBGeneratedKeyFile Condition="'$(SignAssembly)' == 'true'">$(AssemblyOriginatorKeyFile)</_SoloDBGeneratedKeyFile>
+    </PropertyGroup>
+    <SoloDatabase.Metadata.Tools.GenerateHelper Output="$(SoloDBGeneratedContract)" Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" References="@(ReferenceCopyLocalPaths);@(ReferencePath)" />
+    <ItemGroup>
+      <ReferencePath Include="$(SoloDBGeneratedContract)">
+        <Aliases>SoloDBGeneratedOperations</Aliases>
+      </ReferencePath>
+      <ReferencePathWithRefAssemblies Include="$(SoloDBGeneratedContract)">
+        <Aliases>SoloDBGeneratedOperations</Aliases>
+      </ReferencePathWithRefAssemblies>
+      <ReferenceCopyLocalPaths Include="$(SoloDBGeneratedContract)" />
+    </ItemGroup>
+  </Target>
+  <Target Name="SoloDBGenerateHelperImplementation" AfterTargets="CoreCompile" BeforeTargets="GenerateBuildDependencyFile;CopyFilesToOutputDirectory;_ComputeResolvedCopyLocalPublishAssets"
+          Condition="'$(SoloDBGeneratedHelper)' == 'true' and '$(DesignTimeBuild)' != 'true'">
+    <SoloDatabase.Metadata.Tools.GenerateHelper Consumer="@(IntermediateAssembly)" Output="$(SoloDBGeneratedImplementation)" Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" References="@(ReferenceCopyLocalPaths);@(ReferencePath)">
+      <Output TaskParameter="Active" PropertyName="SoloDBGeneratedActive" />
+    </SoloDatabase.Metadata.Tools.GenerateHelper>
+    <ItemGroup>
+      <ReferencePath Remove="@(ReferencePath)" Condition="'%(ReferencePath.Filename)' == '$(SoloDBGeneratedHelperIdentity)'" />
+      <ReferencePath Include="$(SoloDBGeneratedImplementation)" Condition="'$(SoloDBGeneratedActive)' == 'true'">
+        <CopyLocal>true</CopyLocal>
+        <IncludeRuntimeDependency>true</IncludeRuntimeDependency>
+      </ReferencePath>
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.Filename)' == '$(SoloDBGeneratedHelperIdentity)'" />
+      <ReferenceCopyLocalPaths Include="$(SoloDBGeneratedImplementation)" Condition="'$(SoloDBGeneratedActive)' == 'true'" />
+    </ItemGroup>
+    <Delete Files="$(OutDir)$(SoloDBGeneratedHelperIdentity).dll" Condition="'$(SoloDBGeneratedActive)' != 'true'" />
+  </Target>
+  <Import Project="$(MSBuildThisFileDirectory)SoloDB.NativeMetadata.targets" />
+</Project>

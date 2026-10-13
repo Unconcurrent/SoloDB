@@ -1,8 +1,9 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Library</OutputType>
-    <TargetFrameworks>netstandard2.0;netstandard2.1</TargetFrameworks>
+    <TargetFrameworks>netstandard2.0;netstandard2.1;net6.0</TargetFrameworks>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
     <SignAssembly>False</SignAssembly>
     <Title>SoloDB</Title>
     <Description>SoloDB is a document database built on top of SQLite using the JSONB data type. It leverages the robustness and simplicity of SQLite to provide an efficient and lightweight database solution for handling JSON documents.</Description>
@@ -39,39 +40,192 @@
     <Compile Include="Core/Stack128.fs" />
     <Compile Include="Core/Sort.fs" />
     <Compile Include="Core/Types.fs" />
-    <Compile Include="Core/DBRefTypeHelpers.fs" />
+    <Compile Include="Metadata/Attributes.fs" />
+    <Compile Include="Json/JsonStringLiteral.fs" />
+    <Compile Include="Metadata/CodecModel.fs" />
+    <Compile Include="Metadata/TypeSupport.fs" />
+    <Compile Include="Metadata/QueryStorage.fs" />
+    <Compile Include="Metadata/TypeCache.fs" />
+    <Compile Include="Metadata/ReferenceTypes.fs" />
     <Compile Include="Utils/AssemblyInternals.fs" />
     <Compile Include="Utils/SqlCapture.fs" />
+    <Compile Include="Metadata/Capability.fs" />
+    <Compile Include="Metadata/Reflection.fs" />
     <Compile Include="Utils/ReflectionSupport.fs" />
     <Compile Include="Utils/CommonSupport.fs" />
-    <Compile Include="Core/SoloIdAccessor.fs" />
+    <Compile Include="Metadata/QueryWitnesses.fs" />
+    <Compile Include="Metadata/QueryLambdaDiscovery.fs" />
+    <Compile Include="Metadata/QueryScalarOperators.fs" />
+    <Compile Include="Metadata/QueryOperationEmitter.fs" />
+    <Compile Include="Metadata/CodecEmitter.fs" />
+    <Compile Include="Metadata/CodecNumberEmitter.fs" />
+    <Compile Include="Metadata/CodecMagnitudeEmitter.fs" />
+    <Compile Include="Metadata/CodecBigIntegerEmitter.fs" />
+    <Compile Include="Metadata/CodecIntegerEmitter.fs" />
+    <Compile Include="Metadata/CodecNumericTextEmitter.fs" />
+    <Compile Include="Metadata/CodecNumericBooleanEmitter.fs" />
+    <Compile Include="Metadata/CodecQuotedIntegerEmitter.fs" />
+    <Compile Include="Metadata/CodecQuotedNumberEmitter.fs" />
+    <Compile Include="Metadata/CodecFloatingEmitter.fs" />
+    <Compile Include="Metadata/CodecFloatingReadEmitter.fs" />
+    <Compile Include="Metadata/CodecDecimalArithmeticEmitter.fs" />
+    <Compile Include="Metadata/CodecDecimalEmitter.fs" />
+    <Compile Include="Metadata/CodecDynamicNumberEmitter.fs" />
+    <Compile Include="Metadata/CodecNumericDriverEmitter.fs" />
+    <Compile Include="Json/JsonIdentifierSyntax.fs" />
+    <Compile Include="Metadata/CodecStringEmitter.fs" />
+    <Compile Include="Metadata/CodecFormattedReaderEmitter.fs" />
+    <Compile Include="Metadata/CodecScalarAdapterEmitter.fs" />
+    <Compile Include="Metadata/CodecNameEmitter.fs" />
+    <Compile Include="Metadata/CodecFiniteCaptureEmitter.fs" />
+    <Compile Include="Metadata/CodecOptionalEmitter.fs" />
+        <Compile Include="Metadata/CodecOutputEmitter.fs" />
+    <Compile Include="Metadata/CodecStoredNumericEmitter.fs" />
+        <Compile Include="Metadata/CodecStringWriterEmitter.fs" />
+    <Compile Include="Metadata/CodecScalarWriterEmitter.fs" />
+    <Compile Include="Metadata/CodecDigitWriterEmitter.fs" />
+    <Compile Include="Metadata/CodecIntegerWriterEmitter.fs" />
+    <Compile Include="Metadata/CodecBigIntegerWriterEmitter.fs" />
+    <Compile Include="Metadata/CodecDecimalWriterEmitter.fs" />
+    <Compile Include="Metadata/CodecFloatingWriterEmitter.fs" />
+    <Compile Include="Metadata/CodecGuidWriterEmitter.fs" />
+    <Compile Include="Metadata/CodecBase64VectorEmitter.fs" />
+    <Compile Include="Metadata/CodecBase64WriterEmitter.fs" />
+    <Compile Include="Metadata/CodecPolymorphicEmitter.fs" />
+    <Compile Include="Metadata/CodecRawEmitter.fs" />
+    <Compile Include="Metadata/CodecUnionEmitter.fs" />
+    <Compile Include="Metadata/CodecArrayEmitter.fs" />
+    <Compile Include="Metadata/CodecSequenceEmitter.fs" />
+    <Compile Include="Metadata/CodecDictionaryEmitter.fs" />
+    <Compile Include="Metadata/RuntimeCodecIL.fs" />
+    <Compile Include="Metadata/QueryMethodDiscovery.fs" />
+    <Compile Include="Metadata/JsonModelDiscovery.fs" />
+    <Compile Include="Metadata/QueryValues.fs" />
+    <Compile Include="Metadata/ModelMembers.fs" />
+    <Compile Include="Metadata/ValueAccess.fs" />
+    <Compile Include="Metadata/QueryQuotationSyntax.fs" />
+    <Compile Include="Metadata/ExpressionEvaluation.fs" />
+    <Compile Include="Metadata/CustomIdMembers.fs" />
+    <Compile Include="Metadata/SoloId.fs" />
+    <Compile Include="Metadata/EntityIdOperations.fs" />
+    <Compile Include="Metadata/EntityIdentity.fs" />
+    <Compile Include="Metadata/DocumentIdentity.fs" />
+    <Compile Include="QueryTranslator/References/DBRef.fs" />
+    <Compile Include="QueryTranslator/References/DBRefMany.fs" />
+    <Compile Include="QueryTranslator/References/FileSystemRef.fs" />
+    <Compile Include="Metadata/ReferenceCollections.fs" />
     <Compile Include="Core/Extensions.fs" />
-    <Compile Include="Json/JsonHelper.fs" />
+    <Compile Include="Metadata/JsonShape.fs" />
+    <Compile Include="Json/JsonNumbers.fs" />
+    <Compile Include="Json/JsonEncoding.fs" />
+    <Compile Include="Json/JsonStringReader.fs" />
+    <Compile Include="Json/JsonIdentifiers.fs" />
     <Compile Include="Json/JsonLexer.fs" />
+    <Compile Include="Json/JsonParser.fs" />
     <Compile Include="Json/JsonEqualitySupport.fs" />
-    <Compile Include="Json/JsonSerializator.fs" />
+    <Compile Include="Metadata/CodecTupleEmitter.fs" />
+    <Compile Include="Json/JsonOutput.fs" />
+    <Compile Include="Json/JsonRawTypes.fs" />
+    <Compile Include="Json/JsonTupleInput.fs" />
+    <Compile Include="Json/JsonUnionInput.fs" />
+    <Compile Include="Json/JsonNumericInput.fs" />
+    <Compile Include="Json/JsonRawNumbers.fs" />
+    <Compile Include="Json/JsonRawNumericWriter.fs" />
+    <Compile Include="Json/JsonRawScalar.fs" />
+    <Compile Include="Json/JsonWriterRegion.fs" />
+    <Compile Include="Json/JsonStringInput.fs" />
+    <Compile Include="Json/JsonFormattedInput.fs" />
+    <Compile Include="Json/JsonOptionalInput.fs" />
+    <Compile Include="Json/JsonNumericScalarRuntime.fs" />
+    <Compile Include="Numerics/BinaryDecimalWords.fs" />
+    <Compile Include="Numerics/BinaryDecimalScale.fs" />
+    <Compile Include="Numerics/BinaryDecimal.fs" />
+    <Compile Include="Numerics/BigIntegerMagnitude.fs" />
+    <Compile Include="Numerics/BigIntegerRadix.fs" />
+    <Compile Include="Numerics/ExactNumber.fs" />
+    <Compile Include="Numerics/NumericKey.fs" />
+    <Compile Include="Json/JsonStoredNumeric.fs" />
+    <Compile Include="Json/JsonNumericRuntime.fs" />
+    <Compile Include="Json/JsonNameInput.fs" />
+    <Compile Include="Json/JsonNameRuntime.fs" />
+    <Compile Include="Json/JsonFiniteInput.fs" />
+    <Compile Include="Json/JsonOptionalRuntime.fs" />
+    <Compile Include="Json/JsonWriterRuntime.fs" />
+    <Compile Include="Json/JsonFormattedRuntime.fs" />
+    <Compile Include="Json/JsonRawScalarFactory.fs" />
+    <Compile Include="Numerics/NumericalJson.fs" />
+    <Compile Include="Numerics/DecimalAggregate.fs" />
+    <Compile Include="Numerics/DecimalInterval.fs" />
+    <Compile Include="Numerics/DecimalElementary.fs" />
+    <Compile Include="Numerics/DecimalEvaluation.fs" />
+    <Compile Include="Numerics/DecimalMath.fs" />
+    <Compile Include="Json/JsonStoredNumericRuntime.fs" />
+    <Compile Include="Metadata/JsonOperations.fs" />
+    <Compile Include="Metadata/RelationAccessors.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.Engine.fs" />
+    <Compile Include="Events/CallbackSlots.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.TextEncoding.fs" />
+    <Compile Include="RawSqliteFunctions/RawSqliteFunctions.Native.fs" />
+    <Compile Include="RawSqliteFunctions/RawSqliteFunctions.Types.fs" />
+    <Compile Include="RawSqliteFunctions/RawSqliteFunctions.Registration.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.Conversions.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.Arguments.fs" />
+    <Compile Include="Metadata/SqlArguments.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.ArgumentCapture.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.BlobIdentity.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.Statements.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.StatementCache.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.Row.fs" />
     <Compile Include="Json/JsonFunctions.fs" />
-    <Compile Include="SQLiteTools/SQLiteTools.Params.fs" />
-    <Compile Include="SQLiteTools/SQLiteTools.Mapper.Query.fs" />
-    <Compile Include="SQLiteTools/SQLiteTools.Mapper.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.Scope.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.BlobCatalog.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.BlobAdmission.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.BlobStorage.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.Script.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.Rows.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.Functions.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.CallbackDefinitions.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.Connection.fs" />
+    <Compile Include="SQLiteNative/SQLiteNative.Blob.fs" />
+    <Compile Include="Metadata/SqlRowConversions.fs" />
+    <Compile Include="Metadata/SqlRowOperations.fs" />
+    <Compile Include="Metadata/SqlDefaultConstruction.fs" />
+    <Compile Include="Metadata/SqlRowMapping.fs" />
     <Compile Include="SQLiteTools/SQLiteTools.HandlerFaultState.fs" />
     <Compile Include="SQLiteTools/SQLiteTools.Extensions.fs" />
+    <Compile Include="Events/FileSystemEvents.Facts.fs" />
+    <Compile Include="Events/EventDispatchState.fs" />
     <Compile Include="SQLiteTools/SQLiteTools.CachingDbConnection.fs" />
-    <Compile Include="RawSqliteFunctions/RawSqliteFunctions.Types.fs" />
     <Compile Include="RawSqliteFunctions/RawSqliteFunctions.Extensions.fs" />
+    <Compile Include="ADO/Ado.Errors.fs" />
+    <Compile Include="ADO/Ado.Parameters.fs" />
+    <Compile Include="ADO/Ado.Options.fs" />
+    <Compile Include="ADO/Ado.Pooling.fs" />
+    <Compile Include="ADO/Ado.State.fs" />
+    <Compile Include="ADO/Ado.Stream.fs" />
+    <Compile Include="ADO/Ado.Reader.fs" />
+    <Compile Include="ADO/Ado.Metadata.fs" />
+    <Compile Include="ADO/Ado.Public.fs" />
+    <Compile Include="ADO/Ado.Helpers.fs" />
     <Compile Include="Connections/Connections.TransactionHelpers.fs" />
     <Compile Include="Connections/Connections.fs" />
     <Compile Include="FileStorage/FileStorage.Core.Helpers.fs" />
     <Compile Include="FileStorage/FileStorage.Core.Chunks.fs" />
+    <Compile Include="FileStorage/FileStorage.ContentEvents.fs" />
     <Compile Include="FileStorage/FileStorage.Core.fs" />
-    <Compile Include="QueryTranslator/References/DBRef.fs" />
-    <Compile Include="QueryTranslator/References/DBRefMany.fs" />
+    <Compile Include="Metadata/RelationMembers.fs" />
+    <Compile Include="Metadata/OwnerCloning.fs" />
     <Compile Include="Interfaces/SoloDBInterfaces.fs" />
     <Compile Include="Core/IdGenerator.fs" />
-    <Compile Include="Core/CustomTypeId.fs" />
+    <Compile Include="Metadata/CustomIdentity.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.Contract.Primitives.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.Contract.ExprTypes.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Numeric.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.NumericMethods.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.StoredValueParameter.fs" />
+    <Compile Include="Query/QueryValueBindingOrder.fs" />
+    <Compile Include="Query/RelationMetadataSource.fs" />
+    <Compile Include="Query/QueryInput.fs" />
     <Compile Include="Query/QueryContext.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.Contract.ExprCombinators.fs" />
     <Compile Include="QueryTranslator/SqlDu/Contract/SqlDu.Contract.StatementTypes.fs" />
@@ -99,6 +253,7 @@
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.ProjectionPass.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.CompositeGroupByCanonicalization.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.CompositeGroupByCanonicalizationPass.fs" />
+    <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.IndexExpression.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.IndexModel.fs" />
     <Compile Include="SoloDBCore/SoloDB.RuntimeIndexModelCache.fs" />
     <Compile Include="QueryTranslator/SqlDu/Passes/SqlDu.ExpressionMatcher.fs" />
@@ -116,12 +271,27 @@
     <Compile Include="SoloDBCore/SoloDB.StatementExecution.fs" />
     <Compile Include="QueryTranslator/Equality/EqualityRules.fs" />
     <Compile Include="QueryTranslator/Equality/EqualityComparison.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.PhysicalSource.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.ReferenceJoin.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Helpers.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.SerializationSql.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.SerializationChildren.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Serialization.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.SerializationDescriptor.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Characters.fs" />
+    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.WindowHelpers.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.ProducedValue.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.CastAggregate.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.DateTimeFunctions.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.Binary.fs" />
+    <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.StringFormatting.fs" />
+    <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.PreparedCall.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.MethodCall.fs" />
+    <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.MemberAccess.fs" />
+    <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.Construction.fs" />
+    <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.ArrayPredicates.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.ExpressionAdmission.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.Dispatch.fs" />
     <Compile Include="QueryTranslator/VisitPost/QueryTranslator.VisitPost.fs" />
     <Compile Include="QueryTranslator/VisitPost/QueryTranslator.VisitPostJoin.fs" />
@@ -129,34 +299,44 @@
     <Compile Include="QueryTranslator/VisitDbRef/Core/QueryTranslator.VisitDbRef.Helpers.fs" />
     <Compile Include="QueryTranslator/ChainDescriptor/QueryTranslator.ChainDescriptor.Expr.fs" />
     <Compile Include="QueryTranslator/ChainDescriptor/QueryTranslator.ChainDescriptor.OrderedPlan.fs" />
+    <Compile Include="Query/BuildQuery/Queryable.DefaultEquality.fs" />
     <Compile Include="QueryTranslator/ChainDescriptor/QueryTranslator.ChainDescriptor.OrderedRows.fs" />
     <Compile Include="QueryTranslator/ChainDescriptor/QueryTranslator.ChainDescriptor.Ordered.fs" />
     <Compile Include="QueryTranslator/VisitDbRef/Peelers/QueryTranslator.VisitDbRef.Peelers.fs" />
     <Compile Include="QueryTranslator/VisitDbRef/Core/QueryTranslator.VisitDbRef.SingleRef.fs" />
     <Compile Include="QueryTranslator/VisitDbRef/Builder/QueryTranslator.VisitDbRef.Builder.Core.fs" />
+    <Compile Include="QueryTranslator/VisitDbRef/Core/QueryTranslator.VisitGrouping.fs" />
     <Compile Include="QueryTranslator/VisitDbRef/Core/QueryTranslator.VisitDbRef.fs" />
     <Compile Include="Query/QueryTranslator.fs" />
+    <Compile Include="Query/Queryable.ValueBindings.fs" />
     <Compile Include="FileStorage/FileStorage.Helpers.fs" />
     <Compile Include="FileStorage/FileStorage.Listing.fs" />
     <Compile Include="FileStorage/FileStorage.CopySurface.fs" />
+    <Compile Include="FileStorage/FileStorage.AsyncTransfers.fs" />
     <Compile Include="FileStorage/FileStorage.fs" />
     <Compile Include="Events\SoloDBEvents.Helpers.fs" />
+    <Compile Include="Events/FileSystemEvents.Dispatch.fs" />
     <Compile Include="Events\SoloDBEvents.EventSystem.fs" />
     <Compile Include="Events\SoloDBEvents.Context.fs" />
     <Compile Include="Events\SoloDBEvents.fs" />
-		    <Compile Include="Relations/Relations.AccessorCache.fs" />
+    <Compile Include="Events/FileSystemEvents.Context.fs" />
+    <Compile Include="Events/FileSystemEvents.Registration.fs" />
 		    <Compile Include="Relations/Relations.MutationStatements.fs" />
 		    <Compile Include="Relations/Relations.Types.fs" />
 		    <Compile Include="Relations/Relations.SharedSql.fs" />
-		    <Compile Include="SoloDBCore/SoloDB.Helper.Schema.fs" />
-		    <Compile Include="SoloDBCore/SoloDB.Helper.Core.fs" />
+		    <Compile Include="Metadata/Indexes.fs" />
+    <Compile Include="SoloDBCore/SoloDB.Helper.Schema.fs" />
+		    <Compile Include="Metadata/CustomIdExecution.fs" />
+    <Compile Include="SoloDBCore/SoloDB.Helper.Core.fs" />
 		    <Compile Include="Relations/Relations.Schema.Builder.fs" />
-		    <Compile Include="Relations/Relations.Schema.Validator.fs" />
+		    <Compile Include="Metadata/RelationDeclarations.fs" />
 		    <Compile Include="Relations/Relations.Schema.LinkTableDDL.fs" />
 	    <Compile Include="Relations/Relations.Entity.Sync.fs" />
+	    <Compile Include="Relations/Relations.GraphAdmission.fs" />
 	    <Compile Include="Relations/Relations.Entity.Cascade.fs" />
 	    <Compile Include="Relations/Relations.Entity.ApplyOps.fs" />
 	    <Compile Include="Relations/Relations.Delete.fs" />
+	    <Compile Include="Relations/Relations.FileSystemBatchLoad.fs" />
 	    <Compile Include="Relations/Relations.BatchLoad.fs" />
 	    <Compile Include="Relations/Relations.Core.fs" />
 	    <Compile Include="Relations/Relations.Plan.fs" />
@@ -164,38 +344,48 @@
 		    <Compile Include="Query/Queryable.Types.fs" />
 		    <Compile Include="Query/Queryable.HelperBase.fs" />
 		    <Compile Include="Query/Queryable.HelperState.fs" />
+		    <Compile Include="Query/Queryable.HelperJoinBindings.fs" />
 		    <Compile Include="Query/Queryable.HelperJoin.fs" />
 		    <Compile Include="Query/Queryable.Preprocess.fs" />
-		    <Compile Include="Query/Queryable.HydrationSql.Metadata.fs" />
+		    <Compile Include="Metadata/Hydration.fs" />
+    <Compile Include="Relations/Relations.Hydration.fs" />
 		    <Compile Include="Query/Queryable.HydrationSql.fs" />
 		    <Compile Include="Query/BuildQuery/Queryable.BuildLayers.fs" />
-		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.WindowHelpers.fs" />
+		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.Distinct.fs" />
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.SequenceOps.fs" />
 		    <Compile Include="Query/BuildQuery/GroupChain/Queryable.GroupChain.GroupByAliases.fs" />
 		    <Compile Include="Query/BuildQuery/GroupChain/Queryable.GroupChain.GroupJoinRuntimeTypes.fs" />
 		    <Compile Include="Query/BuildQuery/GroupChain/Queryable.GroupChain.GroupJoinAliases.fs" />
 		    <Compile Include="Query/BuildQuery/GroupChain/Queryable.GroupChain.GroupJoinChainParts.fs" />
+    <Compile Include="Query/BuildQuery/Queryable.GroupCompletion.fs" />
     <Compile Include="Query/BuildQuery/Queryable.BuildQuery.GroupByChained.fs" />
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.GroupByOps.fs" />
-		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.GroupJoinChain.fs" />
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.GroupJoinElements.fs" />
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.GroupJoinOps.fs" />
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.SelectManyOps.fs" />
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.JoinAndTerminalOps.fs" />
-		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.SetAndTypeOps.fs" />
+		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.SetMembership.fs" />
+    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.SetAndTypeOps.fs" />
 		    <Compile Include="Query/BuildQuery/Queryable.BuildQuery.Main.fs" />
             <Compile Include="Query/Queryable.IndexedFilterPlanning.fs" />
             <Compile Include="Query/Queryable.CountPlanning.fs" />
             <Compile Include="Query/Queryable.CompiledPage.fs" />
             <Compile Include="Query/Queryable.CompiledPlanning.fs" />
 		    <Compile Include="Query/Queryable.Translation.fs" />
-		    <Compile Include="Query/Queryable.Provider.fs" />
-            <Compile Include="Query/Queryable.Compiled.fs" />
+		    <Compile Include="Metadata/QueryDispatch.fs" />
+    <Compile Include="Query/Queryable.Provider.fs" />
+            <Compile Include="Metadata/CompiledQueryMetadata.fs" />
+    <Compile Include="Metadata/CompiledQueryOperations.fs" />
+    <Compile Include="Metadata/QueryOperations.fs" />
 	    <Compile Include="SoloDBCore/SoloDB.Location.fs" />
     <Compile Include="SoloDBCore/SoloDB.ToCollectionData.fs" />
     <Compile Include="SoloDBCore/SoloDB.SchemaMigration.fs" />
+    <Compile Include="Events/FileSystemEvents.Schema.fs" />
+    <Compile Include="SoloDBCore/SoloDB.NumericalFunctions.fs" />
     <Compile Include="SoloDBCore/SoloDB.Bootstrap.fs" />
     <Compile Include="SoloDBCore/SoloDB.QueryUtils.fs" />
+    <Compile Include="SoloDBCore/SoloDB.NumericMigrationPlan.fs" />
+    <Compile Include="SoloDBCore/SoloDB.NumericMigration.fs" />
     <Compile Include="SoloDBCore/SoloDB.EventDbCache.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.Core.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.Insert.fs" />
@@ -208,7 +398,8 @@
     <Compile Include="SoloDBCore/SoloDB.TransactionalSoloDB.fs" />
     <Compile Include="SoloDBCore/SoloDB.Root.Helpers.fs" />
     <Compile Include="SoloDBCore/SoloDB.Root.fs" />
-    <Compile Include="MongoEmulation/MongoEmulation.BsonDocument.fs" />
+    <Compile Include="Metadata/BsonDocument.fs" />
+    <Compile Include="Metadata/MongoModelExpressions.fs" />
     <Compile Include="MongoEmulation/MongoEmulation.CollectionExt.fs" />
     <Compile Include="MongoEmulation/MongoEmulation.Builders.fs" />
     <Compile Include="MongoEmulation/MongoEmulation.fs" />
@@ -234,16 +425,36 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.6" />
     <PackageReference Include="Portable.System.DateTimeOnly" Version="8.0.1" />
+    <PackageReference Include="System.Reflection.Emit.Lightweight" Version="4.7.0" Condition="'$(TargetFramework)' == 'netstandard2.0'" />
     <PackageReference Include="Snappier" Version="1.3.1" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.11" />
-    <!-- The native library carries the engine, and 2.1.11 ships SQLite 3.49.1, which predates the
-         3.50.2 fix for CVE-2025-6965. Only the native package is advanced; the managed components
-         stay on 2.1.11 because measurement showed the incompatibility was entirely in the engine and
-         nothing required moving them. -->
+    <!-- The native 2.1.12 package carries SQLite 3.53.3, including the WAL-reset fix.
+         Keep this explicit dependency: the 2.1.11 bundle otherwise selects its older engine.
+         Managed provider components remain on 2.1.11. -->
     <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" />
   </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0' and '$(NoBuild)' != 'true'">
+    <ProjectReference Include="../SoloDB.Metadata.CSharp/SoloDB.Metadata.CSharp.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <ProjectReference Include="../SoloDB.Metadata.FSharp/SoloDB.Metadata.FSharp.fsproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../SoloDB.Metadata.Tools/SoloDB.targets;../SoloDB.Metadata.Tools/SoloDB.Metadata.targets;../SoloDB.Metadata.Tools/SoloDB.FSharp.Context.targets;../SoloDB.Metadata.Tools/SoloDB.NativeMetadata.targets"
+          Pack="true" PackagePath="buildTransitive" />
+  </ItemGroup>
+
+  <Target Name="SoloDBCollectMetadataTools" BeforeTargets="_GetPackageFiles">
+    <ItemGroup>
+      <None Include="../SoloDB.Metadata.CSharp/bin/$(Configuration)/netstandard2.0/SoloDB.Metadata.CSharp.dll;../SoloDB.Metadata.CSharp/bin/$(Configuration)/netstandard2.0/SoloDB.Metadata.Codecs.dll;../SoloDB.Metadata.CSharp/bin/$(Configuration)/netstandard2.0/FSharp.Core.dll"
+            Pack="true" PackagePath="analyzers/dotnet/cs" />
+      <None Include="../SoloDB.Metadata.FSharp/bin/$(Configuration)/netstandard2.0/*.dll"
+            Pack="true" PackagePath="tools/netstandard2.0" />
+      <None Include="../SoloDB.Metadata.FSharp/FSharp.TypeProviders.SDK.LICENSE.txt"
+            Pack="true" PackagePath="tools/netstandard2.0" />
+    </ItemGroup>
+  </Target>
 
   <ItemGroup>
     <PackageReference Update="FSharp.Core" Version="9.0.300" />

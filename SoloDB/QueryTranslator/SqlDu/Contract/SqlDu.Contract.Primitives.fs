@@ -18,17 +18,49 @@ namespace SoloDatabase.SqlModel
 // until the full engine move in Batch 4.
 // ======================================================================
 
-type internal JsonPath = JsonPath of head: string * tail: string list
+type internal JsonPath =
+    | JsonPath of head: string * tail: string list
+    | IndexedPath of head: SoloDatabase.JsonSerializator.JsonEqualitySupport.PathSegment * tail: SoloDatabase.JsonSerializator.JsonEqualitySupport.PathSegment list
 
 [<RequireQualifiedAccess>]
 module internal JsonPathOps =
+    open SoloDatabase.JsonSerializator.JsonEqualitySupport
+    let private memberDelimiters = [|'.'; '['; '\000'|]
+
     let ofList (segments: string list) : JsonPath =
         match segments with
         | head :: tail -> JsonPath(head, tail)
         | [] -> invalidArg "segments" "JsonPath must be non-empty."
 
-    let toList (JsonPath(head, tail): JsonPath) : string list =
-        head :: tail
+    let ofSegments segments =
+        match segments with
+        | [] -> invalidArg "segments" "JsonPath must be non-empty."
+        | head :: tail ->
+            if segments |> List.forall (function Member _ -> true | Index _ -> false) then
+                segments |> List.map (function Member name -> name | Index _ -> failwith "Expected member path.") |> ofList
+            else IndexedPath(head, tail)
+
+    let toList path =
+        match path with
+        | JsonPath(head, tail) -> (head :: tail) |> List.map Member
+        | IndexedPath(head, tail) -> head :: tail
+
+    let trySimpleMembers (literal: string) =
+        if literal.StartsWith("$.", System.StringComparison.Ordinal) then
+            let members = literal.Substring(2).Split('.')
+            if members |> Array.forall (fun name ->
+                name.Length > 0 && name |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_' || c = '$')) then
+                Some(members |> Array.toList)
+            else None
+        else None
+
+    let text segments =
+        segments |> List.fold (fun path segment ->
+            match segment with
+            | Member name ->
+                if name.Length > 0 && name.[0] <> '"' && name.IndexOfAny(memberDelimiters) < 0 then path + "." + name
+                else appendMember path name
+            | Index index -> path + "[" + index.ToString(System.Globalization.CultureInfo.InvariantCulture) + "]") "$"
 
 type internal SortDirection =
     | Asc
@@ -46,6 +78,7 @@ type internal AggregateKind =
     | Max
     | GroupConcat
     | JsonGroupArray
+    | ExactNumeric of SoloDatabase.Numerics.DecimalAggregateKind * SoloDatabase.Metadata.Generation.NumericKind
 
 type internal WindowFunctionKind =
     | RowNumber
@@ -128,6 +161,7 @@ type internal BinaryOperator =
     | In
     | NotInOp
     | BitwiseAnd
+    | JsonText
 
 type internal UnaryOperator =
     | Pos

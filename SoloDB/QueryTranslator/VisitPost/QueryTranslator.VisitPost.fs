@@ -83,7 +83,7 @@ module internal QueryTranslatorVisitPost =
     let rec internal tryExtractLambdaExpression (expr: Expression) : LambdaExpression voption =
         let tryEvaluateAsLambda (candidate: Expression) =
             try
-                match evaluateExpr<obj> candidate with
+                match ExpressionEvaluation.evaluateExpr<obj> candidate with
                 | :? LambdaExpression as le -> ValueSome le
                 | :? Expression as e ->
                     match e with
@@ -234,7 +234,7 @@ module internal QueryTranslatorVisitPost =
                 typeSeq
                 |> List.fold (fun acc t ->
                     match acc with
-                    | head :: _ when head = t -> acc
+                    | head :: _ when (if isNull head then isNull t else head.Equals(t)) -> acc
                     | _ -> t :: acc) []
                 |> List.rev
             let visited = HashSet<Type>()
@@ -261,13 +261,12 @@ module internal QueryTranslatorVisitPost =
             let ownerExpr = unwrapConvertAll relMe.Expression
             let ownerType = ownerExpr.Type
             let propName = relMe.Member.Name
-            let propInfo = ownerType.GetProperty(propName, BindingFlags.Public ||| BindingFlags.Instance)
-            if isNull propInfo then
+            if not (relMe.Member :? PropertyInfo) then
                 raise (NotSupportedException(chainPlainPropertyMidChainMessage hopIndex ownerType.Name propName))
-            let propType = propInfo.PropertyType
+            let propType = relMe.Type
             if not (DBRefTypeHelpers.isDBRefType propType) then
                 raise (NotSupportedException(chainPlainPropertyMidChainMessage hopIndex ownerType.Name propName))
-            let targetType = propType.GetGenericArguments().[0]
+            let targetType = DBRefTypeHelpers.referenceTargetType propType
             let hop = { OwnerType = ownerType; RelationPropertyName = propName; TargetType = targetType }
             let acc = hop :: acc
             match ownerExpr with
@@ -365,9 +364,9 @@ module internal QueryTranslatorVisitPost =
         match sourceExpr with
         | :? MemberExpression as leafMe when
                 not (isNull leafMe.Expression) &&
-                DBRefTypeHelpers.isDBRefManyType leafMe.Type ->
+                DBRefTypeHelpers.isManyReferenceType leafMe.Type ->
             let leafManyName = leafMe.Member.Name
-            let leafTargetType = leafMe.Type.GetGenericArguments().[0]
+            let leafTargetType = DBRefTypeHelpers.referenceTargetType leafMe.Type
             let parent = unwrapConvertAll leafMe.Expression
             // If parent is the root parameter, this is the single-hop DBRefMany shape — defer.
             if parent :? ParameterExpression then ValueNone
@@ -388,28 +387,36 @@ module internal QueryTranslatorVisitPost =
             (rhsExpr: Expression) =
         let leafHop = List.last hops
         let leafTargetType = leafHop.TargetType
-        let targetSoloIdProp =
-            leafTargetType.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-            |> Array.tryFind (fun p -> not (isNull (p.GetCustomAttribute<SoloDatabase.Attributes.SoloId>(true))))
-        match targetSoloIdProp with
-        | Some prop when prop.Name = leafTargetPropertyName ->
+        let targetSoloIdMembers = CustomIdMetadata.GetMembers leafTargetType
+        match targetSoloIdMembers with
+        | members when members.Length > 0 && members.[0].Name = leafTargetPropertyName ->
             raise (InvalidOperationException(
                 sprintf "Error: Cannot use UpdateMany to write the [<SoloId>] field '%s.%s' through a Ref-chain mutation.\nReason: The [<SoloId>] field is the type's identity and may not be mutated through UpdateMany. To re-identify a row, delete and re-insert the entity."
                     leafTargetType.FullName leafTargetPropertyName))
         | _ -> ()
         let rhsValue =
-            try evaluateExpr<obj> rhsExpr
+            try ExpressionEvaluation.evaluateExpr<obj> rhsExpr
             with _ ->
                 raise (InvalidOperationException(
                     sprintf "Error: UpdateMany Ref-chain mutation of '%s' requires a closure-captured constant on the right-hand side.\nReason: The expression references the lambda parameter or a target-state value that cannot be reduced at translate time.\nFix: Hoist the value into a local variable above the UpdateMany call and reference that local in the lambda body."
                         leafTargetPropertyName))
-        let jsonLiteral = JsonSerializator.JsonValue.Serialize(rhsValue).ToJsonString()
-        let leafJsonPath = "$." + leafTargetPropertyName
-        MutateRefChainProperty(hops, leafTargetType, leafJsonPath, jsonLiteral)
+        let fileReference = RelationMetadata.Get leafTargetType
+                            |> Array.exists(fun memberValue -> memberValue.Name = leafTargetPropertyName && DBRefTypeHelpers.isFileRefType memberValue.ReferenceType)
+        if fileReference then
+            let reference = rhsValue :?> IFileSystemReferenceValue
+            MutateFileSystemRef(hops, leafTargetPropertyName, FileSystemRefMutation.Set reference.Id)
+        else
+            let jsonLiteral = JsonSerializator.JsonValue.WriteText<obj>(rhsValue,false,false)
+            let leafJsonPath = "$." + leafTargetPropertyName
+            MutateRefChainProperty(hops, leafTargetType, leafJsonPath, jsonLiteral)
 
     let private parseDbRefSetValue (dbRefType: Type) (propertyPath: string) (valueExpr: Expression) =
+        if DBRefTypeHelpers.isFileRefType dbRefType then
+            let value = ExpressionEvaluation.evaluateExpr<obj> valueExpr :?> IFileSystemReferenceValue
+            MutateFileSystemRef([], propertyPath, FileSystemRefMutation.Set value.Id)
+        else
         let dbRefDef = dbRefType.GetGenericTypeDefinition()
-        let args = dbRefType.GetGenericArguments()
+        let args = TypeMetadata.GenericTypeArgCache.Get dbRefType
         let targetType = args.[0]
         let valueExpr = unwrapConvertAll valueExpr
 
@@ -429,12 +436,12 @@ module internal QueryTranslatorVisitPost =
               && DBRefTypeHelpers.isDBRefDefinition (mc.Method.DeclaringType.GetGenericTypeDefinition())
               && mc.Arguments.Count = 1 ->
             if DBRefTypeHelpers.isDBRefSingleDefinition dbRefDef then
-                let rawId = evaluateExpr<obj> mc.Arguments.[0]
+                let rawId = ExpressionEvaluation.evaluateExpr<obj> mc.Arguments.[0]
                 match tryAsInt64 rawId with
                 | ValueSome id when id > 0L -> SetDBRefToId(propertyPath, targetType, id)
                 | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
             else
-                let typedId = evaluateExpr<obj> mc.Arguments.[0]
+                let typedId = ExpressionEvaluation.evaluateExpr<obj> mc.Arguments.[0]
                 SetDBRefToTypedId(propertyPath, targetType, args.[1], typedId)
 
         | :? MethodCallExpression as mc
@@ -456,64 +463,33 @@ module internal QueryTranslatorVisitPost =
             // Closure-captured DBRef value: a hoisted `DBRef.None`, `DBRef.To(id)`,
             // `DBRef.To(typedId)`, or `DBRef.From(unsaved)`. The AST shape here is the
             // closure access (e.g. MemberExpression onto a captured local), so we
-            // evaluate to the runtime DBRef instance and classify by inspecting public
-            // surface (Id, HasTypedId, TypedId) plus the internal PendingEntity probe.
-            let captured = evaluateExpr<obj> valueExpr
+            // evaluate the existing reference contract without rediscovering its members.
+            let captured = ExpressionEvaluation.evaluateExpr<obj> valueExpr
             if isNull captured then
                 SetDBRefToNone(propertyPath, targetType)
             else
-                let t = captured.GetType()
-                // Reject DBRef.From(unsaved) — pending entity present means cascade-insert.
-                let pendingProp = t.GetProperty("PendingEntity", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance)
-                let hasPendingEntity =
-                    if isNull pendingProp then false
-                    else
-                        let raw = pendingProp.GetValue(captured, null)
-                        if isNull raw then false
-                        else
-                            let voptionType = raw.GetType()
-                            let isSomeProp = voptionType.GetProperty("IsSome", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance ||| BindingFlags.Static)
-                            if isNull isSomeProp then false
-                            elif isSomeProp.GetGetMethod(true).IsStatic then isSomeProp.GetValue(null, [| raw |]) :?> bool
-                            else isSomeProp.GetValue(raw, null) :?> bool
-                if hasPendingEntity then
+                let reference = captured :?> IDocumentReference
+                if reference.PendingEntity.IsSome then
                     raise (NotSupportedException updateManyDbRefFromUnsupportedMessage)
-                // Legal capture: classify into SetDBRefToId / SetDBRefToTypedId / SetDBRefToNone.
-                let readId () =
-                    let idProp = t.GetProperty("Id", BindingFlags.Public ||| BindingFlags.Instance)
-                    if isNull idProp then ValueNone
-                    else tryAsInt64 (idProp.GetValue(captured))
                 if DBRefTypeHelpers.isDBRefSingleDefinition dbRefDef then
-                    match readId () with
-                    | ValueSome id when id > 0L -> SetDBRefToId(propertyPath, targetType, id)
-                    | _ -> SetDBRefToNone(propertyPath, targetType)
+                    if reference.Id > 0L then SetDBRefToId(propertyPath,targetType,reference.Id)
+                    else SetDBRefToNone(propertyPath,targetType)
                 else
-                    let hasTypedIdProp = t.GetProperty("HasTypedId", BindingFlags.NonPublic ||| BindingFlags.Public ||| BindingFlags.Instance)
-                    let hasTypedId =
-                        if isNull hasTypedIdProp then false
-                        else
-                            match hasTypedIdProp.GetValue(captured) with
-                            | :? bool as b -> b
-                            | _ -> false
-                    if hasTypedId then
-                        let typedIdProp = t.GetProperty("TypedId", BindingFlags.Public ||| BindingFlags.Instance)
-                        let typedIdVal = if isNull typedIdProp then null else typedIdProp.GetValue(captured)
-                        SetDBRefToTypedId(propertyPath, targetType, args.[1], typedIdVal)
-                    else
-                        match readId () with
-                        | ValueSome id when id > 0L -> SetDBRefToId(propertyPath, targetType, id)
-                        | _ -> SetDBRefToNone(propertyPath, targetType)
+                    match reference.TypedId with
+                    | ValueSome typedId -> SetDBRefToTypedId(propertyPath,targetType,args.[1],typedId)
+                    | ValueNone when reference.Id > 0L -> SetDBRefToId(propertyPath,targetType,reference.Id)
+                    | _ -> SetDBRefToNone(propertyPath,targetType)
 
     let private extractTargetIdForDbRefManyOrThrow (expr: Expression) =
-        let valueObj = evaluateExpr<obj> expr
+        let valueObj = ExpressionEvaluation.evaluateExpr<obj> expr
         if isNull valueObj then
             raise (NotSupportedException updateManyDbRefManyPersistedIdMessage)
 
-        let idProp = valueObj.GetType().GetProperty("Id", BindingFlags.Public ||| BindingFlags.Instance)
-        if isNull idProp then
-            raise (NotSupportedException updateManyDbRefManyPersistedIdMessage)
-
-        let rawId = idProp.GetValue valueObj
+        let read = RelationsAccessorCache.tryCompiledGetter (valueObj.GetType()) "Id"
+        let rawId =
+            match read with
+            | ValueSome getter -> getter.Invoke valueObj
+            | ValueNone -> raise (NotSupportedException updateManyDbRefManyPersistedIdMessage)
         match tryAsInt64 rawId with
         | ValueSome id when id > 0L -> id
         | _ -> raise (NotSupportedException updateManyDbRefManyPersistedIdMessage)
@@ -579,9 +555,13 @@ module internal QueryTranslatorVisitPost =
 
             if isNull oldValue || isNull newValue then ValueNone else
             match tryGetRootRelationMember oldValue with
-            | ValueSome me when DBRefTypeHelpers.isDBRefType me.Type ->
-                let propertyPath = computePathKeyForUpdate me
-                parseDbRefSetValue me.Type propertyPath newValue |> ValueSome
+            | ValueSome me when DBRefTypeHelpers.isSingleReferenceType me.Type ->
+                match tryParseRefChainAssignmentLhs oldValue with
+                | ValueSome (hops, property) when DBRefTypeHelpers.isFileRefType me.Type ->
+                    buildChainPropertyMutation hops property newValue |> ValueSome
+                | _ ->
+                    let propertyPath = computePathKeyForUpdate me
+                    parseDbRefSetValue me.Type propertyPath newValue |> ValueSome
             | ValueSome me when DBRefTypeHelpers.isDBRefManyType me.Type ->
                 raise (NotSupportedException updateManyRelationUnsupportedMessage)
             | _ ->
@@ -600,6 +580,14 @@ module internal QueryTranslatorVisitPost =
             | ValueSome struct (sourceExpr, argStart) ->
                 // Try the multi-hop chain-leaf-Many shape first; single-hop falls through.
                 match tryParseRefChainManySource sourceExpr with
+                | ValueSome (hops, leafManyName, _leafTargetType) when DBRefTypeHelpers.isFileRefManyType sourceExpr.Type ->
+                    let mutation =
+                        match mc.Method.Name with
+                        | "Add" | "Append" -> FileSystemRefMutation.Add(extractTargetIdForDbRefManyOrThrow mc.Arguments.[argStart])
+                        | "Remove" -> FileSystemRefMutation.Remove(extractTargetIdForDbRefManyOrThrow mc.Arguments.[argStart])
+                        | "Clear" -> FileSystemRefMutation.Clear
+                        | _ -> raise (NotSupportedException updateManyDbRefManyPositionalMessage)
+                    MutateFileSystemRef(hops, leafManyName, mutation) |> ValueSome
                 | ValueSome (hops, leafManyName, leafTargetType) ->
                     match mc.Method.Name with
                     | "Add"
@@ -624,6 +612,15 @@ module internal QueryTranslatorVisitPost =
                         raise (NotSupportedException updateManyRelationUnsupportedMessage)
                 | ValueNone ->
                 match tryGetRootRelationMember sourceExpr with
+                | ValueSome me when DBRefTypeHelpers.isFileRefManyType me.Type ->
+                    let propertyPath = computePathKeyForUpdate me
+                    let mutation =
+                        match mc.Method.Name with
+                        | "Add" | "Append" -> FileSystemRefMutation.Add(extractTargetIdForDbRefManyOrThrow mc.Arguments.[argStart])
+                        | "Remove" -> FileSystemRefMutation.Remove(extractTargetIdForDbRefManyOrThrow mc.Arguments.[argStart])
+                        | "Clear" -> FileSystemRefMutation.Clear
+                        | _ -> raise (NotSupportedException updateManyDbRefManyPositionalMessage)
+                    MutateFileSystemRef([], propertyPath, mutation) |> ValueSome
                 | ValueSome me when DBRefTypeHelpers.isDBRefManyType me.Type ->
                     let propertyPath = computePathKeyForUpdate me
                     let targetType = me.Type.GetGenericArguments().[0]

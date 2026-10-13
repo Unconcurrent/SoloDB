@@ -1,36 +1,17 @@
 namespace SoloDatabase
 
 open System
-open System.Collections.Concurrent
 open System.Collections.Generic
-open System.Linq.Expressions
-open System.Reflection
 open JsonFunctions
 open SoloDatabase.JsonSerializator
 open SoloDatabase.SqlModel
 
 /// Canonical allocation boundary for values compared with SQLite-stored document values.
 module internal StoredValueParameter =
-    let private declaredSerializerCache =
-        ConcurrentDictionary<Type, Func<obj, JsonValue>>()
 
-    let private serializeAsDeclaredType (declaredType: Type) (value: obj) =
-        let serializer =
-            declaredSerializerCache.GetOrAdd(
-                declaredType,
-                Func<Type, Func<obj, JsonValue>>(fun valueType ->
-                    let valueParameter = Expression.Parameter(typeof<obj>, "value")
-                    let serializeMethod =
-                        typeof<JsonValue>.GetMethods(BindingFlags.Public ||| BindingFlags.Static)
-                        |> Array.find (fun methodInfo ->
-                            methodInfo.Name = "Serialize"
-                            && methodInfo.IsGenericMethodDefinition
-                            && methodInfo.GetParameters().Length = 1)
-                        |> fun methodInfo -> methodInfo.MakeGenericMethod([| valueType |])
-                    Expression.Lambda<Func<obj, JsonValue>>(
-                        Expression.Call(serializeMethod, Expression.Convert(valueParameter, valueType)),
-                        [| valueParameter |]).Compile(false)))
-        serializer.Invoke(value)
+    /// Structural or dynamic serialization can invoke user accessors or enumerators.
+    let canSerializeWithoutEntityCode declaredType =
+        JsonValue.HasScalarCarrier declaredType
 
     let private normalizeBoolean (value: obj) =
         match value with
@@ -51,31 +32,41 @@ module internal StoredValueParameter =
         else
             parameter
 
+    /// Retain the writer selected by this allocation without sampling the value again.
+    let allocateProduced comparison (variables: #IDictionary<string, obj>) declaredType value =
+        let struct(stored, encoded, writer) = JsonFunctions.prepareQueryParameter comparison declaredType value
+        let name = "dp" + variables.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        variables[name] <- stored
+        let parameter = SqlExpr.Parameter name
+        let expression = if encoded then SqlExpr.FunctionCall("jsonb", [parameter]) else parameter
+        struct(expression, writer)
+
     let allocateNamed variables name value = allocateNamedForComparison false variables name value
 
+    let private parameterName (count: int) =
+        "dp" + count.ToString(System.Globalization.CultureInfo.InvariantCulture)
+
     let allocateComparison variables value =
-        allocateNamedForComparison true variables (sprintf "dp%d" variables.Count) value
+        allocateNamedForComparison true variables (parameterName variables.Count) value
 
     let allocateNext
         (variables: #IDictionary<string, obj>)
         (value: obj)
         : SqlExpr =
-        allocateNamed variables (sprintf "dp%d" variables.Count) value
+        allocateNamed variables (parameterName variables.Count) value
 
-    /// Allocate a decimal so that the digits written are the digits stored.
-    ///
-    /// The ordinary path renders a JSON number as a double, which is lossy for any decimal that
-    /// binary64 cannot represent: the row updates, the query returns, and the value quietly is not
-    /// the one the caller wrote. SoloDB keeps decimal precision as a public guarantee, so the
-    /// value is bound as its exact invariant text and parsed back into a JSON number by SQLite,
-    /// which preserves the digits and leaves the document a JSON number rather than a string.
+    /// Bind the exact comparable value as a JSON string leaf.
     let allocateExactDecimal
         (variables: #IDictionary<string, obj>)
         (value: decimal)
         : SqlExpr =
-        let name = sprintf "dp%d" variables.Count
-        variables.[name] <- (value.ToString(System.Globalization.CultureInfo.InvariantCulture) :> obj)
-        SqlExpr.FunctionCall("jsonb", [ SqlExpr.Parameter name ])
+        allocateNext variables (box value)
+
+    /// Wide unsigned values consume their original JSON digits before comparison.
+    let declaredExpression declaredType expression =
+        if QueryTranslatorNumeric.unsigned64 declaredType then
+            QueryTranslatorNumeric.storedValue declaredType expression
+        else expression
 
     let allocateNamedForDeclaredType
         (variables: #IDictionary<string, obj>)
@@ -83,8 +74,13 @@ module internal StoredValueParameter =
         (declaredType: Type)
         (value: obj)
         : SqlExpr =
+        let exactUnsigned = QueryTranslatorNumeric.unsigned64 declaredType
         let storedValue, shouldEncode =
-            (serializeAsDeclaredType declaredType value).ToSQLValue()
+            if exactUnsigned then JsonValue.StoredComparisonParameter(declaredType,value)
+            else JsonValue.StoredParameter(declaredType,value)
+        let struct(storedValue, shouldEncode) =
+            if exactUnsigned && not shouldEncode then toSQLParameterForComparison true storedValue
+            else struct(storedValue,shouldEncode)
         variables.[name] <- storedValue
 
         let parameter = SqlExpr.Parameter name

@@ -8,8 +8,6 @@ module internal DBRefManyDescriptor =
 
     /// Resolved owner reference for a DBRefMany property.
     type DBRefManyOwnerRef = {
-        OwnerCollection: string
-        OwnerAliasSql: string
-        OwnerIdExpr: SqlExpr option
-        PropertyExpr: System.Linq.Expressions.MemberExpression
+        Reference: QueryProducedValue
+        ReferenceType: System.Type
     }

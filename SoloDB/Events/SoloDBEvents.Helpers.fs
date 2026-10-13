@@ -1,7 +1,6 @@
 namespace SoloDatabase
 
 open CowByteSpanMap
-open Microsoft.Data.Sqlite
 open System.Collections.Generic
 open System
 open SoloDatabase.Types
@@ -12,13 +11,17 @@ open System.Threading
 // NativePtr operations for zero-copy JSON parsing from SQLite trigger callbacks
 #nowarn "9"
 
+type internal EventHandlerList<'THandler>(removeMapping: unit -> unit) =
+    member val Handlers = ResizeArray<'THandler>()
+    member _.RemoveMapping = removeMapping
+
 module internal SoloDBEventsHelpers =
     let private unregisterInsideHandlerMessage =
         "Cannot call Unregister from within a handler. Return SoloDBEventsResult.RemoveHandler instead."
 
     let internal redirectException (ex: exn) =
         match ex with
-        | :? SqliteException as se ->
+        | :? NativeSqliteException as se ->
             let message = se.Message
             let isLocked =
                 se.SqliteErrorCode = 6 ||
@@ -39,120 +42,52 @@ module internal SoloDBEventsHelpers =
 
         | _ -> ValueNone
 
-    let internal runHandlerBody<'THandler>
+    let private standaloneDispatchStates =
+        System.Runtime.CompilerServices.ConditionalWeakTable<NativeSqliteConnection, EventDispatch.EventDispatchState>()
+    let private createStandaloneDispatchState =
+        System.Runtime.CompilerServices.ConditionalWeakTable<NativeSqliteConnection, EventDispatch.EventDispatchState>.CreateValueCallback(fun _ -> EventDispatch.EventDispatchState())
+
+    let internal runHandlerBody<'THandler, 'TFacts>
         (globalLock: UtilsReflection.ReentrantSpinLock)
         (sessionIndex: int64 byref)
-        (connection: SqliteConnection)
+        (connection: NativeSqliteConnection)
         (handlers: ResizeArray<'THandler>)
-        (invokeHandler: 'THandler -> SqliteConnection -> int64 -> SoloDBEventsResult)
+        (facts: 'TFacts)
+        (invokeHandler: 'THandler -> NativeSqliteConnection -> int64 -> 'TFacts -> SoloDBEventsResult)
         (removeMapping: unit -> unit)
         (defaultMessage: string) =
 
         let mutable handlerFailed = false
         let mutable handlerFailureMessage = defaultMessage
-
+        let cachedConnection =
+            match connection with
+            | :? NativeSQLiteTools.NativeCachingDbConnection as cached -> cached
+            | _ -> Unchecked.defaultof<NativeSQLiteTools.NativeCachingDbConnection>
+        let dispatchState =
+            if isNull (box cachedConnection) then standaloneDispatchStates.GetValue(connection, createStandaloneDispatchState)
+            else cachedConnection.EventDispatchState
         let mutable restoreTransactionState = false
-        let mutable previousTransactionState = false
-        let mutable cachedConnection = Unchecked.defaultof<SQLiteTools.CachingDbConnection>
-        let mutable hasConnectionDispatchState = false
-        let mutable fallbackDispatchDepth = 0
-        let fallbackPendingRemovals = ResizeArray<obj * obj>()
 
-        let pendingRemovals () =
-            if hasConnectionDispatchState then cachedConnection.EventDispatchPendingRemovals
-            else fallbackPendingRemovals
-
-        let currentDispatchDepth () =
-            if hasConnectionDispatchState then cachedConnection.EventDispatchDepth
-            else fallbackDispatchDepth
-
-        let enterDispatchScope () =
-            if hasConnectionDispatchState then
-                cachedConnection.EnterEventDispatchScope()
-            else
-                fallbackDispatchDepth <- fallbackDispatchDepth + 1
-
-        let exitDispatchScope () =
-            if hasConnectionDispatchState then
-                cachedConnection.ExitEventDispatchScope()
-            else
-                if fallbackDispatchDepth <= 0 then
-                    fallbackDispatchDepth <- 0
-                    raise (InvalidOperationException("Event dispatch scope underflow detected. ExitEventDispatchScope was called without a matching EnterEventDispatchScope."))
-                fallbackDispatchDepth <- fallbackDispatchDepth - 1
-
+        globalLock.Enter()
         try
-            // EVENT-PATH INVARIANT 1 of 3: GlobalLock serialization.
-            // All handler invocations are serialized under UtilsReflection.ReentrantSpinLock.
-            // This prevents concurrent handler mutation and ensures handler-list
-            // iteration is safe. The lock is reentrant so triggers that fire
-            // during handler execution (via ISoloDB proxy writes) do not deadlock.
-            globalLock.Enter()
-
-            // EVENT-PATH INVARIANT 2 of 3: InsideTransaction flag override.
-            // Forces InsideTransaction=true on the CachingDbConnection so that
-            // any Collection API called from within the handler sees itself as
-            // "in transaction" and skips auto-transaction creation (which would
-            // attempt BEGIN IMMEDIATE inside an already-active transaction and fail).
-            // The original state is saved and restored in the finally block.
-            // InsideTransaction override must remain: it serves Dispose suppression for event handlers.
-            match (connection :> obj) with
-            | :? SQLiteTools.CachingDbConnection as cachingConn ->
-                cachedConnection <- cachingConn
-                hasConnectionDispatchState <- true
-                previousTransactionState <- cachingConn.InsideTransaction
-                if not previousTransactionState then
-                    cachingConn.InsideTransaction <- true
-                    restoreTransactionState <- true
-            | _ -> ()
-
-            // EVENT-PATH INVARIANT 3 of 3: Dispose suppression via InsideTransaction flag.
-            // CachingDbConnection.Dispose() checks InsideTransaction and suppresses pool return
-            // when true. Since invariant 2 above sets InsideTransaction = true, any `use conn = ...`
-            // binding exit inside a handler callback is safe — Dispose becomes a no-op.
-            enterDispatchScope ()
-
-            let session = Interlocked.Increment &sessionIndex
-            let isRecursiveDispatch = currentDispatchDepth () > 1
-
+            // Keep same-connection operations in their active transaction and suppress pool
+            // return while callbacks run. Every event kind shares this connection-owned depth.
+            if not (isNull (box cachedConnection)) && not cachedConnection.InsideTransaction then
+                cachedConnection.InsideTransaction <- true
+                restoreTransactionState <- true
+            dispatchState.Enter()
             try
+                let session = Interlocked.Increment &sessionIndex
+                // Registration may append reentrantly, but removals wait until all active
+                // dispatches finish. The entry count therefore defines a stable invocation order
+                // without copying the list, including recursive callbacks and duplicate handlers.
+                let count = handlers.Count
                 try
-                    if isRecursiveDispatch then
-                        let snapshot = handlers.ToArray()
-                        let handlersToRemove = ResizeArray<'THandler>()
-                        for h in snapshot do
-                            match invokeHandler h connection session |> Option.ofObj with
-                            | None
-                            | Some EventHandled -> ()
-                            | Some RemoveHandler -> handlersToRemove.Add h
-
-                        if handlersToRemove.Count > 0 then
-                            let pending = pendingRemovals ()
-                            let handlersObj = handlers :> obj
-                            for removedHandler in handlersToRemove do
-                                pending.Add((handlersObj, box removedHandler))
-                    else
-                        let mutable handlersToRemove = NativePtr.nullPtr<bool>
-                        let mutable handlersToRemoveCount = 0
-                        let mutable i = 0
-
-                        for h in handlers do
-                            if NativePtr.isNullPtr handlersToRemove then
-                                handlersToRemoveCount <- handlers.Count
-                                handlersToRemove <- NativePtr.stackalloc<bool> handlersToRemoveCount
-                                NativePtr.initBlock handlersToRemove 0uy (uint32 handlersToRemoveCount * uint32 sizeof<bool>)
-
-                            match invokeHandler h connection session |> Option.ofObj with
-                            | None
-                            | Some EventHandled -> ()
-                            | Some RemoveHandler -> NativePtr.set handlersToRemove i true
-
-                            i <- i + 1
-
-                        if not (NativePtr.isNullPtr handlersToRemove) then
-                            for j = handlersToRemoveCount - 1 downto 0 do
-                                if NativePtr.get handlersToRemove j then
-                                    handlers.RemoveAt j
+                    for i = 0 to count - 1 do
+                        let handler = handlers.[i]
+                        let result = invokeHandler handler connection session facts
+                        if not (isNull (box result)) && result = RemoveHandler then
+                            dispatchState.PendingRemovals.Add(struct (handlers :> System.Collections.IList, box handler, removeMapping))
                 with ex ->
                     let finalEx =
                         match redirectException ex with
@@ -162,29 +97,24 @@ module internal SoloDBEventsHelpers =
                     if not (String.IsNullOrWhiteSpace finalEx.Message) then
                         handlerFailureMessage <- finalEx.Message
             finally
-                if currentDispatchDepth () = 1 then
-                    let pending = pendingRemovals ()
-                    if pending.Count > 0 then
-                        let handlersObj = handlers :> obj
-                        for idx = pending.Count - 1 downto 0 do
-                            let (targetList, removedHandler) = pending.[idx]
-                            if Object.ReferenceEquals(targetList, handlersObj) then
-                                for j = handlers.Count - 1 downto 0 do
-                                    if Object.ReferenceEquals(box handlers.[j], removedHandler) then
-                                        handlers.RemoveAt j
-                                pending.RemoveAt idx
-
-                if handlers.Count = 0 then
-                    removeMapping ()
-
+                try
+                    if dispatchState.Depth = 1 then
+                        // Apply every nested list's removals even after a later handler fails.
+                        // Returning a pooled connection must never discard an unhonored removal.
+                        let pending = dispatchState.PendingRemovals
+                        try
+                            for i = pending.Count - 1 downto 0 do
+                                let struct (target, removed, removeTargetMapping) = pending.[i]
+                                for j = target.Count - 1 downto 0 do
+                                    if Object.ReferenceEquals(target.[j], removed) then target.RemoveAt(j)
+                                if target.Count = 0 then removeTargetMapping()
+                        finally
+                            pending.Clear()
+                    if handlers.Count = 0 then removeMapping()
+                finally
+                    dispatchState.Exit()
         finally
-            // EVENT-PATH CLEANUP: reverse order of invariant acquisition.
-            // 1. Restore original InsideTransaction state (invariant 2).
-            //    This also re-enables CachingDbConnection.Dispose pool-return (invariant 3).
-            exitDispatchScope ()
-            if restoreTransactionState then
-                cachedConnection.InsideTransaction <- previousTransactionState
-            // 2. Release GlobalLock (invariant 1).
+            if restoreTransactionState then cachedConnection.InsideTransaction <- false
             globalLock.Exit()
 
         struct (handlerFailed, handlerFailureMessage)
@@ -192,7 +122,7 @@ module internal SoloDBEventsHelpers =
     let internal unregisterHandler<'THandler, 'TSys when 'THandler : not struct and 'TSys : not struct>
         (globalLock: UtilsReflection.ReentrantSpinLock)
         (collectionName: string)
-        (globalMapping: CowByteSpanMap<ResizeArray<'TSys>>)
+        (globalMapping: CowByteSpanMap<EventHandlerList<'TSys>>)
         (localMap: Dictionary<'THandler, ResizeArray<'TSys>>)
         (handler: 'THandler) =
         if globalLock.IsHeldByCurrentThread then
@@ -200,8 +130,9 @@ module internal SoloDBEventsHelpers =
         let collectionNameBytes = System.Text.Encoding.UTF8.GetBytes collectionName
         try
             globalLock.Enter()
-            let mutable list = Unchecked.defaultof<ResizeArray<'TSys>>
-            if globalMapping.TryGetValue(collectionNameBytes, &list) then
+            let mutable entry = Unchecked.defaultof<EventHandlerList<'TSys>>
+            if globalMapping.TryGetValue(collectionNameBytes, &entry) then
+                let list = entry.Handlers
                 match localMap.TryGetValue handler with
                 | true, handlers ->
                     for sysHandler in handlers do
