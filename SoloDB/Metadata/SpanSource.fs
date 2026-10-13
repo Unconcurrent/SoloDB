@@ -31,20 +31,26 @@ module internal QuerySpanSource =
                   parameters [|typeof<string>;typeof<int>;typeof<int>|] (call.Method.GetParameters())) ->
                 make call.Arguments[0] true (call.Arguments |> Seq.skip 1 |> Seq.toList)
             | :? MethodCallExpression as call when call.Method.IsStatic && expression.Type.Equals call.Method.DeclaringType && call.Method.Name = "op_Implicit" &&
-                 parameters [|array|] (call.Method.GetParameters()) -> make call.Arguments[0] false []
+                 (parameters [|array|] (call.Method.GetParameters()) || typeof<char>.Equals element && parameters [|typeof<string>|] (call.Method.GetParameters())) ->
+                make call.Arguments[0] (typeof<string>.Equals call.Arguments[0].Type) []
             | :? UnaryExpression as conversion when not(isNull conversion.Method) && conversion.Method.IsStatic && expression.Type.Equals conversion.Method.DeclaringType &&
-                 conversion.Method.Name = "op_Implicit" && parameters [|array|] (conversion.Method.GetParameters()) -> make conversion.Operand false []
+                 conversion.Method.Name = "op_Implicit" &&
+                 (parameters [|array|] (conversion.Method.GetParameters()) || typeof<char>.Equals element && parameters [|typeof<string>|] (conversion.Method.GetParameters())) ->
+                make conversion.Operand (typeof<string>.Equals conversion.Operand.Type) []
             | _ -> None
 
     let tryWholeArray expression =
         trySource expression |> Option.bind (fun source -> if not source.String && source.Start.IsNone then Some source.Value else None)
 
     /// Subtraction avoids overflow even when the supplied length is Int32.MaxValue.
+    let tryBounds available start length =
+        let length = length |> Option.defaultValue (available - start)
+        if start < 0L || start > available || length < 0L || length > available - start then ValueNone
+        else ValueSome(struct(int start, int length))
+
     let bounds stringSource available start length =
-        let fail () =
+        match tryBounds available start length with
+        | ValueSome range -> range
+        | ValueNone ->
             if stringSource then raise(ArgumentOutOfRangeException("start"))
             else raise(ArgumentOutOfRangeException())
-        if start < 0L || start > available then fail()
-        let length = length |> Option.defaultValue (available - start)
-        if length < 0L || length > available - start then fail()
-        struct(int start, int length)

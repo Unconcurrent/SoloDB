@@ -61,12 +61,12 @@ module internal QueryTranslatorVisitCoreArrayPredicates =
                         | Some range when range.Start.IsSome ->
                             let struct(array,start,length) = unbox<struct(Array * int * int option)> sampled
                             let available = if isNull array then 0 else array.Length
-                            if start < 0 || start > available || (length |> Option.exists (fun length -> length < 0 || length > available - start)) then
+                            match QuerySpanSource.tryBounds (int64 available) (int64 start) (length |> Option.map int64) with
+                            | ValueNone ->
                                 [QueryTranslatorSpanSource.call false (SqlExpr.Literal(SqlLiteral.Integer(int64 available)))
                                      (SqlExpr.Literal(SqlLiteral.Integer(int64 start)))
                                      (length |> Option.map (int64 >> SqlLiteral.Integer >> SqlExpr.Literal) |> Option.defaultValue absent) absent]
-                            else
-                                let count = length |> Option.defaultValue (available - start)
+                            | ValueSome(struct(start,count)) ->
                                 [for index in start .. start + count - 1 -> tryIntegerLiteral (array.GetValue index) |> Option.get]
                         | _ ->
                             if isNull sampled then []
