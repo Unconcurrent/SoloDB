@@ -99,7 +99,7 @@ type CollectionExtensions =
     /// </summary>
     [<Extension>]
     static member DeleteOne<'a>(collection: SoloDatabase.ISoloDBCollection<'a>, filter: Expression<Func<'a, bool>>) =
-        collection.DeleteMany(filter)
+        collection.DeleteOne(filter)
 
     /// <summary>
     /// Deletes all documents that match the filter.

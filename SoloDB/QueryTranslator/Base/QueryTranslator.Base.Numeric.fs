@@ -86,6 +86,8 @@ module internal QueryTranslatorNumeric =
         | _ -> value
 
     let storedValue target argument =
+        // Char has its own native text/unit reader; NumericCore is conversion capability.
+        if typeof<char>.Equals(Utils.optionalPayloadType target) then argument else
         match argument with
         | SqlExpr.JsonExtractExpr _ | SqlExpr.JsonRootExtract _ | SqlExpr.FunctionCall("jsonb_extract",_) ->
             let operation=nativeOperation target

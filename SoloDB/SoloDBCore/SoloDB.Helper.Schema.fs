@@ -96,6 +96,9 @@ module internal HelperSchema =
             | SqlExpr.InSubquery _ | SqlExpr.Exists _ | SqlExpr.ScalarSubquery _ -> true
             | _ -> false) then
             raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
+        if stripped |> SqlExpr.exists (function
+            | SqlExpr.FunctionCall(name, _) -> name = QueryTranslatorSpanSource.name
+            | _ -> false) then raise (ArgumentException "Cannot index span membership.")
         let emitted = emitExprToSqlLocal stripped
         let expressionBody = expression.Body
 

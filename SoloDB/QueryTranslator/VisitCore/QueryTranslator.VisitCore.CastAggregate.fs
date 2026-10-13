@@ -60,6 +60,8 @@ module internal QueryTranslatorVisitCoreCastAggregate =
           | ValueNone ->
               let nativeArgument =
                   if originalInput.IsSome && isSqlScalarResult castToType then QueryTranslatorNumeric.nativeScalar (framed argument)
+                  elif typeof<char>.Equals(Utils.optionalPayloadType o.Type) && not input.LegacyCharacterText then
+                      QueryTranslatorCharacters.comparable o.Type argument input
                   else argument
               let converted = QueryTranslatorNumeric.conversion checkedConversion castToType o.Type nativeArgument
               if obj.ReferenceEquals(converted, argument) then DirectValue(argument, input)

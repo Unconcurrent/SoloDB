@@ -61,19 +61,6 @@ type internal BoundValueCallExpression(inputs: Expression array, valueType: Type
 
 /// Builds an ordered value plan from supplied expression facts and direct leaves.
 module internal QueryValuePlan =
-    // Only a whole array conversion can be fused without losing span bounds.
-    let rec tryWholeArray (expression: Expression) =
-        match expression with
-        | :? UnaryExpression as converted when converted.NodeType = ExpressionType.Convert && isNull converted.Method -> tryWholeArray converted.Operand
-        | :? MethodCallExpression as converted when converted.Arguments.Count = 1 &&
-            converted.Type.IsGenericType && converted.Type.GetGenericTypeDefinition().FullName = "System.ReadOnlySpan`1" &&
-            (converted.Method.Name = "op_Implicit" || converted.Method.Name = "AsSpan") && converted.Arguments.[0].Type.IsArray -> Some converted.Arguments.[0]
-        | :? UnaryExpression as converted when not(isNull converted.Method) && converted.Method.Name = "op_Implicit" &&
-            converted.Type.IsGenericType && converted.Type.GetGenericTypeDefinition().FullName = "System.ReadOnlySpan`1" && converted.Operand.Type.IsArray -> Some converted.Operand
-        | :? NewExpression as created when created.Arguments.Count = 1 && created.Type.IsGenericType &&
-            created.Type.GetGenericTypeDefinition().FullName = "System.ReadOnlySpan`1" && created.Arguments.[0].Type.IsArray -> Some created.Arguments.[0]
-        | _ -> None
-
     [<System.Diagnostics.CodeAnalysis.DynamicDependency("op_Equality(System.String,System.String)", typeof<string>);
       System.Diagnostics.CodeAnalysis.DynamicDependency("op_Inequality(System.String,System.String)", typeof<string>)>]
     let rec bind (variables: IDictionary<ParameterExpression, int>) (replace: Expression -> (obj array -> obj) option) expression =
@@ -333,8 +320,8 @@ module internal QueryValuePlan =
                     save()
                     result
             | :? MethodCallExpression as call when not(isNull call.Method.DeclaringType) && call.Method.DeclaringType.FullName = "System.MemoryExtensions" &&
-                call.Method.Name = "Contains" && call.Arguments.Count = 2 && (tryWholeArray call.Arguments.[0]).IsSome ->
-                let source = (tryWholeArray call.Arguments.[0]).Value
+                call.Method.Name = "Contains" && call.Arguments.Count = 2 && (QuerySpanSource.tryWholeArray call.Arguments.[0]).IsSome ->
+                let source = (QuerySpanSource.tryWholeArray call.Arguments.[0]).Value
                 let array, value = build source, build call.Arguments.[1]
                 let contains = QueryValueMetadata.ArrayContains source.Type
                 fun values ->

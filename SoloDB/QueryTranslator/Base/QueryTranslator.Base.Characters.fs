@@ -30,8 +30,10 @@ module internal QueryTranslatorCharacters =
         input.LegacyCharacterText && typeof<char>.Equals(Utils.optionalPayloadType target)
 
     let comparable target value input =
-        if requiresComparable target input then call Operation.Comparable value nullValue nullValue
-        else value
+        if not(typeof<char>.Equals(Utils.optionalPayloadType target)) then value else
+        match value with
+        | SqlExpr.Literal(SqlLiteral.Integer _) | SqlExpr.Parameter _ -> value
+        | _ -> call Operation.Comparable value nullValue nullValue
 
     let concat (components: (SqlExpr * SqlExpr) array) =
         SqlExpr.FunctionCall("CHARACTER_VALUE", SqlExpr.Literal(SqlLiteral.Integer(int64 Operation.Concat)) ::
@@ -102,6 +104,14 @@ module internal QueryTranslatorCharacters =
             call kind source value (SqlExpr.Literal(SqlLiteral.Integer(if array then 1L else 0L)))
 
     let operation kind source first second = call kind source first second
+
+    /// Character comparison accepts an original unit or a one-unit legacy text carrier.
+    let unitValue (value: SqliteRawValue) =
+        if value.IsNull then ValueNone
+        elif value.IsInteger then ValueSome(char(value.GetInt32()))
+        else
+            let text = value.CopyToString()
+            if text.Length = 1 then ValueSome text[0] else ValueNone
 
     let register (lower: string -> string) (connection: NativeSqliteConnection) =
         connection.RegisterScalar("CHARACTER_VALUE", -1, RawScalarFunc(fun context arguments ->

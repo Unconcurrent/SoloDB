@@ -102,6 +102,7 @@
     <Compile Include="Metadata/JsonModelDiscovery.fs" />
     <Compile Include="Metadata/QueryValues.fs" />
     <Compile Include="Metadata/ModelMembers.fs" />
+    <Compile Include="Metadata/SpanSource.fs" />
     <Compile Include="Metadata/ValueAccess.fs" />
     <Compile Include="Metadata/QueryQuotationSyntax.fs" />
     <Compile Include="Metadata/ExpressionEvaluation.fs" />
@@ -279,6 +280,7 @@
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Serialization.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.SerializationDescriptor.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Characters.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.SpanSource.fs" />
     <Compile Include="Query/BuildQuery/Queryable.BuildQuery.WindowHelpers.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.ProducedValue.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.fs" />

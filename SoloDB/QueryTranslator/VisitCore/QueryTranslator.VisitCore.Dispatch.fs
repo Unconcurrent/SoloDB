@@ -95,7 +95,7 @@ module internal QueryTranslatorVisitCore =
         QueryTranslatorVisitCoreMemberAccess.memberAccess visitProduced visitDu visitPresenceDu (visitValueDu valueUse) memberAccess qb
 
     and private containsImplDu qb array value =
-        QueryTranslatorVisitCoreArrayPredicates.contains isByRefLikeType visitProduced visitComparisonDu qb array value
+        QueryTranslatorVisitCoreArrayPredicates.contains visitProduced visitComparisonDu qb array value
 
     and private visitNestedArrayPredicateDu qb array predicate isAll =
         QueryTranslatorVisitCoreArrayPredicates.nested visitProduced visitDu qb array predicate isAll
@@ -141,8 +141,8 @@ module internal QueryTranslatorVisitCore =
         match unwrapConvert exp with
         // A bare entity assignment retains the update root-path representation.
         // Computed values read their operands before writing the result.
-        | :? ParameterExpression -> visitValueDu Stored exp qb |> QueryProduced.value qb.SourceContext.NextAlias
-        | _ -> visitValueDu Stored exp { qb with UpdateMode = false } |> QueryProduced.value qb.SourceContext.NextAlias
+        | :? ParameterExpression -> visitValueDu Stored exp qb |> QueryProduced.consume qb.SourceContext.NextAlias (QueryTranslatorCharacters.comparable exp.Type)
+        | _ -> visitValueDu Stored exp { qb with UpdateMode = false } |> QueryProduced.consume qb.SourceContext.NextAlias (QueryTranslatorCharacters.comparable exp.Type)
 
     // Comparison mode belongs to this operand only. Recursive expression visits
     // use visitDu, preserving the released kinds inside arithmetic and functions.
@@ -183,14 +183,14 @@ module internal QueryTranslatorVisitCore =
             | ValueNone -> raise (InvalidOperationException "Pre-expression handler returned true but did not set DuHandlerResult")
         else
 
-        match qb.SourceContext.BindQueryValue |> ValueOption.bind (fun bind -> bind.TryBind (valueUse = Comparison) exp) with
+        match qb.SourceContext.BindQueryValue |> ValueOption.bind (fun bind -> bind.TryBind (valueUse = Comparison || valueUse = Stored && typeof<char>.Equals(Utils.optionalPayloadType exp.Type)) exp) with
         | ValueSome value -> value
         | ValueNone ->
 
         // Fully-constant early-out
         if isConstantParameter exp then
             let value = ExpressionEvaluation.evaluateExpr<obj> exp
-            let struct(value, writerType) = StoredValueParameter.allocateProduced (valueUse = Comparison) qb.Variables exp.Type value
+            let struct(value, writerType) = StoredValueParameter.allocateProduced (valueUse = Comparison || valueUse = Stored && typeof<char>.Equals(Utils.optionalPayloadType exp.Type)) qb.Variables exp.Type value
             QueryProduced.typed writerType value
         else
 
