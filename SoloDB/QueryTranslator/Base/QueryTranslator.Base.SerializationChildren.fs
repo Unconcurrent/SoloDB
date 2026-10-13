@@ -68,6 +68,17 @@ module internal QuerySerializationChildren =
             |> ValueOption.ofOption
             |> ValueOption.bind (fun index -> child members[index].ValueType (ValueSome index) (box members[index].StoredName)
                                              |> ValueOption.map (fun selected -> { selected with ClrName = ValueSome members[index].ClrName }))
+            |> ValueOption.orElseWith (fun () ->
+                match access with
+                | ClrMember(name, target) when DBRefTypeHelpers.isManyReferenceType target || DBRefTypeHelpers.isSingleReferenceType target ->
+                    let declared = ModelMetadata.MemberType(parent, name, false)
+                                   |> Option.orElseWith (fun () -> ModelMetadata.MemberType(parent, name, true))
+                    match declared with
+                    | Some declared when declared.Equals target ->
+                        child declared ValueNone (box name)
+                        |> ValueOption.map (fun selected -> { selected with ClrName = ValueSome name })
+                    | _ -> ValueNone
+                | _ -> ValueNone)
         | JsonSerializator.JsonSerializationShape.DeclaredMembers members, _ ->
             selectNamedChild members.Length (fun index -> let struct(name, _) = members[index] in name)
                 (fun index -> let struct(_, target) = members[index] in target) access

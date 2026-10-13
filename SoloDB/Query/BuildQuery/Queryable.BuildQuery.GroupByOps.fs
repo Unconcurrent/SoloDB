@@ -90,52 +90,6 @@ module internal QueryableBuildQueryGroupByOps =
             | _ -> false
         total (inlineProjectionBindings lambda.Body)
 
-    let private tryTranslateProjectedAggregate
-        (translateInner: LambdaExpression -> SqlExpr) (groupParam: ParameterExpression)
-        (call: MethodCallExpression) (aggKind: AggregateKind) (coalesceZero: bool) : SqlExpr option =
-        let source = call.Arguments[0]
-        let isDistinct, innerSource =
-            match source with
-            | :? MethodCallExpression as mc when mc.Method.Name = "Distinct" && mc.Arguments.Count = 1 -> true, mc.Arguments.[0]
-            | _ -> false, source
-        let projLambda, innerSource2 =
-            match innerSource with
-            | :? MethodCallExpression as mc when mc.Method.Name = "Select" && mc.Arguments.Count = 2 ->
-                Some (extractLambdaFromExpr mc.Arguments.[1]), mc.Arguments.[0]
-            | _ -> None, innerSource
-        let whereLambda, innerSource3 =
-            match innerSource2 with
-            | :? MethodCallExpression as mc when mc.Method.Name = "Where" && mc.Arguments.Count = 2 ->
-                Some (extractLambdaFromExpr mc.Arguments.[1]), mc.Arguments.[0]
-            | _ -> None, innerSource2
-        if not (isGroupSource innerSource3 groupParam) || (aggKind = AggregateKind.Count && isDistinct) then None
-        else
-        if aggKind = AggregateKind.Count then
-            projLambda |> Option.iter (fun projection -> translateInner projection |> ignore)
-        let argExpr =
-            match projLambda, whereLambda with
-            // Element counts include NULL projections. Select preserves cardinality;
-            // Distinct must retain its rowset so its NULL element is counted too.
-            | _, Some where when aggKind = AggregateKind.Count ->
-                SqlExpr.CaseExpr((translateInner where, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], None)
-            | _, None when aggKind = AggregateKind.Count -> SqlExpr.Literal(SqlLiteral.Integer 1L)
-            | Some proj, Some where -> SqlExpr.CaseExpr((translateInner where, translateInner proj), [], None)
-            | Some proj, None -> translateInner proj
-            | None, Some where -> SqlExpr.CaseExpr((translateInner where, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], None)
-            | None, None ->
-                if aggKind = AggregateKind.Count then SqlExpr.Literal(SqlLiteral.Integer 1L)
-                else raise (NotSupportedException("Projected aggregate without Select is not supported."))
-        let aggArg =
-            if aggKind = AggregateKind.Count && whereLambda.IsNone then None
-            else Some argExpr
-        let aggExpr =
-            if aggKind = AggregateKind.Count then SqlExpr.AggregateCall(aggKind,aggArg,isDistinct,None)
-            else
-                let inputType = match projLambda with Some projection -> projection.ReturnType | None -> QueryTranslatorNumeric.aggregateInput call.Method
-                QueryTranslatorNumeric.aggregate call.Method inputType aggKind argExpr isDistinct
-        if coalesceZero then Some (SqlExpr.Coalesce(aggExpr, [QueryTranslatorNumeric.zero call.Method.ReturnType]))
-        else Some aggExpr
-
     let private groupingInput groupType keyInput itemInput =
         QuerySerializationInput.Grouping(groupType, keyInput, itemInput)
 
@@ -200,36 +154,7 @@ module internal QueryableBuildQueryGroupByOps =
                 ValueSome(completedItems completion call.Type item)
             | :? MethodCallExpression as mc when referencesParam groupParam mc &&
                     (typeof<Enumerable>.Equals(mc.Method.DeclaringType) || typeof<Queryable>.Equals(mc.Method.DeclaringType)) ->
-                let scalar =
-                    match mc.Method.Name with
-                    | ("Count" | "LongCount") when mc.Arguments.Count = 1 && isGroupSource mc.Arguments.[0] groupParam ->
-                        Some (SqlExpr.AggregateCall(AggregateKind.Count, None, false, None))
-                    | ("Count" | "LongCount") when mc.Arguments.Count = 2 && isGroupSource mc.Arguments.[0] groupParam ->
-                        let pred = extractLambdaFromExpr mc.Arguments.[1]
-                        let predDu = translateArgument pred
-                        Some (SqlExpr.AggregateCall(AggregateKind.Sum, Some (SqlExpr.CaseExpr(
-                            (predDu, SqlExpr.Literal(SqlLiteral.Integer 1L)), [], Some(SqlExpr.Literal(SqlLiteral.Integer 0L)))), false, None))
-                    | "Sum" when mc.Arguments.Count = 2 && isGroupSource mc.Arguments.[0] groupParam ->
-                        let sel = extractLambdaFromExpr mc.Arguments.[1]
-                        let selDu = translateArgument sel
-                        Some (SqlExpr.Coalesce(QueryTranslatorNumeric.aggregate mc.Method sel.ReturnType AggregateKind.Sum selDu false, [QueryTranslatorNumeric.zero mc.Method.ReturnType]))
-                    | "Min" when mc.Arguments.Count = 2 && isGroupSource mc.Arguments.[0] groupParam ->
-                        let sel = extractLambdaFromExpr mc.Arguments.[1]
-                        Some (QueryTranslatorNumeric.aggregate mc.Method sel.ReturnType AggregateKind.Min (translateArgument sel) false)
-                    | "Max" when mc.Arguments.Count = 2 && isGroupSource mc.Arguments.[0] groupParam ->
-                        let sel = extractLambdaFromExpr mc.Arguments.[1]
-                        Some (QueryTranslatorNumeric.aggregate mc.Method sel.ReturnType AggregateKind.Max (translateArgument sel) false)
-                    | "Average" when mc.Arguments.Count = 2 && isGroupSource mc.Arguments.[0] groupParam ->
-                        let sel = extractLambdaFromExpr mc.Arguments.[1]
-                        Some (QueryTranslatorNumeric.aggregate mc.Method sel.ReturnType AggregateKind.Avg (translateArgument sel) false)
-                    | "Sum" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate translateArgument groupParam mc AggregateKind.Sum true
-                    | ("Count" | "LongCount") when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate translateArgument groupParam mc AggregateKind.Count false
-                    | "Min" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate translateArgument groupParam mc AggregateKind.Min false
-                    | "Max" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate translateArgument groupParam mc AggregateKind.Max false
-                    | "Average" when mc.Arguments.Count = 1 -> tryTranslateProjectedAggregate translateArgument groupParam mc AggregateKind.Avg false
-                    | "Any" when mc.Arguments.Count = 1 && isGroupSource mc.Arguments.[0] groupParam ->
-                        Some (SqlExpr.Binary(SqlExpr.AggregateCall(AggregateKind.Count, None, false, None), BinaryOperator.Gt, SqlExpr.Literal(SqlLiteral.Integer 0L)))
-                    | _ -> None
+                let scalar = QueryGroupScalar.tryTranslate groupParam None translateArgument expr
                 match scalar with
                 | Some value -> ValueSome(completion.Bind(QueryProduced.typed mc.Type value))
                 | None -> QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr sourceCtx innerSelect completion.Alias groupParam vars sources producer expr |> ValueOption.ofOption

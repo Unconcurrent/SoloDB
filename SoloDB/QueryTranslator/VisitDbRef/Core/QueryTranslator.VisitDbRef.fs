@@ -80,8 +80,9 @@ module internal QueryTranslatorVisitDbRef =
                     Alias = fun () -> DBRefManyBuilderCore.nextAlias qb.SourceContext "_chain"
                     Value = fun e -> visitProduced e qb
                     Comparison = fun e -> visitComparisonProduced e qb
-                    Translate = fun source input alias lambda ->
+                    Translate = fun source input alias lambda handler ->
                         let sub = qb.ForSubquery(alias, lambda.Parameters, BaseLayer, input, subqueryRootTable = qb.SourceContext.RootTable)
+                        let sub = { sub with ProducedHandler = handler |> ValueOption.orElse sub.ProducedHandler }
                         let value = visitProduced lambda.Body sub
                         let joins = QueryTranslatorReferenceJoin.preparedJoinClauses sub.SourceContext.Joins
                         value, joins

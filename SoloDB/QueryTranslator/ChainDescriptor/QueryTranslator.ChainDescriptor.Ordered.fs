@@ -38,6 +38,50 @@ module internal OrderedChain =
         let struct(rows, input) = build adapter FullValue { Root = expression; Stages = [] }
         materialize adapter rows input resultType (sequenceElementType expression.Type)
 
+    let private groupedQuantifier (adapter: Adapter) (plan: Plan) =
+        let rec split preceding = function
+            | Group(key, false, producedType) :: remaining -> Some(List.rev preceding, key, producedType, remaining)
+            | stage :: remaining -> split (stage :: preceding) remaining
+            | [] -> None
+        match split [] plan.Stages with
+        | Some(preceding, key, producedType, remaining) when
+            remaining |> List.forall (function Filter predicate -> QueryGroupScalar.supportsPredicate predicate.Parameters[0] predicate.Body | _ -> false) ->
+            let struct(rows, input) = build adapter FullValue { plan with Stages = preceding }
+            let alias = adapter.Alias()
+            let fields = [{ Alias = Some "Id"; Expr = col alias "Id" }
+                          { Alias = Some "Value"; Expr = col alias "Value" }
+                          { Alias = Some "__ord"; Expr = col alias "__ord" }]
+                         @ QueryTranslatorSerialization.companionProjections (Some alias) input
+            let struct(keyRows, keyInput, keyName, equalityNames) =
+                prepareGrouping adapter plan.Root input alias (core (Some(DerivedTable(rows, alias))) fields) key
+            let groupAlias = adapter.Alias()
+            let item = QueryTranslatorSerialization.scopeSerializationInput (Some groupAlias) BaseLayer input
+            let keyInput = QueryTranslatorSerialization.scopeSerializationInput (Some groupAlias) OuterLayer keyInput
+            let groupInput = QuerySerializationInput.Grouping(producedType, keyInput, item)
+            let joins = ResizeArray<JoinShape>()
+            let predicates = remaining |> List.map (function
+                | Filter predicate ->
+                    let parameter = predicate.Parameters[0]
+                    let argument (lambda: LambdaExpression) =
+                        let produced, edges = adapter.Translate plan.Root item groupAlias (selector lambda) ValueNone
+                        joins.AddRange edges
+                        QueryProduced.value adapter.Alias produced
+                    let handler expression =
+                        if QueryGroupScalar.isKey parameter expression then ValueSome(DirectValue(col groupAlias keyName, keyInput))
+                        else QueryGroupScalar.tryTranslate parameter None argument expression
+                             |> Option.map (QueryProduced.typed expression.Type) |> ValueOption.ofOption
+                    let produced, edges = adapter.Translate plan.Root groupInput groupAlias predicate (ValueSome handler)
+                    joins.AddRange edges
+                    QueryProduced.value adapter.Alias produced
+                | _ -> invalidOp "A scalar grouped predicate requires its admitted filter.")
+            let having = predicates |> function
+                | [] -> None
+                | first :: remaining -> Some(List.fold (fun left right -> SqlExpr.Binary(left, BinaryOperator.And, right)) first remaining)
+            Some { core (Some(DerivedTable(keyRows, groupAlias))) [proj "v" (integer 1L)] with
+                        Joins = List.ofSeq joins; GroupBy = equalityNames |> List.map (col groupAlias)
+                        Having = having; Limit = Some(integer 1L) }
+        | _ -> None
+
     /// Returns None before any translation when the complete chain is not owned here.
     /// Direct, unchained aggregates retain their specialized aggregate path.
     let rec private tryBuildCore (adapter: Adapter) (expression: Expression) =
@@ -155,10 +199,16 @@ module internal OrderedChain =
                                 memberRead.Member.Name = "Id" && obj.ReferenceEquals(memberRead.Expression, selector.Parameters.[0])
                             | _ -> false
                         | _ -> false))
-                let struct(rows, completedInput) = build rowAdapter (if identityOnly then IdentityOnly else FullValue) plan
+                let grouped =
+                    if name = "Any" || name = "All" then groupedQuantifier rowAdapter plan else None
+                let struct(rows, completedInput) =
+                    match grouped with
+                    | Some row -> struct(select row, (QueryProduced.typed call.Type (integer 1L)).Input)
+                    | None when name = "Any" -> existenceRows rowAdapter (if identityOnly then IdentityOnly else FullValue) plan
+                    | None -> build rowAdapter (if identityOnly then IdentityOnly else FullValue) plan
                 let value expression = adapter.Value expression |> QueryProduced.value adapter.Alias
                 let translate input alias selector =
-                    let produced, joins = adapter.Translate plan.Root input alias selector
+                    let produced, joins = adapter.Translate plan.Root input alias selector ValueNone
                     QueryProduced.value adapter.Alias produced, joins
                 let a = adapter.Alias()
                 let source = Some(DerivedTable(rows,a))

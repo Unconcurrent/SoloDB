@@ -300,6 +300,7 @@
     <Compile Include="QueryTranslator/VisitDbRef/Core/QueryTranslator.VisitDbRef.Descriptor.fs" />
     <Compile Include="QueryTranslator/VisitDbRef/Core/QueryTranslator.VisitDbRef.Helpers.fs" />
     <Compile Include="QueryTranslator/ChainDescriptor/QueryTranslator.ChainDescriptor.Expr.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.GroupScalar.fs" />
     <Compile Include="QueryTranslator/ChainDescriptor/QueryTranslator.ChainDescriptor.OrderedPlan.fs" />
     <Compile Include="Query/BuildQuery/Queryable.DefaultEquality.fs" />
     <Compile Include="QueryTranslator/ChainDescriptor/QueryTranslator.ChainDescriptor.OrderedRows.fs" />

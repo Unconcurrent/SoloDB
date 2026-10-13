@@ -52,7 +52,16 @@ module internal OrderedChainRows =
                 Some(row, rewrite)
             else None
         | _ -> None
-    let rec build (adapter: Adapter) columns (plan: Plan) =
+    let internal prepareGrouping (adapter: Adapter) root input alias (source: SelectCore) selector =
+        let keyProduced, joins = adapter.Translate root input alias selector ValueNone
+        let keyName = "_key" + adapter.Alias()
+        let projections = ProjectionSetOps.toList source.Projections @ [proj keyName (SqlExpr.Literal SqlLiteral.Null)]
+        let keyCore = { source with Joins = source.Joins @ joins; Projections = ProjectionSetOps.ofList projections }
+        let struct(keyRows, keyInput) = QueryProduced.publishSlot adapter.Alias keyName keyCore keyProduced false
+        let struct(keyRows, keyInput, equalityNames) = QueryDefaultEquality.prepareGroups adapter.Alias keyName selector.ReturnType keyRows input keyInput "__ord"
+        struct(keyRows, keyInput, keyName, equalityNames)
+
+    let rec private buildRows (adapter: Adapter) columns (plan: Plan) retainFinalRepresentative =
         adapter.Validate plan
         let struct(start, sourceInput) = adapter.Source columns plan.Root
         let bound (source: SqlSelect) fallback limit offset =
@@ -73,7 +82,7 @@ module internal OrderedChainRows =
             | _ -> select { fallback with Limit = limit; Offset = offset }
         let value expression = adapter.Value expression |> QueryProduced.value adapter.Alias
         let translate root input alias selector =
-            let produced, joins = adapter.Translate root input alias selector
+            let produced, joins = adapter.Translate root input alias selector ValueNone
             QueryProduced.value adapter.Alias produced, joins
         let rec lower (source: SqlSelect) input keys stages =
             match stages with
@@ -108,7 +117,7 @@ module internal OrderedChainRows =
                         | _ -> filtered
                     lower filtered input keys rest
                 | Project l ->
-                    let produced, joins = adapter.Translate plan.Root input a l
+                    let produced, joins = adapter.Translate plan.Root input a l ValueNone
                     let produced =
                         if obj.ReferenceEquals(l.Body, l.Parameters[0]) then
                             let input = QueryTranslatorSerialization.scopeSerializationInput (Some a) BaseLayer produced.Input
@@ -155,7 +164,7 @@ module internal OrderedChainRows =
                             let items = Expression.Call(typeof<Enumerable>, "ToArray", [|sequenceElementType selector.ReturnType|], selector.Body)
                             { selector with Body = items }
                         | _ -> selector
-                    let collectionProduced, joins = adapter.Translate plan.Root input a selector
+                    let collectionProduced, joins = adapter.Translate plan.Root input a selector ValueNone
                     let from, collection, collectionInput, ownerAlias, joins =
                         match collectionProduced with
                         | DirectValue(collection, collectionInput) -> from, collection, collectionInput, a, joins
@@ -208,7 +217,7 @@ module internal OrderedChainRows =
                     let scoped = QueryTranslatorSerialization.scopeSerializationInput (Some a) BaseLayer input
                     distinctOn (QueryDefaultEquality.key adapter.Alias elementType (col a "Value") scoped) []
                 | DistinctBy selector ->
-                    let produced, joins = adapter.Translate plan.Root input a selector
+                    let produced, joins = adapter.Translate plan.Root input a selector ValueNone
                     let name = "_distinct_key" + adapter.Alias()
                     let keyCore = { baseCore with Joins = joins; Projections = ProjectionSetOps.ofList(pass @ [proj name (SqlExpr.Literal SqlLiteral.Null)]) }
                     let struct(prepared, keyInput) = QueryProduced.publishSlot adapter.Alias name keyCore produced false
@@ -220,12 +229,7 @@ module internal OrderedChainRows =
                                      key [col alias "__ord", SortDirection.Asc]
                     lower ranked input [] rest
                 | Group(selector, countOnly, producedType) ->
-                    let keyProduced, joins = adapter.Translate plan.Root input a selector
-                    let keyName = "_key" + adapter.Alias()
-                    let keyCore = { baseCore with Joins = joins
-                                                  Projections = ProjectionSetOps.ofList(pass @ [proj keyName (SqlExpr.Literal SqlLiteral.Null)]) }
-                    let struct(keyRows, keyInput) = QueryProduced.publishSlot adapter.Alias keyName keyCore keyProduced false
-                    let struct(keyRows, keyInput, equalityName) = QueryDefaultEquality.prepareGroups adapter.Alias keyName selector.ReturnType keyRows input keyInput "__ord"
+                    let struct(keyRows, keyInput, keyName, equalityName) = prepareGrouping adapter plan.Root input a baseCore selector
                     let a = adapter.Alias()
                     let from = Some(DerivedTable(keyRows, a))
                     let input = QueryTranslatorSerialization.scopeSerializationInput (Some a) BaseLayer input
@@ -264,7 +268,7 @@ module internal OrderedChainRows =
                 | Set(name, right, keySelector) ->
                     let struct(r, rightInput) =
                         match parse adapter.IsRoot right with
-                        | Some p -> build adapter FullValue p
+                        | Some p -> buildRows adapter FullValue p true
                         | None ->
                             let ra = adapter.Alias()
                             let produced = adapter.Value right
@@ -311,7 +315,7 @@ module internal OrderedChainRows =
                         let keyType = keySelector |> Option.map _.ReturnType |> Option.defaultValue (sequenceElementType right.Type)
                         let produced, joins =
                             match keySelector with
-                            | Some selector -> adapter.Translate plan.Root input a selector
+                            | Some selector -> adapter.Translate plan.Root input a selector ValueNone
                             | None -> DirectValue(col a "Value", QueryTranslatorSerialization.scopeSerializationInput (Some a) BaseLayer input), []
                         let keyName = "_set_key" + adapter.Alias()
                         let struct(prepared, keyInput) = QueryProduced.publishSlot adapter.Alias keyName
@@ -328,7 +332,9 @@ module internal OrderedChainRows =
                         let matches = QueryDefaultEquality.membership left rightKey (core (Some(DerivedTable(r, rightAlias))) [proj "Value" rightKey.Value])
                         let predicate = if name = "Except" || name = "ExceptBy" then SqlExpr.Unary(UnaryOperator.Not, matches) else matches
                         let filtered = { core (Some(DerivedTable(prepared, leftAlias))) (fields input leftAlias) with Where = Some predicate }
-                        let rows = QueryDefaultEquality.firstRows adapter.Alias filtered equality [col leftAlias "__ord", SortDirection.Asc]
+                        let rows =
+                            if rest.IsEmpty && not retainFinalRepresentative then select filtered
+                            else QueryDefaultEquality.firstRows adapter.Alias filtered equality [col leftAlias "__ord", SortDirection.Asc]
                         lower rows input [] rest
                 | Default value ->
                     let fallback = value |> Option.map adapter.Value |> Option.defaultWith (fun () -> QueryProduced.typed input.OriginalType (SqlExpr.Literal SqlLiteral.Null))
@@ -353,3 +359,8 @@ module internal OrderedChainRows =
                     let emptyAlias = adapter.Alias()
                     lower { Ctes = []; Body = UnionAllSelect(arm source input a, [arm empty emptyInput emptyAlias]) } produced [] rest
         lower start sourceInput [] plan.Stages
+
+    let internal build adapter columns plan = buildRows adapter columns plan true
+
+    /// Existence does not select a representative from the final set operation.
+    let internal existenceRows adapter columns plan = buildRows adapter columns plan false

@@ -34,7 +34,7 @@ module internal OrderedChainPlan =
         LambdaContext: string
         Validate: Plan -> unit
         Source: SourceColumns -> Expression -> struct(SqlSelect * QuerySerializationInput)
-        Translate: Expression -> QuerySerializationInput -> string -> Selector -> QueryProducedValue * JoinShape list
+        Translate: Expression -> QuerySerializationInput -> string -> Selector -> (Expression -> QueryProducedValue voption) voption -> QueryProducedValue * JoinShape list
         Value: Expression -> QueryProducedValue
         Comparison: Expression -> QueryProducedValue
         Alias: unit -> string

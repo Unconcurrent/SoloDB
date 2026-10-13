@@ -98,7 +98,7 @@ module internal QueryableHelperBase =
         QueryTranslator.translateToSqlExprForPredicate sourceCtx tableName expr vars
 
     /// Preserve direct scalar results and frame other results for their selected JSON reader.
-    let internal extractValueAsJsonDu (x: Type) : SqlExpr =
+    let internal extractValueAsJsonDu (input: QuerySerializationInput) (x: Type) : SqlExpr =
         let isPrimitive = QueryTranslatorBaseTypes.isSqlScalarResult x
         let value = SqlExpr.Column(None, "Value")
         let jsonValue () =
@@ -116,6 +116,8 @@ module internal QueryableHelperBase =
                     [],
                     Some (SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%!.17g"); value])))
             elif JsonFunctions.consumesSqlScalar x then value
+            elif input.Carrier = SqlScalar && DateTimeFunctions.isDateTimeLikeType payload then
+                SqlExpr.FunctionCall("NULLIF", [SqlExpr.FunctionCall("json_quote", [value]); SqlExpr.Literal(SqlLiteral.String "null")])
             else jsonValue ()
         else
             jsonValue ()

@@ -210,7 +210,7 @@ module internal QueryableTranslationCore =
               IncludedPaths = new HashSet<string>(source.Loading.Included, StringComparer.Ordinal)
               WhitelistMode = source.Loading.Whitelist; HasSingleRelations = shape.HasSingle; HasManyRelations = shape.HasMany
               SingleRelationsHydrated = false; ManyRelationsHydrated = false })
-        let mutable effectiveValueDecodedExpr = extractValueAsJsonDu valueDecodedType
+        let mutable effectiveValueDecodedExpr = extractValueAsJsonDu ownerInput valueDecodedType
         for index = ownerContexts.Length - 1 downto 0 do
             let context = ownerContexts[index]
             if context.HasSingleRelations && not (QueryTranslatorBaseTypes.isPrimitiveSQLiteType valueDecodedType) && not (DBRefTypeHelpers.isFileRefType valueDecodedType) then

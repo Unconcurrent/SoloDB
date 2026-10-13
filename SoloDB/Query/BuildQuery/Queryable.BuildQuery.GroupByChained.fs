@@ -34,8 +34,10 @@ module internal QueryableBuildQueryGroupByChained =
                 QueryTranslator.translateComparisonScopedBody rowCtx groupRowAlias e
                     (System.Collections.ObjectModel.ReadOnlyCollection<ParameterExpression>(Array.empty))
                     (ValueSome captures) (ValueSome producer) false vars
-            Translate = fun _ input alias l ->
+            Translate = fun _ input alias l handler ->
                 let child = { rowCtx with SerializationInput = input; Joins = ResizeArray() }
+                let producer expression =
+                    handler |> ValueOption.bind (fun handler -> handler expression) |> ValueOption.orElseWith (fun () -> producer expression)
                 let value = QueryTranslator.translateScopedBody child alias l.Body l.Parameters
                                 (ValueSome captures) (ValueSome producer) false vars
                 value, QueryTranslatorReferenceJoin.preparedJoinClauses child.Joins

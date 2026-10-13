@@ -38,8 +38,9 @@ module internal QueryTranslatorVisitGrouping =
                 Alias = builder.SourceContext.NextAlias
                 Value = fun value -> visitProduced value builder
                 Comparison = fun value -> visitComparisonProduced value builder
-                Translate = fun _ input alias selector ->
+                Translate = fun _ input alias selector handler ->
                     let child = builder.ForSubquery(alias, selector.Parameters, BaseLayer, input)
+                    let child = { child with ProducedHandler = handler |> ValueOption.orElse child.ProducedHandler }
                     let value = visitProduced selector.Body child
                     let joins = preparedJoinClauses child.SourceContext.Joins
                     value, joins

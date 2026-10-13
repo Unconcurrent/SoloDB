@@ -170,11 +170,11 @@ module internal QueryableBuildQueryGroupJoinOps =
                                                (System.Collections.ObjectModel.ReadOnlyCollection<ParameterExpression>(Array.empty))
                                                (ValueSome(dict [outerParam, { Alias = Some completion.Alias; Context = outerCtx; Value = SourceParameter }] |> fun values -> Dictionary<ParameterExpression, ParameterSource>(values)))
                                                ValueNone false ctx.Vars
-                    Translate = fun _ input a l ->
+                    Translate = fun _ input a l handler ->
                         let sub = { innerCtx with LayerPosition = BaseLayer; SerializationInput = input; Joins=ResizeArray() }
                         let captures = Dictionary<ParameterExpression, ParameterSource>()
                         captures[outerParam] <- { Alias = Some completion.Alias; Context = outerCtx; Value = SourceParameter }
-                        let value = QueryTranslator.translateCapturedBody sub a l.Body l.Parameters (ValueSome captures) ctx.Vars
+                        let value = QueryTranslator.translateScopedBody sub a l.Body l.Parameters (ValueSome captures) handler false ctx.Vars
                         value, QueryTranslatorReferenceJoin.preparedJoinClauses sub.Joins
                     Source = fun _ _ ->
                         let a = GroupJoinAliases.nextRowset innerCtx
@@ -192,37 +192,14 @@ module internal QueryableBuildQueryGroupJoinOps =
                                      || typeof<System.Linq.Queryable>.Equals(call.Method.DeclaringType)) ->
                             match OrderedChainPlan.parse orderedAdapter.IsRoot call.Arguments.[0] with
                             | Some plan when plan.Stages.IsEmpty ->
-                                let count = SqlExpr.AggregateCall(AggregateKind.Count, Some(SqlExpr.Column(Some innerAlias, "Id")), false, None)
                                 let present = SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some innerAlias, "Id"))
-                                let zero = SqlExpr.Literal(SqlLiteral.Integer 0L)
-                                let one = SqlExpr.Literal(SqlLiteral.Integer 1L)
-                                let translateArgument () =
-                                    let selector = unwrapLambdaExpressionOrThrow "GroupJoin terminal argument" call.Arguments.[1]
+                                let translateArgument (selector: LambdaExpression) =
                                     let captures = Dictionary<ParameterExpression, ParameterSource>()
                                     captures[outerParam] <- { Alias = Some outerAlias; Context = rowOuterCtx; Value = SourceParameter }
-                                    let argument = QueryTranslator.translateCapturedBody innerAggCtx innerAlias selector.Body
-                                                       selector.Parameters (ValueSome captures) ctx.Vars
-                                    selector, QueryProduced.value sourceCtx.NextAlias argument
-                                match call.Method.Name, call.Arguments.Count with
-                                | ("Count" | "LongCount"), 1 -> Some count
-                                | "Any", 1 -> Some(SqlExpr.Binary(count, BinaryOperator.Gt, zero))
-                                | ("Sum" | "Min" | "Max" | "Average"), 2 ->
-                                    let selector, value = translateArgument ()
-                                    // A LEFT JOIN's padding row is not a group element,
-                                    // even when the selector is a non-null constant.
-                                    let value = SqlExpr.CaseExpr((present, value), [], None)
-                                    let kind = match call.Method.Name with "Sum" -> AggregateKind.Sum | "Min" -> AggregateKind.Min | "Max" -> AggregateKind.Max | _ -> AggregateKind.Avg
-                                    let aggregate = QueryTranslatorNumeric.aggregate call.Method selector.ReturnType kind value false
-                                    Some(if call.Method.Name = "Sum" then SqlExpr.Coalesce(aggregate, [QueryTranslatorNumeric.zero call.Method.ReturnType])
-                                         else aggregate)
-                                | ("Any" | "All"), 2 ->
-                                    let _, predicate = translateArgument ()
-                                    let all = call.Method.Name = "All"
-                                    let predicate = if all then SqlExpr.Unary(UnaryOperator.Not, predicate) else predicate
-                                    let predicate = SqlExpr.Binary(present, BinaryOperator.And, predicate)
-                                    let matched = SqlExpr.AggregateCall(AggregateKind.Sum, Some(SqlExpr.CaseExpr((predicate, one), [], Some zero)), false, None)
-                                    Some(SqlExpr.Binary(matched, (if all then BinaryOperator.Eq else BinaryOperator.Gt), zero))
-                                | _ -> None
+                                    QueryTranslator.translateCapturedBody innerAggCtx innerAlias selector.Body
+                                        selector.Parameters (ValueSome captures) ctx.Vars
+                                    |> QueryProduced.value sourceCtx.NextAlias
+                                QueryGroupScalar.tryTranslate groupParam (Some present) translateArgument expr
                             | _ -> None
                         | _ -> None
                     match directAggregate with
