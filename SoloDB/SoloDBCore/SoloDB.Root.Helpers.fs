@@ -88,9 +88,9 @@ module internal SoloDBRootOps =
         collection.RefreshIndexModelSnapshot(snapshotConnection)
         collection :> ISoloDBCollection<'T>
 
-    /// Runs a user transaction on a pooled caching connection. The BEGIN IMMEDIATE, handler-fault
-    /// interception, commit/rollback, exception resolution and return-to-pool sequence is owned by
-    /// ConnectionManager.WithTransaction; this function only builds the transactional context.
+    /// Runs a user transaction on a dedicated caching connection. BEGIN IMMEDIATE, handler-fault
+    /// interception, commit/rollback, exception resolution and connection destruction belong to
+    /// ConnectionManager.WithDedicatedTransaction; this function builds the transactional context.
     let withTransaction<'R>
         (checkDisposed: unit -> unit)
         (connectionManager: ConnectionManager)
@@ -99,13 +99,13 @@ module internal SoloDBRootOps =
         checkDisposed()
         connectionManager.WithDedicatedTransaction(fun connectionForTransaction ->
             let transactionalDb = new TransactionalSoloDB(connectionForTransaction, { ClearCacheFunction = ignore; EventSystem = events })
-            // The connection returns to the pool after this scope, so a context leaked out of the
+            // The dedicated connection is destroyed after this scope, so a context leaked out of the
             // callback must fail closed instead of writing through a connection it no longer owns.
             try func.Invoke transactionalDb
             finally transactionalDb.ExitScope())
 
     /// Async counterpart of withTransaction. Delegates the transaction lifecycle to
-    /// ConnectionManager.WithAsyncTransaction so both paths share one corridor.
+    /// ConnectionManager.WithDedicatedAsyncTransaction, including connection destruction.
     let withTransactionAsync<'R>
         (checkDisposed: unit -> unit)
         (connectionManager: ConnectionManager)
