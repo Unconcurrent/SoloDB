@@ -39,7 +39,7 @@ module internal SoloDBCollectionEventDispatch =
             ctx.Reset(conn, session, jsonPtr, json.Length)
             f ctx
         finally
-            ctx.MarkDisposed()
+            ctx.End()
             ctxs.Return()
 
     let inline withUpdatingContext (ctxs: CallbackSlots<SoloDBUpdatingEventContext<'T>>) (conn: NativeSqliteConnection) (session: int64) (jsonOld: nativeptr<byte>) (jsonOldSize: int) (jsonNew: nativeptr<byte>) (jsonNewSize: int) (f: SoloDBUpdatingEventContext<'T> -> SoloDBEventsResult) : SoloDBEventsResult =
@@ -48,7 +48,7 @@ module internal SoloDBCollectionEventDispatch =
             ctx.Reset(conn, session, jsonOld, jsonOldSize, jsonNew, jsonNewSize)
             f ctx
         finally
-            ctx.MarkDisposed()
+            ctx.End()
             ctxs.Return()
 
 open SoloDBCollectionEventDispatch

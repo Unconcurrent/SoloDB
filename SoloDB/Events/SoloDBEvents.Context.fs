@@ -31,7 +31,12 @@ type internal EventContextBase(createDb: NativeSqliteConnection -> (unit -> unit
         database <- Unchecked.defaultof<_>
         System.Threading.Volatile.Write(&session, invocation)
         System.Threading.Volatile.Write(&disposed, false)
-    member _.End() = System.Threading.Volatile.Write(&disposed, true)
+    abstract member ClearInvocation: unit -> unit
+    member this.End() =
+        System.Threading.Volatile.Write(&disposed, true)
+        database <- Unchecked.defaultof<_>
+        connection <- Unchecked.defaultof<_>
+        this.ClearInvocation()
     interface ISoloDB with
         member this.ConnectionString: string = this.ReadDB().ConnectionString
         member this.FileSystem: IFileSystem = this.ReadDB().FileSystem
@@ -63,7 +68,9 @@ type internal SoloDBItemEventContext<'T> internal (collectionName: string, creat
         json <- struct(jsonBytes, jsonSize)
         item <- Unchecked.defaultof<'T>
 
-    member this.MarkDisposed() = this.End()
+    override _.ClearInvocation() =
+        json <- struct (NativePtr.nullPtr<byte>, 0)
+        item <- Unchecked.defaultof<'T>
 
     interface ISoloDBItemEventContext<'T> with
         member this.CollectionName: string =
@@ -94,7 +101,11 @@ type internal SoloDBUpdatingEventContext<'T> internal (collectionName: string, c
         itemOld <- Unchecked.defaultof<'T>
         itemNew <- Unchecked.defaultof<'T>
 
-    member this.MarkDisposed() = this.End()
+    override _.ClearInvocation() =
+        jsonOld <- struct (NativePtr.nullPtr<byte>, 0)
+        jsonNew <- struct (NativePtr.nullPtr<byte>, 0)
+        itemOld <- Unchecked.defaultof<'T>
+        itemNew <- Unchecked.defaultof<'T>
 
     interface ISoloDBUpdatingEventContext<'T> with
         member this.CollectionName: string =

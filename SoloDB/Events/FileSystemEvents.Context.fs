@@ -20,6 +20,10 @@ type internal FileSystemRowEventContext(createDb) =
         | _ -> invalidArg (nameof change) "Expected header row facts."
         path <- null; name <- null; oldPath <- null; oldName <- null
         this.Begin(connection, session)
+    override _.ClearInvocation() =
+        oldRow <- Unchecked.defaultof<_>
+        row <- Unchecked.defaultof<_>
+        path <- null; name <- null; oldPath <- null; oldName <- null
     interface ISoloDBFileEventContext with
         member this.Path = this.Check(); FileSystemText.read &path row.Path
         member this.Name = this.Check(); FileSystemText.read &name row.Name
@@ -43,6 +47,9 @@ type internal FileSystemMetadataEventContext(createDb) =
         | _ -> invalidArg (nameof change) "Expected metadata facts."
         path <- null; key <- null; oldValue <- null; newValue <- null
         this.Begin(connection, session)
+    override _.ClearInvocation() =
+        facts <- Unchecked.defaultof<_>
+        path <- null; key <- null; oldValue <- null; newValue <- null
     interface ISoloDBFileSystemMetadataEventContext with
         member this.Path = this.Check(); FileSystemText.read &path facts.Path
         member this.Key = this.Check(); FileSystemText.read &key facts.Key
@@ -60,6 +67,9 @@ type internal FileSystemContentEventContext(createDb) =
         | _ -> invalidArg (nameof change) "Expected content facts."
         path <- null
         this.Begin(connection, session)
+    override _.ClearInvocation() =
+        facts <- Unchecked.defaultof<_>
+        path <- null
     interface ISoloDBFileContentEventContext with
         member this.Path =
             this.Check()
@@ -89,6 +99,10 @@ type internal FileSystemDirectoryEventContext(createDb) =
         | _ -> invalidArg (nameof change) "Expected header row facts."
         path <- null; name <- null; oldPath <- null; oldName <- null
         this.Begin(connection, session)
+    override _.ClearInvocation() =
+        oldRow <- Unchecked.defaultof<_>
+        row <- Unchecked.defaultof<_>
+        path <- null; name <- null; oldPath <- null; oldName <- null
     interface ISoloDBDirectoryEventContext with
         member this.Path = this.Check(); FileSystemText.read &path row.Path
         member this.Name = this.Check(); FileSystemText.read &name row.Name
