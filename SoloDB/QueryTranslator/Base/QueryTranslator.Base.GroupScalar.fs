@@ -83,7 +83,7 @@ module internal QueryGroupScalar =
                     source <- stage.Arguments[0]
                 | _ -> ()
             if not valid || not(isSource parameter source) || (kind = AggregateKind.Count && distinct)
-               || (quantifier.IsSome && selector.IsSome) || (kind <> AggregateKind.Count && selector.IsNone) then None
+               || (quantifier.IsSome && (selector.IsSome || predicate.IsSome)) || (kind <> AggregateKind.Count && selector.IsNone) then None
             else
                 Some { Kind = kind; Predicate = predicate
                        Selector = if kind = AggregateKind.Count then None else selector
