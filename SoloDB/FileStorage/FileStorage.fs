@@ -66,17 +66,7 @@ module FileStorage =
                     ()
             )
 
-        member this.ReplaceAsyncWithinTransaction(path, stream: Stream) = task {
-            return! connection.WithAsyncTransaction(fun tx -> task {
-                let innerConnection = NativeTransactional tx
-                use file = openOrCreateFile innerConnection path
-                if connection.IsEventHandlerScope then
-                    FileStorageAsyncTransfers.copyOnCallbackThread stream file (int chunkSize)
-                else
-                    do! stream.CopyToAsync(file, int chunkSize)
-                file.SetLength file.Position
-            })
-        }
+        member this.ReplaceAsyncWithinTransaction(path, stream: Stream) = this.UploadAsync(path, stream)
 
         member this.Download(path, stream: Stream) =
             let identity =
