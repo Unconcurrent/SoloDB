@@ -67,23 +67,6 @@ module internal CompilerReferences =
                     closed :> TypeReference
             else
                 let entity = typ.TypeDefinition
-                let identity = entity.Assembly.QualifiedName + ":" + (if entity.IsArrayType then entity.CompiledName else entity.BasicQualifiedName)
-                let root =
-                    match typeReferences.TryGetValue identity with
-                    | true, value -> value
-                    | _ ->
-                        let scope =
-                            if String.IsNullOrEmpty(entity.Assembly.QualifiedName) then AssemblyNameReference(entity.Assembly.SimpleName, currentVersion)
-                            else AssemblyNameReference.Parse(entity.Assembly.QualifiedName)
-                        let parent =
-                            match entity.DeclaringEntity with
-                            | Some declaring when not declaring.IsNamespace -> Some(referenceWith parameter (declaring.AsType()))
-                            | _ -> None
-                        let value = TypeReference(defaultArg entity.Namespace "", entity.CompiledName, moduleDefinition, scope, entity.IsValueType || entity.IsEnum)
-                        for parameter in entity.GenericParameters do value.GenericParameters.Add(GenericParameter(parameter.Name,value))
-                        match parent with Some declaring -> value.DeclaringType <- declaring | _ -> ()
-                        typeReferences.Add(identity, value)
-                        value
                 if entity.IsByRef then ByReferenceType(referenceWith parameter typ.GenericArguments[0]) :> TypeReference
                 elif entity.IsArrayType then
                     if entity.ArrayRank = 1 then ArrayType(referenceWith parameter typ.GenericArguments[0]) :> TypeReference
@@ -91,9 +74,27 @@ module internal CompilerReferences =
                         let array = ArrayType(referenceWith parameter typ.GenericArguments[0], entity.ArrayRank)
                         for index = 0 to array.Dimensions.Count - 1 do array.Dimensions[index] <- ArrayDimension(Nullable 0, Nullable())
                         array :> TypeReference
-                elif typ.GenericArguments.Count = 0 then root
                 else
-                    let closed = GenericInstanceType(root)
-                    for argument in typ.GenericArguments do closed.GenericArguments.Add(referenceWith parameter argument)
-                    closed :> TypeReference
+                    let identity = entity.Assembly.QualifiedName + ":" + entity.BasicQualifiedName
+                    let root =
+                        match typeReferences.TryGetValue identity with
+                        | true, value -> value
+                        | _ ->
+                            let scope =
+                                if String.IsNullOrEmpty(entity.Assembly.QualifiedName) then AssemblyNameReference(entity.Assembly.SimpleName, currentVersion)
+                                else AssemblyNameReference.Parse(entity.Assembly.QualifiedName)
+                            let parent =
+                                match entity.DeclaringEntity with
+                                | Some declaring when not declaring.IsNamespace -> Some(referenceWith parameter (declaring.AsType()))
+                                | _ -> None
+                            let value = TypeReference(defaultArg entity.Namespace "", entity.CompiledName, moduleDefinition, scope, entity.IsValueType || entity.IsEnum)
+                            for parameter in entity.GenericParameters do value.GenericParameters.Add(GenericParameter(parameter.Name,value))
+                            match parent with Some declaring -> value.DeclaringType <- declaring | _ -> ()
+                            typeReferences.Add(identity, value)
+                            value
+                    if typ.GenericArguments.Count = 0 then root
+                    else
+                        let closed = GenericInstanceType(root)
+                        for argument in typ.GenericArguments do closed.GenericArguments.Add(referenceWith parameter argument)
+                        closed :> TypeReference
         referenceWith

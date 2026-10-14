@@ -84,6 +84,7 @@ internal static class GeneratedQueries
     internal static void RegisterExpressions(ModuleDefinition module, ILProcessor il, AssemblyDefinition product, GeneratedQueryLambda[] lambdas)
     {
         var sequenceFacts = new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
+        var carrierFacts = new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
         var standard = il.Body.Method.DeclaringType.BaseType.Scope;
         var type = new TypeReference("System", "Type", module, standard);
         var fromHandle = new MethodReference("GetTypeFromHandle", type, type);
@@ -91,6 +92,13 @@ internal static class GeneratedQueries
         foreach (var lambda in lambdas)
         {
             RegisterSequenceFacts(module,il,product,lambda.Parameters,sequenceFacts);
+            foreach (var parameter in lambda.Parameters)
+            {
+                if (parameter.IsByReference || parameter.IsPointer || !carrierFacts.Add(GeneratedJsonDefinitions.Identity(parameter))) continue;
+                var carrier = new GenericInstanceMethod(module.ImportReference(product.MainModule.GetType("SoloDatabase.QueryValueMetadata")
+                    .Methods.Single(method => method.Name == "RegisterQuotedParameter")));
+                carrier.GenericArguments.Add(module.ImportReference(parameter)); il.Emit(OpCodes.Call,carrier);
+            }
             if (!lambda.Expression) continue;
             il.Emit(OpCodes.Ldc_I4, lambda.Parameters.Length); il.Emit(OpCodes.Newarr, type);
             for (var index = 0; index < lambda.Parameters.Length; index++)

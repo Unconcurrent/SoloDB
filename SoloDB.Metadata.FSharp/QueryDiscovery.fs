@@ -22,7 +22,16 @@ module internal QueryDiscovery =
             |> Seq.tryFind(fun attribute -> attribute.AttributeType.FullName = "System.Reflection.AssemblyVersionAttribute")
             |> Option.map(fun attribute -> Version(attribute.ConstructorArguments[0] |> snd |> unbox<string>))
             |> Option.defaultValue(Version(0,0,0,0))
-        let referenceWith = CompilerReferences.create moduleDefinition currentVersion (project.ProjectContext.GetReferencedAssemblies() |> Seq.find(fun assembly -> assembly.SimpleName = "FSharp.Core") |> _.QualifiedName)
+        let core = project.ProjectContext.GetReferencedAssemblies() |> Seq.find(fun assembly -> assembly.SimpleName = "FSharp.Core")
+        let referenceWith = CompilerReferences.create moduleDefinition currentVersion core.QualifiedName
+        let runtimeMember (memberValue: FSharpMemberOrFunctionOrValue) =
+            not(memberValue.CompiledName = "NameOf" &&
+                (memberValue.DeclaringEntity |> Option.exists(fun entity ->
+                    entity.Assembly.QualifiedName = core.QualifiedName && entity.TryFullName = Some "Microsoft.FSharp.Core.Operators")))
+        let instantiate (substitutions: (FSharpGenericParameter * FSharpType) list) (typ: FSharpType) =
+            let mutable actual = typ.StripAbbreviations()
+            for _ = 0 to substitutions.Length do actual <- actual.Instantiate(substitutions).StripAbbreviations()
+            actual
         let uses = project.GetAllUsesOfAllSymbols()
         let operations = ResizeArray<GeneratedQueryOperation>()
         let calls = Dictionary<string, GeneratedQueryCall>(StringComparer.Ordinal)
@@ -95,9 +104,7 @@ module internal QueryDiscovery =
                 for context in contexts Set.empty useSite do
                     let substitutions = context @ useSite.GenericArguments
                     let actuals = useSite.GenericArguments |> List.map(fun (_,typ) ->
-                        let mutable actual = typ
-                        for _ = 0 to substitutions.Length do actual <- actual.Instantiate substitutions
-                        actual)
+                        instantiate substitutions typ)
                     if actuals |> List.forall closed then
                         complete <- true
                         for actual in actuals do
@@ -162,10 +169,7 @@ module internal QueryDiscovery =
                 (operation.DeclaringEntity |> Option.exists(fun entity -> entity.TryFullName = Some "System.Linq.Queryable")) ->
                 for context in contexts Set.empty useSite do
                     let substitutions = context @ useSite.GenericArguments
-                    let actual (typ: FSharpType) =
-                        let mutable value = typ.StripAbbreviations()
-                        for _ = 0 to substitutions.Length do value <- value.Instantiate substitutions
-                        value
+                    let actual = instantiate substitutions
                     let receiver =
                         if operation.IsExtensionMember && operation.IsInstanceMember then Some operation.ApparentEnclosingType
                         else operation.CurriedParameterGroups |> Seq.collect id |> Seq.tryHead |> Option.map _.Type
@@ -210,7 +214,7 @@ module internal QueryDiscovery =
         let addMemberWitness = QueryMemberWitnesses.create witnesses
         let addWitness context (part: FSharpSymbolUse) =
             match part.Symbol with
-            | :? FSharpMemberOrFunctionOrValue as memberValue when not part.IsFromDefinition ->
+            | :? FSharpMemberOrFunctionOrValue as memberValue when not part.IsFromDefinition && runtimeMember memberValue ->
                 addMemberWitness (bound context part) memberValue
             | _ -> ()
         let sites =
@@ -262,17 +266,20 @@ module internal QueryDiscovery =
                     let closed = GenericInstanceType(root)
                     for typ in actualArguments do closed.GenericArguments.Add typ
                     closed :> TypeReference
+            let result = instantiate (context @ useSite.GenericArguments) callableArguments[callableArguments.Length - 1]
+            match sequence result with
+            | Some element -> add true source arguments (reference element)
+            | None -> add false source arguments (reference result)
             for part in uses do
                 if contains argumentScope part.Range && not (sites |> Array.exists(fun (_,_,other,_) -> other <> callScope && contains callScope other && contains other part.Range)) then
                     match part.Symbol with
-                    | :? FSharpMemberOrFunctionOrValue as operation when not part.IsFromDefinition && operation.IsMethod ->
+                    | :? FSharpMemberOrFunctionOrValue as operation when not part.IsFromDefinition && operation.IsMethod && runtimeMember operation ->
                         let reference = bound context part
                         let substitutions = context @ useSite.GenericArguments @ part.GenericArguments
                         for parameter in operation.CurriedParameterGroups |> Seq.collect id do addLambda reference parameter.Type
                         for typ in seq { yield operation.ReturnParameter.Type
                                          for parameter in operation.CurriedParameterGroups |> Seq.collect id do yield parameter.Type } do
-                            let mutable actual = typ.StripAbbreviations()
-                            for _ = 0 to substitutions.Length do actual <- actual.Instantiate substitutions
+                            let actual = instantiate substitutions typ
                             if closed actual && actual.HasTypeDefinition && (sequence actual |> Option.isNone) then
                                 let element =
                                     if actual.TypeDefinition.IsArrayType then Some actual.GenericArguments[0]
@@ -291,8 +298,7 @@ module internal QueryDiscovery =
                     match part.Symbol with
                     | :? FSharpMemberOrFunctionOrValue as value when not value.IsMethod ->
                         let substitutions = context @ useSite.GenericArguments @ part.GenericArguments
-                        let mutable actual = value.FullType.StripAbbreviations()
-                        for _ = 0 to substitutions.Length do actual <- actual.Instantiate substitutions
+                        let actual = instantiate substitutions value.FullType
                         if closed actual && not actual.IsFunctionType && (actual.IsTupleType || actual.IsAnonRecordType || actual.HasTypeDefinition) && (sequence actual |> Option.isNone) then roots.Add actual
                         if closed actual && actual.IsFunctionType then
                             let reference = bound context part
@@ -309,7 +315,7 @@ module internal QueryDiscovery =
                     match part.Symbol with
                     | :? FSharpMemberOrFunctionOrValue as operation when
                         operation.DeclaringEntity |> Option.exists(fun entity -> entity.TryFullName = Some "System.Linq.Queryable") ->
-                        let result = operation.ReturnParameter.Type.StripAbbreviations()
+                        let result = instantiate (context @ useSite.GenericArguments @ part.GenericArguments) operation.ReturnParameter.Type
                         let reference = bound context part
                         match sequence result with
                         | Some element -> add true source arguments (reference element)
@@ -328,7 +334,7 @@ module internal QueryDiscovery =
                         let arguments=parameters |> Array.map reference
                         calls[target.FullName] <- GeneratedQueryCall(target,declaring,arguments)
                     | :? FSharpMemberOrFunctionOrValue as operation when (operation.IsMethod || operation.IsFunction) && not part.IsFromDefinition &&
-                        operation.DeclaringEntity.IsSome && not operation.IsConstructor ->
+                        operation.DeclaringEntity.IsSome && not operation.IsConstructor && runtimeMember operation ->
                         let reference = bound context part
                         let target = MethodReference(operation.CompiledName, moduleDefinition.TypeSystem.Void,
                                                      reference operation.ApparentEnclosingType, HasThis = operation.IsInstanceMemberInCompiledCode)

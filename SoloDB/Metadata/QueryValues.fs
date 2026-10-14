@@ -5,6 +5,7 @@ open System
 open System.Linq.Expressions
 open System.Reflection
 open System.Reflection.Emit
+open System.Runtime.CompilerServices
 open SoloDatabase.Metadata.CodecGeneration
 
 /// Direct operations for values evaluated while constructing or invoking a query.
@@ -87,7 +88,10 @@ type internal QueryValueMetadata private () =
         TypeMetadataCache.Register(typeof<'Left>, fun metadata -> { metadata with QueryBinary = MetadataMap.set (struct(kind,typeof<'Right>,typeof<'Value>)) operation metadata.QueryBinary })
 
     static member internal RegisterStorage<'Value>() =
-        TypeMetadataCache.Register(typeof<'Value>,fun metadata -> { metadata with QueryStorage = MetadataValue.generated (QueryStorage.create<'Value>()) })
+        TypeMetadataCache.Register(typeof<'Value>,fun metadata ->
+            match metadata.QueryStorage with
+            | ValueSome operation when operation.Generated -> metadata
+            | _ -> { metadata with QueryStorage = MetadataValue.generated (QueryStorage.create<'Value>()) })
 
     static member private MakeStorage<'Value>() = QueryStorage.create<'Value>()
 
@@ -128,7 +132,8 @@ type internal QueryValueMetadata private () =
     static member RegisterType<'Value>() =
         if typeof<'Value>.Equals(typeof<string>) then
             QueryValueMetadata.RegisterMember<string,int>("Length",false,Func<string,int>(fun value -> value.Length))
-        TypeMetadataCache.Register(typeof<'Value>, fun metadata -> { metadata with QueryDefault = MetadataValue.generated (box Unchecked.defaultof<'Value>); QueryStorage = MetadataValue.generated (QueryStorage.create<'Value>()) })
+        QueryValueMetadata.RegisterStorage<'Value>()
+        TypeMetadataCache.Register(typeof<'Value>, fun metadata -> { metadata with QueryDefault = MetadataValue.generated (box Unchecked.defaultof<'Value>) })
         let convert = { Generated = true; Value = QueryValueMetadata.MakeConversion<'Value>() }
         TypeMetadataCache.Register(typeof<obj>, fun metadata ->
             { metadata with QueryUnary = metadata.QueryUnary
@@ -230,6 +235,16 @@ type internal QueryValueMetadata private () =
             Func<Action<obj,obj>>(fun () ->
                 if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "query assignment" memberInfo.DeclaringType
                 QueryMethodDiscovery.setter memberInfo))
+    static member internal RegisterQuotedParameter<'Value>() =
+        let owner = typeof<StrongBox<'Value>>
+        QueryValueMetadata.RegisterStorage<'Value>()
+        QueryValueMetadata.RegisterGeneratedReader(owner,"Value",true,typeof<'Value>,
+            Func<obj,obj>(fun carrier -> box((carrier :?> StrongBox<'Value>).Value)))
+        QueryValueMetadata.RegisterGeneratedSetter(owner,"Value",true,typeof<'Value>,
+            Action<obj,obj>(fun carrier value -> (carrier :?> StrongBox<'Value>).Value <- unbox<'Value> value))
+        QueryValueMetadata.RegisterGeneratedAddress(owner,"Value",typeof<'Value>,
+            QueryAddress<'Value>(fun carrier _ -> &((carrier :?> StrongBox<'Value>).Value)))
+
     static member internal Constructor(valueType: Type, arguments) =
         let current() = TypeMetadataCache.Read(valueType, fun metadata -> MetadataMap.tryFind arguments metadata.QueryConstructors)
         match current() with
