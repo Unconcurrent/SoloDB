@@ -51,6 +51,10 @@ internal static class QueryExpressionInputs
                 return Read(compilation, array.Initializer, symbols, visited);
             case IArrayInitializerOperation initializer:
                 return initializer.ElementValues.SelectMany(element => Read(compilation, element, symbols, visited)).ToArray();
+            case ICollectionExpressionOperation collection:
+                return collection.Elements.SelectMany(element => Read(compilation, element, symbols, visited)).ToArray();
+            case ISpreadOperation spread:
+                return Read(compilation, spread.Operand, symbols, visited);
             case IConditionalOperation conditional:
                 return Read(compilation, conditional.WhenTrue, symbols, visited)
                     .Concat(Read(compilation, conditional.WhenFalse, symbols, visited)).ToArray();
@@ -60,44 +64,70 @@ internal static class QueryExpressionInputs
             case IParameterReferenceOperation parameter:
                 return symbols.Input(parameter.Parameter);
             case ILocalReferenceOperation local:
-                return Binding(local.Local);
+                return Binding(local.Local, symbols);
             case IFieldReferenceOperation field:
-                return Binding(field.Field);
+                return Binding(field.Field, symbols.WithOwner(field.Field.ContainingType));
+            case IPropertyReferenceOperation property when property.Property.GetMethod is IMethodSymbol getter:
+                return Returns(getter, property.Arguments);
             case IInvocationOperation call when Contract(symbols.Type(call.Type!)) != null:
+                return Returns(call.TargetMethod, call.Arguments);
+            default:
+                return Array.Empty<Origin>();
+        }
+
+        IEnumerable<Origin> Binding(ISymbol symbol, QueryRegistrations.Symbols context)
+        {
+            if (!visited.Add(symbol)) return Array.Empty<Origin>();
+            try
             {
-                var method = call.TargetMethod;
-                if (!visited.Add(method.OriginalDefinition)) return Array.Empty<Origin>();
-                var actual = new QueryRegistrations.Symbols(compilation, symbols.Method(method), symbols);
-                foreach (var argument in Arguments(compilation, call, symbols)) actual.BindInput(argument.Parameter, argument.Origins);
-                return method.DeclaringSyntaxReferences.SelectMany(reference =>
+                return symbol.DeclaringSyntaxReferences.SelectMany(reference =>
+                {
+                    var declaration = reference.GetSyntax();
+                    if (declaration is not VariableDeclaratorSyntax { Initializer: not null } variable)
+                        return Array.Empty<Origin>();
+                    return Read(compilation, compilation.GetSemanticModel(variable.SyntaxTree)
+                        .GetOperation(variable.Initializer.Value), context, visited);
+                }).ToArray();
+            }
+            finally { visited.Remove(symbol); }
+        }
+
+        IEnumerable<Origin> Returns(IMethodSymbol method, IEnumerable<IArgumentOperation> arguments)
+        {
+            var actual = new QueryRegistrations.Symbols(compilation, symbols.Method(method), symbols);
+            foreach (var argument in arguments)
+                if (argument.Parameter is IParameterSymbol parameter && Contract(symbols.Type(parameter.Type)) != null)
+                    actual.BindInput(parameter, Read(compilation, argument.Value, symbols, visited).ToArray());
+            if (!visited.Add(method.OriginalDefinition)) return Array.Empty<Origin>();
+            try
+            {
+                var declarations = method.AssociatedSymbol is IPropertySymbol associatedProperty
+                    ? associatedProperty.DeclaringSyntaxReferences : method.DeclaringSyntaxReferences;
+                return declarations.SelectMany(reference =>
                 {
                     var declaration = reference.GetSyntax();
                     var bodies = declaration.DescendantNodes(node => ReferenceEquals(node, declaration) ||
                         node is not (LambdaExpressionSyntax or LocalFunctionStatementSyntax))
                         .OfType<ReturnStatementSyntax>().Select(statement => statement.Expression).OfType<ExpressionSyntax>();
-                    if (declaration is MethodDeclarationSyntax { ExpressionBody: not null } function)
-                        bodies = bodies.Append(function.ExpressionBody.Expression);
-                    if (declaration is LocalFunctionStatementSyntax { ExpressionBody: not null } localFunction)
-                        bodies = bodies.Append(localFunction.ExpressionBody.Expression);
+                    ExpressionSyntax? expression = declaration switch
+                    {
+                        MethodDeclarationSyntax function => function.ExpressionBody?.Expression,
+                        LocalFunctionStatementSyntax function => function.ExpressionBody?.Expression,
+                        AccessorDeclarationSyntax accessor => accessor.ExpressionBody?.Expression,
+                        PropertyDeclarationSyntax property => property.ExpressionBody?.Expression ?? property.Initializer?.Value,
+                        ArrowExpressionClauseSyntax body => body.Expression,
+                        _ => null
+                    };
+                    if (expression != null) bodies = bodies.Append(expression);
+                    if (declaration is PropertyDeclarationSyntax { AccessorList: not null } declaredProperty)
+                        bodies = bodies.Concat(declaredProperty.AccessorList.Accessors
+                            .Where(accessor => accessor.Keyword.ValueText == "get" && accessor.ExpressionBody != null)
+                            .Select(accessor => accessor.ExpressionBody!.Expression));
                     return bodies.SelectMany(body => Read(compilation,
                         compilation.GetSemanticModel(body.SyntaxTree).GetOperation(body), actual, visited));
                 }).ToArray();
             }
-            default:
-                return Array.Empty<Origin>();
-        }
-
-        IEnumerable<Origin> Binding(ISymbol symbol)
-        {
-            if (!visited.Add(symbol)) return Array.Empty<Origin>();
-            return symbol.DeclaringSyntaxReferences.SelectMany(reference =>
-            {
-                var declaration = reference.GetSyntax();
-                if (declaration is not VariableDeclaratorSyntax { Initializer: not null } variable)
-                    return Array.Empty<Origin>();
-                return Read(compilation, compilation.GetSemanticModel(variable.SyntaxTree)
-                    .GetOperation(variable.Initializer.Value), symbols, visited);
-            }).ToArray();
+            finally { visited.Remove(method.OriginalDefinition); }
         }
     }
 }

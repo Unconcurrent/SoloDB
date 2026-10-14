@@ -47,17 +47,6 @@ module internal QueryDiscovery =
                 | true, typ when not typ.IsGenericParameter || typ.GenericParameter <> parameter -> referenceWith actual typ
                 | _ -> invalidOp (sprintf "A query type at %O has no checked use-site substitution: %s." useSite.Range (parameter.Name + " bindings=" + (useSite.GenericArguments |> Seq.map(fun (parameter,typ) -> parameter.Name + "=" + typ.ToString()) |> String.concat ";") + " symbol=" + useSite.Symbol.ToString()))
             referenceWith actual
-        let argumentGroups, expressionInputs = QueryExpressionInputs.create inputs file contains uses
-        let scope firstArgument (useSite: FSharpSymbolUse) =
-            match argumentGroups useSite with
-            | Some(callRange, first :: _) ->
-                let rec supplied expression =
-                    match expression with
-                    | SynExpr.Paren(expr = inner) -> supplied inner
-                    | SynExpr.Tuple(exprs = head :: _) when firstArgument -> supplied head
-                    | _ -> expression.Range
-                callRange, supplied first
-            | _ -> invalidOp (sprintf "The checked query call at %O has no parsed argument scope." useSite.Range)
         let genericOwners (useSite: FSharpSymbolUse) =
             let visitor =
                 { new SyntaxVisitorBase<SynBinding list>() with
@@ -83,6 +72,17 @@ module internal QueryDiscovery =
                 [ for call in calls do
                     for parent in contexts (visited.Add key) call do
                         for own in previous do yield parent @ call.GenericArguments @ own ])
+        let argumentGroups, expressionInputs = QueryExpressionInputs.create inputs file contains uses instantiate (contexts Set.empty)
+        let scope firstArgument (useSite: FSharpSymbolUse) =
+            match argumentGroups useSite with
+            | Some(callRange, first :: _) ->
+                let rec supplied expression =
+                    match expression with
+                    | SynExpr.Paren(expr = inner) -> supplied inner
+                    | SynExpr.Tuple(exprs = head :: _) when firstArgument -> supplied head
+                    | _ -> expression.Range
+                callRange, supplied first
+            | _ -> invalidOp (sprintf "The checked query call at %O has no parsed argument scope." useSite.Range)
         let roots = ResizeArray<FSharpType>()
         let rec closed (typ: FSharpType) =
             not typ.IsGenericParameter && (typ.GenericArguments |> Seq.forall closed)
@@ -230,7 +230,6 @@ module internal QueryDiscovery =
                     let argument,result = reference actual.GenericArguments[0],reference actual.GenericArguments[1]
                     let key=declaring.FullName+"|Invoke"
                     calls[key] <- GeneratedQueryCall(method,result,[|argument|])
-
             | _ -> ()
             addWitness context part
             match part.Symbol with
@@ -378,13 +377,14 @@ module internal QueryDiscovery =
         for useSite in uses do
             match useSite.Symbol with
             | :? FSharpMemberOrFunctionOrValue as operation when not useSite.IsFromDefinition && soloDBUse operation &&
-                operation.CompiledName <> "Compile" && operation.CompiledName <> "CompileQuotation" &&
-                (operation.CurriedParameterGroups |> Seq.collect id |> Seq.exists(fun parameter -> QueryExpressionInputs.isExpression parameter.Type)) ->
-                for input in expressionInputs operation useSite do
-                    for part in uses do
-                        if contains input part.Range then
-                            for context in contexts Set.empty part do
-                                collectPart context part
+                operation.CompiledName <> "Compile" && operation.CompiledName <> "CompileQuotation" ->
+                for context in contexts Set.empty useSite |> List.filter(fun context ->
+                    operation.CurriedParameterGroups |> Seq.collect id |> Seq.exists(fun parameter -> QueryExpressionInputs.isExpression (instantiate (context @ useSite.GenericArguments) parameter.Type))) do
+                    for input in expressionInputs context operation useSite do
+                        for part in uses do
+                            if contains input part.Range then
+                                for actual in contexts Set.empty part do
+                                    collectPart (actual @ part.GenericArguments) part
             | _ -> ()
         // Ordinary Queryable arguments also construct quotations before SoloDB receives them.
         for useSite in uses do

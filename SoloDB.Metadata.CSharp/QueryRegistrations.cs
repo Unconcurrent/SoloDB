@@ -177,7 +177,10 @@ internal static class QueryRegistrations
                         if (info.Type != null && symbols.Type(info.Type) is ITypeSymbol type && EnumerableElement(type) is ITypeSymbol element)
                         {
                             if (element is INamedTypeSymbol { IsAnonymousType: true } anonymous)
-                                Carrier(anonymous, sourceType, argumentType);
+                            {
+                                if (signature.ReturnsVoid) TypedRegistration("RegisterAnonymous",anonymous);
+                                else Carrier(anonymous, sourceType, argumentType);
+                            }
                             else if (Writable(element))
                             {
                                 if (compiled) {
@@ -359,9 +362,19 @@ internal static class QueryRegistrations
             if (method == null) return;
             for (var index = 0; index < method.TypeArguments.Length; index++)
                 parameters[method.OriginalDefinition.TypeParameters[index]] = method.TypeArguments[index];
-            for (var owner = method.ContainingType; owner != null; owner = owner.ContainingType)
-                for (var index = 0; index < owner.TypeArguments.Length; index++)
-                    parameters[owner.OriginalDefinition.TypeParameters[index]] = owner.TypeArguments[index];
+            BindOwner(method.ContainingType);
+        }
+        private void BindOwner(INamedTypeSymbol owner)
+        {
+            for (INamedTypeSymbol? current = owner; current != null; current = current.ContainingType)
+                for (var index = 0; index < current.TypeArguments.Length; index++)
+                    parameters[current.OriginalDefinition.TypeParameters[index]] = Type(current.TypeArguments[index]);
+        }
+        internal Symbols WithOwner(INamedTypeSymbol owner)
+        {
+            var actual = new Symbols(compilation,null,this);
+            actual.BindOwner((INamedTypeSymbol)Type(owner));
+            return actual;
         }
         internal ITypeSymbol Type(ITypeSymbol type)
         {
