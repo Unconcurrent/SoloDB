@@ -17,20 +17,24 @@ internal static class CSharpQueryOperations
         var index = 0;
         var directCalls = new System.Collections.Generic.List<GeneratedQueryCall>();
         var sequenceFacts = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        var carrierFacts = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
         TypeReference Identity(string value) => CSharpCodecFacts.ImportType(module,SourceTypeIdentity.Resolve(consumer.MainModule,value));
         foreach (var descriptor in consumer.CustomAttributes.Where(attribute =>
             attribute.AttributeType.FullName == "SoloDatabase.Generated.SourceQueryRegistrationAttribute"))
         {
             var name = (string)descriptor.ConstructorArguments[0].Value;
             var types = ((CustomAttributeArgument[])descriptor.ConstructorArguments[1].Value).Select(value => Identity((string)value.Value)).ToArray();
-            if (name == "RegisterSequenceFacts")
-            { GeneratedQueries.RegisterSequenceFacts(module,entry,product,types,sequenceFacts); access(product.Name.Name); continue; }
+            if (name is "RegisterSequenceFacts" or "RegisterParameterFacts")
+            {
+                GeneratedQueries.RegisterParameterFacts(module,entry,product,types,sequenceFacts,carrierFacts);
+                access(product.Name.Name); access(consumer.Name.Name); continue;
+            }
             if (name == "RegisterArrayAddress") { references.Array(owner,entry,(ArrayType)types.Single()); continue; }
             if (name == "RegisterAnonymous") continue; // The same resolved identity is consumed by the existing codec fact owner.
             if (name == "RegisterLambda")
             {
                 var delegateType = (GenericInstanceType)types[0];
-                GeneratedQueries.RegisterSequenceFacts(module,entry,product,types.Skip(1),sequenceFacts);
+                GeneratedQueries.RegisterParameterFacts(module,entry,product,types.Skip(1),sequenceFacts,carrierFacts);
                 var action = delegateType.ElementType.FullName.StartsWith("System.Action`",StringComparison.Ordinal);
                 var arity = delegateType.GenericArguments.Count - (action ? 0 : 1);
                 var factory = new GenericInstanceMethod(module.ImportReference(product.MainModule.GetType("SoloDatabase.QueryLambdaFactories")
@@ -62,8 +66,8 @@ internal static class CSharpQueryOperations
                 MethodReference registerOperation;
                 if (kind == 6)
                 {
-                    GeneratedQueries.RegisterSequenceFacts(module,entry,product,
-                        ((CustomAttributeArgument[])data[4].Value).Select(value => CSharpCodecFacts.ImportType(module,(TypeReference)value.Value)),sequenceFacts);
+                    GeneratedQueries.RegisterParameterFacts(module,entry,product,
+                        ((CustomAttributeArgument[])data[4].Value).Select(value => CSharpCodecFacts.ImportType(module,(TypeReference)value.Value)),sequenceFacts,carrierFacts);
                     new GeneratedJsonAssembly.Api(module,product).TypeToken(entry,CSharpCodecFacts.ImportType(module,(TypeReference)data[1].Value));
                     registerOperation = module.ImportReference(product.MainModule.GetType("SoloDatabase.QueryValueMetadata")
                         .Methods.Single(method => method.Name == "RegisterLambda"));

@@ -45,17 +45,27 @@ public sealed class GeneratedQueryLambda
 
 internal static class GeneratedQueries
 {
-    internal static void RegisterSequenceFacts(ModuleDefinition module, ILProcessor il, AssemblyDefinition product,
-        System.Collections.Generic.IEnumerable<TypeReference> parameters, System.Collections.Generic.HashSet<string> seen)
+    internal static void RegisterParameterFacts(ModuleDefinition module, ILProcessor il, AssemblyDefinition product,
+        System.Collections.Generic.IEnumerable<TypeReference> parameters, System.Collections.Generic.HashSet<string> sequences,
+        System.Collections.Generic.HashSet<string> carriers)
     {
         var api = new GeneratedJsonAssembly.Api(module,product);
+        void RegisterCarrier(TypeReference parameter)
+        {
+            if (parameter.IsByReference || parameter.IsPointer || !carriers.Add(GeneratedJsonDefinitions.Identity(parameter))) return;
+            var carrier = new GenericInstanceMethod(module.ImportReference(product.MainModule.GetType("SoloDatabase.QueryValueMetadata")
+                .Methods.Single(method => method.Name == "RegisterQuotedParameter")));
+            carrier.GenericArguments.Add(module.ImportReference(parameter)); il.Emit(OpCodes.Call,carrier);
+        }
+        RegisterCarrier(module.TypeSystem.Object);
         foreach (var type in parameters)
         {
+            RegisterCarrier(type);
             TypeReference? element = type is ArrayType array ? array.ElementType :
                 type is GenericInstanceType generic && generic.ElementType.FullName is
                     "System.Collections.Generic.IEnumerable`1" or "System.Linq.IOrderedEnumerable`1" or
                     "System.Linq.IQueryable`1" or "System.Linq.IOrderedQueryable`1" ? generic.GenericArguments[0] : null;
-            if (element == null || !seen.Add(GeneratedJsonDefinitions.Identity(type))) continue;
+            if (element == null || !sequences.Add(GeneratedJsonDefinitions.Identity(type))) continue;
             api.TypeToken(il,type); api.TypeToken(il,element);
             il.Emit(OpCodes.Call,api.ModelRegistration("RegisterSequence"));
         }
@@ -89,18 +99,9 @@ internal static class GeneratedQueries
         var type = new TypeReference("System", "Type", module, standard);
         var fromHandle = new MethodReference("GetTypeFromHandle", type, type);
         fromHandle.Parameters.Add(new ParameterDefinition(new TypeReference("System", "RuntimeTypeHandle", module, standard, true)));
-        void RegisterCarrier(TypeReference parameter)
-        {
-            if (parameter.IsByReference || parameter.IsPointer || !carrierFacts.Add(GeneratedJsonDefinitions.Identity(parameter))) return;
-            var carrier = new GenericInstanceMethod(module.ImportReference(product.MainModule.GetType("SoloDatabase.QueryValueMetadata")
-                .Methods.Single(method => method.Name == "RegisterQuotedParameter")));
-            carrier.GenericArguments.Add(module.ImportReference(parameter)); il.Emit(OpCodes.Call,carrier);
-        }
-        if (lambdas.Length != 0) RegisterCarrier(module.TypeSystem.Object);
         foreach (var lambda in lambdas)
         {
-            RegisterSequenceFacts(module,il,product,lambda.Parameters,sequenceFacts);
-            foreach (var parameter in lambda.Parameters) RegisterCarrier(parameter);
+            RegisterParameterFacts(module,il,product,lambda.Parameters,sequenceFacts,carrierFacts);
             if (!lambda.Expression) continue;
             il.Emit(OpCodes.Ldc_I4, lambda.Parameters.Length); il.Emit(OpCodes.Newarr, type);
             for (var index = 0; index < lambda.Parameters.Length; index++)

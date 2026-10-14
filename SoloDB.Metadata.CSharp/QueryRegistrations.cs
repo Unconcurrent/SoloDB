@@ -84,6 +84,24 @@ internal static class QueryRegistrations
         {
             descriptors.Append("[assembly: global::SoloDatabase.Generated.SourceQueryRegistration(").Append(Quote(method)).Append(',').Append(SourceTypes(types)).Append(")]\n");
         }
+        INamedTypeSymbol? Callable(ITypeSymbol? original, Symbols symbols)
+        {
+            if (original == null || symbols.Type(original) is not INamedTypeSymbol type) return null;
+            if (type.OriginalDefinition.ToDisplayString() == "System.Linq.Expressions.Expression<TDelegate>")
+                type = (INamedTypeSymbol)type.TypeArguments[0];
+            return type.DelegateInvokeMethod == null ? null : type;
+        }
+        void ParameterFacts(INamedTypeSymbol? callable)
+        {
+            if (callable?.DelegateInvokeMethod is not IMethodSymbol signature) return;
+            var parameters = signature.Parameters.Where(parameter => parameter.RefKind == RefKind.None &&
+                !parameter.Type.IsRefLikeType && parameter.Type.TypeKind is not (TypeKind.Pointer or TypeKind.FunctionPointer) && Closed(parameter.Type))
+                .Select(parameter => parameter.Type).ToArray();
+            var encoded = SourceTypes(parameters);
+            if (queryOperations.Add("parameters|" + encoded))
+                descriptors.Append("[assembly: global::SoloDatabase.Generated.SourceQueryRegistration(\"RegisterParameterFacts\",")
+                    .Append(encoded).Append(")]\n");
+        }
         void Operation(int kind, ITypeSymbol owner, string name, IEnumerable<ITypeSymbol> genericTypes,
             IEnumerable<ITypeSymbol> argumentTypes)
         {
@@ -114,10 +132,14 @@ internal static class QueryRegistrations
             var method = site.Method;
             if (method.ContainingType.ToDisplayString() == "System.Linq.Queryable")
             {
-                foreach (var parameter in method.Parameters)
-                    if (parameter.Type is INamedTypeSymbol expression && expression.OriginalDefinition.ToDisplayString() == "System.Linq.Expressions.Expression<TDelegate>" &&
-                        expression.TypeArguments[0] is INamedTypeSymbol callable && callable.DelegateInvokeMethod is IMethodSymbol signature)
-                        TypedRegistration("RegisterSequenceFacts",signature.Parameters.Select(value => value.Type).ToArray());
+                foreach (var parameter in method.Parameters) ParameterFacts(Callable(parameter.Type,site.Symbols));
+                foreach (var enclosing in invocation.Ancestors().OfType<LambdaExpressionSyntax>())
+                {
+                    var converted = semantic.GetTypeInfo(enclosing).ConvertedType;
+                    if (converted is INamedTypeSymbol expression &&
+                        expression.OriginalDefinition.ToDisplayString() == "System.Linq.Expressions.Expression<TDelegate>")
+                        ParameterFacts(Callable(expression,site.Symbols));
+                }
             }
             {
                 string Name(ITypeSymbol type) => QueryRegistrations.Name(site.Symbols.Type(type));
@@ -128,8 +150,10 @@ internal static class QueryRegistrations
                 var lambda = invocation.ArgumentList.Arguments.Select(argument => argument.Expression).OfType<LambdaExpressionSyntax>().FirstOrDefault();
                 var expression = method.Parameters.Select(parameter => parameter.Type).OfType<INamedTypeSymbol>().FirstOrDefault(type =>
                     type.OriginalDefinition.ToDisplayString() == "System.Linq.Expressions.Expression<TDelegate>");
-                if (lambda == null || expression == null || expression.TypeArguments[0] is not INamedTypeSymbol callable ||
-                    callable.DelegateInvokeMethod is not IMethodSymbol signature) continue;
+                var callable = Callable(expression,site.Symbols);
+                if (callable?.DelegateInvokeMethod is not IMethodSymbol signature) continue;
+                ParameterFacts(callable);
+                if (lambda == null) continue;
                 var sourceType = site.Symbols.Type(compiled ? method.ContainingType.TypeArguments[0] : signature.Parameters[0].Type);
                 var source = Name(sourceType);
                 var argumentSymbols = signature.Parameters.Skip(1).Select(parameter => site.Symbols.Type(parameter.Type)).ToArray();
@@ -219,10 +243,8 @@ internal static class QueryRegistrations
                                 Producer(4, "NegateChecked", new[] { input,output }, "value => checked((" + Name(output) + ")(-value))");
                         }
                     }
-                    if (node is LambdaExpressionSyntax && info.ConvertedType != null && site.Symbols.Type(info.ConvertedType) is INamedTypeSymbol delegateType)
+                    if (node is LambdaExpressionSyntax && Callable(info.ConvertedType,site.Symbols) is INamedTypeSymbol delegateType)
                     {
-                        if (delegateType.ContainingNamespace.ToDisplayString() == "System.Linq.Expressions" && delegateType.Name == "Expression")
-                            delegateType = (INamedTypeSymbol)delegateType.TypeArguments[0];
                         if (delegateType.DelegateInvokeMethod is IMethodSymbol invoke && !invoke.ReturnsVoid && Writable(invoke.ReturnType) &&
                             invoke.Parameters.All(parameter => parameter.RefKind == RefKind.None && Writable(parameter.Type)))
                         {
