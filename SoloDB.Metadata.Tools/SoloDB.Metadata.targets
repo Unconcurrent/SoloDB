@@ -42,6 +42,8 @@
       <Output TaskParameter="Assemblies" ItemName="_SoloDBGeneratedImplementationIdentity" />
     </GetAssemblyIdentity>
     <ItemGroup>
+      <_SoloDBGeneratedDependencyInputs Include="@(IntermediateAssembly)" />
+      <_SoloDBGeneratedDependencyInputs Include="$(SoloDBGeneratedImplementation)" Condition="'$(SoloDBGeneratedActive)' == 'true'" />
       <_SoloDBGeneratedImplementationReference Include="@(_SoloDBGeneratedImplementationIdentity->'%(OriginalItemSpec)')" Condition="'$(SoloDBGeneratedActive)' == 'true'">
         <FusionName>%(_SoloDBGeneratedImplementationIdentity.Identity)</FusionName>
       </_SoloDBGeneratedImplementationReference>
@@ -54,6 +56,18 @@
       <ReferenceCopyLocalPaths Include="@(_SoloDBGeneratedImplementationReference)" Condition="'$(SoloDBGeneratedActive)' == 'true'" />
     </ItemGroup>
     <Delete Files="$(OutDir)$(SoloDBGeneratedHelperIdentity).dll" Condition="'$(SoloDBGeneratedActive)' != 'true'" />
+  </Target>
+  <Target Name="SoloDBRefreshBuildDependencyFile" BeforeTargets="GenerateBuildDependencyFile"
+          DependsOnTargets="SoloDBGenerateHelperImplementation"
+          Inputs="@(_SoloDBGeneratedDependencyInputs)" Outputs="$(ProjectDepsFilePath)"
+          Condition="'$(SoloDBGeneratedHelper)' == 'true' and '$(DesignTimeBuild)' != 'true' and '$(GenerateDependencyFile)' == 'true' and '$(ProjectDepsFilePath)' != ''">
+    <Delete Files="$(ProjectDepsFilePath)" />
+  </Target>
+  <Target Name="SoloDBRefreshPublishDependencyFile" BeforeTargets="GeneratePublishDependencyFile"
+          DependsOnTargets="SoloDBGenerateHelperImplementation;_ComputeIntermediateDepsFilePath"
+          Inputs="@(_SoloDBGeneratedDependencyInputs)" Outputs="$(IntermediateDepsFilePath)"
+          Condition="'$(SoloDBGeneratedHelper)' == 'true' and '$(DesignTimeBuild)' != 'true' and '$(GenerateDependencyFile)' == 'true' and '$(_UseBuildDependencyFile)' != 'true' and '$(PublishAot)' != 'true'">
+    <Delete Files="$(IntermediateDepsFilePath)" />
   </Target>
   <Import Project="$(MSBuildThisFileDirectory)SoloDB.NativeMetadata.targets" />
 </Project>
