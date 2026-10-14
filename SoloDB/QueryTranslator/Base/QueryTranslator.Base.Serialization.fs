@@ -76,10 +76,22 @@ module internal QueryTranslatorSerialization =
 
     let internal scopeSerializationInput alias position (input: QuerySerializationInput) =
         let qualify expression = SqlExpr.map (function Column(None, name) -> Column(alias, name) | other -> other) expression
+        let rec qualifyInput (input: QuerySerializationInput) =
+            { input with
+                Source = input.Source |> ValueOption.map qualify
+                Operand = input.Operand |> ValueOption.map (fun operand ->
+                    { Descriptor = qualify operand.Descriptor
+                      Accesses = operand.Accesses |> Array.map (fun step ->
+                        { Kind = qualify step.Kind; Label = qualify step.Label
+                          MemberType = qualify step.MemberType; ActualType = qualify step.ActualType }) })
+                Children = input.Children |> Array.map qualifyInput
+                PhysicalOwner = input.PhysicalOwner |> ValueOption.map (fun owner -> { owner with Descriptor = qualify owner.Descriptor })
+                ReferenceOwner = input.ReferenceOwner |> ValueOption.map (fun owner -> { owner with Descriptor = qualify owner.Descriptor }) }
+        let input = qualifyInput input
         TypeMetadata.registerType input.OriginalType
         let source =
             match input.Source with
-            | ValueSome source -> qualify source
+            | ValueSome source -> source
             | ValueNone ->
                 let column = SqlExpr.Column(alias, "Value")
                 match position with
@@ -87,21 +99,16 @@ module internal QueryTranslatorSerialization =
                 | OuterLayer -> QueryTranslatorBaseTypes.canonicalToken input.Carrier column
         let operand =
             match input.Operand with
-            | ValueSome operand ->
-                ValueSome { Descriptor = qualify operand.Descriptor
-                            Accesses = operand.Accesses |> Array.map (fun step ->
-                                { Kind = qualify step.Kind; Label = qualify step.Label
-                                  MemberType = qualify step.MemberType; ActualType = qualify step.ActualType }) }
+            | ValueSome operand -> ValueSome operand
+            | ValueNone when input.Children.Length > 0 -> ValueNone
             | ValueNone ->
                 match input.Facts with
                 | JsonSerializator.JsonSerializationShape.ObjectMembers _
                 | JsonSerializator.JsonSerializationShape.DeclaredMembers _
                 | JsonSerializator.JsonSerializationShape.Dynamic ->
-                    ValueSome { Descriptor = qualify (writerDescriptor { input with Source = ValueSome source }); Accesses = Array.empty }
+                    ValueSome { Descriptor = writerDescriptor { input with Source = ValueSome source }; Accesses = Array.empty }
                 | _ -> ValueNone
-        { input with Source = ValueSome source; Operand = operand
-                     PhysicalOwner = input.PhysicalOwner |> ValueOption.map (fun owner -> { owner with Descriptor = qualify owner.Descriptor })
-                     ReferenceOwner = input.ReferenceOwner |> ValueOption.map (fun owner -> { owner with Descriptor = qualify owner.Descriptor }) }
+        { input with Source = ValueSome source; Operand = operand }
 
     /// Group item descriptors aggregate in the same row order as the public items.
     let internal groupingDescriptor (input: QuerySerializationInput) alias =

@@ -99,11 +99,12 @@ type ProjectGeneration private () =
                     report.Invoke(location.FileName,location.StartLine,location.StartColumn + 1,
                         sprintf "Cannot infer closed types for SoloDB use '%s'. Supply explicit SoloDBAOT model roots and a closed query signature for any runtime-selected use." methodName))
                 let models = ModelDiscovery.collect result references inferredRoots parsedInputs (Path.GetDirectoryName(project))
-                let queryWitnesses =
-                    if queryWitnesses.Length = 0 then queryWitnesses else
+                let queryWitnesses, queryCalls =
+                    if queryWitnesses.Length = 0 then queryWitnesses, queryCalls else
                     let core = result.ProjectContext.GetReferencedAssemblies() |> Seq.find(fun assembly -> assembly.SimpleName = "FSharp.Core")
                     let path = core.FileName |> Option.defaultWith(fun () -> invalidOp "The current FSharp.Core expression-construction input has no assembly path.")
-                    Array.append queryWitnesses (QueryConstructionWitnesses.Read(path, references))
+                    let struct(witnesses, calls) = QueryConstructionWitnesses.Read(path, references)
+                    Array.append queryWitnesses witnesses, Array.append queryCalls calls
                 let hasAttribute = ModelDiscovery.hasAccessAttribute result
                 let access = Array.append [|product.Name.Name|] (models |> Array.collect(fun model -> model.AccessAssemblies |> Seq.toArray)) |> Array.distinct |> Array.sort
                 let source = Text.StringBuilder()

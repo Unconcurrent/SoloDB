@@ -8,7 +8,7 @@ namespace SoloDatabase.Metadata.Tools;
 /// <summary>Metadata needed by the caller's FSharp quotation and expression construction.</summary>
 public static class QueryConstructionWitnesses
 {
-    public static GeneratedQueryWitness[] Read(string path, ModuleDefinition output)
+    public static (GeneratedQueryWitness[] Witnesses, GeneratedQueryCall[] Calls) Read(string path, ModuleDefinition output)
     {
         using var core = AssemblyDefinition.ReadAssembly(path);
         var result = new List<GeneratedQueryWitness>();
@@ -43,7 +43,15 @@ public static class QueryConstructionWitnesses
             var method = constants.Methods.Single(candidate => candidate.Name == name && candidate.IsPublic);
             result.Add(new GeneratedQueryWitness(MethodSignature(method), output.ImportReference(constants)));
         }
-        return result.ToArray();
+        // Decimal quotation literals invoke this compiler intrinsic even when
+        // the source has no explicit method use to supply a direct operation.
+        var intrinsics = core.MainModule.GetType("Microsoft.FSharp.Core.LanguagePrimitives/IntrinsicFunctions")
+            ?? throw new NotSupportedException("The referenced FSharp.Core has no literal construction owner.");
+        var decimalLiteral = intrinsics.Methods.Single(candidate => candidate.Name == "MakeDecimal" && candidate.IsPublic);
+        result.Add(new GeneratedQueryWitness(MethodSignature(decimalLiteral), output.ImportReference(intrinsics)));
+        var literal = output.ImportReference(decimalLiteral);
+        return (result.ToArray(), new[] { new GeneratedQueryCall(literal, literal.ReturnType,
+            literal.Parameters.Select(parameter => parameter.ParameterType).ToArray()) });
     }
 
     public static string MethodSignature(MethodDefinition method) =>
