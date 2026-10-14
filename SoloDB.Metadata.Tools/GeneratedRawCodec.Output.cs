@@ -129,12 +129,10 @@ internal static partial class GeneratedRawCodec
                 .Where(item=>!item.candidate.Facts.AbstractType && !GeneratedJsonDefinitions.SameType(item.candidate.Type,declared) && item.candidate.AssignableTo.Any(target=>GeneratedJsonDefinitions.SameType(target,declared)))
                 .Select(item=> {
                     var candidate=item.candidate;
-                    var primitive=TypeSupport.RawPrimitive(candidate.Type.FullName);
                     var candidateDefinitions=definitions.Stored && TypeSupport.StoredNumeric(candidate.Type.FullName) != null
                         ? definitions.NativeView : definitions;
-                    var body=GeneratedOptionalCodec.Kind(candidate.Type,models)!=0 || (primitive.Length!=0 && primitive!="Type")
-                        ? GeneratedChildCodec.WriteCall(candidateDefinitions,module,owner,product,candidate.Type,encoding,output,"WriteKnown"+suffix+item.index,models)
-                        : Writer(definitions,module,owner,product,candidate,item.index,models,encoding,output,suffix,true);
+                    var body=GeneratedChildCodec.WriteCall(candidateDefinitions,module,owner,product,candidate.Type,encoding,output,"WriteKnown"+suffix+item.index,models,false)
+                        ?? Writer(definitions,module,owner,product,candidate,item.index,models,encoding,output,suffix,true);
                     return new CodecKnownWriter<TypeReference,MethodReference>(candidate.Type,candidate.Facts.ValueType,body);
                 }).ToArray()));
     }
