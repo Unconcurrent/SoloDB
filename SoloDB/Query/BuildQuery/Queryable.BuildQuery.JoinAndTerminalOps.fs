@@ -61,11 +61,11 @@ module internal QueryableBuildQueryJoinAndTerminalOps =
 Reason: SoloDB only supports SQL-translatable equality without custom comparers here.
 Fix: Remove the comparer or move the join after AsEnumerable()."))
                     | 4 ->
+                        let innerExpression = readSoloDBQueryableUntyped m.Expressions.[0]
                         let innerSource =
-                            match tryExtractInnerJoinSource m.Expressions.[0] with
+                            match tryExtractInnerJoinSource innerExpression with
                             | Some source -> source
                             | None ->
-                                let innerExpression = readSoloDBQueryableUntyped m.Expressions.[0]
                                 match tryGetJoinRootSource innerExpression with
                                 | Some struct(tableName, originalType) -> { TableName = tableName; SerializationType = originalType; WherePredicates = [] }
                                 | None ->

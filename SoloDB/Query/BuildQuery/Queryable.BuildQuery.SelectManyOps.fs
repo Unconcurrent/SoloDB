@@ -49,11 +49,11 @@ Fix: Use SelectMany with the standard (carrier, inner) result selector or move t
 Reason: Anonymous-type and composite key equality lowering is not supported here.
 Fix: Join on a single scalar key or move the query after AsEnumerable()."))
 
+                        let innerExpression = readSoloDBQueryableUntyped composite.InnerExpression
                         let innerSource =
-                            match tryExtractInnerJoinSource composite.InnerExpression with
+                            match tryExtractInnerJoinSource innerExpression with
                             | Some source -> source
                             | None ->
-                                let innerExpression = readSoloDBQueryableUntyped composite.InnerExpression
                                 match tryGetJoinRootSource innerExpression with
                                 | Some struct(tableName, originalType) -> { TableName = tableName; SerializationType = originalType; WherePredicates = [] }
                                 | None ->

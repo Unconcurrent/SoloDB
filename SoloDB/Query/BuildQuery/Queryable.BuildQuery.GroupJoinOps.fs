@@ -32,10 +32,7 @@ module internal QueryableBuildQueryGroupJoinOps =
         (expressions: Expression array) =
         match expressions.Length with
         | 4 ->
-            let innerExpression =
-                match expressions.[0] with
-                | :? MemberExpression | :? ConstantExpression -> readSoloDBQueryableUntyped expressions.[0]
-                | expression -> expression
+            let innerExpression = readSoloDBQueryableUntyped expressions.[0]
             let outerKeySelector = unwrapLambdaExpressionOrThrow "GroupJoin outer key selector" expressions.[1]
             let innerKeySelector = unwrapLambdaExpressionOrThrow "GroupJoin inner key selector" expressions.[2]
             let resultSelector = unwrapLambdaExpressionOrThrow "GroupJoin result selector" expressions.[3]

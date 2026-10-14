@@ -45,19 +45,6 @@ module internal QueryableHelperJoin =
     let rec internal readSoloDBQueryableUntyped (methodArg: Expression) =
         let unsupportedJoinMessage = "Join is supported only when the inner source is another SoloDB IQueryable. To do this anyway, use AsEnumerable() first."
 
-        let rec isSoloDBQueryableExpression (expr: Expression) =
-            match expr with
-            | :? UnaryExpression as convert when QueryTranslatorBaseHelpers.isReferenceUpcast convert -> isSoloDBQueryableExpression convert.Operand
-            | :? ConstantExpression as ce ->
-                match ce.Value with
-                | :? IQueryable as q -> q.Provider :? SoloDBQueryProvider
-                | :? IRootQueryable -> true
-                | _ -> false
-            | :? MethodCallExpression as mce when mce.Arguments.Count > 0 ->
-                isSoloDBQueryableExpression mce.Arguments.[0]
-            | :? RelationQueryExpression as directive -> isSoloDBQueryableExpression directive.Source
-            | _ -> false
-
         match methodArg with
         | :? UnaryExpression as convert when QueryTranslatorBaseHelpers.isReferenceUpcast convert -> readSoloDBQueryableUntyped convert.Operand
         | :? MemberExpression when typeof<IQueryable>.IsAssignableFrom(methodArg.Type) && QueryTranslatorBaseHelpers.isFullyConstant methodArg ->
@@ -65,15 +52,20 @@ module internal QueryableHelperJoin =
             readSoloDBQueryableUntyped (Expression.Constant(query, typeof<IQueryable>))
         | :? ConstantExpression as ce ->
             match ce.Value with
-            | :? IQueryable as q when (match q.Provider with | :? SoloDBQueryProvider -> true | _ -> false) ->
-                q.Expression
-            | :? IRootQueryable as rq ->
-                Expression.Constant(rq, typeof<IRootQueryable>)
-            | _ ->
-                raise (NotSupportedException(unsupportedJoinMessage))
-        | :? MethodCallExpression as mcl when isSoloDBQueryableExpression mcl ->
-            mcl
-        | :? RelationQueryExpression when isSoloDBQueryableExpression methodArg -> methodArg
+            | :? IRootQueryable -> methodArg
+            | :? IQueryable as query when (query.Provider :? SoloDBQueryProvider) ->
+                readSoloDBQueryableUntyped query.Expression
+            | _ -> raise (NotSupportedException(unsupportedJoinMessage))
+        | :? MethodCallExpression as call when call.Arguments.Count > 0 ->
+            let source = readSoloDBQueryableUntyped call.Arguments.[0]
+            if obj.ReferenceEquals(source,call.Arguments.[0]) then methodArg else
+            let arguments = call.Arguments |> Seq.toArray
+            arguments.[0] <- source
+            call.Update(call.Object,arguments) :> Expression
+        | :? RelationQueryExpression as directive ->
+            let source = readSoloDBQueryableUntyped directive.Source
+            if obj.ReferenceEquals(source,directive.Source) then methodArg
+            else RelationQueryExpression(directive.Type,source,directive.Selector,directive.Operation) :> Expression
         | _ ->
             raise (NotSupportedException(unsupportedJoinMessage))
 
