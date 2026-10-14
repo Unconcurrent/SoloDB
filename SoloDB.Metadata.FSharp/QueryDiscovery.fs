@@ -27,16 +27,6 @@ module internal QueryDiscovery =
         let operations = ResizeArray<GeneratedQueryOperation>()
         let calls = Dictionary<string, GeneratedQueryCall>(StringComparer.Ordinal)
         let witnesses = Dictionary<string,GeneratedQueryWitness>(StringComparer.Ordinal)
-        let rec memberSignatureType (value: TypeReference) =
-            match value with
-            | :? GenericParameter as parameter -> (if parameter.Type = GenericParameterType.Method then "``" else "`") + string parameter.Position
-            | :? GenericInstanceType as closed ->
-                let name = System.Text.RegularExpressions.Regex.Replace(closed.ElementType.FullName.Replace('/', '.'), "`[0-9]+", "")
-                name + "{" + (closed.GenericArguments |> Seq.map memberSignatureType |> String.concat ",") + "}"
-            | :? ArrayType as array -> memberSignatureType array.ElementType + "[" + (if array.IsVector then "" else Array.create array.Rank "0:" |> String.concat ",") + "]"
-            | :? ByReferenceType as pointer -> memberSignatureType pointer.ElementType + "@"
-            | _ -> value.FullName.Replace('/', '.')
-
         let lambdas = Dictionary<string,GeneratedQueryLambda>(StringComparer.Ordinal)
         let seen = HashSet<string>(StringComparer.Ordinal)
         let bound (context: (FSharpGenericParameter * FSharpType) list) (useSite: FSharpSymbolUse) =
@@ -47,11 +37,11 @@ module internal QueryDiscovery =
                 | true, typ when not typ.IsGenericParameter || typ.GenericParameter <> parameter -> referenceWith actual typ
                 | _ -> invalidOp (sprintf "A query type at %O has no checked use-site substitution: %s." useSite.Range (parameter.Name + " bindings=" + (useSite.GenericArguments |> Seq.map(fun (parameter,typ) -> parameter.Name + "=" + typ.ToString()) |> String.concat ";") + " symbol=" + useSite.Symbol.ToString()))
             referenceWith actual
-        let scope (useSite: FSharpSymbolUse) =
+        let scope firstArgument (useSite: FSharpSymbolUse) =
             let rec supplied expression =
                 match expression with
                 | SynExpr.Paren(expr = inner) -> supplied inner
-                | SynExpr.Tuple(exprs = first :: _) -> supplied first
+                | SynExpr.Tuple(exprs = first :: _) when firstArgument -> supplied first
                 | _ -> expression.Range
             let visitor =
                 { new SyntaxVisitorBase<range * range>() with
@@ -238,8 +228,7 @@ module internal QueryDiscovery =
                                 witnesses.Remove key |> ignore
                                 for method in definition.Methods do
                                     if method.Name = memberValue.CompiledName || method.Name = memberValue.CompiledName + "$W" then
-                                        let name = method.Name + (if method.GenericParameters.Count = 0 then "" else "``" + string method.GenericParameters.Count)
-                                        let signature = name + "(" + (method.Parameters |> Seq.map(fun parameter -> memberSignatureType parameter.ParameterType) |> String.concat ",") + ")"
+                                        let signature = QueryConstructionWitnesses.MethodSignature method
                                         let key = declaring.FullName + "," + declaring.Scope.ToString() + "|" + signature
                                         witnesses[key] <- GeneratedQueryWitness(signature,declaring)
                         | None -> ()
@@ -249,7 +238,7 @@ module internal QueryDiscovery =
                 match useSite.Symbol with
                 | :? FSharpMemberOrFunctionOrValue as method when (method.CompiledName = "Compile" || method.CompiledName = "CompileQuotation")
                     && (method.DeclaringEntity |> Option.exists(fun entity -> entity.Namespace = Some "SoloDatabase")) ->
-                    let callScope, argumentScope = scope useSite
+                    let callScope, argumentScope = scope true useSite
                     Some(useSite, method, callScope, argumentScope)
                 | _ -> None)
         for useSite, method, callScope, argumentScope in sites do
@@ -391,7 +380,7 @@ module internal QueryDiscovery =
             match useSite.Symbol with
             | :? FSharpMemberOrFunctionOrValue as operation when not useSite.IsFromDefinition &&
                 (operation.DeclaringEntity |> Option.exists(fun entity -> entity.TryFullName = Some "System.Linq.Queryable")) ->
-                let _, argumentScope = scope useSite
+                let _, argumentScope = scope false useSite
                 for context in contexts Set.empty useSite do
                     for part in uses do
                         if contains argumentScope part.Range then addWitness context part

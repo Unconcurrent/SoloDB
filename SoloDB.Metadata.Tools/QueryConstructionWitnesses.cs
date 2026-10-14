@@ -22,13 +22,24 @@ public static class QueryConstructionWitnesses
             foreach (var name in names)
             {
                 var method = owner.Methods.Single(candidate => candidate.Name == name && candidate.IsPublic);
-                var signature = name + (method.HasGenericParameters ? "``" + method.GenericParameters.Count : "") +
-                    "(" + string.Join(",", method.Parameters.Select(parameter => Signature(parameter.ParameterType))) + ")";
-                result.Add(new GeneratedQueryWitness(signature, output.ImportReference(owner)));
+                result.Add(new GeneratedQueryWitness(MethodSignature(method), output.ImportReference(owner)));
             }
+        }
+        // Whole query quotations contain these compiler-authored nodes even though
+        // token-free lowering consumes them without calling the external converter.
+        var quotationOwner = core.MainModule.GetType("Microsoft.FSharp.Linq.RuntimeHelpers.LeafExpressionConverter")
+            ?? throw new NotSupportedException("The referenced FSharp.Core has no quotation construction owner.");
+        foreach (var name in new[] { "QuotationToLambdaExpression", "SubstHelper" })
+        {
+            var method = quotationOwner.Methods.Single(candidate => candidate.Name == name && candidate.IsPublic);
+            result.Add(new GeneratedQueryWitness(MethodSignature(method), output.ImportReference(quotationOwner)));
         }
         return result.ToArray();
     }
+
+    public static string MethodSignature(MethodDefinition method) =>
+        method.Name + (method.HasGenericParameters ? "``" + method.GenericParameters.Count : "") +
+        "(" + string.Join(",", method.Parameters.Select(parameter => Signature(parameter.ParameterType))) + ")";
 
     private static string Signature(TypeReference type)
     {
@@ -36,7 +47,7 @@ public static class QueryConstructionWitnesses
         if (type is GenericInstanceType generic)
         {
             var name = generic.ElementType.FullName.Replace('/', '.');
-            return name.Substring(0, name.LastIndexOf('`')) + "{" + string.Join(",", generic.GenericArguments.Select(Signature)) + "}";
+            return System.Text.RegularExpressions.Regex.Replace(name, "`[0-9]+", "") + "{" + string.Join(",", generic.GenericArguments.Select(Signature)) + "}";
         }
         if (type is ByReferenceType reference) return Signature(reference.ElementType) + "@";
         if (type is ArrayType array) return Signature(array.ElementType) + (array.IsVector ? "[]" : "[" + string.Join(",", Enumerable.Repeat("0:", array.Rank)) + "]");
