@@ -89,16 +89,18 @@ internal static class GeneratedQueries
         var type = new TypeReference("System", "Type", module, standard);
         var fromHandle = new MethodReference("GetTypeFromHandle", type, type);
         fromHandle.Parameters.Add(new ParameterDefinition(new TypeReference("System", "RuntimeTypeHandle", module, standard, true)));
+        void RegisterCarrier(TypeReference parameter)
+        {
+            if (parameter.IsByReference || parameter.IsPointer || !carrierFacts.Add(GeneratedJsonDefinitions.Identity(parameter))) return;
+            var carrier = new GenericInstanceMethod(module.ImportReference(product.MainModule.GetType("SoloDatabase.QueryValueMetadata")
+                .Methods.Single(method => method.Name == "RegisterQuotedParameter")));
+            carrier.GenericArguments.Add(module.ImportReference(parameter)); il.Emit(OpCodes.Call,carrier);
+        }
+        if (lambdas.Length != 0) RegisterCarrier(module.TypeSystem.Object);
         foreach (var lambda in lambdas)
         {
             RegisterSequenceFacts(module,il,product,lambda.Parameters,sequenceFacts);
-            foreach (var parameter in lambda.Parameters)
-            {
-                if (parameter.IsByReference || parameter.IsPointer || !carrierFacts.Add(GeneratedJsonDefinitions.Identity(parameter))) continue;
-                var carrier = new GenericInstanceMethod(module.ImportReference(product.MainModule.GetType("SoloDatabase.QueryValueMetadata")
-                    .Methods.Single(method => method.Name == "RegisterQuotedParameter")));
-                carrier.GenericArguments.Add(module.ImportReference(parameter)); il.Emit(OpCodes.Call,carrier);
-            }
+            foreach (var parameter in lambda.Parameters) RegisterCarrier(parameter);
             if (!lambda.Expression) continue;
             il.Emit(OpCodes.Ldc_I4, lambda.Parameters.Length); il.Emit(OpCodes.Newarr, type);
             for (var index = 0; index < lambda.Parameters.Length; index++)
