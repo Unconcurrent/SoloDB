@@ -79,13 +79,11 @@ module FileStorageCore =
     /// <summary>
     /// Attempts to retrieve directories from the database based on a WHERE clause.
     /// </summary>
-    let internal tryGetDirectoriesWhere (connection: NativeSqliteConnection) (where: string) (parameters: obj) =
+    let internal tryGetDirectoriesWhere (connection: NativeSqliteConnection) (where: string) (bind: NativeStatementScope -> unit) =
         let query = $"SELECT dh.Id, dh.Name, dh.FullPath, dh.ParentId, dh.Created, dh.Modified, dm.Key, dm.Value FROM SoloDBDirectoryHeader dh LEFT JOIN SoloDBDirectoryMetadata dm ON dh.Id = dm.DirectoryId WHERE {where}"
         let mutable statement = connection.OpenStatement(query)
         try
-            match parameters with
-            | :? IReadOnlyDictionary<string, obj> as values -> statement.BindValues(values)
-            | _ -> statement.Bind(statement.Statement.Capture(parameters))
+            bind statement
             let directories = Dictionary<int64, SoloDBDirectoryHeader>()
             while statement.Step() do
                 let row = statement.Row
@@ -117,7 +115,7 @@ module FileStorageCore =
         with error -> statement.Abort(error); reraise()
 
     let internal tryGetDir (db: NativeSqliteConnection) (path: string) =
-        tryGetDirectoriesWhere db "dh.FullPath = @Path" {|Path = path|} |> Seq.tryHead
+        tryGetDirectoriesWhere db "dh.FullPath = @Path" (fun statement -> statement.BindText(1, path)) |> Seq.tryHead
 
     /// <summary>
     /// Recursively retrieves or creates a directory, resolving ancestors by id only.

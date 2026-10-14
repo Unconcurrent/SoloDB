@@ -73,10 +73,10 @@ let internal batchLoadFileSystemProperties
                     let names = Array.init count (fun i -> let name = "@id" + string i in parameters.Add(name, targetIds.[offset+i]); name)
                     let predicate = (if isFile then "fh.Id" else "dh.Id") + " IN (" + String.Join(",", names) + ") ORDER BY " + (if isFile then "fh.Id" else "dh.Id")
                     if isFile then
-                        for header in FileStorageHelpers.getFilesWhere connection predicate parameters do
+                        for header in FileStorageHelpers.getFilesWhere connection predicate (fun statement -> statement.BindValues parameters) do
                             loaded.Add(header.Id, factory.Invoke(header.Id, header))
                     else
-                        for header in FileStorageCore.tryGetDirectoriesWhere connection predicate parameters do
+                        for header in FileStorageCore.tryGetDirectoriesWhere connection predicate (fun statement -> statement.BindValues parameters) do
                             loaded.Add(header.Id, factory.Invoke(header.Id, header))
                 for ownerId, owner in ownerEntities do
                     match kind with

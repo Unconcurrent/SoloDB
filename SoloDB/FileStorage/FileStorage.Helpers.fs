@@ -51,7 +51,8 @@ module internal FileStorageHelpers =
         match tryGetDir db dirPath with
         | None -> Seq.empty
         | Some dir ->
-        tryGetDirectoriesWhere db "ParentId = @Id" {|Id = dir.Id|}
+        let id = dir.Id
+        tryGetDirectoriesWhere db "ParentId = @Id" (fun statement -> statement.BindInt64(1, id))
 
     let internal readFileWithMetadata (statement: byref<NativeStatementScope>) =
         try
@@ -65,19 +66,17 @@ module internal FileStorageHelpers =
             header
         with error -> statement.Abort(error); reraise()
 
-    let private openFilesWhere (connection: NativeSqliteConnection) where (parameters: obj) =
+    let private openFilesWhere (connection: NativeSqliteConnection) where (bind: NativeStatementScope -> unit) =
         let query = $"SELECT fh.Id, fh.Name, fh.FullPath, fh.DirectoryId, fh.Length, fh.Created, fh.Modified, fm.Key, fm.Value FROM SoloDBFileHeader fh LEFT JOIN SoloDBFileMetadata fm ON fh.Id = fm.FileId WHERE {where}"
         let mutable statement = connection.OpenStatement(query)
         try
-            match parameters with
-            | :? IReadOnlyDictionary<string, obj> as values -> statement.BindValues(values)
-            | _ -> statement.Bind(statement.Statement.Capture(parameters))
+            bind statement
             statement.Step() |> ignore
             statement
         with error -> statement.Abort(error); reraise()
 
-    let internal getFilesWhere (connection: NativeSqliteConnection) (where: string) (parameters: obj) = seq {
-        let mutable statement = openFilesWhere connection where parameters
+    let internal getFilesWhere (connection: NativeSqliteConnection) (where: string) (bind: NativeStatementScope -> unit) = seq {
+        let mutable statement = openFilesWhere connection where bind
         try
             while statement.HasRow do yield readFileWithMetadata &statement
         finally statement.Dispose()
@@ -119,7 +118,7 @@ module internal FileStorageHelpers =
     let internal tryGetFileAt (db: NativeSqliteConnection) (path: string) =
         let struct (dirPath, name) = getPathAndName path
         let fullPath = combinePath dirPath name
-        getFilesWhere db "fh.FullPath = @FullPath" {|FullPath = fullPath|} |> Seq.tryHead
+        getFilesWhere db "fh.FullPath = @FullPath" (fun statement -> statement.BindText(1, fullPath)) |> Seq.tryHead
 
     let internal getOrCreateFileAt (db: NativeSqliteConnection) (path: string) =
         match tryGetFileAt db path with
@@ -158,7 +157,8 @@ module internal FileStorageHelpers =
         match tryGetDir db dirPath with
         | None -> Seq.empty
         | Some dir ->
-        getFilesWhere db "DirectoryId = @DirectoryId" {|DirectoryId = dir.Id|} |> ResizeArray :> SoloDBFileHeader seq
+        let id = dir.Id
+        getFilesWhere db "DirectoryId = @DirectoryId" (fun statement -> statement.BindInt64(1, id)) |> ResizeArray :> SoloDBFileHeader seq
 
     let private getSortDirection (sortDir: SortDirection) =
         match sortDir with
