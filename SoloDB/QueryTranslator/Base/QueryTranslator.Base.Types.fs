@@ -57,10 +57,13 @@ module internal QueryTranslatorBaseTypes =
         TargetType: Type                  // target type via reflection on the property
     }
 
+    type internal DocumentReferenceMutation =
+        | SetId of TargetId: int64
+        | SetTypedId of TargetIdType: Type * TargetTypedId: obj
+        | Clear
+
     type internal UpdateManyRelationTransform =
-        | SetDBRefToId of PropertyPath: string * TargetType: Type * TargetId: int64
-        | SetDBRefToTypedId of PropertyPath: string * TargetType: Type * TargetIdType: Type * TargetTypedId: obj
-        | SetDBRefToNone of PropertyPath: string * TargetType: Type
+        | MutateDocumentRef of Hops: ChainHopSpec list * PropertyPath: string * TargetType: Type * Mutation: DocumentReferenceMutation
         | AddDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
         | RemoveDBRefMany of PropertyPath: string * TargetType: Type * TargetId: int64
         | ClearDBRefMany of PropertyPath: string * TargetType: Type

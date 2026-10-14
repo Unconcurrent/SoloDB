@@ -214,42 +214,11 @@ module internal QueryTranslatorVisitPost =
             else ValueNone
         | _ -> ValueNone
 
-    /// Asserts that a chain's type sequence does not form a closed-loop cycle through
-    /// distinct types. Two contracts apply:
-    ///   - A chain that visits A, then a different type B, then returns to A rejects
-    ///     (T -> S -> T). This includes longer cycles A -> B -> C -> A.
-    ///   - A chain that walks a self-recursive type repeatedly (T -> T -> T -> ... -> T)
-    ///     is allowed at any depth — it is depth, not a cycle.
-    /// Implementation: build the type sequence (entry-owner :: per-hop targets), collapse
-    /// consecutive runs of the same type, then detect duplicates in the collapsed sequence.
-    /// A duplicate after collapsing means the chain LEFT a type and RETURNED to it, which
-    /// is a closed-loop cycle. Same-type runs (linked-list-style self-recursion) collapse
-    /// to a single entry and pass.
-    let private assertChainHasNoTypeCycle (hops: ChainHopSpec list) : unit =
-        match hops with
-        | [] -> ()
-        | firstHop :: _ ->
-            let typeSeq = firstHop.OwnerType :: (hops |> List.map (fun h -> h.TargetType))
-            let collapsed =
-                typeSeq
-                |> List.fold (fun acc t ->
-                    match acc with
-                    | head :: _ when (if isNull head then isNull t else head.Equals(t)) -> acc
-                    | _ -> t :: acc) []
-                |> List.rev
-            let visited = HashSet<Type>()
-            for t in collapsed do
-                if not (visited.Add(t)) then
-                    raise (InvalidOperationException(
-                        sprintf "Error: UpdateMany Ref-chain mutation revisits a previously-visited type '%s' (cycle).\nReason: The Ref.Value chain forms a closed-loop cycle through distinct types — leaving a type and returning to it (e.g. T -> S -> T or A -> B -> C -> A). Such a chain cannot be lowered to a finite SQL plan.\nFix: Restructure the chain so distinct types do not form a closed loop. Pure self-recursion (T -> T -> T at any depth) is allowed; only loops through different types are rejected."
-                            t.FullName))
-
     /// Walks a Ref.Value chain backwards from the innermost DBRef-typed expression to the root
     /// query parameter, producing a hop list ordered root-first. Validates each hop is a
     /// DBRef-shape property on the previous target type. Raises NotSupportedException for
-    /// any non-chain shape encountered during the walk. Cycle detection is NOT performed
-    /// here; callers that require it (B4 property-mutation paths) call
-    /// assertChainHasNoTypeCycle on the result.
+    /// any non-chain shape encountered during the walk. Persisted physical graph
+    /// admission belongs to the completed mutation, not the sequence of CLR types.
     let private walkRefChainBackwards (innerDbRefExpr: Expression) : ChainHopSpec list =
         // hopIndex grows as we walk inward (toward the leaf); when we walk backwards the
         // counter starts at the leaf-side hop and increments as we step toward the root.
@@ -336,7 +305,6 @@ module internal QueryTranslatorVisitPost =
             match tryAsDbRefValueAccessor me.Expression with
             | ValueSome innerDbRefExpr ->
                 let hops = walkRefChainBackwards innerDbRefExpr
-                assertChainHasNoTypeCycle hops
                 ValueSome (hops, me.Member.Name)
             | ValueNone -> ValueNone
         | _ -> ValueNone
@@ -352,7 +320,6 @@ module internal QueryTranslatorVisitPost =
             | ValueSome innerDbRefExpr ->
                 let propName = mc.Method.Name.Substring(4)
                 let hops = walkRefChainBackwards innerDbRefExpr
-                assertChainHasNoTypeCycle hops
                 ValueSome (hops, propName, mc.Arguments.[0])
             | ValueNone -> ValueNone
 
@@ -378,15 +345,84 @@ module internal QueryTranslatorVisitPost =
                 | ValueNone -> ValueNone
         | _ -> ValueNone
 
-    /// Build a MutateRefChainProperty op from a parsed chain assignment / setter LHS, applying
-    /// leaf-side validations: target leaf property is not [<SoloId>]-marked, and RHS reduces to
-    /// a closure-captured constant.
+    let private parseDbRefSetValue hops (dbRefType: Type) (propertyPath: string) (valueExpr: Expression) =
+        if DBRefTypeHelpers.isFileRefType dbRefType then
+            let value = ExpressionEvaluation.evaluateExpr<obj> valueExpr :?> IFileSystemReferenceValue
+            MutateFileSystemRef(hops, propertyPath, FileSystemRefMutation.Set value.Id)
+        else
+        let dbRefDef = dbRefType.GetGenericTypeDefinition()
+        let args = TypeMetadata.GenericTypeArgCache.Get dbRefType
+        let targetType = args.[0]
+        let valueExpr = unwrapConvertAll valueExpr
+
+        let mutation =
+            match valueExpr with
+            // DBRef.From(...) — explicit cascade-insert shape; reject with a tailored Fix line.
+            | :? MethodCallExpression as mc
+                when mc.Method.Name = "From"
+                  && not (isNull mc.Method.DeclaringType)
+                  && mc.Method.DeclaringType.IsGenericType
+                  && DBRefTypeHelpers.isDBRefDefinition (mc.Method.DeclaringType.GetGenericTypeDefinition()) ->
+                raise (NotSupportedException updateManyDbRefFromUnsupportedMessage)
+
+            | :? MethodCallExpression as mc
+                when mc.Method.Name = "To"
+                  && not (isNull mc.Method.DeclaringType)
+                  && mc.Method.DeclaringType.IsGenericType
+                  && DBRefTypeHelpers.isDBRefDefinition (mc.Method.DeclaringType.GetGenericTypeDefinition())
+                  && mc.Arguments.Count = 1 ->
+                if DBRefTypeHelpers.isDBRefSingleDefinition dbRefDef then
+                    let rawId = ExpressionEvaluation.evaluateExpr<obj> mc.Arguments.[0]
+                    match tryAsInt64 rawId with
+                    | ValueSome id when id > 0L -> DocumentReferenceMutation.SetId id
+                    | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+                else
+                    let typedId = ExpressionEvaluation.evaluateExpr<obj> mc.Arguments.[0]
+                    DocumentReferenceMutation.SetTypedId(args.[1], typedId)
+
+            | :? MethodCallExpression as mc
+                when mc.Method.Name = "get_None"
+                  && not (isNull mc.Method.DeclaringType)
+                  && mc.Method.DeclaringType.IsGenericType
+                  && DBRefTypeHelpers.isDBRefDefinition (mc.Method.DeclaringType.GetGenericTypeDefinition()) ->
+                DocumentReferenceMutation.Clear
+
+            | :? MemberExpression as me
+                when me.Member.Name = "None"
+                  && isNull me.Expression
+                  && not (isNull me.Member.DeclaringType)
+                  && me.Member.DeclaringType.IsGenericType
+                  && DBRefTypeHelpers.isDBRefDefinition (me.Member.DeclaringType.GetGenericTypeDefinition()) ->
+                DocumentReferenceMutation.Clear
+
+            | _ ->
+                // Closure-captured DBRef value: a hoisted `DBRef.None`, `DBRef.To(id)`,
+                // `DBRef.To(typedId)`, or `DBRef.From(unsaved)`. The AST shape here is the
+                // closure access (e.g. MemberExpression onto a captured local), so we
+                // evaluate the existing reference contract without rediscovering its members.
+                let captured = ExpressionEvaluation.evaluateExpr<obj> valueExpr
+                if isNull captured then
+                    DocumentReferenceMutation.Clear
+                else
+                    let reference = captured :?> IDocumentReference
+                    if reference.PendingEntity.IsSome then
+                        raise (NotSupportedException updateManyDbRefFromUnsupportedMessage)
+                    if DBRefTypeHelpers.isDBRefSingleDefinition dbRefDef then
+                        if reference.Id > 0L then DocumentReferenceMutation.SetId reference.Id
+                        else DocumentReferenceMutation.Clear
+                    else
+                        match reference.TypedId with
+                        | ValueSome typedId -> DocumentReferenceMutation.SetTypedId(args.[1],typedId)
+                        | ValueNone when reference.Id > 0L -> DocumentReferenceMutation.SetId reference.Id
+                        | _ -> DocumentReferenceMutation.Clear
+        MutateDocumentRef(hops, propertyPath, targetType, mutation)
+
+    /// Classify the declared leaf before choosing scalar JSON or relation mutation.
     let private buildChainPropertyMutation
             (hops: ChainHopSpec list)
             (leafTargetPropertyName: string)
             (rhsExpr: Expression) =
-        let leafHop = List.last hops
-        let leafTargetType = leafHop.TargetType
+        let leafTargetType = (List.last hops).TargetType
         let targetSoloIdMembers = CustomIdMetadata.GetMembers leafTargetType
         match targetSoloIdMembers with
         | members when members.Length > 0 && members.[0].Name = leafTargetPropertyName ->
@@ -394,91 +430,23 @@ module internal QueryTranslatorVisitPost =
                 sprintf "Error: Cannot use UpdateMany to write the [<SoloId>] field '%s.%s' through a Ref-chain mutation.\nReason: The [<SoloId>] field is the type's identity and may not be mutated through UpdateMany. To re-identify a row, delete and re-insert the entity."
                     leafTargetType.FullName leafTargetPropertyName))
         | _ -> ()
-        let rhsValue =
-            try ExpressionEvaluation.evaluateExpr<obj> rhsExpr
-            with _ ->
-                raise (InvalidOperationException(
-                    sprintf "Error: UpdateMany Ref-chain mutation of '%s' requires a closure-captured constant on the right-hand side.\nReason: The expression references the lambda parameter or a target-state value that cannot be reduced at translate time.\nFix: Hoist the value into a local variable above the UpdateMany call and reference that local in the lambda body."
-                        leafTargetPropertyName))
-        let fileReference = RelationMetadata.Get leafTargetType
-                            |> Array.exists(fun memberValue -> memberValue.Name = leafTargetPropertyName && DBRefTypeHelpers.isFileRefType memberValue.ReferenceType)
-        if fileReference then
-            let reference = rhsValue :?> IFileSystemReferenceValue
-            MutateFileSystemRef(hops, leafTargetPropertyName, FileSystemRefMutation.Set reference.Id)
-        else
+        let reference =
+            RelationMetadata.Get leafTargetType
+            |> Array.tryFind (fun memberValue -> memberValue.Name = leafTargetPropertyName)
+        match reference with
+        | Some memberValue when DBRefTypeHelpers.isSingleReferenceType memberValue.ReferenceType ->
+            parseDbRefSetValue hops memberValue.ReferenceType leafTargetPropertyName rhsExpr
+        | Some _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
+        | None ->
+            let rhsValue =
+                try ExpressionEvaluation.evaluateExpr<obj> rhsExpr
+                with _ ->
+                    raise (InvalidOperationException(
+                        sprintf "Error: UpdateMany Ref-chain mutation of '%s' requires a closure-captured constant on the right-hand side.\nReason: The expression references the lambda parameter or a target-state value that cannot be reduced at translate time.\nFix: Hoist the value into a local variable above the UpdateMany call and reference that local in the lambda body."
+                            leafTargetPropertyName))
             let jsonLiteral = JsonSerializator.JsonValue.WriteText<obj>(rhsValue,false,false)
             let leafJsonPath = "$." + leafTargetPropertyName
             MutateRefChainProperty(hops, leafTargetType, leafJsonPath, jsonLiteral)
-
-    let private parseDbRefSetValue (dbRefType: Type) (propertyPath: string) (valueExpr: Expression) =
-        if DBRefTypeHelpers.isFileRefType dbRefType then
-            let value = ExpressionEvaluation.evaluateExpr<obj> valueExpr :?> IFileSystemReferenceValue
-            MutateFileSystemRef([], propertyPath, FileSystemRefMutation.Set value.Id)
-        else
-        let dbRefDef = dbRefType.GetGenericTypeDefinition()
-        let args = TypeMetadata.GenericTypeArgCache.Get dbRefType
-        let targetType = args.[0]
-        let valueExpr = unwrapConvertAll valueExpr
-
-        match valueExpr with
-        // DBRef.From(...) — explicit cascade-insert shape; reject with a tailored Fix line.
-        | :? MethodCallExpression as mc
-            when mc.Method.Name = "From"
-              && not (isNull mc.Method.DeclaringType)
-              && mc.Method.DeclaringType.IsGenericType
-              && DBRefTypeHelpers.isDBRefDefinition (mc.Method.DeclaringType.GetGenericTypeDefinition()) ->
-            raise (NotSupportedException updateManyDbRefFromUnsupportedMessage)
-
-        | :? MethodCallExpression as mc
-            when mc.Method.Name = "To"
-              && not (isNull mc.Method.DeclaringType)
-              && mc.Method.DeclaringType.IsGenericType
-              && DBRefTypeHelpers.isDBRefDefinition (mc.Method.DeclaringType.GetGenericTypeDefinition())
-              && mc.Arguments.Count = 1 ->
-            if DBRefTypeHelpers.isDBRefSingleDefinition dbRefDef then
-                let rawId = ExpressionEvaluation.evaluateExpr<obj> mc.Arguments.[0]
-                match tryAsInt64 rawId with
-                | ValueSome id when id > 0L -> SetDBRefToId(propertyPath, targetType, id)
-                | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
-            else
-                let typedId = ExpressionEvaluation.evaluateExpr<obj> mc.Arguments.[0]
-                SetDBRefToTypedId(propertyPath, targetType, args.[1], typedId)
-
-        | :? MethodCallExpression as mc
-            when mc.Method.Name = "get_None"
-              && not (isNull mc.Method.DeclaringType)
-              && mc.Method.DeclaringType.IsGenericType
-              && DBRefTypeHelpers.isDBRefDefinition (mc.Method.DeclaringType.GetGenericTypeDefinition()) ->
-            SetDBRefToNone(propertyPath, targetType)
-
-        | :? MemberExpression as me
-            when me.Member.Name = "None"
-              && isNull me.Expression
-              && not (isNull me.Member.DeclaringType)
-              && me.Member.DeclaringType.IsGenericType
-              && DBRefTypeHelpers.isDBRefDefinition (me.Member.DeclaringType.GetGenericTypeDefinition()) ->
-            SetDBRefToNone(propertyPath, targetType)
-
-        | _ ->
-            // Closure-captured DBRef value: a hoisted `DBRef.None`, `DBRef.To(id)`,
-            // `DBRef.To(typedId)`, or `DBRef.From(unsaved)`. The AST shape here is the
-            // closure access (e.g. MemberExpression onto a captured local), so we
-            // evaluate the existing reference contract without rediscovering its members.
-            let captured = ExpressionEvaluation.evaluateExpr<obj> valueExpr
-            if isNull captured then
-                SetDBRefToNone(propertyPath, targetType)
-            else
-                let reference = captured :?> IDocumentReference
-                if reference.PendingEntity.IsSome then
-                    raise (NotSupportedException updateManyDbRefFromUnsupportedMessage)
-                if DBRefTypeHelpers.isDBRefSingleDefinition dbRefDef then
-                    if reference.Id > 0L then SetDBRefToId(propertyPath,targetType,reference.Id)
-                    else SetDBRefToNone(propertyPath,targetType)
-                else
-                    match reference.TypedId with
-                    | ValueSome typedId -> SetDBRefToTypedId(propertyPath,targetType,args.[1],typedId)
-                    | ValueNone when reference.Id > 0L -> SetDBRefToId(propertyPath,targetType,reference.Id)
-                    | _ -> SetDBRefToNone(propertyPath,targetType)
 
     let private extractTargetIdForDbRefManyOrThrow (expr: Expression) =
         let valueObj = ExpressionEvaluation.evaluateExpr<obj> expr
@@ -500,9 +468,8 @@ module internal QueryTranslatorVisitPost =
             if isNull raw then null else normalizeUpdateManyBody raw
         if isNull body then ValueNone else
 
-        // B4 — DBRef.Value.<TargetProp> mutation. Try the supported single-hop shape first.
-        // Out-of-scope variants (multi-hop, DBRefMany.Value, target-state-dependent RHS,
-        // method-call mutations) fall through to the existing rejection paths.
+        // Assignments and setters classify the complete reference chain and its leaf.
+        // Unsupported expression shapes retain their existing rejection paths.
         match body with
         | :? BinaryExpression as be when be.NodeType = ExpressionType.Assign ->
             match tryParseRefChainAssignmentLhs be.Left with
@@ -557,11 +524,11 @@ module internal QueryTranslatorVisitPost =
             match tryGetRootRelationMember oldValue with
             | ValueSome me when DBRefTypeHelpers.isSingleReferenceType me.Type ->
                 match tryParseRefChainAssignmentLhs oldValue with
-                | ValueSome (hops, property) when DBRefTypeHelpers.isFileRefType me.Type ->
+                | ValueSome (hops, property) ->
                     buildChainPropertyMutation hops property newValue |> ValueSome
                 | _ ->
                     let propertyPath = computePathKeyForUpdate me
-                    parseDbRefSetValue me.Type propertyPath newValue |> ValueSome
+                    parseDbRefSetValue [] me.Type propertyPath newValue |> ValueSome
             | ValueSome me when DBRefTypeHelpers.isDBRefManyType me.Type ->
                 raise (NotSupportedException updateManyRelationUnsupportedMessage)
             | _ ->

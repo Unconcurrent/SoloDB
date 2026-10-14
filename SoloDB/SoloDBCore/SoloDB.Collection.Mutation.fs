@@ -576,13 +576,21 @@ type internal CollectionMutationOps<'T>() =
                 // Owner JSON callbacks precede target-side chain and link writes.
                 // Capture physical membership before either pass, and admit their
                 // combined final graph only after both passes and callbacks finish.
-                let mutable affected = executeJsonUpdateManyByRows conn selectedRows jsonTransforms
+                let affected = executeJsonUpdateManyByRows conn selectedRows jsonTransforms
+
+                let documentReferenceOp property targetType mutation =
+                    match mutation with
+                    | QueryTranslatorBaseTypes.DocumentReferenceMutation.SetId id -> RelationsTypes.SetDBRefToId(property, targetType, id)
+                    | QueryTranslatorBaseTypes.DocumentReferenceMutation.SetTypedId(idType, id) -> RelationsTypes.SetDBRefToTypedId(property, targetType, idType, id)
+                    | QueryTranslatorBaseTypes.DocumentReferenceMutation.Clear -> RelationsTypes.SetDBRefToNone(property, targetType)
 
                 // Partition: B4 chain ops (depth >= 1) vs link-touching apply ops.
                 let chainOps = ResizeArray<QueryTranslatorBaseTypes.UpdateManyRelationTransform>()
                 let applyOpsRaw = ResizeArray<QueryTranslatorBaseTypes.UpdateManyRelationTransform>()
                 for op in relationTransforms do
                     match op with
+                    | QueryTranslatorBaseTypes.MutateDocumentRef(hops, _, _, _) when not hops.IsEmpty ->
+                        chainOps.Add op
                     | QueryTranslatorBaseTypes.MutateRefChainProperty _
                     | QueryTranslatorBaseTypes.RefChainManyAdd _
                     | QueryTranslatorBaseTypes.RefChainManyRemove _
@@ -595,46 +603,30 @@ type internal CollectionMutationOps<'T>() =
                 // SELECT (joins through link tables hop-by-hop) anchored on selectedRows ids,
                 // then wraps as UPDATE / DELETE / INSERT … SELECT depending on the op shape.
                 if chainOps.Count > 0 && selectedRows.Length > 0 then
-                    let descriptorCache = Dictionary<Type, RelationsTypes.RelationDescriptor array>()
-                    let getDescriptors (ownerType: Type) =
-                        match descriptorCache.TryGetValue(ownerType) with
-                        | true, d -> d
-                        | false, _ ->
-                            // buildRelationDescriptors uses tx.OwnerTable for link-table naming,
-                            // so a tx bound to the entry-point collection mis-names every
-                            // descriptor for non-entry hops. Build a hop-local tx context that
-                            // names ownerTable from the hop's owner type instead. This keeps the
-                            // SQLite connection, transaction state, and metadata source intact.
-                            let hopTx : RelationsTypes.RelationTxContext = {
-                                Connection = tx.Connection
-                                OwnerTable = Utils.formatName ownerType.Name
-                                OwnerType = ownerType
-                                InTransaction = tx.InTransaction
-                                Preparation = tx.Preparation
-                                CollectionFactory = tx.CollectionFactory
-                            }
-                            let d = RelationsSchemaValidator.buildRelationDescriptors hopTx ownerType
-                            descriptorCache.[ownerType] <- d
-                            d
-                    let resolveHopDescriptor (ownerType: Type) (relationPropertyName: string) : RelationsTypes.RelationDescriptor =
-                        let descs = getDescriptors ownerType
-                        match descs |> Array.tryFind (fun d -> d.PropertyPath = relationPropertyName) with
-                        | Some d -> d
-                        | None ->
+                    let resolveDescriptor (ownerTx: RelationsTypes.RelationTxContext) propertyName =
+                        let descriptors = RelationsEntitySync.relationDescriptorByPath ownerTx ownerTx.OwnerType
+                        match descriptors.TryGetValue(propertyName) with
+                        | true, descriptor -> descriptor
+                        | _ ->
                             raise (InvalidOperationException(
                                 sprintf "Error: UpdateMany Ref-chain mutation cannot resolve a relation descriptor for hop property '%s' on type '%s'.\nReason: The chain walker emitted a hop whose relation property is not registered as a DBRef/DBRefMany on its declared owner type. This indicates a schema/translator drift.\nFix: Confirm the property is a DBRef on the owner type and that the relation schema for that owner has been initialized."
-                                    relationPropertyName ownerType.FullName))
+                                    propertyName ownerTx.OwnerType.FullName))
+
+                    let resolveChain (hops: QueryTranslatorBaseTypes.ChainHopSpec list) =
+                        let descriptors = ResizeArray<RelationsTypes.RelationDescriptor>(hops.Length)
+                        let mutable ownerTx = tx
+                        for hop in hops do
+                            let descriptor = resolveDescriptor { ownerTx with OwnerType = hop.OwnerType } hop.RelationPropertyName
+                            descriptors.Add(descriptor)
+                            ownerTx <- { tx with OwnerTable = descriptor.TargetTable; OwnerType = descriptor.TargetType }
+                        descriptors.ToArray(), ownerTx
 
                     // Build the chain SELECT as a SqlDu SqlSelect tree. Joins through link tables
                     // hop-by-hop; entry side anchored on a parameterized IN-list against
                     // selectedRows ids. Returns (chainSelect, leafProjection) — leafProjection is
                     // the inner Projection record so callers can append a sibling column for
                     // INSERT … SELECT shapes that need (leafTargetId, savedTargetId).
-                    let buildChainSqlSelectForOwners (hops: QueryTranslatorBaseTypes.ChainHopSpec list) (vars: Dictionary<string, obj>) ownerOffset ownerCount : SqlSelect * Projection =
-                        let descArr =
-                            hops
-                            |> List.map (fun h -> resolveHopDescriptor h.OwnerType h.RelationPropertyName)
-                            |> List.toArray
+                    let buildChainSqlSelectForOwners (descArr: RelationsTypes.RelationDescriptor array) (vars: Dictionary<string, obj>) ownerOffset ownerCount : SqlSelect * Projection =
                         let sourceColOf (d: RelationsTypes.RelationDescriptor) = if d.OwnerUsesSourceColumn then "SourceId" else "TargetId"
                         let targetColOf (d: RelationsTypes.RelationDescriptor) = if d.OwnerUsesSourceColumn then "TargetId" else "SourceId"
                         let alias (i: int) = "l" + i.ToString(System.Globalization.CultureInfo.InvariantCulture)
@@ -684,8 +676,8 @@ type internal CollectionMutationOps<'T>() =
 
                         { Ctes = []; Body = SingleSelect core }, leafProj
 
-                    let buildChainSqlSelect hops vars =
-                        buildChainSqlSelectForOwners hops vars 0 selectedRows.Length
+                    let buildChainSqlSelect descriptors vars =
+                        buildChainSqlSelectForOwners descriptors vars 0 selectedRows.Length
 
                     // Emit and execute a SqlDu statement through the canonical executor.
                     //
@@ -708,50 +700,56 @@ type internal CollectionMutationOps<'T>() =
                             FunctionCall("jsonb", [Parameter paramName])
                         ])
 
-                    let captureChainOwners hops leafTable leafType =
-                        let seen = HashSet<int64>()
-                        let leafTx = { tx with OwnerTable = leafTable; OwnerType = leafType }
-                        for offset in 0 .. 500 .. selectedRows.Length - 1 do
-                            let count = min 500 (selectedRows.Length - offset)
-                            let vars = Dictionary<string, obj>()
-                            let select, _ = buildChainSqlSelectForOwners hops vars offset count
-                            let mutable statement = conn.OpenStatement(StatementExecution.emit(SelectStmt select))
-                            try
-                                statement.BindValues(vars)
-                                while statement.Step() do
-                                    let id = statement.Row.GetInt64(0)
-                                    seen.Add(id) |> ignore
-                                statement.Dispose()
-                            with error -> statement.Abort(error); reraise()
-                        RelationsGraphAdmission.captureMany leafTx seen
+                    // Each Single hop yields at most one leaf per selected entry. Keep the
+                    // deduplicated IDs in source order before callbacks can mutate membership.
+                    let selectChainOwners descriptors =
+                        if Array.isEmpty descriptors then selectedRows |> Array.map (fun row -> row.Id.Value)
+                        else
+                            let ids = ResizeArray<int64>()
+                            let seen = HashSet<int64>()
+                            for offset in 0 .. 500 .. selectedRows.Length - 1 do
+                                let count = min 500 (selectedRows.Length - offset)
+                                let variables = Dictionary<string, obj>()
+                                let select, _ = buildChainSqlSelectForOwners descriptors variables offset count
+                                let mutable statement = conn.OpenStatement(StatementExecution.emit(SelectStmt select))
+                                try
+                                    statement.BindValues(variables)
+                                    while statement.Step() do
+                                        let id = statement.Row.GetInt64(0)
+                                        if seen.Add(id) then ids.Add(id)
+                                    statement.Dispose()
+                                with error -> statement.Abort(error); reraise()
+                            ids.ToArray()
+
+                    let captureChainOwners descriptors leafTx =
+                        let ids = selectChainOwners descriptors
+                        RelationsGraphAdmission.captureMany leafTx ids
+                        ids
 
                     for op in chainOps do
+                        let hops =
+                            match op with
+                            | QueryTranslatorBaseTypes.MutateDocumentRef(hops, _, _, _)
+                            | QueryTranslatorBaseTypes.MutateFileSystemRef(hops, _, _)
+                            | QueryTranslatorBaseTypes.MutateRefChainProperty(hops, _, _, _)
+                            | QueryTranslatorBaseTypes.RefChainManyAdd(hops, _, _, _)
+                            | QueryTranslatorBaseTypes.RefChainManyRemove(hops, _, _, _)
+                            | QueryTranslatorBaseTypes.RefChainManyClear(hops, _, _) -> hops
+                            | _ -> failwith "Non-chain op leaked into chainOps partition; partitioning logic bug."
+                        let descriptors, leafTx = resolveChain hops
                         match op with
-                        | QueryTranslatorBaseTypes.MutateFileSystemRef(hops, property, mutation) ->
-                            let leafTable, leafType, ownerIds =
-                                match hops with
-                                | [] -> name, typeof<'T>, selectedRows |> Array.map (fun row -> row.Id.Value)
-                                | _ ->
-                                    let last = List.last hops
-                                    let descriptor = resolveHopDescriptor last.OwnerType last.RelationPropertyName
-                                    let ids = ResizeArray<int64>()
-                                    let seen = HashSet<int64>()
-                                    for offset in 0 .. 500 .. selectedRows.Length - 1 do
-                                        let count = min 500 (selectedRows.Length - offset)
-                                        let variables = Dictionary<string, obj>()
-                                        let select, _ = buildChainSqlSelectForOwners hops variables offset count
-                                        let sql = StatementExecution.emit(SelectStmt select)
-                                        let mutable statement = conn.OpenStatement(sql)
-                                        try
-                                            statement.BindValues(variables)
-                                            while statement.Step() do
-                                                let id = statement.Row.GetInt64(0)
-                                                if seen.Add(id) then ids.Add(id)
-                                            statement.Dispose()
-                                        with error -> statement.Abort(error); reraise()
-                                    descriptor.TargetTable, last.TargetType, ids.ToArray()
-                            let leafTx = { tx with OwnerTable = leafTable; OwnerType = leafType }
-                            RelationsCore.ensureSchemaForOwnerType leafTx leafType
+                        | QueryTranslatorBaseTypes.MutateDocumentRef(_, property, targetType, mutation) ->
+                            let ownerIds = captureChainOwners descriptors leafTx
+                            let writePlan: RelationsTypes.RelationWritePlan = {
+                                Kind = RelationsTypes.RelationPlanKind.UpdateMany
+                                OwnerType = leafTx.OwnerType
+                                Ops = [ documentReferenceOp property targetType mutation ]
+                            }
+                            for ownerId in ownerIds do RelationsSync.syncUpdate leafTx ownerId writePlan
+
+                        | QueryTranslatorBaseTypes.MutateFileSystemRef(_, property, mutation) ->
+                            let ownerIds = selectChainOwners descriptors
+                            RelationsCore.ensureSchemaForOwnerType leafTx leafTx.OwnerType
                             RelationsGraphAdmission.captureMany leafTx ownerIds
                             let referenceOp =
                                 match mutation with
@@ -761,29 +759,26 @@ type internal CollectionMutationOps<'T>() =
                                 | FileSystemRefMutation.Clear -> RelationsTypes.ClearFileSystemRefs property
                             RelationsCore.withRelationSqliteWrap "sync" "UpdateMany.filesystem" (fun () ->
                                 RelationsEntitySync.applyFileSystemReferenceToOwners leafTx ownerIds referenceOp)
-                            if jsonTransforms.Count = 0 then affected <- selectedRows.Length
 
-                        | QueryTranslatorBaseTypes.MutateRefChainProperty(hops, _leafTargetType, leafJsonPath, jsonLiteral) ->
+                        | QueryTranslatorBaseTypes.MutateRefChainProperty(_, _, leafJsonPath, jsonLiteral) ->
                             let vars = Dictionary<string, obj>()
                             vars.["v"] <- jsonLiteral
-                            let chainSelect, _ = buildChainSqlSelect hops vars
-                            let leafDesc = resolveHopDescriptor (List.last hops).OwnerType (List.last hops).RelationPropertyName
-                            let updateStmt : UpdateStatement = {
-                                TableName = leafDesc.TargetTable
+                            let chainSelect, _ = buildChainSqlSelect descriptors vars
+                            let updateStmt: UpdateStatement = {
+                                TableName = leafTx.OwnerTable
                                 SetClauses = [ "Value", jsonbSetExpr leafJsonPath "v" ]
                                 Where = Some (InSubquery(Column(None, "Id"), chainSelect))
                             }
                             executeSqlDu (UpdateStmt updateStmt) vars
 
-                        | QueryTranslatorBaseTypes.RefChainManyAdd(hops, leafManyName, _leafTargetType, savedTargetId) ->
-                            let innerOwnerType = (List.last hops).TargetType
-                            let leafDesc = resolveHopDescriptor innerOwnerType leafManyName
-                            captureChainOwners hops leafDesc.OwnerTable innerOwnerType
+                        | QueryTranslatorBaseTypes.RefChainManyAdd(_, leafManyName, _leafTargetType, savedTargetId) ->
+                            let leafDesc = resolveDescriptor leafTx leafManyName
+                            captureChainOwners descriptors leafTx |> ignore
                             let leafSourceCol = if leafDesc.OwnerUsesSourceColumn then "SourceId" else "TargetId"
                             let leafTargetCol = if leafDesc.OwnerUsesSourceColumn then "TargetId" else "SourceId"
                             let vars = Dictionary<string, obj>()
                             vars.["sav"] <- savedTargetId :> obj
-                            let chainSelect, leafProj = buildChainSqlSelect hops vars
+                            let chainSelect, leafProj = buildChainSqlSelect descriptors vars
                             // Append the @sav projection so chain SELECT yields (leafId, savedId).
                             let augmented =
                                 let savProj = { Alias = None; Expr = Parameter "sav" }
@@ -801,15 +796,14 @@ type internal CollectionMutationOps<'T>() =
                             }
                             executeSqlDu (InsertStmt insertStmt) vars
 
-                        | QueryTranslatorBaseTypes.RefChainManyRemove(hops, leafManyName, _leafTargetType, savedTargetId) ->
-                            let innerOwnerType = (List.last hops).TargetType
-                            let leafDesc = resolveHopDescriptor innerOwnerType leafManyName
-                            captureChainOwners hops leafDesc.OwnerTable innerOwnerType
+                        | QueryTranslatorBaseTypes.RefChainManyRemove(_, leafManyName, _leafTargetType, savedTargetId) ->
+                            let leafDesc = resolveDescriptor leafTx leafManyName
+                            captureChainOwners descriptors leafTx |> ignore
                             let leafSourceCol = if leafDesc.OwnerUsesSourceColumn then "SourceId" else "TargetId"
                             let leafTargetCol = if leafDesc.OwnerUsesSourceColumn then "TargetId" else "SourceId"
                             let vars = Dictionary<string, obj>()
                             vars.["sav"] <- savedTargetId :> obj
-                            let chainSelect, _ = buildChainSqlSelect hops vars
+                            let chainSelect, _ = buildChainSqlSelect descriptors vars
                             let deleteStmt : DeleteStatement = {
                                 TableName = leafDesc.LinkTable
                                 Where = Some (
@@ -820,13 +814,12 @@ type internal CollectionMutationOps<'T>() =
                             }
                             executeSqlDu (DeleteStmt deleteStmt) vars
 
-                        | QueryTranslatorBaseTypes.RefChainManyClear(hops, leafManyName, _leafTargetType) ->
-                            let innerOwnerType = (List.last hops).TargetType
-                            let leafDesc = resolveHopDescriptor innerOwnerType leafManyName
-                            captureChainOwners hops leafDesc.OwnerTable innerOwnerType
+                        | QueryTranslatorBaseTypes.RefChainManyClear(_, leafManyName, _leafTargetType) ->
+                            let leafDesc = resolveDescriptor leafTx leafManyName
+                            captureChainOwners descriptors leafTx |> ignore
                             let leafSourceCol = if leafDesc.OwnerUsesSourceColumn then "SourceId" else "TargetId"
                             let vars = Dictionary<string, obj>()
-                            let chainSelect, _ = buildChainSqlSelect hops vars
+                            let chainSelect, _ = buildChainSqlSelect descriptors vars
                             let deleteStmt : DeleteStatement = {
                                 TableName = leafDesc.LinkTable
                                 Where = Some (InSubquery(Column(None, leafSourceCol), chainSelect))
@@ -840,12 +833,11 @@ type internal CollectionMutationOps<'T>() =
                     let mappedOps =
                         applyOpsRaw
                         |> Seq.map (function
-                            | QueryTranslatorBaseTypes.SetDBRefToId(path, targetType, targetId) -> RelationsTypes.SetDBRefToId(path, targetType, targetId)
-                            | QueryTranslatorBaseTypes.SetDBRefToTypedId(path, targetType, targetIdType, targetTypedId) -> RelationsTypes.SetDBRefToTypedId(path, targetType, targetIdType, targetTypedId)
-                            | QueryTranslatorBaseTypes.SetDBRefToNone(path, targetType) -> RelationsTypes.SetDBRefToNone(path, targetType)
+                            | QueryTranslatorBaseTypes.MutateDocumentRef([], path, targetType, mutation) -> documentReferenceOp path targetType mutation
                             | QueryTranslatorBaseTypes.AddDBRefMany(path, targetType, targetId) -> RelationsTypes.AddDBRefMany(path, targetType, targetId)
                             | QueryTranslatorBaseTypes.RemoveDBRefMany(path, targetType, targetId) -> RelationsTypes.RemoveDBRefMany(path, targetType, targetId)
                             | QueryTranslatorBaseTypes.ClearDBRefMany(path, targetType) -> RelationsTypes.ClearDBRefMany(path, targetType)
+                            | QueryTranslatorBaseTypes.MutateDocumentRef _
                             | QueryTranslatorBaseTypes.MutateRefChainProperty _
                             | QueryTranslatorBaseTypes.RefChainManyAdd _
                             | QueryTranslatorBaseTypes.RefChainManyRemove _
@@ -862,11 +854,8 @@ type internal CollectionMutationOps<'T>() =
                         }
                         RelationsSync.syncUpdate tx row.Id.Value writePlan
 
-                    if jsonTransforms.Count = 0 then
-                        affected <- selectedRows.Length
-
                 RelationsGraphAdmission.validate tx
-                affected
+                if jsonTransforms.Count = 0 then selectedRows.Length else affected
             )
         else
             use conn = getConnection()
