@@ -205,33 +205,11 @@ module internal QueryDiscovery =
             providerIndex <- providerIndex + 1
         for operation in providers do
             roots.Add providerTypes[typeKey operation.Result]
+        let addMemberWitness = QueryMemberWitnesses.create witnesses
         let addWitness context (part: FSharpSymbolUse) =
             match part.Symbol with
-            | :? FSharpMemberOrFunctionOrValue as memberValue when not part.IsFromDefinition && memberValue.DeclaringEntity.IsSome &&
-                (memberValue.IsProperty || memberValue.IsMethod || memberValue.IsFunction || memberValue.IsConstructor) ->
-                let entity = memberValue.DeclaringEntity.Value
-                let prefix = entity.XmlDocSig.Substring(2) + "."
-                let documentation = memberValue.XmlDocSig
-                if documentation.Length > 2 && documentation.Substring(2).StartsWith(prefix,StringComparison.Ordinal) then
-                    let reference = bound context part
-                    let declaring = reference memberValue.ApparentEnclosingType
-                    let signature = documentation.Substring(2 + prefix.Length)
-                    let key = declaring.FullName + "," + declaring.Scope.ToString() + "|" + signature
-                    witnesses[key] <- GeneratedQueryWitness(signature,declaring)
-                    // FSharp inline documentation signatures include source witnesses, not the actual CLR argument list.
-                    if memberValue.IsFunction then
-                        match entity.Assembly.FileName with
-                        | Some path ->
-                            use input = AssemblyDefinition.ReadAssembly(path)
-                            let definition = input.MainModule.GetType(declaring.FullName)
-                            if not(isNull definition) then
-                                witnesses.Remove key |> ignore
-                                for method in definition.Methods do
-                                    if method.Name = memberValue.CompiledName || method.Name = memberValue.CompiledName + "$W" then
-                                        let signature = QueryConstructionWitnesses.MethodSignature method
-                                        let key = declaring.FullName + "," + declaring.Scope.ToString() + "|" + signature
-                                        witnesses[key] <- GeneratedQueryWitness(signature,declaring)
-                        | None -> ()
+            | :? FSharpMemberOrFunctionOrValue as memberValue when not part.IsFromDefinition ->
+                addMemberWitness (bound context part) memberValue
             | _ -> ()
         let sites =
             uses |> Array.choose(fun useSite ->
@@ -375,7 +353,6 @@ module internal QueryDiscovery =
                         calls[key] <- GeneratedQueryCall(method,result,arguments)
                     | _ -> ()
         // Ordinary Queryable arguments also construct quotations before SoloDB receives them.
-        // Preserve their exact checked member witnesses through the same collection policy.
         for useSite in uses do
             match useSite.Symbol with
             | :? FSharpMemberOrFunctionOrValue as operation when not useSite.IsFromDefinition &&

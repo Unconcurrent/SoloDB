@@ -34,6 +34,15 @@ public static class QueryConstructionWitnesses
             var method = quotationOwner.Methods.Single(candidate => candidate.Name == name && candidate.IsPublic);
             result.Add(new GeneratedQueryWitness(MethodSignature(method), output.ImportReference(quotationOwner)));
         }
+        // Generic numeric constants can be inserted into inline quotations without
+        // a source symbol use, such as the multiplicative identity for integer power.
+        var constants = core.MainModule.GetType("Microsoft.FSharp.Core.LanguagePrimitives")
+            ?? throw new NotSupportedException("The referenced FSharp.Core has no generic constant owner.");
+        foreach (var name in new[] { "GenericZero", "GenericOne" })
+        {
+            var method = constants.Methods.Single(candidate => candidate.Name == name && candidate.IsPublic);
+            result.Add(new GeneratedQueryWitness(MethodSignature(method), output.ImportReference(constants)));
+        }
         return result.ToArray();
     }
 
