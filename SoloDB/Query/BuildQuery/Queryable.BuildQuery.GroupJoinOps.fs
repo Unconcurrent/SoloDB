@@ -32,7 +32,7 @@ module internal QueryableBuildQueryGroupJoinOps =
         (expressions: Expression array) =
         match expressions.Length with
         | 4 ->
-            let innerExpression = readSoloDBQueryableUntyped expressions.[0]
+            let prepareInner = prepareInnerJoinSource "GroupJoin" sourceCtx translateQueryFn expressions.[0]
             let outerKeySelector = unwrapLambdaExpressionOrThrow "GroupJoin outer key selector" expressions.[1]
             let innerKeySelector = unwrapLambdaExpressionOrThrow "GroupJoin inner key selector" expressions.[2]
             let resultSelector = unwrapLambdaExpressionOrThrow "GroupJoin result selector" expressions.[3]
@@ -43,15 +43,6 @@ module internal QueryableBuildQueryGroupJoinOps =
                     "Reason: Anonymous-type and composite key equality lowering is not available.\n" +
                     "Fix: Join on a single scalar key or move the query after AsEnumerable()."))
 
-            let innerRootTable =
-                match tryGetJoinRootSourceTable innerExpression with
-                | Some tn -> tn
-                | None ->
-                    raise (NotSupportedException(
-                        "Error: GroupJoin inner source is not supported.\n" +
-                        "Reason: The inner query does not resolve to a SoloDB root collection.\n" +
-                        "Fix: Use another SoloDB IQueryable rooted in a collection or move the query after AsEnumerable()."))
-
             if resultSelector.Parameters.Count <> 2 then
                 raise (NotSupportedException(
                     "Error: GroupJoin result selector must have two parameters (outer, group).\n" +
@@ -60,21 +51,13 @@ module internal QueryableBuildQueryGroupJoinOps =
 
             let outerParam = resultSelector.Parameters.[0]
             let groupParam = resultSelector.Parameters.[1]
-            let capturedInnerExpr = innerExpression
 
             addComplexFinal statements (fun ctx ->
                 let outerAlias = "o"
                 let innerAlias = "gj"
                 let completion = QueryGroupCompletion("_groups" + sourceCtx.NextAlias(), sourceCtx.NextAlias)
-                let innerCtx =
-                    { sourceCtx with
-                        RootTable = innerRootTable
-                        RootGraph = QueryRootGraph.Single(innerRootTable)
-                        Joins = ResizeArray() }
-                let innerInput = translateQueryFn innerCtx ctx.Vars capturedInnerExpr
-                let originalInnerSelect = innerInput.Query
+                let struct(innerCtx, innerInput) = prepareInner ctx.Vars
                 let outerSelect = QueryProduced.completedRows sourceCtx.NextAlias ctx.Inner ctx.Input
-                let innerCtx = { innerCtx with LayerPosition = OuterLayer; SerializationInput = innerInput.SerializationInput }
 
                 let rowOuterCtx =
                     { sourceCtx with
@@ -116,19 +99,11 @@ module internal QueryableBuildQueryGroupJoinOps =
                                    |> QueryProduced.value sourceCtx.NextAlias
 
                 // Lower the actual inner key once; reference edges stay beside that occurrence.
-                let innerKeyCtx = { innerCtx with Joins = ResizeArray() }
-                let innerKey =
-                    match tryTranslateDbRefValueIdKey innerKeyCtx innerKeySelector.Parameters.[0] innerAlias innerKeySelector.Body with
-                    | Some value -> QueryProduced.typed innerKeySelector.ReturnType value
-                    | None -> translateJoinSingleSourceProduced innerKeyCtx innerAlias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body
-                let keyName = "_join_key" + sourceCtx.NextAlias()
-                let fields = [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some innerAlias, "Id") }
-                              { Alias = Some "Value"; Expr = SqlExpr.Column(Some innerAlias, "Value") }
-                              { Alias = Some keyName; Expr = SqlExpr.Literal SqlLiteral.Null }]
-                             @ QueryTranslatorSerialization.companionProjections (Some innerAlias) innerInput.SerializationInput
-                let keyCore = { mkCore fields (Some(DerivedTable(originalInnerSelect, innerAlias))) with
-                                    Joins = QueryTranslatorReferenceJoin.preparedJoinClauses innerKeyCtx.Joins }
-                let struct(innerSelect, _) = QueryProduced.publishSlot sourceCtx.NextAlias keyName keyCore innerKey false
+                let struct(innerSelect, keyName) =
+                    publishInnerJoinKey innerCtx innerInput innerAlias (fun context alias ->
+                        match tryTranslateDbRefValueIdKey context innerKeySelector.Parameters.[0] alias innerKeySelector.Body with
+                        | Some value -> QueryProduced.typed innerKeySelector.ReturnType value
+                        | None -> translateJoinSingleSourceProduced context alias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body)
                 let innerSource = DerivedTable(innerSelect, innerAlias)
                 let innerJoinKeyExpr = SqlExpr.Column(Some innerAlias, keyName)
 

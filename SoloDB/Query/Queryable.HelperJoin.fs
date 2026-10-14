@@ -105,34 +105,63 @@ module internal QueryableHelperJoin =
             | _ -> None
         loop expression
 
-    let internal tryGetJoinRootSourceTable expression =
-        tryGetJoinRootSource expression |> Option.map (fun struct(table, _) -> table)
+    let internal prepareInnerJoinSource
+        (operation: string)
+        (sourceCtx: QueryContext)
+        (translate: QueryContext -> Dictionary<string, obj> -> Expression -> TranslatedQuery)
+        expression =
+        let expression = readSoloDBQueryableUntyped expression
+        let table =
+            match tryGetJoinRootSource expression with
+            | Some struct(table, _) -> table
+            | None -> raise(NotSupportedException($"Error: {operation} inner source is not supported.\nReason: The inner query does not resolve to a SoloDB root collection.\nFix: Use another SoloDB IQueryable rooted in a collection or move the join after AsEnumerable()."))
+        fun vars ->
+            let context = { QueryContext.ChildOf(sourceCtx, table) with AliasCounter = sourceCtx.AliasCounter }
+            let input = translate context vars expression
+            struct({ context with LayerPosition = OuterLayer; SerializationInput = input.SerializationInput }, input)
 
-    type internal InnerJoinSource = {
-        TableName: string
-        SerializationType: Type
-        WherePredicates: LambdaExpression list
-    }
-
-    let internal tryExtractInnerJoinSource (expression: Expression) =
-        let rec loop (expr: Expression) (predicates: LambdaExpression list) =
-            match expr with
-            | :? ConstantExpression as ce ->
-                match ce.Value with
-                | :? IQueryable as q when (q.Provider :? SoloDBQueryProvider) ->
-                    match tryGetJoinRootSource q.Expression with
-                    | Some struct(tableName, originalType) -> Some { TableName = tableName; SerializationType = originalType; WherePredicates = List.rev predicates }
-                    | None -> None
-                | :? IRootQueryable as rq ->
-                    Some { TableName = rq.SourceTableName; SerializationType = QueryRootFacts.elementType rq; WherePredicates = List.rev predicates }
-                | _ -> None
-            | :? MethodCallExpression as mce when mce.Method.Name = "Where" && mce.Arguments.Count = 2 ->
-                match unwrapQuotedLambda mce.Arguments.[1] with
-                | :? LambdaExpression as lambda ->
-                    loop mce.Arguments.[0] (lambda :: predicates)
-                | _ -> None
+    /// An unbounded physical identity SELECT can publish its key at the stored input.
+    /// All other completed shapes retain their prepared input and relational boundary.
+    let private tryPhysicalJoinInput (context: QueryContext) (input: TranslatedQuery) =
+        match input.Query.Ctes, input.Query.Body, input.SerializationInput.PhysicalOwner with
+        | [], SingleSelect core, ValueSome owner when owner.Sources.Length = 1 && input.KeyInput.IsNone
+            && not core.Distinct && core.Joins.IsEmpty && core.GroupBy.IsEmpty && core.Having.IsNone
+            && core.OrderBy.IsEmpty && core.Limit.IsNone && core.Offset.IsNone ->
+            match core.Source, ProjectionSetOps.toList core.Projections with
+            | Some(BaseTable(table, alias)), [identity; value] ->
+                let source = defaultArg alias table
+                let isColumn name = function
+                    | SqlExpr.Column(Some qualifier, column) -> column = name && AliasRewrite.normalizeSourceAlias qualifier = source
+                    | _ -> false
+                let physical = owner.Sources.[0]
+                if physical.TableName = table && physical.OwnerType.Equals(input.SerializationInput.OriginalType)
+                   && AliasRewrite.projectionAlias identity = Some "Id" && isColumn "Id" identity.Expr
+                   && AliasRewrite.projectionAlias value = Some "Value"
+                   && (match value.Expr with SqlExpr.FunctionCall("jsonb", [column]) -> isColumn "Value" column | _ -> false) then
+                    let stored = QueryTranslatorPhysicalSource.ownerInput context physical.OwnerType table (SqlExpr.Column(Some source, "Id"))
+                    Some(core, source, { context with LayerPosition = BaseLayer; SerializationInput = stored; Joins = ResizeArray() })
+                else None
             | _ -> None
-        loop expression []
+        | _ -> None
+
+    /// Publish keys beside the complete right source, including their reference edges.
+    let internal publishInnerJoinKey (context: QueryContext) (input: TranslatedQuery) alias lower =
+        let name = "_join_key" + context.NextAlias()
+        let core, keyAlias, keyContext =
+            match tryPhysicalJoinInput context input with
+            | Some(core, source, context) ->
+                let projections = ProjectionSetOps.toList core.Projections @ [{ Alias = Some name; Expr = SqlExpr.Literal SqlLiteral.Null }]
+                { core with Projections = ProjectionSetOps.ofList projections }, source, context
+            | None ->
+                let fields = [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some alias, "Id") }
+                              { Alias = Some "Value"; Expr = SqlExpr.Column(Some alias, "Value") }
+                              { Alias = Some name; Expr = SqlExpr.Literal SqlLiteral.Null }]
+                             @ QueryTranslatorSerialization.companionProjections (Some alias) input.SerializationInput
+                mkCore fields (Some(DerivedTable(input.Query, alias))), alias, { context with Joins = ResizeArray() }
+        let key = lower keyContext keyAlias
+        let core = { core with Joins = core.Joins @ QueryTranslatorReferenceJoin.preparedJoinClauses keyContext.Joins }
+        let struct(query, _) = QueryProduced.publishSlot context.NextAlias name core key false
+        struct(query, name)
 
     type internal GroupJoinCarrierMembers = {
         OuterMember: MemberInfo

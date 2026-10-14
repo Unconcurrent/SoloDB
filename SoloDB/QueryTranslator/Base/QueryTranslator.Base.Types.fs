@@ -149,6 +149,9 @@ module internal QueryTranslatorBaseTypes =
     let internal jsonToken value =
         SqlExpr.FunctionCall("jsonb", [SqlExpr.FunctionCall("json_quote", [value])])
 
+    let internal canonicalToken carrier value =
+        if carrier = CanonicalToken then value else jsonToken value
+
     /// Consume a canonical token through the selected scalar or structural reader.
     let internal jsonTokenValue target token =
         if isSqlScalarResult target then

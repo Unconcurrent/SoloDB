@@ -49,20 +49,7 @@ Fix: Use SelectMany with the standard (carrier, inner) result selector or move t
 Reason: Anonymous-type and composite key equality lowering is not supported here.
 Fix: Join on a single scalar key or move the query after AsEnumerable()."))
 
-                        let innerExpression = readSoloDBQueryableUntyped composite.InnerExpression
-                        let innerSource =
-                            match tryExtractInnerJoinSource innerExpression with
-                            | Some source -> source
-                            | None ->
-                                match tryGetJoinRootSource innerExpression with
-                                | Some struct(tableName, originalType) -> { TableName = tableName; SerializationType = originalType; WherePredicates = [] }
-                                | None ->
-                                    raise (NotSupportedException(
-                                        "Error: Left-join inner source is not supported.
-Reason: The inner query does not resolve to a SoloDB root collection.
-Fix: Use another SoloDB IQueryable rooted in a collection or move the query after AsEnumerable()."))
-
-                        let innerRootTable = innerSource.TableName
+                        let prepareInner = prepareInnerJoinSource "Left-join" sourceCtx translateQueryFn composite.InnerExpression
 
                         let outerResultParam = composite.ResultSelector.Parameters.[0]
                         let innerResultParam = composite.ResultSelector.Parameters.[1]
@@ -79,22 +66,16 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                             let outerAlias = "o"
                             let innerAlias = "j"
                             let outerCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input; Joins = ResizeArray() }
-                            let innerCtx = { QueryContext.ChildOf(sourceCtx, innerRootTable) with SerializationInput = QueryTranslatorPhysicalSource.ownerInput sourceCtx innerSource.SerializationType innerRootTable (SqlExpr.Column(Some innerAlias, "Id")) }
+                            let struct(innerCtx, innerInput) = prepareInner ctx.Vars
                             let outerKeyExpr =
                                 translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars (Some composite.OuterKeySelector.Parameters.[0]) composite.OuterKeySelector.Body
-                            let innerKeyExpr =
-                                translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some composite.InnerKeySelector.Parameters.[0]) composite.InnerKeySelector.Body
+                            let struct(innerQuery, keyName) =
+                                publishInnerJoinKey innerCtx innerInput innerAlias (fun context alias ->
+                                    translateJoinSingleSourceProduced context alias ctx.Vars (Some composite.InnerKeySelector.Parameters.[0]) composite.InnerKeySelector.Body)
+                            let joinCondition = SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, SqlExpr.Column(Some innerAlias, keyName))
 
-                            let joinCondition =
-                                let keyEq = SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr)
-                                match innerSource.WherePredicates with
-                                | [] -> keyEq
-                                | predicates ->
-                                    let translatedPredicates =
-                                        predicates |> List.map (fun lambda ->
-                                            translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some lambda.Parameters.[0]) lambda.Body)
-                                    translatedPredicates |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) keyEq
-
+                            let outerKeyJoins = QueryTranslatorReferenceJoin.preparedJoinClauses outerCtx.Joins
+                            let outerCtx = { outerCtx with Joins = ResizeArray() }
                             let result =
                                 translateJoinResultSelectorProduced
                                     outerCtx
@@ -113,10 +94,13 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                                     (Some (DerivedTable(ctx.Inner, outerAlias)))
                                   with
                                       Joins =
-                                          [ConditionedJoin(
+                                          outerKeyJoins
+                                          @ [ConditionedJoin(
                                               JoinKind.Left,
-                                              BaseTable(innerRootTable, Some innerAlias),
-                                              joinCondition)] }
+                                              DerivedTable(innerQuery, innerAlias),
+                                              joinCondition)]
+                                          @ QueryTranslatorReferenceJoin.preparedJoinClauses outerCtx.Joins
+                                          @ QueryTranslatorReferenceJoin.preparedJoinClauses innerCtx.Joins }
                             let struct(query, input) = QueryProduced.publishCore sourceCtx.NextAlias core result false
                             { Query = query; SerializationInput = input; KeyInput = ValueNone }
                         )

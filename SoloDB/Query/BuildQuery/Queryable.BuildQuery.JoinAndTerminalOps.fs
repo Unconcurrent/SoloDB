@@ -61,18 +61,7 @@ module internal QueryableBuildQueryJoinAndTerminalOps =
 Reason: SoloDB only supports SQL-translatable equality without custom comparers here.
 Fix: Remove the comparer or move the join after AsEnumerable()."))
                     | 4 ->
-                        let innerExpression = readSoloDBQueryableUntyped m.Expressions.[0]
-                        let innerSource =
-                            match tryExtractInnerJoinSource innerExpression with
-                            | Some source -> source
-                            | None ->
-                                match tryGetJoinRootSource innerExpression with
-                                | Some struct(tableName, originalType) -> { TableName = tableName; SerializationType = originalType; WherePredicates = [] }
-                                | None ->
-                                    raise (NotSupportedException(
-                                        "Error: Join inner source is not supported.
-Reason: The inner query does not resolve to a SoloDB root collection.
-Fix: Use another SoloDB IQueryable rooted in a collection or move the join after AsEnumerable()."))
+                        let prepareInner = prepareInnerJoinSource "Join" sourceCtx translateQueryFn m.Expressions.[0]
 
                         let outerKeySelector = unwrapLambdaExpressionOrThrow "Join outer key selector" m.Expressions.[1]
                         let innerKeySelector = unwrapLambdaExpressionOrThrow "Join inner key selector" m.Expressions.[2]
@@ -84,7 +73,6 @@ Fix: Use another SoloDB IQueryable rooted in a collection or move the join after
 Reason: Anonymous-type and composite key equality lowering is not supported here.
 Fix: Join on a single scalar key or move the join after AsEnumerable()."))
 
-                        let innerRootTable = innerSource.TableName
                         addComplexFinal statements (fun ctx ->
                             let outerAlias = "o"
                             let innerAlias = "j"
@@ -93,28 +81,16 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                                     LayerPosition = OuterLayer
                                     SerializationInput = ctx.Input
                                     Joins = ResizeArray() }
-                            let innerCtx =
-                                { sourceCtx with
-                                    RootTable = innerRootTable
-                                    SerializationInput = QueryTranslatorPhysicalSource.ownerInput sourceCtx innerSource.SerializationType innerRootTable (SqlExpr.Column(Some innerAlias, "Id"))
-                                    LayerPosition = BaseLayer
-                                    RootGraph = QueryRootGraph.Single(innerRootTable)
-                                    Joins = ResizeArray() }
+                            let struct(innerCtx, innerInput) = prepareInner ctx.Vars
                             let outerKeyExpr =
                                 translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars (Some outerKeySelector.Parameters.[0]) outerKeySelector.Body
-                            let innerKeyExpr =
-                                translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body
+                            let struct(innerQuery, keyName) =
+                                publishInnerJoinKey innerCtx innerInput innerAlias (fun context alias ->
+                                    translateJoinSingleSourceProduced context alias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body)
+                            let joinCondition = SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, SqlExpr.Column(Some innerAlias, keyName))
 
-                            let joinCondition =
-                                let keyEq = SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, innerKeyExpr)
-                                match innerSource.WherePredicates with
-                                | [] -> keyEq
-                                | predicates ->
-                                    let translatedPredicates =
-                                        predicates |> List.map (fun lambda ->
-                                            translateJoinSingleSourceExpression innerCtx innerAlias ctx.Vars (Some lambda.Parameters.[0]) lambda.Body)
-                                    translatedPredicates |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) keyEq
-
+                            let outerKeyJoins = QueryTranslatorReferenceJoin.preparedJoinClauses outerCtx.Joins
+                            let outerCtx = { outerCtx with Joins = ResizeArray() }
                             let result =
                                 translateJoinResultSelectorProduced
                                     outerCtx
@@ -137,11 +113,12 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                                     (Some (DerivedTable(ctx.Inner, outerAlias)))
                                   with
                                       Joins =
-                                          outerDiscoveredJoins
+                                          outerKeyJoins
                                           @ [ConditionedJoin(
                                                 JoinKind.Inner,
-                                                BaseTable(innerRootTable, Some innerAlias),
+                                                DerivedTable(innerQuery, innerAlias),
                                                 joinCondition)]
+                                          @ outerDiscoveredJoins
                                           @ innerDiscoveredJoins }
                             let struct(query, input) = QueryProduced.publishCore sourceCtx.NextAlias core result false
                             { Query = query; SerializationInput = input; KeyInput = ValueNone }

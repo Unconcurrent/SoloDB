@@ -169,7 +169,7 @@ module internal QueryProduced =
 
     /// Ordered stages publish a canonical token while retaining its writer facts.
     let canonical nextName produced =
-        bind nextName (fun value input -> DirectValue(jsonToken value, { input with Carrier = CanonicalToken })) produced
+        bind nextName (fun value input -> DirectValue(canonicalToken input.Carrier value, { input with Carrier = CanonicalToken })) produced
 
     /// A serialized grouping publishes its sequence under its authored Items child.
     let sequence nextName produced =

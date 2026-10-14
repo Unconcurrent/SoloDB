@@ -84,7 +84,7 @@ module internal QueryTranslatorSerialization =
                 let column = SqlExpr.Column(alias, "Value")
                 match position with
                 | BaseLayer -> SqlExpr.FunctionCall("jsonb", [column])
-                | OuterLayer -> QueryTranslatorBaseTypes.jsonToken column
+                | OuterLayer -> QueryTranslatorBaseTypes.canonicalToken input.Carrier column
         let operand =
             match input.Operand with
             | ValueSome operand ->
