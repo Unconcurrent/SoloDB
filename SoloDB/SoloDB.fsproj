@@ -48,7 +48,6 @@
     <Compile Include="Metadata/TypeCache.fs" />
     <Compile Include="Metadata/ReferenceTypes.fs" />
     <Compile Include="Utils/AssemblyInternals.fs" />
-    <Compile Include="Utils/SqlCapture.fs" />
     <Compile Include="Metadata/Capability.fs" />
     <Compile Include="Metadata/Reflection.fs" />
     <Compile Include="Utils/ReflectionSupport.fs" />

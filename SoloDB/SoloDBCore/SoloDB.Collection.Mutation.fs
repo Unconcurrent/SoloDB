@@ -524,7 +524,7 @@ type internal CollectionMutationOps<'T>() =
         (withTransaction: (NativeSqliteConnection -> int) -> int)
         (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
         (selectMutationRows: NativeSqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array)
-        (executeJsonUpdateManyByRows: NativeSqliteConnection -> DbObjectRow array -> ResizeArray<Expression<System.Action<'T>>> -> int) =
+        (executeJsonUpdateManyByRows: NativeSqliteConnection -> RelationMutationStatements.SelectedOwners -> ResizeArray<Expression<System.Action<'T>>> -> int) =
 
         let transform = nullArgCheck (nameof transform) transform
         let filter = nullArgCheck (nameof filter) filter
@@ -576,7 +576,8 @@ type internal CollectionMutationOps<'T>() =
                 // Owner JSON callbacks precede target-side chain and link writes.
                 // Capture physical membership before either pass, and admit their
                 // combined final graph only after both passes and callbacks finish.
-                let affected = executeJsonUpdateManyByRows conn selectedRows jsonTransforms
+                let selectedOwners = RelationMutationStatements.SelectedOwners(selectedRows.Length, fun index -> selectedRows.[index].Id.Value)
+                let affected = executeJsonUpdateManyByRows conn selectedOwners jsonTransforms
 
                 let documentReferenceOp property targetType mutation =
                     match mutation with
@@ -599,9 +600,8 @@ type internal CollectionMutationOps<'T>() =
                         chainOps.Add op
                     | other -> applyOpsRaw.Add other
 
-                // Chain executor. Resolves per-hop relation descriptors and emits a chain
-                // SELECT (joins through link tables hop-by-hop) anchored on selectedRows ids,
-                // then wraps as UPDATE / DELETE / INSERT … SELECT depending on the op shape.
+                // Each chain statement retains the complete physical traversal and consumes
+                // the same fixed entry identities as the owner JSON pass.
                 if chainOps.Count > 0 && selectedRows.Length > 0 then
                     let resolveDescriptor (ownerTx: RelationsTypes.RelationTxContext) propertyName =
                         let descriptors = RelationsEntitySync.relationDescriptorByPath ownerTx ownerTx.OwnerType
@@ -621,12 +621,7 @@ type internal CollectionMutationOps<'T>() =
                             ownerTx <- { tx with OwnerTable = descriptor.TargetTable; OwnerType = descriptor.TargetType }
                         descriptors.ToArray(), ownerTx
 
-                    // Build the chain SELECT as a SqlDu SqlSelect tree. Joins through link tables
-                    // hop-by-hop; entry side anchored on a parameterized IN-list against
-                    // selectedRows ids. Returns (chainSelect, leafProjection) — leafProjection is
-                    // the inner Projection record so callers can append a sibling column for
-                    // INSERT … SELECT shapes that need (leafTargetId, savedTargetId).
-                    let buildChainSqlSelectForOwners (descArr: RelationsTypes.RelationDescriptor array) (vars: Dictionary<string, obj>) ownerOffset ownerCount : SqlSelect * Projection =
+                    let buildChainSqlSelectCore (descArr: RelationsTypes.RelationDescriptor array) predicate : SqlSelect * Projection =
                         let sourceColOf (d: RelationsTypes.RelationDescriptor) = if d.OwnerUsesSourceColumn then "SourceId" else "TargetId"
                         let targetColOf (d: RelationsTypes.RelationDescriptor) = if d.OwnerUsesSourceColumn then "TargetId" else "SourceId"
                         let alias (i: int) = "l" + i.ToString(System.Globalization.CultureInfo.InvariantCulture)
@@ -646,17 +641,7 @@ type internal CollectionMutationOps<'T>() =
                                 ConditionedJoin(Inner, BaseTable(cur.LinkTable, Some (alias i)), onExpr) ]
 
                         let entryColumn = Column(Some (alias 0), sourceColOf descArr.[0])
-                        let idParams =
-                            [ for j in 0 .. ownerCount - 1 ->
-                                let key = "muid" + j.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                                if not (vars.ContainsKey(key)) then
-                                    vars.[key] <- selectedRows.[ownerOffset + j].Id.Value :> obj
-                                Parameter key ]
-                        let whereExpr =
-                            match idParams with
-                            | [ single ] -> Binary(entryColumn, Eq, single)
-                            | head :: tail -> InList(entryColumn, head, tail)
-                            | [] -> Literal(Boolean false)
+                        let whereExpr = predicate entryColumn
 
                         let leafProj =
                             { Alias = None
@@ -676,8 +661,21 @@ type internal CollectionMutationOps<'T>() =
 
                         { Ctes = []; Body = SingleSelect core }, leafProj
 
+                    let buildChainSqlSelectForOwners descriptors (vars: Dictionary<string, obj>) ownerOffset ownerCount =
+                        buildChainSqlSelectCore descriptors (fun entryColumn ->
+                            let parameters =
+                                [ for index in 0 .. ownerCount - 1 ->
+                                    let key = "muid" + string index
+                                    vars.[key] <- box selectedRows.[ownerOffset + index].Id.Value
+                                    Parameter key ]
+                            match parameters with
+                            | [ single ] -> Binary(entryColumn, Eq, single)
+                            | head :: tail -> InList(entryColumn, head, tail)
+                            | [] -> Literal(Boolean false))
+
                     let buildChainSqlSelect descriptors vars =
-                        buildChainSqlSelectForOwners descriptors vars 0 selectedRows.Length
+                        buildChainSqlSelectCore descriptors (fun entryColumn ->
+                            selectedOwners.Predicate(conn, vars, entryColumn, "muid", true))
 
                     // Emit and execute a SqlDu statement through the canonical executor.
                     //

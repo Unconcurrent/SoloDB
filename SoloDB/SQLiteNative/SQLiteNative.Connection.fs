@@ -208,6 +208,7 @@ type NativeSqliteConnection(connectionString: string) =
                 statement.Dispose()
                 result
         with error -> statement.Abort(error); reraise()
+    member internal _.VariableLimit = raw.sqlite3_limit(database.Handle, raw.SQLITE_LIMIT_VARIABLE_NUMBER, -1)
     member _.Handle = database.Handle
     member _.ConnectionString = database.ConnectionString
     member _.DataSource = database.DataSource

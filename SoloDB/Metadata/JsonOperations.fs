@@ -389,6 +389,16 @@ type JsonValue =
         let text = JsonValue.WriteBuffer(value,includeType,omitId)
         System.String(text.Array,text.Offset,text.Count)
 
+    static member internal WritePhysicalIds(count: int, idAt: int -> int64): string =
+        let mutable destination = Span<char>.Empty
+        let mutable state = JsonWriteState<char>(null,null,null)
+        JsonRawOutput<char,JsonUtf16Writer,JsonNativeContract>.BeginArray(&destination,&state)
+        for index = 0 to count - 1 do
+            if index > 0 then JsonRawOutput<char,JsonUtf16Writer,JsonNativeContract>.Separator(&destination,&state)
+            JsonRawNumericWriter.int64Utf16 (idAt index) &destination &state
+        JsonRawOutput<char,JsonUtf16Writer,JsonNativeContract>.EndArray(&destination,&state)
+        System.String(state.Storage,0,state.Written)
+
     static member internal ReadRawRuntime(context: byref<JsonReadContext<Utf16Reader>>, targetType: Type): obj =
         JsonRawReadMetadata<JsonStoredContract>.Runtime<Utf16Reader>(&context,targetType)
 

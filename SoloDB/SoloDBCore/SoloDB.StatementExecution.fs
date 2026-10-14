@@ -8,10 +8,9 @@ open SoloDatabase.SqlModel
 /// The owning native statement scope retains binding, fault and cleanup authority.
 module internal StatementExecution =
 
-    /// Emit a statement to SQL, reporting it to the capture boundary.
+    /// Emit a statement through the canonical SQL owner.
     let emit (stmt: SqlStatement) : string =
         let emitted = EmitStatement.emitStatement (EmitContext(InlineLiterals = true)) stmt
-        SqlCapture.OnSqlEmitted |> Option.iter (fun cb -> cb emitted.Sql)
         emitted.Sql
 
     /// Emit and execute, returning the affected row count.

@@ -93,16 +93,13 @@ type internal Collection<'T>(connection: NativeConnection, name: string, connect
             rows.ToArray()
         with error -> statement.Abort(error); reraise()
 
-    member internal this.ExecuteJsonUpdateManyByRows(connection: NativeSqliteConnection, rows: DbObjectRow array, expressions: ResizeArray<Expression<System.Action<'T>>>) =
+    member internal this.ExecuteJsonUpdateManyByRows(connection: NativeSqliteConnection, owners: RelationMutationStatements.SelectedOwners, expressions: ResizeArray<Expression<System.Action<'T>>>) =
         // No expressions or no selected rows means there is nothing to update, and the corridor
         // emits no statement at all rather than one with an empty id list.
-        if expressions.Count = 0 || rows.Length = 0 then
+        if expressions.Count = 0 || owners.Count = 0 then
             0
         else
-            // One dictionary for the whole statement, filled in the order the SQL reads: every
-            // assignment in source order, then the row ids. The names are observable, so the
-            // order they are allocated in is part of the contract rather than an implementation
-            // detail.
+            // Acquire assignments once in source order before choosing the fixed identity input.
             let variables = Dictionary<string, obj>()
 
             let assignments =
@@ -114,16 +111,7 @@ type internal Collection<'T>(connection: NativeConnection, name: string, connect
                     SqlExpr.Column(None, "Value")
                     :: [ for (path, value) in assignments do yield path; yield value ])
 
-            let idParameters =
-                [ for i in 0 .. rows.Length - 1 do
-                    let key = $"id{i}"
-                    variables.[key] <- rows.[i].Id.Value :> obj
-                    yield SqlExpr.Parameter key ]
-
-            let where =
-                match idParameters with
-                | head :: tail -> SqlExpr.InList(SqlExpr.Column(None, "Id"), head, tail)
-                | [] -> SqlExpr.Literal(SqlLiteral.Boolean false)
+            let where = owners.Predicate(connection, variables, SqlExpr.Column(None, "Id"), "id", false)
 
             let statement =
                 UpdateStmt

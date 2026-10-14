@@ -114,6 +114,38 @@ let internal setOwnerValueJson (connection: NativeSqliteConnection) ownerTable p
         statement.Dispose()
     with error -> statement.Abort(error); reraise()
 
+/// Fixed matched identities share one input across all statements in a bulk mutation.
+/// Compact transport is prepared only when distinct host parameters exceed the live budget.
+[<Sealed>]
+type internal SelectedOwners(count: int, idAt: int -> int64) =
+    let mutable compact: string = null
+
+    member _.Count = count
+
+    member _.Predicate(connection: NativeSqliteConnection, variables: Dictionary<string, obj>, column: SqlExpr, prefix: string, singleEquality: bool) =
+        if count = 0 then SqlExpr.Literal(SqlLiteral.Boolean false)
+        elif count <= connection.VariableLimit - variables.Count then
+            let parameters =
+                [ for index in 0 .. count - 1 ->
+                    let key = prefix + string index
+                    variables.[key] <- box (idAt index)
+                    SqlExpr.Parameter key ]
+            match parameters with
+            | [ single ] when singleEquality -> SqlExpr.Binary(column, BinaryOperator.Eq, single)
+            | head :: tail -> SqlExpr.InList(column, head, tail)
+            | [] -> SqlExpr.Literal(SqlLiteral.Boolean false)
+        else
+            if isNull compact then
+                compact <- JsonSerializator.JsonValue.WritePhysicalIds(count, idAt)
+            variables.[prefix] <- compact
+            let core: SelectCore = {
+                Source = Some (FromJsonEach(SqlExpr.Parameter prefix, None))
+                Joins = []
+                Projections = Explicit({ Alias = None; Expr = SqlExpr.Column(None, "value") }, [])
+                Where = None; GroupBy = []; Having = None; OrderBy = []
+                Limit = None; Offset = None; Distinct = false }
+            SqlExpr.InSubquery(column, { Ctes = []; Body = SingleSelect core })
+
 /// A physical owner or a bounded slice of the already matched owner identities.
 [<RequireQualifiedAccess>]
 type internal OwnerSelection =

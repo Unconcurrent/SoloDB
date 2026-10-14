@@ -132,5 +132,5 @@ module internal CollectionInstanceCrud =
         (withTransaction: (NativeSqliteConnection -> int) -> int)
         (ensureRelationTx: NativeSqliteConnection -> RelationsTypes.RelationTxContext)
         (selectMutationRows: NativeSqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array)
-        (executeJsonUpdateManyByRows: NativeSqliteConnection -> DbObjectRow array -> ResizeArray<Expression<Action<'T>>> -> int) =
+        (executeJsonUpdateManyByRows: NativeSqliteConnection -> RelationMutationStatements.SelectedOwners -> ResizeArray<Expression<Action<'T>>> -> int) =
         CollectionMutationOps<'T>.UpdateMany transform filter name hasRelations getConnection withTransaction ensureRelationTx selectMutationRows executeJsonUpdateManyByRows
