@@ -322,7 +322,8 @@ module internal QueryDiscovery =
                         | None -> add false source arguments (reference result)
                     | :? FSharpMemberOrFunctionOrValue as operation when operation.IsConstructor && not part.IsFromDefinition ->
                         let reference=bound context part
-                        let declaring=reference operation.ApparentEnclosingType
+                        let declaration, _ = CompilerReferences.compiledMember operation
+                        let declaring=reference declaration.ApparentEnclosingType
                         let target=MethodReference(".ctor",moduleDefinition.TypeSystem.Void,declaring,HasThis=true)
                         let definition=match declaring with :? GenericInstanceType as closed -> closed.ElementType | _ -> declaring
                         let signature=referenceWith(fun parameter ->
@@ -335,27 +336,32 @@ module internal QueryDiscovery =
                         calls[target.FullName] <- GeneratedQueryCall(target,declaring,arguments)
                     | :? FSharpMemberOrFunctionOrValue as operation when (operation.IsMethod || operation.IsFunction) && not part.IsFromDefinition &&
                         operation.DeclaringEntity.IsSome && not operation.IsConstructor && runtimeMember operation ->
-                        let reference = bound context part
-                        let target = MethodReference(operation.CompiledName, moduleDefinition.TypeSystem.Void,
-                                                     reference operation.ApparentEnclosingType, HasThis = operation.IsInstanceMemberInCompiledCode)
-                        for parameter in operation.GenericParameters do target.GenericParameters.Add(GenericParameter(parameter.Name,target))
+                        let declaration, slots = CompilerReferences.compiledMember operation
+                        let checkedBindings = context @ useSite.GenericArguments @ part.GenericArguments
+                        let declarationBindings = slots |> Array.map(fun (original,selected) ->
+                            original, (checkedBindings |> List.find(fun (candidate,_) -> candidate.Equals selected) |> snd)) |> Array.toList
+                        let substitutions = declarationBindings @ checkedBindings
+                        let reference = bound (declarationBindings @ context @ useSite.GenericArguments) part
+                        let target = MethodReference(declaration.CompiledName, moduleDefinition.TypeSystem.Void,
+                                                     reference declaration.ApparentEnclosingType, HasThis = declaration.IsInstanceMemberInCompiledCode)
+                        for parameter in declaration.GenericParameters do target.GenericParameters.Add(GenericParameter(parameter.Name,target))
                         let signature = referenceWith(fun parameter ->
-                            match operation.GenericParameters |> Seq.tryFindIndex(fun candidate -> candidate.Equals parameter) with
+                            match declaration.GenericParameters |> Seq.tryFindIndex(fun candidate -> candidate.Equals parameter) with
                             | Some index -> target.GenericParameters[index] :> TypeReference
                             | None ->
-                                context @ useSite.GenericArguments @ part.GenericArguments
+                                substitutions
                                 |> List.find(fun (candidate,_) -> candidate.Equals parameter)
                                 |> snd |> reference)
-                        target.ReturnType <- signature operation.ReturnParameter.Type
-                        let parameters = operation.CurriedParameterGroups |> Seq.collect id |> Seq.map _.Type |> Seq.toArray
+                        target.ReturnType <- signature declaration.ReturnParameter.Type
+                        let parameters = declaration.CurriedParameterGroups |> Seq.collect id |> Seq.map _.Type |> Seq.toArray
                         for parameter in parameters do target.Parameters.Add(ParameterDefinition(signature parameter))
                         let method =
-                            if operation.GenericParameters.Count = 0 then target else
+                            if declaration.GenericParameters.Count = 0 then target else
                             let closed = GenericInstanceMethod(target)
-                            for parameter in operation.GenericParameters do
-                                closed.GenericArguments.Add(reference (context @ useSite.GenericArguments @ part.GenericArguments |> List.find(fun (candidate,_) -> candidate.Equals parameter) |> snd))
+                            for parameter in declaration.GenericParameters do
+                                closed.GenericArguments.Add(reference (substitutions |> List.find(fun (candidate,_) -> candidate.Equals parameter) |> snd))
                             closed :> MethodReference
-                        let result = reference operation.ReturnParameter.Type
+                        let result = reference declaration.ReturnParameter.Type
                         let arguments = parameters |> Array.map reference
                         let key = method.FullName + "|" + result.FullName + "|" + String.Join(";",arguments |> Array.map _.FullName)
                         calls[key] <- GeneratedQueryCall(method,result,arguments)

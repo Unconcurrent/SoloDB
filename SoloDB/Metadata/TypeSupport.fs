@@ -410,6 +410,11 @@ module internal TypeSupport =
         elif definition = nullableDefinition then 2
         else 0
 
+    let QueryConstructionMembers shape definition =
+        match shape with
+        | TypeShape.DocumentReference | TypeShape.TypedDocumentReference | TypeShape.FileReference | TypeShape.DirectoryReference -> [| "Value" |]
+        | _ -> OptionalQueryMembers(RawAdaptation definition (shape = TypeShape.Enum))
+
     let ForShape shape =
         let decision factory registration arguments children kind raw reader writer contract named =
             { Shape = shape; Factory = factory; Registration = registration; Arguments = arguments

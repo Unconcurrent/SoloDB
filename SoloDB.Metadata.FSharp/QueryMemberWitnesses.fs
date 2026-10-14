@@ -13,6 +13,7 @@ module internal QueryMemberWitnesses =
         fun (reference: FSharpType -> TypeReference) (memberValue: FSharpMemberOrFunctionOrValue) ->
             if memberValue.DeclaringEntity.IsSome &&
                (memberValue.IsProperty || memberValue.IsMethod || memberValue.IsFunction || memberValue.IsConstructor) then
+                let memberValue, _ = CompilerReferences.compiledMember memberValue
                 let entity = memberValue.DeclaringEntity.Value
                 let prefix = entity.XmlDocSig.Substring(2) + "."
                 let documentation = memberValue.XmlDocSig

@@ -134,7 +134,11 @@ internal static class GeneratedQueries
             var dependency = new CustomAttribute(constructor);
             dependency.ConstructorArguments.Add(new CustomAttributeArgument(module.TypeSystem.String, witness.Signature));
             WitnessTarget(dependency,module,witness.Type);
-            entry.CustomAttributes.Add(dependency);
+            if (!entry.CustomAttributes.Any(existing => existing.Constructor.FullName == constructor.FullName &&
+                existing.Constructor.DeclaringType.Scope.ToString() == constructor.DeclaringType.Scope.ToString() &&
+                existing.ConstructorArguments.Select(argument => argument.Value)
+                    .SequenceEqual(dependency.ConstructorArguments.Select(argument => argument.Value))))
+                entry.CustomAttributes.Add(dependency);
         }
     }
 

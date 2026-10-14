@@ -16,6 +16,15 @@ module internal CompilerReferences =
                 parent.HasTypeDefinition && parent.TypeDefinition.TryFullName = Some "System.ValueType")
         else typ.HasTypeDefinition && typ.TypeDefinition.IsValueType
 
+    let compiledMember (memberValue: FSharpMemberOrFunctionOrValue) =
+        if memberValue.IsExtensionMember then
+            let definition =
+                memberValue.DeclaringEntity.Value.MembersFunctionsAndValues
+                |> Seq.filter(fun candidate -> candidate.CompiledName = memberValue.CompiledName && candidate.XmlDocSig = memberValue.XmlDocSig)
+                |> Seq.exactlyOne
+            definition, Array.zip (definition.GenericParameters |> Seq.toArray) (memberValue.GenericParameters |> Seq.toArray)
+        else memberValue, [||]
+
     let create (moduleDefinition: ModuleDefinition) (currentVersion: Version) (coreIdentity: string) =
         let typeReferences = Dictionary<string, TypeReference>(StringComparer.Ordinal)
         let rec referenceWith (parameter: FSharpGenericParameter -> TypeReference) (typ: FSharpType) =

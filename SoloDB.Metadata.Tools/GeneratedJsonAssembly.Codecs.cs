@@ -92,8 +92,7 @@ public static partial class GeneratedJsonAssembly
             RegisterConstruction(module,owner,il,product,model,arguments,index);
         }
         if (model.Facts.Shape == TypeShape.NonGenericDictionary || model.Facts.NonGenericEnumerable) il.Emit(OpCodes.Call,api.Metadata("RegisterDynamicObject"));
-        var witnesses = model.Facts.Members.Select((member,ordinal) => new GeneratedQueryWitness(member.Name,
-            model.Members[ordinal].Getter?.DeclaringType ?? model.Members[ordinal].Field?.DeclaringType ?? type)).ToList();
+        var witnesses = new List<GeneratedQueryWitness>();
         if (model.UnionCases != null)
         {
             if (model.UnionRoot == null)

@@ -203,6 +203,12 @@ public static partial class GeneratedJsonAssembly
             il.Emit(OpCodes.Call,api.Metadata("RegisterRecordFields",type));
             RegisterFacts(il,model.Type,model.Facts.Members.Select(member => member.Name).ToArray(),model.Members.Select(member => member.Type).ToArray(),
                 model.Facts.Members.Select(member => member.Field).ToArray(),model.SequenceElement,api);
+            var memberWitnesses = model.Facts.Members.Select((member,memberIndex) => new GeneratedQueryWitness(member.Name,
+                model.Members[memberIndex].Getter?.DeclaringType ?? model.Members[memberIndex].Field?.DeclaringType ?? type));
+            var definition = type is GenericInstanceType original ? original.ElementType.FullName : type.FullName;
+            var constructionWitnesses = TypeSupport.QueryConstructionMembers(model.Facts.Shape,definition)
+                .Select(name => new GeneratedQueryWitness(name,type));
+            GeneratedQueries.Preserve(module,il.Body.Method,product,memberWitnesses.Concat(constructionWitnesses).ToArray());
             var decision = TypeSupport.ForDefinition(model.Facts.Shape,type.FullName);
             switch (decision.RegistrationKind)
             {
