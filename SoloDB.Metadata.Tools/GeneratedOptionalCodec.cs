@@ -113,5 +113,14 @@ internal static class GeneratedOptionalCodec
             var output = Type(name); Delegate(Closed(module,product,"JsonDirectWriter`2",target,encoding),Writer(definitions,module,owner,product,target,encoding,output,"WriteOptional" + name + index,models));
         }
         entry.Emit(OpCodes.Call,api.Metadata("RegisterRaw",target));
+        if (definitions.Stored) return;
+        var kind = Kind(target,models);
+        foreach(var name in TypeSupport.OptionalQueryMembers(kind))
+        {
+            var valueType = name == "HasValue" ? module.TypeSystem.Boolean : Payload(module,target,models);
+            var member = new CodecMember<TypeReference,MethodReference,FieldReference>(name,valueType,null!,
+                FSharpOption<MethodReference>.Some(Member(module,target,"get_" + name,kind)),null!,false,true,false,false,false);
+            GeneratedJsonAssembly.RegisterMemberReader(module,owner,entry,product,target,kind == 2,kind == 2,member,"Optional" + index + name);
+        }
     }
 }

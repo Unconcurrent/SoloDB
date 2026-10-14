@@ -7,6 +7,15 @@ open Mono.Cecil
 
 /// Compiler-established CLR references shared by every generated operation.
 module internal CompilerReferences =
+    let isValueType (typ: FSharpType) =
+        let typ = typ.StripAbbreviations()
+        if typ.IsTupleType then typ.IsStructTupleType
+        elif typ.IsAnonRecordType then
+            typ.BaseType |> Option.exists(fun parent ->
+                let parent = parent.StripAbbreviations()
+                parent.HasTypeDefinition && parent.TypeDefinition.TryFullName = Some "System.ValueType")
+        else typ.HasTypeDefinition && typ.TypeDefinition.IsValueType
+
     let create (moduleDefinition: ModuleDefinition) (currentVersion: Version) (coreIdentity: string) =
         let typeReferences = Dictionary<string, TypeReference>(StringComparer.Ordinal)
         let rec referenceWith (parameter: FSharpGenericParameter -> TypeReference) (typ: FSharpType) =
@@ -31,6 +40,31 @@ module internal CompilerReferences =
                     if parts.Length > 7 then closed.GenericArguments.Add(tupleReference parts[7..])
                     closed :> TypeReference
                 tupleReference arguments
+            elif typ.IsAnonRecordType then
+                let details = typ.AnonRecordTypeDetails
+                let scope =
+                    if String.IsNullOrEmpty(details.Assembly.QualifiedName) then AssemblyNameReference(details.Assembly.SimpleName,currentVersion)
+                    else AssemblyNameReference.Parse(details.Assembly.QualifiedName)
+                let identity = scope.FullName + ":" + String.concat "/" (details.EnclosingCompiledTypeNames @ [details.CompiledName])
+                let root =
+                    match typeReferences.TryGetValue identity with
+                    | true, value -> value
+                    | _ ->
+                        let mutable declaring = null
+                        for name in details.EnclosingCompiledTypeNames do
+                            let enclosing = TypeReference("",name,moduleDefinition,scope)
+                            enclosing.DeclaringType <- declaring
+                            declaring <- enclosing
+                        let value = TypeReference("",details.CompiledName,moduleDefinition,scope,isValueType typ)
+                        value.DeclaringType <- declaring
+                        for field in details.SortedFieldNames do value.GenericParameters.Add(GenericParameter(field,value))
+                        typeReferences.Add(identity,value)
+                        value
+                if typ.GenericArguments.Count = 0 then root
+                else
+                    let closed = GenericInstanceType(root)
+                    for argument in typ.GenericArguments do closed.GenericArguments.Add(referenceWith parameter argument)
+                    closed :> TypeReference
             else
                 let entity = typ.TypeDefinition
                 let identity = entity.Assembly.QualifiedName + ":" + (if entity.IsArrayType then entity.CompiledName else entity.BasicQualifiedName)

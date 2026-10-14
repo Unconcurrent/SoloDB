@@ -166,8 +166,10 @@ module internal QueryDiscovery =
                         let mutable value = typ.StripAbbreviations()
                         for _ = 0 to substitutions.Length do value <- value.Instantiate substitutions
                         value
-                    let first = operation.CurriedParameterGroups |> Seq.collect id |> Seq.tryHead
-                    match first |> Option.bind(fun parameter -> sequence (actual parameter.Type)) with
+                    let receiver =
+                        if operation.IsExtensionMember && operation.IsInstanceMember then Some operation.ApparentEnclosingType
+                        else operation.CurriedParameterGroups |> Seq.collect id |> Seq.tryHead |> Option.map _.Type
+                    match receiver |> Option.bind(actual >> sequence) with
                     | Some source when closed source ->
                         let result = actual operation.ReturnParameter.Type
                         if closed result then
@@ -291,7 +293,7 @@ module internal QueryDiscovery =
                         let substitutions = context @ useSite.GenericArguments @ part.GenericArguments
                         let mutable actual = value.FullType.StripAbbreviations()
                         for _ = 0 to substitutions.Length do actual <- actual.Instantiate substitutions
-                        if closed actual && not actual.IsFunctionType && (actual.IsTupleType || actual.HasTypeDefinition) && (sequence actual |> Option.isNone) then roots.Add actual
+                        if closed actual && not actual.IsFunctionType && (actual.IsTupleType || actual.IsAnonRecordType || actual.HasTypeDefinition) && (sequence actual |> Option.isNone) then roots.Add actual
                         if closed actual && actual.IsFunctionType then
                             let reference = bound context part
                             let declaring = reference actual

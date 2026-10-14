@@ -15,6 +15,8 @@ public sealed class GeneratedModel
     { Facts = facts; Type = type; Constructor = constructor; Members = members; }
     public Model Facts { get; }
     public TypeReference[] AssignableTo { get; set; } = Array.Empty<TypeReference>();
+    // Unavailable original interface facts use the existing exact-type writer guard.
+    public TypeReference[] UnknownInterfaces { get; set; } = Array.Empty<TypeReference>();
     public TypeReference Type { get; }
     public MethodReference? Constructor { get; }
     public MethodReference? DefaultConstructor { get; set; }

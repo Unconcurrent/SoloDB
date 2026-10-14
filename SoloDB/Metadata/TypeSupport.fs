@@ -398,6 +398,12 @@ module internal TypeSupport =
         | TypeShape.DirectoryMany -> Some(struct(false,true,"SoloDatabase.DirectoryRef"))
         | _ -> None
 
+    let OptionalQueryMembers kind =
+        match kind with
+        | 1 -> [| "Value" |]
+        | 2 -> [| "HasValue"; "Value" |]
+        | _ -> [||]
+
     let RawAdaptation definition isEnum =
         if isEnum then 3
         elif definition = optionDefinition then 1

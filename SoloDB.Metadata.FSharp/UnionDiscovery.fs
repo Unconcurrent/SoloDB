@@ -11,6 +11,10 @@ open SoloDatabase.Metadata.Tools
 module internal UnionDiscovery =
     let collect (moduleDefinition: ModuleDefinition) (typ: FSharpType) (actual: TypeReference)
                 (memberType: FSharpType -> TypeReference) (signature: FSharpType -> TypeReference) =
+        let hasNoArguments (memberValue: FSharpMemberOrFunctionOrValue) =
+            memberValue.CurriedParameterGroups |> Seq.collect id |> Seq.forall(fun argument ->
+                let actual = argument.Type.StripAbbreviations()
+                actual.HasTypeDefinition && actual.TypeDefinition.TryFullName = Some "Microsoft.FSharp.Core.Unit")
         let entity = typ.TypeDefinition
         let cases = entity.UnionCases |> Seq.toArray
         let attribute name = entity.Attributes |> Seq.tryFind(fun item -> item.AttributeType.FullName = name)
@@ -56,7 +60,7 @@ module internal UnionDiscovery =
             if item.IsProperty && item.IsInstanceMember && item.HasGetterMethod && item.Accessibility.IsPublic
                && not(rootFacts |> Seq.exists(fun fact -> fact.Name = item.DisplayName))
                && not(nullBacked && cases |> Array.exists(fun unionCase -> item.DisplayName = "Is" + unionCase.CompiledName))
-               && (item.CurriedParameterGroups |> Seq.collect id |> Seq.forall(fun parameter -> parameter.Type.StripAbbreviations().TypeDefinition.TryFullName = Some "Microsoft.FSharp.Core.Unit")) then
+               && hasNoArguments item then
                 let ignored = item.Attributes |> Seq.exists(fun attribute -> attribute.AttributeType.FullName = "System.Runtime.Serialization.IgnoreDataMemberAttribute")
                 property rootFacts rootMembers actual item.DisplayName (memberType item.FullType) (signature item.FullType) ignored
         let root = Model(actual.FullName,entity.FullName,TypeShape.Object,entity.IsValueType,not nested,false,null,rootFacts)
@@ -67,7 +71,9 @@ module internal UnionDiscovery =
         let visited = HashSet<string>(StringComparer.Ordinal)
         let rec hostedReferences (candidate: FSharpType) =
             let candidate = candidate.StripAbbreviations()
-            if candidate.IsGenericParameter then false else
+            if candidate.IsGenericParameter then false
+            elif candidate.IsTupleType || candidate.IsAnonRecordType then candidate.GenericArguments |> Seq.exists hostedReferences
+            else
             let owner = candidate.TypeDefinition
             match owner.TryFullName with
             | Some "SoloDatabase.DBRef`1" | Some "SoloDatabase.DBRef`2" | Some "SoloDatabase.DBRefMany`1" | Some "SoloDatabase.DBRefMany`2"
@@ -88,7 +94,7 @@ module internal UnionDiscovery =
                     else
                         owner.MembersFunctionsAndValues |> Seq.exists(fun property ->
                             property.IsProperty && property.IsInstanceMember && property.HasGetterMethod && property.Accessibility.IsPublic
-                            && (property.CurriedParameterGroups |> Seq.collect id |> Seq.forall(fun argument -> argument.Type.StripAbbreviations().TypeDefinition.TryFullName = Some "Microsoft.FSharp.Core.Unit"))
+                            && hasNoArguments property
                             && hostedReferences(property.FullType.Instantiate(substitutions)))
                         || (match candidate.BaseType with Some parent -> hostedReferences parent | None -> false)
         let hosted = hostedReferences typ

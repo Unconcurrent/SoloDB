@@ -23,6 +23,30 @@ public static partial class GeneratedJsonAssembly
             .Methods.Single(method => method.Name == "RegisterDefaultConstruction")));
     }
 
+    internal static void RegisterMemberReader(ModuleDefinition module,TypeDefinition owner,ILProcessor il,
+        AssemblyDefinition product,TypeReference type,bool valueType,bool nullable,
+        CodecMember<TypeReference,MethodReference,FieldReference> member,string suffix)
+    {
+        var api = new Api(module,product);
+        var getter = Method(owner,"ReadMember" + suffix,valueType ? module.TypeSystem.Object : module.ImportReference(member.Type),
+            valueType ? module.TypeSystem.Object : module.ImportReference(type));
+        QueryOperationEmitter.memberRead(new CecilCodecIL(getter),type,valueType,nullable,member,member.Type.IsValueType,valueType,valueType);
+        if (valueType)
+        {
+            api.TypeToken(il,type); il.Emit(OpCodes.Ldstr,member.Name);
+            il.Emit(member.Field != null ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0); api.TypeToken(il,member.Type);
+            Delegate(il,api.Function(module.TypeSystem.Object,module.TypeSystem.Object),getter);
+            il.Emit(OpCodes.Call,module.ImportReference(product.MainModule.GetType("SoloDatabase.QueryValueMetadata")
+                .Methods.Single(method => method.Name == "RegisterGeneratedReader")));
+        }
+        else
+        {
+            il.Emit(OpCodes.Ldstr,member.Name); il.Emit(member.Field != null ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
+            Delegate(il,api.Function(type,member.Type),getter);
+            il.Emit(OpCodes.Call,api.MemberRegistration(type,member.Type));
+        }
+    }
+
     internal static void RegisterObject(GeneratedJsonDefinitions definitions,ModuleDefinition module, TypeDefinition owner, ILProcessor il,
         AssemblyDefinition product, GeneratedModel model, int index, GeneratedModel[] models)
     {
@@ -40,29 +64,10 @@ public static partial class GeneratedJsonAssembly
         foreach (var member in model.Members)
             if (member.Field != null && member.QueryWritable)
                 references.Field(owner,il,member.Field.DeclaringType,member.Field,member.Type,member.StaticField);
-        for (var memberIndex = 0; memberIndex < model.Facts.Members.Count; memberIndex++)
-        {
-            var fact = model.Facts.Members[memberIndex];
-            if (!fact.Read) continue;
-            var member = model.Members[memberIndex];
-            if (model.Facts.ValueType)
-            {
-                var boxedGetter = Method(owner,"ReadMember" + index + "_" + memberIndex,module.TypeSystem.Object,module.TypeSystem.Object);
-                QueryOperationEmitter.memberRead(new CecilCodecIL(boxedGetter),type,true,false,
-                    GeneratedCodec.Model(model).Members[memberIndex],member.Type.IsValueType,true,true);
-                api.TypeToken(il,type); il.Emit(OpCodes.Ldstr,fact.Name);
-                il.Emit(fact.Field ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0); api.TypeToken(il,member.Type);
-                Delegate(il,api.Function(module.TypeSystem.Object,module.TypeSystem.Object),boxedGetter);
-                il.Emit(OpCodes.Call,module.ImportReference(product.MainModule.GetType("SoloDatabase.QueryValueMetadata").Methods.Single(method => method.Name == "RegisterGeneratedReader")));
-                continue;
-            }
-            var getter = Method(owner, "Property" + index + "_" + memberIndex, module.ImportReference(member.Type), type);
-            GeneratedCodec.Getter(getter, model, memberIndex);
-            il.Emit(OpCodes.Ldstr, fact.Name);
-            il.Emit(fact.Field ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
-            Delegate(il, api.Function(type, member.Type), getter);
-            il.Emit(OpCodes.Call, api.MemberRegistration(type, member.Type));
-        }
+        var memberFacts = GeneratedCodec.Model(model).Members;
+        for (var memberIndex = 0; memberIndex < memberFacts.Length; memberIndex++)
+            if (memberFacts[memberIndex].Readable)
+                RegisterMemberReader(module,owner,il,product,type,model.Facts.ValueType,false,memberFacts[memberIndex],index + "_" + memberIndex);
         for (var memberIndex = 0; memberIndex < model.Members.Length; memberIndex++)
         {
             var fact = model.Facts.Members[memberIndex];

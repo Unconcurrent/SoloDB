@@ -5,9 +5,14 @@ using Mono.Cecil;
 
 namespace SoloDatabase.Metadata.Tools;
 
-// Decodes compiler-established closed identities only during helper completion.
+// Resolves compiler-established original definitions and closed identities.
 internal static class SourceTypeIdentity
 {
+    internal static TypeDefinition Definition(AssemblyDefinition assembly, string name) =>
+        assembly.MainModule.GetType(name) ??
+        assembly.MainModule.ExportedTypes.SingleOrDefault(type => type.FullName == name)?.Resolve() ??
+        throw new InvalidOperationException("The exact generated type is absent from current inputs: " + name + ", " + assembly.Name.FullName);
+
     internal static TypeReference Resolve(ModuleDefinition consumer, string identity)
     {
         var position = 0;
@@ -55,9 +60,7 @@ internal static class SourceTypeIdentity
             var count = Number();
             var assembly = consumer.Assembly.Name.FullName == assemblyName ? consumer.Assembly :
                 consumer.AssemblyResolver.Resolve(AssemblyNameReference.Parse(assemblyName));
-            var definition = assembly.MainModule.GetType(name) ??
-                assembly.MainModule.ExportedTypes.SingleOrDefault(type => type.FullName == name)?.Resolve() ??
-                throw new InvalidOperationException("The exact generated type is absent from current inputs: " + name + ", " + assemblyName);
+            var definition = Definition(assembly,name);
             if (definition.GenericParameters.Count != count)
                 throw new InvalidOperationException("The generated type arguments do not match current inputs: " + name);
             if (count == 0) return definition;

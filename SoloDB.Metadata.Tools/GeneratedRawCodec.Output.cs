@@ -126,7 +126,8 @@ internal static partial class GeneratedRawCodec
         var equals=new MethodReference("Equals",module.TypeSystem.Boolean,runtimeType){HasThis=true};equals.Parameters.Add(new ParameterDefinition(runtimeType));
         return new CodecPolymorphicApi<TypeReference,MethodReference>(runtimeType,equals,Method("IncludeType"),Method("SetIncludeType"),Method("Actual"),
             Function<TypeReference,CodecKnownWriter<TypeReference,MethodReference>[]>(declared=>models.Select((candidate,index)=>(candidate,index))
-                .Where(item=>!item.candidate.Facts.AbstractType && !GeneratedJsonDefinitions.SameType(item.candidate.Type,declared) && item.candidate.AssignableTo.Any(target=>GeneratedJsonDefinitions.SameType(target,declared)))
+                .Where(item=>!item.candidate.Facts.AbstractType && !GeneratedJsonDefinitions.SameType(item.candidate.Type,declared) && (item.candidate.AssignableTo.Any(target=>GeneratedJsonDefinitions.SameType(target,declared)) ||
+                    item.candidate.UnknownInterfaces.Any(target=>GeneratedJsonDefinitions.SameType(target,declared))))
                 .Select(item=> {
                     var candidate=item.candidate;
                     var candidateDefinitions=definitions.Stored && TypeSupport.StoredNumeric(candidate.Type.FullName) != null

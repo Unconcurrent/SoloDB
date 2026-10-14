@@ -74,6 +74,21 @@ module internal ModelDiscovery =
         let referenceWith = CompilerReferences.create moduleDefinition (version project) (project.ProjectContext.GetReferencedAssemblies() |> Seq.find(fun assembly -> assembly.SimpleName = "FSharp.Core") |> _.QualifiedName)
         let sources = ResizeArray<GeneratedModel * FSharpType>()
         let reference typ = referenceWith (fun _ -> invalidOp "An open model type requires its actual closed use-site arguments.") typ
+        let completeReferenceFacts (facts: ResizeArray<Member>) (members: ResizeArray<GeneratedMember>) =
+            for index = 0 to facts.Count - 1 do
+                let fact = facts[index]
+                let referenceType = members[index].Type
+                let definition = match referenceType with :? GenericInstanceType as generic -> generic.ElementType | _ -> referenceType
+                let isReference =
+                    match definition.FullName with
+                    | "SoloDatabase.DBRef`1" | "SoloDatabase.DBRef`2" | "SoloDatabase.DBRefMany`1" | "SoloDatabase.DBRefMany`2"
+                    | "SoloDatabase.FileRef" | "SoloDatabase.DirectoryRef" | "SoloDatabase.FileRefMany" | "SoloDatabase.DirectoryRefMany" -> true
+                    | _ -> false
+                fact.Reference <- not fact.Field && isReference
+                fact.ManyReference <-
+                    match definition.FullName with
+                    | "SoloDatabase.DBRefMany`1" | "SoloDatabase.DBRefMany`2" | "SoloDatabase.FileRefMany" | "SoloDatabase.DirectoryRefMany" -> true
+                    | _ -> false
         let directGetters = HashSet<string>(StringComparer.Ordinal)
         let rec inspect declarations =
             for declaration in declarations do
@@ -151,7 +166,31 @@ module internal ModelDiscovery =
             | _ -> queue.Enqueue(importedType value)
         while queue.Count <> 0 do
             let typ = queue.Dequeue().StripAbbreviations()
-            if typ.IsTupleType then
+            if typ.IsAnonRecordType then
+                let actual = reference typ
+                if visited.Add(actual.FullName + "," + actual.Scope.Name) then
+                    let names = typ.AnonRecordTypeDetails.SortedFieldNames
+                    let definition = match actual with :? GenericInstanceType as closed -> closed.ElementType | _ -> actual
+                    let facts = ResizeArray<Member>()
+                    let members = ResizeArray<GeneratedMember>()
+                    let constructor = MethodReference(".ctor",moduleDefinition.TypeSystem.Void,actual,HasThis = true)
+                    for index = 0 to names.Length - 1 do
+                        let child = typ.GenericArguments[index]
+                        queue.Enqueue(child)
+                        let value = reference child
+                        let parameter = definition.GenericParameters[index]
+                        constructor.Parameters.Add(ParameterDefinition(parameter))
+                        facts.Add(Member(names[index],value.FullName,false,true,false,false))
+                        members.Add(GeneratedMember(value,MethodReference("get_" + names[index],parameter,actual,HasThis = true),null,null))
+                    completeReferenceFacts facts members
+                    let model = Model(actual.FullName,actual.FullName,TypeShape.Object,CompilerReferences.isValueType typ,true,names.Length = 0,null,facts)
+                    model.ConstructFromMembers <- true
+                    model.RecordType <- true
+                    model.RecordFields <- names
+                    let generated = GeneratedModel(model,actual,constructor,members.ToArray())
+                    models.Add(generated)
+                    sources.Add(generated,typ)
+            elif typ.IsTupleType then
                 for argument in typ.GenericArguments do queue.Enqueue argument
                 let rec addTuple (actual: TypeReference) =
                     if visited.Add(actual.FullName + "," + actual.Scope.Name) then
@@ -301,8 +340,13 @@ module internal ModelDiscovery =
                                     | _ -> moduleDefinition.ImportReference(value)
                                 for field in source.Fields do
                                     if field.IsPublic && (entity.IsValueType || not field.IsStatic) then
-                                        let valueType = closedFieldType field.FieldType
-                                        enqueueImported valueType
+                                        let valueType =
+                                            match entity.FSharpFields |> Seq.tryFind(fun original -> original.Name = field.Name) with
+                                            | Some original -> memberType original.FieldType
+                                            | None ->
+                                                let value = closedFieldType field.FieldType
+                                                enqueueImported value
+                                                value
                                         facts.Add(Member(field.Name,valueType.FullName,true,true,entity.IsValueType && not field.IsInitOnly && not field.IsLiteral,false))
                                         let original = moduleDefinition.ImportReference(field)
                                         original.DeclaringType <- actual
@@ -447,20 +491,7 @@ module internal ModelDiscovery =
                                     if property.HasSetterMethod then requireDeclaringAccess property.SetterMethod.Accessibility
                                     members.Add(GeneratedMember(valueType, getter, setter, null))
                                     policyFacts facts.[facts.Count - 1] members.[members.Count - 1] property.Attributes
-                    for index = 0 to facts.Count - 1 do
-                        let fact = facts[index]
-                        let referenceType = members[index].Type
-                        let definition = match referenceType with :? GenericInstanceType as generic -> generic.ElementType | _ -> referenceType
-                        let isReference =
-                            match definition.FullName with
-                            | "SoloDatabase.DBRef`1" | "SoloDatabase.DBRef`2" | "SoloDatabase.DBRefMany`1" | "SoloDatabase.DBRefMany`2"
-                            | "SoloDatabase.FileRef" | "SoloDatabase.DirectoryRef" | "SoloDatabase.FileRefMany" | "SoloDatabase.DirectoryRefMany" -> true
-                            | _ -> false
-                        fact.Reference <- not fact.Field && isReference
-                        fact.ManyReference <-
-                            match definition.FullName with
-                            | "SoloDatabase.DBRefMany`1" | "SoloDatabase.DBRefMany`2" | "SoloDatabase.FileRefMany" | "SoloDatabase.DirectoryRefMany" -> true
-                            | _ -> false
+                    completeReferenceFacts facts members
                     let mutable constructFromMembers = entity.IsFSharpRecord
                     let constructor =
                         if shape = TypeShape.BsonDocument then
@@ -615,6 +646,9 @@ module internal ModelDiscovery =
                     else
                         models.Add(generated)
                         sources.Add(generated,typ)
+        use metadataResolver = new DefaultAssemblyResolver()
+        for directory in referenced |> Seq.choose _.FileName |> Seq.map Path.GetDirectoryName |> Seq.distinct do
+            metadataResolver.AddSearchDirectory(directory)
         let variances = Dictionary<FSharpEntity,int[]>()
         let variance (typ: FSharpType) =
             let entity = typ.TypeDefinition
@@ -626,32 +660,38 @@ module internal ModelDiscovery =
                     else
                         match entity.Assembly.FileName with
                         | Some path ->
-                            use input = AssemblyDefinition.ReadAssembly(path)
+                            use input = AssemblyDefinition.ReadAssembly(path, ReaderParameters(AssemblyResolver = metadataResolver))
                             if input.Name.FullName <> entity.Assembly.QualifiedName then invalidOp "Generic variance input differs from the compiler identity."
                             let actual = reference typ
                             let definition = match actual with :? GenericInstanceType as instance -> instance.ElementType | _ -> actual
-                            let original = input.MainModule.GetType(definition.FullName)
-                            if isNull original then invalidOp "Generic variance input has no original type definition."
+                            let original = SourceTypeIdentity.Definition(input,definition.FullName)
+                            if original.GenericParameters.Count <> entity.GenericParameters.Count then
+                                invalidOp ("The original generic variance arity differs from its compiler identity: " + definition.FullName)
                             original.GenericParameters |> Seq.map(fun parameter ->
                                 if parameter.IsCovariant then 1 elif parameter.IsContravariant then -1 else 0) |> Seq.toArray
-                        | None -> Array.zeroCreate entity.GenericParameters.Count
+                        | None -> invalidOp ("The compiler generic variance input has no original metadata path: " + entity.BasicQualifiedName)
                 variances.Add(entity,values)
                 values
         let assignment: CodecTypeAssignment<FSharpType> =
             { Equal = fun (a: FSharpType) b -> a.Equals b
               Parents = fun typ ->
-                  if typ.HasTypeDefinition then Array.append (typ.BaseType |> Option.toArray) (typ.AllInterfaces |> Seq.toArray)
+                  if typ.HasTypeDefinition || typ.IsAnonRecordType then Array.append (typ.BaseType |> Option.toArray) (typ.AllInterfaces |> Seq.toArray)
                   else [||]
               Arguments = fun typ -> typ.GenericArguments |> Seq.toArray
               Definition = fun typ -> if typ.HasTypeDefinition then typ.TypeDefinition.AsType() else typ
               Variance = variance
-              ValueType = fun typ -> if typ.IsTupleType then typ.IsStructTupleType else typ.HasTypeDefinition && typ.TypeDefinition.IsValueType
+              ValueType = CompilerReferences.isValueType
               ArrayRank = fun typ -> if typ.HasTypeDefinition && typ.TypeDefinition.IsArrayType then typ.TypeDefinition.ArrayRank else 0
               Object = fun typ -> typ.HasTypeDefinition && typ.TypeDefinition.TryFullName = Some "System.Object" }
         for model,source in sources do
-            model.AssignableTo <-
-                sources |> Seq.choose(fun (target,destination) ->
-                    if not target.Facts.ValueType && not target.Facts.SealedType && target.Type.FullName <> "System.Object" &&
-                       SoloDatabase.Metadata.CodecGeneration.CodecTypeAssignment.accepts assignment source destination then Some target.Type
-                    else None) |> Seq.toArray
+            let assignable = ResizeArray<TypeReference>()
+            let unknownInterfaces = ResizeArray<TypeReference>()
+            for target,destination in sources do
+                if not target.Facts.ValueType && not target.Facts.SealedType && target.Type.FullName <> "System.Object" then
+                    if SoloDatabase.Metadata.CodecGeneration.CodecTypeAssignment.accepts assignment source destination then
+                        assignable.Add(target.Type)
+                    elif source.IsAnonRecordType && destination.HasTypeDefinition && destination.TypeDefinition.IsInterface then
+                        unknownInterfaces.Add(target.Type)
+            model.AssignableTo <- assignable.ToArray()
+            model.UnknownInterfaces <- unknownInterfaces.ToArray()
         models.ToArray()
