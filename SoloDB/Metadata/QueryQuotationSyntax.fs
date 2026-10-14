@@ -19,6 +19,15 @@ module internal QueryQuotationSyntax =
         let checkedOwner = owner = "Microsoft.FSharp.Core.Operators+Checked"
         if not (basic || checkedOwner) then None else
         let binary kind = Some(Expression.MakeBinary(kind, arguments.[0], arguments.[1]) :> Expression)
+        let comparison =
+            match method.Name with
+            | "op_Equality" -> ValueSome ExpressionType.Equal
+            | "op_Inequality" -> ValueSome ExpressionType.NotEqual
+            | "op_LessThan" -> ValueSome ExpressionType.LessThan
+            | "op_LessThanOrEqual" -> ValueSome ExpressionType.LessThanOrEqual
+            | "op_GreaterThan" -> ValueSome ExpressionType.GreaterThan
+            | "op_GreaterThanOrEqual" -> ValueSome ExpressionType.GreaterThanOrEqual
+            | _ -> ValueNone
         if arguments.Length = 1 && numeric arguments.[0].Type && numeric method.ReturnType &&
            (match method.Name with
             | "ToSByte" | "ToByte" | "ToInt16" | "ToUInt16" | "ToInt" | "ToInt32" | "ToUInt32"
@@ -28,19 +37,11 @@ module internal QueryQuotationSyntax =
         elif arguments.Length = 1 && numeric arguments.[0].Type && arguments.[0].Type.Equals(method.ReturnType)
              && method.Name = "op_UnaryNegation" then
             Some(Expression.MakeUnary((if checkedOwner then ExpressionType.NegateChecked else ExpressionType.Negate),arguments.[0],method.ReturnType) :> Expression)
-        elif arguments.Length = 2 && arguments.[0].Type.Equals(arguments.[1].Type) &&
-           (method.Name = "op_Equality" || method.Name = "op_Inequality") then
-            let kind = if method.Name = "op_Equality" then ExpressionType.Equal else ExpressionType.NotEqual
-            if numeric arguments.[0].Type then binary kind
-            else Some(Expression.MakeBinary(kind,arguments.[0],arguments.[1],false,method) :> Expression)
+        elif arguments.Length = 2 && arguments.[0].Type.Equals(arguments.[1].Type) && comparison.IsSome then
+            if numeric arguments.[0].Type then binary comparison.Value
+            else Some(Expression.MakeBinary(comparison.Value,arguments.[0],arguments.[1],false,method) :> Expression)
         elif arguments.Length = 2 && numeric arguments.[0].Type && arguments.[0].Type.Equals(arguments.[1].Type) then
             match method.Name with
-            | "op_Equality" -> binary ExpressionType.Equal
-            | "op_Inequality" -> binary ExpressionType.NotEqual
-            | "op_LessThan" -> binary ExpressionType.LessThan
-            | "op_LessThanOrEqual" -> binary ExpressionType.LessThanOrEqual
-            | "op_GreaterThan" -> binary ExpressionType.GreaterThan
-            | "op_GreaterThanOrEqual" -> binary ExpressionType.GreaterThanOrEqual
             | "op_Addition" -> binary (if checkedOwner then ExpressionType.AddChecked else ExpressionType.Add)
             | "op_Subtraction" -> binary (if checkedOwner then ExpressionType.SubtractChecked else ExpressionType.Subtract)
             | "op_Multiply" -> binary (if checkedOwner then ExpressionType.MultiplyChecked else ExpressionType.Multiply)
