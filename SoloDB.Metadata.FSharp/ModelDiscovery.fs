@@ -285,7 +285,9 @@ module internal ModelDiscovery =
                                 let _, argument = attribute.ConstructorArguments.[0]
                                 match argument with
                                 | :? FSharpType as generatorType ->
+                                    let generatorType = generatorType.StripAbbreviations()
                                     operation.IdentityGenerator <- MethodReference(".ctor", moduleDefinition.TypeSystem.Void, reference generatorType, HasThis = true)
+                                    access.Add(generatorType.TypeDefinition.Assembly.SimpleName) |> ignore
                                 | _ -> invalidOp "The compiler did not supply the original identity generator type."
                             | "SoloDatabase.Attributes.IndexedAttribute" ->
                                 fact.Indexed <- true
