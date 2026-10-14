@@ -71,14 +71,14 @@ internal static partial class GeneratedDictionaryCodec
             module.ImportReference(typeof(string).GetMethod("op_Equality")!),module.ImportReference(typeof(string).GetMethod("Concat",new[]{typeof(string),typeof(string)})!),
             module.ImportReference(typeof(ArgumentException).GetConstructor(new[]{typeof(string)})!),Output("Property"),Output("TypeMember",model.Type,value),Output("EndObject",model.Type));
         var forward=new CodecRawWriterApi<TypeReference,MethodReference>(module.TypeSystem.Boolean,
-            Function<TypeReference,FSharpOption<MethodReference>>(child=>Some(GeneratedOptionalCodec.WriteCall(definitions,module,owner,product,child,encoding,output,name+"Value",models))),
+            Function<TypeReference,FSharpOption<MethodReference>>(child=>Some(GeneratedChildCodec.WriteCall(definitions,module,owner,product,child,encoding,output,name+"Value",models))),
             null!,GeneratedOutputCodec.Constant(definitions,module,owner,product,encoding,"null",name+"Null"),Output("SerializeActual"),
             null!,null!,null!,GeneratedOutputCodec.Constant(definitions,module,owner,product,encoding,"{",name+"Begin"),null!,null!,null!,
             Output("OmitId"),Function<TypeReference,MethodReference>(child=>
             {
                 var bound=module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonRawWrite`4").Methods.Single(m=>m.Name=="Discard"));
                 bound.DeclaringType=api.RawType("JsonRawWrite",child,encoding,output);return bound;
-            }),Function<TypeReference,MethodReference>(child=>GeneratedOptionalCodec.WriteCall(definitions,module,owner,product,child,encoding,output,name+"Child",models)));
+            }),Function<TypeReference,MethodReference>(child=>GeneratedChildCodec.WriteCall(definitions,module,owner,product,child,encoding,output,name+"Child",models)));
         CodecDictionaryEmitter.writer(new CecilCodecIL(method),forward,operands,model.Type,model.Facts.ValueType,nonGeneric);
         return method;
     }

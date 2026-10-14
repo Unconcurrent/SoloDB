@@ -3127,6 +3127,28 @@ and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueO
               { Type = target; ValueType = target.IsValueType
                 Operation = (body) }) }
 
+    static member internal ChildOperation(target: Type): MethodBase option =
+        let flags = BindingFlags.Static ||| BindingFlags.NonPublic ||| BindingFlags.Public
+        let definition = if target.IsGenericType then target.GetGenericTypeDefinition().FullName else target.FullName
+        let rank = if target.IsArray then target.GetArrayRank() else 0
+        match TypeSupport.RawChildWriter(definition,target.IsEnum,rank,JsonOperationPolicy<'Contract>.IsStored) with
+        | RawChildOperation.Member -> None
+        | RawChildOperation.StoredNumeric -> Some(JsonStoredNumericRuntime.writerMethod target typeof<'E> :> MethodBase)
+        | RawChildOperation.Adapted native ->
+            Some(if native then JsonRawCollections<JsonNativeContract>.WriteMethod<'E,'O>(target) :> MethodBase
+                 else JsonRawCollections<'Contract>.WriteMethod<'E,'O>(target) :> MethodBase)
+        | RawChildOperation.Sequence _ ->
+            JsonRawCollections<'Contract>.Invoke(typeof<JsonRawCollections<'Contract>>,"SequenceWriteMethod",[|target;target.GetGenericArguments().[0];typeof<'E>;typeof<'O>|],
+                [|box(target.GetGenericArguments().[0].Equals(typeof<byte>))|]) :?> MethodBase |> Some
+        | RawChildOperation.Numeric -> Some(JsonWriterRuntime.number target typeof<'E> :> MethodBase)
+        | RawChildOperation.Text -> Some(JsonWriterRuntime.text typeof<'E> :> MethodBase)
+        | RawChildOperation.Boolean -> Some(JsonWriterRuntime.boolean typeof<'E> :> MethodBase)
+        | RawChildOperation.Guid -> Some(JsonWriterRuntime.guid typeof<'E> :> MethodBase)
+        | RawChildOperation.Bytes -> Some(JsonWriterRuntime.bytes typeof<'E> :> MethodBase)
+        | RawChildOperation.Primitive name -> Some(typeof<JsonRawPrimitive>.GetMethod("Write" + name,flags).MakeGenericMethod(typeof<'E>,typeof<'O>) :> MethodBase)
+        | RawChildOperation.Array -> Some(JsonRawOutput<'E,'O,'Contract>.ArrayMethod(target.GetElementType()) :> MethodBase)
+        | RawChildOperation.Formatted -> invalidOp "A formatted reader cannot be selected for output."
+
     static member internal ForwardApi(modelType: Type): CodecRawWriterApi<Type,MethodBase> =
         let flags = BindingFlags.Static ||| BindingFlags.NonPublic ||| BindingFlags.Public
         let helper name arguments =
@@ -3134,29 +3156,7 @@ and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueO
             (if Array.isEmpty arguments then method else method.MakeGenericMethod arguments) :> MethodBase
         { Boolean = typeof<bool>
           Polymorphic = JsonRawOutput<'E,'O,'Contract>.Polymorphic(fun declared -> TypeMetadataCache.KnownJsonWriterBodies(declared,typeof<'E>,typeof<'O>,JsonOperationPolicy<'Contract>.Name "raw-model-body"))
-          Operation = fun target ->
-              let name = TypeSupport.RawPrimitive target.FullName
-              if JsonOperationPolicy<'Contract>.IsStored && (TypeSupport.StoredNumeric target.FullName).IsSome then
-                  Some(JsonStoredNumericRuntime.writerMethod target typeof<'E> :> MethodBase)
-              elif JsonOptionalRuntime.kind target <> 0 then
-                  Some (JsonRawCollections<'Contract>.WriteMethod<'E,'O>(target) :> MethodBase)
-              elif target.IsGenericType && (TypeSupport.SequenceDefinition (target.GetGenericTypeDefinition().FullName) true).IsSome then
-                  let body = JsonRawCollections<'Contract>.Invoke(typeof<JsonRawCollections<'Contract>>,"SequenceWriteMethod",[|target;target.GetGenericArguments().[0];typeof<'E>;typeof<'O>|],
-                                 [|box(target.GetGenericArguments().[0].Equals(typeof<byte>))|]) :?> MethodBase
-                  Some body
-              elif name = "" || name = "Type" then
-                  if target.IsArray && target.GetArrayRank() = 1 then
-
-                      Some (JsonRawOutput<'E,'O,'Contract>.ArrayMethod(target.GetElementType()) :> MethodBase)
-                  else None
-              else
-
-              Some ((if (TypeSupport.NumericWriterCore target.FullName).IsSome then JsonWriterRuntime.number target typeof<'E> :> MethodBase
-                                  elif name = "Boolean" then JsonWriterRuntime.boolean typeof<'E> :> MethodBase
-                                  elif name = "Guid" then JsonWriterRuntime.guid typeof<'E> :> MethodBase
-                                  elif name = "Bytes" then JsonWriterRuntime.bytes typeof<'E> :> MethodBase
-                                  elif name = "String" then JsonWriterRuntime.text typeof<'E> :> MethodBase
-                                  else typeof<JsonRawPrimitive>.GetMethod("Write" + name,flags).MakeGenericMethod(typeof<'E>,typeof<'O>) :> MethodBase))
+          Operation = JsonRawOutput<'E,'O,'Contract>.ChildOperation
           Null = JsonWriterRuntime.constant typeof<'E> "null" :> MethodBase
           SerializeActual = helper "SerializeActual" [||]
           BeginArray = JsonWriterRuntime.constant typeof<'E> "[" :> MethodBase; Separator = JsonWriterRuntime.constant typeof<'E> "," :> MethodBase; EndArray = JsonWriterRuntime.constant typeof<'E> "]" :> MethodBase
@@ -3170,7 +3170,15 @@ and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueO
         let parameters = typeof<JsonDirectWriter<obj,'E>>.GetMethod("Invoke",BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic).GetParameters() |> Array.map _.ParameterType
         parameters[0] <- element.MakeArrayType()
         let method = DynamicMethod("WriteRawArray",typeof<Void>,parameters,typeof<JsonValue>.Module,true)
-        CodecArrayEmitter.rawArrayWriter (RuntimeCodecIL(method.GetILGenerator())) typeof<int> (JsonRawOutput<'E,'O,'Contract>.ForwardApi(element.MakeArrayType())) element
+        let flags = BindingFlags.Static ||| BindingFlags.NonPublic ||| BindingFlags.Public
+        let output: CodecArrayWriterApi<Type,MethodBase> =
+            { Operation = JsonRawOutput<'E,'O,'Contract>.ChildOperation
+              Serialize = fun target -> typeof<JsonRawWrite<obj,byte,JsonUtf8Writer,'Contract>>.GetGenericTypeDefinition().MakeGenericType(target,typeof<'E>,typeof<'O>,typeof<'Contract>).GetMethod("Member",flags) :> MethodBase
+              Null = JsonWriterRuntime.constant typeof<'E> "null" :> MethodBase
+              BeginArray = JsonWriterRuntime.constant typeof<'E> "[" :> MethodBase
+              Separator = JsonWriterRuntime.constant typeof<'E> "," :> MethodBase
+              EndArray = JsonWriterRuntime.constant typeof<'E> "]" :> MethodBase }
+        CodecArrayEmitter.rawArrayWriter (RuntimeCodecIL(method.GetILGenerator())) typeof<int> output element
         method
     static member internal ArrayMethod(element: Type): DynamicMethod =
         JsonDefaultMethods.withContract (element.MakeArrayType()) typeof<'E> typeof<'O> (JsonOperationPolicy<'Contract>.Name "array-write") (fun () -> JsonRawOutput<'E,'O,'Contract>.CreateArrayMethod(element))
@@ -3556,32 +3564,35 @@ and private JsonRawInput<'Contract> =
             Contains = helper "Contains" [||]; GetProperty = helper "GetProperty" [||]
             RawReader = true }
 
+    static member internal ChildOperation<'R when 'R : struct and 'R :> IJsonReader>(target: Type): MethodBase option =
+        let flags = BindingFlags.Static ||| BindingFlags.Public ||| BindingFlags.NonPublic
+        let definition = if target.IsGenericType then target.GetGenericTypeDefinition().FullName else target.FullName
+        let rank = if target.IsArray then target.GetArrayRank() else 0
+        match TypeSupport.RawChildReader(definition,target.IsEnum,rank,JsonOperationPolicy<'Contract>.IsStored) with
+        | RawChildOperation.Member -> None
+        | RawChildOperation.StoredNumeric ->
+            let struct(_,name) = (TypeSupport.StoredNumeric target.FullName).Value
+            Some(typeof<JsonStoredNumeric>.GetMethod(name,flags).MakeGenericMethod(typeof<'R>) :> MethodBase)
+        | RawChildOperation.Adapted _ -> Some(JsonRawCollections<'Contract>.ReadMethod<'R>(target) :> MethodBase)
+        | RawChildOperation.Sequence policy ->
+            JsonRawCollections<'Contract>.Invoke(typeof<JsonRawCollections<'Contract>>,"SequenceReadMethod",[|target;target.GetGenericArguments().[0];typeof<'R>|],
+                [|box policy;box false|]) :?> MethodBase |> Some
+        | RawChildOperation.Numeric ->
+            Some((if JsonOperationPolicy<'Contract>.IsStored && (TypeSupport.StoredNumericReader target.FullName).IsSome then
+                      JsonNumericRuntime.storedMethod target typeof<'R>
+                  else JsonNumericRuntime.method target typeof<'R>) :> MethodBase)
+        | RawChildOperation.Formatted -> Some(JsonFormattedRuntime.method target typeof<'R> :> MethodBase)
+        | RawChildOperation.Primitive name -> Some(typeof<JsonRawPrimitive>.GetMethod("Read" + name,flags).MakeGenericMethod(typeof<'R>) :> MethodBase)
+        | RawChildOperation.Array -> Some(JsonRawInput<'Contract>.ArrayMethod<'R>(target.GetElementType()) :> MethodBase)
+        | RawChildOperation.Text | RawChildOperation.Boolean | RawChildOperation.Guid | RawChildOperation.Bytes ->
+            invalidOp "An output operation cannot be selected for input."
+
     static member internal ForwardApi<'R when 'R : struct and 'R :> IJsonReader>(properties: bool): CodecRawReaderApi<Type,MethodBase> =
-        let api = JsonRawInput<'Contract>.Api<'R>()
         let flags = BindingFlags.Static ||| BindingFlags.Public ||| BindingFlags.NonPublic
         let helper name = typeof<JsonRawInput<'Contract>>.GetMethod(name,flags).MakeGenericMethod(typeof<'R>) :> MethodBase
         {
             Boolean = typeof<bool>
-            Operation = fun target ->
-                let name = TypeSupport.RawPrimitive target.FullName
-                if JsonOperationPolicy<'Contract>.IsStored && (TypeSupport.StoredNumeric target.FullName).IsSome then
-                    let struct(_,name) = (TypeSupport.StoredNumeric target.FullName).Value
-                    Some(typeof<JsonStoredNumeric>.GetMethod(name,flags).MakeGenericMethod(typeof<'R>) :> MethodBase)
-                elif JsonOptionalRuntime.kind target <> 0 then
-                    Some (JsonRawCollections<'Contract>.ReadMethod<'R>(target) :> MethodBase)
-                elif target.IsGenericType && (TypeSupport.SequenceDefinition (target.GetGenericTypeDefinition().FullName) false).IsSome then
-                    let policy = (TypeSupport.SequenceDefinition (target.GetGenericTypeDefinition().FullName) false).Value
-                    let body = JsonRawCollections<'Contract>.Invoke(typeof<JsonRawCollections<'Contract>>,"SequenceReadMethod",[|target;target.GetGenericArguments().[0];typeof<'R>|],
-                                   [|box policy;box false|]) :?> MethodBase
-                    Some body
-                elif name = "" then
-                    if target.IsArray && target.GetArrayRank() = 1 then
-                        Some (JsonRawInput<'Contract>.ArrayMethod<'R>(target.GetElementType()) :> MethodBase)
-                    else None
-                else
-                Some ((if (TypeSupport.NumericCore target.FullName).IsSome then (if JsonOperationPolicy<'Contract>.IsStored && (TypeSupport.StoredNumericReader target.FullName).IsSome then JsonNumericRuntime.storedMethod target typeof<'R> else JsonNumericRuntime.method target typeof<'R>) :> MethodBase
-                                  elif TypeSupport.FormattedReader target.FullName <> "" then JsonFormattedRuntime.method target typeof<'R> :> MethodBase
-                                  else typeof<JsonRawPrimitive>.GetMethod("Read" + name,flags).MakeGenericMethod(typeof<'R>) :> MethodBase))
+            Operation = JsonRawInput<'Contract>.ChildOperation<'R>
             BeginArray = helper "BeginArray"; NextElement = helper "NextElement"
             GrowArray = fun target -> typeof<JsonRawInput<'Contract>>.GetMethod("GrowArray",flags).MakeGenericMethod(target) :> MethodBase
             ArrayWrapper = fun target -> typeof<JsonRawInput<'Contract>>.GetMethod("ArrayWrapper",flags).MakeGenericMethod(target,typeof<'R>) :> MethodBase

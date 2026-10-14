@@ -52,22 +52,6 @@ internal static class GeneratedOptionalCodec
         var result = new GenericInstanceMethod(method); result.GenericArguments.Add(module.ImportReference(source)); result.GenericArguments.Add(module.ImportReference(target));
         return result;
     }
-    internal static MethodReference ReadCall(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference reader,string name,GeneratedModel[] models)
-    {
-        var api = new GeneratedJsonAssembly.Api(module,product,definitions.Stored);
-        if(definitions.Stored && TypeSupport.StoredNumeric(target.FullName) != null)
-            return api.Operation("JsonStoredNumeric",TypeSupport.StoredNumeric(target.FullName).Value.Item2,reader);
-        var primitive = TypeSupport.RawPrimitive(target.FullName);
-        var sequence = target is GenericInstanceType closedSequence ? TypeSupport.SequenceDefinition(closedSequence.ElementType.FullName,false) : null;
-        MethodReference direct = Kind(target,models) != 0 ? Reader(definitions,module,owner,product,target,reader,name,models)
-            : sequence != null ? GeneratedSequenceCodec.Reader(definitions,module,owner,product,target,((GenericInstanceType)target).GenericArguments[0],reader,sequence.Value,false,name,models)
-            : TypeSupport.RawNumericCore(target.FullName) != null ? GeneratedNumericCodec.Reader(definitions,module,owner,product,target,reader,name)
-            : TypeSupport.FormattedReader(target.FullName).Length!=0 ? GeneratedFormattedCodec.Reader(definitions,module,owner,product,target,reader,name)
-            : primitive.Length != 0 ? api.Operation("JsonRawPrimitive","Read" + primitive,reader)
-            : target is ArrayType { Rank: 1 } array ? GeneratedRawCodec.ArrayReader(definitions,module,owner,product,array,reader,name,models)
-            : api.Operation("JsonRawRead","ReadMember",target,reader);
-        return direct;
-    }
     internal static MethodDefinition Reader(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference reader,string name,GeneratedModel[] models)
     {
         if (definitions.TryGet("optional-read",target,reader,"",out var existing)) return existing;
@@ -81,7 +65,7 @@ internal static class GeneratedOptionalCodec
         var operands = new CodecOptionalReaderApi<TypeReference,MethodReference>(target,payload,context,module.TypeSystem.Boolean,module.TypeSystem.Int32,
             Input("Begin"),Input("Open"),Input("Capture"),Input("End"),Input("Flat"),Input("Restore"),api.Operation("JsonOptionalInput","Missing"),
             names,api.Operation("JsonRawInput","Skip",reader),
-            ReadCall(definitions,module,owner,product,payload,reader,name + "Payload",models),ReadCall(definitions,module,owner,product,module.TypeSystem.Boolean,reader,name + "Flag",models),
+            GeneratedChildCodec.ReadCall(definitions,module,owner,product,payload,reader,name + "Payload",models),GeneratedChildCodec.ReadCall(definitions,module,owner,product,module.TypeSystem.Boolean,reader,name + "Flag",models),
             module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonPrimitiveShapeMismatch")),
             module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonScalarShapeMismatch")),
             api.Operation("JsonRawRead","PrimitiveRetry",payload,reader),api.Operation("JsonRawRead","ScalarRetry",payload,reader),
@@ -89,32 +73,6 @@ internal static class GeneratedOptionalCodec
             Kind(target,models) == 3 ? null! : FSharpOption<MethodReference>.Some(Member(module,target,".ctor",Kind(target,models))),
             Kind(target,models) == 3 ? FSharpOption<MethodReference>.Some(Transfer(module,product,payload,target)) : null!);
         CodecOptionalEmitter.reader(new CecilCodecIL(body),operands); return body;
-    }
-    internal static MethodReference WriteCall(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference encoding,TypeReference output,string name,GeneratedModel[] models)
-    {
-        if(definitions.Stored && Kind(target,models)==3)
-            return WriteCall(definitions.NativeView,module,owner,product,target,encoding,output,name,models);
-        var api = new GeneratedJsonAssembly.Api(module,product,definitions.Stored);
-        MethodReference Member()
-        {
-            var method = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonRawWrite`4").Methods.Single(value => value.Name == "Member"));
-            method.DeclaringType = api.RawType("JsonRawWrite",target,encoding,output);
-            return method;
-        }
-        var primitive = TypeSupport.RawPrimitive(target.FullName);
-        var sequence = target is GenericInstanceType closedSequence ? TypeSupport.SequenceDefinition(closedSequence.ElementType.FullName,true) : null;
-        MethodReference direct = Kind(target,models) != 0 ? Writer(definitions,module,owner,product,target,encoding,output,name,models)
-            : sequence != null ? GeneratedSequenceCodec.Writer(definitions,module,owner,product,target,((GenericInstanceType)target).GenericArguments[0],encoding,output,target.IsValueType,
-                ((GenericInstanceType)target).GenericArguments[0].FullName == "System.Byte",name,models)
-            : TypeSupport.NumericWriterCore(target.FullName) != null
-            ? GeneratedOutputCodec.Number(definitions,module,owner,product,target,encoding,name)
-            : primitive == "String" ? GeneratedOutputCodec.String(definitions,module,owner,product,encoding,name)
-            : primitive == "Boolean" ? GeneratedOutputCodec.Boolean(definitions,module,owner,product,encoding,name)
-                    : primitive == "Guid" ? GeneratedOutputCodec.Guid(definitions,module,owner,product,target,encoding,name)
-                    : primitive == "Bytes" ? GeneratedOutputCodec.Bytes(definitions,module,owner,product,target,encoding,name)
-            : primitive.Length != 0 && primitive != "Type" ? api.Operation("JsonRawPrimitive","Write" + primitive,encoding,output)
-            : Member();
-        return direct;
     }
     internal static MethodDefinition Writer(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference encoding,TypeReference output,string name,GeneratedModel[] models)
     {
@@ -132,7 +90,7 @@ internal static class GeneratedOptionalCodec
             Kind(target,models) == 2 ? FSharpOption<MethodReference>.Some(Member(module,target,"get_HasValue",Kind(target,models))) : null!,
             Kind(target,models) == 3 ? null! : FSharpOption<MethodReference>.Some(Member(module,target,"get_Value",Kind(target,models))),
             Kind(target,models) == 3 ? FSharpOption<MethodReference>.Some(Transfer(module,product,target,payload)) : null!,nullMethod,
-            WriteCall(definitions,module,owner,product,payload,encoding,output,name + "Payload",models));
+            GeneratedChildCodec.WriteCall(definitions,module,owner,product,payload,encoding,output,name + "Payload",models));
         CodecOptionalEmitter.writer(new CecilCodecIL(body),operands); return body;
     }
     internal static void Register(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,ILProcessor entry,AssemblyDefinition product,TypeReference target,int index,GeneratedModel[] models)

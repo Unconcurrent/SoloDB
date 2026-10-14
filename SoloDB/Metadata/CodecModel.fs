@@ -187,6 +187,16 @@ type internal CodecPolymorphicApi<'T,'M> = {
     Known: 'T -> CodecKnownWriter<'T,'M>[]
 }
 
+/// Array emission needs only its selected child and delimiter operations.
+type internal CodecArrayWriterApi<'Type,'Method> = {
+    Operation: 'Type -> 'Method option
+    Serialize: 'Type -> 'Method
+    Null: 'Method
+    BeginArray: 'Method
+    Separator: 'Method
+    EndArray: 'Method
+}
+
 /// Direct text destinations retain the same member admission and typed codec calls.
 type internal CodecRawWriterApi<'Type,'Method> = {
     Boolean: 'Type

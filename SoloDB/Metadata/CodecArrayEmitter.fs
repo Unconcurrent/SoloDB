@@ -76,7 +76,7 @@ module internal CodecArrayEmitter =
         il.EmitMethod(OpCodes.Call,input.TrimArray element)
         il.Emit OpCodes.Ret
 
-    let rawArrayWriter (il: CodecIL<'T,'M,'F>) int32 (output: CodecRawWriterApi<'T,'M>) element =
+    let rawArrayWriter (il: CodecIL<'T,'M,'F>) int32 (output: CodecArrayWriterApi<'T,'M>) element =
         let present = il.Label()
         il.Emit OpCodes.Ldarg_0
         il.EmitBranch(OpCodes.Brtrue,present)

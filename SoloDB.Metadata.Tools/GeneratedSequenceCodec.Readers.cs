@@ -50,7 +50,7 @@ internal static partial class GeneratedSequenceCodec
             GeneratedFiniteCodec.Api(module,product,reader),
             api.Operation("JsonReadCursor","child",reader),api.Operation("JsonTupleInput","Missing"),
             Reader(definitions,module,owner,product,items,element,reader,"Array",false,name + "Items",models),
-            GeneratedOptionalCodec.ReadCall(definitions,module,owner,product,key,reader,name + "Key",models),
+            GeneratedChildCodec.ReadCall(definitions,module,owner,product,key,reader,name + "Key",models),
             constructor,api.Operation("JsonRawCollections","FinishGrouping",key,element),
             Product("JsonPrimitiveShapeMismatch"),Product("JsonScalarShapeMismatch"),
             api.Operation("JsonRawRead","PrimitiveRetry",key,reader),api.Operation("JsonRawRead","ScalarRetry",key,reader));
@@ -146,7 +146,7 @@ internal static partial class GeneratedSequenceCodec
         CodecSequenceEmitter.reader(new CecilCodecIL(method),operands,
             FSharpFunc<TypeReference,FSharpOption<MethodReference>>.FromConverter(
                 new Converter<TypeReference,FSharpOption<MethodReference>>(child => FSharpOption<MethodReference>.Some(
-                    GeneratedOptionalCodec.ReadCall(definitions,module,owner,product,child,reader,name + "Element",models)))),
+                    GeneratedChildCodec.ReadCall(definitions,module,owner,product,child,reader,name + "Element",models)))),
             FSharpFunc<TypeReference,MethodReference>.FromConverter(new Converter<TypeReference,MethodReference>(child => api.Operation("JsonRawRead","ReadMember",child,reader))),
             model.Type,element,!reference && model.Facts.SupportsValuesWrapper,false,!populate,false,false);
         return method;

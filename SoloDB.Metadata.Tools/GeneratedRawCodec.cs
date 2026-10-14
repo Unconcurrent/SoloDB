@@ -28,7 +28,7 @@ internal static partial class GeneratedRawCodec
         MethodReference Input(string operation,params TypeReference[] arguments) => api.Operation("JsonRawInput",operation,arguments.Concat(new[] {reader}).ToArray());
         var forward = new CodecRawReaderApi<TypeReference,MethodReference>(module.TypeSystem.Boolean,
             Function<TypeReference,FSharpOption<MethodReference>>(element =>
-                FSharpOption<MethodReference>.Some(GeneratedOptionalCodec.ReadCall(definitions,module,owner,product,element,reader,name+"Element",models))),
+                FSharpOption<MethodReference>.Some(GeneratedChildCodec.ReadCall(definitions,module,owner,product,element,reader,name+"Element",models))),
             Input("BeginArray"),Input("NextElement"),
             Function<TypeReference,MethodReference>(element => api.Operation("JsonRawInput","GrowArray",element)),
             Function<TypeReference,MethodReference>(element => api.Operation("JsonRawInput","TrimArray",element)),
@@ -116,7 +116,7 @@ internal static partial class GeneratedRawCodec
                     Function<TypeReference,MethodReference>(target=>Method("JsonRawRead","ScalarRetry",target,reader)));
                 CodecTupleEmitter.rawReader(new CecilCodecIL(method),tupleInput,
                     Function<TypeReference,FSharpOption<MethodReference>>(target=>FSharpOption<MethodReference>.Some(
-                        GeneratedOptionalCodec.ReadCall(definitions,module,owner,product,target,reader,"ReadTuple"+suffix+index+"Child",models!))),
+                        GeneratedChildCodec.ReadCall(definitions,module,owner,product,target,reader,"ReadTuple"+suffix+index+"Child",models!))),
                     Function<TypeReference,MethodReference>(target=>Method("JsonRawRead","ReadMember",target,reader)),GeneratedCodec.Tuple(model,models!));
             }
             else
@@ -131,18 +131,11 @@ internal static partial class GeneratedRawCodec
                     tree.UnionCaseSelected,Input("Contains"),Input("GetProperty"),tree.EnsureStack,true);
                 CodecRawReaderApi<TypeReference,MethodReference> forward = null!;
                 var serial = 0;
-                MethodReference? ReadOperation(TypeReference target)
-                {
-                    if(definitions.Stored && TypeSupport.StoredNumeric(target.FullName) != null)
-                        return Method("JsonStoredNumeric",TypeSupport.StoredNumeric(target.FullName).Value.Item2,reader);
-                    if (GeneratedOptionalCodec.Kind(target,models!) == 0 && TypeSupport.RawPrimitive(target.FullName).Length == 0 && target is not ArrayType { Rank: 1 }) return null;
-                    return GeneratedOptionalCodec.ReadCall(definitions,module,owner,product,target,reader,"ReadDefault"+suffix+index+"_"+serial++,models!);
-                }
                 var codecModel = GeneratedCodec.Model(model);
                 var property = !CodecRawEmitter.forwardReader(codecModel) ? null
                     : FSharpOption<CodecNameApi<TypeReference,MethodReference>>.Some(GeneratedPropertyCodec.Api(module,product,reader));
                 forward = new CodecRawReaderApi<TypeReference,MethodReference>(module.TypeSystem.Boolean,
-                    Function<TypeReference,FSharpOption<MethodReference>>(target => ReadOperation(target) is { } operation ? FSharpOption<MethodReference>.Some(operation) : null!),
+                    Function<TypeReference,FSharpOption<MethodReference>>(target => GeneratedChildCodec.ReadCall(definitions,module,owner,product,target,reader,"ReadDefault"+suffix+index+"_"+serial++,models!,false) is { } operation ? FSharpOption<MethodReference>.Some(operation) : null!),
                     Input("BeginArray"),Input("NextElement"),
                     Function<TypeReference,MethodReference>(target => Method("JsonRawInput","GrowArray",target)),
                     Function<TypeReference,MethodReference>(target => Method("JsonRawInput","TrimArray",target)),
@@ -162,7 +155,7 @@ internal static partial class GeneratedRawCodec
                         Function<TypeReference,MethodReference>(target=>Method("JsonRawRead","ScalarRetry",target,reader)));
                     CodecUnionEmitter.reader(il,raw,unionInput,
                         Function<TypeReference,FSharpOption<MethodReference>>(target=>FSharpOption<MethodReference>.Some(
-                            GeneratedOptionalCodec.ReadCall(definitions,module,owner,product,target,reader,"ReadUnion"+suffix+index+"Child",models!))),
+                            GeneratedChildCodec.ReadCall(definitions,module,owner,product,target,reader,"ReadUnion"+suffix+index+"Child",models!))),
                         forward.Read,codecModel!);
                     return null!;
                 }));

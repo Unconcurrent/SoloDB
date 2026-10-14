@@ -81,7 +81,7 @@ internal static partial class GeneratedDictionaryCodec
             policy.Item3?Some(Bind(module,typeof(KeyValuePair<,>).GetConstructors().Single(),pair)):null!,module.ImportReference(typeof(string).GetMethod("op_Equality")!),
             Product("JsonPrimitiveShapeMismatch"),Product("JsonScalarShapeMismatch"),api.Operation("JsonRawRead","PrimitiveRetry",value,reader),api.Operation("JsonRawRead","ScalarRetry",value,reader));
         CodecDictionaryEmitter.reader(new CecilCodecIL(method),operands,
-            Function<TypeReference,FSharpOption<MethodReference>>(child=>Some(GeneratedOptionalCodec.ReadCall(definitions,module,owner,product,child,reader,name+"Value",models))),
+            Function<TypeReference,FSharpOption<MethodReference>>(child=>Some(GeneratedChildCodec.ReadCall(definitions,module,owner,product,child,reader,name+"Value",models))),
             Function<TypeReference,MethodReference>(child=>api.Operation("JsonRawRead","ReadMember",child,reader)),model.Type,policy.Item2);
         return method;
     }

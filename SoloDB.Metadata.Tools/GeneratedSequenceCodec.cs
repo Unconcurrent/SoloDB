@@ -88,7 +88,7 @@ internal static partial class GeneratedSequenceCodec
         CodecSequenceEmitter.reader(il, operands,
             FSharpFunc<TypeReference, FSharpOption<MethodReference>>.FromConverter(
                 new Converter<TypeReference, FSharpOption<MethodReference>>(child => FSharpOption<MethodReference>.Some(
-                    GeneratedOptionalCodec.ReadCall(definitions, module, owner, product, child, reader, name + "Element" + serial++, models)))),
+                    GeneratedChildCodec.ReadCall(definitions, module, owner, product, child, reader, name + "Element" + serial++, models)))),
             FSharpFunc<TypeReference, MethodReference>.FromConverter(new Converter<TypeReference, MethodReference>(child => api.Operation("JsonRawRead", "ReadMember", child, reader))),
             target, element, wrapper, array, facts.Item3, facts.Item4, discardAdd);
         return method;
@@ -212,7 +212,7 @@ internal static partial class GeneratedSequenceCodec
         var outputApi = new CodecRawWriterApi<TypeReference, MethodReference>(module.TypeSystem.Boolean,
             FSharpFunc<TypeReference, FSharpOption<MethodReference>>.FromConverter(
                 new Converter<TypeReference, FSharpOption<MethodReference>>(child =>
-                    FSharpOption<MethodReference>.Some(GeneratedOptionalCodec.WriteCall(
+                    FSharpOption<MethodReference>.Some(GeneratedChildCodec.WriteCall(
                         definitions, module, owner, product, child, encoding, output, name + "Element" + serial++, models)))),
             null!, Literal("null"), null!, Literal("["), Literal(","), Literal("]"), null!, null!, null!, null!, null!, null!, null!);
         CodecSequenceEmitter.writer(new CecilCodecIL(method), outputApi, sequence, target, element, valueType, binary);

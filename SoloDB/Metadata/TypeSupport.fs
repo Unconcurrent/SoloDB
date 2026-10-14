@@ -168,6 +168,25 @@ type internal SqlRawDecision =
 #endif
     { Registration: string; Arguments: SqlTypeArgument[]; Read: SqlReadDecision voption }
 
+[<RequireQualifiedAccess>]
+#if METADATA_TOOLING
+type RawChildOperation =
+#else
+type internal RawChildOperation =
+#endif
+    | Member
+    | StoredNumeric
+    | Adapted of bool
+    | Sequence of string
+    | Numeric
+    | Formatted
+    | Primitive of string
+    | Text
+    | Boolean
+    | Guid
+    | Bytes
+    | Array
+
 #if METADATA_TOOLING
 module TypeSupport =
 #else
@@ -619,6 +638,37 @@ module internal TypeSupport =
         if decision.RawKind = RawCodecKind.Sequence && decision.Shape <> TypeShape.Array &&
            not(writer && RawPolymorphicFactory(decision.Shape,true)) then Some decision.Factory
         else None
+
+    let RawChildReader(definition, isEnum, arrayRank, stored) =
+        if stored && (StoredNumeric definition).IsSome then RawChildOperation.StoredNumeric
+        elif RawAdaptation definition isEnum <> 0 then RawChildOperation.Adapted false
+        else
+            match SequenceDefinition definition false with
+            | Some policy -> RawChildOperation.Sequence policy
+            | None when (RawNumericCore definition).IsSome -> RawChildOperation.Numeric
+            | None when FormattedReader definition <> "" -> RawChildOperation.Formatted
+            | None ->
+                match RawPrimitive definition with
+                | "" when arrayRank = 1 -> RawChildOperation.Array
+                | "" -> RawChildOperation.Member
+                | name -> RawChildOperation.Primitive name
+
+    let RawChildWriter(definition, isEnum, arrayRank, stored) =
+        if stored && (StoredNumeric definition).IsSome then RawChildOperation.StoredNumeric
+        elif RawAdaptation definition isEnum <> 0 then RawChildOperation.Adapted(stored && isEnum)
+        else
+            match SequenceDefinition definition true with
+            | Some policy -> RawChildOperation.Sequence policy
+            | None when (NumericWriterCore definition).IsSome -> RawChildOperation.Numeric
+            | None ->
+                match RawPrimitive definition with
+                | "String" -> RawChildOperation.Text
+                | "Boolean" -> RawChildOperation.Boolean
+                | "Guid" -> RawChildOperation.Guid
+                | "Bytes" -> RawChildOperation.Bytes
+                | "" | "Type" when arrayRank = 1 -> RawChildOperation.Array
+                | "" | "Type" -> RawChildOperation.Member
+                | name -> RawChildOperation.Primitive name
 
     let PopulateCollection(shape, argumentCount, list, parameterless) =
         shape = TypeShape.CustomSequence && argumentCount = 1 && list && parameterless
