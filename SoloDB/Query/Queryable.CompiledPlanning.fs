@@ -49,6 +49,10 @@ module internal QueryReadPlanning =
         match FlattenTransform.normalizeExprQuoting expression with
         | Literal _ | Parameter _ -> true
         | Column(qualifier, ("Id" | "Value")) -> fromSource source qualifier
+        | FunctionCall("jsonb", [value]) when baseColumn source "Value" value ->
+            // A physical document root is published as a canonical token. Keep
+            // that frame at the emitted-row fetch, after identity selection.
+            true
         | expression when readsDocument source expression ->
             // A sorter may evaluate projections on discarded rows. Preserve parse
             // errors through the same extraction in the order key: JSONB can

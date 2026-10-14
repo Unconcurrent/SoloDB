@@ -222,9 +222,12 @@ module internal QueryTranslatorVisitCoreMethodCall =
                 if qb.SourceContext.GeneralPrefixMatch then
                     // Empty prefixes preserve the existing IS NOT NULL behavior,
                     // including documents whose stored value is not a JSON string.
-                    SqlExpr.CaseExpr(
-                        (SqlExpr.Binary(prefix, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.String "")),
-                         SqlExpr.Unary(UnaryOperator.IsNotNull, value)), [], Some range)
+                    let empty = SqlExpr.Unary(UnaryOperator.IsNotNull, value)
+                    let isEmpty =
+                        match binder.PrepareChoice with
+                        | ValueSome prepare -> prepare local (fun sampled -> Object.Equals(sampled, ""))
+                        | ValueNone -> SqlExpr.Binary(prefix, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.String ""))
+                    SqlExpr.CaseExpr((isEmpty, empty), [], Some range)
                 else range
             | _ ->
             if isFullyConstant v then

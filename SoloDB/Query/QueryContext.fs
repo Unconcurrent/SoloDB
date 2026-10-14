@@ -24,6 +24,7 @@ type internal QueryValueBinder = {
     Order: QueryValueBindingOrder
     PrepareConstant: System.Linq.Expressions.Expression -> System.Type -> QueryPreparedConstant
     PrepareList: (System.Linq.Expressions.Expression -> ((obj -> SqlExpr list) -> SqlExpr)) voption
+    PrepareChoice: (System.Linq.Expressions.Expression -> ((obj -> bool) -> SqlExpr)) voption
     Produced: bool -> System.Linq.Expressions.Expression -> QueryProducedValue
     IsValue: System.Linq.Expressions.Expression -> bool
     Parameter: System.Linq.Expressions.Expression -> SqlExpr

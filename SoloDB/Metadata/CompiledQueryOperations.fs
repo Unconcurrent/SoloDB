@@ -217,6 +217,7 @@ module internal CompiledQueries =
             let binder = { Order = bindingOrder
                            PrepareConstant = fun expression _ -> PreparedConstant(ExpressionEvaluation.evaluateExpr<obj> expression)
                            PrepareList = ValueNone
+                           PrepareChoice = ValueNone
                            Produced = produced
                            IsValue = isValue
                            Parameter = (fun value -> produced false value |> function DirectValue(value, _) -> value | _ -> invalidOp "A bound parameter is direct.")

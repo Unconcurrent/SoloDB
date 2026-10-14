@@ -11,6 +11,7 @@ module internal QueryableValueBindings =
     type private PreparedLayout =
         | ScalarLayout of SqlExpr
         | ListLayout of SqlExpr list
+        | ChoiceLayout of bool
 
     let create (variables: Dictionary<string, obj>) =
         let order = QueryValueBindingOrder()
@@ -75,6 +76,9 @@ module internal QueryableValueBindings =
         let prepareList expression =
             let complete = prepareLayout expression (ListLayout [])
             fun produce -> complete (produce >> ListLayout)
+        let prepareChoice expression =
+            let complete = prepareLayout expression (ChoiceLayout false)
+            fun decide -> complete (decide >> ChoiceLayout)
         let prepareConstant (expression: Expression) target =
             match expression with
             | :? ConstantExpression as literal -> PreparedConstant literal.Value
@@ -89,15 +93,20 @@ module internal QueryableValueBindings =
                 match layouts[name] with
                 | ListLayout [] -> SqlExpr.Binary(SqlExpr.Literal(SqlLiteral.Integer 1L), BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L))
                 | ListLayout(head :: tail) -> SqlExpr.InList(resolveExpression value, head, tail)
-                | ScalarLayout _ -> SqlExprCombinators.mapChildren resolveExpression resolveQuery expression
+                | ScalarLayout _ | ChoiceLayout _ -> SqlExprCombinators.mapChildren resolveExpression resolveQuery expression
+            | SqlExpr.CaseExpr((SqlExpr.Parameter name, selected), [], Some otherwise) when layouts.ContainsKey name ->
+                match layouts[name] with
+                | ChoiceLayout decision -> resolveExpression (if decision then selected else otherwise)
+                | _ -> SqlExprCombinators.mapChildren resolveExpression resolveQuery expression
             | SqlExpr.Parameter name when layouts.ContainsKey name ->
                 match layouts[name] with
                 | ScalarLayout value -> resolveExpression value
+                | ChoiceLayout decision -> SqlExpr.Literal(SqlLiteral.Boolean decision)
                 | ListLayout _ -> invalidOp "A captured list must occupy an IN operand."
             | _ -> SqlExprCombinators.mapChildren resolveExpression resolveQuery expression
         and resolveQuery query =
             SqlExprCombinators.mapSelectParts (SqlExprCombinators.mapCores (SqlExprCombinators.mapCoreExpressions resolveExpression resolveQuery)) resolveQuery query
-        let binder = { Order = order; PrepareConstant = prepareConstant; PrepareList = ValueSome prepareList
+        let binder = { Order = order; PrepareConstant = prepareConstant; PrepareList = ValueSome prepareList; PrepareChoice = ValueSome prepareChoice
                        Produced = produced; IsValue = isConstantParameter
                        Parameter = value false; Comparison = value true
                        Scalar = scalar; PreparedScalar = preparedScalar; Prefix = prefix; Local = local }
