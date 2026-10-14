@@ -218,9 +218,9 @@ module internal QueryableHelperPreprocess =
             ) |> Seq.toList
 
         let bindBound bound =
-            match sourceCtx.BindQueryValue |> ValueOption.bind (fun bind -> bind.TryBind false bound) with
-            | ValueSome parameter -> QueryProduced.value sourceCtx.NextAlias parameter
-            | ValueNone -> allocateParam vars (ExpressionEvaluation.evaluateExpr<obj> bound)
+            match sourceCtx.BindQueryValue with
+            | ValueSome binder when binder.IsValue bound -> binder.Scalar bound
+            | _ -> allocateParam vars (ExpressionEvaluation.evaluateExpr<obj> bound)
 
         let limit =
             match statement.Take with

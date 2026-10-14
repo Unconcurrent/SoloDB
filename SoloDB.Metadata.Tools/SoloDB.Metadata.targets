@@ -17,14 +17,20 @@
       <_SoloDBGeneratedKeyFile Condition="'$(SignAssembly)' == 'true'">$(AssemblyOriginatorKeyFile)</_SoloDBGeneratedKeyFile>
     </PropertyGroup>
     <SoloDatabase.Metadata.Tools.GenerateHelper Output="$(SoloDBGeneratedContract)" Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" References="@(ReferenceCopyLocalPaths);@(ReferencePath)" />
+    <GetAssemblyIdentity AssemblyFiles="$(SoloDBGeneratedContract)">
+      <Output TaskParameter="Assemblies" ItemName="_SoloDBGeneratedContractIdentity" />
+    </GetAssemblyIdentity>
     <ItemGroup>
-      <ReferencePath Include="$(SoloDBGeneratedContract)">
+      <_SoloDBGeneratedContractReference Include="@(_SoloDBGeneratedContractIdentity->'%(OriginalItemSpec)')">
+        <FusionName>%(_SoloDBGeneratedContractIdentity.Identity)</FusionName>
+      </_SoloDBGeneratedContractReference>
+      <ReferencePath Include="@(_SoloDBGeneratedContractReference)">
         <Aliases>SoloDBGeneratedOperations</Aliases>
       </ReferencePath>
-      <ReferencePathWithRefAssemblies Include="$(SoloDBGeneratedContract)">
+      <ReferencePathWithRefAssemblies Include="@(_SoloDBGeneratedContractReference)">
         <Aliases>SoloDBGeneratedOperations</Aliases>
       </ReferencePathWithRefAssemblies>
-      <ReferenceCopyLocalPaths Include="$(SoloDBGeneratedContract)" />
+      <ReferenceCopyLocalPaths Include="@(_SoloDBGeneratedContractReference)" />
     </ItemGroup>
   </Target>
   <Target Name="SoloDBGenerateHelperImplementation" AfterTargets="CoreCompile" BeforeTargets="GenerateBuildDependencyFile;CopyFilesToOutputDirectory;_ComputeResolvedCopyLocalPublishAssets"
@@ -32,14 +38,20 @@
     <SoloDatabase.Metadata.Tools.GenerateHelper Consumer="@(IntermediateAssembly)" Output="$(SoloDBGeneratedImplementation)" Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" References="@(ReferenceCopyLocalPaths);@(ReferencePath)">
       <Output TaskParameter="Active" PropertyName="SoloDBGeneratedActive" />
     </SoloDatabase.Metadata.Tools.GenerateHelper>
+    <GetAssemblyIdentity AssemblyFiles="$(SoloDBGeneratedImplementation)" Condition="'$(SoloDBGeneratedActive)' == 'true'">
+      <Output TaskParameter="Assemblies" ItemName="_SoloDBGeneratedImplementationIdentity" />
+    </GetAssemblyIdentity>
     <ItemGroup>
+      <_SoloDBGeneratedImplementationReference Include="@(_SoloDBGeneratedImplementationIdentity->'%(OriginalItemSpec)')" Condition="'$(SoloDBGeneratedActive)' == 'true'">
+        <FusionName>%(_SoloDBGeneratedImplementationIdentity.Identity)</FusionName>
+      </_SoloDBGeneratedImplementationReference>
       <ReferencePath Remove="@(ReferencePath)" Condition="'%(ReferencePath.Filename)' == '$(SoloDBGeneratedHelperIdentity)'" />
-      <ReferencePath Include="$(SoloDBGeneratedImplementation)" Condition="'$(SoloDBGeneratedActive)' == 'true'">
+      <ReferencePath Include="@(_SoloDBGeneratedImplementationReference)" Condition="'$(SoloDBGeneratedActive)' == 'true'">
         <CopyLocal>true</CopyLocal>
         <IncludeRuntimeDependency>true</IncludeRuntimeDependency>
       </ReferencePath>
       <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.Filename)' == '$(SoloDBGeneratedHelperIdentity)'" />
-      <ReferenceCopyLocalPaths Include="$(SoloDBGeneratedImplementation)" Condition="'$(SoloDBGeneratedActive)' == 'true'" />
+      <ReferenceCopyLocalPaths Include="@(_SoloDBGeneratedImplementationReference)" Condition="'$(SoloDBGeneratedActive)' == 'true'" />
     </ItemGroup>
     <Delete Files="$(OutDir)$(SoloDBGeneratedHelperIdentity).dll" Condition="'$(SoloDBGeneratedActive)' != 'true'" />
   </Target>

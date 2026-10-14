@@ -38,9 +38,15 @@
       <Output TaskParameter="TargetOutputs" ItemName="_SoloDBExecutableContext" />
     </MSBuild>
     <Error Condition="'@(_SoloDBExecutableContext)' == ''" Text="The current FSharp compiler context was not delivered." />
+    <GetAssemblyIdentity AssemblyFiles="@(_SoloDBExecutableContext)">
+      <Output TaskParameter="Assemblies" ItemName="_SoloDBExecutableContextIdentity" />
+    </GetAssemblyIdentity>
     <ItemGroup>
-      <ReferencePath Include="@(_SoloDBExecutableContext)" />
-      <ReferencePathWithRefAssemblies Include="@(_SoloDBExecutableContext)" />
+      <_SoloDBExecutableContextReference Include="@(_SoloDBExecutableContextIdentity->'%(OriginalItemSpec)')">
+        <FusionName>%(_SoloDBExecutableContextIdentity.Identity)</FusionName>
+      </_SoloDBExecutableContextReference>
+      <ReferencePath Include="@(_SoloDBExecutableContextReference)" />
+      <ReferencePathWithRefAssemblies Include="@(_SoloDBExecutableContextReference)" />
       <Compile Remove="$(IntermediateOutputPath)SoloDB.Generated/SoloDB.Access.fs" />
       <Compile Include="$(IntermediateOutputPath)SoloDB.Generated/SoloDB.Access.fs">
         <CompileOrder>CompileBefore</CompileOrder>
