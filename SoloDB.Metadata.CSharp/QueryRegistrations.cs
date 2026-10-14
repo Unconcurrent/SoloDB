@@ -6,6 +6,7 @@ using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Operations;
 
 namespace SoloDatabase.Metadata.CSharp;
 
@@ -141,167 +142,171 @@ internal static class QueryRegistrations
                         ParameterFacts(Callable(expression,site.Symbols));
                 }
             }
+            if (method.ContainingNamespace.ToDisplayString() != "SoloDatabase") continue;
+            var compiled = method.Name == "Compile";
+            if (compiled && (method.ContainingType.TypeArguments.Length == 0 ||
+                !roots.Contains(Name(method.ContainingType.TypeArguments[0])))) continue;
+            if (semantic.GetOperation(invocation) is not IInvocationOperation checkedCall) continue;
+            foreach (var expressionInput in QueryExpressionInputs.Arguments(compilation,checkedCall,site.Symbols))
             {
-                string Name(ITypeSymbol type) => QueryRegistrations.Name(site.Symbols.Type(type));
-                if (method.ContainingNamespace.ToDisplayString() != "SoloDatabase") continue;
-                var compiled = method.Name == "Compile";
-                if (compiled && (method.ContainingType.TypeArguments.Length == 0 ||
-                    !roots.Contains(Name(method.ContainingType.TypeArguments[0])))) continue;
-                var lambda = invocation.ArgumentList.Arguments.Select(argument => argument.Expression).OfType<LambdaExpressionSyntax>().FirstOrDefault();
-                var expression = method.Parameters.Select(parameter => parameter.Type).OfType<INamedTypeSymbol>().FirstOrDefault(type =>
-                    type.OriginalDefinition.ToDisplayString() == "System.Linq.Expressions.Expression<TDelegate>");
-                var callable = Callable(expression,site.Symbols);
+                var callable = Callable(QueryExpressionInputs.Contract(site.Symbols.Type(expressionInput.Parameter.Type)),site.Symbols);
                 if (callable?.DelegateInvokeMethod is not IMethodSymbol signature) continue;
                 ParameterFacts(callable);
-                if (lambda == null) continue;
-                var sourceType = site.Symbols.Type(compiled ? method.ContainingType.TypeArguments[0] : signature.Parameters[0].Type);
-                var source = Name(sourceType);
-                var argumentSymbols = signature.Parameters.Skip(1).Select(parameter => site.Symbols.Type(parameter.Type)).ToArray();
-                var argumentType = argumentSymbols.Length == 0 ? compilation.GetTypeByMetadataName("Microsoft.FSharp.Core.Unit")! :
-                    argumentSymbols.Length == 1 ? argumentSymbols[0] : compilation.GetTypeByMetadataName("System.ValueTuple`" + argumentSymbols.Length)!.Construct(argumentSymbols);
-                var arguments = signature.Parameters.Skip(1).Select(parameter => Name(parameter.Type)).ToArray();
-                var args = arguments.Length switch
+                foreach (var origin in expressionInput.Origins)
                 {
-                    0 => "global::Microsoft.FSharp.Core.Unit", 1 => arguments[0],
-                    _ => "global::System.ValueTuple<" + string.Join(",", arguments) + ">"
-                };
-                foreach (var node in lambda.DescendantNodes().OfType<ExpressionSyntax>())
-                {
-                    var info = semantic.GetTypeInfo(node);
-                    if (info.Type != null && site.Symbols.Type(info.Type) is IArrayTypeSymbol { Rank: > 1 } addressedArray && queryOperations.Add("arrayaddress|" + Name(addressedArray)))
-                        descriptors.Append("[assembly: global::SoloDatabase.Generated.SourceQueryRegistration(\"RegisterArrayAddress\",").Append(SourceTypes(new[] { addressedArray })).Append(")]\n");
-                    if (info.Type != null && site.Symbols.Type(info.Type) is ITypeSymbol type && EnumerableElement(type) is ITypeSymbol element)
+                    var lambda = origin.Lambda;
+                    semantic = compilation.GetSemanticModel(lambda.SyntaxTree);
+                    var symbols = origin.Symbols;
+                    string Name(ITypeSymbol type) => QueryRegistrations.Name(symbols.Type(type));
+                    var sourceType = symbols.Type(compiled ? method.ContainingType.TypeArguments[0] : signature.Parameters[0].Type);
+                    var source = Name(sourceType);
+                    var argumentSymbols = signature.Parameters.Skip(1).Select(parameter => symbols.Type(parameter.Type)).ToArray();
+                    var argumentType = argumentSymbols.Length == 0 ? compilation.GetTypeByMetadataName("Microsoft.FSharp.Core.Unit")! :
+                        argumentSymbols.Length == 1 ? argumentSymbols[0] : compilation.GetTypeByMetadataName("System.ValueTuple`" + argumentSymbols.Length)!.Construct(argumentSymbols);
+                    var arguments = signature.Parameters.Skip(1).Select(parameter => Name(parameter.Type)).ToArray();
+                    var args = arguments.Length switch
                     {
-                        if (element is INamedTypeSymbol { IsAnonymousType: true } anonymous)
-                            Carrier(anonymous, sourceType, argumentType);
-                        else if (Writable(element))
-                        {
-                            if (compiled) {
-                                TypedRegistration("RegisterSequence",sourceType,element);
-                                TypedRegistration("RegisterCompiledSequence",sourceType,argumentType,element);
-                            }
-                        }
-                    }
-                    if (node is InvocationExpressionSyntax call && semantic.GetSymbolInfo(call).Symbol is IMethodSymbol originalOperation)
+                        0 => "global::Microsoft.FSharp.Core.Unit", 1 => arguments[0],
+                        _ => "global::System.ValueTuple<" + string.Join(",", arguments) + ">"
+                    };
+                    foreach (var node in lambda.DescendantNodes().OfType<ExpressionSyntax>())
                     {
-                        var operation = site.Symbols.Method(originalOperation);
-                        if (operation.ContainingType.ToDisplayString() == "System.Linq.Queryable" &&
-                            SequenceElement(operation.ReturnType) == null && Writable(operation.ReturnType))
+                        var info = semantic.GetTypeInfo(node);
+                        if (info.Type != null && symbols.Type(info.Type) is IArrayTypeSymbol { Rank: > 1 } addressedArray && queryOperations.Add("arrayaddress|" + Name(addressedArray)))
+                            descriptors.Append("[assembly: global::SoloDatabase.Generated.SourceQueryRegistration(\"RegisterArrayAddress\",").Append(SourceTypes(new[] { addressedArray })).Append(")]\n");
+                        if (info.Type != null && symbols.Type(info.Type) is ITypeSymbol type && EnumerableElement(type) is ITypeSymbol element)
                         {
-                            if (compiled) TypedRegistration("RegisterResult",sourceType,operation.ReturnType);
-                            if (compiled) TypedRegistration("RegisterCompiledResult",sourceType,argumentType,operation.ReturnType);
-                        }
-                        else if (operation.ContainingType.ToDisplayString() != "System.Linq.Queryable") RegisterCall(operation);
-                    }
-                    if ((node is BinaryExpressionSyntax || node is PrefixUnaryExpressionSyntax || node is PostfixUnaryExpressionSyntax || node is CastExpressionSyntax) &&
-                        semantic.GetSymbolInfo(node).Symbol is IMethodSymbol operatorMethod &&
-                        operatorMethod.MethodKind is MethodKind.UserDefinedOperator or MethodKind.Conversion)
-                        RegisterCall(site.Symbols.Method(operatorMethod));
-                    if (semantic.GetConversion(node).MethodSymbol is IMethodSymbol conversionMethod)
-                        RegisterCall(site.Symbols.Method(conversionMethod));
-                    if (node is ElementAccessExpressionSyntax && semantic.GetSymbolInfo(node).Symbol is IPropertySymbol indexer && indexer.GetMethod != null)
-                        RegisterCall(site.Symbols.Method(indexer.GetMethod));
-                    if (node is MemberAccessExpressionSyntax access && semantic.GetSymbolInfo(access).Symbol is ISymbol member)
-                    {
-                        var valueType = member is IPropertySymbol property ? site.Symbols.Type(property.Type) : member is IFieldSymbol field ? site.Symbols.Type(field.Type) : null;
-                        var memberOwner = site.Symbols.Type(member.ContainingType);
-                        if (valueType != null && Writable(valueType) && Writable(memberOwner))
-                        {
-                            Operation(member is IFieldSymbol ? 0 : 1, memberOwner, member.Name, Array.Empty<ITypeSymbol>(), Array.Empty<ITypeSymbol>());
-                        }
-                    }
-                    if (node is ObjectCreationExpressionSyntax created && semantic.GetSymbolInfo(created).Symbol is IMethodSymbol originalConstructor &&
-                        site.Symbols.Method(originalConstructor) is IMethodSymbol constructor &&
-                        Writable(constructor.ContainingType) && constructor.Parameters.All(parameter => Writable(parameter.Type)))
-                    {
-                        if (constructor.Parameters.Any(parameter => parameter.RefKind != RefKind.None))
-                        {
-                            var key = "refconstructor|" + constructor.ToDisplayString(Display);
-                            if (queryOperations.Add(key)) descriptors.Append("[assembly: global::SoloDatabase.Generated.SourceQueryOperationRegistration(2,")
-                                .Append(Quote(SourceTypeIdentity.Encode(constructor.ContainingType))).Append(",\".ctor\",new string[0],new string[]{")
-                                .Append(string.Join(",",constructor.Parameters.Select(parameter => Quote((parameter.RefKind == RefKind.None ? "" : "R") + SourceTypeIdentity.Encode(parameter.Type)))))
-                                .Append("})]\n");
-                        }
-                        else Operation(2, constructor.ContainingType, ".ctor", Array.Empty<ITypeSymbol>(), constructor.Parameters.Select(parameter => parameter.Type));
-                    }
-                    if (node is CastExpressionSyntax cast)
-                        Conversion(semantic.GetTypeInfo(cast.Expression).Type, semantic.GetTypeInfo(cast).Type);
-                    if (node is PrefixUnaryExpressionSyntax unary && semantic.GetTypeInfo(unary.Operand).ConvertedType is ITypeSymbol originalInput && info.Type != null)
-                    {
-                        var input = site.Symbols.Type(originalInput);
-                        var output = site.Symbols.Type(info.Type);
-                        var unaryKind = unary.Kind() switch
-                        {
-                            SyntaxKind.UnaryMinusExpression => "Negate", SyntaxKind.UnaryPlusExpression => "UnaryPlus",
-                            SyntaxKind.LogicalNotExpression or SyntaxKind.BitwiseNotExpression => "Not", _ => null
-                        };
-                        var token = unary.OperatorToken.Text;
-                        if (unaryKind != null && Writable(input) && Writable(output) && Accessible(input) && Accessible(output))
-                        {
-                            Producer(4, unaryKind, new[] { input,output }, "value => unchecked((" + Name(output) + ")(" + token + "value))");
-                            if (unaryKind == "Negate")
-                                Producer(4, "NegateChecked", new[] { input,output }, "value => checked((" + Name(output) + ")(-value))");
-                        }
-                    }
-                    if (node is LambdaExpressionSyntax && Callable(info.ConvertedType,site.Symbols) is INamedTypeSymbol delegateType)
-                    {
-                        if (delegateType.DelegateInvokeMethod is IMethodSymbol invoke && !invoke.ReturnsVoid && Writable(invoke.ReturnType) &&
-                            invoke.Parameters.All(parameter => parameter.RefKind == RefKind.None && Writable(parameter.Type)))
-                        {
-                            if (!Accessible(delegateType)) TypedRegistration("RegisterLambda",new[] { (ITypeSymbol)delegateType }.Concat(invoke.Parameters.Select(parameter => parameter.Type)).ToArray());
-                            else
+                            if (element is INamedTypeSymbol { IsAnonymousType: true } anonymous)
+                                Carrier(anonymous, sourceType, argumentType);
+                            else if (Writable(element))
                             {
-                                var names = invoke.Parameters.Select((_, index) => "arg" + index).ToArray();
-                                var assignments = string.Join("",names.Select((name,index) => "values[offset+" + index + "]=" + name + ";"));
-                                Producer(6, "RegisterLambda", new[] { delegateType },
-                                    "(offset,size,run) => new " + Name(delegateType) + "((" + string.Join(",",names) +
-                                    ") => { var values = new object[size];" + assignments + "return (" + Name(invoke.ReturnType) + ")run.Invoke(values); })");
+                                if (compiled) {
+                                    TypedRegistration("RegisterSequence",sourceType,element);
+                                    TypedRegistration("RegisterCompiledSequence",sourceType,argumentType,element);
+                                }
                             }
                         }
-                    }
-                    if (node is BinaryExpressionSyntax binary && BinaryKind(binary.Kind()) is string kind)
-                    {
-                        var originalLeft = semantic.GetTypeInfo(binary.Left).ConvertedType;
-                        var originalRight = semantic.GetTypeInfo(binary.Right).ConvertedType;
-                        var left = originalLeft == null ? null : site.Symbols.Type(originalLeft);
-                        var right = originalRight == null ? null : site.Symbols.Type(originalRight);
-                        var result = info.Type == null ? null : site.Symbols.Type(info.Type);
-                        if (left != null && right != null && result != null && Writable(left) && Writable(right) && Writable(result) && Accessible(left) && Accessible(right) && Accessible(result))
+                        if (node is InvocationExpressionSyntax call && semantic.GetSymbolInfo(call).Symbol is IMethodSymbol originalOperation)
                         {
-                            Producer(5, kind, new[] { left,right,result }, "(left,right) => unchecked(left " + binary.OperatorToken.Text + " right)");
-                            if (kind is "Add" or "Subtract" or "Multiply")
-                                Producer(5, kind + "Checked", new[] { left,right,result }, "(left,right) => checked(left " + binary.OperatorToken.Text + " right)");
+                            var operation = symbols.Method(originalOperation);
+                            if (operation.ContainingType.ToDisplayString() == "System.Linq.Queryable" &&
+                                SequenceElement(operation.ReturnType) == null && Writable(operation.ReturnType))
+                            {
+                                if (compiled) TypedRegistration("RegisterResult",sourceType,operation.ReturnType);
+                                if (compiled) TypedRegistration("RegisterCompiledResult",sourceType,argumentType,operation.ReturnType);
+                            }
+                            else if (operation.ContainingType.ToDisplayString() != "System.Linq.Queryable") RegisterCall(operation);
                         }
+                        if ((node is BinaryExpressionSyntax || node is PrefixUnaryExpressionSyntax || node is PostfixUnaryExpressionSyntax || node is CastExpressionSyntax) &&
+                            semantic.GetSymbolInfo(node).Symbol is IMethodSymbol operatorMethod &&
+                            operatorMethod.MethodKind is MethodKind.UserDefinedOperator or MethodKind.Conversion)
+                            RegisterCall(symbols.Method(operatorMethod));
+                        if (semantic.GetConversion(node).MethodSymbol is IMethodSymbol conversionMethod)
+                            RegisterCall(symbols.Method(conversionMethod));
+                        if (node is ElementAccessExpressionSyntax && semantic.GetSymbolInfo(node).Symbol is IPropertySymbol indexer && indexer.GetMethod != null)
+                            RegisterCall(symbols.Method(indexer.GetMethod));
+                        if (node is MemberAccessExpressionSyntax access && semantic.GetSymbolInfo(access).Symbol is ISymbol member)
+                        {
+                            var valueType = member is IPropertySymbol property ? symbols.Type(property.Type) : member is IFieldSymbol field ? symbols.Type(field.Type) : null;
+                            var memberOwner = symbols.Type(member.ContainingType);
+                            if (valueType != null && Writable(valueType) && Writable(memberOwner))
+                            {
+                                Operation(member is IFieldSymbol ? 0 : 1, memberOwner, member.Name, Array.Empty<ITypeSymbol>(), Array.Empty<ITypeSymbol>());
+                            }
+                        }
+                        if (node is ObjectCreationExpressionSyntax created && semantic.GetSymbolInfo(created).Symbol is IMethodSymbol originalConstructor &&
+                            symbols.Method(originalConstructor) is IMethodSymbol constructor &&
+                            Writable(constructor.ContainingType) && constructor.Parameters.All(parameter => Writable(parameter.Type)))
+                        {
+                            if (constructor.Parameters.Any(parameter => parameter.RefKind != RefKind.None))
+                            {
+                                var key = "refconstructor|" + constructor.ToDisplayString(Display);
+                                if (queryOperations.Add(key)) descriptors.Append("[assembly: global::SoloDatabase.Generated.SourceQueryOperationRegistration(2,")
+                                    .Append(Quote(SourceTypeIdentity.Encode(constructor.ContainingType))).Append(",\".ctor\",new string[0],new string[]{")
+                                    .Append(string.Join(",",constructor.Parameters.Select(parameter => Quote((parameter.RefKind == RefKind.None ? "" : "R") + SourceTypeIdentity.Encode(parameter.Type)))))
+                                    .Append("})]\n");
+                            }
+                            else Operation(2, constructor.ContainingType, ".ctor", Array.Empty<ITypeSymbol>(), constructor.Parameters.Select(parameter => parameter.Type));
+                        }
+                        if (node is CastExpressionSyntax cast)
+                            Conversion(semantic.GetTypeInfo(cast.Expression).Type, semantic.GetTypeInfo(cast).Type);
+                        if (node is PrefixUnaryExpressionSyntax unary && semantic.GetTypeInfo(unary.Operand).ConvertedType is ITypeSymbol originalInput && info.Type != null)
+                        {
+                            var input = symbols.Type(originalInput);
+                            var output = symbols.Type(info.Type);
+                            var unaryKind = unary.Kind() switch
+                            {
+                                SyntaxKind.UnaryMinusExpression => "Negate", SyntaxKind.UnaryPlusExpression => "UnaryPlus",
+                                SyntaxKind.LogicalNotExpression or SyntaxKind.BitwiseNotExpression => "Not", _ => null
+                            };
+                            var token = unary.OperatorToken.Text;
+                            if (unaryKind != null && Writable(input) && Writable(output) && Accessible(input) && Accessible(output))
+                            {
+                                Producer(4, unaryKind, new[] { input,output }, "value => unchecked((" + Name(output) + ")(" + token + "value))");
+                                if (unaryKind == "Negate")
+                                    Producer(4, "NegateChecked", new[] { input,output }, "value => checked((" + Name(output) + ")(-value))");
+                            }
+                        }
+                        if (node is LambdaExpressionSyntax && Callable(info.ConvertedType,symbols) is INamedTypeSymbol delegateType)
+                        {
+                            if (delegateType.DelegateInvokeMethod is IMethodSymbol invoke && !invoke.ReturnsVoid && Writable(invoke.ReturnType) &&
+                                invoke.Parameters.All(parameter => parameter.RefKind == RefKind.None && Writable(parameter.Type)))
+                            {
+                                if (!Accessible(delegateType)) TypedRegistration("RegisterLambda",new[] { (ITypeSymbol)delegateType }.Concat(invoke.Parameters.Select(parameter => parameter.Type)).ToArray());
+                                else
+                                {
+                                    var names = invoke.Parameters.Select((_, index) => "arg" + index).ToArray();
+                                    var assignments = string.Join("",names.Select((name,index) => "values[offset+" + index + "]=" + name + ";"));
+                                    Producer(6, "RegisterLambda", new[] { delegateType },
+                                        "(offset,size,run) => new " + Name(delegateType) + "((" + string.Join(",",names) +
+                                        ") => { var values = new object[size];" + assignments + "return (" + Name(invoke.ReturnType) + ")run.Invoke(values); })");
+                                }
+                            }
+                        }
+                        if (node is BinaryExpressionSyntax binary && BinaryKind(binary.Kind()) is string kind)
+                        {
+                            var originalLeft = semantic.GetTypeInfo(binary.Left).ConvertedType;
+                            var originalRight = semantic.GetTypeInfo(binary.Right).ConvertedType;
+                            var left = originalLeft == null ? null : symbols.Type(originalLeft);
+                            var right = originalRight == null ? null : symbols.Type(originalRight);
+                            var result = info.Type == null ? null : symbols.Type(info.Type);
+                            if (left != null && right != null && result != null && Writable(left) && Writable(right) && Writable(result) && Accessible(left) && Accessible(right) && Accessible(result))
+                            {
+                                Producer(5, kind, new[] { left,right,result }, "(left,right) => unchecked(left " + binary.OperatorToken.Text + " right)");
+                                if (kind is "Add" or "Subtract" or "Multiply")
+                                    Producer(5, kind + "Checked", new[] { left,right,result }, "(left,right) => checked(left " + binary.OperatorToken.Text + " right)");
+                            }
+                        }
+                        Conversion(info.Type, info.ConvertedType);
                     }
-                    Conversion(info.Type, info.ConvertedType);
-                }
 
-                void Conversion(ITypeSymbol? input, ITypeSymbol? output)
-                {
-                    if (input == null || output == null) return;
-                    input = site.Symbols.Type(input); output = site.Symbols.Type(output);
-                    if (SymbolEqualityComparer.Default.Equals(input, output) || !Writable(input) || !Writable(output) || !Accessible(input) || !Accessible(output) ||
-                        input.TypeKind == TypeKind.Interface || output.TypeKind == TypeKind.Interface || SequenceElement(input) != null) return;
-                    Producer(4, "Convert", new[] { input,output }, "value => unchecked((" + Name(output) + ")value)");
-                    Producer(4, "ConvertChecked", new[] { input,output }, "value => checked((" + Name(output) + ")value)");
-                }
-                void RegisterCall(IMethodSymbol operation)
-                {
-                    operation = operation.ReducedFrom == null ? operation : operation.IsGenericMethod ?
-                        operation.ReducedFrom.Construct(operation.TypeArguments.ToArray()) : operation.ReducedFrom;
-                    if (operation.ReturnsByRef || operation.ReturnsByRefReadonly || operation.ReturnType.IsRefLikeType || operation.Parameters.Any(parameter => parameter.Type.IsRefLikeType)) return;
-                    if (operation.ReturnsVoid || operation.Parameters.Any(parameter => parameter.RefKind != RefKind.None))
+                    void Conversion(ITypeSymbol? input, ITypeSymbol? output)
                     {
-                        var key = "refcall|" + operation.ToDisplayString(Display);
-                        if (!queryOperations.Add(key)) return;
-                        descriptors.Append("[assembly: global::SoloDatabase.Generated.SourceQueryOperationRegistration(3,")
-                            .Append(Quote(SourceTypeIdentity.Encode(operation.ContainingType))).Append(',').Append(Quote(operation.MetadataName)).Append(',')
-                            .Append(SourceTypes(operation.TypeArguments)).Append(",new string[]{")
-                            .Append(string.Join(",",operation.Parameters.Select(parameter => Quote((parameter.RefKind == RefKind.None ? "" : "R") + SourceTypeIdentity.Encode(parameter.Type)))))
-                            .Append("})]\n");
-                        return;
+                        if (input == null || output == null) return;
+                        input = symbols.Type(input); output = symbols.Type(output);
+                        if (SymbolEqualityComparer.Default.Equals(input, output) || !Writable(input) || !Writable(output) || !Accessible(input) || !Accessible(output) ||
+                            input.TypeKind == TypeKind.Interface || output.TypeKind == TypeKind.Interface || SequenceElement(input) != null) return;
+                        Producer(4, "Convert", new[] { input,output }, "value => unchecked((" + Name(output) + ")value)");
+                        Producer(4, "ConvertChecked", new[] { input,output }, "value => checked((" + Name(output) + ")value)");
                     }
-                    Operation(3, operation.ContainingType, operation.MetadataName, operation.TypeArguments, operation.Parameters.Select(parameter => parameter.Type));
+                    void RegisterCall(IMethodSymbol operation)
+                    {
+                        operation = operation.ReducedFrom == null ? operation : operation.IsGenericMethod ?
+                            operation.ReducedFrom.Construct(operation.TypeArguments.ToArray()) : operation.ReducedFrom;
+                        if (operation.ReturnsByRef || operation.ReturnsByRefReadonly || operation.ReturnType.IsRefLikeType || operation.Parameters.Any(parameter => parameter.Type.IsRefLikeType)) return;
+                        if (operation.ReturnsVoid || operation.Parameters.Any(parameter => parameter.RefKind != RefKind.None))
+                        {
+                            var key = "refcall|" + operation.ToDisplayString(Display);
+                            if (!queryOperations.Add(key)) return;
+                            descriptors.Append("[assembly: global::SoloDatabase.Generated.SourceQueryOperationRegistration(3,")
+                                .Append(Quote(SourceTypeIdentity.Encode(operation.ContainingType))).Append(',').Append(Quote(operation.MetadataName)).Append(',')
+                                .Append(SourceTypes(operation.TypeArguments)).Append(",new string[]{")
+                                .Append(string.Join(",",operation.Parameters.Select(parameter => Quote((parameter.RefKind == RefKind.None ? "" : "R") + SourceTypeIdentity.Encode(parameter.Type)))))
+                                .Append("})]\n");
+                            return;
+                        }
+                        Operation(3, operation.ContainingType, operation.MetadataName, operation.TypeArguments, operation.Parameters.Select(parameter => parameter.Type));
+                    }
                 }
             }
         }
@@ -341,12 +346,16 @@ internal static class QueryRegistrations
     internal sealed class Symbols
     {
         private readonly Compilation compilation;
+        private readonly Dictionary<IParameterSymbol,QueryExpressionInputs.Origin[]> inputs = new(SymbolEqualityComparer.Default);
         private readonly Dictionary<ITypeParameterSymbol,ITypeSymbol> parameters = new(SymbolEqualityComparer.Default);
         internal Symbols(Compilation compilation, IMethodSymbol? method = null, Symbols? enclosing = null)
         {
             this.compilation = compilation;
             if (enclosing != null)
+            {
                 foreach (var pair in enclosing.parameters) parameters.Add(pair.Key,pair.Value);
+                foreach (var pair in enclosing.inputs) inputs.Add(pair.Key,pair.Value);
+            }
             if (method == null) return;
             for (var index = 0; index < method.TypeArguments.Length; index++)
                 parameters[method.OriginalDefinition.TypeParameters[index]] = method.TypeArguments[index];
@@ -376,7 +385,15 @@ internal static class QueryRegistrations
             }
             return named.TypeArguments.Length == 0 ? root : root.Construct(named.TypeArguments.Select(Type).ToArray());
         }
-        internal bool Same(Symbols other) => parameters.Count == other.parameters.Count && parameters.All(pair =>
+        internal QueryExpressionInputs.Origin[] Input(IParameterSymbol parameter) =>
+            inputs.TryGetValue(parameter.OriginalDefinition,out var origins) ? origins : Array.Empty<QueryExpressionInputs.Origin>();
+        internal void BindInput(IParameterSymbol parameter, QueryExpressionInputs.Origin[] origins) =>
+            inputs[parameter.OriginalDefinition] = origins;
+        internal bool Same(Symbols other) => SameTypes(other) && inputs.Count == other.inputs.Count && inputs.All(pair =>
+            other.inputs.TryGetValue(pair.Key,out var values) && pair.Value.Length == values.Length &&
+            pair.Value.Zip(values,(left,right) => left.Lambda.SyntaxTree == right.Lambda.SyntaxTree && left.Lambda.Span == right.Lambda.Span &&
+                left.Symbols.SameTypes(right.Symbols)).All(equal => equal));
+        private bool SameTypes(Symbols other) => parameters.Count == other.parameters.Count && parameters.All(pair =>
             other.parameters.TryGetValue(pair.Key,out var actual) && SymbolEqualityComparer.Default.Equals(pair.Value,actual));
         internal IMethodSymbol Method(IMethodSymbol method)
         {
@@ -446,9 +463,14 @@ internal static class QueryRegistrations
                 return;
             }
             if (method.DeclaringSyntaxReferences.Length == 0 ||
-                method.MethodKind != MethodKind.LocalFunction && !method.IsGenericMethod && !method.ContainingType.IsGenericType ||
                 !method.TypeArguments.All(Closed) || !method.ContainingType.TypeArguments.All(Closed)) return;
+            var boundInputs = semantic.GetOperation(invocation) is IInvocationOperation checkedCall
+                ? QueryExpressionInputs.Arguments(compilation,checkedCall,symbols).ToArray()
+                : Array.Empty<(IParameterSymbol Parameter, QueryExpressionInputs.Origin[] Origins)>();
+            if (method.MethodKind != MethodKind.LocalFunction && !method.IsGenericMethod && !method.ContainingType.IsGenericType &&
+                boundInputs.All(input => input.Origins.Length == 0)) return;
             var actual = new Symbols(compilation,method,symbols);
+            foreach (var input in boundInputs) actual.BindInput(input.Parameter,input.Origins);
             if (!visited.TryGetValue(method,out var contexts)) visited.Add(method,contexts = new List<Symbols>());
             if (contexts.Any(previous => previous.Same(actual))) return;
             contexts.Add(actual);

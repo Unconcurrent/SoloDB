@@ -95,7 +95,7 @@ type ProjectGeneration private () =
                     |> function [|path|] -> path | _ -> invalidOp "SoloDB generation requires exactly one current runtime reference."
                 use product = AssemblyDefinition.ReadAssembly(productPath)
                 use references = ModuleDefinition.CreateModule("SoloDB.CompilerReferences", ModuleKind.Dll)
-                let queries, queryCalls, queryWitnesses, queryLambdas, inferredRoots, providerOperations = QueryDiscovery.collect result references parsedInputs (Path.GetDirectoryName(project)) (fun location methodName ->
+                let queries, queryCalls, queryWitnesses, queryLambdas, inferredRoots, providerOperations, operationAccess = QueryDiscovery.collect result references parsedInputs (Path.GetDirectoryName(project)) (fun location methodName ->
                     report.Invoke(location.FileName,location.StartLine,location.StartColumn + 1,
                         sprintf "Cannot infer closed types for SoloDB use '%s'. Supply explicit SoloDBAOT model roots and a closed query signature for any runtime-selected use." methodName))
                 let models = ModelDiscovery.collect result references inferredRoots parsedInputs (Path.GetDirectoryName(project))
@@ -114,7 +114,7 @@ type ProjectGeneration private () =
                 source.AppendLine("do ()") |> ignore
                 let template = Path.Combine(workspace, "Template.dll")
                 let attribute = if access.Length = 0 then null else ModelDiscovery.accessAttribute result references assemblyName
-                GeneratedJsonAssembly.Write(template, "SoloDB.Generated.FSharp", "Template", product, models, attribute, queries, queryCalls, queryWitnesses, queryLambdas, providerOperations, referencePaths)
+                GeneratedJsonAssembly.Write(template, "SoloDB.Generated.FSharp", "Template", product, models, attribute, queries, queryCalls, queryWitnesses, queryLambdas, providerOperations, referencePaths, operationAccess)
                 Directory.CreateDirectory(Path.GetDirectoryName(attributeSource)) |> ignore
                 File.Copy(template, templatePath, true)
                 File.WriteAllText(attributeSource, source.ToString())

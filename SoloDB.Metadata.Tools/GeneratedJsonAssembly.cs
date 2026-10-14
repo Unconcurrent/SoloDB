@@ -85,7 +85,7 @@ public static partial class GeneratedJsonAssembly
         HelperAssembly.Write(assembly, path, null);
     }
 
-    public static void Write(string path, string identity, string name, AssemblyDefinition product, GeneratedModel[] models, TypeReference? existingAccessAttribute = null, GeneratedQueryOperation[]? queries = null, GeneratedQueryCall[]? queryCalls = null, GeneratedQueryWitness[]? queryWitnesses = null, GeneratedQueryLambda[]? queryLambdas = null, GeneratedProviderOperation[]? providerOperations = null, string[]? references = null)
+    public static void Write(string path, string identity, string name, AssemblyDefinition product, GeneratedModel[] models, TypeReference? existingAccessAttribute = null, GeneratedQueryOperation[]? queries = null, GeneratedQueryCall[]? queryCalls = null, GeneratedQueryWitness[]? queryWitnesses = null, GeneratedQueryLambda[]? queryLambdas = null, GeneratedProviderOperation[]? providerOperations = null, string[]? references = null, string[]? operationAccessAssemblies = null)
     {
         using var assembly = HelperAssembly.Create(identity);
         var module = assembly.MainModule;
@@ -100,7 +100,7 @@ public static partial class GeneratedJsonAssembly
         RegisterModels(new GeneratedJsonDefinitions(references),module,owner,il,product,models);
         il.Emit(OpCodes.Ret);
         GuardRegistration(module, owner, entry);
-        var access = models.SelectMany(model => model.AccessAssemblies).Concat(new[] { product.Name.Name }).Distinct().ToArray();
+        var access = models.SelectMany(model => model.AccessAssemblies).Concat(operationAccessAssemblies ?? Array.Empty<string>()).Concat(new[] { product.Name.Name }).Distinct().ToArray();
         if (access.Length != 0)
         {
             MethodReference? constructor = null;
