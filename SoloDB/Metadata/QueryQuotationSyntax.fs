@@ -25,6 +25,9 @@ module internal QueryQuotationSyntax =
             | "ToInt64" | "ToUInt64" | "ToSingle" | "ToDouble" | "ToDecimal" -> true
             | _ -> false) then
             Some(Expression.MakeUnary((if checkedOwner then ExpressionType.ConvertChecked else ExpressionType.Convert),arguments.[0],method.ReturnType) :> Expression)
+        elif arguments.Length = 1 && numeric arguments.[0].Type && arguments.[0].Type.Equals(method.ReturnType)
+             && method.Name = "op_UnaryNegation" then
+            Some(Expression.MakeUnary((if checkedOwner then ExpressionType.NegateChecked else ExpressionType.Negate),arguments.[0],method.ReturnType) :> Expression)
         elif arguments.Length = 2 && arguments.[0].Type.Equals(arguments.[1].Type) &&
            (method.Name = "op_Equality" || method.Name = "op_Inequality") then
             let kind = if method.Name = "op_Equality" then ExpressionType.Equal else ExpressionType.NotEqual
