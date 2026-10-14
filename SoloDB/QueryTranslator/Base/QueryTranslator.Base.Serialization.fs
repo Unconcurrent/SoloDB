@@ -216,7 +216,7 @@ module internal QueryTranslatorSerialization =
             | _ -> child
         let child =
             match child.Operand with
-            | ValueSome operand when operand.Accesses.Length = 0 && producedChildPosition.IsSome && parent.Children.Length > 0 -> fromDescriptor operand.Descriptor child
+            | ValueSome operand when parent.Operand.IsSome && operand.Accesses.Length = 0 && producedChildPosition.IsSome && parent.Children.Length > 0 -> fromDescriptor operand.Descriptor child
             | _ -> child
         let child =
             if DBRefTypeHelpers.isSingleReferenceType child.OriginalType || DBRefTypeHelpers.isManyReferenceType child.OriginalType then
