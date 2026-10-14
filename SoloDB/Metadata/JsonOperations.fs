@@ -108,6 +108,10 @@ type JsonValue =
     /// <summary>Represents a JSON object, a dictionary from string keys to JsonValue instances.</summary>
     | Object of IDictionary<string, JsonValue>
 
+    [<System.Diagnostics.CodeAnalysis.DynamicDependency(
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicProperties, typeof<JsonValue>)>]
+    static member internal InvalidValue<'T>(message: string): 'T = failwith message
+
     static member private EqualsCore (left: JsonValue) (right: JsonValue) : bool =
         let rec equals (l: JsonValue) (r: JsonValue) =
             match l, r with
@@ -1365,7 +1369,7 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         | Number value -> value.ToString(CultureInfo.InvariantCulture)
         | String value -> value
         | Null -> "NaN"
-        | other -> failwithf "Cannot convert %A into %s" other typeof<'T>.FullName
+        | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'T>.FullName)
 
     static member internal CreateNumeric<'T>() =
         let flags = BindingFlags.NonPublic ||| BindingFlags.Static
@@ -1513,7 +1517,7 @@ and [<AbstractClass; Sealed>] JsonMetadata =
                 loaded.Invoke(identity,unbox<'Target> value)
             | Object values when values.ContainsKey "$dbrefTypedId" ->
                 failwithf "Cannot deserialize DBRef<%s> from $dbrefTypedId marker: only DBRef<TTarget,TId> supports typed-id wire format." typeof<'Target>.Name
-            | other -> failwithf "Cannot deserialize DBRef<%s> from %A" typeof<'Target>.Name other
+            | other -> JsonValue.InvalidValue(sprintf "Cannot deserialize DBRef<%s> from %A" typeof<'Target>.Name other)
         JsonCodec<'Reference>(Func<'Reference,JsonValue>(write),Func<JsonValue,'Reference>(read),JsonCodecShape.Scalar)
 
     static member internal RegisterFileReference(): unit =
@@ -1601,7 +1605,7 @@ and [<AbstractClass; Sealed>] JsonMetadata =
                 | ValueSome typedId -> DBRef<'T,'Id>.Loaded(id,unbox<'Id> typedId,unbox<'T> entity)
                 | ValueNone -> DBRef<'T,'Id>.Loaded(id,unbox<'T> entity)
             | JsonValue.Object values when values.ContainsKey "$dbrefTypedId" -> DBRef<'T,'Id>.To(values.["$dbrefTypedId"].ToObject<'Id>())
-            | other -> failwithf "Cannot deserialize DBRef<%s> from %A" typeof<'T>.Name other
+            | other -> JsonValue.InvalidValue(sprintf "Cannot deserialize DBRef<%s> from %A" typeof<'T>.Name other)
         JsonCodec<DBRef<'T,'Id>>(Func<DBRef<'T,'Id>,JsonValue>(write),Func<JsonValue,DBRef<'T,'Id>>(read),JsonCodecShape.ReferenceIdentity typeof<'Id>)
     /// Registers the shared typed-ID reference policy over original generated types.
     static member internal RegisterTypedDocument<'T,'Id>() =
@@ -1894,7 +1898,7 @@ and private JsonSequenceOperations =
         | Object _ when json.Contains "$type" && json.Contains "$values" ->
             if supportsValuesWrapper then JsonReadOperations<'T>.Deserialize json["$values"]
             else failwithf "Type not supported for Newtownsoft deserialization: %s" typeof<'T>.FullName
-        | other -> failwithf "Expected JsonValue.List or Object{$type, $values} for array deserialization but got %A" other
+        | other -> JsonValue.InvalidValue(sprintf "Expected JsonValue.List or Object{$type, $values} for array deserialization but got %A" other)
 
 and private JsonReadOperations<'A> =
     static let read =
@@ -1984,7 +1988,7 @@ and private JsonImpl =
     static member internal AsListOrFail(json: JsonValue) =
         match json with
         | List l -> l
-        | other -> failwithf "Expected json object to be a list, instead it is a %A" other
+        | other -> JsonValue.InvalidValue(sprintf "Expected json object to be a list, instead it is a %A" other)
 
     /// <summary>
     /// Asserts that a JsonValue is an Object and returns the underlying dictionary, or fails.
@@ -1994,7 +1998,7 @@ and private JsonImpl =
     static member internal AsDictOrFail(json: JsonValue) =
         match json with
         | Object d -> d
-        | other -> failwithf "Expected json object to be a object/dictionary, instead it is a %A" other
+        | other -> JsonValue.InvalidValue(sprintf "Expected json object to be a object/dictionary, instead it is a %A" other)
 
     /// <summary>
     /// Tries to determine the target type for deserialization from a "$type" property in the JSON object.
@@ -2049,7 +2053,7 @@ and private JsonImpl =
                 result.Add(JsonReadOperations<'T>.Deserialize item)
             JsonImpl.SequenceResult<'T,_>(result) :> IEnumerable<'T>
         | other ->
-            failwithf "Expected JsonValue.List but got %A" other
+            JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
 
     static member internal KeyValuePairDeserialize<'Key,'Value>(json: JsonValue): KeyValuePair<'Key,'Value> =
         KeyValuePair<'Key,'Value>(JsonReadOperations<'Key>.Deserialize json["Key"], JsonReadOperations<'Value>.Deserialize json["Value"])
@@ -2108,7 +2112,7 @@ and private JsonImpl =
                 result.Add(JsonReadOperations<'T>.Deserialize item)
             result
         | other ->
-            failwithf "Expected JsonValue.List but got %A" other
+            JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
 
     /// <summary>
     /// Deserializes a JsonValue.List into an F# list.
@@ -2124,7 +2128,7 @@ and private JsonImpl =
                     JsonReadOperations<'T>.Deserialize item
             ]
         | other ->
-            failwithf "Expected JsonValue.List but got %A" other
+            JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
 
     /// <summary>
     /// Deserializes a JsonValue.List into an array.
@@ -2138,7 +2142,7 @@ and private JsonImpl =
             let arr = Array.init items.Count (fun i -> JsonReadOperations<'T>.Deserialize items.[i])
             arr
         | other ->
-            failwithf "Expected JsonValue.List but got %A" other
+            JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
     
     /// <summary>
     /// Serializes a dictionary (IDictionary or IReadOnlyDictionary) into a JsonValue.Object.
@@ -2183,7 +2187,7 @@ and private JsonImpl =
                 result.Add(JsonReadOperations<'T>.Deserialize item) |> ignore
             result
         | other ->
-            failwithf "Expected JsonValue.List but got %A" other
+            JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
 
     /// <summary>
     /// Deserializes a JsonValue.List into a Queue.
@@ -2199,7 +2203,7 @@ and private JsonImpl =
                 result.Enqueue(JsonReadOperations<'T>.Deserialize item)
             result
         | other ->
-            failwithf "Expected JsonValue.List but got %A" other
+            JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
 
     /// <summary>
     /// Deserializes a JsonValue.List into a Stack.
@@ -2216,7 +2220,7 @@ and private JsonImpl =
                 result.Push(JsonReadOperations<'T>.Deserialize items.[i])
             result
         | other ->
-            failwithf "Expected JsonValue.List but got %A" other
+            JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
 
     /// <summary>
     /// Deserializes a JsonValue.List into a LinkedList.
@@ -2232,7 +2236,7 @@ and private JsonImpl =
                 result.AddLast(JsonReadOperations<'T>.Deserialize item) |> ignore
             result
         | other ->
-            failwithf "Expected JsonValue.List but got %A" other
+            JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" other)
 
     /// <summary>
     /// Deserializes a JsonValue.Object into an IDictionary.
@@ -2252,7 +2256,7 @@ and private JsonImpl =
                     result.Add(typedKey, typedValue)
             result :> IDictionary<'TKey, 'TValue>
         | other ->
-            failwithf "Expected JsonValue.Object but got %A" other
+            JsonValue.InvalidValue(sprintf "Expected JsonValue.Object but got %A" other)
 
     /// <summary>
     /// Deserializes a JsonValue.Object into an IReadOnlyDictionary.
@@ -2273,7 +2277,7 @@ and private JsonImpl =
                     dict.Add(typedKey, typedValue)
             dict :> IReadOnlyDictionary<'TKey, 'TValue>
         | other ->
-            failwithf "Expected JsonValue.Object but got %A" other
+            JsonValue.InvalidValue(sprintf "Expected JsonValue.Object but got %A" other)
 
     /// <summary>
     /// Deserializes a JsonValue.Object into a non-generic IDictionary (Hashtable).
@@ -2290,7 +2294,7 @@ and private JsonImpl =
                     result.Add(key, typedValue)
             result :> IDictionary
         | other ->
-            failwithf "Expected JsonValue.Object but got %A" other
+            JsonValue.InvalidValue(sprintf "Expected JsonValue.Object but got %A" other)
 
     /// <summary>
     /// Deserializes a JsonValue.Object into a custom dictionary type that implements IDictionary.
@@ -2311,7 +2315,7 @@ and private JsonImpl =
                     result.Add(KeyValuePair<'TKey, 'TValue>(typedKey, typedValue))
             result
         | other ->
-            failwithf "Expected JsonValue.Object but got %A" other
+            JsonValue.InvalidValue(sprintf "Expected JsonValue.Object but got %A" other)
 
     /// <summary>
     /// Deserializes a JsonValue.Object into a custom non-generic dictionary type.
@@ -2329,7 +2333,7 @@ and private JsonImpl =
                     result.Add(key, typedValue)
             result
         | other ->
-            failwithf "Expected JsonValue.Object but got %A" other
+            JsonValue.InvalidValue(sprintf "Expected JsonValue.Object but got %A" other)
 
     /// <summary>
     /// A cached function to deserialize a JsonValue to a specific runtime type.
@@ -2450,7 +2454,7 @@ and private JsonScalarOperations<'A> =
             match x with
             | Number i -> cast i
             | String s -> parse s
-            | other -> failwithf "Cannot convert %A into %s" other typeof<'T>.FullName
+            | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'T>.FullName)
 
         match typeof<'A> with
         | t when typeof<obj>.Equals(t) ->
@@ -2511,7 +2515,7 @@ and private JsonScalarOperations<'A> =
                 | JsonValue.Number n -> (if n = Decimal.Zero then false else true)
                 | JsonValue.String s -> s = "true" || (JsonImpl.IsParsableToNumber (s.AsSpan()) && int64 s <> 0)
                 | JsonValue.Null -> false
-                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'A>.FullName)
                 
             ) :> obj :?> Func<JsonValue,'A> |> ValueSome
 
@@ -2530,7 +2534,7 @@ and private JsonScalarOperations<'A> =
                 match json with
                 | JsonValue.String s -> JsonHelper.JSONStringToByteArray s
                 | JsonValue.Null -> null
-                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'A>.FullName)
                 
             ) :> obj :?> Func<JsonValue,'A> |> ValueSome
 
@@ -2539,7 +2543,7 @@ and private JsonScalarOperations<'A> =
                 match json with
                 | JsonValue.String s -> ResizeArray<byte>(JsonHelper.JSONStringToByteArray s)
                 | JsonValue.Null -> null
-                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'A>.FullName)
                 
             ) :> obj :?> Func<JsonValue,'A> |> ValueSome
 
@@ -2547,7 +2551,7 @@ and private JsonScalarOperations<'A> =
             Func<_,_>(fun (json: JsonValue) ->
                 match json with
                 | JsonValue.String s -> JsonHelper.JSONStringToByteArray s |> Array.toList
-                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'A>.FullName)
                 
             ) :> obj :?> Func<JsonValue,'A> |> ValueSome
 
@@ -2556,7 +2560,7 @@ and private JsonScalarOperations<'A> =
                 match json with
                 | JsonValue.Null -> null
                 | JsonValue.String s -> JsonHelper.JSONStringToByteArray s :> byte seq
-                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'A>.FullName)
                 
             ) :> obj :?> Func<JsonValue,'A> |> ValueSome
 
@@ -2566,7 +2570,7 @@ and private JsonScalarOperations<'A> =
                 | JsonValue.String s -> s
                 | JsonValue.Number i -> string i
                 | JsonValue.Null -> null
-                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'A>.FullName)
                 
             ) :> obj :?> Func<JsonValue,'A> |> ValueSome
 
@@ -2575,7 +2579,7 @@ and private JsonScalarOperations<'A> =
                 match json with
                 | JsonValue.String s -> TypeMetadata.nameToType s
                 | JsonValue.Null -> null
-                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'A>.FullName)
                 
             ) :> obj :?> Func<JsonValue,'A> |> ValueSome
 
@@ -2583,7 +2587,7 @@ and private JsonScalarOperations<'A> =
             Func<_,_>(fun (json: JsonValue) ->
                 match json with
                 | JsonValue.String s -> Guid.Parse s
-                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'A>.FullName)
                 
             ) :> obj :?> Func<JsonValue,'A> |> ValueSome
 
@@ -2592,7 +2596,7 @@ and private JsonScalarOperations<'A> =
                 match json with
                 | JsonValue.String s -> DateTimeOffset.Parse(s, CultureInfo.InvariantCulture)
                 | JsonValue.Number n -> n |> int64 |> DateTimeOffset.FromUnixTimeMilliseconds
-                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'A>.FullName)
             ) :> obj :?> Func<JsonValue,'A> |> ValueSome
     
         | OfType (id: DateTime -> DateTime) ->
@@ -2600,7 +2604,7 @@ and private JsonScalarOperations<'A> =
                 match json with
                 | JsonValue.String s -> DateTime.Parse(s, CultureInfo.InvariantCulture)
                 | JsonValue.Number n -> n |> int64 |> DateTime.FromBinary
-                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'A>.FullName)
             ) :> obj :?> Func<JsonValue,'A> |> ValueSome
     
         | OfType (id: DateOnly -> DateOnly) ->
@@ -2608,7 +2612,7 @@ and private JsonScalarOperations<'A> =
                 match json with
                 | JsonValue.String s -> DateOnly.Parse(s, CultureInfo.InvariantCulture)
                 | JsonValue.Number n -> n |> int |> DateOnly.FromDayNumber
-                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'A>.FullName)
             ) :> obj :?> Func<JsonValue,'A> |> ValueSome
     
         | OfType (id: TimeOnly -> TimeOnly) ->
@@ -2616,7 +2620,7 @@ and private JsonScalarOperations<'A> =
                 match json with
                 | JsonValue.String s -> TimeOnly.Parse(s, CultureInfo.InvariantCulture)
                 | JsonValue.Number n -> n |> float |> TimeSpan.FromMilliseconds |> TimeOnly.FromTimeSpan
-                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'A>.FullName)
             ) :> obj :?> Func<JsonValue,'A> |> ValueSome
     
         | OfType (id: TimeSpan -> TimeSpan) ->
@@ -2624,7 +2628,7 @@ and private JsonScalarOperations<'A> =
                 match json with
                 | JsonValue.String s -> TimeSpan.Parse(s, CultureInfo.InvariantCulture)
                 | JsonValue.Number n -> n |> float |> TimeSpan.FromMilliseconds
-                | other -> failwithf "Cannot convert %A into %s" other typeof<'A>.FullName
+                | other -> JsonValue.InvalidValue(sprintf "Cannot convert %A into %s" other typeof<'A>.FullName)
             ) :> obj :?> Func<JsonValue,'A> |> ValueSome
 
         | OfType (id: JsonValue -> JsonValue) ->
@@ -3762,7 +3766,7 @@ and private JsonRawCollections<'Contract> =
         (context: byref<JsonReadContext<'R>>, marker: bool): 'Reference =
         if marker then
             failwithf "Cannot deserialize DBRef<%s> from $dbrefTypedId marker: only DBRef<TTarget,TId> supports typed-id wire format." typeof<'Target>.Name
-        else failwithf "Cannot deserialize DBRef<%s> from %A" typeof<'Target>.Name (JsonRawInput<'Contract>.Tree<'R> &context)
+        else JsonValue.InvalidValue(sprintf "Cannot deserialize DBRef<%s> from %A" typeof<'Target>.Name (JsonRawInput<'Contract>.Tree<'R> &context))
 
     static member internal PhysicalReader<'Reference,'Target,'R when 'R : struct and 'R :> IJsonReader>
         (unloaded: Func<int64,'Reference>, loaded: Func<int64,'Target,'Reference>): JsonDirectReader<'Reference,'R> =
@@ -3775,7 +3779,7 @@ and private JsonRawCollections<'Contract> =
             | NumberToken _ -> unloaded.Invoke(JsonRawRead<'Contract>.PhysicalId<'R> &context)
             | OpenBracket ->
                 if isNull context.Elements then JsonReadCursor.scan &context
-                if context.Elements.Count <> 2 then failwithf "Cannot deserialize DBRef<%s> from %A" typeof<'Target>.Name (JsonRawInput<'Contract>.Tree<'R> &context)
+                if context.Elements.Count <> 2 then JsonValue.InvalidValue(sprintf "Cannot deserialize DBRef<%s> from %A" typeof<'Target>.Name (JsonRawInput<'Contract>.Tree<'R> &context))
                 let mutable first = JsonReadCursor.element &context 0
                 let identity = JsonValue.ReadRawPhysicalId<'R> &first
                 let mutable second = JsonReadCursor.element &context 1
@@ -3788,7 +3792,7 @@ and private JsonRawCollections<'Contract> =
             | OpenBrace ->
                 let marker = JsonMarkerCapture<'R>.Read &context
                 JsonRawCollections<'Contract>.PhysicalObject<'Reference,'Target,'R>(&context,marker.Present)
-            | _ -> failwithf "Cannot deserialize DBRef<%s> from %A" typeof<'Target>.Name (JsonRawInput<'Contract>.Tree<'R> &context))
+            | _ -> JsonValue.InvalidValue(sprintf "Cannot deserialize DBRef<%s> from %A" typeof<'Target>.Name (JsonRawInput<'Contract>.Tree<'R> &context)))
 
     static member internal AbstractWriter<'T,'E,'O when 'O : struct and 'O :> IJsonValueOutput<'E>>(): JsonDirectWriter<'T,'E> =
         if MetadataRuntime.supportsDynamicCode() && not(typeof<'T>.Equals(typeof<obj>)) then
@@ -3910,14 +3914,14 @@ and private JsonRawCollections<'Contract> =
         | OpenBrace ->
             let envelope = JsonEnvelopeCapture<'R>.Read &source
             if not(envelope.TypePresent && envelope.ValuesPresent) then
-                failwithf "Expected JsonValue.List or Object{$type, $values} for array deserialization but got %A" (JsonRawInput<'Contract>.Tree<'R> &source)
+                JsonValue.InvalidValue(sprintf "Expected JsonValue.List or Object{$type, $values} for array deserialization but got %A" (JsonRawInput<'Contract>.Tree<'R> &source))
             if not wrapper then failwithf "Type not supported for Newtownsoft deserialization: %s" typeof<'T>.FullName
             context <- source
             source <- JsonReadCursor.child &source envelope.Values
             JsonReadCursor.scan &source
             if isNull source.Elements then
-                failwithf "Expected JsonValue.List but got %A" (JsonRawInput<'Contract>.Tree<'R> &source)
-        | _ -> failwithf "Expected JsonValue.List or Object{$type, $values} for array deserialization but got %A" (JsonRawInput<'Contract>.Tree<'R> &source)
+                JsonValue.InvalidValue(sprintf "Expected JsonValue.List but got %A" (JsonRawInput<'Contract>.Tree<'R> &source))
+        | _ -> JsonValue.InvalidValue(sprintf "Expected JsonValue.List or Object{$type, $values} for array deserialization but got %A" (JsonRawInput<'Contract>.Tree<'R> &source))
         source
 
     static member internal FinishFSharpList<'Element>(value: ResizeArray<'Element>): 'Element list = List.ofSeq value

@@ -40,15 +40,33 @@ public sealed class PrepareNativeUnionMetadata : ITask
             foreach (var directory in paths.Select(Path.GetDirectoryName).Distinct()) resolver.AddSearchDirectory(directory!);
             foreach (var path in paths)
                 assemblies.Add(path, AssemblyDefinition.ReadAssembly(path, new ReaderParameters { AssemblyResolver = resolver }));
-            // Generated witnesses identify the model identities selected by this build.
+            // Authored dependencies and generated witnesses identify the selected union metadata.
             var targets = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-            foreach (var assembly in assemblies.Values.Where(assembly => assembly.MainModule.AssemblyReferences.Any(reference => reference.Name == "SoloDB")))
+            foreach (var assembly in assemblies.Values.Where(assembly => assembly.Name.Name == "SoloDB" || assembly.MainModule.AssemblyReferences.Any(reference => reference.Name == "SoloDB")))
                 foreach (var type in assembly.MainModule.Types.SelectMany(Types))
                     foreach (var method in type.Methods)
                         foreach (var attribute in method.CustomAttributes.Where(attribute => attribute.AttributeType.FullName == "System.Diagnostics.CodeAnalysis.DynamicDependencyAttribute"))
                         {
                             var arguments = attribute.ConstructorArguments;
-                            if (arguments.Count != 3 || arguments[1].Value is not string name || arguments[2].Value is not string identity) continue;
+                            string name, identity;
+                            if (arguments.Count == 3 && arguments[1].Value is string named && arguments[2].Value is string namedAssembly)
+                            {
+                                name = named;
+                                identity = namedAssembly;
+                            }
+                            else if (arguments.Count == 2 && arguments[1].Value is TypeReference target)
+                            {
+                                var definition = target is GenericInstanceType generic ? generic.ElementType : target;
+                                name = definition.FullName.Replace('/', '.');
+                                identity = definition.Scope switch
+                                {
+                                    AssemblyNameReference reference => reference.Name,
+                                    ModuleDefinition module => module.Assembly.Name.Name,
+                                    _ => ""
+                                };
+                                if (identity.Length == 0) continue;
+                            }
+                            else continue;
                             if (!targets.TryGetValue(identity, out var names)) targets.Add(identity, names = new HashSet<string>(StringComparer.Ordinal));
                             names.Add(name);
                         }
