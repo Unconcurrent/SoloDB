@@ -231,20 +231,18 @@ module internal QueryReadPlanning =
                         | JsonExtractExpr(qualifier, name, path) when fromSource source qualifier -> JsonExtractExpr(Some payloadAlias, name, path)
                         | JsonRootExtract(qualifier, name) when fromSource source qualifier -> JsonRootExtract(Some payloadAlias, name)
                         | node -> node)
-                    let fetch = ScalarSubquery {
-                        Ctes = []
-                        Body = SingleSelect {
-                            inner with
-                                Source = Some(BaseTable(table, Some payloadAlias))
-                                Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = fetchedValue }]
-                                Where = Some(Binary(Column(Some payloadAlias, "Id"), BinaryOperator.Eq, Column(Some alias, "Id")))
-                                OrderBy = []; Limit = None; Offset = None } }
-                    let replacement =
+                    let replacement, joins =
                         match projectedValue with
-                        | Literal _ | Parameter _ -> projectedValue
-                        | value when baseColumn source "Id" value -> Column(Some alias, "Id")
-                        | _ -> fetch
-                    let rewrite = SqlExpr.map (function Column(_, "Value") -> replacement | node -> node)
+                        | Literal _ | Parameter _ -> projectedValue, []
+                        | value when baseColumn source "Id" value -> Column(Some alias, "Id"), []
+                        | _ ->
+                            fetchedValue,
+                            [ConditionedJoin(JoinKind.Inner, BaseTable(table, Some payloadAlias),
+                                Binary(Column(Some payloadAlias, "Id"), BinaryOperator.Eq, Column(Some alias, "Id")))]
+                    let rewrite = SqlExpr.map (function
+                        | Column(_, "Value") -> replacement
+                        | Column(_, "Id") -> Column(Some alias, "Id")
+                        | node -> node)
                     // Carry the caller's actual order through the page boundary. Id is
                     // identity only; no additional ordering term is introduced.
                     let orderName i order = if baseColumn source "Id" order.Expr then "Id" else "ord" + string i
@@ -255,6 +253,7 @@ module internal QueryReadPlanning =
                     let result =
                         { outer with
                             Source = Some(DerivedTable(CompiledPage.tryPlan model estimates table source ids, alias))
+                            Joins = joins
                             Projections = ProjectionSetOps.map (fun p -> { p with Expr = rewrite p.Expr }) outer.Projections
                             OrderBy = inner.OrderBy |> List.mapi (fun i order ->
                                 { order with Expr = Column(Some alias, orderName i order) }) }

@@ -119,11 +119,6 @@ module internal QueryableHelperBase =
             elif input.Carrier = SqlScalar && DateTimeFunctions.isDateTimeLikeType payload then
                 SqlExpr.FunctionCall("NULLIF", [SqlExpr.FunctionCall("json_quote", [value]); SqlExpr.Literal(SqlLiteral.String "null")])
             else jsonValue ()
-        elif input.Carrier = CanonicalToken then
-            let json = SqlExpr.FunctionCall("json", [value])
-            if Utils.isOptionType x then
-                SqlExpr.FunctionCall("COALESCE", [json; SqlExpr.Literal(SqlLiteral.String "null")])
-            else json
         else
             jsonValue ()
 
