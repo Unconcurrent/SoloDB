@@ -83,10 +83,11 @@ module FileStorageCoreStream =
 
             let bytesToReadTotal  = int (min (int64 buffer.Length) remainingBytes)
             let buffer            = buffer.Slice(0, bytesToReadTotal)
+            let readEnd           = currentPosition + int64 bytesToReadTotal
 
             use db = db.Get()
             let startChunk        = currentPosition / chunkSize
-            let endChunk          = (currentPosition + int64 bytesToReadTotal - 1L) / chunkSize
+            let endChunk          = (readEnd - 1L) / chunkSize
 
             let mutable bytesWrittenToBuffer    = 0
             let mutable chunkDecompressionBuffer = NativeArray.NativeArray.Empty
@@ -95,8 +96,8 @@ module FileStorageCoreStream =
                 for chunk in getAllCompressedChunksWithinRange db fileId startChunk endChunk do
                     let chunkStartPos = chunk.Number * chunkSize
                     let copyFrom      = max currentPosition chunkStartPos
-                    let copyTo        = min (currentPosition + int64 bytesToReadTotal) (chunkStartPos + chunkSize)
-                    let bytesInChunk  = int (copyTo - copyFrom)
+                    let offsetInChunk = int (copyFrom - chunkStartPos)
+                    let bytesInChunk  = int (min (readEnd - copyFrom) (chunkSize - int64 offsetInChunk))
 
                     if bytesInChunk > 0 then
                         let bufferOffset    = int (copyFrom - currentPosition)
@@ -106,7 +107,6 @@ module FileStorageCoreStream =
                             destinationSpan.Fill(0uy)
                             bytesWrittenToBuffer <- bytesWrittenToBuffer + bytesInChunk
                         else
-                            let offsetInChunk = int (copyFrom - chunkStartPos)
                             let written =
                                 if offsetInChunk = 0 then
                                     match Snappy.TryDecompress(chunk.Data.Span, destinationSpan) with
@@ -214,12 +214,7 @@ module FileStorageCoreStream =
                     checkDisposed()
                     let len = facts.OldLength
                     if len < value then
-                        let chunkOffset = len % chunkSize
-                        let fillSize = int (chunkSize - chunkOffset)
-                        use mem = NativeArray.NativeArray.Alloc fillSize
-                        let mem = mem.Span
-                        mem.Clear()
-                        writeChunkedData db fileId len (Span.op_Implicit mem) |> ignore
+                        clearChunkTail db fileId len
                         updateLenById db fileId value
                     elif len > value then downsetFileLength db fileId value
                     shouldMarkDirty <- len <> value

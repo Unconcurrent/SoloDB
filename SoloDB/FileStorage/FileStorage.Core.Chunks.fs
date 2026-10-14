@@ -129,19 +129,23 @@ module internal FileStorageCoreChunks =
             rowid
         with error -> statement.Abort(error); reraise()
 
+    /// Clear the stored boundary suffix without forming an absolute chunk end.
+    let internal clearChunkTail (db: NativeSqliteConnection) (fileId: int64) (position: int64) =
+        let chunkNumber = position / chunkSize
+        let retainedBytes = int (position % chunkSize)
+        use buffer = NativeArray.NativeArray.Alloc (int chunkSize)
+        let bytes = buffer.Span
+        bytes.Clear()
+        let stored = tryGetChunkData db fileId chunkNumber bytes
+        if not stored.IsEmpty then
+            bytes.Slice(retainedBytes).Clear()
+            writeChunkData db fileId chunkNumber bytes
+
     /// Truncate within the caller's transaction, including the discarded tail of
     /// a retained chunk so a subsequent sparse write cannot reveal old bytes.
     let internal downsetFileLength (db: NativeSqliteConnection) (fileId: int64) (newFileLength: int64) =
         let lastChunk = if newFileLength = 0L then -1L else (newFileLength - 1L) / chunkSize
-        let retainedBytes = newFileLength % chunkSize
-        if retainedBytes <> 0L then
-            use buffer = NativeArray.NativeArray.Alloc (int chunkSize)
-            let bytes = buffer.Span
-            bytes.Clear()
-            let stored = tryGetChunkData db fileId lastChunk bytes
-            if not stored.IsEmpty then
-                bytes.Slice(int retainedBytes).Clear()
-                writeChunkData db fileId lastChunk bytes
+        if newFileLength % chunkSize <> 0L then clearChunkTail db fileId newFileLength
         let mutable statement = db.OpenStatement("DELETE FROM SoloDBFileChunk WHERE FileId = @FileId AND Number > @LastChunkNumber")
         try
             statement.BindInt64(1, fileId)
