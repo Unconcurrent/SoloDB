@@ -13,6 +13,18 @@ internal static class SourceTypeIdentity
         assembly.MainModule.ExportedTypes.SingleOrDefault(type => type.FullName == name)?.Resolve() ??
         throw new InvalidOperationException("The exact generated type is absent from current inputs: " + name + ", " + assembly.Name.FullName);
 
+    internal static TypeReference Original(TypeReference reference,IAssemblyResolver resolver)
+    {
+        var root = reference is GenericInstanceType closed ? closed.ElementType : reference;
+        var definition = Definition(resolver.Resolve((AssemblyNameReference)root.Scope),root.FullName);
+        if (reference is not GenericInstanceType instance) return definition;
+        if (definition.GenericParameters.Count != instance.GenericArguments.Count)
+            throw new InvalidOperationException("The original raw source generic arity differs from its compiler identity: " + root.FullName);
+        var actual = new GenericInstanceType(definition);
+        foreach(var argument in instance.GenericArguments) actual.GenericArguments.Add(argument);
+        return actual;
+    }
+
     internal static TypeReference Resolve(ModuleDefinition consumer, string identity)
     {
         var position = 0;

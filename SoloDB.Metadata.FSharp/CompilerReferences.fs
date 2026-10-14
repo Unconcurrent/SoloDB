@@ -25,8 +25,36 @@ module internal CompilerReferences =
             definition, Array.zip (definition.GenericParameters |> Seq.toArray) (memberValue.GenericParameters |> Seq.toArray)
         else memberValue, [||]
 
+    type References =
+        { Reference: (FSharpGenericParameter -> TypeReference) -> FSharpType -> TypeReference
+          Anonymous: FSharpAnonRecordTypeDetails -> bool -> TypeReference[] -> TypeReference }
+
     let create (moduleDefinition: ModuleDefinition) (currentVersion: Version) (coreIdentity: string) =
         let typeReferences = Dictionary<string, TypeReference>(StringComparer.Ordinal)
+        let anonymous (details: FSharpAnonRecordTypeDetails) valueType (arguments: TypeReference[]) =
+            let scope =
+                if String.IsNullOrEmpty(details.Assembly.QualifiedName) then AssemblyNameReference(details.Assembly.SimpleName,currentVersion)
+                else AssemblyNameReference.Parse(details.Assembly.QualifiedName)
+            let identity = scope.FullName + ":" + String.concat "/" (details.EnclosingCompiledTypeNames @ [details.CompiledName])
+            let root =
+                match typeReferences.TryGetValue identity with
+                | true, value -> value
+                | _ ->
+                    let mutable declaring = null
+                    for name in details.EnclosingCompiledTypeNames do
+                        let enclosing = TypeReference("",name,moduleDefinition,scope)
+                        enclosing.DeclaringType <- declaring
+                        declaring <- enclosing
+                    let value = TypeReference("",details.CompiledName,moduleDefinition,scope,valueType)
+                    value.DeclaringType <- declaring
+                    for field in details.SortedFieldNames do value.GenericParameters.Add(GenericParameter(field,value))
+                    typeReferences.Add(identity,value)
+                    value
+            if arguments.Length = 0 then root
+            else
+                let closed = GenericInstanceType(root)
+                for argument in arguments do closed.GenericArguments.Add(argument)
+                closed :> TypeReference
         let rec referenceWith (parameter: FSharpGenericParameter -> TypeReference) (typ: FSharpType) =
             let typ = typ.StripAbbreviations()
             if typ.IsGenericParameter then parameter typ.GenericParameter
@@ -50,30 +78,7 @@ module internal CompilerReferences =
                     closed :> TypeReference
                 tupleReference arguments
             elif typ.IsAnonRecordType then
-                let details = typ.AnonRecordTypeDetails
-                let scope =
-                    if String.IsNullOrEmpty(details.Assembly.QualifiedName) then AssemblyNameReference(details.Assembly.SimpleName,currentVersion)
-                    else AssemblyNameReference.Parse(details.Assembly.QualifiedName)
-                let identity = scope.FullName + ":" + String.concat "/" (details.EnclosingCompiledTypeNames @ [details.CompiledName])
-                let root =
-                    match typeReferences.TryGetValue identity with
-                    | true, value -> value
-                    | _ ->
-                        let mutable declaring = null
-                        for name in details.EnclosingCompiledTypeNames do
-                            let enclosing = TypeReference("",name,moduleDefinition,scope)
-                            enclosing.DeclaringType <- declaring
-                            declaring <- enclosing
-                        let value = TypeReference("",details.CompiledName,moduleDefinition,scope,isValueType typ)
-                        value.DeclaringType <- declaring
-                        for field in details.SortedFieldNames do value.GenericParameters.Add(GenericParameter(field,value))
-                        typeReferences.Add(identity,value)
-                        value
-                if typ.GenericArguments.Count = 0 then root
-                else
-                    let closed = GenericInstanceType(root)
-                    for argument in typ.GenericArguments do closed.GenericArguments.Add(referenceWith parameter argument)
-                    closed :> TypeReference
+                anonymous typ.AnonRecordTypeDetails (isValueType typ) (typ.GenericArguments |> Seq.map (referenceWith parameter) |> Seq.toArray)
             else
                 let entity = typ.TypeDefinition
                 if entity.IsByRef then ByReferenceType(referenceWith parameter typ.GenericArguments[0]) :> TypeReference
@@ -106,4 +111,4 @@ module internal CompilerReferences =
                         let closed = GenericInstanceType(root)
                         for argument in typ.GenericArguments do closed.GenericArguments.Add(referenceWith parameter argument)
                         closed :> TypeReference
-        referenceWith
+        { Reference = referenceWith; Anonymous = anonymous }

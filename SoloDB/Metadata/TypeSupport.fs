@@ -584,6 +584,19 @@ module internal TypeSupport =
             | _ -> ValueNone
         else ValueNone
 
+    let SqlArgumentParameter(assembly: string, owner: string, name: string, definition: string) =
+        assembly = "SoloDB" && name = "parameters" && definition = "System.Object" &&
+        (match owner.Replace('/', '.').Replace('+', '.') with
+         | "SoloDatabase.SQLiteTools.CachingDbConnection"
+         | "SoloDatabase.SQLiteTools.IDbConnectionExtensions"
+         | "SoloDatabase.SQLiteToolsExtensions.IDbConnectionExtensions"
+         | "SoloDatabase.NativeSQLiteTools.NativeCachingDbConnection"
+         | "SoloDatabase.NativeSQLiteTools.IDbConnectionExtensions" -> true
+         | _ -> false)
+
+    let SqlArgumentProperty(publicProperty, readable, isStatic, indexed) =
+        publicProperty && readable && not isStatic && not indexed
+
     let SqlRawRegistration shape underlyingShape =
         match shape with
         | TypeShape.Option ->

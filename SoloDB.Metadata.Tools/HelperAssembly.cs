@@ -50,8 +50,10 @@ internal static class HelperAssembly
         var runtime = product.Name.Name;
         var il = entry.Body.GetILProcessor();
         var access = new HashSet<string>(StringComparer.Ordinal) { runtime };
-        CSharpCodecFacts.Register(new GeneratedJsonDefinitions(references.Select(reference=>reference.ItemSpec).ToArray()),consumer, product, module, entry.DeclaringType, il, name => access.Add(name));
-        CSharpQueryOperations.Register(consumer, product, module, entry.DeclaringType, il, name => access.Add(name));
+        var definitions = new GeneratedJsonDefinitions(references.Select(reference=>reference.ItemSpec).ToArray());
+        CSharpQueryOperations.RegisterArguments(definitions,consumer,product,module,entry.DeclaringType,il,name=>access.Add(name));
+        CSharpCodecFacts.Register(definitions,consumer, product, module, entry.DeclaringType, il, name => access.Add(name));
+        CSharpQueryOperations.Register(definitions,consumer, product, module, entry.DeclaringType, il, name => access.Add(name));
         if (access.Count != 0) AllowAccess(module, access, entry.DeclaringType.BaseType.Scope);
         il.Emit(OpCodes.Ret);
         Write(helper, output, keyFile);

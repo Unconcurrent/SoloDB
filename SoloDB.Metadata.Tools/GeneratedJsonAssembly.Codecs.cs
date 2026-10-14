@@ -23,14 +23,28 @@ public static partial class GeneratedJsonAssembly
             .Methods.Single(method => method.Name == "RegisterDefaultConstruction")));
     }
 
-    internal static void RegisterMemberReader(ModuleDefinition module,TypeDefinition owner,ILProcessor il,
+    internal static MethodDefinition MemberReader(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,
+        TypeReference type,bool valueType,bool nullable,CodecMember<TypeReference,MethodReference,FieldReference> member,
+        bool boxedReceiver,bool boxedValue,string suffix)
+    {
+        var result = boxedValue ? module.TypeSystem.Object : module.ImportReference(member.Type);
+        var operation = member.Getter != null
+            ? GeneratedJsonDefinitions.Identity(member.Getter.Value.DeclaringType) + member.Getter.Value.FullName
+            : GeneratedJsonDefinitions.Identity(member.Field.Value.DeclaringType) + member.Field.Value.FullName;
+        var policy = operation + "|" + valueType + "|" + nullable + "|" + boxedReceiver + "|" + boxedValue + "|" + member.Static;
+        if (definitions.TryGet("member-read",type,result,policy,out var existing)) return existing;
+        var getter = Method(owner,"ReadMember" + suffix,result,boxedReceiver ? module.TypeSystem.Object : module.ImportReference(type));
+        QueryOperationEmitter.memberRead(new CecilCodecIL(getter),type,valueType,nullable,member,member.Type.IsValueType,boxedReceiver,boxedValue);
+        definitions.Add("member-read",type,result,policy,getter);
+        return getter;
+    }
+
+    internal static void RegisterMemberReader(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,ILProcessor il,
         AssemblyDefinition product,TypeReference type,bool valueType,bool nullable,
         CodecMember<TypeReference,MethodReference,FieldReference> member,string suffix)
     {
         var api = new Api(module,product);
-        var getter = Method(owner,"ReadMember" + suffix,valueType ? module.TypeSystem.Object : module.ImportReference(member.Type),
-            valueType ? module.TypeSystem.Object : module.ImportReference(type));
-        QueryOperationEmitter.memberRead(new CecilCodecIL(getter),type,valueType,nullable,member,member.Type.IsValueType,valueType,valueType);
+        var getter = MemberReader(definitions,module,owner,type,valueType,nullable,member,valueType,valueType,suffix);
         if (valueType)
         {
             api.TypeToken(il,type); il.Emit(OpCodes.Ldstr,member.Name);
@@ -67,7 +81,7 @@ public static partial class GeneratedJsonAssembly
         var memberFacts = GeneratedCodec.Model(model).Members;
         for (var memberIndex = 0; memberIndex < memberFacts.Length; memberIndex++)
             if (memberFacts[memberIndex].Readable)
-                RegisterMemberReader(module,owner,il,product,type,model.Facts.ValueType,false,memberFacts[memberIndex],index + "_" + memberIndex);
+                RegisterMemberReader(definitions,module,owner,il,product,type,model.Facts.ValueType,false,memberFacts[memberIndex],index + "_" + memberIndex);
         for (var memberIndex = 0; memberIndex < model.Members.Length; memberIndex++)
         {
             var fact = model.Facts.Members[memberIndex];

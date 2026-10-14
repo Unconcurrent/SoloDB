@@ -7,6 +7,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Operations;
+using SoloDatabase.Metadata.Generation;
 
 namespace SoloDatabase.Metadata.CSharp;
 
@@ -131,6 +132,15 @@ internal static class QueryRegistrations
             var semantic = compilation.GetSemanticModel(site.Invocation.SyntaxTree);
             var invocation = site.Invocation;
             var method = site.Method;
+            if (semantic.GetOperation(invocation) is not IInvocationOperation checkedCall) continue;
+            foreach (var argument in checkedCall.Arguments)
+                if (argument.Parameter is IParameterSymbol input && TypeSupport.SqlArgumentParameter(
+                    method.ContainingAssembly.Name,method.ContainingType.ToDisplayString(),input.Name,
+                    site.Symbols.Type(input.Type).SpecialType == SpecialType.System_Object ? "System.Object" : site.Symbols.Type(input.Type).ToDisplayString()))
+                    foreach (var source in QueryExpressionInputs.Sources(compilation,argument.Value,site.Symbols))
+                        if (source.Type is ITypeSymbol type && Closed(type) &&
+                            queryOperations.Add("sql-arguments|" + SourceTypeIdentity.Encode(type)))
+                            TypedRegistration("RegisterSqlArguments",type);
             if (method.ContainingType.ToDisplayString() == "System.Linq.Queryable")
             {
                 foreach (var parameter in method.Parameters) ParameterFacts(Callable(parameter.Type,site.Symbols));
@@ -146,7 +156,6 @@ internal static class QueryRegistrations
             var compiled = method.Name == "Compile";
             if (compiled && (method.ContainingType.TypeArguments.Length == 0 ||
                 !roots.Contains(Name(method.ContainingType.TypeArguments[0])))) continue;
-            if (semantic.GetOperation(invocation) is not IInvocationOperation checkedCall) continue;
             foreach (var expressionInput in QueryExpressionInputs.Arguments(compilation,checkedCall,site.Symbols))
             {
                 var callable = Callable(QueryExpressionInputs.Contract(site.Symbols.Type(expressionInput.Parameter.Type)),site.Symbols);
@@ -404,8 +413,8 @@ internal static class QueryRegistrations
             inputs[parameter.OriginalDefinition] = origins;
         internal bool Same(Symbols other) => SameTypes(other) && inputs.Count == other.inputs.Count && inputs.All(pair =>
             other.inputs.TryGetValue(pair.Key,out var values) && pair.Value.Length == values.Length &&
-            pair.Value.Zip(values,(left,right) => left.Lambda.SyntaxTree == right.Lambda.SyntaxTree && left.Lambda.Span == right.Lambda.Span &&
-                left.Symbols.SameTypes(right.Symbols)).All(equal => equal));
+            pair.Value.Zip(values,(left,right) => left.Syntax.SyntaxTree == right.Syntax.SyntaxTree && left.Syntax.Span == right.Syntax.Span &&
+                SymbolEqualityComparer.Default.Equals(left.Type,right.Type) && left.Symbols.SameTypes(right.Symbols)).All(equal => equal));
         private bool SameTypes(Symbols other) => parameters.Count == other.parameters.Count && parameters.All(pair =>
             other.parameters.TryGetValue(pair.Key,out var actual) && SymbolEqualityComparer.Default.Equals(pair.Value,actual));
         internal IMethodSymbol Method(IMethodSymbol method)
@@ -478,7 +487,7 @@ internal static class QueryRegistrations
             if (method.DeclaringSyntaxReferences.Length == 0 ||
                 !method.TypeArguments.All(Closed) || !method.ContainingType.TypeArguments.All(Closed)) return;
             var boundInputs = semantic.GetOperation(invocation) is IInvocationOperation checkedCall
-                ? QueryExpressionInputs.Arguments(compilation,checkedCall,symbols).ToArray()
+                ? QueryExpressionInputs.Arguments(compilation,checkedCall,symbols,true).ToArray()
                 : Array.Empty<(IParameterSymbol Parameter, QueryExpressionInputs.Origin[] Origins)>();
             if (method.MethodKind != MethodKind.LocalFunction && !method.IsGenericMethod && !method.ContainingType.IsGenericType &&
                 boundInputs.All(input => input.Origins.Length == 0)) return;

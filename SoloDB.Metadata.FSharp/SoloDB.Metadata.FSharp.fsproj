@@ -10,6 +10,8 @@
     <Compile Include="ModelDiscovery.fs" />
     <Compile Include="QueryMemberWitnesses.fs" />
     <Compile Include="QueryExpressionInputs.fs" />
+    <Compile Include="ArgumentSourceFacts.fs" />
+    <Compile Include="RawSqlInputs.fs" />
     <Compile Include="QueryDiscovery.fs" />
     <Compile Include="ProjectGeneration.fs" />
     <Compile Include="Provider.fs" />

@@ -61,7 +61,7 @@ module internal QueryExpressionInputs =
                 when operation.LongIdent |> List.map _.idText = ["op_Equality"] -> Some(name.idText,value)
             | _ -> None
 
-        let selected context (method: FSharpMemberOrFunctionOrValue) (useSite: FSharpSymbolUse) =
+        let selected (method: FSharpMemberOrFunctionOrValue) (useSite: FSharpSymbolUse) =
             match arguments useSite with
             | None -> []
             | Some(_, groups) ->
@@ -76,8 +76,12 @@ module internal QueryExpressionInputs =
                                 | None when parameters.Count > 0 && parameters[parameters.Count - 1].IsParamArrayArg -> Some(parameters[parameters.Count - 1],item)
                                 | None -> None
                             match selected with
-                            | Some(parameter,value) when isExpression (instantiate (context @ useSite.GenericArguments) parameter.Type) -> yield value.Range
+                            | Some(parameter,value) -> yield parameter,value
                             | _ -> () ]
+
+        let expressionArguments context method useSite =
+            selected method useSite |> List.choose(fun (parameter,value) ->
+                if isExpression (instantiate (context @ useSite.GenericArguments) parameter.Type) then Some value.Range else None)
 
         let rec origins context visited location =
             [ yield! lambdas |> Seq.filter(contains location)
@@ -101,11 +105,11 @@ module internal QueryExpressionInputs =
                                             for call in uses do
                                                 if not call.IsFromDefinition && call.Symbol.Equals owner then
                                                     for actual in contexts call do
-                                                        for input in selected actual owner call do
+                                                        for input in expressionArguments actual owner call do
                                                             yield! origins (actual @ call.GenericArguments) (declared :: visited) input
                                         | _ -> ()
                         | _ -> ()
                     | _ -> () ]
             |> List.distinct
 
-        arguments, (fun context method useSite -> selected context method useSite |> List.collect(origins (context @ useSite.GenericArguments) []))
+        arguments, (fun context method useSite -> expressionArguments context method useSite |> List.collect(origins (context @ useSite.GenericArguments) [])), selected, bindings.ToArray()

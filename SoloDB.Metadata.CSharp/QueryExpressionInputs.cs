@@ -13,8 +13,12 @@ internal static class QueryExpressionInputs
     internal sealed class Origin
     {
         internal Origin(LambdaExpressionSyntax lambda, QueryRegistrations.Symbols symbols)
-        { Lambda = lambda; Symbols = symbols; }
-        internal LambdaExpressionSyntax Lambda { get; }
+        { Syntax = lambda; Symbols = symbols; }
+        internal Origin(SyntaxNode syntax, QueryRegistrations.Symbols symbols, ITypeSymbol type)
+        { Syntax = syntax; Symbols = symbols; Type = type; }
+        internal SyntaxNode Syntax { get; }
+        internal LambdaExpressionSyntax Lambda => (LambdaExpressionSyntax)Syntax;
+        internal ITypeSymbol? Type { get; }
         internal QueryRegistrations.Symbols Symbols { get; }
     }
 
@@ -26,50 +30,69 @@ internal static class QueryExpressionInputs
     }
 
     internal static IEnumerable<(IParameterSymbol Parameter, Origin[] Origins)> Arguments(
-        Compilation compilation, IInvocationOperation invocation, QueryRegistrations.Symbols symbols)
+        Compilation compilation, IInvocationOperation invocation, QueryRegistrations.Symbols symbols, bool objects = false)
     {
         foreach (var argument in invocation.Arguments)
-            if (argument.Parameter is IParameterSymbol parameter && Contract(symbols.Type(parameter.Type)) != null)
-                yield return (parameter, Read(compilation, argument.Value, symbols,
-                    new HashSet<ISymbol>(SymbolEqualityComparer.Default)).ToArray());
+            if (argument.Parameter is IParameterSymbol parameter)
+            {
+                if (Contract(symbols.Type(parameter.Type)) != null)
+                    yield return (parameter, Read(compilation, argument.Value, symbols,
+                        new HashSet<ISymbol>(SymbolEqualityComparer.Default)).ToArray());
+                else if (objects && symbols.Type(parameter.Type).SpecialType == SpecialType.System_Object)
+                    yield return (parameter, Sources(compilation,argument.Value,symbols));
+            }
     }
 
+    internal static Origin[] Sources(Compilation compilation, IOperation value, QueryRegistrations.Symbols symbols) =>
+        Read(compilation,value,symbols,new HashSet<ISymbol>(SymbolEqualityComparer.Default),true).ToArray();
+
     private static IEnumerable<Origin> Read(Compilation compilation, IOperation? value,
-        QueryRegistrations.Symbols symbols, HashSet<ISymbol> visited)
+        QueryRegistrations.Symbols symbols, HashSet<ISymbol> visited, bool source = false)
+    {
+        var known = source && value is not IParenthesizedOperation && (value is not IConversionOperation conversionValue || conversionValue.OperatorMethod != null) && value?.Type is ITypeSymbol raw &&
+            symbols.Type(raw) is ITypeSymbol actual && actual.SpecialType != SpecialType.System_Object && actual.TypeKind != TypeKind.Dynamic
+            ? new Origin(value.Syntax,symbols,actual) : null;
+        if (known != null && value is IArrayCreationOperation or ICollectionExpressionOperation) return new[] { known };
+        var origins = ReadOrigins(compilation,value,symbols,visited,source).ToArray();
+        return origins.Length != 0 || known == null ? origins : new[] { known };
+    }
+
+    private static IEnumerable<Origin> ReadOrigins(Compilation compilation, IOperation? value,
+        QueryRegistrations.Symbols symbols, HashSet<ISymbol> visited, bool source)
     {
         switch (value)
         {
-            case IConversionOperation conversion:
-                return Read(compilation, conversion.Operand, symbols, visited);
+            case IConversionOperation conversion when conversion.OperatorMethod == null:
+                return Read(compilation, conversion.Operand, symbols, visited,source);
             case IParenthesizedOperation parenthesized:
-                return Read(compilation, parenthesized.Operand, symbols, visited);
+                return Read(compilation, parenthesized.Operand, symbols, visited,source);
             case IDelegateCreationOperation creation:
-                return Read(compilation, creation.Target, symbols, visited);
+                return Read(compilation, creation.Target, symbols, visited,source);
             case IAnonymousFunctionOperation { Syntax: LambdaExpressionSyntax lambda }:
-                return new[] { new Origin(lambda, symbols) };
+                return source ? Array.Empty<Origin>() : new[] { new Origin(lambda, symbols) };
             case IArrayCreationOperation array:
-                return Read(compilation, array.Initializer, symbols, visited);
+                return Read(compilation, array.Initializer, symbols, visited,source);
             case IArrayInitializerOperation initializer:
-                return initializer.ElementValues.SelectMany(element => Read(compilation, element, symbols, visited)).ToArray();
+                return initializer.ElementValues.SelectMany(element => Read(compilation, element, symbols, visited,source)).ToArray();
             case ICollectionExpressionOperation collection:
-                return collection.Elements.SelectMany(element => Read(compilation, element, symbols, visited)).ToArray();
+                return collection.Elements.SelectMany(element => Read(compilation, element, symbols, visited,source)).ToArray();
             case ISpreadOperation spread:
-                return Read(compilation, spread.Operand, symbols, visited);
+                return Read(compilation, spread.Operand, symbols, visited,source);
             case IConditionalOperation conditional:
-                return Read(compilation, conditional.WhenTrue, symbols, visited)
-                    .Concat(Read(compilation, conditional.WhenFalse, symbols, visited)).ToArray();
+                return Read(compilation, conditional.WhenTrue, symbols, visited,source)
+                    .Concat(Read(compilation, conditional.WhenFalse, symbols, visited,source)).ToArray();
             case ICoalesceOperation coalesce:
-                return Read(compilation, coalesce.Value, symbols, visited)
-                    .Concat(Read(compilation, coalesce.WhenNull, symbols, visited)).ToArray();
+                return Read(compilation, coalesce.Value, symbols, visited,source)
+                    .Concat(Read(compilation, coalesce.WhenNull, symbols, visited,source)).ToArray();
             case IParameterReferenceOperation parameter:
-                return symbols.Input(parameter.Parameter);
+                return symbols.Input(parameter.Parameter).Where(origin => source ? origin.Type != null : origin.Type == null).ToArray();
             case ILocalReferenceOperation local:
                 return Binding(local.Local, symbols);
             case IFieldReferenceOperation field:
                 return Binding(field.Field, symbols.WithOwner(field.Field.ContainingType));
             case IPropertyReferenceOperation property when property.Property.GetMethod is IMethodSymbol getter:
                 return Returns(getter, property.Arguments);
-            case IInvocationOperation call when Contract(symbols.Type(call.Type!)) != null:
+            case IInvocationOperation call when source || Contract(symbols.Type(call.Type!)) != null:
                 return Returns(call.TargetMethod, call.Arguments);
             default:
                 return Array.Empty<Origin>();
@@ -80,14 +103,28 @@ internal static class QueryExpressionInputs
             if (!visited.Add(symbol)) return Array.Empty<Origin>();
             try
             {
-                return symbol.DeclaringSyntaxReferences.SelectMany(reference =>
-                {
-                    var declaration = reference.GetSyntax();
-                    if (declaration is not VariableDeclaratorSyntax { Initializer: not null } variable)
-                        return Array.Empty<Origin>();
-                    return Read(compilation, compilation.GetSemanticModel(variable.SyntaxTree)
-                        .GetOperation(variable.Initializer.Value), context, visited);
-                }).ToArray();
+                var declarations = symbol.DeclaringSyntaxReferences.Select(reference => reference.GetSyntax()).ToArray();
+                var initial = declarations.OfType<VariableDeclaratorSyntax>().Where(variable => variable.Initializer != null)
+                    .SelectMany(variable => Read(compilation,compilation.GetSemanticModel(variable.SyntaxTree)
+                        .GetOperation(variable.Initializer!.Value),context,visited,source));
+                if (!source) return initial.ToArray();
+                var scopes = symbol is IFieldSymbol field
+                    ? field.ContainingType.DeclaringSyntaxReferences.Select(reference => reference.GetSyntax())
+                    : declarations.Select(declaration => declaration.Ancestors().FirstOrDefault(node =>
+                        node is BaseMethodDeclarationSyntax or LocalFunctionStatementSyntax or LambdaExpressionSyntax) ?? declaration);
+                var assigned = scopes.SelectMany(scope => scope.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+                    .Select(syntax => compilation.GetSemanticModel(syntax.SyntaxTree).GetOperation(syntax))
+                    .OfType<IAssignmentOperation>().Where(assignment =>
+                    {
+                        var target = assignment.Target switch
+                        {
+                            ILocalReferenceOperation local => (ISymbol)local.Local,
+                            IFieldReferenceOperation field => field.Field,
+                            _ => null
+                        };
+                        return target != null && SymbolEqualityComparer.Default.Equals(target.OriginalDefinition,symbol.OriginalDefinition);
+                    }).SelectMany(assignment => Read(compilation,assignment.Value,context,visited,source));
+                return initial.Concat(assigned).ToArray();
             }
             finally { visited.Remove(symbol); }
         }
@@ -96,8 +133,9 @@ internal static class QueryExpressionInputs
         {
             var actual = new QueryRegistrations.Symbols(compilation, symbols.Method(method), symbols);
             foreach (var argument in arguments)
-                if (argument.Parameter is IParameterSymbol parameter && Contract(symbols.Type(parameter.Type)) != null)
-                    actual.BindInput(parameter, Read(compilation, argument.Value, symbols, visited).ToArray());
+                if (argument.Parameter is IParameterSymbol parameter &&
+                    (Contract(symbols.Type(parameter.Type)) != null || source && symbols.Type(parameter.Type).SpecialType == SpecialType.System_Object))
+                    actual.BindInput(parameter, Read(compilation, argument.Value, symbols, visited,source).ToArray());
             if (!visited.Add(method.OriginalDefinition)) return Array.Empty<Origin>();
             try
             {
@@ -124,7 +162,7 @@ internal static class QueryExpressionInputs
                             .Where(accessor => accessor.Keyword.ValueText == "get" && accessor.ExpressionBody != null)
                             .Select(accessor => accessor.ExpressionBody!.Expression));
                     return bodies.SelectMany(body => Read(compilation,
-                        compilation.GetSemanticModel(body.SyntaxTree).GetOperation(body), actual, visited));
+                        compilation.GetSemanticModel(body.SyntaxTree).GetOperation(body), actual, visited,source));
                 }).ToArray();
             }
             finally { visited.Remove(method.OriginalDefinition); }

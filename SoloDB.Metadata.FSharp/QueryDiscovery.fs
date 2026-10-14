@@ -1,5 +1,4 @@
 namespace SoloDatabase.Metadata.FSharp
-
 open System
 open System.Collections.Generic
 open System.IO
@@ -9,7 +8,6 @@ open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 open Mono.Cecil
 open SoloDatabase.Metadata.Tools
-
 /// Checked substitutions own type facts; syntax bounds each supplied query call.
 module internal QueryDiscovery =
     let collect (project: FSharpCheckProjectResults) (moduleDefinition: ModuleDefinition) (inputs: IDictionary<string, ParsedInput>) projectDirectory report =
@@ -23,7 +21,8 @@ module internal QueryDiscovery =
             |> Option.map(fun attribute -> Version(attribute.ConstructorArguments[0] |> snd |> unbox<string>))
             |> Option.defaultValue(Version(0,0,0,0))
         let core = project.ProjectContext.GetReferencedAssemblies() |> Seq.find(fun assembly -> assembly.SimpleName = "FSharp.Core")
-        let referenceWith = CompilerReferences.create moduleDefinition currentVersion core.QualifiedName
+        let mapper = CompilerReferences.create moduleDefinition currentVersion core.QualifiedName
+        let referenceWith = mapper.Reference
         let runtimeMember (memberValue: FSharpMemberOrFunctionOrValue) =
             not(memberValue.CompiledName = "NameOf" &&
                 (memberValue.DeclaringEntity |> Option.exists(fun entity ->
@@ -72,7 +71,7 @@ module internal QueryDiscovery =
                 [ for call in calls do
                     for parent in contexts (visited.Add key) call do
                         for own in previous do yield parent @ call.GenericArguments @ own ])
-        let argumentGroups, expressionInputs = QueryExpressionInputs.create inputs file contains uses instantiate (contexts Set.empty)
+        let argumentGroups, expressionInputs, selectedArguments, inputBindings = QueryExpressionInputs.create inputs file contains uses instantiate (contexts Set.empty)
         let scope firstArgument (useSite: FSharpSymbolUse) =
             match argumentGroups useSite with
             | Some(callRange, first :: _) ->
@@ -396,4 +395,5 @@ module internal QueryDiscovery =
                     for part in uses do
                         if contains argumentScope part.Range then addWitness context part
             | _ -> ()
-        operations.ToArray(), (calls.Values |> Seq.toArray), (witnesses.Values |> Seq.toArray), (lambdas.Values |> Seq.toArray), roots.ToArray(), providers.ToArray(), (operationAccess |> Seq.toArray)
+        let argumentSources = RawSqlInputs.collect moduleDefinition mapper (project.ProjectContext.GetReferencedAssemblies()) uses contains instantiate (contexts Set.empty) selectedArguments inputBindings
+        operations.ToArray(), (calls.Values |> Seq.toArray), (witnesses.Values |> Seq.toArray), (lambdas.Values |> Seq.toArray), roots.ToArray(), providers.ToArray(), (operationAccess |> Seq.toArray), argumentSources

@@ -85,7 +85,7 @@ public static partial class GeneratedJsonAssembly
         HelperAssembly.Write(assembly, path, null);
     }
 
-    public static void Write(string path, string identity, string name, AssemblyDefinition product, GeneratedModel[] models, TypeReference? existingAccessAttribute = null, GeneratedQueryOperation[]? queries = null, GeneratedQueryCall[]? queryCalls = null, GeneratedQueryWitness[]? queryWitnesses = null, GeneratedQueryLambda[]? queryLambdas = null, GeneratedProviderOperation[]? providerOperations = null, string[]? references = null, string[]? operationAccessAssemblies = null)
+    public static void Write(string path, string identity, string name, AssemblyDefinition product, GeneratedModel[] models, TypeReference? existingAccessAttribute = null, GeneratedQueryOperation[]? queries = null, GeneratedQueryCall[]? queryCalls = null, GeneratedQueryWitness[]? queryWitnesses = null, GeneratedQueryLambda[]? queryLambdas = null, GeneratedProviderOperation[]? providerOperations = null, string[]? references = null, string[]? operationAccessAssemblies = null, GeneratedArgumentSource[]? argumentSources = null)
     {
         using var assembly = HelperAssembly.Create(identity);
         var module = assembly.MainModule;
@@ -97,10 +97,13 @@ public static partial class GeneratedJsonAssembly
         if (queries != null) GeneratedQueries.Register(module, il, product, queries);
         if (providerOperations != null) GeneratedQueries.RegisterProviders(module, il, product, providerOperations);
         if (queryCalls != null) GeneratedQueryCalls.Register(module, owner, il, product, queryCalls);
-        RegisterModels(new GeneratedJsonDefinitions(references),module,owner,il,product,models);
+        var definitions = new GeneratedJsonDefinitions(references);
+        if (argumentSources != null)
+            foreach (var source in argumentSources) GeneratedArgumentCapture.Register(definitions,module,owner,il,product,source);
+        RegisterModels(definitions,module,owner,il,product,models);
         il.Emit(OpCodes.Ret);
         GuardRegistration(module, owner, entry);
-        var access = models.SelectMany(model => model.AccessAssemblies).Concat(operationAccessAssemblies ?? Array.Empty<string>()).Concat(new[] { product.Name.Name }).Distinct().ToArray();
+        var access = models.SelectMany(model => model.AccessAssemblies).Concat((argumentSources ?? Array.Empty<GeneratedArgumentSource>()).SelectMany(source => source.AccessAssemblies)).Concat(operationAccessAssemblies ?? Array.Empty<string>()).Concat(new[] { product.Name.Name }).Distinct().ToArray();
         if (access.Length != 0)
         {
             MethodReference? constructor = null;
@@ -166,7 +169,7 @@ public static partial class GeneratedJsonAssembly
             var type = module.ImportReference(model.Type);
             GeneratedStringIndexer.Register(module,owner,il,product,model,index);
             GeneratedIdentity.Register(module, owner, il, product, model, index);
-            GeneratedArgumentCapture.Register(module, owner, il, product, model, index);
+            GeneratedArgumentCapture.Register(definitions,module,owner,il,product,model);
             GeneratedSqlRows.Register(module, owner, il, product, model, index, models);
             GeneratedRelations.Register(module, owner, il, product, model, index);
             GeneratedCloning.Register(module, owner, il, product, model, index);

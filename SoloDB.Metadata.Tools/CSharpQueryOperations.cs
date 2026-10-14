@@ -10,7 +10,25 @@ namespace SoloDatabase.Metadata.Tools;
 // Exact compiler descriptors supply facts; QueryOperationEmitter owns every operation body.
 internal static class CSharpQueryOperations
 {
-    internal static void Register(AssemblyDefinition consumer, AssemblyDefinition product, ModuleDefinition module,
+    internal static void RegisterArguments(GeneratedJsonDefinitions definitions,AssemblyDefinition consumer,AssemblyDefinition product,
+        ModuleDefinition module,TypeDefinition owner,ILProcessor entry,Action<string> access)
+    {
+        foreach (var descriptor in consumer.CustomAttributes.Where(attribute =>
+            attribute.AttributeType.FullName == "SoloDatabase.Generated.SourceQueryRegistrationAttribute" &&
+            (string)attribute.ConstructorArguments[0].Value == "RegisterSqlArguments"))
+        {
+            foreach (var value in (CustomAttributeArgument[])descriptor.ConstructorArguments[1].Value)
+            {
+                var source = OriginalArgumentSources.Read(module,SourceTypeIdentity.Resolve(consumer.MainModule,(string)value.Value));
+                if (source == null) continue;
+                GeneratedArgumentCapture.Register(definitions,module,owner,entry,product,source);
+                foreach (var assembly in source.AccessAssemblies) access(assembly);
+            }
+            access(consumer.Name.Name);
+        }
+    }
+
+    internal static void Register(GeneratedJsonDefinitions definitions,AssemblyDefinition consumer, AssemblyDefinition product, ModuleDefinition module,
         TypeDefinition owner, ILProcessor entry, Action<string> access)
     {
         var references = new GeneratedQueryReferences(module,product);
@@ -23,6 +41,7 @@ internal static class CSharpQueryOperations
             attribute.AttributeType.FullName == "SoloDatabase.Generated.SourceQueryRegistrationAttribute"))
         {
             var name = (string)descriptor.ConstructorArguments[0].Value;
+            if (name == "RegisterSqlArguments") continue;
             var types = ((CustomAttributeArgument[])descriptor.ConstructorArguments[1].Value).Select(value => Identity((string)value.Value)).ToArray();
             if (name is "RegisterSequenceFacts" or "RegisterParameterFacts")
             {

@@ -71,7 +71,7 @@ module internal ModelDiscovery =
                        (location.StartLine,location.StartColumn) <= (declared.StartLine,declared.StartColumn) &&
                        (declared.EndLine,declared.EndColumn) <= (location.EndLine,location.EndColumn) then Some isPublic else None))
              |> Option.defaultValue memberValue.Accessibility.IsPublic)
-        let referenceWith = CompilerReferences.create moduleDefinition (version project) (project.ProjectContext.GetReferencedAssemblies() |> Seq.find(fun assembly -> assembly.SimpleName = "FSharp.Core") |> _.QualifiedName)
+        let referenceWith = (CompilerReferences.create moduleDefinition (version project) (project.ProjectContext.GetReferencedAssemblies() |> Seq.find(fun assembly -> assembly.SimpleName = "FSharp.Core") |> _.QualifiedName)).Reference
         let sources = ResizeArray<GeneratedModel * FSharpType>()
         let reference typ = referenceWith (fun _ -> invalidOp "An open model type requires its actual closed use-site arguments.") typ
         let completeReferenceFacts (facts: ResizeArray<Member>) (members: ResizeArray<GeneratedMember>) =
