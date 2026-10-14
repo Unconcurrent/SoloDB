@@ -38,14 +38,14 @@ module internal OrderedChain =
         let struct(rows, input) = build adapter FullValue { Root = expression; Stages = [] }
         materialize adapter rows input resultType (sequenceElementType expression.Type)
 
-    let private groupedQuantifier (adapter: Adapter) (plan: Plan) =
+    let private groupedQuantifier (adapter: Adapter) (plan: Plan) bounded =
         let rec split preceding = function
             | Group(key, false, producedType) :: remaining -> Some(List.rev preceding, key, producedType, remaining)
             | stage :: remaining -> split (stage :: preceding) remaining
             | [] -> None
         match split [] plan.Stages with
         | Some(preceding, key, producedType, remaining) when
-            remaining |> List.forall (function Filter predicate -> QueryGroupScalar.supportsPredicate predicate.Parameters[0] predicate.Body | _ -> false) ->
+            remaining |> List.mapi (fun index -> function Filter predicate -> QueryGroupScalar.supportsPredicate predicate.Parameters[0] predicate.Body (index > 0) | _ -> false) |> List.forall id ->
             let struct(rows, input) = build adapter FullValue { plan with Stages = preceding }
             let alias = adapter.Alias()
             let fields = [{ Alias = Some "Id"; Expr = col alias "Id" }
@@ -79,7 +79,7 @@ module internal OrderedChain =
                 | first :: remaining -> Some(List.fold (fun left right -> SqlExpr.Binary(left, BinaryOperator.And, right)) first remaining)
             Some { core (Some(DerivedTable(keyRows, groupAlias))) [proj "v" (integer 1L)] with
                         Joins = List.ofSeq joins; GroupBy = equalityNames |> List.map (col groupAlias)
-                        Having = having; Limit = Some(integer 1L) }
+                        Having = having; Limit = if bounded then Some(integer 1L) else None }
         | _ -> None
 
     /// Returns None before any translation when the complete chain is not owned here.
@@ -200,7 +200,9 @@ module internal OrderedChain =
                             | _ -> false
                         | _ -> false))
                 let grouped =
-                    if name = "Any" || name = "All" then groupedQuantifier rowAdapter plan else None
+                    if name = "Any" || name = "All" || name = "Count" || name = "LongCount" then
+                        groupedQuantifier rowAdapter plan (name = "Any" || name = "All")
+                    else None
                 let struct(rows, completedInput) =
                     match grouped with
                     | Some row -> struct(select row, (QueryProduced.typed call.Type (integer 1L)).Input)

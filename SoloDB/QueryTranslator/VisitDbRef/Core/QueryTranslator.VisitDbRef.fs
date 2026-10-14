@@ -82,7 +82,7 @@ module internal QueryTranslatorVisitDbRef =
                     Comparison = fun e -> visitComparisonProduced e qb
                     Translate = fun source input alias lambda handler ->
                         let sub = qb.ForSubquery(alias, lambda.Parameters, BaseLayer, input, subqueryRootTable = qb.SourceContext.RootTable)
-                        let sub = { sub with ProducedHandler = handler |> ValueOption.orElse sub.ProducedHandler }
+                        let sub = { sub with ProducedHandler = QueryGroupScalar.withFallback handler sub.ProducedHandler }
                         let value = visitProduced lambda.Body sub
                         let joins = QueryTranslatorReferenceJoin.preparedJoinClauses sub.SourceContext.Joins
                         value, joins

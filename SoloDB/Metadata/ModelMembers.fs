@@ -91,16 +91,15 @@ type internal ModelMetadata private () =
                 typeof<ModelMetadata>.GetMethod("Comparer",BindingFlags.NonPublic ||| BindingFlags.Static).MakeGenericMethod(owner).Invoke(null,null)))
 
     static member SequenceElement(owner: Type) =
+        if owner.IsArray then owner.GetElementType() else
         TypeMetadataCache.Discover(owner,(fun metadata -> metadata.SequenceElement),
             (fun value metadata -> { metadata with SequenceElement = ValueSome value }),Func<Type>(fun () ->
                 if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "sequence element" owner
-                if owner.IsArray then owner.GetElementType()
-                else
-                    let enumerable (candidate: Type) = candidate.IsGenericType && typedefof<IEnumerable<_>>.Equals(candidate.GetGenericTypeDefinition())
-                    if enumerable owner then owner.GetGenericArguments()[0]
-                    else match owner.GetInterfaces() |> Array.tryFind enumerable with
-                         | Some contract -> contract.GetGenericArguments()[0]
-                         | None -> raise(NotSupportedException("Could not resolve sequence element type."))))
+                let enumerable (candidate: Type) = candidate.IsGenericType && typedefof<IEnumerable<_>>.Equals(candidate.GetGenericTypeDefinition())
+                if enumerable owner then owner.GetGenericArguments()[0]
+                else match owner.GetInterfaces() |> Array.tryFind enumerable with
+                     | Some contract -> contract.GetGenericArguments()[0]
+                     | None -> raise(NotSupportedException("Could not resolve sequence element type."))))
 
     static member PropertyReader(owner: Type, name: string) =
         let selected = TypeMetadataCache.Read(owner,fun metadata ->

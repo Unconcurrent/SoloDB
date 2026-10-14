@@ -10,7 +10,6 @@ open SoloDatabase.QueryTranslatorVisitPost
 /// Scalar demand consumes grouped rows before sequence payload publication.
 module internal QueryGroupScalar =
     type private Demand = {
-        Call: MethodCallExpression
         Kind: AggregateKind
         Predicate: LambdaExpression option
         Selector: LambdaExpression option
@@ -18,6 +17,12 @@ module internal QueryGroupScalar =
         Distinct: bool
         Quantifier: bool option
     }
+
+    let internal withFallback selected fallback =
+        match selected with
+        | ValueNone -> fallback
+        | ValueSome selected ->
+            ValueSome(fun expression -> selected expression |> ValueOption.orElseWith (fun () -> fallback |> ValueOption.bind (fun fallback -> fallback expression)))
 
     let rec private isSource parameter (expression: Expression) =
         match expression with
@@ -78,9 +83,9 @@ module internal QueryGroupScalar =
                     source <- stage.Arguments[0]
                 | _ -> ()
             if not valid || not(isSource parameter source) || (kind = AggregateKind.Count && distinct)
-               || (quantifier.IsSome && selector.IsSome) then None
+               || (quantifier.IsSome && selector.IsSome) || (kind <> AggregateKind.Count && selector.IsNone) then None
             else
-                Some { Call = call; Kind = kind; Predicate = predicate
+                Some { Kind = kind; Predicate = predicate
                        Selector = if kind = AggregateKind.Count then None else selector
                        DiscardedProjection = if kind = AggregateKind.Count then selector else None
                        Distinct = distinct; Quantifier = quantifier }
@@ -91,8 +96,9 @@ module internal QueryGroupScalar =
         | _ -> false
 
     /// Admission inspects syntax only; it does not lower or acquire arguments.
-    let internal supportsPredicate parameter (expression: Expression) =
+    let internal supportsPredicate parameter (expression: Expression) guarded =
         let mutable supported = true
+        let mutable lazyBranch = guarded
         let visitor =
             { new ExpressionVisitor() with
                 override this.Visit(node: Expression) =
@@ -100,9 +106,25 @@ module internal QueryGroupScalar =
                     elif isKey parameter node then node
                     else
                         match node with
+                        | :? ConditionalExpression as conditional ->
+                            let previous = lazyBranch
+                            this.Visit conditional.Test |> ignore
+                            lazyBranch <- true
+                            this.Visit conditional.IfTrue |> ignore
+                            this.Visit conditional.IfFalse |> ignore
+                            lazyBranch <- previous
+                            node
+                        | :? BinaryExpression as binary when binary.NodeType = ExpressionType.AndAlso || binary.NodeType = ExpressionType.OrElse ->
+                            let previous = lazyBranch
+                            this.Visit binary.Left |> ignore
+                            lazyBranch <- true
+                            this.Visit binary.Right |> ignore
+                            lazyBranch <- previous
+                            node
                         | :? MethodCallExpression as call ->
                             match describe parameter call with
                             | Some demand ->
+                                if lazyBranch && (demand.Kind <> AggregateKind.Count || demand.Predicate.IsSome || demand.DiscardedProjection.IsSome) then supported <- false
                                 for argument in [demand.Predicate; demand.Selector; demand.DiscardedProjection] do
                                     argument |> Option.iter (fun argument -> this.Visit argument.Body |> ignore)
                                 node

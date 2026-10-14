@@ -61,6 +61,25 @@ module internal OrderedChainRows =
         let struct(keyRows, keyInput, equalityNames) = QueryDefaultEquality.prepareGroups adapter.Alias keyName selector.ReturnType keyRows input keyInput "__ord"
         struct(keyRows, keyInput, keyName, equalityNames)
 
+    let private pureLookupExpression expression =
+        SqlExpr.fold (fun valid node ->
+            valid && (match node with
+                      | ScalarSubquery _ | Exists _ | InSubquery _ | AggregateCall _ | WindowCall _ -> false
+                      | FunctionCall(name, _) ->
+                          name = "jsonb" || name = "jsonb_extract" || name = "json_quote" || name = "json" || name = "NULLIF"
+                      | _ -> true)) true expression
+
+    let private hasPureRightLookup (source: SqlSelect) =
+        let mutable valid = true
+        let rec inspect source =
+            valid <- valid && source.Ctes.IsEmpty
+            let inspectCore (row: SelectCore) =
+                valid <- valid && row.Limit.IsNone && row.Offset.IsNone && row.GroupBy.IsEmpty && row.Having.IsNone && not row.Distinct
+                mapCoreExpressions (fun expression -> valid <- valid && pureLookupExpression expression; expression) inspect row
+            mapSelectParts (mapCores inspectCore) inspect source
+        inspect source |> ignore
+        valid
+
     let rec private buildRows (adapter: Adapter) columns (plan: Plan) retainFinalRepresentative =
         adapter.Validate plan
         let struct(start, sourceInput) = adapter.Source columns plan.Root
@@ -329,7 +348,12 @@ module internal OrderedChainRows =
                         let struct(left, rightKey) = QueryDefaultEquality.membershipKeys adapter.Alias keyType context (adapter.IsValue right)
                                                         (col leftAlias keyName, keyInput) (col rightAlias "Value", rightInput)
                                                         (fun () -> col rightAlias "Id")
-                        let matches = QueryDefaultEquality.membership left rightKey (core (Some(DerivedTable(r, rightAlias))) [proj "Value" rightKey.Value])
+                        let rightSource = core (Some(DerivedTable(r, rightAlias))) [proj "Value" rightKey.Value]
+                        let matches =
+                            if rest.IsEmpty && not retainFinalRepresentative && hasPureRightLookup r
+                               && (QueryDefaultEquality.terms rightKey |> List.forall pureLookupExpression) then
+                                QueryDefaultEquality.lookup left rightKey rightSource
+                            else QueryDefaultEquality.membership left rightKey rightSource
                         let predicate = if name = "Except" || name = "ExceptBy" then SqlExpr.Unary(UnaryOperator.Not, matches) else matches
                         let filtered = { core (Some(DerivedTable(prepared, leftAlias))) (fields input leftAlias) with Where = Some predicate }
                         let rows =

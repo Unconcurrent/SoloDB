@@ -168,6 +168,11 @@ module internal QueryDefaultEquality =
             let fields = rightTerms |> List.mapi (fun index value -> projection ("_comparison" + string index) value)
             SqlExpr.InSubquery(SqlExpr.RowValueExpr leftTerms, select { source with Projections = ProjectionSetOps.ofList fields })
 
+    /// A pure terminal lookup consumes one null-aware comparison and stops at a match.
+    let lookup left right (source: SelectCore) =
+        SqlExpr.Exists(select { source with Projections = ProjectionSetOps.ofList [projection "Value" (integer 1L)]
+                                            Where = Some(equal left right); Limit = Some(integer 1L) })
+
     /// Rank one original occurrence, keeping every payload and input companion together.
     let firstRows nextName (source: SelectCore) equality order =
         let rankName = "_rank" + nextName()
