@@ -81,12 +81,13 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                                     LayerPosition = OuterLayer
                                     SerializationInput = ctx.Input
                                     Joins = ResizeArray() }
-                            let struct(innerCtx, innerInput) = prepareInner ctx.Vars
                             let outerKeyExpr =
                                 translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars (Some outerKeySelector.Parameters.[0]) outerKeySelector.Body
+                            let keyPhase = reserveJoinKey sourceCtx
+                            let struct(innerCtx, innerInput) = prepareInner ctx.Vars
                             let struct(innerQuery, keyName) =
                                 publishInnerJoinKey innerCtx innerInput innerAlias (fun context alias ->
-                                    translateJoinSingleSourceProduced context alias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body)
+                                    keyPhase (fun () -> translateJoinSingleSourceProduced context alias ctx.Vars (Some innerKeySelector.Parameters.[0]) innerKeySelector.Body))
                             let joinCondition = SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, SqlExpr.Column(Some innerAlias, keyName))
 
                             let outerKeyJoins = QueryTranslatorReferenceJoin.preparedJoinClauses outerCtx.Joins

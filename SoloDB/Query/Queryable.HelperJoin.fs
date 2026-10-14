@@ -120,6 +120,14 @@ module internal QueryableHelperJoin =
             let input = translate context vars expression
             struct({ context with LayerPosition = OuterLayer; SerializationInput = input.SerializationInput }, input)
 
+    /// Key captures retain their original phase while source dependencies lower first.
+    let internal reserveJoinKey (context: QueryContext) =
+        match context.BindQueryValue with
+        | ValueSome binder ->
+            let group = binder.Order.ReserveProjection()
+            fun lower -> binder.Order.Within(group, lower)
+        | ValueNone -> fun lower -> lower()
+
     /// An unbounded physical identity SELECT can publish its key at the stored input.
     /// All other completed shapes retain their prepared input and relational boundary.
     let private tryPhysicalJoinInput (context: QueryContext) (input: TranslatedQuery) =

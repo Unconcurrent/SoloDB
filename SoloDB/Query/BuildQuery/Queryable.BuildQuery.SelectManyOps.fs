@@ -66,12 +66,13 @@ Fix: Project scalar members from the outer row and the SupportedLinqMethods.Defa
                             let outerAlias = "o"
                             let innerAlias = "j"
                             let outerCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input; Joins = ResizeArray() }
-                            let struct(innerCtx, innerInput) = prepareInner ctx.Vars
                             let outerKeyExpr =
                                 translateJoinSingleSourceExpression outerCtx outerAlias ctx.Vars (Some composite.OuterKeySelector.Parameters.[0]) composite.OuterKeySelector.Body
+                            let keyPhase = reserveJoinKey sourceCtx
+                            let struct(innerCtx, innerInput) = prepareInner ctx.Vars
                             let struct(innerQuery, keyName) =
                                 publishInnerJoinKey innerCtx innerInput innerAlias (fun context alias ->
-                                    translateJoinSingleSourceProduced context alias ctx.Vars (Some composite.InnerKeySelector.Parameters.[0]) composite.InnerKeySelector.Body)
+                                    keyPhase (fun () -> translateJoinSingleSourceProduced context alias ctx.Vars (Some composite.InnerKeySelector.Parameters.[0]) composite.InnerKeySelector.Body))
                             let joinCondition = SqlExpr.Binary(outerKeyExpr, BinaryOperator.Eq, SqlExpr.Column(Some innerAlias, keyName))
 
                             let outerKeyJoins = QueryTranslatorReferenceJoin.preparedJoinClauses outerCtx.Joins
