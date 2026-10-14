@@ -156,7 +156,10 @@ module internal QueryGroupScalar =
                     | None, predicate -> predicate
                 let aggregate =
                     if demand.Kind = AggregateKind.Count then
-                        let argument = predicate |> Option.map (fun predicate -> SqlExpr.CaseExpr((predicate, one), [], None))
+                        let argument =
+                            match demand.Predicate, present with
+                            | None, Some(SqlExpr.Unary(UnaryOperator.IsNotNull, value)) -> Some value
+                            | _ -> predicate |> Option.map (fun predicate -> SqlExpr.CaseExpr((predicate, one), [], None))
                         SqlExpr.AggregateCall(AggregateKind.Count, argument, false, None)
                     else
                         let value =
