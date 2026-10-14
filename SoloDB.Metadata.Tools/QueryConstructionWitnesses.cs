@@ -5,7 +5,7 @@ using Mono.Cecil;
 
 namespace SoloDatabase.Metadata.Tools;
 
-/// <summary>Metadata needed by the caller's FSharp.Core expression converter.</summary>
+/// <summary>Metadata needed by the caller's FSharp quotation and expression construction.</summary>
 public static class QueryConstructionWitnesses
 {
     public static GeneratedQueryWitness[] Read(string path, ModuleDefinition output)
