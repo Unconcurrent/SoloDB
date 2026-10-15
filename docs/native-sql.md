@@ -57,6 +57,10 @@ var values = connection.Query("SELECT Value FROM Notes",
 
 Reuse a plan for its stable parameter shape. Anonymous objects, named dictionaries and `SqlArguments` provide dynamic input convenience. Values are captured at execution acquisition; capture exceptions occur before the first statement takes effect. Missing values fail instead of reusing earlier bindings. Supply null or `DBNull.Value` for SQL NULL. An unprefixed name must identify one SQL parameter; retain its symbol prefix when names would be ambiguous. Strings and blobs preserve empty values and embedded NUL.
 
+Generated registration infers argument capture separately from JSON model roots at checked C# and F# SQL calls. It follows available original anonymous and named input types, including source-local helpers and factories; an unavailable runtime-selected concrete type cannot be inferred from an object or interface declaration alone.
+
+Object capture uses original readable public instance CLR properties, including inherited properties. JSON ignore and naming policies do not omit or rename SQL arguments. Each selected getter runs once during acquisition, even when its name is unused by the SQL. Boxed value-type getters operate on the original box, preserving mutations before success or an exception.
+
 Raw SQL Decimal and BigInteger parameters and function results use invariant numeric text. Typed BigInteger reads preserve full-width integer text, construct from SQLite INTEGER or REAL values, and retain native integer parsing rules. Untyped reads return the original SQLite value, including a string for TEXT; they do not interpret document numerical keys.
 
 ## Transactions, batches and ownership

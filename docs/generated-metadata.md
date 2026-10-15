@@ -70,6 +70,8 @@ module Startup =
 
 Active generation combines explicitly selected models with concrete types inferred from typed collection and JSON calls, closed generic helper uses and supported query signatures. It follows their required operation dependencies without generating every type in referenced assemblies. Explicit and inferred roots retain the same original types.
 
+Raw SQL argument inputs have their own generated capture capability; they do not need JSON model roots. See [SQL argument capture](native-sql.md#typed-arguments-and-direct-mapping) for property selection, source availability and acquisition behavior.
+
 An open-ended runtime-selected type cannot always be inferred. Resolve `SOLO003` warnings at the reported use: supply an explicit model root and a concrete closed signature where required. Attributes do not make an unsupported operation supported.
 
 Each consuming project registers its own generated operations. A library can call its project-local registration from its own initialization method. Call registration before generated metadata is needed, including in libraries used by the application. Successful repeated calls, including concurrent calls, are no-ops; a failed registration can be retried. Registration does not invoke model constructors or getters.
