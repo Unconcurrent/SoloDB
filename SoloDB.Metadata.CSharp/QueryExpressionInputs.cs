@@ -85,7 +85,8 @@ internal static class QueryExpressionInputs
                 return Read(compilation, coalesce.Value, symbols, visited,source)
                     .Concat(Read(compilation, coalesce.WhenNull, symbols, visited,source)).ToArray();
             case IParameterReferenceOperation parameter:
-                return symbols.Input(parameter.Parameter).Where(origin => source ? origin.Type != null : origin.Type == null).ToArray();
+                return symbols.Input(parameter.Parameter).Where(origin => source ? origin.Type != null : origin.Type == null)
+                    .Concat(source ? Binding(parameter.Parameter,symbols) : Array.Empty<Origin>()).ToArray();
             case ILocalReferenceOperation local:
                 return Binding(local.Local, symbols);
             case IFieldReferenceOperation field:
@@ -108,8 +109,9 @@ internal static class QueryExpressionInputs
                     .SelectMany(variable => Read(compilation,compilation.GetSemanticModel(variable.SyntaxTree)
                         .GetOperation(variable.Initializer!.Value),context,visited,source));
                 if (!source) return initial.ToArray();
-                var scopes = symbol is IFieldSymbol field
-                    ? field.ContainingType.DeclaringSyntaxReferences.Select(reference => reference.GetSyntax())
+                var carrier = symbol.ContainingType;
+                var scopes = symbol is IFieldSymbol or IPropertySymbol
+                    ? carrier!.DeclaringSyntaxReferences.Select(reference => reference.GetSyntax())
                     : declarations.Select(declaration => declaration.Ancestors().FirstOrDefault(node =>
                         node is BaseMethodDeclarationSyntax or LocalFunctionStatementSyntax or LambdaExpressionSyntax) ?? declaration);
                 var assigned = scopes.SelectMany(scope => scope.DescendantNodes().OfType<AssignmentExpressionSyntax>())
@@ -119,7 +121,9 @@ internal static class QueryExpressionInputs
                         var target = assignment.Target switch
                         {
                             ILocalReferenceOperation local => (ISymbol)local.Local,
+                            IParameterReferenceOperation parameter => parameter.Parameter,
                             IFieldReferenceOperation field => field.Field,
+                            IPropertyReferenceOperation property => property.Property,
                             _ => null
                         };
                         return target != null && SymbolEqualityComparer.Default.Equals(target.OriginalDefinition,symbol.OriginalDefinition);
@@ -163,7 +167,8 @@ internal static class QueryExpressionInputs
                             .Select(accessor => accessor.ExpressionBody!.Expression));
                     return bodies.SelectMany(body => Read(compilation,
                         compilation.GetSemanticModel(body.SyntaxTree).GetOperation(body), actual, visited,source));
-                }).ToArray();
+                }).Concat(source && method.AssociatedSymbol is IPropertySymbol writtenProperty
+                    ? Binding(writtenProperty,actual) : Array.Empty<Origin>()).ToArray();
             }
             finally { visited.Remove(method.OriginalDefinition); }
         }

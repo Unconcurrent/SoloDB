@@ -17,7 +17,7 @@ module internal RawSqlInputs =
                 (instantiate: (FSharpGenericParameter * FSharpType) list -> FSharpType -> FSharpType)
                 (contexts: FSharpSymbolUse -> (FSharpGenericParameter * FSharpType) list list)
                 (selectedArguments: FSharpMemberOrFunctionOrValue -> FSharpSymbolUse -> (FSharpParameter * SynExpr) list)
-                (bindings: SynBinding[]) =
+                (producers: (FSharpGenericParameter * FSharpType) list -> FSharpSymbolUse -> ((FSharpGenericParameter * FSharpType) list * SynExpr) list) =
         let core = assemblies |> Seq.find(fun assembly -> assembly.SimpleName = "FSharp.Core")
         let read, dispose = ArgumentSourceFacts.create moduleDefinition mapper assemblies
         try
@@ -93,23 +93,14 @@ module internal RawSqlInputs =
                                 read (reference actual) (instantiate actual typ) |> Option.iter add
                                 match (value :> FSharpSymbol).DeclarationLocation with
                                 | Some declared when not(List.contains declared visited) ->
-                                    for SynBinding(expr=body) as binding in bindings do
-                                        if contains binding.RangeOfHeadPattern declared then
-                                            origins actual (declared::visited) body
-                                            // A source parameter is supplied by the bounded original callers.
-                                            for definition in uses do
-                                                match definition.Symbol with
-                                                | :? FSharpMemberOrFunctionOrValue as owner when definition.IsFromDefinition &&
-                                                    (owner.IsFunction || owner.IsMethod) && contains binding.RangeOfHeadPattern definition.Range ->
-                                                    for call in uses do
-                                                        if not call.IsFromDefinition && call.Symbol.Equals owner then
-                                                            for context in contexts call do
-                                                                for parameter,input in selectedArguments owner call do
-                                                                    if parameter.Name = Some value.DisplayName then origins (context @ call.GenericArguments) (declared::visited) input
-                                                | _ -> ()
+                                    for context,source in producers actual part do origins context (declared::visited) source
                                 | _ -> ()
                             | :? FSharpField as field when not field.IsAnonRecordField ->
                                 publish field.FieldType
+                                match (field :> FSharpSymbol).DeclarationLocation with
+                                | Some declared when not(List.contains declared visited) ->
+                                    for context,source in producers actual part do origins context (declared::visited) source
+                                | _ -> ()
                             | :? FSharpEntity as entity -> publish(entity.AsType())
                             | _ -> ()
             for useSite in uses do

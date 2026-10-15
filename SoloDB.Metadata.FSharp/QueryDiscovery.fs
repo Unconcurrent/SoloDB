@@ -71,7 +71,7 @@ module internal QueryDiscovery =
                 [ for call in calls do
                     for parent in contexts (visited.Add key) call do
                         for own in previous do yield parent @ call.GenericArguments @ own ])
-        let argumentGroups, expressionInputs, selectedArguments, inputBindings = QueryExpressionInputs.create inputs file contains uses instantiate (contexts Set.empty)
+        let argumentGroups, expressionInputs, selectedArguments, inputProducers = QueryExpressionInputs.create inputs file contains uses instantiate (contexts Set.empty)
         let scope firstArgument (useSite: FSharpSymbolUse) =
             match argumentGroups useSite with
             | Some(callRange, first :: _) ->
@@ -395,5 +395,5 @@ module internal QueryDiscovery =
                     for part in uses do
                         if contains argumentScope part.Range then addWitness context part
             | _ -> ()
-        let argumentSources = RawSqlInputs.collect moduleDefinition mapper (project.ProjectContext.GetReferencedAssemblies()) uses contains instantiate (contexts Set.empty) selectedArguments inputBindings
+        let argumentSources = RawSqlInputs.collect moduleDefinition mapper (project.ProjectContext.GetReferencedAssemblies()) uses contains instantiate (contexts Set.empty) selectedArguments inputProducers
         operations.ToArray(), (calls.Values |> Seq.toArray), (witnesses.Values |> Seq.toArray), (lambdas.Values |> Seq.toArray), roots.ToArray(), providers.ToArray(), (operationAccess |> Seq.toArray), argumentSources

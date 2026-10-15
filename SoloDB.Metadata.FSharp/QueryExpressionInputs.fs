@@ -16,11 +16,18 @@ module internal QueryExpressionInputs =
 
     let create (inputs: IDictionary<string,ParsedInput>) file contains (uses: FSharpSymbolUse[]) instantiate contexts =
         let bindings = ResizeArray<SynBinding>()
+        let assignments = ResizeArray<range * SynExpr>()
         let lambdas = ResizeArray<range>()
         for input in inputs.Values do
             ParsedInput.fold (fun () _ node ->
                 match node with
                 | SyntaxNode.SynBinding binding -> bindings.Add binding
+                | SyntaxNode.SynExpr(SynExpr.LongIdentSet(longDotId=target;expr=value)) -> assignments.Add(target.Range,value)
+                | SyntaxNode.SynExpr(SynExpr.DotSet(longDotId=target;rhsExpr=value)) -> assignments.Add(target.Range,value)
+                | SyntaxNode.SynExpr(SynExpr.Set(targetExpr=target;rhsExpr=value)) -> assignments.Add(target.Range,value)
+                | SyntaxNode.SynExpr(SynExpr.Record(recordFields=fields)) ->
+                    for SynExprRecordField(fieldName=(target,_);expr=value) in fields do
+                        value |> Option.iter(fun value -> assignments.Add(target.Range,value))
                 | SyntaxNode.SynExpr(SynExpr.Lambda(range = location)) -> lambdas.Add location
                 | _ -> ()) () input
 
@@ -79,6 +86,52 @@ module internal QueryExpressionInputs =
                             | Some(parameter,value) -> yield parameter,value
                             | _ -> () ]
 
+        let ends = uses |> Array.filter(fun part -> not part.IsFromDefinition)
+                   |> Array.groupBy(fun part -> struct(file part.Range.FileName,part.Range.EndLine,part.Range.EndColumn)) |> dict
+        let writes = Dictionary<FSharpSymbol,ResizeArray<SynExpr>>()
+        for target,value in assignments do
+            match ends.TryGetValue(struct(file target.FileName,target.EndLine,target.EndColumn)) with
+            | true, parts ->
+                for part in parts do
+                    if contains target part.Range then
+                        match writes.TryGetValue part.Symbol with
+                        | true, values -> values.Add value
+                        | _ -> writes.Add(part.Symbol,ResizeArray([value]))
+            | _ -> ()
+
+        let producers context (useSite: FSharpSymbolUse) =
+            let symbol = useSite.Symbol
+            let associated =
+                [ yield symbol
+                  match symbol with
+                  | :? FSharpMemberOrFunctionOrValue as value when value.IsProperty ->
+                      if value.HasGetterMethod then yield value.GetterMethod
+                      if value.HasSetterMethod then yield value.SetterMethod
+                  | _ -> () ]
+            [ for original in associated do
+                match writes.TryGetValue original with
+                | true, values -> for value in values do yield context,value
+                | _ -> ()
+              match symbol.DeclarationLocation with
+              | Some declared ->
+                for SynBinding(expr=body) as binding in bindings do
+                    if contains binding.RangeOfHeadPattern declared then
+                        yield context,body
+                        match symbol with
+                        | :? FSharpMemberOrFunctionOrValue as parameter ->
+                            for definition in uses do
+                                match definition.Symbol with
+                                | :? FSharpMemberOrFunctionOrValue as owner when definition.IsFromDefinition &&
+                                    (owner.IsFunction || owner.IsMethod) && contains binding.RangeOfHeadPattern definition.Range ->
+                                    for call in uses do
+                                        if not call.IsFromDefinition && call.Symbol.Equals owner then
+                                            for actual in contexts call do
+                                                for input,value in selected owner call do
+                                                    if input.Name = Some parameter.DisplayName then yield actual @ call.GenericArguments,value
+                                | _ -> ()
+                        | _ -> ()
+              | None -> () ]
+
         let expressionArguments context method useSite =
             selected method useSite |> List.choose(fun (parameter,value) ->
                 if isExpression (instantiate (context @ useSite.GenericArguments) parameter.Type) then Some value.Range else None)
@@ -93,23 +146,10 @@ module internal QueryExpressionInputs =
                         value.FullType.IsFunctionType && isExpression (instantiate (context @ part.GenericArguments) value.ReturnParameter.Type) ->
                         match (value :> FSharpSymbol).DeclarationLocation with
                         | Some declared when not (visited |> List.exists((=) declared)) ->
-                            for binding in bindings do
-                                if contains binding.RangeOfHeadPattern declared then
-                                    let (SynBinding(expr = body)) = binding
-                                    yield! origins context (declared :: visited) body.Range
-                                    // A parameter binding has no initializer: follow the actual source calls.
-                                    for definition in uses do
-                                        match definition.Symbol with
-                                        | :? FSharpMemberOrFunctionOrValue as owner when definition.IsFromDefinition &&
-                                            (owner.IsFunction || owner.IsMethod) && contains binding.RangeOfHeadPattern definition.Range ->
-                                            for call in uses do
-                                                if not call.IsFromDefinition && call.Symbol.Equals owner then
-                                                    for actual in contexts call do
-                                                        for input in expressionArguments actual owner call do
-                                                            yield! origins (actual @ call.GenericArguments) (declared :: visited) input
-                                        | _ -> ()
+                            for actual,body in producers (context @ part.GenericArguments) part do
+                                yield! origins actual (declared :: visited) body.Range
                         | _ -> ()
                     | _ -> () ]
             |> List.distinct
 
-        arguments, (fun context method useSite -> expressionArguments context method useSite |> List.collect(origins (context @ useSite.GenericArguments) [])), selected, bindings.ToArray()
+        arguments, (fun context method useSite -> expressionArguments context method useSite |> List.collect(origins (context @ useSite.GenericArguments) [])), selected, producers
