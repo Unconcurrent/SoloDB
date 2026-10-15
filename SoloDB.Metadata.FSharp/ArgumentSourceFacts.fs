@@ -53,6 +53,7 @@ module internal ArgumentSourceFacts =
             elif typ.IsTupleType then
                 let original = SourceTypeIdentity.Original(reference typ,resolver)
                 Option.ofObj(OriginalArgumentSources.Read(moduleDefinition,original))
+            elif typ.HasTypeDefinition && (typ.TypeDefinition.IsInterface || typ.TypeDefinition.IsAbstractClass) then None
             elif typ.HasTypeDefinition && typ.TypeDefinition.Assembly.FileName.IsSome && not(String.IsNullOrEmpty typ.TypeDefinition.Assembly.QualifiedName) then
                 let actual: TypeReference = reference typ
                 let root = match actual with :? GenericInstanceType as closed -> closed.ElementType | _ -> actual

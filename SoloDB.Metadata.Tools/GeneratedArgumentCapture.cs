@@ -11,7 +11,7 @@ internal static class GeneratedArgumentCapture
     internal static void Register(GeneratedJsonDefinitions definitions, ModuleDefinition module, TypeDefinition owner,
         ILProcessor il, AssemblyDefinition product, GeneratedModel model)
     {
-        if (model.Facts.Shape != TypeShape.Object) return;
+        if (model.Facts.Shape != TypeShape.Object || model.Facts.AbstractType) return;
         var members = GeneratedCodec.Model(model).Members.Where(member =>
             member.Field == null && TypeSupport.SqlArgumentProperty(true,member.Readable,member.Static,
                 member.Getter != null && member.Getter.Value.Parameters.Count != 0)).ToArray();

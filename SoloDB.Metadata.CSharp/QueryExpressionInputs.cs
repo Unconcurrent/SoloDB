@@ -29,8 +29,12 @@ internal static class QueryExpressionInputs
             named.OriginalDefinition.ToDisplayString() == "System.Linq.Expressions.Expression<TDelegate>" ? named : null;
     }
 
+    private static bool SourceInput(ITypeSymbol type) => type.SpecialType == SpecialType.System_Object ||
+        type.TypeKind == TypeKind.Interface || type is INamedTypeSymbol { IsReferenceType: true, IsSealed: false } ||
+        type is IArrayTypeSymbol { ElementType.IsReferenceType: true };
+
     internal static IEnumerable<(IParameterSymbol Parameter, Origin[] Origins)> Arguments(
-        Compilation compilation, IInvocationOperation invocation, QueryRegistrations.Symbols symbols, bool objects = false)
+        Compilation compilation, IInvocationOperation invocation, QueryRegistrations.Symbols symbols, bool rawSources = false)
     {
         foreach (var argument in invocation.Arguments)
             if (argument.Parameter is IParameterSymbol parameter)
@@ -38,7 +42,7 @@ internal static class QueryExpressionInputs
                 if (Contract(symbols.Type(parameter.Type)) != null)
                     yield return (parameter, Read(compilation, argument.Value, symbols,
                         new HashSet<ISymbol>(SymbolEqualityComparer.Default)).ToArray());
-                else if (objects && symbols.Type(parameter.Type).SpecialType == SpecialType.System_Object)
+                else if (rawSources && SourceInput(symbols.Type(parameter.Type)))
                     yield return (parameter, Sources(compilation,argument.Value,symbols));
             }
     }
@@ -50,7 +54,8 @@ internal static class QueryExpressionInputs
         QueryRegistrations.Symbols symbols, HashSet<ISymbol> visited, bool source = false)
     {
         var known = source && value is not IParenthesizedOperation && (value is not IConversionOperation conversionValue || conversionValue.OperatorMethod != null) && value?.Type is ITypeSymbol raw &&
-            symbols.Type(raw) is ITypeSymbol actual && actual.SpecialType != SpecialType.System_Object && actual.TypeKind != TypeKind.Dynamic
+            symbols.Type(raw) is ITypeSymbol actual && actual.SpecialType != SpecialType.System_Object && actual.TypeKind != TypeKind.Dynamic &&
+            actual is not INamedTypeSymbol { IsAbstract: true }
             ? new Origin(value.Syntax,symbols,actual) : null;
         if (known != null && value is IArrayCreationOperation or ICollectionExpressionOperation) return new[] { known };
         var origins = ReadOrigins(compilation,value,symbols,visited,source).ToArray();
@@ -138,7 +143,7 @@ internal static class QueryExpressionInputs
             var actual = new QueryRegistrations.Symbols(compilation, symbols.Method(method), symbols);
             foreach (var argument in arguments)
                 if (argument.Parameter is IParameterSymbol parameter &&
-                    (Contract(symbols.Type(parameter.Type)) != null || source && symbols.Type(parameter.Type).SpecialType == SpecialType.System_Object))
+                    (Contract(symbols.Type(parameter.Type)) != null || source && SourceInput(symbols.Type(parameter.Type))))
                     actual.BindInput(parameter, Read(compilation, argument.Value, symbols, visited,source).ToArray());
             if (!visited.Add(method.OriginalDefinition)) return Array.Empty<Origin>();
             try
