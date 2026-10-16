@@ -64,7 +64,8 @@ internal sealed class GeneratedJsonDefinitions
             return type.MetadataType.ToString() + Part(Identity(specification.ElementType,signature,definition));
         if (type is GenericParameter parameter)
             return "P" + parameter.Type + ":" + parameter.Position + (signature ? "" : ":" + parameter.Owner);
-        if (signature && (type.IsPrimitive || TypeSupport.ClrPrimitiveSignature(type.FullName,type.Scope.Name))) return type.FullName;
+        var assemblyName = type.Scope is ModuleDefinition definitionModule ? definitionModule.Assembly.Name.Name : type.Scope.Name;
+        if (signature && (type.IsPrimitive || TypeSupport.ClrPrimitiveSignature(type.FullName,assemblyName))) return type.FullName;
         if (definition != null) type = definition(type);
         var scope = type.Scope is AssemblyNameReference assembly ? assembly.FullName
             : type.Scope is ModuleDefinition module ? module.Assembly.Name.FullName : type.Scope.Name;
