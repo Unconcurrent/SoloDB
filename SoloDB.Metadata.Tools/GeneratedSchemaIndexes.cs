@@ -28,7 +28,7 @@ internal static class GeneratedSchemaIndexes
             {
                 var body = factory.Body.GetILProcessor();
                 body.Emit(OpCodes.Ldtoken,module.ImportReference(property.Member.Getter?.Value.DeclaringType ?? property.Member.Setter!.Value.DeclaringType));
-                body.Emit(OpCodes.Ldstr,GeneratedRowFields.Signature(property.Member));
+                body.Emit(OpCodes.Ldtoken,module.ImportReference(property.Member.Getter?.Value ?? property.Member.Setter!.Value));
                 body.Emit(OpCodes.Call,module.ImportReference(metadata.Methods.Single(method => method.Name == "UncompletedAttributes")));
                 body.Emit(OpCodes.Ret);
             }
@@ -66,7 +66,7 @@ internal static class GeneratedSchemaIndexes
     }
     private static bool Pending(MethodDefinition method,AssemblyDefinition product) => method.HasBody && method.Body.Instructions.Any(instruction =>
         instruction.OpCode == OpCodes.Call && instruction.Operand is MethodReference call && !call.HasThis && call.GenericParameters.Count == 0 &&
-        call.FullName == "System.Object[] SoloDatabase.SchemaMetadata::UncompletedAttributes(System.RuntimeTypeHandle,System.String)" &&
+        call.FullName == "System.Object[] SoloDatabase.SchemaMetadata::UncompletedAttributes(System.RuntimeTypeHandle,System.RuntimeMethodHandle)" &&
         call.DeclaringType.Scope is AssemblyNameReference assembly && assembly.FullName == product.Name.FullName);
 
     // Only explicit compiler placeholders are completed, from actual emitted property metadata.
@@ -74,13 +74,28 @@ internal static class GeneratedSchemaIndexes
     {
         System.Collections.Generic.IEnumerable<MethodDefinition> Factories(TypeDefinition type) =>
             type.Methods.Where(method => Pending(method,product)).Concat(type.NestedTypes.SelectMany(Factories));
-        (TypeReference Owner,string Signature,string Key) Source(MethodDefinition method)
+        string Signature(MethodReference method,System.Func<TypeReference,string> identity) =>
+            method.Name + ":" + method.CallingConvention + ":" + method.HasThis + ":" + method.GenericParameters.Count + ":" +
+            identity(method.ReturnType) + ":" + string.Join(";",method.Parameters.Select(parameter => identity(parameter.ParameterType)));
+        (TypeReference Owner,MethodReference Accessor,string Key) Source(MethodDefinition method)
         {
             var body = method.Body.Instructions.Where(instruction => instruction.OpCode != OpCodes.Nop).ToArray();
-            if (body.Length != 4 || body[0].OpCode != OpCodes.Ldtoken || body[0].Operand is not TypeReference owner || body[1].OpCode != OpCodes.Ldstr || body[2].OpCode != OpCodes.Call || body[3].OpCode != OpCodes.Ret)
+            if (body.Length != 4 || body[0].OpCode != OpCodes.Ldtoken || body[0].Operand is not TypeReference owner ||
+                body[1].OpCode != OpCodes.Ldtoken || body[1].Operand is not MethodReference accessor || body[2].OpCode != OpCodes.Call || body[3].OpCode != OpCodes.Ret)
                 throw new System.InvalidOperationException("Generated schema source operands are incomplete: " + method.FullName);
-            return (owner,(string)body[1].Operand,method.Name + ":" + GeneratedJsonDefinitions.Identity(owner) + ":" + (string)body[1].Operand);
+            if (!GeneratedJsonDefinitions.SameType(owner,accessor.DeclaringType))
+                throw new System.InvalidOperationException("Generated schema accessor has a different source owner: " + method.FullName);
+            return (owner,accessor,method.Name + ":" + GeneratedJsonDefinitions.Identity(owner) + ":" + Signature(accessor,OriginalIdentity));
         }
+        TypeReference Definition(TypeReference reference)
+        {
+            var scope = reference.Scope is AssemblyNameReference assembly ? assembly.FullName
+                : reference.Scope is ModuleDefinition module ? module.Assembly.Name.FullName : reference.Scope.Name;
+            return scope == consumer.Name.FullName
+                ? consumer.MainModule.GetType(reference.FullName) ?? throw new System.InvalidOperationException("The current compiler image has no signature type: " + reference.FullName)
+                : SourceTypeIdentity.Definition(consumer.MainModule.AssemblyResolver.Resolve(AssemblyNameReference.Parse(scope)),reference.FullName);
+        }
+        string OriginalIdentity(TypeReference reference) => GeneratedJsonDefinitions.SignatureIdentity(reference,Definition);
         var expected = template.MainModule.Types.SelectMany(Factories).Select(method => Source(method).Key).ToArray();
         var actual = consumer.MainModule.Types.SelectMany(Factories).Select(method => Source(method).Key).ToArray();
         if (expected.Except(actual,System.StringComparer.Ordinal).Any() || actual.Except(expected,System.StringComparer.Ordinal).Any())
@@ -97,16 +112,12 @@ internal static class GeneratedSchemaIndexes
                 if (sourceAssembly != consumer.Name.FullName)
                     throw new System.InvalidOperationException("Generated schema source does not belong to the current compiler image: " + owner.FullName);
                 var original = consumer.MainModule.GetType(root.FullName) ?? throw new System.InvalidOperationException("The current compiler image has no schema source type: " + root.FullName);
-                var candidates = original.Properties.Where(property => {
-                    var getter = property.GetMethod; var setter = property.SetMethod;
-                    var member = new CodecMember<TypeReference,MethodReference,FieldReference>(property.Name,property.PropertyType,null!,
-                        getter == null ? null! : Microsoft.FSharp.Core.FSharpOption<MethodReference>.Some(getter),
-                        setter == null ? null! : Microsoft.FSharp.Core.FSharpOption<MethodReference>.Some(setter),
-                        (getter ?? setter!).IsStatic,getter != null,setter != null,false,false);
-                    return GeneratedRowFields.Signature(member) == source.Signature;
-                }).ToArray();
+                var signature = Signature(source.Accessor,OriginalIdentity);
+                var candidates = original.Properties.Where(property =>
+                    (property.GetMethod != null && Signature(property.GetMethod,OriginalIdentity) == signature) ||
+                    (property.SetMethod != null && Signature(property.SetMethod,OriginalIdentity) == signature)).ToArray();
                 if (candidates.Length != 1)
-                    throw new System.InvalidOperationException("The original schema property is missing or ambiguous: " + original.FullName + " " + source.Signature);
+                    throw new System.InvalidOperationException("The original schema property is missing or ambiguous: " + original.FullName + " " + signature);
                 var attributes = OriginalAttributeFacts.Read(consumer.MainModule,candidates[0],access);
                 method.Body = new Mono.Cecil.Cil.MethodBody(method);
                 Emit(consumer.MainModule,product,method,attributes);

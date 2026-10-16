@@ -22,28 +22,48 @@ module internal CompilerPropertyFacts =
         typ.TypeDefinition.Attributes |> Seq.exists(fun attribute -> attribute.AttributeType.FullName = "SoloDatabase.Attributes.PolymorphicAttribute")
         || (typ.BaseType |> Option.exists polymorphic)
 
-    let private virtualSlot referenceWith reference (owner: FSharpType) (method: FSharpMemberOrFunctionOrValue) =
+    let private virtualSlot referenceWith reference (resolver: IAssemblyResolver) (owner: FSharpType) (method: FSharpMemberOrFunctionOrValue) =
         let declaringType: TypeReference = reference owner
         let definition = match declaringType with :? GenericInstanceType as closed -> closed.ElementType | _ -> declaringType
         let substitutions = Seq.zip owner.TypeDefinition.GenericParameters owner.GenericArguments |> Seq.toList
         let signature typ = referenceWith (fun parameter ->
             let index = owner.TypeDefinition.GenericParameters |> Seq.findIndex(fun candidate -> candidate.Equals parameter)
             definition.GenericParameters[index] :> TypeReference) typ
-        let slot = method.ImplementedAbstractSignatures |> Seq.tryFind(fun slot -> not slot.DeclaringType.TypeDefinition.IsInterface)
-        match slot with
-        | Some slot ->
-            let declaring = slot.DeclaringType.Instantiate(substitutions).StripAbbreviations()
-            let actual = reference declaring
-            let definition = match actual with :? GenericInstanceType as closed -> closed.ElementType | _ -> actual
-            let parameterType = referenceWith (fun parameter ->
-                let index = slot.DeclaringTypeGenericParameters |> Seq.findIndex(fun candidate -> candidate.Equals parameter)
-                definition.GenericParameters[index] :> TypeReference)
-            let result = if method.IsPropertySetterMethod then actual.Module.TypeSystem.Void else parameterType slot.AbstractReturnType
-            GeneratedRowFields.SlotIdentity(actual,slot.Name,result,slot.AbstractArguments |> Seq.collect id |> Seq.map(fun parameter -> parameterType parameter.Type) |> Seq.toArray)
-        | None when method.IsDispatchSlot ->
-            let result = if method.IsPropertySetterMethod then declaringType.Module.TypeSystem.Void else signature method.ReturnParameter.Type
-            GeneratedRowFields.SlotIdentity(declaringType,method.CompiledName,result,method.CurriedParameterGroups |> Seq.collect id |> Seq.map(fun parameter -> signature parameter.Type) |> Seq.toArray)
-        | None -> null
+        let originalSlot (owner: FSharpType) name result (parameters: TypeReference[]) =
+            let original = SourceTypeIdentity.Original(reference owner,resolver)
+            let definition = original.Resolve()
+            let identity typ = GeneratedJsonDefinitions.SignatureIdentity(typ,Func<TypeReference,TypeReference>(fun typ ->
+                match typ with
+                | :? TypeDefinition -> typ
+                | _ -> SourceTypeIdentity.Original(typ,resolver)))
+            let same (candidate: MethodDefinition) =
+                not(isNull candidate) && candidate.Name = name && candidate.HasThis = method.IsInstanceMemberInCompiledCode &&
+                candidate.CallingConvention = MethodCallingConvention.Default && candidate.GenericParameters.Count = 0 &&
+                identity candidate.ReturnType = identity result && candidate.Parameters.Count = parameters.Length &&
+                Seq.forall2 (fun (parameter: ParameterDefinition) expected -> identity parameter.ParameterType = identity expected) candidate.Parameters parameters
+            let property = definition.Properties |> Seq.filter(fun property -> same property.GetMethod || same property.SetMethod) |> Seq.exactlyOne
+            GeneratedRowFields.VirtualSlot(property,original)
+        let result = if method.IsPropertySetterMethod then declaringType.Module.TypeSystem.Void else signature method.ReturnParameter.Type
+        let parameters = method.CurriedParameterGroups |> Seq.collect id |> Seq.map(fun parameter -> signature parameter.Type) |> Seq.toArray
+        if not(String.IsNullOrEmpty(owner.TypeDefinition.Assembly.QualifiedName)) then
+            originalSlot owner method.CompiledName result parameters
+        else
+            let slot = method.ImplementedAbstractSignatures |> Seq.tryFind(fun slot -> not slot.DeclaringType.TypeDefinition.IsInterface)
+            match slot with
+            | Some slot ->
+                let declaring = slot.DeclaringType.Instantiate(substitutions).StripAbbreviations()
+                let actual = reference declaring
+                let definition = match actual with :? GenericInstanceType as closed -> closed.ElementType | _ -> actual
+                let parameterType = referenceWith (fun parameter ->
+                    let index = slot.DeclaringTypeGenericParameters |> Seq.findIndex(fun candidate -> candidate.Equals parameter)
+                    definition.GenericParameters[index] :> TypeReference)
+                let result = if method.IsPropertySetterMethod then actual.Module.TypeSystem.Void else parameterType slot.AbstractReturnType
+                let parameters = slot.AbstractArguments |> Seq.collect id |> Seq.map(fun parameter -> parameterType parameter.Type) |> Seq.toArray
+                if String.IsNullOrEmpty(declaring.TypeDefinition.Assembly.QualifiedName) then
+                    GeneratedRowFields.SlotIdentity(actual,slot.Name,result,parameters)
+                else originalSlot declaring slot.Name result parameters
+            | None when method.IsDispatchSlot -> GeneratedRowFields.SlotIdentity(declaringType,method.CompiledName,result,parameters)
+            | None -> null
 
     let private attributes slotIdentity (owner: FSharpType) (property: FSharpMemberOrFunctionOrValue) =
         let rec inherited (owner: FSharpType) (property: FSharpMemberOrFunctionOrValue) =
@@ -136,11 +156,11 @@ module internal CompilerPropertyFacts =
                         Getter = getter; Setter = setter; Static = not property.IsInstanceMemberInCompiledCode
                         Readable = getter.IsSome; Writable = setter.IsSome; Ignored = false
                         Many = identities && property.IsInstanceMemberInCompiledCode && getter.IsSome && setter.IsSome && many (valueType.Instantiate substitutions) }
-                    let selected = declaration memberFacts (if identities then property.Attributes :> seq<_> else Seq.empty) (if identities then attributes (virtualSlot referenceWith reference) owner property else Seq.empty)
+                    let selected = declaration memberFacts (if identities then property.Attributes :> seq<_> else Seq.empty) (if identities then attributes (virtualSlot referenceWith reference resolver) owner property else Seq.empty)
                     result.Add(GeneratedProperty(selected.Member,selected.Identity,
                         property.HasGetterMethod && property.GetterMethod.Accessibility.IsPrivate,
                         property.HasSetterMethod && property.SetterMethod.Accessibility.IsPrivate,
-                        virtualSlot referenceWith reference owner (if property.HasGetterMethod then property.GetterMethod else property.SetterMethod),selected.Attributes,selected.DeferredSchema))
+                        virtualSlot referenceWith reference resolver owner (if property.HasGetterMethod then property.GetterMethod else property.SetterMethod),selected.Attributes,selected.DeferredSchema))
                 owner.BaseType |> Option.iter(fun parent -> owners parent true)
         owners typ false
         GeneratedRowFields.Merge(result.ToArray())

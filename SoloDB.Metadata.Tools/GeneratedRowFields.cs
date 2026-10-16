@@ -48,7 +48,7 @@ internal static class GeneratedRowFields
         return member.Name + ":" + (method?.CallingConvention.ToString() ?? "Default") + ":" + !member.Static + ":" + GeneratedJsonDefinitions.SignatureIdentity(value) + ":" + string.Join(";",parameters.Select(GeneratedJsonDefinitions.SignatureIdentity));
     }
 
-    private static string? VirtualSlot(PropertyDefinition property,TypeReference owner)
+    internal static string? VirtualSlot(PropertyDefinition property,TypeReference owner)
     {
         var accessor = property.GetMethod ?? property.SetMethod;
         if (accessor == null || !accessor.IsVirtual) return null;

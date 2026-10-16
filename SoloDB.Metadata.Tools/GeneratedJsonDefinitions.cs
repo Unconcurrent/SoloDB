@@ -48,22 +48,24 @@ internal sealed class GeneratedJsonDefinitions
 
     internal static string Identity(TypeReference type) => Identity(type,false);
     internal static string SignatureIdentity(TypeReference type) => Identity(type,true);
-    private static string Identity(TypeReference type,bool signature)
+    internal static string SignatureIdentity(TypeReference type,Func<TypeReference,TypeReference> definition) => Identity(type,true,definition);
+    private static string Identity(TypeReference type,bool signature,Func<TypeReference,TypeReference>? definition = null)
     {
         if (type is GenericInstanceType generic)
-            return "G" + Identity(generic.ElementType,signature) + string.Concat(generic.GenericArguments.Select(value => Part(Identity(value,signature))));
+            return "G" + Identity(generic.ElementType,signature,definition) + string.Concat(generic.GenericArguments.Select(value => Part(Identity(value,signature,definition))));
         if (type is ArrayType array)
         {
             var dimensions = signature ? string.Concat(array.Dimensions.Select(dimension => Part(dimension.ToString()))) : "";
-            return "A" + (array.IsVector ? "vector" : array.Rank.ToString(System.Globalization.CultureInfo.InvariantCulture)) + dimensions + Part(Identity(array.ElementType,signature));
+            return "A" + (array.IsVector ? "vector" : array.Rank.ToString(System.Globalization.CultureInfo.InvariantCulture)) + dimensions + Part(Identity(array.ElementType,signature,definition));
         }
-        if (type is RequiredModifierType required) return "Q" + Part(Identity(required.ModifierType,signature)) + Part(Identity(required.ElementType,signature));
-        if (type is OptionalModifierType optional) return "O" + Part(Identity(optional.ModifierType,signature)) + Part(Identity(optional.ElementType,signature));
+        if (type is RequiredModifierType required) return "Q" + Part(Identity(required.ModifierType,signature,definition)) + Part(Identity(required.ElementType,signature,definition));
+        if (type is OptionalModifierType optional) return "O" + Part(Identity(optional.ModifierType,signature,definition)) + Part(Identity(optional.ElementType,signature,definition));
         if (type is TypeSpecification specification)
-            return type.MetadataType.ToString() + Part(Identity(specification.ElementType,signature));
+            return type.MetadataType.ToString() + Part(Identity(specification.ElementType,signature,definition));
         if (type is GenericParameter parameter)
             return "P" + parameter.Type + ":" + parameter.Position + (signature ? "" : ":" + parameter.Owner);
         if (signature && (type.IsPrimitive || TypeSupport.ClrPrimitiveSignature(type.FullName,type.Scope.Name))) return type.FullName;
+        if (definition != null) type = definition(type);
         var scope = type.Scope is AssemblyNameReference assembly ? assembly.FullName
             : type.Scope is ModuleDefinition module ? module.Assembly.Name.FullName : type.Scope.Name;
         return "N" + Part(scope) + Part(type.FullName);

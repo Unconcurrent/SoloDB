@@ -43,7 +43,7 @@ type internal SchemaMetadata private () =
         let create = Func<DeclaredIndex[]>(fun () -> properties |> Array.choose(fun property ->
             IndexMetadata.select property.Name property.ValueType (property.Attributes.Invoke())))
         TypeMetadataCache.Register(typeof<'T>,fun metadata -> { metadata with Indexes = MetadataValue.generated(PendingIndexes create) })
-    static member UncompletedAttributes(_owner: RuntimeTypeHandle,_signature: string) : obj[] =
+    static member UncompletedAttributes(_owner: RuntimeTypeHandle,_accessor: RuntimeMethodHandle) : obj[] =
         invalidOp "Generated schema attributes require completed compiler metadata."
     static member NamedAssignmentError(name: string,property: bool,error: Exception) : unit =
         let inner = if property then TargetInvocationException(error) :> Exception else error

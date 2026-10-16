@@ -43,7 +43,7 @@ internal static class HelperAssembly
             if (File.Exists(output)) File.Delete(output);
             return false;
         }
-        using var helper = Create(identity);
+        using var helper = Create(identity,resolver);
         var module = helper.MainModule;
         var entry = EntryPoint(module);
         var runtimePath = references.Select(reference => reference.ItemSpec).First(path => Path.GetFileName(path) == "SoloDB.dll");
@@ -151,10 +151,12 @@ internal static class HelperAssembly
         }
     }
 
-    internal static AssemblyDefinition Create(string identity)
+    internal static AssemblyDefinition Create(string identity,IAssemblyResolver? resolver = null)
     {
+        var parameters = new ModuleParameters { Kind = ModuleKind.Dll };
+        if (resolver != null) parameters.AssemblyResolver = resolver;
         var assembly = AssemblyDefinition.CreateAssembly(new AssemblyNameDefinition(identity, new Version(1, 0, 0, 0)),
-            identity + ".dll", ModuleKind.Dll);
+            identity + ".dll", parameters);
         // Build tooling runs on modern MSBuild; its runtime core library must not leak
         // into the generated netstandard2.0 helper.
         var module = assembly.MainModule;
