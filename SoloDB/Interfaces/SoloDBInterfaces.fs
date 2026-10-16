@@ -1142,8 +1142,7 @@ and ISoloDBCollection<'T> =
 /// Defines the public API for the SoloDB virtual file system.
 /// </summary>
 and IFileSystem =
-    /// Gets filesystem event registration for this database instance.
-    abstract Events: ISoloDBFileSystemEvents
+    inherit ISoloDBFileSystemEvents
 
     /// <summary>
     /// Uploads a stream to a file at the specified path. If the file exists, it is overwritten. If it does not exist, it is created.

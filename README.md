@@ -707,7 +707,7 @@ Documents can protect existing files and directories with Single and Many refere
 
 ### Events API
 
-Filesystem changes are available through `db.FileSystem.Events`, including typed header, metadata and logical byte-range callbacks. See [Filesystem events](docs/filesystem-events.md) for examples and callback semantics.
+Filesystem changes are available through `db.FileSystem`, including typed header, metadata and logical byte-range callbacks. See [Filesystem events](docs/filesystem-events.md) for examples and callback semantics.
 
 SoloDB provides a powerful event system for reacting to collection changes. Events are implemented via SQLite triggers, ensuring they participate in the same transaction as the triggering operation.
 

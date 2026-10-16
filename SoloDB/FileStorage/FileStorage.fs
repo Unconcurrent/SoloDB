@@ -27,7 +27,7 @@ module FileStorage =
     /// Provides an API for interacting with a virtual file system within the SQLite database.
     /// </summary>
     type internal FileSystem(connection: NativeConnection, events: unit -> ISoloDBFileSystemEvents) =
-        member _.Events =
+        member private _.Registration =
             use _connection = connection.Get()
             events()
         member this.Upload(path, stream: Stream) =
@@ -335,8 +335,45 @@ module FileStorage =
         member _.CopyReplaceDirectory(fromPath, toPath, recursive, copyMetadata) = copyReplaceDirectory connection fromPath toPath recursive copyMetadata
         member _.CopyReplaceDirectoryAsync(fromPath, toPath, recursive, copyMetadata) = copyReplaceDirectoryAsync connection fromPath toPath recursive copyMetadata
 
+        interface ISoloDBFileSystemEvents with
+            member this.OnFileCreating(handler) = this.Registration.OnFileCreating(handler)
+            member this.Unregister(handler: FileCreatingHandler) = this.Registration.Unregister(handler)
+            member this.OnFileCreated(handler) = this.Registration.OnFileCreated(handler)
+            member this.Unregister(handler: FileCreatedHandler) = this.Registration.Unregister(handler)
+            member this.OnFileDeleting(handler) = this.Registration.OnFileDeleting(handler)
+            member this.Unregister(handler: FileDeletingHandler) = this.Registration.Unregister(handler)
+            member this.OnFileDeleted(handler) = this.Registration.OnFileDeleted(handler)
+            member this.Unregister(handler: FileDeletedHandler) = this.Registration.Unregister(handler)
+            member this.OnFileUpdating(handler) = this.Registration.OnFileUpdating(handler)
+            member this.Unregister(handler: FileUpdatingHandler) = this.Registration.Unregister(handler)
+            member this.OnFileUpdated(handler) = this.Registration.OnFileUpdated(handler)
+            member this.Unregister(handler: FileUpdatedHandler) = this.Registration.Unregister(handler)
+            member this.OnDirectoryCreating(handler) = this.Registration.OnDirectoryCreating(handler)
+            member this.Unregister(handler: DirectoryCreatingHandler) = this.Registration.Unregister(handler)
+            member this.OnDirectoryCreated(handler) = this.Registration.OnDirectoryCreated(handler)
+            member this.Unregister(handler: DirectoryCreatedHandler) = this.Registration.Unregister(handler)
+            member this.OnDirectoryDeleting(handler) = this.Registration.OnDirectoryDeleting(handler)
+            member this.Unregister(handler: DirectoryDeletingHandler) = this.Registration.Unregister(handler)
+            member this.OnDirectoryDeleted(handler) = this.Registration.OnDirectoryDeleted(handler)
+            member this.Unregister(handler: DirectoryDeletedHandler) = this.Registration.Unregister(handler)
+            member this.OnDirectoryUpdating(handler) = this.Registration.OnDirectoryUpdating(handler)
+            member this.Unregister(handler: DirectoryUpdatingHandler) = this.Registration.Unregister(handler)
+            member this.OnDirectoryUpdated(handler) = this.Registration.OnDirectoryUpdated(handler)
+            member this.Unregister(handler: DirectoryUpdatedHandler) = this.Registration.Unregister(handler)
+            member this.OnFileMetadataChanging(handler) = this.Registration.OnFileMetadataChanging(handler)
+            member this.Unregister(handler: FileMetadataChangingHandler) = this.Registration.Unregister(handler)
+            member this.OnFileMetadataChanged(handler) = this.Registration.OnFileMetadataChanged(handler)
+            member this.Unregister(handler: FileMetadataChangedHandler) = this.Registration.Unregister(handler)
+            member this.OnDirectoryMetadataChanging(handler) = this.Registration.OnDirectoryMetadataChanging(handler)
+            member this.Unregister(handler: DirectoryMetadataChangingHandler) = this.Registration.Unregister(handler)
+            member this.OnDirectoryMetadataChanged(handler) = this.Registration.OnDirectoryMetadataChanged(handler)
+            member this.Unregister(handler: DirectoryMetadataChangedHandler) = this.Registration.Unregister(handler)
+            member this.OnFileContentChanging(handler) = this.Registration.OnFileContentChanging(handler)
+            member this.Unregister(handler: FileContentChangingHandler) = this.Registration.Unregister(handler)
+            member this.OnFileContentChanged(handler) = this.Registration.OnFileContentChanged(handler)
+            member this.Unregister(handler: FileContentChangedHandler) = this.Registration.Unregister(handler)
+
         interface IFileSystem with
-            member this.Events = this.Events
             member this.Upload(path, stream) = this.Upload(path, stream)
             member this.UploadAsync(path, stream) = this.UploadAsync(path, stream)
             member this.UploadBulk(files) = this.UploadBulk(files)

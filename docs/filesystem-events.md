@@ -1,6 +1,6 @@
 # Filesystem events
 
-Subscribe through `db.FileSystem.Events`. Registrations also apply to filesystem operations through a transaction or an event context from the same database instance.
+Subscribe through `db.FileSystem`. Registrations also apply to filesystem operations through a transaction or an event context from the same database instance.
 
 | Change | Before | After | Context |
 |---|---|---|---|
@@ -44,13 +44,13 @@ FileContentChangedHandler written = ctx => {
     Console.WriteLine($"{ctx.Path}: {ctx.Kind} at {ctx.Offset}, {ctx.Length} bytes");
     return SoloDBEventsResult.EventHandled;
 };
-db.FileSystem.Events.OnFileContentChanged(written);
+db.FileSystem.OnFileContentChanged(written);
 
 using (var file = db.FileSystem.OpenOrCreateAt("/report")) {
     file.Write(new byte[] { 1, 2, 3 }, 0, 3);
 }
 
-db.FileSystem.Events.Unregister(written);
+db.FileSystem.Unregister(written);
 ```
 
 ## F#
@@ -62,11 +62,11 @@ use db = new SoloDB("example.db")
 let written = FileContentChangedHandler(fun ctx ->
     printfn "%s: %A at %d, %d bytes" ctx.Path ctx.Kind ctx.Offset ctx.Length
     SoloDBEventsResult.EventHandled)
-db.FileSystem.Events.OnFileContentChanged(written)
+db.FileSystem.OnFileContentChanged(written)
 
 use file = db.FileSystem.OpenOrCreateAt("/report")
 file.Write([|1uy; 2uy; 3uy|], 0, 3)
-db.FileSystem.Events.Unregister(written)
+db.FileSystem.Unregister(written)
 ```
 
 ## Transactions and callback lifetime
