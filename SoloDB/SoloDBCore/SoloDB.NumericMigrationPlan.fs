@@ -23,25 +23,32 @@ module internal NumericMigrationPlan =
         Leaves: struct (int * NumericKind)[]
         Edges: Edge[]
         Dynamic: struct (int * Type)[]
+        Paths: Selection list[]
+        Recursive: bool
     }
 
-    let create (rootType: Type) (actualTypes: Dictionary<Type,HashSet<Type>>) =
+    let create (rootType: Type) (actualTypes: Type -> Selection list -> Type seq) =
         let states = Dictionary<Type, int>()
         let leaves = ResizeArray<struct (int * NumericKind)>()
         let edges = ResizeArray<Edge>()
         let dynamic = ResizeArray<struct (int * Type)>()
+        let paths = ResizeArray<Selection list>()
         let mutable nextState = 0
+        let mutable recursive = false
 
-        let allocate() =
+        let allocate path =
             let state = nextState
             nextState <- state + 1
+            paths.Add(List.rev path)
             state
 
-        let rec prepare (target: Type) =
+        let rec prepare path (target: Type) =
             match states.TryGetValue target with
-            | true, state -> state
+            | true, state ->
+                recursive <- true
+                state
             | _ ->
-                let state = allocate()
+                let state = allocate path
                 states.Add(target, state)
 
                 if typeof<decimal>.Equals(target) then
@@ -51,7 +58,7 @@ module internal NumericMigrationPlan =
                 else
                     let shape = JsonValue.SerializedValueFacts target
                     let child selection valueType =
-                        edges.Add({ Source = state; Target = prepare valueType; Selection = selection })
+                        edges.Add({ Source = state; Target = prepare (selection :: path) valueType; Selection = selection })
 
                     let members fields =
                         for struct (name, valueType) in fields do
@@ -76,9 +83,9 @@ module internal NumericMigrationPlan =
                     | JsonSerializationShape.GroupingValues(key, element) ->
                         child (Member "Key") key
                         child Elements element
-                        let items = allocate()
+                        let items = allocate (Member "Items" :: path)
                         edges.Add({ Source = state; Target = items; Selection = Member "Items" })
-                        edges.Add({ Source = items; Target = prepare element; Selection = Elements })
+                        edges.Add({ Source = items; Target = prepare (Elements :: Member "Items" :: path) element; Selection = Elements })
                     | JsonSerializationShape.ArrayMembers fields ->
                         for index = 0 to fields.Length - 1 do
                             child (Index index) fields[index].ValueType
@@ -114,12 +121,11 @@ module internal NumericMigrationPlan =
 
                     if modelShape && not target.IsValueType && not target.IsSealed then
                         dynamic.Add(struct (state, target))
-                        match actualTypes.TryGetValue target with
-                        | true, types ->
-                            for actual in types do
-                                child (ActualType actual.FullName) actual
-                        | _ -> ()
+                        for actual in actualTypes target (List.rev path) do
+                            child (ActualType actual.FullName) actual
+                states.Remove(target) |> ignore
                 state
 
-        let root = prepare rootType
-        { Root = root; Leaves = leaves.ToArray(); Edges = edges.ToArray(); Dynamic = dynamic.ToArray() }
+        let root = prepare [] rootType
+        { Root = root; Leaves = leaves.ToArray(); Edges = edges.ToArray(); Dynamic = dynamic.ToArray()
+          Paths = paths.ToArray(); Recursive = recursive }

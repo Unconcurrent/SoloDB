@@ -387,6 +387,8 @@
     <Compile Include="SoloDBCore/SoloDB.Bootstrap.fs" />
     <Compile Include="SoloDBCore/SoloDB.QueryUtils.fs" />
     <Compile Include="SoloDBCore/SoloDB.NumericMigrationPlan.fs" />
+    <Compile Include="SoloDBCore/SoloDB.NumericMigrationSql.fs" />
+    <Compile Include="SoloDBCore/SoloDB.NumericMigrationProbe.fs" />
     <Compile Include="SoloDBCore/SoloDB.NumericMigration.fs" />
     <Compile Include="SoloDBCore/SoloDB.EventDbCache.fs" />
     <Compile Include="SoloDBCore/SoloDB.Collection.Core.fs" />
