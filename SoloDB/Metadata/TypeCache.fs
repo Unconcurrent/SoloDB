@@ -65,6 +65,17 @@ type internal DeclaredIndex(name: string, valueType: Type, unique: bool, customI
     member _.Unique = unique
     member _.CustomIdentity = customIdentity
 
+/// The existing schema slot owns pending typed acquisition and completed index values.
+type internal SchemaIndexSource =
+    | PendingIndexes of Func<DeclaredIndex[]>
+    | ReadyIndexes of DeclaredIndex[]
+
+[<Sealed>]
+type internal SchemaProperty(name: string,valueType: Type,attributes: Func<obj[]>) =
+    member _.Name = name
+    member _.ValueType = valueType
+    member _.Attributes = attributes
+
 /// A layout is independent of one invocation's values and belongs to the argument source.
 type internal NativeArgumentLayout(names: string[]) =
     member _.Names = names
@@ -78,6 +89,14 @@ type internal NativeOperationArgumentLayout(names: string[]) =
 type internal JsonRawReadOperations = { Reader: Delegate; ReadRuntime: Delegate; Intrinsic: Delegate }
 type internal JsonRawWriteOperations = { Writer: Delegate; WriteRuntime: Delegate }
 
+[<Struct>]
+type internal StringIndexerOperations = {
+    Value: struct(Type * Func<obj,string,obj>) voption
+    Ambiguous: bool
+    MissingGetter: bool
+    RestrictedMethod: string
+}
+
 /// Physical identity preserves typed byref and existing-box receivers.
 type internal PhysicalIdTypeOperations = {
     TypedReader: Delegate
@@ -86,12 +105,18 @@ type internal PhysicalIdTypeOperations = {
     Writer: Action<obj, int64>
     HasWritableId: bool
     TrivialGetter: bool
+    Ambiguous: bool
+    MissingGetter: bool
+    Indexed: bool
+    WriteIndexed: bool
 }
 
 [<Struct>]
 type internal OwnerCloneOperations = {
     CreateInstance: Func<obj>
     CopyScalars: Action<obj, obj>
+    Constructible: bool
+    Indexed: bool
 }
 
 [<Struct>]
@@ -160,7 +185,7 @@ type internal TypeMetadataRecord = {
     NullableUnderlying: MetadataValue<Type> voption
     EnumUnderlying: MetadataValue<Type> voption
     MemberTypes: MetadataValue<struct(string * Type * bool)[]> voption
-    StringIndexer: MetadataValue<struct(Type * Func<obj,string,obj>) voption> voption
+    StringIndexer: MetadataValue<StringIndexerOperations> voption
     SequenceElement: MetadataValue<Type> voption
     EqualityComparer: MetadataValue<obj> voption
     ObjectModel: MetadataValue<CodecModel<Type,MethodBase,FieldInfo>> voption
@@ -186,7 +211,7 @@ type internal TypeMetadataRecord = {
     Union: MetadataValue<bool> voption
     UnionKind: MetadataValue<bool> voption
     UnionStorage: MetadataValue<struct(bool * int[] * string[][] * Type[][])> voption
-    Indexes: MetadataValue<DeclaredIndex[]> voption
+    Indexes: MetadataValue<SchemaIndexSource> voption
     SqlArguments: MetadataValue<struct (NativeArgumentLayout * Action<obj,obj[]>)> voption
     SqlRows: MetadataValue<Delegate> voption
     SqlDefault: MetadataValue<Delegate> voption
@@ -321,7 +346,7 @@ type internal TypeMetadataCache private () =
             try
                 let key = struct(element,contract,operation)
                 [|for KeyValue(target,metadata) in entries do
-                      if not(target.Equals declared) && not target.IsAbstract && declared.IsAssignableFrom target then
+                      if Metadata.Generation.TypeSupport.KnownWriterCandidate(target.IsAbstract,target.Equals declared) && declared.IsAssignableFrom target then
                           match metadata.JsonDefaultMethods with
                           | Some methods ->
                               match methods.TryGetValue key with
@@ -386,25 +411,41 @@ type internal TypeMetadataCache private () =
         finally gate.ExitWriteLock()
     static member Discover(modelType: Type, select: TypeMetadataRecord -> MetadataValue<'T> voption,
                           store: MetadataValue<'T> -> TypeMetadataRecord -> TypeMetadataRecord,
-                          create: Func<'T>) =
-        match TypeMetadataCache.Read(modelType, select) with
-        | ValueSome value -> value.Value
-        | ValueNone ->
+                          create: Func<'T>, prepare: Func<'T,'T voption>) =
+        let publish expected discovered generated =
+            gate.EnterWriteLock()
             try
-                let discovered = create.Invoke()
-                gate.EnterWriteLock()
-                try
-                    let metadata = get modelType
-                    match select metadata with
-                    | ValueSome existing -> existing.Value
-                    | ValueNone ->
-                        entries.[modelType] <- store { Generated = false; Value = discovered } metadata
-                        discovered
-                finally gate.ExitWriteLock()
+                let metadata = get modelType
+                match select metadata with
+                | ValueSome current when expected |> ValueOption.forall(fun original -> not(obj.ReferenceEquals(original.Value,current.Value))) -> current
+                | _ ->
+                    let completed = { Generated = generated; Value = discovered }
+                    entries.[modelType] <- store completed metadata
+                    completed
+            finally gate.ExitWriteLock()
+        let rec acquire current =
+            try
+                match current with
+                | ValueSome original ->
+                    match prepare.Invoke original.Value with
+                    | ValueNone -> original.Value
+                    | ValueSome completed -> acquire(ValueSome(publish current completed original.Generated))
+                | ValueNone ->
+                    let discovered = create.Invoke()
+                    let completed = prepare.Invoke discovered |> ValueOption.defaultValue discovered
+                    acquire(ValueSome(publish ValueNone completed false))
             with _ ->
-                match TypeMetadataCache.Read(modelType, select) with
-                | ValueSome value when value.Generated -> value.Value
+                match TypeMetadataCache.Read(modelType,select) with
+                | ValueSome winner when winner.Generated && (current |> ValueOption.forall(fun original -> not(obj.ReferenceEquals(original.Value,winner.Value)))) ->
+                    acquire(ValueSome winner)
                 | _ -> reraise()
+        acquire(TypeMetadataCache.Read(modelType,select))
+
+    static member Discover(modelType: Type, select: TypeMetadataRecord -> MetadataValue<'T> voption,
+                          store: MetadataValue<'T> -> TypeMetadataRecord -> TypeMetadataRecord, create: Func<'T>) =
+        match TypeMetadataCache.Read(modelType,select) with
+        | ValueSome value -> value.Value
+        | ValueNone -> TypeMetadataCache.Discover(modelType,select,store,create,Func<'T,'T voption>(fun _ -> ValueNone))
 
 module internal MetadataValue =
     let tryValue value = match value with ValueSome entry -> ValueSome entry.Value | ValueNone -> ValueNone

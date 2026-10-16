@@ -6,8 +6,14 @@
     <Compile Include="../SoloDB/Json/JsonStringLiteral.fs" Link="JsonStringLiteral.fs" />
     <Compile Include="../SoloDB/Metadata/CodecModel.fs" Link="CodecModel.fs" />
     <Compile Include="../SoloDB/Metadata/TypeSupport.fs" Link="TypeSupport.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecPreparation.fs" Link="CodecPreparation.fs" />
+    <Compile Include="../SoloDB/Metadata/CodecNumericPreparation.fs" Link="CodecNumericPreparation.fs" />
     <Compile Include="../SoloDB/Metadata/QueryOperationEmitter.fs" Link="QueryOperationEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/SqlArgumentEmitter.fs" Link="SqlArgumentEmitter.fs" />
     <Compile Include="../SoloDB/Metadata/CodecEmitter.fs" Link="CodecEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/AttributeConstructionEmitter.fs" Link="AttributeConstructionEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/RegistrationEmitter.fs" Link="RegistrationEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/OwnerCloneEmitter.fs" Link="OwnerCloneEmitter.fs" />
     <Compile Include="../SoloDB/Metadata/CodecNumberEmitter.fs" Link="CodecNumberEmitter.fs" />
     <Compile Include="../SoloDB/Metadata/CodecMagnitudeEmitter.fs" Link="CodecMagnitudeEmitter.fs" />
     <Compile Include="../SoloDB/Metadata/CodecBigIntegerEmitter.fs" Link="CodecBigIntegerEmitter.fs" />
@@ -48,5 +54,7 @@
     <Compile Include="../SoloDB/Metadata/CodecSequenceEmitter.fs" Link="CodecSequenceEmitter.fs" />
     <Compile Include="../SoloDB/Metadata/CodecDictionaryEmitter.fs" Link="CodecDictionaryEmitter.fs" />
     <Compile Include="../SoloDB/Metadata/CodecTupleEmitter.fs" Link="CodecTupleEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/SqlTupleDefaultEmitter.fs" Link="SqlTupleDefaultEmitter.fs" />
+    <Compile Include="../SoloDB/Metadata/SqlRowEmitter.fs" Link="SqlRowEmitter.fs" />
   </ItemGroup>
 </Project>

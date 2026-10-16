@@ -35,7 +35,8 @@ type internal JsonRawScalarWriter =
         | "String" -> convert((JsonWriterRuntime.text typeof<'E>).CreateDelegate(typeof<JsonDirectWriter<string,'E>>))
         | "Bytes" -> convert((JsonWriterRuntime.bytes typeof<'E>).CreateDelegate(typeof<JsonDirectWriter<byte[],'E>>))
         | "Guid" -> convert((JsonWriterRuntime.guid typeof<'E>).CreateDelegate(typeof<JsonDirectWriter<Guid,'E>>))
-        | _ when typeof<System.Collections.Generic.IEnumerable<byte>>.IsAssignableFrom typeof<'T> ->
+        | _ when SoloDatabase.Metadata.Generation.TypeSupport.SequenceBytes(typeof<'T>.IsArray,
+                     (if typeof<System.Collections.Generic.IEnumerable<byte>>.IsAssignableFrom typeof<'T> then "System.Byte" else "")) ->
             let writer = JsonWriterRuntime.sequenceBytes<'E>()
             ValueSome(JsonDirectWriter<'T,'E>(fun value destination state ->
                 if isNull(box value) then JsonOutputOperations.literal Unchecked.defaultof<'O> "null" &destination &state

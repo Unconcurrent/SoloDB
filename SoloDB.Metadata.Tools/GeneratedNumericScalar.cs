@@ -66,11 +66,6 @@ internal static class GeneratedNumericScalar
         entry.Emit(OpCodes.Newobj,api.CodecConstructor(target));
         entry.Emit(OpCodes.Call,api.Metadata("RegisterGenerated",target));
     }
-    internal static MethodDefinition Writer(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference element,TypeReference output,string name)
-    {
-        return GeneratedOutputCodec.Number(definitions,module,owner,product,target,element,name);
-    }
-
     internal static void RegisterRaw(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,ILProcessor entry,AssemblyDefinition product,TypeReference target,int index)
     {
         target = module.ImportReference(target);
@@ -86,8 +81,7 @@ internal static class GeneratedNumericScalar
         foreach(var encoding in new[] {"Utf8","Utf16"})
         {
             var element = encoding == "Utf8" ? module.TypeSystem.Byte : module.TypeSystem.Char;
-            var output = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.Json" + encoding + "Writer"));
-            var method = Writer(definitions,module,owner,product,target,element,output,"WriteNumeric" + encoding + index);
+            var method = GeneratedOutputCodec.Number(definitions,module,owner,product,target,element,"WriteNumeric" + encoding + index);
             var callable = new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonDirectWriter`2")));
             callable.GenericArguments.Add(target);callable.GenericArguments.Add(element);
             GeneratedJsonAssembly.Delegate(entry,callable,method);

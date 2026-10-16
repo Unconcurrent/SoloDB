@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using Microsoft.Build.Framework;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using SoloDatabase.Metadata.Generation;
 
 namespace SoloDatabase.Metadata.Tools;
 
@@ -60,16 +61,72 @@ internal static class HelperAssembly
         return true;
     }
 
-    internal static MethodReference IdentityConstructor(ModuleDefinition module, PropertyDefinition property, out string assemblyName)
+    internal static (PropertyDefinition Property,TypeReference Owner)? ParentProperty(PropertyDefinition property,TypeReference owner)
     {
-        var attribute = property.CustomAttributes.Single(attribute => attribute.AttributeType.FullName == "SoloDatabase.Attributes.SoloId");
-        var generator = (TypeReference)attribute.ConstructorArguments[0].Value;
+        var accessor = property.GetMethod ?? property.SetMethod;
+        if (accessor == null || !accessor.IsVirtual) return null;
+        foreach (var overridden in accessor.Overrides)
+        {
+            var original = overridden.Resolve();
+            var inherited = original.DeclaringType.Properties.SingleOrDefault(candidate => candidate.GetMethod == original || candidate.SetMethod == original);
+            if (inherited != null) return (inherited,OriginalArgumentSources.Close(overridden.DeclaringType,owner));
+        }
+        if (accessor.IsNewSlot) return null;
+        var symbolic = property.DeclaringType.BaseType;
+        for (var parent = symbolic == null ? null : OriginalArgumentSources.Close(symbolic,owner); parent != null;)
+        {
+            var definition = parent.Resolve();
+            foreach (var candidate in definition.Properties)
+            {
+                var method = property.GetMethod != null ? candidate.GetMethod : candidate.SetMethod;
+                if (method == null || !method.IsVirtual || method.Name != accessor.Name || method.Parameters.Count != accessor.Parameters.Count) continue;
+                if (method.Parameters.Select(parameter => OriginalArgumentSources.Close(parameter.ParameterType,symbolic!))
+                    .Zip(accessor.Parameters,(left,right) => GeneratedRowFields.SameSignatureType(left,right.ParameterType)).All(equal => equal)) return (candidate,parent);
+            }
+            symbolic = definition.BaseType == null ? null : OriginalArgumentSources.Close(definition.BaseType,symbolic!);
+            parent = definition.BaseType == null ? null : OriginalArgumentSources.Close(definition.BaseType,parent);
+        }
+        return null;
+    }
+
+    private static CustomAttribute? IdentityAttribute(PropertyDefinition property)
+    {
+        var own = property.CustomAttributes.SingleOrDefault(attribute => attribute.AttributeType.FullName == "SoloDatabase.Attributes.SoloId");
+        if (own != null) return own;
+        var parent = ParentProperty(property,property.DeclaringType);
+        if (!parent.HasValue || parent.Value.Property.Name != property.Name) return null;
+        var value = OriginalArgumentSources.Close(parent.Value.Property.PropertyType,parent.Value.Owner);
+        return GeneratedRowFields.SameSignatureType(value,property.PropertyType) ? IdentityAttribute(parent.Value.Property) : null;
+    }
+
+    internal static bool InheritedAttribute(TypeReference type,string name)
+    {
+        for (TypeReference? current = type; current != null;)
+        {
+            var definition = current.Resolve();
+            if (definition.CustomAttributes.Any(attribute => attribute.AttributeType.FullName == name)) return true;
+            current = definition.BaseType == null ? null : OriginalArgumentSources.Close(definition.BaseType,current);
+        }
+        return false;
+    }
+
+    internal static GeneratedIdGenerator? IdentityGenerator(ModuleDefinition module, PropertyDefinition property, Action<string> access)
+    {
+        var attribute = IdentityAttribute(property);
+        if (attribute == null) return null;
+        if (attribute.ConstructorArguments[0].Value is not TypeReference generator) return new GeneratedIdGenerator(null,null,false);
         var definition = generator.Resolve();
-        assemblyName = definition.Module.Assembly.Name.Name;
-        var constructor = definition.Methods.Single(method => method.IsConstructor && !method.IsStatic && method.Parameters.Count == 0);
-        var call = module.ImportReference(constructor);
-        call.DeclaringType = CSharpCodecFacts.ImportType(module,generator);
-        return call;
+        var type = CSharpCodecFacts.ImportType(module,generator);
+        access(definition.Module.Assembly.Name.Name);
+        bool Family(TypeReference current) {
+            var original = current.Resolve();
+            return original.Interfaces.Any(contract => TypeSupport.IdentityGeneratorContract(contract.InterfaceType.FullName,contract.InterfaceType is ArrayType) || Family(contract.InterfaceType)) ||
+                original.BaseType != null && Family(original.BaseType);
+        }
+        var constructor = definition.Methods.FirstOrDefault(method => method.IsConstructor && !method.IsStatic && method.IsPublic && method.Parameters.Count == 0);
+        MethodReference? call = null;
+        if (constructor != null) { call = module.ImportReference(constructor); call.DeclaringType = type; }
+        return new GeneratedIdGenerator(type,call,Family(generator));
     }
 
     internal static void AllowAccess(ModuleDefinition module, IEnumerable<string> assemblies, IMetadataScope standard, MethodReference? constructor = null)

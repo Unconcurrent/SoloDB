@@ -70,45 +70,17 @@ module internal ArgumentSourceFacts =
                 Option.ofObj(OriginalArgumentSources.Read(moduleDefinition,original))
             elif typ.HasTypeDefinition then
                 let actual = reference typ
-                let members = ResizeArray<CodecMember<TypeReference,MethodReference,FieldReference>>()
                 let access = HashSet<string>(StringComparer.Ordinal)
-                let names = HashSet<string>(StringComparer.Ordinal)
-                let rec owners (current: FSharpType) = seq {
-                    yield current
-                    match current.BaseType with
-                    | Some parent when parent.HasTypeDefinition && parent.TypeDefinition.TryFullName <> Some "System.Object" -> yield! owners parent
-                    | _ -> () }
-                let direct = typ.AllInterfaces |> Seq.exists(fun item ->
-                    item.HasTypeDefinition && (item.TypeDefinition.TryFullName = Some "System.Collections.IDictionary" ||
-                        item.TypeDefinition.TryFullName = Some "System.Collections.Generic.IDictionary`2" &&
-                        item.GenericArguments[0].TypeDefinition.TryFullName = Some "System.String" && item.GenericArguments[1].TypeDefinition.TryFullName = Some "System.Object"))
+                let direct = seq { yield typ; yield! typ.AllInterfaces } |> Seq.exists(fun item ->
+                    item.HasTypeDefinition && TypeSupport.DirectSqlArguments(defaultArg item.TypeDefinition.TryFullName "",
+                        item.GenericArguments |> Seq.map(fun typ -> (reference typ).FullName) |> Seq.toArray))
                 if direct then None else
-                for owning in owners typ do
-                    let entity = owning.TypeDefinition
-                    let declaring = reference owning
-                    let definition = match declaring with :? GenericInstanceType as closed -> closed.ElementType | _ -> declaring
-                    let substitutions = Seq.zip entity.GenericParameters owning.GenericArguments |> Seq.toList
-                    let signature = mapper.Reference(fun parameter ->
-                        let index = entity.GenericParameters |> Seq.findIndex(fun candidate -> candidate.Equals parameter)
-                        definition.GenericParameters[index] :> TypeReference)
-                    if not entity.Accessibility.IsPublic then access.Add(entity.Assembly.SimpleName) |> ignore
-                    let add name (value: FSharpType) getter =
-                        let typ = reference (value.Instantiate substitutions)
-                        if names.Add(name + "|" + GeneratedJsonDefinitions.Identity typ) then members.Add(memberFact name typ getter)
-                    if entity.IsFSharpRecord then
-                        for field in entity.FSharpFields do
-                            if field.Accessibility.IsPublic then
-                                add field.Name field.FieldType (MethodReference("get_" + field.Name,signature field.FieldType,declaring,HasThis=true))
-                    for property in entity.MembersFunctionsAndValues |> Seq.filter _.IsProperty |> Seq.sortBy(fun property -> property.DeclarationLocation.StartLine,property.DeclarationLocation.StartColumn) do
-                        let getter = if property.HasGetterMethod then Some property.GetterMethod else None
-                        let indexed = getter |> Option.exists(fun method -> method.CurriedParameterGroups |> Seq.collect id |> Seq.exists(fun parameter ->
-                            let typ = parameter.Type.StripAbbreviations()
-                            not typ.HasTypeDefinition || typ.TypeDefinition.TryFullName <> Some "Microsoft.FSharp.Core.Unit"))
-                        if TypeSupport.SqlArgumentProperty(property.Accessibility.IsPublic,getter.IsSome,not property.IsInstanceMember,indexed) then
-                            let method = getter.Value
-                            if not method.Accessibility.IsPublic then access.Add(entity.Assembly.SimpleName) |> ignore
-                            add property.DisplayName method.ReturnParameter.Type (MethodReference(method.CompiledName,signature method.ReturnParameter.Type,declaring,HasThis=true))
-                let result = GeneratedArgumentSource(actual,members.ToArray())
+                let members = CompilerPropertyFacts.read moduleDefinition mapper.Reference reference resolver access
+                                  (fun memberValue _ _ -> GeneratedProperty(memberValue)) (fun _ -> Nullable()) false typ
+                              |> Array.map _.Member
+                              |> Array.filter(fun memberValue -> TypeSupport.SqlArgumentProperty(true,memberValue.Getter.IsSome,
+                                  memberValue.Static,GeneratedRowFields.IndexParameters(memberValue).Length <> 0))
+                let result = GeneratedArgumentSource(actual,members)
                 for name in access do result.AccessAssemblies.Add name |> ignore
                 Some result
             else None

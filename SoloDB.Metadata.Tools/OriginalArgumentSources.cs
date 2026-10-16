@@ -26,7 +26,9 @@ public static class OriginalArgumentSources
         if (value is OptionalModifierType optional) return new OptionalModifierType(Close(optional.ModifierType,owner),Close(optional.ElementType,owner));
         if (value is GenericInstanceType instance)
         {
-            var result=new GenericInstanceType(instance.ElementType);
+            var element = instance.ElementType;
+            if (element is not TypeDefinition) element.IsValueType = instance.IsValueType;
+            var result = new GenericInstanceType(element) { IsValueType = instance.IsValueType };
             foreach(var argument in instance.GenericArguments) result.GenericArguments.Add(Close(argument,owner));
             return result;
         }
@@ -40,42 +42,22 @@ public static class OriginalArgumentSources
         bool Direct(TypeReference current)
         {
             if (!dictionary.Add(GeneratedJsonDefinitions.Identity(current))) return false;
-            if (current.FullName is "SoloDatabase.SqlArguments" or "SoloDatabase.ParameterValues" or "System.Collections.IDictionary") return true;
-            if (current is GenericInstanceType pair && pair.ElementType.FullName == "System.Collections.Generic.IDictionary`2" &&
-                pair.GenericArguments[0].FullName == "System.String" && pair.GenericArguments[1].FullName == "System.Object") return true;
+            var original = current as GenericInstanceType;
+            if (TypeSupport.DirectSqlArguments(original?.ElementType.FullName ?? current.FullName,
+                original?.GenericArguments.Select(argument => argument.FullName).ToArray() ?? Array.Empty<string>())) return true;
             var definition=current.Resolve();
             return definition.Interfaces.Any(item=>Direct(Close(item.InterfaceType,current))) ||
                 definition.BaseType != null && Direct(Close(definition.BaseType,current));
         }
         if (original is not ArrayType && Direct(original)) return null;
         var access=new HashSet<string>(StringComparer.Ordinal);
-        var members=new List<CodecMember<TypeReference,MethodReference,FieldReference>>();
-        var names=new HashSet<string>(StringComparer.Ordinal);
         var first = original is ArrayType
             ? new TypeReference("System","Array",original.Module,original.Module.TypeSystem.CoreLibrary) : original;
-        for (var current=first;current!=null;)
-        {
-            var definition=current.Resolve();
-            var declaring=module.ImportReference(current);
-            declaring.IsValueType=definition.IsValueType;
-            if (declaring is GenericInstanceType generic) generic.ElementType.IsValueType=definition.IsValueType;
-            bool Visible(TypeDefinition type) => type.DeclaringType == null ? type.IsPublic : type.IsNestedPublic && Visible(type.DeclaringType);
-            if (!Visible(definition)) access.Add(definition.Module.Assembly.Name.Name);
-            foreach(var property in definition.Properties)
-            {
-                var getter=property.GetMethod;
-                if (!TypeSupport.SqlArgumentProperty(getter?.IsPublic == true || property.SetMethod?.IsPublic == true,
-                    getter!=null,getter?.IsStatic == true,property.Parameters.Count!=0)) continue;
-                var value=module.ImportReference(Close(property.PropertyType,current));
-                if (!names.Add(property.Name+"|"+GeneratedJsonDefinitions.Identity(value))) continue;
-                var read=module.ImportReference(getter!);read.DeclaringType=declaring;
-                if (!getter!.IsPublic) access.Add(definition.Module.Assembly.Name.Name);
-                members.Add(new CodecMember<TypeReference,MethodReference,FieldReference>(property.Name,value,null!,
-                    FSharpOption<MethodReference>.Some(read),null!,false,true,false,false,false));
-            }
-            current=definition.BaseType==null ? null : Close(definition.BaseType,current);
-        }
-        var result=new GeneratedArgumentSource(module.ImportReference(original),members.ToArray());
+        var members = GeneratedRowFields.Properties(module,first,name => access.Add(name),identities: false)
+            .Select(property => property.Member)
+            .Where(member => TypeSupport.SqlArgumentProperty(true,member.Getter != null,member.Static,
+                GeneratedRowFields.IndexParameters(member).Length != 0)).ToArray();
+        var result=new GeneratedArgumentSource(module.ImportReference(original),members);
         foreach(var name in access) result.AccessAssemblies.Add(name);
         return result;
     }

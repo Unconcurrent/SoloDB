@@ -43,8 +43,9 @@ internal static partial class GeneratedDictionaryCodec
     {
         var api=new GeneratedJsonAssembly.Api(module,product);
         var arguments=Arguments(module,model);
-        var polymorphic=TypeSupport.RawPolymorphicFactory(model.Facts.Shape,model.Facts.AbstractType);
-        if(polymorphic)
+        var preparation=CodecPreparation.factory(model.Type.FullName,TypeSupport.ForDefinition(model.Facts.Shape,model.Type.FullName),model.Facts.AbstractType);
+        var polymorphic=preparation.ReadersOnly;
+        if(preparation.ConcreteReaderFactory.Length != 0)
         {
             var destination=models.FirstOrDefault(candidate=>candidate.Facts.Shape==TypeShape.Dictionary &&
                 candidate.Type is GenericInstanceType dictionary && dictionary.GenericArguments.Count==2 &&
@@ -56,11 +57,10 @@ internal static partial class GeneratedDictionaryCodec
                 destination=new GeneratedModel(facts,concrete,Bind(module,typeof(System.Collections.Generic.Dictionary<,>).GetConstructor(Type.EmptyTypes)!,concrete),Array.Empty<GeneratedMember>()) {CollectionArguments=arguments};
             }
             var concreteType=destination.Type;
-            entry.Emit(OpCodes.Call,api.Metadata("CreateDictionary",arguments));entry.Emit(OpCodes.Call,api.Metadata("RegisterGenerated",concreteType));
+            entry.Emit(OpCodes.Call,api.Metadata("Create"+preparation.ConcreteReaderFactory,arguments));entry.Emit(OpCodes.Call,api.Metadata("RegisterGenerated",concreteType));
             Register(definitions,module,owner,entry,product,destination,index,models,false);
         }
-        var factory=TypeSupport.ForShape(model.Facts.Shape).Factory;
-        entry.Emit(OpCodes.Call,api.Metadata("Create"+factory,arguments));entry.Emit(OpCodes.Call,api.Metadata("RegisterGenerated",model.Type));
+        entry.Emit(OpCodes.Call,api.Metadata("Create"+preparation.Factory,arguments));entry.Emit(OpCodes.Call,api.Metadata("RegisterGenerated",model.Type));
         Register(definitions,module,owner,entry,product,model,index,models,polymorphic);
         if(polymorphic) GeneratedRawCodec.RegisterFactoryWriters(definitions,module,owner,entry,product,model,index,models);
     }

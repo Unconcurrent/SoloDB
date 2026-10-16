@@ -3,6 +3,7 @@ using System.Linq;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using SoloDatabase.Metadata.Generation;
+using SoloDatabase.Metadata.CodecGeneration;
 
 namespace SoloDatabase.Metadata.Tools;
 
@@ -11,8 +12,8 @@ internal static class GeneratedArgumentCapture
     internal static void Register(GeneratedJsonDefinitions definitions, ModuleDefinition module, TypeDefinition owner,
         ILProcessor il, AssemblyDefinition product, GeneratedModel model)
     {
-        if (model.Facts.Shape != TypeShape.Object || model.Facts.AbstractType) return;
-        var members = GeneratedCodec.Model(model).Members.Where(member =>
+        if (!CodecPreparation.argumentPublication(model.Facts.Shape,model.Facts.AbstractType)) return;
+        var members = model.OriginalProperties!.Select(property => property.Member).Where(member =>
             member.Field == null && TypeSupport.SqlArgumentProperty(true,member.Readable,member.Static,
                 member.Getter != null && member.Getter.Value.Parameters.Count != 0)).ToArray();
         Register(definitions,module,owner,il,product,new GeneratedArgumentSource(model.Type,members));
@@ -30,16 +31,14 @@ internal static class GeneratedArgumentCapture
         owner.Methods.Add(read);
         definitions.Add("sql-arguments",type,module.TypeSystem.Object,"",read);
         var body = read.Body.GetILProcessor();
-        for (var ordinal = 0; ordinal < source.Members.Length; ordinal++)
+        SqlArgumentEmitter.capture(new CecilCodecIL(read),1,source.Members.Length,new Action<int>(ordinal =>
         {
             var member = source.Members[ordinal];
             var declaring = member.Getter.Value.DeclaringType;
             var getter = GeneratedJsonAssembly.MemberReader(definitions,module,owner,declaring,
                 declaring.IsValueType,false,member,true,true,"Sql" + owner.Methods.Count);
-            body.Emit(OpCodes.Ldarg_1); body.Emit(OpCodes.Ldc_I4,ordinal);
-            body.Emit(OpCodes.Ldarg_0); body.Emit(OpCodes.Call,getter); body.Emit(OpCodes.Stelem_Ref);
-        }
-        body.Emit(OpCodes.Ret);
+            body.Emit(OpCodes.Ldarg_0); body.Emit(OpCodes.Call,getter);
+        }));
         il.Emit(OpCodes.Ldc_I4,source.Members.Length); il.Emit(OpCodes.Newarr,module.TypeSystem.String);
         for (var ordinal = 0; ordinal < source.Members.Length; ordinal++)
         {

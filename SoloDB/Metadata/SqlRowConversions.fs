@@ -34,6 +34,13 @@ type SqlRowValue private () =
           ValueJSON = if row.IsDBNull(1) then null else row.GetString(1)
           HydrationJSON = if row.FieldCount > 2 && not (row.IsDBNull(2)) then row.GetString(2) else null }
 
+    static member internal ReadMappedBytes(row: SqlRow, ordinal: int) =
+        match row.GetValue ordinal with
+        | :? (byte[]) as bytes -> bytes
+        | _ -> null
+
+    static member internal ReadMappedNativeArray(row: SqlRow, ordinal: int) = row.GetNativeArray ordinal
+
     static member private Cast<'A, 'B>(value: 'A) : 'B =
         let mutable value = value
         Unsafe.As<'A, 'B>(&value)
@@ -189,18 +196,3 @@ and [<AbstractClass; Sealed>] internal SqlRawNullableReader<'T> private () =
                             let methodInfo = typeof<SqlRowValue>.GetMethod(read.Method,BindingFlags.Static ||| BindingFlags.NonPublic)
                             methodInfo.MakeGenericMethod(SqlReadArguments.resolve target read.Arguments).CreateDelegate(typeof<Func<SqlRow,int,'T>>)))
         reader :?> Func<SqlRow,int,'T>
-
-/// Conversion expressions call the same typed reader used by direct callers.
-module internal SQLiteToolsRowConversions =
-    let internal tryBindScalar<'T> ordinal =
-        let t = typeof<'T>
-        let readOperation = SqlReadArguments.operation t
-        if readOperation.NeedsClosedBinding then
-            if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "optional SQL row mapping" t
-            let arguments = SqlReadArguments.resolve t readOperation.Arguments
-            let read = typeof<SqlRowValue>.GetMethod(readOperation.Method,BindingFlags.Static ||| BindingFlags.Public ||| BindingFlags.NonPublic)
-                           .MakeGenericMethod(arguments).CreateDelegate(typeof<Func<SqlRow,int,'T>>) :?> Func<SqlRow,int,'T>
-            ValueSome(Func<SqlRow,'T>(fun row -> read.Invoke(row,ordinal)))
-        elif t.IsEnum || TypeSupport.SqlScalar t.FullName then
-            ValueSome(Func<SqlRow,'T>(fun row -> SqlRowValue.Read<'T>(row,ordinal)))
-        else ValueNone

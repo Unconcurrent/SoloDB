@@ -13,17 +13,17 @@ internal static class GeneratedNumericCodec
     internal static MethodDefinition Reader(GeneratedJsonDefinitions definitions,ModuleDefinition module, TypeDefinition owner,
         AssemblyDefinition product, TypeReference target, TypeReference reader, string name)
     {
-        if(definitions.Stored && TypeSupport.StoredNumericReader(target.FullName)==null)
+        var plan = CodecNumericPreparation.reader(target.FullName,definitions.Stored,null!);
+        if(plan.ReuseNative)
             return Reader(definitions.NativeView,module,owner,product,target,reader,name);
-        var storedName=definitions.Stored ? TypeSupport.StoredNumericReader(target.FullName) : null;
+        var storedName = plan.StoredReader;
         if (definitions.TryGet("numeric-read",target,reader,"",out var existing)) return existing;
         var api = new GeneratedJsonAssembly.Api(module, product,definitions.Stored);
-        var coreName = TypeSupport.NumericCore(target.FullName).Value;
-        var shape = TypeSupport.Numeric(coreName).Value;
-        var scalarAdapter = TypeSupport.NumericTextAdapter(coreName) != null;
+        var coreName = plan.Core;
+        var scalarAdapter = plan.ScalarAdapter;
         var core = scalarAdapter ? module.ImportReference(target)
             : module.ImportReference(api.Operation("JsonRawPrimitive","Read" + TypeSupport.NumericIntrinsicOperation(coreName),reader).ReturnType);
-        var adapter = core.FullName != target.FullName;
+        var adapter = plan.TargetCompatibility;
         var utf16 = reader.Name == "Utf16Reader";
         MethodDefinition BodyResult(string suffix, TypeReference result, params TypeReference[] arguments)
         {
@@ -38,7 +38,7 @@ internal static class GeneratedNumericCodec
         MethodDefinition Body(string suffix, params TypeReference[] arguments) => BodyResult(suffix,core,arguments);
         var context = new GenericInstanceType(module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonReadContext`1")));
         context.GenericArguments.Add(module.ImportReference(reader));
-        var entry = BodyResult(TypeSupport.NumericText(target.FullName) ? "String" : "",target,new ByReferenceType(context));
+        var entry = BodyResult(plan.StringWrapper ? "String" : "",target,new ByReferenceType(context));
         definitions.Add("numeric-read",target,reader,"",entry);
         var unsafeScope = product.MainModule.AssemblyReferences.Single(reference => reference.Name == "System.Runtime.CompilerServices.Unsafe");
         var unsafeType = module.ImportReference(new TypeReference("System.Runtime.CompilerServices", "Unsafe", product.MainModule, unsafeScope));
@@ -80,36 +80,32 @@ internal static class GeneratedNumericCodec
         MethodDefinition Leaf(int width, bool hex)
         {
             var role = hex ? "integer-hex" : "integer-decimal";
-            var policy = width + ":" + shape.Signed + ":" + shape.Native;
+            var policy = width + ":" + plan.Signed + ":" + plan.Native;
             if (definitions.TryGet(role,core,reader,policy,out var existingLeaf)) return existingLeaf;
             var leaf = Body((hex ? "Hex" : "Decimal") + width,rawArguments);
             definitions.Add(role,core,reader,policy,leaf);
-            if (hex) CodecIntegerEmitter.hexReader(new CecilCodecIL(leaf),integerApi,width,shape.Signed,utf16,shape.Native);
-            else CodecIntegerEmitter.decimalReader(new CecilCodecIL(leaf),integerApi,width,shape.Signed,utf16,shape.Native);
+            if (hex) CodecIntegerEmitter.hexReader(new CecilCodecIL(leaf),integerApi,width,plan.Signed,utf16,plan.Native);
+            else CodecIntegerEmitter.decimalReader(new CecilCodecIL(leaf),integerApi,width,plan.Signed,utf16,plan.Native);
             return leaf;
         }
         MethodDefinition SelectWidth(bool hex)
         {
-            if (!shape.Native) return Leaf(shape.Width,hex);
+            if (!plan.DeferredWidth) return Leaf(plan.Width,hex);
             var narrow = Leaf(32,hex);
             var wide = Leaf(64,hex);
             var selected = Body(hex ? "Hex" : "Decimal",rawArguments);
-            var il = selected.Body.GetILProcessor();
-            var narrowCall = il.Create(OpCodes.Nop);
             var size = new MethodReference("get_Size",module.TypeSystem.Int32,module.TypeSystem.IntPtr);
-            il.Emit(OpCodes.Call,size); il.Emit(OpCodes.Ldc_I4_4); il.Emit(OpCodes.Beq,narrowCall);
-            il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Ldarg_1); il.Emit(OpCodes.Ldarg_2); il.Emit(OpCodes.Call,wide); il.Emit(OpCodes.Ret);
-            il.Append(narrowCall);
-            il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Ldarg_1); il.Emit(OpCodes.Ldarg_2); il.Emit(OpCodes.Call,narrow); il.Emit(OpCodes.Ret);
+            CodecEmitter.nativeWidthCall(new CecilCodecIL(selected),size,3,narrow,wide);
             return selected;
         }
         var compatibility = scalarAdapter ? GeneratedNumericScalar.Compatibility(definitions,module,owner,product,core,reader,context,name + "Compatibility")
             : api.Operation("JsonRawPrimitive","Read" + TypeSupport.NumericIntrinsicOperation(coreName),reader);
         MethodReference Input(string operation) => api.Operation("JsonNumericInput",operation,reader);
+        TypeReference[] Arguments(bool contextArgument) => contextArgument ? rawArguments.Concat(new[] { new ByReferenceType(context) }).ToArray() : rawArguments;
         Microsoft.FSharp.Core.FSharpOption<MethodReference> quoted = null!;
         MethodDefinition QuotedWrapper(MethodReference leaf)
         {
-            var wrapper = Body("Quoted",rawArguments.Concat(new[] { new ByReferenceType(context) }).ToArray());
+            var wrapper = Body("Quoted",Arguments(plan.QuotedContext));
             var quotedApi = new CodecQuotedNumberApi<TypeReference,MethodReference>(core,module.TypeSystem.Int32,
                 offset,leaf,Input("Consumed"),compatibility);
             CodecQuotedNumberEmitter.reader(new CecilCodecIL(wrapper),quotedApi,utf16);
@@ -117,8 +113,8 @@ internal static class GeneratedNumericCodec
         }
         MethodDefinition decimalRead;
         MethodDefinition hexRead;
-        var needsContext = false;
-        switch (shape.Kind)
+
+        switch (plan.Leaf)
         {
             case NumericKind.Inferred:
                 var inferredRounded = Rounded(64,module.TypeSystem.UInt64,"RoundDouble");
@@ -142,7 +138,7 @@ internal static class GeneratedNumericCodec
                     module.TypeSystem.Int32,module.TypeSystem.Int64,module.TypeSystem.UInt64,offset,
                     inferredDecimalConstructor,integerApi.Overflow,integerApi.InvalidNumber);
                 var inferredBigType = api.Operation("JsonRawPrimitive","ReadBigInteger",reader).ReturnType;
-                var parameterResult = TypeSupport.NumericParameterResult(target.FullName);
+                var parameterResult = plan.ParameterResult;
                 var inferredBigReader = parameterResult ? null! : Reader(definitions,module,owner,product,inferredBigType,reader,name+"BigInteger");
                 Microsoft.FSharp.Core.FSharpOption<MethodReference> parameterConstructor = null!;
                 if (parameterResult) {
@@ -152,11 +148,10 @@ internal static class GeneratedNumericCodec
                     parameterConstructor = Microsoft.FSharp.Core.FSharpOption<MethodReference>.Some(suppliedConstructor);
                 }
                 var inference = new CodecDynamicNumberApi<TypeReference,MethodReference>(integerApi,inferredDecimal,inferredFloating,inferredBigType,inferredBigReader,parameterConstructor);
-                decimalRead = Body("Decimal",rawArguments.Concat(new[] { new ByReferenceType(context) }).ToArray());
+                decimalRead = Body("Decimal",Arguments(plan.DecimalContext));
                 CodecDynamicNumberEmitter.decimalReader(new CecilCodecIL(decimalRead),inference,utf16);
-                hexRead = Body("Hex",rawArguments.Concat(new[] { new ByReferenceType(context) }).ToArray());
+                hexRead = Body("Hex",Arguments(plan.HexContext));
                 CodecDynamicNumberEmitter.hexReader(new CecilCodecIL(hexRead),inference,utf16);
-                needsContext = true;
                 break;
             case NumericKind.NumericText:
                 var stringConstructor = new MethodReference(".ctor",module.TypeSystem.Void,module.TypeSystem.String) { HasThis = true };
@@ -192,8 +187,8 @@ internal static class GeneratedNumericCodec
                 hexRead = SelectWidth(true);
                 break;
             case NumericKind.Binary:
-                var bitsType = shape.Width == 64 ? module.TypeSystem.UInt64 : shape.Width == 16 ? module.TypeSystem.UInt16 : module.TypeSystem.UInt32;
-                var rounded = Rounded(shape.Width,bitsType,"Rounded");
+                var bitsType = plan.Bits == "System.UInt64" ? module.TypeSystem.UInt64 : plan.Bits == "System.UInt16" ? module.TypeSystem.UInt16 : module.TypeSystem.UInt32;
+                var rounded = Rounded(plan.Width,bitsType,"Rounded");
                 var reinterpret = new MethodReference("As",module.TypeSystem.Void,unsafeType);
                 var from = new GenericParameter("TFrom",reinterpret);
                 var to = new GenericParameter("TTo",reinterpret);
@@ -206,24 +201,23 @@ internal static class GeneratedNumericCodec
                     module.TypeSystem.Int32,module.TypeSystem.Int64,module.TypeSystem.UInt64,offset,rounded,reference,compatibility,integerApi.InvalidNumber);
                 MethodDefinition FloatingLeaf(string role,string suffix,TypeReference[] arguments,Action<MethodDefinition> emit)
                 {
-                    var policy = shape.Width.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    var policy = plan.Width.ToString(System.Globalization.CultureInfo.InvariantCulture);
                     if (definitions.TryGet(role,core,reader,policy,out var existingLeaf)) return existingLeaf;
                     var body = Body(suffix,arguments);
                     definitions.Add(role,core,reader,policy,body);
                     emit(body);
                     return body;
                 }
-                decimalRead = FloatingLeaf("binary-decimal","Decimal",rawArguments.Concat(new[] { new ByReferenceType(context) }).ToArray(),
-                    body => CodecFloatingReadEmitter.reader(new CecilCodecIL(body),floatingApi,shape.Width,utf16,false));
-                hexRead = FloatingLeaf("binary-hex","Hex",rawArguments,
-                    body => CodecFloatingReadEmitter.hex(new CecilCodecIL(body),integerApi,floatingApi,shape.Width,utf16));
-                if (!adapter && storedName==null)
+                decimalRead = FloatingLeaf("binary-decimal","Decimal",Arguments(plan.DecimalContext),
+                    body => CodecFloatingReadEmitter.reader(new CecilCodecIL(body),floatingApi,plan.Width,utf16,false));
+                hexRead = FloatingLeaf("binary-hex","Hex",Arguments(plan.HexContext),
+                    body => CodecFloatingReadEmitter.hex(new CecilCodecIL(body),integerApi,floatingApi,plan.Width,utf16));
+                if (plan.Quote == CodecNumericQuote.Binary)
                 {
-                    var quotedBinary = FloatingLeaf("binary-quoted","QuotedDecimal",rawArguments.Concat(new[] { new ByReferenceType(context) }).ToArray(),
-                        body => CodecFloatingReadEmitter.reader(new CecilCodecIL(body),floatingApi,shape.Width,utf16,true));
+                    var quotedBinary = FloatingLeaf("binary-quoted","QuotedDecimal",Arguments(plan.QuotedContext),
+                        body => CodecFloatingReadEmitter.reader(new CecilCodecIL(body),floatingApi,plan.Width,utf16,true));
                     quoted = Microsoft.FSharp.Core.FSharpOption<MethodReference>.Some(QuotedWrapper(quotedBinary));
                 }
-                needsContext = true;
                 break;
             case NumericKind.Decimal:
                 var decimalConstructor = new MethodReference(".ctor",module.TypeSystem.Void,core) { HasThis = true };
@@ -235,9 +229,9 @@ internal static class GeneratedNumericCodec
                 CodecDecimalEmitter.reader(new CecilCodecIL(decimalRead),decimalApi,utf16,null!);
                 hexRead = Body("Hex",rawArguments);
                 CodecDecimalEmitter.hex(new CecilCodecIL(hexRead),integerApi,decimalApi,utf16);
-                if (!adapter && storedName==null)
+                if (plan.Quote == CodecNumericQuote.Decimal)
                 {
-                    var quotedDecimal = Body("QuotedDecimal",rawArguments.Concat(new[] { new ByReferenceType(context) }).ToArray());
+                    var quotedDecimal = Body("QuotedDecimal",Arguments(plan.QuotedContext));
                     CodecDecimalEmitter.reader(new CecilCodecIL(quotedDecimal),decimalApi,utf16,
                         Microsoft.FSharp.Core.FSharpOption<MethodReference>.Some(compatibility));
                     quoted = Microsoft.FSharp.Core.FSharpOption<MethodReference>.Some(QuotedWrapper(quotedDecimal));
@@ -245,37 +239,30 @@ internal static class GeneratedNumericCodec
                 break;
             default: throw new InvalidOperationException("Unsupported numeric format.");
         }
-        if (shape.Kind == NumericKind.Integer && !adapter && storedName==null)
+        if (plan.Quote == CodecNumericQuote.Integer)
         {
             var quotedApi = new CodecQuotedIntegerApi<TypeReference,MethodReference>(module.TypeSystem.Int32,module.TypeSystem.UInt32,
                 module.TypeSystem.UInt64,offset,compatibility);
             MethodDefinition QuotedLeaf(int width)
             {
-                var leaf = Body("Quoted" + width,rawArguments.Concat(new[] { new ByReferenceType(context) }).ToArray());
-                CodecQuotedIntegerEmitter.reader(new CecilCodecIL(leaf),quotedApi,width,shape.Signed,utf16,shape.Native);
+                var leaf = Body("Quoted" + width,Arguments(plan.QuotedContext));
+                CodecQuotedIntegerEmitter.reader(new CecilCodecIL(leaf),quotedApi,width,plan.Signed,utf16,plan.Native);
                 return leaf;
             }
             MethodDefinition selected;
-            if (!shape.Native) selected = QuotedLeaf(shape.Width);
+            if (!plan.DeferredWidth) selected = QuotedLeaf(plan.Width);
             else
             {
                 var narrow = QuotedLeaf(32);
                 var wide = QuotedLeaf(64);
-                selected = Body("Quoted",rawArguments.Concat(new[] { new ByReferenceType(context) }).ToArray());
-                var il = selected.Body.GetILProcessor();
-                var narrowCall = il.Create(OpCodes.Nop);
+                selected = Body("Quoted",Arguments(plan.QuotedContext));
                 var size = new MethodReference("get_Size",module.TypeSystem.Int32,module.TypeSystem.IntPtr);
-                il.Emit(OpCodes.Call,size); il.Emit(OpCodes.Ldc_I4_4); il.Emit(OpCodes.Beq,narrowCall);
-                il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Ldarg_1); il.Emit(OpCodes.Ldarg_2); il.Emit(OpCodes.Ldarg_3);
-                il.Emit(OpCodes.Call,wide); il.Emit(OpCodes.Ret);
-                il.Append(narrowCall);
-                il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Ldarg_1); il.Emit(OpCodes.Ldarg_2); il.Emit(OpCodes.Ldarg_3);
-                il.Emit(OpCodes.Call,narrow); il.Emit(OpCodes.Ret);
+                CodecEmitter.nativeWidthCall(new CecilCodecIL(selected),size,4,narrow,wide);
             }
             quoted = Microsoft.FSharp.Core.FSharpOption<MethodReference>.Some(selected);
         }
         var argument = core;
-        var after = TypeSupport.NumericFinish(target.FullName).Select(finish =>
+        var after = plan.Finish.Select(finish =>
         {
             var type = finish.Item1 == target.FullName ? module.ImportReference(target)
                 : module.ImportReference(api.Operation("JsonRawPrimitive","Read" + TypeSupport.NumericIntrinsicOperation(finish.Item1),reader).ReturnType);
@@ -286,7 +273,7 @@ internal static class GeneratedNumericCodec
         }).ToArray();
         var targetCompatibility = adapter ? api.Operation("JsonRawPrimitive","Read" + TypeSupport.NumericIntrinsicOperation(target.FullName),reader) : compatibility;
         Microsoft.FSharp.Core.FSharpOption<Tuple<MethodReference,MethodReference>> predicate = null!,text = null!;
-        if (TypeSupport.NumericPredicate(target.FullName) && shape.Kind != NumericKind.Predicate)
+        if (plan.Predicate)
         {
             var zero = new MethodReference("op_Implicit",core,core);
             zero.Parameters.Add(new ParameterDefinition(module.TypeSystem.Int32));
@@ -294,7 +281,7 @@ internal static class GeneratedNumericCodec
             compare.Parameters.Add(new ParameterDefinition(core)); compare.Parameters.Add(new ParameterDefinition(core));
             predicate = Microsoft.FSharp.Core.FSharpOption<Tuple<MethodReference,MethodReference>>.Some(Tuple.Create<MethodReference,MethodReference>(zero,compare));
         }
-        if (TypeSupport.NumericText(target.FullName) && shape.Kind != NumericKind.NumericText)
+        if (plan.Text)
         {
             var culture = new TypeReference("System.Globalization","CultureInfo",module,core.Scope);
             var provider = new TypeReference("System","IFormatProvider",module,core.Scope);
@@ -303,19 +290,19 @@ internal static class GeneratedNumericCodec
             format.Parameters.Add(new ParameterDefinition(provider));
             text = Microsoft.FSharp.Core.FSharpOption<Tuple<MethodReference,MethodReference>>.Some(Tuple.Create<MethodReference,MethodReference>(invariant,format));
         }
-        var method = TypeSupport.NumericText(target.FullName) ? BodyResult("",target,new ByReferenceType(context)) : entry;
+        var method = plan.StringWrapper ? BodyResult("",target,new ByReferenceType(context)) : entry;
         Microsoft.FSharp.Core.FSharpOption<MethodReference> storedQuoted = null!;
         if(storedName != null) {
-            var readKey=storedName.Value=="ReadKeyHalf" ? api.Operation("JsonStoredNumeric",storedName.Value,core,reader)
+            var readKey=plan.StoredCoreArgument ? api.Operation("JsonStoredNumeric",storedName.Value,core,reader)
                 : api.Operation("JsonStoredNumeric",storedName.Value,reader);
             storedQuoted=Microsoft.FSharp.Core.FSharpOption<MethodReference>.Some(readKey);
             quoted=null!;
         }
         var driverApi = new CodecNumericDriverApi<TypeReference, MethodReference>(module.ImportReference(target),core,after,predicate,text,module.TypeSystem.Int32,
             rawArguments[0],rawArguments[2],Input("Begin"),Input("Reference"),Input("Length"),Input("Position"),Input("Complete"),offset,
-            decimalRead,hexRead,quoted,storedQuoted,needsContext,shape.Kind == NumericKind.Inferred,targetCompatibility);
+            decimalRead,hexRead,quoted,storedQuoted,plan.DecimalContext,plan.HexContext,targetCompatibility);
         CodecNumericDriverEmitter.reader(new CecilCodecIL(method),driverApi,utf16);
-        if (TypeSupport.NumericText(target.FullName))
+        if (plan.StringWrapper)
         {
             var textMethod = entry;
             var read = new MethodReference("ReadUnaligned",module.TypeSystem.Void,unsafeType);

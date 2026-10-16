@@ -12,9 +12,6 @@ type internal CustomTypeId<'t> =
         | [||] -> None
         | members ->
             let memberValue = members.[0]
-            let generated = match TypeMetadataCache.Get(typeof<'t>).CustomIdentity with ValueSome operations -> operations.Generated | _ -> false
-            if generated && (typeof<bool>.Equals(memberValue.IdType) || typeof<nativeint>.Equals(memberValue.IdType) || typeof<unativeint>.Equals(memberValue.IdType)) then
-                raise (InvalidOperationException($"Error: Invalid [<SoloId>] type on '{typeof<'t>.FullName}.{memberValue.Name}'.\nReason: '{memberValue.IdType.Name}' has a value space too small or too platform-dependent to serve as a stable identity key (bool: 2 values; IntPtr/UIntPtr: width depends on runtime).\nFix: Use a wider type — int64, Guid, string, or a custom struct."))
             let generator = memberValue.Generator
             match generator with
             | :? IIdGenerator | :? IIdGenerator<'t> -> ()

@@ -187,6 +187,7 @@ type internal RawChildOperation =
     | Bytes
     | Array
 
+
 #if METADATA_TOOLING
 module TypeSupport =
 #else
@@ -209,6 +210,16 @@ module internal TypeSupport =
         | _ -> false
 
     // This selection is consumed mechanically by ordinary factories and both IL destinations.
+    /// Plain compiler references retain original scopes but lack Cecil primitive element tags.
+    let ClrPrimitiveSignature(definition,scope) =
+        (scope = "mscorlib" || scope = "System.Private.CoreLib" || scope = "System.Runtime" || scope = "netstandard") &&
+        match definition with
+        | "System.Boolean" | "System.Char" | "System.SByte" | "System.Byte"
+        | "System.Int16" | "System.UInt16" | "System.Int32" | "System.UInt32"
+        | "System.Int64" | "System.UInt64" | "System.IntPtr" | "System.UIntPtr"
+        | "System.Single" | "System.Double" | "System.String" | "System.Object" | "System.Void" -> true
+        | _ -> false
+
     let RawPrimitive definition =
         match definition with
         | "System.SByte" -> "SByte"
@@ -328,11 +339,21 @@ module internal TypeSupport =
     // Produced numeric parameters retain the intrinsic SQL conversion dependencies.
     let NumericParameterDependencies() = [|"System.Int64"; "System.Double"; "System.Decimal"; "SoloDatabase.JsonSerializator.JsonSqlNumber"|]
 
+    let private storedNumeric = [|
+        "System.Decimal", "PrepareDecimal", "ReadDecimal"
+        "System.Numerics.BigInteger", "PrepareBigInteger", "ReadBigInteger"
+    |]
+
     let StoredNumeric definition =
-        match definition with
-        | "System.Decimal" -> Some(struct("PrepareDecimal","ReadDecimal"))
-        | "System.Numerics.BigInteger" -> Some(struct("PrepareBigInteger","ReadBigInteger"))
-        | _ -> None
+        let mutable index = 0
+        let mutable result = None
+        while index < storedNumeric.Length && result.IsNone do
+            let name,prepare,read = storedNumeric[index]
+            if name = definition then result <- Some(struct(prepare,read))
+            index <- index + 1
+        result
+
+    let StoredNumericDependencies() = storedNumeric |> Array.map(fun (definition,_,read) -> struct(definition,read))
 
     // Quoted stored numeric leaves carry exact keys; ordinary number tokens keep native conversion.
     let StoredNumericReader definition =
@@ -355,6 +376,16 @@ module internal TypeSupport =
 
     let StoredRole name = "stored:" + name
 
+    let OperationRole(stored, role: string) =
+        let sensitive =
+            match role with
+            | "numeric-read" | "array-read" | "array-write" | "optional-read" | "optional-write"
+            | "tuple-read" | "tuple-write" | "grouping-read" | "dictionary-read" | "dictionary-write"
+            | "reference-sequence-read" | "custom-sequence-read" | "non-generic-sequence-write" | "raw-model-body"
+            | "raw-read" | "raw-write" | "raw-abstract-write" | "sequence-write" | "sequence-binary-write" -> true
+            | _ -> role.StartsWith("sequence-read:",StringComparison.Ordinal)
+        if stored && sensitive then StoredRole role else role
+
     // Internal factory dependencies retain original return-type operands even when compiler references hide them.
     let NumericDependencies definition =
         if definition = "System.Object" then Array.append [|"System.Object"|] (numericAdapters |> Array.map(fun (name,_,_) -> name))
@@ -367,6 +398,15 @@ module internal TypeSupport =
         | "System.Single" | "System.Double" | "System.Decimal" | "System.Char" | "System.DateTime" | "System.TimeSpan"
         | "System.IntPtr" | "System.UIntPtr" -> true
         | _ -> false
+
+    let ArrayValuesWrapper(array, element) = array && SupportsValuesWrapper element
+
+    let KnownWriterCandidate(abstractType, sameType) = not abstractType && not sameType
+
+    let PolymorphicNative(stored, definition) = stored && (StoredNumeric definition).IsSome
+
+    let StoredDynamic(shape, nonGenericEnumerable) =
+        shape = TypeShape.DynamicObject || nonGenericEnumerable || shape = TypeShape.NonGenericDictionary
 
     /// Cold construction facts for selected, validated sequence ranges.
     let SequenceConstruction name =
@@ -383,6 +423,8 @@ module internal TypeSupport =
 
     let SequenceBinaryReader name element =
         element = "System.Byte" && (name = "List" || name = "Enumerable" || name = "FSharpList")
+
+    let SequenceBytes(array, element) = not array && element = "System.Byte"
 
     let SequenceNullMismatch name element = name = "FSharpList" && element = "System.Byte"
 
@@ -495,13 +537,27 @@ module internal TypeSupport =
                             Arguments = (if (NumericTextAdapter definition).IsSome then CodecArguments.Target else decision.Arguments) }
         else decision
 
+    let ReferenceShape definition =
+        match definition with
+        | "SoloDatabase.DBRef`1" -> TypeShape.DocumentReference
+        | "SoloDatabase.DBRef`2" -> TypeShape.TypedDocumentReference
+        | "SoloDatabase.DBRefMany`1" -> TypeShape.ManyReference
+        | "SoloDatabase.DBRefMany`2" -> TypeShape.TypedManyReference
+        | "SoloDatabase.FileRef" -> TypeShape.FileReference
+        | "SoloDatabase.DirectoryRef" -> TypeShape.DirectoryReference
+        | "SoloDatabase.FileRefMany" -> TypeShape.FileMany
+        | "SoloDatabase.DirectoryRefMany" -> TypeShape.DirectoryMany
+        | _ -> TypeShape.Object
+
+    let ReferenceMany shape =
+        match shape with
+        | TypeShape.ManyReference | TypeShape.TypedManyReference | TypeShape.FileMany | TypeShape.DirectoryMany -> true
+        | _ -> false
+
     let Select (facts: TypeSupportFacts) =
         let shape =
             match facts.Definition with
-            | "SoloDatabase.FileRef" -> TypeShape.FileReference
-            | "SoloDatabase.DirectoryRef" -> TypeShape.DirectoryReference
-            | "SoloDatabase.FileRefMany" -> TypeShape.FileMany
-            | "SoloDatabase.DirectoryRefMany" -> TypeShape.DirectoryMany
+            | definition when ReferenceShape definition <> TypeShape.Object -> ReferenceShape definition
             | "SoloDatabase.MongoDB.BsonDocument" -> TypeShape.BsonDocument
             | _ when facts.Enum -> TypeShape.Enum
             | _ when IsScalar facts.Definition || (facts.ArrayRank = 1 && facts.ElementDefinition = "System.Byte") -> TypeShape.Scalar
@@ -524,10 +580,6 @@ module internal TypeSupport =
             | "System.Collections.Generic.SortedDictionary`2" -> TypeShape.SortedDictionary
             | "System.Collections.Generic.IDictionary`2" -> TypeShape.DictionaryInterface
             | "System.Collections.Generic.IReadOnlyDictionary`2" -> TypeShape.ReadOnlyDictionaryInterface
-            | "SoloDatabase.DBRef`1" -> TypeShape.DocumentReference
-            | "SoloDatabase.DBRef`2" -> TypeShape.TypedDocumentReference
-            | "SoloDatabase.DBRefMany`1" -> TypeShape.ManyReference
-            | "SoloDatabase.DBRefMany`2" -> TypeShape.TypedManyReference
             | _ when facts.Dictionary -> TypeShape.CustomDictionary
             | _ when facts.ReadOnlyDictionary -> TypeShape.CustomReadOnlyDictionary
             | _ when facts.NonGenericDictionary -> TypeShape.NonGenericDictionary
@@ -541,6 +593,12 @@ module internal TypeSupport =
     let private sqlRead methodName arguments closed =
         { Method = methodName; Arguments = arguments; NeedsClosedBinding = closed }
 
+    let SqlMappedReader (definition: string) =
+        match definition.Replace('/', '+') with
+        | "System.Byte[]" -> Some "ReadMappedBytes"
+        | "SoloDatabase.NativeArray+NativeArray" -> Some "ReadMappedNativeArray"
+        | _ -> None
+
     let SqlReader shape underlyingShape array =
         match shape with
         | TypeShape.Enum -> sqlRead "ReadEnum" [|SqlTypeArgument.Target; SqlTypeArgument.EnumUnderlying|] false
@@ -550,9 +608,6 @@ module internal TypeSupport =
         | TypeShape.Option -> sqlRead "ReadOption" [|SqlTypeArgument.Element|] true
         | TypeShape.Scalar when not array -> sqlRead "Read" [|SqlTypeArgument.Target|] false
         | _ -> sqlRead "ReadObject" [|SqlTypeArgument.Target|] false
-
-    let ScalarRow shape =
-        shape = TypeShape.Scalar || shape = TypeShape.Nullable || shape = TypeShape.Option || shape = TypeShape.Enum
 
     let RuntimeFacts (target: System.Type) =
         let definition = if target.IsGenericType then target.GetGenericTypeDefinition() else target
@@ -594,6 +649,67 @@ module internal TypeSupport =
          | "SoloDatabase.NativeSQLiteTools.IDbConnectionExtensions" -> true
          | _ -> false)
 
+    /// Name-only public lookup precedes the consumer's type or accessor eligibility.
+    let NamedProperty(name, instance, properties: 'P[], propertyName: Func<'P,string>, isStatic: Func<'P,bool>) =
+        let mutable selected = -1
+        for index = 0 to properties.Length - 1 do
+            let property = properties[index]
+            if propertyName.Invoke property = name && (not instance || not(isStatic.Invoke property)) then
+                selected <- if selected = -1 then index else -2
+        selected
+
+    let QueryCallRestricted(generic, byrefResult, pointerParameter) = generic || byrefResult || pointerParameter
+
+    let RequireQueryCall(name, restricted) =
+        if restricted then raise(NotSupportedException($"Query method '{name}' requires a generated direct operation."))
+
+    let RequireNamedProperty ambiguous =
+        if ambiguous then raise(Reflection.AmbiguousMatchException())
+
+    let StringIndexer(parameters: string[]) = parameters.Length = 1 && parameters[0] = "System.String"
+
+
+    let IndexedProperty(getterParameters, setterParameters) = getterParameters > 0 || setterParameters > 1
+
+    let SqlRowFieldFallback(valueType, record, writableProperties) = valueType && not record && writableProperties = 0
+
+    let SqlRowWritable(field, writable, indexed) = not indexed && (not field || writable)
+
+    let SqlColumnName(record, name: string) = if record then name else name.TrimEnd('@')
+
+    let PhysicalIdentity(name, int64Value, field, readable) =
+        not field && name = "Id" && int64Value && readable
+
+    let TrivialIdentityReader(isVirtual, isFinal, sealedType, directFieldRead) =
+        directFieldRead && (not isVirtual || isFinal || sealedType)
+
+    let CloneProperty(field, isStatic, readable, writable, many) =
+        not field && not isStatic && readable && writable && not many
+
+    let RequireDefaultConstructor(constructible, name) =
+        if not constructible then invalidArg "type" (sprintf "Type '%s' does not have a default constructor." name)
+
+    let RequireNonIndexedProperty indexed =
+        if indexed then invalidArg "memberInfo" "A query member requires a field or non-indexed property."
+
+    let RequireQueryProperty(write, accessor, indexed) =
+        RequireNonIndexedProperty indexed
+        if not accessor then
+            if write then invalidArg "left" "Expression must be writeable"
+            else invalidArg "memberInfo" "A query property requires a getter."
+
+    let ManyContract(assembly, definition) = assembly = "SoloDB" && definition = "SoloDatabase.IDBRefManyInternal"
+
+    let IdentityGeneratorContract(definition: string, array) =
+        not array && definition.StartsWith("SoloDatabase.Attributes.IIdGenerator",StringComparison.Ordinal)
+
+    let DirectSqlArguments(definition, arguments: string[]) =
+        match definition with
+        | "SoloDatabase.SqlArguments" | "SoloDatabase.ParameterValues" | "System.Collections.IDictionary" -> true
+        | "System.Collections.Generic.IDictionary`2" ->
+            arguments.Length = 2 && arguments[0] = "System.String" && arguments[1] = "System.Object"
+        | _ -> false
+
     let SqlArgumentProperty(publicProperty, readable, isStatic, indexed) =
         publicProperty && readable && not isStatic && not indexed
 
@@ -616,6 +732,9 @@ module internal TypeSupport =
         | "System.Char" | "System.Boolean" | "System.Guid" | "System.DateTime" | "System.DateTimeOffset"
         | "System.DateOnly" | "System.TimeOnly" | "System.TimeSpan" -> true
         | _ -> false
+
+    let ScalarRow(shape, definition) =
+        shape = TypeShape.Nullable || shape = TypeShape.Option || shape = TypeShape.Enum || SqlScalar definition
 
     let Collection shape =
         shape = TypeShape.CustomDictionary || shape = TypeShape.CustomReadOnlyDictionary || shape = TypeShape.CustomSequence || shape = TypeShape.NonGenericDictionary

@@ -6,6 +6,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="CompilerReferences.fs" />
+    <Compile Include="CompilerPropertyFacts.fs" />
     <Compile Include="UnionDiscovery.fs" />
     <Compile Include="ModelDiscovery.fs" />
     <Compile Include="QueryMemberWitnesses.fs" />

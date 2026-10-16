@@ -5,12 +5,14 @@ open System.Collections.Generic
 open FSharp.Compiler.Symbols
 open Mono.Cecil
 open SoloDatabase.Metadata.Generation
+open SoloDatabase.Metadata.CodecGeneration
 open SoloDatabase.Metadata.Tools
 
 /// Case reading and ordered CLR representation are separate compiler facts.
 module internal UnionDiscovery =
     let collect (moduleDefinition: ModuleDefinition) (typ: FSharpType) (actual: TypeReference)
-                (memberType: FSharpType -> TypeReference) (signature: FSharpType -> TypeReference) =
+                (memberType: FSharpType -> TypeReference) (signature: FSharpType -> TypeReference) (originalProperties: GeneratedProperty[])
+                (declaration: CodecMember<TypeReference,MethodReference,FieldReference> -> seq<FSharpAttribute> -> seq<FSharpAttribute> -> GeneratedProperty) =
         let hasNoArguments (memberValue: FSharpMemberOrFunctionOrValue) =
             memberValue.CurriedParameterGroups |> Seq.collect id |> Seq.forall(fun argument ->
                 let actual = argument.Type.StripAbbreviations()
@@ -22,11 +24,17 @@ module internal UnionDiscovery =
             match attribute "Microsoft.FSharp.Core.DefaultAugmentationAttribute" with
             | Some item -> unbox<bool>(snd item.ConstructorArguments[0])
             | None -> true
-        let nullBacked =
+        let nullFlag =
             match attribute "Microsoft.FSharp.Core.CompilationRepresentationAttribute" with
             | Some item -> Convert.ToInt32(snd item.ConstructorArguments[0]) &&& int Microsoft.FSharp.Core.CompilationRepresentationFlags.UseNullAsTrueValue <> 0
             | None -> false
-        let nested = not entity.IsValueType && not nullBacked && cases.Length > 1 && (cases |> Array.exists(fun item -> item.Fields.Count <> 0))
+        let emptyCases = cases |> Array.sumBy(fun item -> if item.Fields.Count = 0 then 1 else 0)
+        let payloadCases = cases.Length - emptyCases
+        let nullBacked = not entity.IsValueType && nullFlag && cases.Length <= 3 && cases.Length >= 2 && emptyCases = 1 && payloadCases > 0
+        let runtimeTypes = not entity.IsValueType && cases.Length >= 2 && cases.Length <= 3 && payloadCases > 0 && not nullBacked
+        let nested = not entity.IsValueType && (runtimeTypes || payloadCases > 0 && cases.Length > 1 && (not nullBacked || payloadCases > 1))
+        let abstractRoot = runtimeTypes || nested && emptyCases = 0
+        let publicRepresentation = entity.RepresentationAccessibility.IsPublic
         let definition = match actual with :? GenericInstanceType as closed -> closed.ElementType | _ -> actual
         let returnSignature =
             if definition.GenericParameters.Count = 0 then definition
@@ -39,17 +47,17 @@ module internal UnionDiscovery =
                 let factory = MethodReference((if item.Fields.Count = 0 then "get_" else "New") + item.CompiledName, returnSignature, actual)
                 let fieldTypes = item.Fields |> Seq.map(fun field -> memberType field.FieldType) |> Seq.toArray
                 for field in item.Fields do factory.Parameters.Add(ParameterDefinition(signature field.FieldType))
-                GeneratedUnionCase(item.Name,tag,(if helpers then factory else null),item.Fields |> Seq.map _.Name |> Seq.toArray,fieldTypes))
+                GeneratedUnionCase(item.Name,tag,(if helpers && publicRepresentation then factory else null),item.Fields |> Seq.map _.Name |> Seq.toArray,fieldTypes))
         let rootFacts = ResizeArray<Member>()
         let rootMembers = ResizeArray<GeneratedMember>()
         let property (facts: ResizeArray<Member>) (members: ResizeArray<GeneratedMember>) (owner: TypeReference) name (valueType: TypeReference) result ignored =
             facts.Add(Member(name,valueType.FullName,false,true,false,ignored))
             members.Add(GeneratedMember(valueType,MethodReference("get_" + name,result,owner,HasThis=true),null,null))
-        if not nullBacked then
+        if publicRepresentation && not nullBacked then
             property rootFacts rootMembers actual "Tag" moduleDefinition.TypeSystem.Int32 moduleDefinition.TypeSystem.Int32 false
             if helpers && cases.Length > 1 then
                 for item in cases do property rootFacts rootMembers actual ("Is" + item.CompiledName) moduleDefinition.TypeSystem.Boolean moduleDefinition.TypeSystem.Boolean false
-        if not nested then
+        if publicRepresentation && not nested then
             let names = HashSet<string>(StringComparer.Ordinal)
             for item in cases do
                 for field in item.Fields do
@@ -57,16 +65,33 @@ module internal UnionDiscovery =
                         let ignored = field.PropertyAttributes |> Seq.exists(fun item -> item.AttributeType.FullName = "System.Runtime.Serialization.IgnoreDataMemberAttribute")
                         property rootFacts rootMembers actual field.Name (memberType field.FieldType) (signature field.FieldType) ignored
         for item in entity.MembersFunctionsAndValues do
-            if item.IsProperty && item.IsInstanceMember && item.HasGetterMethod && item.Accessibility.IsPublic
+            if item.IsProperty && item.IsInstanceMemberInCompiledCode && item.HasGetterMethod && item.Accessibility.IsPublic
                && not(rootFacts |> Seq.exists(fun fact -> fact.Name = item.DisplayName))
-               && not(nullBacked && cases |> Array.exists(fun unionCase -> item.DisplayName = "Is" + unionCase.CompiledName))
                && hasNoArguments item then
                 let ignored = item.Attributes |> Seq.exists(fun attribute -> attribute.AttributeType.FullName = "System.Runtime.Serialization.IgnoreDataMemberAttribute")
                 property rootFacts rootMembers actual item.DisplayName (memberType item.FullType) (signature item.FullType) ignored
         let root = Model(actual.FullName,entity.FullName,TypeShape.Object,entity.IsValueType,not nested,false,null,rootFacts)
-        root.AbstractType <- nested
-        root.RequiresTypeInformation <- nested
+        root.AbstractType <- abstractRoot
+        let polymorphic = CompilerPropertyFacts.polymorphic typ
+        root.RequiresTypeInformation <- abstractRoot || polymorphic
         let generated = GeneratedModel(root,actual,null,rootMembers.ToArray())
+        let declarations (facts: ResizeArray<Member>) (members: ResizeArray<GeneratedMember>) attributes =
+            members |> Seq.mapi(fun index memberValue ->
+                let memberFacts = {
+                    Name = facts[index].Name; Type = memberValue.Type; Field = None
+                    Getter = Option.ofObj memberValue.Getter; Setter = Option.ofObj memberValue.Setter
+                    Static = false; Readable = not(isNull memberValue.Getter); Writable = not(isNull memberValue.Setter)
+                    Ignored = false; Many = false }
+                declaration memberFacts (attributes index) (attributes index)) |> Seq.toArray
+        let rootAttributes index =
+            if nested then Seq.empty else
+            cases |> Seq.collect _.Fields |> Seq.tryFind(fun field -> field.Name = rootFacts[index].Name)
+            |> Option.map(fun field -> field.PropertyAttributes :> seq<_>) |> Option.defaultValue Seq.empty
+        let rootDeclarations = declarations rootFacts rootMembers rootAttributes
+        generated.OriginalProperties <- GeneratedRowFields.Merge(originalProperties,rootDeclarations)
+        if not entity.IsValueType && (runtimeTypes || nullBacked || cases.Length = 1 && emptyCases = 1) then
+            generated.CloneConstructor <- MethodReference(".ctor",moduleDefinition.TypeSystem.Void,actual,HasThis = true)
+            generated.AccessAssemblies.Add(entity.Assembly.SimpleName) |> ignore
         generated.UnionCases <- caseFacts
         let visited = HashSet<string>(StringComparer.Ordinal)
         let rec hostedReferences (candidate: FSharpType) =
@@ -103,7 +128,7 @@ module internal UnionDiscovery =
         let models = ResizeArray<GeneratedModel>()
         models.Add generated
         if nested then
-            for item in cases do
+            for item in cases |> Array.filter(fun item -> item.Fields.Count > 0 || runtimeTypes) do
                 let caseDefinition = TypeReference("",(if item.Fields.Count = 0 then "_" else "") + item.CompiledName,moduleDefinition,definition.Scope,DeclaringType=definition)
                 for parameter in definition.GenericParameters do caseDefinition.GenericParameters.Add(GenericParameter(parameter.Name,caseDefinition))
                 let rec caseSignature (value: TypeReference) =
@@ -127,16 +152,25 @@ module internal UnionDiscovery =
                 let members = ResizeArray<GeneratedMember>()
                 for field in item.Fields do
                     let fieldSignature = caseSignature(signature field.FieldType)
-                    property facts members caseType field.Name (memberType field.FieldType) fieldSignature
-                        (field.PropertyAttributes |> Seq.exists(fun attribute -> attribute.AttributeType.FullName = "System.Runtime.Serialization.IgnoreDataMemberAttribute"))
+                    if publicRepresentation then
+                        property facts members caseType field.Name (memberType field.FieldType) fieldSignature
+                            (field.PropertyAttributes |> Seq.exists(fun attribute -> attribute.AttributeType.FullName = "System.Runtime.Serialization.IgnoreDataMemberAttribute"))
+                let localDeclarations = if publicRepresentation then declarations facts members (fun index -> item.Fields[index].PropertyAttributes) else [||]
                 for fact in rootFacts do facts.Add fact
                 for memberValue in rootMembers do members.Add memberValue
                 let model = Model(caseType.FullName,entity.FullName,TypeShape.Object,false,false,false,null,facts)
                 let caseModel = GeneratedModel(model,caseType,null,members.ToArray())
+                caseModel.OriginalProperties <- GeneratedRowFields.Merge(
+                    localDeclarations,
+                    GeneratedRowFields.Inherited(generated.OriginalProperties))
+                if item.Fields.Count = 0 then
+                    caseModel.CloneConstructor <- MethodReference(".ctor",moduleDefinition.TypeSystem.Void,caseType,HasThis = true)
+                    caseModel.AccessAssemblies.Add(entity.Assembly.SimpleName) |> ignore
+                model.RequiresTypeInformation <- polymorphic
                 caseModel.UnionCases <- caseFacts
                 caseModel.UnionRoot <- actual
                 caseModel.UnionHostedReferences <- hosted
-                if (helpers && item.Fields.Count = 0) || not entity.Accessibility.IsPublic then caseModel.AccessAssemblies.Add(entity.Assembly.SimpleName) |> ignore
+                if (helpers && item.Fields.Count = 0) || not entity.Accessibility.IsPublic || not publicRepresentation then caseModel.AccessAssemblies.Add(entity.Assembly.SimpleName) |> ignore
                 models.Add caseModel
         if String.IsNullOrEmpty(entity.Assembly.QualifiedName) then models.ToArray()
         else

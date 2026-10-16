@@ -95,11 +95,12 @@ module internal CodecEmitter =
     let construction (il: CodecIL<'T,'M,'F>) result valueType constructor (arguments: 'T[]) =
         QueryOperationEmitter.construction il result (fun _ -> None) result valueType constructor arguments true
 
-    let constructor (il: CodecIL<'T,'M,'F>) method =
+    let typedConstruction (il: CodecIL<'T,'M,'F>) method argumentCount =
+        for index = 0 to argumentCount - 1 do il.EmitInt(OpCodes.Ldarg,index)
         il.EmitMethod(OpCodes.Newobj,method)
         il.Emit OpCodes.Ret
 
-    let boxedDefaultConstruction (il: CodecIL<'T,'M,'F>) result valueType constructor =
+    let defaultConstruction (il: CodecIL<'T,'M,'F>) result valueType constructor boxed =
         match constructor with
         | Some method -> il.EmitMethod(OpCodes.Newobj,method)
         | None ->
@@ -107,13 +108,22 @@ module internal CodecEmitter =
             il.EmitLocal(OpCodes.Ldloca,value)
             il.EmitType(OpCodes.Initobj,result)
             il.EmitLocal(OpCodes.Ldloc,value)
-        if valueType then il.EmitType(OpCodes.Box,result)
+        if boxed && valueType then il.EmitType(OpCodes.Box,result)
         il.Emit OpCodes.Ret
 
     let directCall (il: CodecIL<'T,'M,'F>) method argumentCount =
         for index in 0 .. argumentCount - 1 do il.EmitInt(OpCodes.Ldarg,index)
         il.EmitMethod(OpCodes.Call,method)
         il.Emit OpCodes.Ret
+
+    let nativeWidthCall (il: CodecIL<'T,'M,'F>) size argumentCount narrow wide =
+        let useNarrow = il.Label()
+        il.EmitMethod(OpCodes.Call,size)
+        il.EmitInt(OpCodes.Ldc_I4,4)
+        il.EmitBranch(OpCodes.Beq,useNarrow)
+        directCall il wide argumentCount
+        il.Mark useNarrow
+        directCall il narrow argumentCount
 
     let private argumentFailure (il: CodecIL<'T,'M,'F>) (api: CodecApi<'T,'M>) reader message parameter =
         il.EmitString (if reader then "SoloDatabase.JsonSerializator.JsonDeserializerImpl`1" else "SoloDatabase.JsonSerializator.JsonSerializerImpl`1")

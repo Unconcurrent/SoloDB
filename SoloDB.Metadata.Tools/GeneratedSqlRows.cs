@@ -1,4 +1,6 @@
+using System;
 using System.Linq;
+using SoloDatabase.Metadata.CodecGeneration;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using SoloDatabase.Metadata.Generation;
@@ -52,7 +54,7 @@ internal static class GeneratedSqlRows
             GeneratedObjectSqlRows.Register(module, owner, il, product, model, index, models);
             return;
         }
-        if (!TypeSupport.ScalarRow(model.Facts.Shape)) return;
+        if (!TypeSupport.ScalarRow(model.Facts.Shape,model.Type.FullName)) return;
         var type = module.ImportReference(model.Type);
         var shape = module.ImportReference(product.MainModule.GetType("SoloDatabase.SqlRowShape"));
         var row = module.ImportReference(product.MainModule.GetType("SoloDatabase.SqlRow"));
@@ -65,9 +67,9 @@ internal static class GeneratedSqlRows
         body.Emit(OpCodes.Call, new MethodReference(".ctor", module.TypeSystem.Void, owner.BaseType) { HasThis = true });
         body.Emit(OpCodes.Ldarg_0); body.Emit(OpCodes.Ldarg_1); body.Emit(OpCodes.Stfld, ordinal); body.Emit(OpCodes.Ret);
         var read = Method(mapper, "Read", type, false, row); body = read.Body.GetILProcessor();
-        body.Emit(OpCodes.Ldarg_1); body.Emit(OpCodes.Ldarg_0); body.Emit(OpCodes.Ldfld, ordinal);
-        var readMethod = ReadMethod(module,product,model.Type,models);
-        body.Emit(OpCodes.Call, readMethod); body.Emit(OpCodes.Ret);
+        SqlRowEmitter.scalarRow(new CecilCodecIL(read),Api(module,product,models),type,new Action<int>(_ => {
+            body.Emit(OpCodes.Ldarg_0); body.Emit(OpCodes.Ldfld,ordinal);
+        }));
         var factory = Method(owner, "BindScalarRow" + index, Function(module, owner, row, type), true, shape);
         body = factory.Body.GetILProcessor(); body.Emit(OpCodes.Ldarg_0);
         body.Emit(OpCodes.Callvirt, module.ImportReference(product.MainModule.GetType("SoloDatabase.SqlRowShape").Methods.Single(method => method.Name == "get_Start")));
@@ -78,16 +80,44 @@ internal static class GeneratedSqlRows
         var mappingCtor = module.ImportReference(mapping.Methods.Single(method => method.IsConstructor)); mappingCtor.DeclaringType = mappingType; il.Emit(OpCodes.Newobj, mappingCtor);
         var register = module.ImportReference(mapping.Methods.Single(method => method.Name == "Register")); register.DeclaringType = mappingType; il.Emit(OpCodes.Call, register);
     }
+    internal static SqlRowEmitterApi<TypeReference,MethodReference> Api(ModuleDefinition module,AssemblyDefinition product,GeneratedModel[] models)
+    {
+        var api = new GeneratedJsonAssembly.Api(module,product);
+        return new SqlRowEmitterApi<TypeReference,MethodReference>(
+            module.ImportReference(product.MainModule.GetType("SoloDatabase.SqlRow").Methods.Single(method => method.Name == "IsDBNull")),
+            new Func<TypeReference,MethodReference>(target => ReadMethod(module,product,target,models)),
+            new Func<TypeReference,MethodReference>(target => api.Metadata("Uninitialized",target)),
+            new Func<TypeReference,bool>(target => target.IsValueType),
+            new Func<TypeReference,bool>(target => target is GenericInstanceType instance && instance.ElementType.FullName == "System.Nullable`1"),
+            new Func<TypeReference,string>(target => target.Name),
+            module.ImportReference(product.MainModule.GetType("SoloDatabase.SqlRowShape").Methods.Single(method => method.Name == "TupleNull")));
+    }
+
     internal static MethodReference ReadMethod(ModuleDefinition module, AssemblyDefinition product, TypeReference value, GeneratedModel[] models)
     {
-        var fact = models.FirstOrDefault(candidate => candidate.Type.FullName == value.FullName);
-        var shape = fact?.Facts.Shape ?? TypeShape.Scalar;
-        var element = value is GenericInstanceType generic && generic.GenericArguments.Count > 0 ? generic.GenericArguments[0] : null;
-        var child = element == null ? null : models.FirstOrDefault(candidate => candidate.Type.FullName == element.FullName);
-        var operation = TypeSupport.SqlReader(shape,child?.Facts.Shape ?? TypeShape.Object,value is ArrayType);
+        var mapped = TypeSupport.SqlMappedReader(value.FullName);
+        if (mapped != null)
+            return module.ImportReference(product.MainModule.GetType("SoloDatabase.SqlRowValue").Methods.Single(method => method.Name == mapped.Value));
+        GeneratedModel? Fact(TypeReference target) => models.FirstOrDefault(candidate => GeneratedJsonDefinitions.SameType(candidate.Type,target));
+        TypeDefinition? OriginalEnum(TypeReference target) {
+            if (Fact(target) != null) return null;
+            if (target is ArrayType || TypeSupport.RawPrimitive(target.FullName).Length != 0) return null;
+            var original = target.Resolve(); return original.IsEnum ? original : null;
+        }
+        var fact = Fact(value);
+        var originalEnum = OriginalEnum(value);
+        var definition = value is GenericInstanceType generic ? generic.ElementType.FullName : value.FullName;
+        var decision = TypeSupport.Select(new TypeSupportFacts(definition,value is ArrayType array ? array.Rank : 0,
+            value is ArrayType elementArray ? elementArray.ElementType.FullName : "",originalEnum != null,false,false,false,false,false,false));
+        var shape = fact?.Facts.Shape ?? decision.Shape;
+        var element = value is GenericInstanceType instance && instance.GenericArguments.Count > 0 ? instance.GenericArguments[0] : null;
+        var child = element == null ? null : Fact(element);
+        var elementEnum = element == null ? null : OriginalEnum(element);
+        var operation = TypeSupport.SqlReader(shape,child?.Facts.Shape ?? (elementEnum == null ? TypeShape.Object : TypeShape.Enum),value is ArrayType);
         var read = new GenericInstanceMethod(module.ImportReference(product.MainModule.GetType("SoloDatabase.SqlRowValue").Methods.Single(method => method.Name == operation.Method)));
+        TypeReference? Underlying(TypeDefinition? target) => target?.Fields.Single(field => field.Name == "value__").FieldType;
         foreach (var argument in operation.Arguments)
-            read.GenericArguments.Add(module.ImportReference(Argument(argument,value,element,fact?.ElementType,child?.ElementType)));
+            read.GenericArguments.Add(module.ImportReference(Argument(argument,value,element,fact?.ElementType ?? Underlying(originalEnum),child?.ElementType ?? Underlying(elementEnum))));
         return read;
     }
 

@@ -5,6 +5,9 @@ module internal SoloDatabase.RelationsAccessorCache
 open System
 open SoloDatabase.DocumentReferenceConstruction
 open System.Reflection
+open System.Reflection.Emit
+open SoloDatabase.Metadata.CodecGeneration
+open SoloDatabase.Metadata.Generation
 open System.Linq.Expressions
 open SoloDatabase
 
@@ -127,8 +130,7 @@ let internal compiledDefaultCtor (t: Type) =
     TypeMetadataCache.Discover(t, (fun metadata -> metadata.DefaultConstructor), (fun operation metadata -> { metadata with DefaultConstructor = ValueSome operation }), Func<_>(fun () ->
         if not (MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "default construction" t
         let constructor = t.GetConstructor(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance,null,Type.EmptyTypes,null)
-        if isNull constructor && not t.IsValueType then
-            raise(ArgumentException(sprintf "Type '%s' does not have a default constructor." t.FullName, "type"))
+        TypeSupport.RequireDefaultConstructor(not(isNull constructor) || t.IsValueType,t.FullName)
         QueryMethodDiscovery.defaultConstruction t (Option.ofObj constructor)
     ))
 
@@ -159,23 +161,28 @@ let internal compiledAddMethod (collectionType: Type) =
 // ─── Clone helpers: per-type property copier for cloneOwnerForReplaceMany ────
 
 let internal compiledCloneDescriptor (ownerType: Type) =
-    TypeMetadataCache.Discover(ownerType, (fun metadata -> metadata.OwnerClone), (fun operation metadata -> { metadata with OwnerClone = ValueSome operation }), Func<_>(fun () ->
+    let operations = TypeMetadataCache.Discover(ownerType, (fun metadata -> metadata.OwnerClone), (fun operation metadata -> { metadata with OwnerClone = ValueSome operation }), Func<_>(fun () ->
         let t = ownerType
         if not (MetadataRuntime.supportsDynamicCode()) then
             invalidOp ("Collection cloning operations have not been registered: " + t.FullName)
         let ctor = compiledDefaultCtor t
 
-        let props = t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
-        let scalarProps = ResizeArray<PropertyInfo>()
+        let members =
+            t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
+            |> Array.filter(fun property -> TypeSupport.CloneProperty(false,false,property.CanRead,property.CanWrite,
+                typeof<IDBRefManyInternal>.IsAssignableFrom(property.PropertyType)))
+            |> Array.map(fun property ->
+                TypeSupport.RequireNonIndexedProperty(property.GetIndexParameters().Length <> 0)
+                { Name = property.Name; Type = property.PropertyType; Field = None
+                  Getter = Some(property.GetGetMethod(true) :> MethodBase)
+                  Setter = Some(property.GetSetMethod(true) :> MethodBase)
+                  Static = false; Readable = true; Writable = true; Ignored = false; Many = false })
+        let method = DynamicMethod("CopyOwnerScalars",typeof<Void>,[|typeof<obj>;typeof<obj>|],t.Module,true)
+        OwnerCloneEmitter.copy (RuntimeCodecIL(method.GetILGenerator())) t t.IsValueType members
+        let copyDelegate = method.CreateDelegate(typeof<Action<obj,obj>>) :?> Action<obj,obj>
 
-        for prop in props do
-            if prop.CanRead && prop.CanWrite then
-                if not (typeof<IDBRefManyInternal>.IsAssignableFrom(prop.PropertyType)) then
-                    scalarProps.Add(prop)
-
-        let members = scalarProps |> Seq.map(fun property -> struct(compiledPropGetter property,compiledPropSetter property)) |> Seq.toArray
-        let copyDelegate = Action<obj,obj>(fun source destination ->
-            for struct(read,write) in members do write.Invoke(destination,read.Invoke source))
-
-        { CreateInstance = ctor; CopyScalars = copyDelegate }
+        { CreateInstance = ctor; CopyScalars = copyDelegate; Constructible = true; Indexed = false }
     ))
+    TypeSupport.RequireDefaultConstructor(operations.Constructible,ownerType.FullName)
+    TypeSupport.RequireNonIndexedProperty operations.Indexed
+    operations

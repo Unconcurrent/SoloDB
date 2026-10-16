@@ -18,9 +18,6 @@ public sealed class Member
     public string? DeclaringType { get; set; }
     public bool Reference { get; set; }
     public bool ManyReference { get; set; }
-    public bool CustomIdentity { get; set; }
-    public bool Indexed { get; set; }
-    public bool IndexUnique { get; set; }
     public bool HasReferencePolicy { get; set; }
     public int OnDelete { get; set; }
     public int OnOwnerDelete { get; set; } = 3;

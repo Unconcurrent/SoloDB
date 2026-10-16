@@ -4,6 +4,7 @@ open System
 open System.Reflection
 open System.Reflection.Emit
 open SoloDatabase.Metadata.CodecGeneration
+open SoloDatabase.Metadata.Generation
 
 /// Runtime facts feed the same instruction policy as compiler-established operations.
 module internal QueryMethodDiscovery =
@@ -17,26 +18,24 @@ module internal QueryMethodDiscovery =
     let create (methodInfo: MethodInfo) =
         let parameters = methodInfo.GetParameters() |> Array.map _.ParameterType
         let owner = methodInfo.DeclaringType
-        if methodInfo.ContainsGenericParameters || methodInfo.ReturnType.IsByRef || parameters |> Array.exists(fun parameter -> parameter.IsPointer) then
-            raise (NotSupportedException($"Query method '{methodInfo.Name}' requires a generated direct operation."))
+        TypeSupport.RequireQueryCall(methodInfo.Name,TypeSupport.QueryCallRestricted(methodInfo.ContainsGenericParameters,methodInfo.ReturnType.IsByRef,
+            parameters |> Array.exists(fun parameter -> parameter.IsPointer)))
         let method = DynamicMethod("QueryCall",typeof<obj>,[|typeof<obj>;typeof<obj[]>|],methodInfo.Module,true)
         QueryOperationEmitter.call (RuntimeCodecIL(method.GetILGenerator())) typeof<QueryReference> referenceMethod (if not(isNull owner) && owner.IsValueType then Some(typeof<QueryReference>.GetMethod("Address",BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance).MakeGenericMethod(owner) :> MethodBase) else None) owner (not(isNull owner) && owner.IsValueType)
             (not(isNull owner) && not(isNull(TypeMetadata.nullableUnderlying owner))) methodInfo.IsStatic (methodInfo :> MethodBase) parameters
             methodInfo.ReturnType methodInfo.ReturnType.IsValueType (typeof<Void>.Equals(methodInfo.ReturnType)) true
         method.CreateDelegate(typeof<Func<obj,obj[],obj>>) :?> Func<obj,obj[],obj>
 
-    let private memberFacts (memberInfo: MemberInfo) write =
+    let memberFacts (memberInfo: MemberInfo) write =
         match memberInfo with
         | :? FieldInfo as field ->
             if write && (field.IsInitOnly || field.IsLiteral) then
                 raise(ArgumentException("Expression must be writeable", "left"))
             { Name = field.Name; Type = field.FieldType; Field = Some field; Getter = None; Setter = None
               Static = field.IsStatic; Readable = true; Writable = not field.IsInitOnly; Ignored = false; Many = false }
-        | :? PropertyInfo as property when property.GetIndexParameters().Length = 0 ->
+        | :? PropertyInfo as property ->
             let method = if write then property.GetSetMethod(true) else property.GetGetMethod(true)
-            if isNull method then
-                if write then raise(ArgumentException("Expression must be writeable", "left"))
-                else invalidArg "memberInfo" "A query property requires a getter."
+            TypeSupport.RequireQueryProperty(write,not(isNull method),property.GetIndexParameters().Length <> 0)
             { Name = property.Name; Type = property.PropertyType; Field = None
               Getter = if write then None else Some(method :> MethodBase)
               Setter = if write then Some(method :> MethodBase) else None
@@ -88,8 +87,8 @@ module internal QueryMethodDiscovery =
 
     let defaultConstruction (owner: Type) (constructor: ConstructorInfo option) =
         let method = DynamicMethod("DefaultConstruction",typeof<obj>,Type.EmptyTypes,owner.Module,true)
-        CodecEmitter.boxedDefaultConstruction (RuntimeCodecIL(method.GetILGenerator())) owner (not(isNull owner) && owner.IsValueType)
-            (constructor |> Option.map(fun value -> value :> MethodBase))
+        CodecEmitter.defaultConstruction (RuntimeCodecIL(method.GetILGenerator())) owner (not(isNull owner) && owner.IsValueType)
+            (constructor |> Option.map(fun value -> value :> MethodBase)) true
         method.CreateDelegate(typeof<Func<obj>>) :?> Func<obj>
 
     let fieldAddress (field: FieldInfo) =

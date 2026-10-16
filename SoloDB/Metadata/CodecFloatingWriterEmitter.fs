@@ -14,7 +14,7 @@ type internal CodecFloatingWriterApi<'Type,'Method,'Field> = {
 }
 
 module internal CodecFloatingWriterEmitter =
-    let writer (il: CodecIL<'T,'M,'F>) (api: CodecFloatingWriterApi<'T,'M,'F>) width utf16 =
+    let writerFrom (il: CodecIL<'T,'M,'F>) (api: CodecFloatingWriterApi<'T,'M,'F>) width utf16 address =
         let output = api.Digits.Output
         let wide = width = 64
         let wordType = if wide then output.UInt64 else output.UInt32
@@ -37,7 +37,7 @@ module internal CodecFloatingWriterEmitter =
         let complete = il.Label()
         let mantissaBits = if width = 64 then 52 elif width = 16 then 10 else 23
         let exponentMask = if width = 64 then 2047 else if width = 16 then 31 else 255
-        il.EmitInt(OpCodes.Ldarga,0); il.EmitMethod(OpCodes.Call,api.Source); il.EmitMethod(OpCodes.Call,api.Bits); save bits
+        address(); il.EmitMethod(OpCodes.Call,api.Source); il.EmitMethod(OpCodes.Call,api.Bits); save bits
         load bits; constant(width-1); il.Emit OpCodes.Shr_Un; il.Emit OpCodes.Conv_I4; save negative
         load bits; number((1UL <<< mantissaBits)-1UL); il.Emit OpCodes.And; save mantissa
         load bits; constant mantissaBits; il.Emit OpCodes.Shr_Un; il.Emit OpCodes.Conv_I4; constant exponentMask; il.Emit OpCodes.And; save exponent

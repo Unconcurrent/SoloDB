@@ -5,6 +5,7 @@ open System.Collections.Generic
 open System.Reflection
 open System.Reflection.Emit
 open SoloDatabase.Metadata.CodecGeneration
+open SoloDatabase.Metadata.Generation
 
 /// Declared shape facts shared by translation and generated registration.
 [<AbstractClass; Sealed>]
@@ -30,20 +31,29 @@ type internal ModelMetadata private () =
                        yield struct(memberField.Name,memberField.FieldType,true) |]))
         members |> Array.tryPick(fun struct(memberName,valueType,isField) -> if memberName = name && isField = field then Some valueType else None)
 
-    static member internal RegisterStringIndexer(owner: Type, valueType: Type, read: Func<obj,string,obj>) =
-        let operation = if isNull read then ValueNone else ValueSome(struct(valueType,read))
+    static member internal RegisterStringIndexer(owner: Type, valueType: Type, read: Func<obj,string,obj>, ambiguous: bool, missingGetter: bool, restrictedMethod: string) =
+        let operation = { Value = if isNull read then ValueNone else ValueSome(struct(valueType,read))
+                          Ambiguous = ambiguous; MissingGetter = missingGetter; RestrictedMethod = restrictedMethod }
         TypeMetadataCache.Register(owner,fun metadata -> { metadata with StringIndexer = MetadataValue.generated operation })
 
     static member StringIndexer(owner: Type) =
-        TypeMetadataCache.Discover(owner,(fun metadata -> metadata.StringIndexer),
-            (fun operation metadata -> { metadata with StringIndexer = ValueSome operation }),Func<struct(Type * Func<obj,string,obj>) voption>(fun () ->
+        let operation = TypeMetadataCache.Discover(owner,(fun metadata -> metadata.StringIndexer),
+            (fun operation metadata -> { metadata with StringIndexer = ValueSome operation }),Func<StringIndexerOperations>(fun () ->
                 if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "string indexer" owner
-                let property = owner.GetProperty("Item")
-                if isNull property then ValueNone else
-                let parameters = property.GetIndexParameters()
-                if parameters.Length <> 1 || not (typeof<string>.Equals(parameters[0].ParameterType)) then ValueNone else
+                let properties = owner.GetProperties()
+                let index = TypeSupport.NamedProperty("Item",false,properties,Func<PropertyInfo,string>(fun property -> property.Name),
+                    Func<PropertyInfo,bool>(fun property -> (if property.CanRead then property.GetGetMethod(true) else property.GetSetMethod(true)).IsStatic))
+                let empty = { Value = ValueNone; Ambiguous = index = -2; MissingGetter = false; RestrictedMethod = null }
+                if index < 0 then empty else
+                let property = properties[index]
+                if not(TypeSupport.StringIndexer(property.GetIndexParameters() |> Array.map(fun parameter -> parameter.ParameterType.FullName))) then empty else
+                if not property.CanRead then { empty with MissingGetter = true } else
                 let call = QueryMethodDiscovery.create (property.GetGetMethod(true))
-                ValueSome(struct(property.PropertyType,Func<obj,string,obj>(fun value key -> call.Invoke(value,[|box key|]))))))
+                { empty with Value = ValueSome(struct(property.PropertyType,Func<obj,string,obj>(fun value key -> call.Invoke(value,[|box key|])))) }))
+        TypeSupport.RequireNamedProperty operation.Ambiguous
+        if operation.MissingGetter then raise(NullReferenceException())
+        TypeSupport.RequireQueryCall(operation.RestrictedMethod,not(isNull operation.RestrictedMethod))
+        operation.Value
 
     /// Binds a declared member without constructing reflective expression syntax.
     static member NamedMember(owner: Type, name: string) =

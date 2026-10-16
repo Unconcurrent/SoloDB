@@ -1196,8 +1196,9 @@ and [<AbstractClass; Sealed>] JsonMetadata =
 
     static member internal RegisterStoredScalar<'T>() =
         let native = TypeMetadataCache.Get typeof<'T>
-        let equivalentWriter = (TypeSupport.StoredNumeric typeof<'T>.FullName).IsNone
-        let equivalentReader = equivalentWriter && (TypeSupport.StoredNumericReader typeof<'T>.FullName).IsNone && not typeof<'T>.IsEnum
+        let preparation = CodecPreparation.stored typeof<'T>.FullName (TypeSupport.Runtime typeof<'T>) typeof<'T>.IsAbstract
+        let equivalentWriter = preparation.ReuseWriter
+        let equivalentReader = preparation.ReuseReader
         TypeMetadataCache.Register(typeof<'T>,fun metadata ->
             let metadata =
                 match (if equivalentReader then native.JsonUtf8Read else ValueNone) with
@@ -2791,7 +2792,7 @@ and private JsonCodecDiscovery =
                 | TypeShape.TypedDocumentReference -> JsonSerializationShape.ReferenceIdentity((arguments())[decision.IdentityArgument])
                 | TypeShape.Nullable | TypeShape.Option -> JsonSerializationShape.NullableValue((arguments())[0])
                 | TypeShape.Tuple ->
-                    JsonSerializationShape.DeclaredArrayMembers(CodecTupleEmitter.leaves(JsonTupleGeneration.Model target)
+                    JsonSerializationShape.DeclaredArrayMembers(CodecTupleEmitter.leaves(RuntimeTupleFacts.model target)
                         |> Array.map(fun path -> (snd(Array.last path)).Type))
                 | TypeShape.Dictionary | TypeShape.SortedDictionary | TypeShape.DictionaryInterface
                 | TypeShape.ReadOnlyDictionaryInterface | TypeShape.CustomDictionary | TypeShape.CustomReadOnlyDictionary ->
@@ -2813,10 +2814,12 @@ and private JsonCodecDiscovery =
                 | _ -> modelShape()
     static member Select(target: Type): (string * Type[] * obj[]) option =
         let decision = JsonCodecDiscovery.Decision target
-        if decision.Factory = "" then None
+        let definition = if target.IsGenericType then target.GetGenericTypeDefinition().FullName else target.FullName
+        let preparation = CodecPreparation.factory definition decision target.IsAbstract
+        if preparation.Factory = "" then None
         else
             let arguments =
-                match decision.Arguments with
+                match preparation.Arguments with
                 | CodecArguments.None -> [||]
                 | CodecArguments.Target -> [|target|]
                 | CodecArguments.Element -> [|target.GetElementType()|]
@@ -2825,8 +2828,8 @@ and private JsonCodecDiscovery =
                 | CodecArguments.TargetAndContract ->
                     Array.append [|target|] (JsonCodecDiscovery.ContractArguments(target,decision))
                 | value -> invalidOp (string value)
-            let values = if decision.ArrayWrapper then [|box (TypeSupport.SupportsValuesWrapper(target.GetElementType().FullName))|] else [||]
-            Some(decision.Factory,arguments,values)
+            let values = if preparation.ArrayWrapper then [|box (TypeSupport.SupportsValuesWrapper(target.GetElementType().FullName))|] else [||]
+            Some(preparation.Factory,arguments,values)
     static member TryBuild<'T>(): JsonCodec<'T> voption =
         match JsonCodecDiscovery.Select(typeof<'T>) with
         | None -> ValueNone
@@ -2840,24 +2843,8 @@ and private JsonCodecDiscovery =
                 Unchecked.defaultof<_>
 
 and private JsonTupleGeneration =
-    static member internal Model(target: Type): CodecTuple<Type,MethodBase,FieldInfo> =
-        let arguments = TypeMetadata.GenericTypeArgCache.Get target
-        let members = arguments |> Array.mapi (fun index element ->
-            let name = if index = 7 then "Rest" else "Item" + string(index + 1)
-            let memberValue =
-                if target.IsValueType then
-                    let field = target.GetField(name)
-                    { Name = name; Type = element; Field = Some field; Getter = None; Setter = None; Static = false
-                      Readable = true; Writable = true; Ignored = false; Many = false }
-                else
-                    { Name = name; Type = element; Field = None
-                      Getter = Some(target.GetProperty(name).GetGetMethod() :> MethodBase); Setter = None; Static = false
-                      Readable = true; Writable = false; Ignored = false; Many = false }
-            { Member = memberValue; Rest = if index = 7 then Some(JsonTupleGeneration.Model element) else None })
-        { Type = target; ValueType = target.IsValueType; Constructor = target.GetConstructor(arguments) :> MethodBase; Members = members }
-
     static member Codec<'T>(): JsonCodec<'T> =
-        let model = JsonTupleGeneration.Model typeof<'T>
+        let model = RuntimeTupleFacts.model typeof<'T>
         let api = JsonObjectGeneration.Api()
         let writer = DynamicMethod("WriteTuple",typeof<JsonValue[]>,[|typeof<'T>|],typeof<JsonValue>.Module,true)
         CodecTupleEmitter.writer (RuntimeCodecIL(writer.GetILGenerator())) typeof<JsonValue> api.Serialize model
@@ -2988,18 +2975,19 @@ and private JsonRawWrite<'T,'E,'O,'Contract when 'O : struct and 'O :> IJsonValu
         else operations.Writer :?> JsonDirectWriter<'T,'E>
 
     static member private Build(): JsonRawWriteOperations =
+        let target = typeof<'T>
+        let decision = JsonCodecDiscovery.Decision target
+        let operation = CodecPreparation.writer(target.FullName,decision,JsonOperationPolicy<'Contract>.IsStored,
+                            target.IsAbstract,typeof<IEnumerable<byte>>.IsAssignableFrom target,typeof<IEnumerable>.IsAssignableFrom target && not(typeof<string>.Equals target))
         let writer =
-            let scalar =
-                if JsonOperationPolicy<'Contract>.IsStored && (TypeSupport.StoredNumeric typeof<'T>.FullName).IsSome then
-                    ValueSome((JsonStoredNumericRuntime.writerMethod typeof<'T> typeof<'E>).CreateDelegate(typeof<JsonDirectWriter<'T,'E>>) :?> JsonDirectWriter<'T,'E>)
-                else JsonRawScalarWriter.Create<'T,'E,'O>()
-            match scalar with
-            | ValueSome writer -> writer
-            | ValueNone when typeof<'T>.Equals(typeof<JsonValue>) ->
+            match operation with
+            | RawRootOperation.StoredNumeric ->
+                (JsonStoredNumericRuntime.writerMethod target typeof<'E>).CreateDelegate(typeof<JsonDirectWriter<'T,'E>>) :?> JsonDirectWriter<'T,'E>
+            | RawRootOperation.Scalar -> JsonRawScalarWriter.Create<'T,'E,'O>().Value
+            | RawRootOperation.Tree ->
                 JsonRawCollections<'Contract>.TreeWriter<'T,'E,'O>(Func<'T,JsonValue>(fun value -> unbox<JsonValue>(box value)))
-            | ValueNone when typeof<'T>.IsAbstract && not(typeof<'T>.Equals(typeof<obj>)) ->
-                JsonRawCollections<'Contract>.AbstractWriter<'T,'E,'O>()
-            | ValueNone when typeof<'T>.Equals(typeof<obj>) ->
+            | RawRootOperation.Abstract -> JsonRawCollections<'Contract>.AbstractWriter<'T,'E,'O>()
+            | RawRootOperation.Dynamic ->
                 JsonDirectWriter<'T,'E>(fun value destination state ->
                     let boxed = box value
                     if isNull boxed then JsonRawOutput<'E,'O,'Contract>.Null(&destination,&state)
@@ -3007,11 +2995,13 @@ and private JsonRawWrite<'T,'E,'O,'Contract when 'O : struct and 'O :> IJsonValu
                         JsonRawOutput<'E,'O,'Contract>.BeginObject(&destination,&state)
                         Unchecked.defaultof<'O>.Ascii('}'B,&destination,&state)
                     else JsonRawOutput<'E,'O,'Contract>.SerializeActual(boxed,&destination,&state))
-            | ValueNone ->
-                if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "direct JSON write" typeof<'T>
-                match (if isTuple typeof<'T> then ValueSome(JsonRawOutput<'E,'O,'Contract>.Tuple<'T>()) else JsonRawCollections<'Contract>.Writer<'T,'E,'O>()) with
-                | ValueSome writer -> writer
-                | ValueNone -> JsonRawOutput<'E,'O,'Contract>.Model<'T>()
+            | _ ->
+                if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "direct JSON write" target
+                if operation = RawRootOperation.Tuple then JsonRawOutput<'E,'O,'Contract>.Tuple<'T>()
+                else
+                    match JsonRawCollections<'Contract>.Writer<'T,'E,'O>() with
+                    | ValueSome writer -> writer
+                    | ValueNone -> JsonRawOutput<'E,'O,'Contract>.Model<'T>()
         { Writer = writer; WriteRuntime = JsonDirectRuntimeWriter<'E>(fun value destination state -> writer.Invoke(unbox<'T> value,&destination,&state)) }
     static member private Prepare(): JsonRawWriteOperations =
         TypeMetadataCache.Discover(typeof<'T>,JsonRawWriteMetadata<'E,'O,'Contract>.Select,
@@ -3115,7 +3105,7 @@ and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueO
               OmitId = state.GetField("OmitId",BindingFlags.Instance ||| flags)
               Required = fun child -> TypeSupport.TupleMemberScope(TypeSupport.RawPrimitive child.FullName,JsonOptionalRuntime.kind child) }
         let method = DynamicMethod("WriteRawTuple",typeof<Void>,parameters,typeof<JsonValue>.Module,true)
-        CodecTupleEmitter.rawWriter (RuntimeCodecIL(method.GetILGenerator())) (JsonRawOutput<'E,'O,'Contract>.ForwardApi target) scope (JsonTupleGeneration.Model target)
+        CodecTupleEmitter.rawWriter (RuntimeCodecIL(method.GetILGenerator())) (JsonRawOutput<'E,'O,'Contract>.ForwardApi target) scope (RuntimeTupleFacts.model target)
         method
 
     static member internal Tuple<'T>(): JsonDirectWriter<'T,'E> =
@@ -3126,7 +3116,7 @@ and private JsonRawOutput<'E,'O,'Contract when 'O : struct and 'O :> IJsonValueO
     static member internal SetIncludeType(state: byref<JsonWriteState<'E>>, value: bool) = state.IncludeType <- value
     static member internal Actual(value: obj, actual: Type, destination: byref<Span<'E>>, state: byref<JsonWriteState<'E>>): unit =
         let target = JsonValue.RuntimeWriterType(value, actual)
-        if JsonOperationPolicy<'Contract>.IsStored && (TypeSupport.StoredNumeric target.FullName).IsSome then
+        if TypeSupport.PolymorphicNative(JsonOperationPolicy<'Contract>.IsStored,target.FullName) then
             JsonRawWriteMetadata<'E,'O,JsonNativeContract>.ForType(target,value,&destination,&state)
         else JsonRawWriteMetadata<'E,'O,'Contract>.ForType(target,value,&destination,&state)
     static member internal Polymorphic(known: Type -> struct(Type * MethodBase)[]): CodecPolymorphicApi<Type,MethodBase> =
@@ -3291,32 +3281,34 @@ and private JsonRawRead<'Contract> =
           ReadRuntime = JsonDirectRuntimeReader<'R>(fun context -> box(JsonRawRead<'Contract>.Invoke<'T,'R>(root,&context))) }
 
     static member private Build<'T,'R when 'R : struct and 'R :> IJsonReader>(): JsonRawReadOperations =
+        let target = typeof<'T>
+        let decision = JsonCodecDiscovery.Decision target
+        let operation = CodecPreparation.reader(target.FullName,decision,JsonOperationPolicy<'Contract>.IsStored)
         let mutable numeric: Delegate = null
         let reader: JsonDirectReader<'T,'R> =
-            let scalar =
-                if JsonOperationPolicy<'Contract>.IsStored && (TypeSupport.StoredNumeric typeof<'T>.FullName).IsSome then
-                    let struct(_,name) = (TypeSupport.StoredNumeric typeof<'T>.FullName).Value
-                    let method = typeof<JsonStoredNumeric>.GetMethod(name,BindingFlags.Static ||| BindingFlags.NonPublic).MakeGenericMethod(typeof<'R>)
-                    ValueSome(method.CreateDelegate(typeof<JsonDirectReader<'T,'R>>) :?> JsonDirectReader<'T,'R>)
-                elif JsonOperationPolicy<'Contract>.IsStored && (TypeSupport.StoredNumericReader typeof<'T>.FullName).IsSome then
-                    ValueSome(JsonNumericRuntime.storedReader<'T,'R>())
-                else JsonRawScalarReader.Create<'T,'R>()
-            match scalar with
-            | ValueSome reader -> reader
-            | ValueNone when typeof<'T>.Equals(typeof<JsonValue>) ->
+            match operation with
+            | RawRootOperation.StoredNumeric ->
+                let struct(_,name) = (TypeSupport.StoredNumeric target.FullName).Value
+                let method = typeof<JsonStoredNumeric>.GetMethod(name,BindingFlags.Static ||| BindingFlags.NonPublic).MakeGenericMethod(typeof<'R>)
+                method.CreateDelegate(typeof<JsonDirectReader<'T,'R>>) :?> JsonDirectReader<'T,'R>
+            | RawRootOperation.ConvertedNumeric -> JsonNumericRuntime.storedReader<'T,'R>()
+            | RawRootOperation.Scalar -> JsonRawScalarReader.Create<'T,'R>().Value
+            | RawRootOperation.Tree ->
                 JsonDirectReader<JsonValue,'R>(fun (context: byref<JsonReadContext<'R>>) -> JsonRawInput<'Contract>.Tree<'R> &context) :> Delegate :?> JsonDirectReader<'T,'R>
-            | ValueNone when typeof<'T>.Equals(typeof<obj>) ->
+            | RawRootOperation.Dynamic ->
                 let number = JsonRawRead<'Contract>.AcquireIntrinsic<obj,'R>()
                 numeric <- number
                 JsonDirectReader<obj,'R>(fun context -> JsonRawInput<'Contract>.Dynamic<'R>(number,&context)) :> Delegate :?> JsonDirectReader<'T,'R>
-            | ValueNone ->
-                if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "direct JSON read" typeof<'T>
-                match (if isTuple typeof<'T> then ValueSome(JsonRawInput<'Contract>.Tuple<'T,'R>()) else JsonRawCollections<'Contract>.Reader<'T,'R>()) with
-                | ValueSome reader -> reader
-                | ValueNone -> JsonRawInput<'Contract>.Model<'T,'R>()
+            | _ ->
+                if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "direct JSON read" target
+                if operation = RawRootOperation.Tuple then JsonRawInput<'Contract>.Tuple<'T,'R>()
+                else
+                    match JsonRawCollections<'Contract>.Reader<'T,'R>() with
+                    | ValueSome reader -> reader
+                    | ValueNone -> JsonRawInput<'Contract>.Model<'T,'R>()
         let intrinsic =
-            if typeof<'T>.Equals(typeof<obj>) then numeric
-            elif (TypeSupport.NumericCore typeof<'T>.FullName).IsSome then reader :> Delegate
+            if operation = RawRootOperation.Dynamic then numeric
+            elif (TypeSupport.NumericCore target.FullName).IsSome then reader :> Delegate
             else null
         { Reader = reader; ReadRuntime = JsonDirectRuntimeReader<'R>(fun (context: byref<JsonReadContext<'R>>) -> box(JsonRawRead<'Contract>.Invoke<'T,'R>(reader,&context))); Intrinsic = intrinsic }
 
@@ -3554,7 +3546,7 @@ and private JsonRawInput<'Contract> =
               PrimitiveError = typeof<JsonPrimitiveShapeMismatch>; ScalarError = typeof<JsonScalarShapeMismatch>
               PrimitiveRetry = retry "PrimitiveRetry"; ScalarRetry = retry "ScalarRetry" }
         let method = DynamicMethod("ReadRawTuple",target,[|context.MakeByRefType()|],typeof<JsonValue>.Module,true)
-        CodecTupleEmitter.rawReader (RuntimeCodecIL(method.GetILGenerator())) api input.Operation input.Read (JsonTupleGeneration.Model target)
+        CodecTupleEmitter.rawReader (RuntimeCodecIL(method.GetILGenerator())) api input.Operation input.Read (RuntimeTupleFacts.model target)
         method
 
     static member internal Tuple<'T,'R when 'R : struct and 'R :> IJsonReader>(): JsonDirectReader<'T,'R> =
@@ -3702,8 +3694,7 @@ and private JsonRawCollections<'Contract> =
         let invoke name types values = ValueSome(JsonRawCollections<'Contract>.Invoke(typeof<JsonRawCollections<'Contract>>,name,types,values) :?> JsonDirectReader<'T,'R>)
         if decision.Shape = TypeShape.BsonDocument then
             let method = DynamicMethod("ReadBsonJson",target,[|typeof<JsonValue>|],typeof<JsonValue>.Module,true)
-            let il = method.GetILGenerator()
-            il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Newobj,target.GetConstructor([|typeof<JsonValue>|])); il.Emit(OpCodes.Ret)
+            CodecEmitter.typedConstruction (RuntimeCodecIL(method.GetILGenerator())) (target.GetConstructor([|typeof<JsonValue>|]) :> MethodBase) 1
             ValueSome(JsonRawCollections<'Contract>.TreeReader<'T,'R>(method.CreateDelegate(typeof<Func<JsonValue,'T>>) :?> Func<JsonValue,'T>))
         else
             let struct(name,policy) = TypeSupport.RawCollectionReader(decision.Shape,target.IsAbstract)
@@ -3714,7 +3705,7 @@ and private JsonRawCollections<'Contract> =
                 if policy <> "" then invoke name signature [|box policy|]
                 elif name = "CustomSequenceReader" then
                     let populate = TypeSupport.PopulateCollection(decision.Shape,(if target.IsGenericType then (TypeMetadata.GenericTypeArgCache.Get target).Length else 0),typeof<IList>.IsAssignableFrom target,not(isNull(target.GetConstructor(Type.EmptyTypes))))
-                    invoke name signature [|box populate;box(JsonHelper.isSupportedNewtownsoftArrayType target)|]
+                    invoke name signature [|box populate;box(TypeSupport.ArrayValuesWrapper(target.IsArray,(if target.IsArray then target.GetElementType().FullName else "")))|]
                 else invoke name signature [||]
 
     static member internal GroupingImplementationReader<'Sequence,'Key,'Element,'R when 'R : struct and 'R :> IJsonReader>(): JsonDirectReader<'Sequence,'R> =
@@ -3748,8 +3739,7 @@ and private JsonRawCollections<'Contract> =
         | _ when typeof<JsonValue>.IsAssignableFrom target -> ValueSome(JsonRawCollections<'Contract>.TreeWriter<'T,'E,'O>(Func<'T,JsonValue>(fun value -> box value :?> JsonValue)))
         | _ when decision.Shape = TypeShape.BsonDocument ->
             let method = DynamicMethod("WriteBsonJson",typeof<JsonValue>,[|target|],typeof<JsonValue>.Module,true)
-            let il = method.GetILGenerator()
-            il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Call,target.GetProperty("Json").GetGetMethod()); il.Emit(OpCodes.Ret)
+            CodecEmitter.directCall (RuntimeCodecIL(method.GetILGenerator())) (target.GetProperty("Json").GetGetMethod() :> MethodBase) 1
             ValueSome(JsonRawCollections<'Contract>.TreeWriter<'T,'E,'O>(method.CreateDelegate(typeof<Func<'T,JsonValue>>) :?> Func<'T,JsonValue>))
         | _ ->
             let name =
@@ -4276,7 +4266,7 @@ and private JsonRuntimeCalls =
 
     static member Empty<'T>(constructor: ConstructorInfo) =
         let method = DynamicMethod("JsonEmptyCollection",typeof<'T>,Type.EmptyTypes,typeof<JsonValue>.Module,true)
-        CodecEmitter.constructor (RuntimeCodecIL(method.GetILGenerator())) (constructor :> MethodBase)
+        CodecEmitter.typedConstruction (RuntimeCodecIL(method.GetILGenerator())) (constructor :> MethodBase) 0
         method.CreateDelegate(typeof<Func<'T>>) :?> Func<'T>
 
 and private JsonDeserializerImpl<'A> =
@@ -4291,6 +4281,7 @@ and private JsonDeserializerImpl<'A> =
     static member private BuildStructuredDeserializer() : Func<JsonValue,'A> =
         let target = typeof<'A>
         let decision = JsonCodecDiscovery.Decision target
+        let preparation = CodecPreparation.treeReader decision.Shape
         let read before call after cast nullDefault = JsonRuntimeCalls.Reader<'A>(before,call,after,cast,nullDefault)
         let genericArguments name =
             let definition = target.GetInterface(name) |> Option.ofObj |> Option.defaultValue target
@@ -4301,7 +4292,7 @@ and private JsonDeserializerImpl<'A> =
         match selected with
         | Some operation -> JsonRuntimeCalls.ReaderOperation<'A> operation
         | None ->
-        if TypeSupport.Collection decision.Shape then
+        if preparation = CodecTreeOperation.Collection then
             let arguments = if decision.Contract = "" then [||] else genericArguments (decision.Contract.Split('.') |> Array.last)
             let populate = TypeSupport.PopulateCollection(decision.Shape,(if target.IsGenericType then (TypeMetadata.GenericTypeArgCache.Get target).Length else 0),typeof<IList>.IsAssignableFrom target,not(isNull(target.GetConstructor(Type.EmptyTypes))))
             let constructor =
@@ -4313,11 +4304,11 @@ and private JsonDeserializerImpl<'A> =
             let operation = TypeSupport.CollectionTreeReader(decision.Shape,target,constructor |> Option.ofObj |> Option.map(fun value -> value :> MethodBase),target.IsAbstract,populate,arguments,helper)
             let standard = JsonRuntimeCalls.ReaderOperation<'A> operation
             if decision.Shape = TypeShape.CustomSequence then
-                Func<JsonValue,'A>(fun json -> JsonSequenceOperations.Read<'A>(json,JsonHelper.isSupportedNewtownsoftArrayType target,standard))
+                Func<JsonValue,'A>(fun json -> JsonSequenceOperations.Read<'A>(json,TypeSupport.ArrayValuesWrapper(target.IsArray,(if target.IsArray then target.GetElementType().FullName else "")),standard))
             else standard
         else
           match target with
-          | t when decision.Shape = TypeShape.BsonDocument -> read None None (Some(t.GetConstructor([|typeof<JsonValue>|]))) false false
+          | t when preparation = CodecTreeOperation.Bson -> read None None (Some(t.GetConstructor([|typeof<JsonValue>|]))) false false
           | _ -> JsonObjectGeneration.Reader<'A>()
 
 /// <summary>
@@ -4328,7 +4319,7 @@ and private JsonSerializerImpl<'A> =
     static member internal Build() =
         let mutable shape = JsonSerializationShape.Dynamic
         let write =
-            if typeof<'A>.IsAbstract then
+            if CodecPreparation.treeWriter(TypeShape.Object,false,typeof<'A>.IsAbstract) = CodecTreeOperation.Abstract then
                 let target=typeof<'A>
                 let decision=JsonCodecDiscovery.Decision target
                 if typeof<JsonValue>.IsAssignableFrom target then shape <- JsonCodecDiscovery.ValueShape target
@@ -4368,8 +4359,9 @@ and private JsonSerializerImpl<'A> =
     static member private BuildStructuredSerializer(setShape: JsonSerializationShape -> unit): Func<'A,JsonValue> =
         let target = typeof<'A>
         let decision = JsonCodecDiscovery.Decision target
+        let preparation = CodecPreparation.treeWriter(decision.Shape,typeof<IEnumerable>.IsAssignableFrom target && not(typeof<string>.Equals target),target.IsAbstract)
         let write name arguments boxValue = JsonRuntimeCalls.Writer<'A>(JsonRuntimeCalls.Helper(name,arguments),boxValue,false)
-        if TypeSupport.Collection decision.Shape then
+        if preparation = CodecTreeOperation.Collection then
             let definition = if decision.Contract = "" then target else target.GetInterface(decision.Contract.Split('.') |> Array.last) |> Option.ofObj |> Option.defaultValue target
             let arguments = if decision.Contract = "" then [||] else TypeMetadata.GenericTypeArgCache.Get definition
             match decision.Shape with
@@ -4389,16 +4381,16 @@ and private JsonSerializerImpl<'A> =
                   if isNull boxed then Null
                   elif typeof<obj>.Equals(boxed.GetType()) then JsonValue.New()
                   else JsonImpl.SerializeByTypeWithType (boxed.GetType()) boxed)
-          | t when t.IsAbstract ->
+          | t when preparation = CodecTreeOperation.Abstract ->
               Func<'A,JsonValue>(fun value -> let boxed = box value in if isNull boxed then Null else JsonImpl.SerializeByTypeWithType (boxed.GetType()) boxed)
           | OfType (id: byte seq -> byte seq) -> setShape JsonSerializationShape.Scalar; write "SerializeByteSequence" [||] false
           | t when typeof<JsonValue>.IsAssignableFrom t ->
               setShape(JsonCodecDiscovery.ValueShape t)
               Func<'A,JsonValue>(fun value -> box value :?> JsonValue)
-          | t when decision.Shape = TypeShape.BsonDocument ->
+          | t when preparation = CodecTreeOperation.Bson ->
               setShape JsonSerializationShape.Uninterpreted
               JsonRuntimeCalls.Writer<'A>(t.GetProperty("Json").GetGetMethod() :> MethodBase,false,true)
-          | t when typeof<IEnumerable>.IsAssignableFrom t && not (typeof<string>.Equals(t)) ->
+          | t when preparation = CodecTreeOperation.NonGenericSequence ->
               setShape JsonSerializationShape.Uninterpreted
               write "SerializeNonGenericEnumerable" [||] t.IsValueType
           | _ ->

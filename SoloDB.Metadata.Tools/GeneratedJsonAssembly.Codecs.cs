@@ -105,7 +105,7 @@ public static partial class GeneratedJsonAssembly
                 : model.Constructor.Parameters.Select(parameter => module.ImportReference(parameter.ParameterType)).ToArray();
             RegisterConstruction(module,owner,il,product,model,arguments,index);
         }
-        if (model.Facts.Shape == TypeShape.NonGenericDictionary || model.Facts.NonGenericEnumerable) il.Emit(OpCodes.Call,api.Metadata("RegisterDynamicObject"));
+        if (CodecPreparation.dynamicCompanion(model.Facts.Shape,model.Facts.NonGenericEnumerable)) il.Emit(OpCodes.Call,api.Metadata("RegisterDynamicObject"));
         var witnesses = new List<GeneratedQueryWitness>();
         if (model.UnionCases != null)
         {
@@ -170,7 +170,7 @@ public static partial class GeneratedJsonAssembly
                 var test=Method(owner,"TestUnionCase" + index + "_" + item.Tag,module.TypeSystem.Boolean,module.TypeSystem.Object);
                 QueryOperationEmitter.unionTest(new CecilCodecIL(test),type,model.Facts.ValueType,tagMethod,nullBacked,item.Tag);
                 var factory=Method(owner,"UnionFactory" + index + "_" + item.Tag,module.TypeSystem.Object,new ArrayType(module.TypeSystem.Object));
-                var body=factory.Body.GetILProcessor(); body.Emit(OpCodes.Ldnull); body.Emit(OpCodes.Ldarg_0); body.Emit(OpCodes.Call,create); body.Emit(OpCodes.Ret);
+                QueryOperationEmitter.withoutReceiver(new CecilCodecIL(factory),create);
                 api.TypeToken(il,type); il.Emit(OpCodes.Ldc_I4,item.Tag);
                 Delegate(il,api.Function(new ArrayType(module.TypeSystem.Object),module.TypeSystem.Object),factory);
                 Delegate(il,api.Function(module.TypeSystem.Object,module.TypeSystem.Boolean),test);
@@ -214,12 +214,6 @@ public static partial class GeneratedJsonAssembly
         { il.Emit(OpCodes.Dup); il.Emit(OpCodes.Ldc_I4,index); il.Emit(fields[index] ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0); il.Emit(OpCodes.Stelem_I1); }
         il.Emit(OpCodes.Call,api.ModelRegistration("RegisterMembers"));
         if (element != null) { api.TypeToken(il,type); api.TypeToken(il,element); il.Emit(OpCodes.Call,api.ModelRegistration("RegisterSequence")); }
-    }
-
-    internal static void RegisterCollection(ILProcessor il, GeneratedModel model, Api api)
-    {
-        var arguments = model.Type is GenericInstanceType closed ? closed.GenericArguments.ToArray() : Array.Empty<TypeReference>();
-        il.Emit(OpCodes.Call,api.Metadata(TypeSupport.RawFactoryRegistration(model.Facts.Shape,model.Facts.AbstractType,TypeSupport.ForShape(model.Facts.Shape).Registration),arguments));
     }
 
     private static MethodDefinition Writer(TypeDefinition owner, GeneratedModel model, int index, Api api)

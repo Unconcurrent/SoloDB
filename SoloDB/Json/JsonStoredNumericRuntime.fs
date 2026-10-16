@@ -16,9 +16,10 @@ module internal JsonStoredNumericRuntime =
         let close index = signature[index].ParameterType.GetElementType().GetGenericTypeDefinition().MakeGenericType(element).MakeByRefType()
         let method = DynamicMethod("WriteNumericalKey",typeof<Void>,[|target;close 1;close 2|],typeof<JsonStoredNumeric>.Module,true)
         let helper name = typeof<JsonStoredNumeric>.GetMethod(name,flags) :> MethodBase
+        let plan = CodecNumericPreparation.writer target.FullName true (Some IntPtr.Size)
         let facts =
             { Output = JsonWriterRuntime.api element; Prepared = typeof<NumericKeyDigits>
-              Prepare = helper (let struct(name,_) = (SoloDatabase.Metadata.Generation.TypeSupport.StoredNumeric target.FullName).Value in name)
+              Prepare = helper plan.StoredOperation.Value
               Length = helper "Length"; Utf8Length = helper "Utf8Length"; Unit = helper "Unit" }
         CodecStoredNumericEmitter.writer (RuntimeCodecIL(method.GetILGenerator())) facts (element.Equals(typeof<char>))
         method

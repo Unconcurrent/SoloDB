@@ -78,23 +78,23 @@ module internal JsonWriterRuntime =
 
     let private createNumber (target: Type) element =
         if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "direct JSON write" target
-        let coreName = (TypeSupport.NumericWriterCore target.FullName).Value
+        let plan = CodecNumericPreparation.writer target.FullName false (Some IntPtr.Size)
+        let coreName = plan.Core
         let core = if coreName = target.FullName then target else typeof<int>.Assembly.GetType(coreName,true)
-        let shape = (TypeSupport.Numeric core.FullName).Value
         let method = DynamicMethod("WriteNumber" + target.Name,typeof<Void>,Array.append [|target|] (signature element),typeof<JsonWriterRegion>.Module,true)
         let il = RuntimeCodecIL(method.GetILGenerator())
         let output = api element
-        let steps = TypeSupport.NumericWriterSteps target.FullName |> Array.map(fun (owner,name,address,result) ->
+        let steps = plan.Steps |> Array.map(fun (owner,name,address,result) ->
             let owner = if owner = target.FullName then target else typeof<int>.Assembly.GetType(owner,true)
             let result = typeof<int>.Assembly.GetType(result,true)
             let call = owner.GetMethods(BindingFlags.Public ||| BindingFlags.Static ||| BindingFlags.Instance)
                        |> Array.find(fun method -> method.Name = name && method.ReturnType.Equals(result) &&
                                                    method.IsStatic <> address && method.GetParameters().Length = (if address then 0 else 1))
             { Result = result; Call = call :> MethodBase; Address = address })
-        let value,address =
-            if shape.Kind = NumericKind.ArbitraryInteger then (fun () -> ()),(fun () -> ())
-            else CodecScalarWriterEmitter.prepare il target core steps (TypeSupport.NumericWriterCast target.FullName)
-        match shape.Kind with
+        let input =
+            if plan.Family = NumericKind.ArbitraryInteger then (fun () -> ())
+            else CodecScalarWriterEmitter.prepare il target core steps plan.Cast plan.AddressInput
+        match plan.Family with
         | NumericKind.ArbitraryInteger ->
             let prepared = typeof<SoloDatabase.Numerics.BigIntegerRadixDigits>
             let memberFlags = BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic
@@ -105,30 +105,29 @@ module internal JsonWriterRuntime =
                           Chunks = prepared.GetProperty("Chunks",memberFlags).GetMethod :> MethodBase }
             CodecBigIntegerWriterEmitter.writer il facts (typeof<char>.Equals(element))
         | NumericKind.Integer ->
-            let width = if shape.Native then IntPtr.Size * 8 else shape.Width
-            CodecIntegerWriterEmitter.writerFrom il (digits element output) width shape.Signed (typeof<char>.Equals(element)) value
+            let width = plan.Width
+            CodecIntegerWriterEmitter.writerFrom il (digits element output) width plan.Signed (typeof<char>.Equals(element)) input
         | NumericKind.Decimal ->
             let unaligned = typeof<Unsafe>.GetMethods(BindingFlags.Static ||| BindingFlags.Public)
                             |> Array.find(fun method -> method.Name = "ReadUnaligned" && method.IsGenericMethodDefinition &&
                                                         method.GetParameters().Length = 1 && method.GetParameters().[0].ParameterType.Equals(typeof<byte>.MakeByRefType()))
             let facts = { Digits = digits element output; Source = typeof<JsonWriterRegion>.GetMethod("DecimalSource",flags) :> MethodBase
                           Read32 = unaligned.MakeGenericMethod(typeof<uint32>) :> MethodBase; Read64 = unaligned.MakeGenericMethod(typeof<uint64>) :> MethodBase }
-            CodecDecimalWriterEmitter.writerFrom il facts (typeof<char>.Equals(element)) address
+            CodecDecimalWriterEmitter.writerFrom il facts (typeof<char>.Equals(element)) input
         | NumericKind.Binary ->
             let methods = typeof<Unsafe>.GetMethods(BindingFlags.Static ||| BindingFlags.Public)
             let unaligned =
                 methods |> Array.find(fun method ->
                     method.Name = "ReadUnaligned" && method.IsGenericMethodDefinition &&
                     method.GetParameters().Length = 1 && method.GetParameters().[0].ParameterType.Equals(typeof<byte>.MakeByRefType()))
-            let wide = shape.Width = 64
             let prepared = typeof<BinaryDecimalCoefficient>
             let facts = { Digits = digits element output; Prepared = prepared
                           Prepare = typeof<BinaryDecimal>.GetMethod("Coefficient",flags) :> MethodBase
                           Coefficient = prepared.GetProperty("Value",BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic).GetMethod :> MethodBase
                           Exponent = prepared.GetProperty("Exponent",BindingFlags.Instance ||| BindingFlags.Public ||| BindingFlags.NonPublic).GetMethod :> MethodBase
-                          Source = typeof<JsonWriterRegion>.GetMethod("Source",flags).MakeGenericMethod(target) :> MethodBase
-                          Bits = unaligned.MakeGenericMethod(if wide then typeof<uint64> elif shape.Width = 16 then typeof<uint16> else typeof<uint32>) :> MethodBase }
-            CodecFloatingWriterEmitter.writer il facts shape.Width (typeof<char>.Equals(element))
+                          Source = typeof<JsonWriterRegion>.GetMethod("Source",flags).MakeGenericMethod(core) :> MethodBase
+                          Bits = unaligned.MakeGenericMethod(typeof<int>.Assembly.GetType(plan.Bits,true)) :> MethodBase }
+            CodecFloatingWriterEmitter.writerFrom il facts plan.Width (typeof<char>.Equals(element)) input
         | _ -> invalidArg "target" "Unsupported numeric writer role."
 
         method

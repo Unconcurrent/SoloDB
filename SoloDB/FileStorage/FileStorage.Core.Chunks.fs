@@ -2,7 +2,6 @@ namespace SoloDatabase
 
 open System
 open NativeSQLiteTools
-open SQLiteToolsRowConversions
 open NativeArray
 open Snappier
 open SoloDatabase.Types

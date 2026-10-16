@@ -47,6 +47,7 @@ public sealed class CompleteFSharpAssembly : ITask
             foreach (var reference in References)
                 resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(reference.ItemSpec))!);
             using var template = AssemblyDefinition.ReadAssembly(Literal("Template"));
+            var product = resolver.Resolve(template.MainModule.AssemblyReferences.Single(reference => reference.Name == "SoloDB"));
             const string accessType = "System.Runtime.CompilerServices.IgnoresAccessChecksToAttribute";
             var targets = template.CustomAttributes.Where(attribute => attribute.AttributeType.FullName == accessType)
                 .Select(attribute => (string)attribute.ConstructorArguments[0].Value).Distinct(StringComparer.Ordinal).ToArray();
@@ -57,7 +58,7 @@ public sealed class CompleteFSharpAssembly : ITask
                 var existing = header.CustomAttributes.Where(attribute => attribute.AttributeType.FullName == accessType)
                     .Select(attribute => (string)attribute.ConstructorArguments[0].Value);
                 missing = targets.Except(existing, StringComparer.Ordinal).ToArray();
-                if (missing.Length == 0)
+                if (missing.Length == 0 && !GeneratedSchemaIndexes.HasUncompleted(header.MainModule,product) && !GeneratedSchemaIndexes.HasUncompleted(template.MainModule,product))
                 {
                     Assembly = Input;
                     return true;
@@ -71,6 +72,10 @@ public sealed class CompleteFSharpAssembly : ITask
                 ReadSymbols = readSymbols,
                 SymbolReaderProvider = readSymbols ? new DefaultSymbolReaderProvider(false) : null
             });
+            var completedTargets = new System.Collections.Generic.HashSet<string>(targets,StringComparer.Ordinal);
+            GeneratedSchemaIndexes.Complete(consumer,product,template,name => completedTargets.Add(name));
+            missing = completedTargets.Except(consumer.CustomAttributes.Where(attribute => attribute.AttributeType.FullName == accessType)
+                .Select(attribute => (string)attribute.ConstructorArguments[0].Value),StringComparer.Ordinal).ToArray();
             var sidecarSymbols = consumer.MainModule.HasSymbols && consumer.MainModule.SymbolReader is not EmbeddedPortablePdbReader;
             CompilerSymbols = sidecarSymbols ? Path.ChangeExtension(Input, ".pdb") : "";
             var definition = consumer.MainModule.GetType(accessType)

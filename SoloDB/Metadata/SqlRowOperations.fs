@@ -12,6 +12,12 @@ type internal SqlRowShape internal (columns: NativeColumnLayout, first: int, fin
     member _.Start = first
     /// Returns the absolute ordinal of a named column, or minus one when absent.
     member _.Ordinal(name: string) = columns.Ordinal(name, first, finish)
+    /// Validates a selected field only when its column belongs to this layout.
+    member this.BindMember(name: string, writable: bool, indexed: bool) =
+        let ordinal = this.Ordinal name
+        if ordinal >= 0 && indexed then invalidArg "memberInfo" "A query member requires a field or non-indexed property."
+        if ordinal >= 0 && not writable then raise(ArgumentException("Expression must be writeable", "left"))
+        ordinal
     /// Retains tuple column admission diagnostics for typed factories.
     member _.RequireTupleColumns(tupleName: string, required: int) =
         if required > finish - first then

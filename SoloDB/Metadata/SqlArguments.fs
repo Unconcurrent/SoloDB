@@ -2,6 +2,8 @@ namespace SoloDatabase
 
 open System
 open System.Reflection
+open System.Reflection.Emit
+open SoloDatabase.Metadata.CodecGeneration
 open SoloDatabase.Metadata.Generation
 
 module internal NativeArgumentSources =
@@ -20,9 +22,16 @@ module internal NativeArgumentSources =
             let properties = t.GetProperties(BindingFlags.Public ||| BindingFlags.Instance)
                              |> Array.filter (fun p -> TypeSupport.SqlArgumentProperty(true,p.CanRead,false,p.GetIndexParameters().Length <> 0))
             let readers = properties |> Array.map(fun property -> QueryValueMetadata.Reader(property,t))
-            let capture = Action<obj,obj[]>(fun source values ->
-                for index = 0 to readers.Length - 1 do
-                    values[index] <- readers[index].Invoke source)
+            let method = DynamicMethod("CaptureSqlArguments",typeof<Void>,[|typeof<Func<obj,obj>[]>;typeof<obj>;typeof<obj[]>|],t.Module,true)
+            let il = RuntimeCodecIL(method.GetILGenerator())
+            let invoke = typeof<Func<obj,obj>>.GetMethod("Invoke")
+            SqlArgumentEmitter.capture il 2 readers.Length (Action<int>(fun index ->
+                il.Emit OpCodes.Ldarg_0
+                il.EmitInt(OpCodes.Ldc_I4,index)
+                il.Emit OpCodes.Ldelem_Ref
+                il.Emit OpCodes.Ldarg_1
+                il.EmitMethod(OpCodes.Callvirt,invoke)))
+            let capture = method.CreateDelegate(typeof<Action<obj,obj[]>>,readers) :?> Action<obj,obj[]>
             struct (NativeArgumentLayout(properties |> Array.map _.Name),capture)))
 
 

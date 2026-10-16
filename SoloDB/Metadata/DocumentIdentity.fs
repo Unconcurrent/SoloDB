@@ -27,12 +27,14 @@ type internal EntityDocumentId<'T> =
                         ValueSome { Generated = operation.Generated; Value = reader }
                     | ValueNone -> metadata.DocumentIdReader),
                 (fun operation metadata -> { metadata with DocumentIdReader = ValueSome operation }), Func<Delegate>(fun () ->
-                    let property = typeof<'T>.GetProperty("Id",BindingFlags.Public ||| BindingFlags.Instance)
+                    let property = EntityIdentity.physicalProperty typeof<'T>
                     QueryMethodDiscovery.typedReader<'T,int64> property :> Delegate))
             if isNull read then failwithf "Cannot read nonexistant Id from Type %A" typeof<'T>.FullName
             (read :?> Func<'T,int64>).Invoke value
         | ValueNone -> MetadataRuntime.missing "physical identity" typeof<'T>
-        | ValueSome operations when operations.HasWritableId -> (operations.TypedReader :?> Func<'T,int64>).Invoke(value)
+        | ValueSome operations when operations.HasWritableId ->
+            EntityIdMetadata.RequireReader operations
+            (operations.TypedReader :?> Func<'T,int64>).Invoke(value)
         | _ -> failwithf "Cannot read nonexistant Id from Type %A" typeof<'T>.FullName
     static member internal WithId(value: 'T) (id: int64) =
         match EntityIdMetadata.TryGet(typeof<'T>) with
@@ -43,6 +45,7 @@ type internal EntityDocumentId<'T> =
             unbox<'T> boxed
         | ValueNone -> MetadataRuntime.missing "physical identity" typeof<'T>
         | ValueSome operations when operations.HasWritableId ->
+            EntityIdMetadata.RequireWriter operations
             let mutable result = value
             (operations.TypedWriter :?> EntityIdSetter<'T>).Invoke(&result, id)
             result

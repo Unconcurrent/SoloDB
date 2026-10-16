@@ -4,7 +4,6 @@ open System
 open System.Collections.Generic
 open System.Runtime.CompilerServices
 open System.Runtime.InteropServices
-open SQLiteToolsRowConversions
 open SQLiteToolsMapper
 
 module NativeSQLiteTools =

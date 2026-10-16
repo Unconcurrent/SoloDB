@@ -27,11 +27,7 @@ internal sealed class GeneratedJsonDefinitions
     internal string MethodName(string name) => Stored ? name + "Stored" : name;
     internal GeneratedJsonDefinitions NativeView => native ?? this;
     internal GeneratedJsonDefinitions StoredView() => new(this);
-    private string Role(string role) => Stored && (role is "numeric-read" or "array-read" or "array-write" or "optional-read" or "optional-write"
-        or "tuple-read" or "tuple-write" or "grouping-read" or "dictionary-read" or "dictionary-write"
-        or "reference-sequence-read" or "custom-sequence-read" or "non-generic-sequence-write" or "raw-model-body"
-        or "raw-read" or "raw-write" or "raw-abstract-write" || role.StartsWith("sequence-read:",StringComparison.Ordinal)
-        || role is "sequence-write" or "sequence-binary-write") ? TypeSupport.StoredRole(role) : role;
+    private string Role(string role) => TypeSupport.OperationRole(Stored,role);
 
     internal FSharpOption<CodecBase64VectorApi<TypeReference,MethodReference>> Base64Vector(ModuleDefinition module,bool utf16)
     {
@@ -50,18 +46,24 @@ internal sealed class GeneratedJsonDefinitions
         return utf8Vector;
     }
 
-    internal static string Identity(TypeReference type)
+    internal static string Identity(TypeReference type) => Identity(type,false);
+    internal static string SignatureIdentity(TypeReference type) => Identity(type,true);
+    private static string Identity(TypeReference type,bool signature)
     {
         if (type is GenericInstanceType generic)
-            return "G" + Identity(generic.ElementType) + string.Concat(generic.GenericArguments.Select(value => Part(Identity(value))));
+            return "G" + Identity(generic.ElementType,signature) + string.Concat(generic.GenericArguments.Select(value => Part(Identity(value,signature))));
         if (type is ArrayType array)
-            return "A" + (array.IsVector ? "vector" : array.Rank.ToString(System.Globalization.CultureInfo.InvariantCulture)) + Part(Identity(array.ElementType));
-        if (type is RequiredModifierType required) return "Q" + Part(Identity(required.ModifierType)) + Part(Identity(required.ElementType));
-        if (type is OptionalModifierType optional) return "O" + Part(Identity(optional.ModifierType)) + Part(Identity(optional.ElementType));
+        {
+            var dimensions = signature ? string.Concat(array.Dimensions.Select(dimension => Part(dimension.ToString()))) : "";
+            return "A" + (array.IsVector ? "vector" : array.Rank.ToString(System.Globalization.CultureInfo.InvariantCulture)) + dimensions + Part(Identity(array.ElementType,signature));
+        }
+        if (type is RequiredModifierType required) return "Q" + Part(Identity(required.ModifierType,signature)) + Part(Identity(required.ElementType,signature));
+        if (type is OptionalModifierType optional) return "O" + Part(Identity(optional.ModifierType,signature)) + Part(Identity(optional.ElementType,signature));
         if (type is TypeSpecification specification)
-            return type.MetadataType.ToString() + Part(Identity(specification.ElementType));
+            return type.MetadataType.ToString() + Part(Identity(specification.ElementType,signature));
         if (type is GenericParameter parameter)
-            return "P" + parameter.Type + ":" + parameter.Position + ":" + parameter.Owner;
+            return "P" + parameter.Type + ":" + parameter.Position + (signature ? "" : ":" + parameter.Owner);
+        if (signature && (type.IsPrimitive || TypeSupport.ClrPrimitiveSignature(type.FullName,type.Scope.Name))) return type.FullName;
         var scope = type.Scope is AssemblyNameReference assembly ? assembly.FullName
             : type.Scope is ModuleDefinition module ? module.Assembly.Name.FullName : type.Scope.Name;
         return "N" + Part(scope) + Part(type.FullName);

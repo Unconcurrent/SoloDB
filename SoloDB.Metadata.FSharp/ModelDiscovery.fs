@@ -17,6 +17,9 @@ module internal ModelDiscovery =
     let private hasAttribute name (attributes: seq<FSharpAttribute>) =
         attributes |> Seq.exists (fun attribute -> attribute.AttributeType.FullName = name)
 
+    let private sealedEntity (entity: FSharpEntity) =
+        entity.IsValueType || entity.IsFSharpRecord || hasAttribute "Microsoft.FSharp.Core.SealedAttribute" entity.Attributes
+
     let rec private entities (items: seq<FSharpEntity>) = seq {
         for entity in items do
             yield entity
@@ -79,16 +82,9 @@ module internal ModelDiscovery =
                 let fact = facts[index]
                 let referenceType = members[index].Type
                 let definition = match referenceType with :? GenericInstanceType as generic -> generic.ElementType | _ -> referenceType
-                let isReference =
-                    match definition.FullName with
-                    | "SoloDatabase.DBRef`1" | "SoloDatabase.DBRef`2" | "SoloDatabase.DBRefMany`1" | "SoloDatabase.DBRefMany`2"
-                    | "SoloDatabase.FileRef" | "SoloDatabase.DirectoryRef" | "SoloDatabase.FileRefMany" | "SoloDatabase.DirectoryRefMany" -> true
-                    | _ -> false
-                fact.Reference <- not fact.Field && isReference
-                fact.ManyReference <-
-                    match definition.FullName with
-                    | "SoloDatabase.DBRefMany`1" | "SoloDatabase.DBRefMany`2" | "SoloDatabase.FileRefMany" | "SoloDatabase.DirectoryRefMany" -> true
-                    | _ -> false
+                let shape = TypeSupport.ReferenceShape definition.FullName
+                fact.Reference <- not fact.Field && shape <> TypeShape.Object
+                fact.ManyReference <- TypeSupport.ReferenceMany shape
         let directGetters = HashSet<string>(StringComparer.Ordinal)
         let rec inspect declarations =
             for declaration in declarations do
@@ -110,6 +106,10 @@ module internal ModelDiscovery =
         let visited = HashSet<string>(StringComparer.Ordinal)
         let models = ResizeArray<GeneratedModel>()
         let referenced = project.ProjectContext.GetReferencedAssemblies() |> Seq.toArray
+        let sourceAssemblies = project.AssemblySignature.Entities |> Seq.map(fun entity -> entity.Assembly.SimpleName) |> Set.ofSeq
+        use metadataResolver = new DefaultAssemblyResolver()
+        for directory in referenced |> Seq.choose _.FileName |> Seq.map Path.GetDirectoryName |> Seq.distinct do
+            metadataResolver.AddSearchDirectory(directory)
         let arrayTemplates = Dictionary<int,FSharpType>()
         let arrayTemplate rank =
             match arrayTemplates.TryGetValue rank with
@@ -141,7 +141,10 @@ module internal ModelDiscovery =
                     | :? GenericInstanceType as closed -> closed.ElementType, closed.GenericArguments |> Seq.map importedType |> Seq.toArray
                     | _ -> value, [||]
                 let path = definition.FullName.Replace('/', '.').Split('.') |> Array.toList
-                let candidates = referenced |> Array.choose(fun assembly -> assembly.Contents.FindEntityByPath(path))
+                let candidates =
+                    Array.append
+                        (project.AssemblySignature.FindEntityByPath(path) |> Option.toArray)
+                        (referenced |> Array.choose(fun assembly -> assembly.Contents.FindEntityByPath(path)))
                 let entity =
                     match candidates |> Array.filter(fun entity -> entity.Assembly.SimpleName = definition.Scope.Name) with
                     | [|entity|] -> entity
@@ -162,7 +165,7 @@ module internal ModelDiscovery =
                     let model = Model(value.FullName,value.FullName,shape,false,true,false,array.ElementType.FullName,[||])
                     model.NonGenericEnumerable <- array.Rank <> 1
                     model.SupportsValuesWrapper <- TypeSupport.SupportsValuesWrapper array.ElementType.FullName
-                    models.Add(GeneratedModel(model,value,null,[||],SequenceElement = array.ElementType))
+                    models.Add(GeneratedModel(model,value,null,[||],SequenceElement = array.ElementType,OriginalProperties = [||]))
             | _ -> queue.Enqueue(importedType value)
         while queue.Count <> 0 do
             let typ = queue.Dequeue().StripAbbreviations()
@@ -188,6 +191,12 @@ module internal ModelDiscovery =
                     model.RecordType <- true
                     model.RecordFields <- names
                     let generated = GeneratedModel(model,actual,constructor,members.ToArray())
+                    generated.OriginalProperties <-
+                        if String.IsNullOrEmpty typ.AnonRecordTypeDetails.Assembly.QualifiedName then
+                            members |> Seq.mapi(fun index memberValue ->
+                                GeneratedProperty({ Name = names[index]; Type = memberValue.Type; Field = None; Getter = Some memberValue.Getter; Setter = None;
+                                  Static = false; Readable = true; Writable = false; Ignored = false; Many = false },deferredSchema = true)) |> Seq.toArray
+                        else GeneratedRowFields.Properties(moduleDefinition,SourceTypeIdentity.Original(actual,metadataResolver),Action<string>(fun assembly -> generated.AccessAssemblies.Add assembly |> ignore))
                     models.Add(generated)
                     sources.Add(generated,typ)
             elif typ.IsTupleType then
@@ -210,7 +219,9 @@ module internal ModelDiscovery =
                                 members.Add(GeneratedMember(valueType, MethodReference("get_" + name, parameter, actual, HasThis = true), null, null))
                             if index = 7 then addTuple valueType
                         let model = Model(actual.FullName, actual.FullName, TypeShape.Tuple, typ.IsStructTupleType, true, false, null, facts)
-                        models.Add(GeneratedModel(model, actual, constructor, members.ToArray()))
+                        let generated = GeneratedModel(model, actual, constructor, members.ToArray())
+                        generated.OriginalProperties <- GeneratedRowFields.Properties(moduleDefinition,SourceTypeIdentity.Original(actual,metadataResolver),Action<string>(fun assembly -> generated.AccessAssemblies.Add assembly |> ignore))
+                        models.Add generated
                 addTuple (reference typ)
             else
                 let entity = typ.TypeDefinition
@@ -275,23 +286,9 @@ module internal ModelDiscovery =
                         referenceWith (fun parameter ->
                             let index = entity.GenericParameters |> Seq.findIndex(fun candidate -> candidate.Equals(parameter))
                             definition.GenericParameters[index] :> TypeReference) memberType
-                    let policyFacts (fact: Member) (operation: GeneratedMember) (attributes: seq<FSharpAttribute>) =
+                    let referencePolicyFacts (fact: Member) (attributes: seq<FSharpAttribute>) =
                         for attribute in attributes do
                             match attribute.AttributeType.FullName with
-                            | "SoloDatabase.Attributes.SoloId" ->
-                                fact.CustomIdentity <- true
-                                fact.Indexed <- true
-                                fact.IndexUnique <- true
-                                let _, argument = attribute.ConstructorArguments.[0]
-                                match argument with
-                                | :? FSharpType as generatorType ->
-                                    let generatorType = generatorType.StripAbbreviations()
-                                    operation.IdentityGenerator <- MethodReference(".ctor", moduleDefinition.TypeSystem.Void, reference generatorType, HasThis = true)
-                                    access.Add(generatorType.TypeDefinition.Assembly.SimpleName) |> ignore
-                                | _ -> invalidOp "The compiler did not supply the original identity generator type."
-                            | "SoloDatabase.Attributes.IndexedAttribute" ->
-                                fact.Indexed <- true
-                                fact.IndexUnique <- attribute.ConstructorArguments.Count > 0 && unbox<bool>(snd attribute.ConstructorArguments.[0])
                             | "SoloDatabase.Attributes.SoloRefAttribute" ->
                                 fact.HasReferencePolicy <- true
                                 for _, name, _, value in attribute.NamedArguments do
@@ -302,6 +299,46 @@ module internal ModelDiscovery =
                                     | "OrderBy" -> fact.OrderBy <- Convert.ToInt32(value)
                                     | _ -> ()
                             | _ -> ()
+                    let originalType =
+                        if not entity.IsArrayType && not(String.IsNullOrEmpty(entity.Assembly.QualifiedName)) then
+                            Some(SourceTypeIdentity.Original(actual,metadataResolver))
+                        else None
+                    let declaration memberValue (attributes: seq<FSharpAttribute>) (identityAttributes: seq<FSharpAttribute>) =
+                        let identity =
+                            identityAttributes |> Seq.tryFind(fun attribute -> attribute.AttributeType.FullName = "SoloDatabase.Attributes.SoloId")
+                            |> Option.map(fun attribute ->
+                                match snd attribute.ConstructorArguments[0] with
+                                | :? FSharpType as generatorType ->
+                                    let generatorType = generatorType.StripAbbreviations()
+                                    let actual = reference generatorType
+                                    let constructor =
+                                        if String.IsNullOrEmpty(generatorType.TypeDefinition.Assembly.QualifiedName) then
+                                            if generatorType.TypeDefinition.MembersFunctionsAndValues |> Seq.exists(fun memberValue -> publicConstructor memberValue && (constructorParameters memberValue).Length = 0) then
+                                                MethodReference(".ctor",moduleDefinition.TypeSystem.Void,actual,HasThis = true)
+                                            else null
+                                        else
+                                            let original = SourceTypeIdentity.Original(actual,metadataResolver)
+                                            match original.Resolve().Methods |> Seq.tryFind(fun method -> method.IsConstructor && not method.IsStatic && method.IsPublic && method.Parameters.Count = 0) with
+                                            | Some constructor ->
+                                                let call = moduleDefinition.ImportReference constructor
+                                                call.DeclaringType <- actual
+                                                call
+                                            | None -> null
+                                    let family = generatorType.AllInterfaces |> Seq.exists(fun contract ->
+                                        let contract = contract.StripAbbreviations()
+                                        contract.HasTypeDefinition && (contract.TypeDefinition.TryFullName |> Option.exists(fun name -> TypeSupport.IdentityGeneratorContract(name,contract.TypeDefinition.IsArrayType))))
+                                    access.Add(generatorType.TypeDefinition.Assembly.SimpleName) |> ignore
+                                    GeneratedIdGenerator(actual,constructor,family)
+                                | null -> GeneratedIdGenerator(null,null,false)
+                                | _ -> invalidOp "The compiler did not supply the original identity generator type.") |> Option.toObj
+                        for attribute in attributes do access.Add attribute.AttributeType.Assembly.SimpleName |> ignore
+                        GeneratedProperty(memberValue,identity,deferredSchema = true)
+                    let originalProperties =
+                        if entity.IsArrayType then [||] else
+                        CompilerPropertyFacts.read moduleDefinition referenceWith reference metadataResolver access declaration
+                            (fun value ->
+                                if sourceAssemblies.Contains value.Scope.Name then Nullable(CompilerPropertyFacts.many (importedType value))
+                                else Nullable()) true typ
                     if (shape = TypeShape.Object || shape = TypeShape.BsonDocument) && not entity.IsArrayType then
                         if entity.IsFSharpUnion then
                             ()
@@ -317,7 +354,7 @@ module internal ModelDiscovery =
                                         method
                                     else null
                                 members.Add(GeneratedMember(valueType, MethodReference("get_" + field.Name, signature field.FieldType, actual, HasThis = true), setter, null))
-                                policyFacts facts.[facts.Count - 1] members.[members.Count - 1] field.PropertyAttributes
+                                referencePolicyFacts facts.[facts.Count - 1] field.PropertyAttributes
                         else
                             if String.IsNullOrEmpty(entity.Assembly.QualifiedName) then
                                 for field in entity.FSharpFields do
@@ -423,13 +460,14 @@ module internal ModelDiscovery =
                                         properties |> Seq.sortBy(fun property -> positions[propertyKey property]) |> Seq.toArray :> seq<_>
                                     | None -> invalidOp ("The compiler model input has no metadata path: " + fullName)
                             for property in properties do
-                                if property.Accessibility.IsPublic && not property.IsInstanceMember && property.HasGetterMethod && not property.HasSetterMethod &&
+                                if property.Accessibility.IsPublic && not property.IsInstanceMemberInCompiledCode && property.HasGetterMethod && not property.HasSetterMethod &&
                                    (property.GetterMethod.CurriedParameterGroups |> Seq.collect id |> Seq.forall(fun parameter ->
                                        parameter.Type.StripAbbreviations().HasTypeDefinition && parameter.Type.StripAbbreviations().TypeDefinition.TryFullName = Some "Microsoft.FSharp.Core.Unit")) then
                                     let valueType = declaringMemberType property.GetterMethod.ReturnParameter.Type
                                     if names.Add(property.DisplayName + ":" + valueType.FullName + ":") then
                                         facts.Add(Member(property.DisplayName,valueType.FullName,false,false,false,false))
                                         members.Add(GeneratedMember(valueType,null,null,null))
+                                        referencePolicyFacts facts.[facts.Count - 1] property.Attributes
                                 match imported.TryGetValue(propertyKey property) with
                                 | true,(getter,setter,_) when (not(isNull getter) && getter.Parameters.Count > 0) || (not(isNull setter) && setter.Parameters.Count > 1) ->
                                     let valueType =
@@ -438,8 +476,9 @@ module internal ModelDiscovery =
                                     if names.Add(property.DisplayName + ":" + valueType.FullName + ":indexer") then
                                         facts.Add(Member(property.DisplayName,valueType.FullName,false,false,false,false))
                                         members.Add(GeneratedMember(valueType,null,null,null))
+                                        referencePolicyFacts facts.[facts.Count - 1] property.Attributes
                                 | _ -> ()
-                                if String.IsNullOrEmpty(declaringEntity.Assembly.QualifiedName) && property.Accessibility.IsPublic && property.IsInstanceMember then
+                                if String.IsNullOrEmpty(declaringEntity.Assembly.QualifiedName) && property.Accessibility.IsPublic && property.IsInstanceMemberInCompiledCode then
                                     let accessor = if property.HasGetterMethod then property.GetterMethod else property.SetterMethod
                                     let arguments = accessor.CurriedParameterGroups |> Seq.collect id |> Seq.filter(fun argument ->
                                         let actual = argument.Type.Instantiate(declaringSubstitutions).StripAbbreviations()
@@ -462,37 +501,24 @@ module internal ModelDiscovery =
                                         if names.Add key then
                                             facts.Add(Member(property.DisplayName,valueType.FullName,false,false,false,false))
                                             members.Add(GeneratedMember(valueType,null,null,null))
-                                if property.IsProperty && property.Accessibility.IsPublic && property.IsInstanceMember
+                                            referencePolicyFacts facts.[facts.Count - 1] property.Attributes
+                                if property.IsProperty && property.Accessibility.IsPublic && property.IsInstanceMemberInCompiledCode
                                    && (property.CurriedParameterGroups |> Seq.collect id
                                        |> Seq.forall(fun argument -> argument.Type.StripAbbreviations().HasTypeDefinition && argument.Type.StripAbbreviations().TypeDefinition.TryFullName = Some "Microsoft.FSharp.Core.Unit"))
                                    && names.Add(property.DisplayName + ":" + (reference (property.FullType.Instantiate(declaringSubstitutions))).FullName) then
                                     let valueType = declaringMemberType property.FullType
-                                    let importedProperty = match imported.TryGetValue(propertyKey property) with true,value -> Some value | _ -> None
-                                    let getter =
-                                        match importedProperty with
-                                        | Some (getter, _, _) -> getter
-                                        | None when property.HasGetterMethod -> MethodReference(property.GetterMethod.CompiledName, declaringSignature property.FullType, declaringType, HasThis = true)
-                                        | _ -> null
-                                    let setter =
-                                        match importedProperty with
-                                        | Some (_, setter, _) -> setter
-                                        | None when property.HasSetterMethod ->
-                                            let method = MethodReference(property.SetterMethod.CompiledName, moduleDefinition.TypeSystem.Void, declaringType, HasThis = true)
-                                            method.Parameters.Add(ParameterDefinition(declaringSignature property.FullType))
-                                            method
-                                        | _ -> null
+                                    let effective = originalProperties |> Array.tryFind(fun declaration ->
+                                        let memberValue = declaration.Member
+                                        memberValue.Name = property.DisplayName && memberValue.Type.FullName = valueType.FullName &&
+                                        (match memberValue.Getter,memberValue.Setter with
+                                         | Some method,_ | _,Some method -> GeneratedJsonDefinitions.SameType(method.DeclaringType,declaringType)
+                                         | _ -> false) && GeneratedRowFields.IndexParameters(memberValue).Length = 0)
+                                    let getter = effective |> Option.bind(fun declaration -> declaration.Member.Getter) |> Option.toObj
+                                    let setter = effective |> Option.bind(fun declaration -> declaration.Member.Setter) |> Option.toObj
                                     facts.Add(Member(property.DisplayName, valueType.FullName, false, getter <> null, setter <> null,
                                                      hasAttribute "System.Runtime.Serialization.IgnoreDataMemberAttribute" property.Attributes))
-                                    match importedProperty with
-                                    | Some (_, _, true) -> access.Add(declaringEntity.Assembly.SimpleName) |> ignore
-                                    | _ -> ()
-                                    let requireDeclaringAccess (accessibility: FSharpAccessibility) =
-                                        if accessibility.IsPrivate || (not accessibility.IsPublic && not(String.IsNullOrEmpty(declaringEntity.Assembly.QualifiedName))) then
-                                            access.Add(declaringEntity.Assembly.SimpleName) |> ignore
-                                    if property.HasGetterMethod then requireDeclaringAccess property.GetterMethod.Accessibility
-                                    if property.HasSetterMethod then requireDeclaringAccess property.SetterMethod.Accessibility
                                     members.Add(GeneratedMember(valueType, getter, setter, null))
-                                    policyFacts facts.[facts.Count - 1] members.[members.Count - 1] property.Attributes
+                                    referencePolicyFacts facts.[facts.Count - 1] property.Attributes
                     completeReferenceFacts facts members
                     let mutable constructFromMembers = entity.IsFSharpRecord
                     let constructor =
@@ -532,7 +558,7 @@ module internal ModelDiscovery =
                                 let constructor = MethodReference(".ctor",moduleDefinition.TypeSystem.Void,actual,HasThis = true)
                                 for parameter in parameters memberValue do constructor.Parameters.Add(ParameterDefinition(signature parameter.Type))
                                 constructor) |> Option.toObj
-                    let sealedType = entity.IsValueType || entity.IsFSharpRecord || hasAttribute "Microsoft.FSharp.Core.SealedAttribute" entity.Attributes
+                    let sealedType = sealedEntity entity
                     let model = Model(actual.FullName, (if entity.IsArrayType then actual.FullName else fullName), shape,
                                       entity.IsValueType || entity.IsEnum, sealedType, constructor <> null && constructor.Parameters.Count = 0, null, facts)
                     model.IndexedRead <- indexedRead
@@ -551,52 +577,50 @@ module internal ModelDiscovery =
                               Array.forall2 (fun (left: FSharpType) (right: FSharpType) -> left.StripAbbreviations().Equals(right.StripAbbreviations())) selected readonlyArguments)))
                     model.NonGenericEnumerable <- shape = TypeShape.Object && (entity.IsArrayType || (contract "System.Collections.IEnumerable").IsSome)
                     model.AbstractType <- entity.IsInterface || entity.IsAbstractClass
-                    model.RequiresTypeInformation <- model.AbstractType || hasAttribute "SoloDatabase.Attributes.PolymorphicAttribute" entity.Attributes
+                    model.RequiresTypeInformation <- model.AbstractType || CompilerPropertyFacts.polymorphic typ
                     model.ConstructFromMembers <- constructFromMembers
                     model.RecordType <- entity.IsFSharpRecord
                     if entity.IsFSharpRecord then model.RecordFields <- entity.FSharpFields |> Seq.map _.Name |> Seq.toArray
                     model.IdentityTrivialGetter <-
                         if entity.IsFSharpRecord then
-                            entity.FSharpFields |> Seq.exists(fun field -> field.Name = "Id" && (field.IsMutable || mutableRecord) && field.FieldType.TypeDefinition.TryFullName = Some "System.Int64")
+                            entity.FSharpFields |> Seq.exists(fun field ->
+                                field.Name = "Id" && (field.IsMutable || mutableRecord) && field.FieldType.TypeDefinition.TryFullName = Some "System.Int64" &&
+                                TypeSupport.TrivialIdentityReader(false,false,sealedType,true))
                         else
                             entity.MembersFunctionsAndValues |> Seq.exists(fun property ->
                                 property.IsProperty && property.DisplayName = "Id" && property.HasGetterMethod && property.HasSetterMethod
-                                && directGetters.Contains(property.GetterMethod.FullName) && not property.GetterMethod.IsDispatchSlot
-                                && not property.GetterMethod.IsOverrideOrExplicitInterfaceImplementation)
+                                && TypeSupport.TrivialIdentityReader(
+                                    property.GetterMethod.IsDispatchSlot || property.GetterMethod.IsOverrideOrExplicitInterfaceImplementation,
+                                    false,(property.DeclaringEntity |> Option.exists sealedEntity),directGetters.Contains(property.GetterMethod.FullName)))
                     if shape = TypeShape.Array then
                         model.SupportsValuesWrapper <- TypeSupport.SupportsValuesWrapper elementName
                     let generated = GeneratedModel(model, actual, constructor, members.ToArray())
-                    if not entity.IsArrayType then
-                        let rec indexerOwner (owner: FSharpType) = seq {
-                            yield owner
-                            match owner.BaseType with
-                            | Some parent -> yield! indexerOwner (parent.StripAbbreviations())
-                            | None -> ()
-                        }
-                        let indexer = indexerOwner typ |> Seq.tryPick(fun owner ->
-                            let substitutions = Seq.zip owner.TypeDefinition.GenericParameters owner.GenericArguments |> Seq.toList
-                            owner.TypeDefinition.MembersFunctionsAndValues
-                            |> Seq.tryFind(fun property ->
-                                property.IsProperty && property.DisplayName = "Item" && property.HasGetterMethod &&
-                                (property.GetterMethod.CurriedParameterGroups |> Seq.collect id |> Seq.map(fun argument -> reference(argument.Type.Instantiate(substitutions)) |> _.FullName) |> Seq.toList) = ["System.String"])
-                            |> Option.map(fun property -> owner,substitutions,property.GetterMethod))
-                        match indexer with
-                        | Some (owner,substitutions,getter) ->
-                            let declaring = reference owner
-                            let definition = match declaring with :? GenericInstanceType as closed -> closed.ElementType | _ -> declaring
-                            let result = getter.ReturnParameter.Type.Instantiate(substitutions)
-                            let signature = referenceWith(fun parameter ->
-                                let index = owner.TypeDefinition.GenericParameters |> Seq.findIndex(fun candidate -> candidate.Equals parameter)
-                                definition.GenericParameters[index] :> TypeReference) getter.ReturnParameter.Type
-                            let method = MethodReference(getter.CompiledName,signature,declaring,HasThis = true)
-                            let parameter = getter.CurriedParameterGroups |> Seq.collect id |> Seq.exactlyOne
-                            method.Parameters.Add(ParameterDefinition(referenceWith (fun parameter ->
-                                let index = owner.TypeDefinition.GenericParameters |> Seq.findIndex(fun candidate -> candidate.Equals parameter)
-                                definition.GenericParameters[index] :> TypeReference) parameter.Type))
-                            generated.StringIndexer <- method
-                            generated.StringIndexerValue <- reference result
-                            queue.Enqueue result
-                        | None -> ()
+                    generated.OriginalProperties <- originalProperties
+                    if shape = TypeShape.Object then
+                        generated.CloneConstructor <-
+                            match originalType with
+                            | Some original ->
+                                let constructor = GeneratedRowFields.DefaultConstructor(moduleDefinition,original)
+                                if not(isNull constructor) then access.Add(original.Resolve().Module.Assembly.Name.Name) |> ignore
+                                constructor
+                            | None when not entity.IsArrayType &&
+                                        (mutableRecord || (entity.MembersFunctionsAndValues |> Seq.exists(fun memberValue -> memberValue.IsConstructor && (constructorParameters memberValue).Length = 0))) ->
+                                access.Add(entity.Assembly.SimpleName) |> ignore
+                                MethodReference(".ctor",moduleDefinition.TypeSystem.Void,actual,HasThis = true)
+                            | _ -> null
+                    if shape = TypeShape.Object && TypeSupport.SqlRowFieldFallback(entity.IsValueType,entity.IsFSharpRecord,(generated.OriginalProperties |> Array.sumBy(fun property -> if property.Member.Setter.IsSome then 1 else 0))) then
+                        if not(String.IsNullOrEmpty(entity.Assembly.QualifiedName)) then
+                            generated.SqlFields <- GeneratedRowFields.Read(moduleDefinition,originalType.Value)
+                            for field in generated.SqlFields do enqueueImported field.Type
+                        else
+                            generated.SqlFields <- entity.FSharpFields |> Seq.filter(fun field ->
+                                not field.IsStatic && not field.Accessibility.IsPublic && not field.Accessibility.IsPrivate)
+                                |> Seq.map(fun field ->
+                                    let valueType = memberType field.FieldType
+                                    let fieldReference = FieldReference(field.Name,signature field.FieldType,actual)
+                                    { Name = field.Name; Type = valueType; Field = Some fieldReference
+                                      Getter = None; Setter = None; Static = false; Readable = true
+                                      Writable = field.IsMutable; Ignored = false; Many = false }) |> Seq.toArray
                     if model.ValueType then
                         generated.DefaultConstructor <-
                             publicConstructors |> Array.tryFind(fun memberValue -> (constructorParameters memberValue).Length = 0)
@@ -644,13 +668,10 @@ module internal ModelDiscovery =
                                 | None -> invalidOp ("The compiler did not supply an enum width: " + fullName)
                         generated.ElementType <- width
                     if shape = TypeShape.Object && entity.IsFSharpUnion then
-                        for unionModel in UnionDiscovery.collect moduleDefinition typ actual memberType signature do models.Add(unionModel)
+                        for unionModel in UnionDiscovery.collect moduleDefinition typ actual memberType signature generated.OriginalProperties declaration do models.Add(unionModel)
                     else
                         models.Add(generated)
                         sources.Add(generated,typ)
-        use metadataResolver = new DefaultAssemblyResolver()
-        for directory in referenced |> Seq.choose _.FileName |> Seq.map Path.GetDirectoryName |> Seq.distinct do
-            metadataResolver.AddSearchDirectory(directory)
         let variances = Dictionary<FSharpEntity,int[]>()
         let variance (typ: FSharpType) =
             let entity = typ.TypeDefinition

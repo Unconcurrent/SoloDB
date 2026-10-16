@@ -27,13 +27,11 @@ public static class CSharpEmitter
                 .Append(",DictionaryReadOnly=").Append(model.DictionaryReadOnly ? "true" : "false")
                 .Append(",Formattable=").Append(model.Formattable ? "true" : "false")
                 .Append(",AssignableTo=new string[]{").Append(string.Join(",",model.AssignableTo.Select(Quote))).Append("}")
-                .Append(",RequiresTypeInformation=").Append(model.RequiresTypeInformation ? "true" : "false")
                 .Append(",SupportsValuesWrapper=").Append(model.SupportsValuesWrapper ? "true" : "false")
                 .Append(",Element=").Append(model.ElementType == null ? "null" : Quote(model.TypeIdentities[model.ElementType]))
                 .Append(",SequenceElement=").Append(model.SequenceElementType == null ? "null" : Quote(model.TypeIdentities[model.SequenceElementType]));
             foreach (var pair in new (string Name,Func<Member,bool> Value)[] {
-                ("References",member => member.Reference),("CustomIds",member => member.CustomIdentity),
-                ("Indexes",member => member.Indexed),("IndexUnique",member => member.IndexUnique),
+                ("References",member => member.Reference),
                 ("HasPolicies",member => member.HasReferencePolicy),("Unique",member => member.Unique) })
                 output.Append(',').Append(pair.Name).Append("=new bool[]{").Append(string.Join(",",model.Members.Select(member => pair.Value(member) ? "true" : "false"))).Append('}');
             foreach (var pair in new (string Name,Func<Member,int> Value)[] {

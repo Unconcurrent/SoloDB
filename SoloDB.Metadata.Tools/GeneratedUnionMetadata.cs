@@ -87,9 +87,18 @@ public static class GeneratedUnionMetadata
                 }
             var policy = new Model(type.FullName,root.FullName.Replace('/','+'),TypeShape.Object,
                 definition.IsValueType,definition.IsSealed,false,null,facts)
-                { AbstractType = definition.IsAbstract, RequiresTypeInformation = definition.IsAbstract || definition.CustomAttributes.Any(attribute => attribute.AttributeType.FullName == "SoloDatabase.Attributes.PolymorphicAttribute") };
+                { AbstractType = definition.IsAbstract, RequiresTypeInformation = definition.IsAbstract || HelperAssembly.InheritedAttribute(definition,"SoloDatabase.Attributes.PolymorphicAttribute") };
             var model = new GeneratedModel(policy,type,null,members.ToArray())
                 { UnionRoot = unionRoot, UnionCases = cases, UnionHostedReferences = hosted };
+            TypeReference original = definition;
+            if (source is GenericInstanceType originalArguments) {
+                var closed = new GenericInstanceType(definition);
+                foreach (var argument in originalArguments.GenericArguments) closed.GenericArguments.Add(argument);
+                original = closed;
+            }
+            model.OriginalProperties = GeneratedRowFields.Properties(module,original,name => model.AccessAssemblies.Add(name));
+            model.CloneConstructor = GeneratedRowFields.DefaultConstructor(module,original);
+            if (model.CloneConstructor != null) model.AccessAssemblies.Add(root.Module.Assembly.Name.Name);
             if (!definition.IsPublic && !definition.IsNestedPublic) model.AccessAssemblies.Add(root.Module.Assembly.Name.Name);
             models.Add(model);
         }
@@ -97,8 +106,8 @@ public static class GeneratedUnionMetadata
 
     private static bool ContainsReferences(TypeReference type, HashSet<string> seen)
     {
-        if (type.Namespace == "SoloDatabase" && (type.Name.StartsWith("DBRef",StringComparison.Ordinal) ||
-            type.Name is "FileRef" or "DirectoryRef" or "FileRefMany" or "DirectoryRefMany")) return true;
+        var original = type is GenericInstanceType instance ? instance.ElementType : type;
+        if (TypeSupport.ReferenceShape(original.FullName) != TypeShape.Object) return true;
         if (!seen.Add(type.FullName + "," + type.Scope.Name)) return false;
         if (type is ArrayType array) return ContainsReferences(array.ElementType,seen);
         if (type is GenericInstanceType generic && generic.GenericArguments.Any(argument => ContainsReferences(argument,seen))) return true;

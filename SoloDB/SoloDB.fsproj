@@ -44,6 +44,8 @@
     <Compile Include="Json/JsonStringLiteral.fs" />
     <Compile Include="Metadata/CodecModel.fs" />
     <Compile Include="Metadata/TypeSupport.fs" />
+    <Compile Include="Metadata/CodecPreparation.fs" />
+    <Compile Include="Metadata/CodecNumericPreparation.fs" />
     <Compile Include="Metadata/QueryStorage.fs" />
     <Compile Include="Metadata/TypeCache.fs" />
     <Compile Include="Metadata/ReferenceTypes.fs" />
@@ -56,7 +58,11 @@
     <Compile Include="Metadata/QueryLambdaDiscovery.fs" />
     <Compile Include="Metadata/QueryScalarOperators.fs" />
     <Compile Include="Metadata/QueryOperationEmitter.fs" />
+    <Compile Include="Metadata/SqlArgumentEmitter.fs" />
     <Compile Include="Metadata/CodecEmitter.fs" />
+    <Compile Include="Metadata/AttributeConstructionEmitter.fs" />
+    <Compile Include="Metadata/RegistrationEmitter.fs" />
+    <Compile Include="Metadata/OwnerCloneEmitter.fs" />
     <Compile Include="Metadata/CodecNumberEmitter.fs" />
     <Compile Include="Metadata/CodecMagnitudeEmitter.fs" />
     <Compile Include="Metadata/CodecBigIntegerEmitter.fs" />
@@ -98,6 +104,7 @@
     <Compile Include="Metadata/CodecDictionaryEmitter.fs" />
     <Compile Include="Metadata/RuntimeCodecIL.fs" />
     <Compile Include="Metadata/QueryMethodDiscovery.fs" />
+    <Compile Include="Metadata/RuntimeTupleFacts.fs" />
     <Compile Include="Metadata/JsonModelDiscovery.fs" />
     <Compile Include="Metadata/QueryValues.fs" />
     <Compile Include="Metadata/ModelMembers.fs" />
@@ -124,6 +131,8 @@
     <Compile Include="Json/JsonParser.fs" />
     <Compile Include="Json/JsonEqualitySupport.fs" />
     <Compile Include="Metadata/CodecTupleEmitter.fs" />
+    <Compile Include="Metadata/SqlTupleDefaultEmitter.fs" />
+    <Compile Include="Metadata/SqlRowEmitter.fs" />
     <Compile Include="Json/JsonOutput.fs" />
     <Compile Include="Json/JsonRawTypes.fs" />
     <Compile Include="Json/JsonTupleInput.fs" />

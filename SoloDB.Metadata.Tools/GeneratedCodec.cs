@@ -74,8 +74,6 @@ internal static class GeneratedCodec
             api.Metadata("UnionCaseSelected"), api.JsonMethod("Contains"), api.JsonMethod("GetProperty"), ensureStack,false);
     }
 
-    private static bool Collection(GeneratedModel model) => TypeSupport.Collection(model.Facts.Shape);
-
     private static void CollectionWriter(MethodDefinition method, GeneratedModel model, GeneratedJsonAssembly.Api api)
     {
         var operation = TypeSupport.CollectionTreeWriter(model.Facts.Shape,model.Type,model.Facts.ValueType,model.Facts.AbstractType,
@@ -93,14 +91,15 @@ internal static class GeneratedCodec
 
     internal static void Writer(MethodDefinition method, GeneratedModel model, GeneratedJsonAssembly.Api api)
     {
-        if (Collection(model)) { CollectionWriter(method,model,api); return; }
-        if (model.Facts.NonGenericEnumerable)
+        var operation = CodecPreparation.treeWriter(model.Facts.Shape,model.Facts.NonGenericEnumerable,model.Facts.AbstractType);
+        if (operation == CodecTreeOperation.Collection) { CollectionWriter(method,model,api); return; }
+        if (operation == CodecTreeOperation.NonGenericSequence || operation == CodecTreeOperation.Abstract)
         {
             CodecEmitter.writerCall(new CecilCodecIL(method),api.JsonMethod("get_Null"),
                 new CodecWriterCall<TypeReference,MethodReference>(model.Type,model.Facts.ValueType,model.Facts.ValueType,
-                    api.Helper(model.Facts.AbstractType ? "SerializeAbstract" : "SerializeNonGenericEnumerable"),false));
+                    api.Helper(operation == CodecTreeOperation.Abstract ? "SerializeAbstract" : "SerializeNonGenericEnumerable"),false));
         }
-        else if (model.Facts.Shape == TypeShape.BsonDocument)
+        else if (operation == CodecTreeOperation.Bson)
         {
             var getter = new MethodReference("get_Json",api.Json,model.Type) { HasThis = true };
             CodecEmitter.writerCall(new CecilCodecIL(method),api.JsonMethod("get_Null"),
@@ -119,8 +118,9 @@ internal static class GeneratedCodec
             CodecEmitter.readerCall(new CecilCodecIL(method),api.JsonMethod("get_IsNull"),selected.Value);
             return;
         }
-        if (Collection(model)) { CollectionReader(method,model,api); return; }
-        if (model.Facts.Shape == TypeShape.BsonDocument)
+        var operation = CodecPreparation.treeReader(model.Facts.Shape);
+        if (operation == CodecTreeOperation.Collection) { CollectionReader(method,model,api); return; }
+        if (operation == CodecTreeOperation.Bson)
             CodecEmitter.readerCall(new CecilCodecIL(method),api.JsonMethod("get_IsNull"),
                 new CodecReaderCall<TypeReference,MethodReference>(model.Type,null!,null!,Some(model.Constructor),false,false));
         else CodecEmitter.reader(new CecilCodecIL(method), Api(api), Model(model));
@@ -128,7 +128,7 @@ internal static class GeneratedCodec
     internal static void Construction(MethodDefinition method, GeneratedModel model, TypeReference[] arguments) =>
         CodecEmitter.construction(new CecilCodecIL(method),model.Type,model.Facts.ValueType,model.Constructor!,arguments);
     internal static void DefaultConstruction(MethodDefinition method, TypeReference type, MethodReference? constructor) =>
-        CodecEmitter.boxedDefaultConstruction(new CecilCodecIL(method),type,true,Some(constructor));
+        CodecEmitter.defaultConstruction(new CecilCodecIL(method),type,true,Some(constructor),true);
     internal static void Getter(MethodDefinition method, GeneratedModel model, int member) =>
         CodecEmitter.getter(new CecilCodecIL(method), Model(model), member);
     internal static int[] WrittenMembers(GeneratedModel model) => CodecEmitter.writtenMembers(Model(model));

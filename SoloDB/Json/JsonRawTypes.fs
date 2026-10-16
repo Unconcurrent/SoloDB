@@ -45,7 +45,7 @@ type internal JsonStoredContract private () = class end
 type internal JsonOperationPolicy<'Contract> =
     static member IsStored = typeof<'Contract>.Equals(typeof<JsonStoredContract>)
     static member Name(name: string) =
-        if JsonOperationPolicy<'Contract>.IsStored then SoloDatabase.Metadata.Generation.TypeSupport.StoredRole name else name
+        SoloDatabase.Metadata.Generation.TypeSupport.OperationRole(JsonOperationPolicy<'Contract>.IsStored,name)
 
 module internal JsonReadCursor =
     let numericStart<'R when 'R : struct and 'R :> IJsonReader> (context: byref<JsonReadContext<'R>>) =

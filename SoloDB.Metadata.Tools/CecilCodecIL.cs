@@ -26,7 +26,9 @@ internal sealed class CecilCodecIL : CodecIL<TypeReference, MethodReference, Fie
         var translated = Codes[code.Value];
         if (translated.Equals(OpCodes.Unaligned)) il.Emit(translated,(byte)value);
         else if (translated.OperandType is OperandType.InlineArg or OperandType.ShortInlineArg)
-            il.Emit(translated, il.Body.Method.Parameters[value]);
+            il.Emit(translated, il.Body.Method.HasThis
+                ? value == 0 ? il.Body.ThisParameter : il.Body.Method.Parameters[value - 1]
+                : il.Body.Method.Parameters[value]);
         else il.Emit(translated, value);
     }
     public override void EmitInt64(long value) => il.Emit(OpCodes.Ldc_I8, value);

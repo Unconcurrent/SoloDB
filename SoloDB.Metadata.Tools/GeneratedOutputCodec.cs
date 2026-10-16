@@ -141,47 +141,44 @@ internal static class GeneratedOutputCodec
         definitions.Add("type-literal",target,element,"",method);
         return method;
     }
-    private static Tuple<Microsoft.FSharp.Core.FSharpFunc<Microsoft.FSharp.Core.Unit,Microsoft.FSharp.Core.Unit>,Microsoft.FSharp.Core.FSharpFunc<Microsoft.FSharp.Core.Unit,Microsoft.FSharp.Core.Unit>> Prepare(
-        ModuleDefinition module,AssemblyDefinition product,CecilCodecIL il,TypeReference target)
+    private static Microsoft.FSharp.Core.FSharpFunc<Microsoft.FSharp.Core.Unit,Microsoft.FSharp.Core.Unit> Prepare(
+        ModuleDefinition module,AssemblyDefinition product,CecilCodecIL il,TypeReference target,CodecNumericWriterPreparation plan)
     {
         var api = new GeneratedJsonAssembly.Api(module,product);
-        TypeReference Result(string name) => module.ImportReference(api.Operation("JsonRawPrimitive","Read"+TypeSupport.RawPrimitive(name),
-            module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.Utf8Reader"))).ReturnType);
-        var core = Result(TypeSupport.NumericWriterCore(target.FullName).Value);
+        TypeReference Result(string name) => name == target.FullName ? module.ImportReference(target)
+            : module.ImportReference(api.Operation("JsonRawPrimitive","Read"+TypeSupport.RawPrimitive(name),
+                module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.Utf8Reader"))).ReturnType);
+        var core = Result(plan.Core);
         var current = target;
-        var steps = TypeSupport.NumericWriterSteps(target.FullName).Select(step => {
+        var steps = plan.Steps.Select(step => {
             var result = Result(step.Item4);
             var call = new MethodReference(step.Item2,result,module.ImportReference(current)) { HasThis=step.Item3 };
             if (!step.Item3) call.Parameters.Add(new ParameterDefinition(module.ImportReference(current)));
             current=result;
             return new CodecWriterConversion<TypeReference,MethodReference>(result,call,step.Item3);
         }).ToArray();
-        return CodecScalarWriterEmitter.prepare(il,target,core,steps,TypeSupport.NumericWriterCast(target.FullName));
+        return CodecScalarWriterEmitter.prepare(il,target,core,steps,plan.Cast,plan.AddressInput);
     }
 
-    internal static MethodDefinition Integer(ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference element,string name)
+    private static MethodDefinition Integer(ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference element,string name,CodecNumericWriterPreparation plan)
     {
-        var shape = TypeSupport.Numeric(TypeSupport.NumericWriterCore(target.FullName).Value).Value;
         var method = Body(module,owner,product,element,target,name);
-        if (!shape.Native) {
+        if (!plan.DeferredWidth) {
             var body = new CecilCodecIL(method);
-            var input = Prepare(module,product,body,target);
-            CodecIntegerWriterEmitter.writerFrom(body,Digits(module,product,element),shape.Width,shape.Signed,element.FullName=="System.Char",input.Item1);
+            var input = Prepare(module,product,body,target,plan);
+            CodecIntegerWriterEmitter.writerFrom(body,Digits(module,product,element),plan.Width,plan.Signed,element.FullName=="System.Char",input);
             return method;
         }
         var narrow = Body(module,owner,product,element,target,name+"32");
         var wide = Body(module,owner,product,element,target,name+"64");
-        CodecIntegerWriterEmitter.writer(new CecilCodecIL(narrow),Digits(module,product,element),32,shape.Signed,element.FullName=="System.Char");
-        CodecIntegerWriterEmitter.writer(new CecilCodecIL(wide),Digits(module,product,element),64,shape.Signed,element.FullName=="System.Char");
-        var il = method.Body.GetILProcessor();var useNarrow = Instruction.Create(OpCodes.Nop);
+        CodecIntegerWriterEmitter.writer(new CecilCodecIL(narrow),Digits(module,product,element),32,plan.Signed,element.FullName=="System.Char");
+        CodecIntegerWriterEmitter.writer(new CecilCodecIL(wide),Digits(module,product,element),64,plan.Signed,element.FullName=="System.Char");
         var size = new MethodReference("get_Size",module.TypeSystem.Int32,module.TypeSystem.IntPtr);
-        il.Emit(OpCodes.Call,size);il.Emit(OpCodes.Ldc_I4_4);il.Emit(OpCodes.Beq,useNarrow);
-        il.Emit(OpCodes.Ldarg_0);il.Emit(OpCodes.Ldarg_1);il.Emit(OpCodes.Ldarg_2);il.Emit(OpCodes.Call,wide);il.Emit(OpCodes.Ret);
-        il.Append(useNarrow);il.Emit(OpCodes.Ldarg_0);il.Emit(OpCodes.Ldarg_1);il.Emit(OpCodes.Ldarg_2);il.Emit(OpCodes.Call,narrow);il.Emit(OpCodes.Ret);
+        CodecEmitter.nativeWidthCall(new CecilCodecIL(method),size,3,narrow,wide);
         return method;
     }
 
-    internal static MethodDefinition Decimal(ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference element,string name)
+    private static MethodDefinition Decimal(ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference element,string name,CodecNumericWriterPreparation plan)
     {
         var api = new GeneratedJsonAssembly.Api(module,product);
         var method = Body(module,owner,product,element,target,name);
@@ -195,21 +192,22 @@ internal static class GeneratedOutputCodec
         var facts = new CodecDecimalWriterApi<TypeReference,MethodReference,FieldReference>(Digits(module,product,element),
             api.Operation("JsonWriterRegion","DecimalSource"),Read(module.TypeSystem.UInt32),Read(module.TypeSystem.UInt64));
         var il = new CecilCodecIL(method);
-        var input = Prepare(module,product,il,target);
-        CodecDecimalWriterEmitter.writerFrom(il,facts,element.FullName=="System.Char",input.Item2);
+        var input = Prepare(module,product,il,target,plan);
+        CodecDecimalWriterEmitter.writerFrom(il,facts,element.FullName=="System.Char",input);
         return method;
     }
 
     internal static MethodDefinition Number(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference element,string name)
     {
-        if(definitions.Stored && TypeSupport.StoredNumeric(target.FullName) != null)
+        var plan = CodecNumericPreparation.writer(target.FullName,definitions.Stored,null!);
+        if(plan.StoredOperation != null)
             return StoredNumber(definitions,module,owner,product,target,element,name);
         if (definitions.TryGet("numeric-write",target,element,"",out var existing)) return existing;
-        var method = TypeSupport.Numeric(TypeSupport.NumericWriterCore(target.FullName).Value).Value.Kind switch {
-            NumericKind.Decimal => Decimal(module,owner,product,target,element,name),
-            NumericKind.Binary => Floating(module,owner,product,target,element,name),
+        var method = plan.Family switch {
+            NumericKind.Decimal => Decimal(module,owner,product,target,element,name,plan),
+            NumericKind.Binary => Floating(module,owner,product,target,element,name,plan),
             NumericKind.ArbitraryInteger => BigInteger(module,owner,product,target,element,name),
-            _ => Integer(module,owner,product,target,element,name)
+            _ => Integer(module,owner,product,target,element,name,plan)
         };
         definitions.Add("numeric-write",target,element,"",method);
         return method;
@@ -223,7 +221,7 @@ internal static class GeneratedOutputCodec
         var method=Body(module,owner,product,element,target,definitions.MethodName(name));
         var prepared=module.ImportReference(api.Operation("JsonStoredNumeric","PrepareDecimal").ReturnType);
         var facts=new CodecStoredNumericApi<TypeReference,MethodReference,FieldReference>(Api(module,product,element),prepared,
-            api.Operation("JsonStoredNumeric",TypeSupport.StoredNumeric(target.FullName).Value.Item1),
+            api.Operation("JsonStoredNumeric",CodecNumericPreparation.writer(target.FullName,true,null!).StoredOperation.Value),
             api.Operation("JsonStoredNumeric","Length"),api.Operation("JsonStoredNumeric","Utf8Length"),api.Operation("JsonStoredNumeric","Unit"));
         CodecStoredNumericEmitter.writer(new CecilCodecIL(method),facts,element.FullName=="System.Char");
         definitions.Add("stored-number-write",target,element,"",method);
@@ -261,24 +259,24 @@ internal static class GeneratedOutputCodec
         return method;
     }
 
-    internal static MethodDefinition Floating(ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference element,string name)
+    private static MethodDefinition Floating(ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference element,string name,CodecNumericWriterPreparation plan)
     {
         var api = new GeneratedJsonAssembly.Api(module,product);
         var method = Body(module,owner,product,element,target,name);
-        var shape = TypeSupport.Numeric(TypeSupport.NumericWriterCore(target.FullName).Value).Value;
-        var wide = shape.Width == 64;
         var unsafeType = module.ImportReference(typeof(System.Runtime.CompilerServices.Unsafe));
         var read = new MethodReference("ReadUnaligned",module.TypeSystem.Void,unsafeType);
         var parameter = new GenericParameter("T",read);read.GenericParameters.Add(parameter);read.ReturnType=parameter;
         read.Parameters.Add(new ParameterDefinition(new ByReferenceType(module.TypeSystem.Byte)));
-        var bits = new GenericInstanceMethod(read);bits.GenericArguments.Add(wide?module.TypeSystem.UInt64:shape.Width==16?module.TypeSystem.UInt16:module.TypeSystem.UInt32);
+        var bits = new GenericInstanceMethod(read);bits.GenericArguments.Add(plan.Bits == "System.UInt64" ? module.TypeSystem.UInt64 : plan.Bits == "System.UInt16" ? module.TypeSystem.UInt16 : module.TypeSystem.UInt32);
         var prepared=product.MainModule.GetType("SoloDatabase.Numerics.BinaryDecimalCoefficient");
         var kernel=product.MainModule.GetType("SoloDatabase.Numerics.BinaryDecimal");
         MethodReference Operation(string name)=>module.ImportReference(kernel.Methods.Single(method=>method.Name==name));
         MethodReference Fact(string name)=>module.ImportReference(prepared.Methods.Single(method=>method.Name==name));
         var facts = new CodecFloatingWriterApi<TypeReference,MethodReference,FieldReference>(Digits(module,product,element),module.ImportReference(prepared),
-            Operation("Coefficient"),Fact("get_Value"),Fact("get_Exponent"),api.Operation("JsonWriterRegion","Source",target),bits);
-        CodecFloatingWriterEmitter.writer(new CecilCodecIL(method),facts,shape.Width,element.FullName=="System.Char");
+            Operation("Coefficient"),Fact("get_Value"),Fact("get_Exponent"),api.Operation("JsonWriterRegion","Source",module.ImportReference(target)),bits);
+        var il = new CecilCodecIL(method);
+        var input = Prepare(module,product,il,target,plan);
+        CodecFloatingWriterEmitter.writerFrom(il,facts,plan.Width,element.FullName=="System.Char",input);
         return method;
     }
     internal static MethodDefinition Guid(GeneratedJsonDefinitions definitions,ModuleDefinition module,TypeDefinition owner,AssemblyDefinition product,TypeReference target,TypeReference element,string name)

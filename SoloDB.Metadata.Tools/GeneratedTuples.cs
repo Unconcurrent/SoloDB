@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.FSharp.Core;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using SoloDatabase.Metadata.Generation;
@@ -10,31 +11,13 @@ namespace SoloDatabase.Metadata.Tools;
 
 internal static class GeneratedTuples
 {
-    private sealed class Leaf
-    {
-        internal Leaf(GeneratedMember[] path) { Path = path; }
-        internal GeneratedMember[] Path { get; }
-        internal TypeReference Type => Path[Path.Length - 1].Type;
-    }
-
     internal static void Register(GeneratedJsonDefinitions definitions,ModuleDefinition module, TypeDefinition owner, ILProcessor entry,
         AssemblyDefinition product, GeneratedModel model, int index, GeneratedModel[] models, bool includeRows = true)
     {
         var api = new Api(module, owner, product);
         var type = module.ImportReference(model.Type);
-        var leaves = new List<Leaf>();
-        void Collect(GeneratedModel tuple, GeneratedMember[] path)
-        {
-            for (var i = 0; i < tuple.Members.Length; i++)
-            {
-                var member = tuple.Members[i];
-                var current = path.Concat(new[] { member }).ToArray();
-                if (i == 7) Collect(Find(member.Type), current);
-                else leaves.Add(new Leaf(current));
-            }
-        }
+        var leaves = CodecTupleEmitter.leaves(GeneratedCodec.Tuple(model,models));
         GeneratedModel Find(TypeReference value) => models.First(candidate => GeneratedJsonDefinitions.SameType(candidate.Type,value));
-        Collect(model, Array.Empty<GeneratedMember>());
         for (var ordinal = 0; ordinal < model.Members.Length; ordinal++)
         {
             var member = model.Members[ordinal];
@@ -59,10 +42,10 @@ internal static class GeneratedTuples
         api.Delegate(entry, api.Function(type, array), write);
         api.Delegate(entry, api.Function(api.Json, type), read);
         var stored = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonStoredMember"));
-        entry.Emit(OpCodes.Ldc_I4, leaves.Count); entry.Emit(OpCodes.Newarr, stored);
-        for (var i = 0; i < leaves.Count; i++)
+        entry.Emit(OpCodes.Ldc_I4, leaves.Length); entry.Emit(OpCodes.Newarr, stored);
+        for (var i = 0; i < leaves.Length; i++)
         {
-            var leaf = leaves[i]; var getter = api.Method(owner, "TupleMember" + index + "_" + i, module.ImportReference(leaf.Type), true, type);
+            var leaf = leaves[i][leaves[i].Length - 1].Item2; var getter = api.Method(owner, "TupleMember" + index + "_" + i, module.ImportReference(leaf.Type), true, type);
             GeneratedCodec.TupleGetter(getter,model,models,i);
             entry.Emit(OpCodes.Dup); entry.Emit(OpCodes.Ldc_I4, i);
             entry.Emit(OpCodes.Ldtoken, type); entry.Emit(OpCodes.Call, api.TypeHandle());
@@ -77,11 +60,11 @@ internal static class GeneratedTuples
         if (includeRows)
         {
             RegisterRows(api, entry, model, index, leaves, Find, models);
-            RegisterDefault(api, entry, model, index, Find);
+            RegisterDefault(api, entry, model, index, models);
         }
     }
 
-    private static void RegisterRows(Api api, ILProcessor entry, GeneratedModel model, int index, List<Leaf> leaves, Func<TypeReference, GeneratedModel> find, GeneratedModel[] models)
+    private static void RegisterRows(Api api, ILProcessor entry, GeneratedModel model, int index, Tuple<bool,CodecMember<TypeReference,MethodReference,FieldReference>>[][] leaves, Func<TypeReference, GeneratedModel> find, GeneratedModel[] models)
     {
         var module = api.Module; var type = module.ImportReference(model.Type);
         var shape = module.ImportReference(api.Definition("SqlRowShape")); var row = module.ImportReference(api.Definition("SqlRow"));
@@ -92,35 +75,14 @@ internal static class GeneratedTuples
         var il = ctor.Body.GetILProcessor(); il.Emit(OpCodes.Ldarg_0);
         il.Emit(OpCodes.Call, new MethodReference(".ctor", module.TypeSystem.Void, api.Owner.BaseType) { HasThis = true });
         il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Ldarg_1); il.Emit(OpCodes.Stfld, start); il.Emit(OpCodes.Ret);
-        var read = api.Method(mapper, "Read", type, false, row); il = read.Body.GetILProcessor(); var ordinal = 0;
-        void ReadTuple(GeneratedModel tuple)
-        {
-            for (var i = 0; i < tuple.Members.Length; i++)
-            {
-                var member = tuple.Members[i]; var fact = find(member.Type);
-                if (i == 7) { ReadTuple(fact); continue; }
-                var position = ordinal++; var result = new VariableDefinition(module.ImportReference(member.Type)); read.Body.Variables.Add(result);
-                var present = il.Create(OpCodes.Nop); var complete = il.Create(OpCodes.Nop);
-                il.Emit(OpCodes.Ldarga, read.Parameters[0]); LoadOrdinal(position);
-                il.Emit(OpCodes.Call, api.Product("SqlRow", "IsDBNull")); il.Emit(OpCodes.Brfalse, present);
-                if (fact.Facts.ValueType && fact.Facts.Shape != TypeShape.Nullable)
-                {
-                    il.Emit(OpCodes.Ldstr, member.Type.Name); il.Emit(OpCodes.Ldc_I4, position);
-                    il.Emit(OpCodes.Call, api.Product("SqlRowShape", "TupleNull")); il.Emit(OpCodes.Throw);
-                }
-                else { il.Emit(OpCodes.Ldloca, result); il.Emit(OpCodes.Initobj, result.VariableType); }
-                il.Emit(OpCodes.Br, complete); il.Append(present);
-                il.Emit(OpCodes.Ldarg_1); LoadOrdinal(position);
-                il.Emit(OpCodes.Call,GeneratedSqlRows.ReadMethod(module,api.ProductAssembly,member.Type,models)); il.Emit(OpCodes.Stloc,result);
-                il.Append(complete); il.Emit(OpCodes.Ldloc, result);
-            }
-            il.Emit(OpCodes.Newobj, module.ImportReference(tuple.Constructor!));
-        }
-        void LoadOrdinal(int position)
-        { il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Ldfld, start); il.Emit(OpCodes.Ldc_I4, position); il.Emit(OpCodes.Add); }
-        ReadTuple(model); il.Emit(OpCodes.Ret);
+        var read = api.Method(mapper,"Read",type,false,row); il = read.Body.GetILProcessor();
+        SqlRowEmitter.tupleRow(new CecilCodecIL(read),GeneratedSqlRows.Api(module,api.ProductAssembly,models),GeneratedCodec.Tuple(model,models),
+            new Action<int>(position => {
+                il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Ldfld,start);
+                il.Emit(OpCodes.Ldc_I4,position); il.Emit(OpCodes.Add);
+            }));
         var factory = api.Method(api.Owner, "BindTupleRow" + index, api.Function(row, type), true, shape); il = factory.Body.GetILProcessor();
-        il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Ldstr, model.Type.Name); il.Emit(OpCodes.Ldc_I4, leaves.Count);
+        il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Ldstr, model.Type.Name); il.Emit(OpCodes.Ldc_I4, leaves.Length);
         il.Emit(OpCodes.Callvirt, api.Product("SqlRowShape", "RequireTupleColumns"));
         il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Callvirt, api.Product("SqlRowShape", "get_Start")); il.Emit(OpCodes.Newobj, ctor);
         il.Emit(OpCodes.Ldftn, read); il.Emit(OpCodes.Newobj, api.DelegateConstructor((GenericInstanceType)factory.ReturnType)); il.Emit(OpCodes.Ret);
@@ -129,41 +91,24 @@ internal static class GeneratedTuples
         entry.Emit(OpCodes.Newobj, api.OnType("SqlRowMapping`1", ".ctor", mapping)); entry.Emit(OpCodes.Call, api.OnType("SqlRowMapping`1", "Register", mapping));
     }
 
-    private static void RegisterDefault(Api api, ILProcessor entry, GeneratedModel model, int index, Func<TypeReference, GeneratedModel> find)
+    private static void RegisterDefault(Api api,ILProcessor entry,GeneratedModel model,int index,GeneratedModel[] models)
     {
         var module = api.Module; var serial = 0;
-        MethodDefinition Create(GeneratedModel current, bool root)
-        {
-            var type = module.ImportReference(current.Type);
-            var method = api.Method(api.Owner, "DefaultTuple" + index + "_" + serial++, type, true); var il = method.Body.GetILProcessor();
-            var result = new VariableDefinition(type); method.Body.Variables.Add(result);
-            if (root && current.Facts.ValueType)
-            { il.Emit(OpCodes.Ldloca, result); il.Emit(OpCodes.Initobj, type); il.Emit(OpCodes.Ldloc, result); il.Emit(OpCodes.Ret); return method; }
-            var arguments = new List<VariableDefinition>();
-            for (var i = 0; i < current.Members.Length; i++)
-            {
-                var member = current.Members[i]; var value = new VariableDefinition(module.ImportReference(member.Type)); method.Body.Variables.Add(value); arguments.Add(value);
-                var fact = find(member.Type);
-                if (i == 7) il.Emit(OpCodes.Call, Create(fact, false));
-                else if (fact.Facts.ValueType && fact.Constructor?.Parameters.Count == 0) il.Emit(OpCodes.Call, Create(fact, false));
-                else { il.Emit(OpCodes.Ldloca, value); il.Emit(OpCodes.Initobj, value.VariableType); il.Emit(OpCodes.Ldloc, value); }
-                il.Emit(OpCodes.Stloc, value);
-            }
-            var begin = il.Create(OpCodes.Nop); il.Append(begin);
-            foreach (var value in arguments) il.Emit(OpCodes.Ldloc, value);
-            il.Emit(OpCodes.Newobj, module.ImportReference(current.Constructor!)); il.Emit(OpCodes.Stloc, result);
-            var done = il.Create(OpCodes.Nop); il.Emit(OpCodes.Leave, done);
-            var handler = il.Create(OpCodes.Nop); il.Append(handler);
-            var wrapped = new TypeReference("System.Reflection", "TargetInvocationException", module, api.Owner.BaseType.Scope);
-            var ctor = new MethodReference(".ctor", module.TypeSystem.Void, wrapped) { HasThis = true };
-            var exception = new TypeReference("System", "Exception", module, api.Owner.BaseType.Scope);
-            ctor.Parameters.Add(new ParameterDefinition(exception)); il.Emit(OpCodes.Newobj, ctor); il.Emit(OpCodes.Throw);
-            il.Append(done); il.Emit(OpCodes.Ldloc, result); il.Emit(OpCodes.Ret);
-            method.Body.ExceptionHandlers.Add(new ExceptionHandler(ExceptionHandlerType.Catch)
-            { TryStart = begin, TryEnd = handler, HandlerStart = handler, HandlerEnd = done, CatchType = exception });
-            return method;
-        }
-        var create = Create(model, true); var actual = module.ImportReference(model.Type);
+        var exception = new TypeReference("System","Exception",module,api.Owner.BaseType.Scope);
+        var wrapped = new TypeReference("System.Reflection","TargetInvocationException",module,api.Owner.BaseType.Scope);
+        var wrapper = new MethodReference(".ctor",module.TypeSystem.Void,wrapped) { HasThis = true };
+        wrapper.Parameters.Add(new ParameterDefinition(exception));
+        var create = SqlTupleDefaultEmitter.prepare(GeneratedCodec.Tuple(model,models),
+            new Func<TypeReference,bool>(target => target.IsValueType),
+            new Func<TypeReference,FSharpOption<MethodReference>>(target => {
+                var fact = models.First(candidate => GeneratedJsonDefinitions.SameType(candidate.Type,target));
+                return fact.DefaultConstructor == null ? null! : FSharpOption<MethodReference>.Some(module.ImportReference(fact.DefaultConstructor));
+            }),exception,wrapper,
+            new Func<TypeReference,Tuple<CodecIL<TypeReference,MethodReference,FieldReference>,MethodReference>>(target => {
+                var method = api.Method(api.Owner,"DefaultTuple" + index + "_" + serial++,module.ImportReference(target),true);
+                return Tuple.Create<CodecIL<TypeReference,MethodReference,FieldReference>,MethodReference>(new CecilCodecIL(method),method);
+            }));
+        var actual = module.ImportReference(model.Type);
         var function = api.Closed(new TypeReference("System", "Func`1", module, api.Owner.BaseType.Scope), actual);
         api.Delegate(entry, function, create);
         var defaults = api.Closed(module.ImportReference(api.Definition("SqlRowDefault`1")), actual);
@@ -197,7 +142,7 @@ internal static class GeneratedTuples
         }
         internal MethodReference DelegateConstructor(GenericInstanceType type)
         { var ctor = new MethodReference(".ctor", Module.TypeSystem.Void, type) { HasThis = true }; ctor.Parameters.Add(new ParameterDefinition(Module.TypeSystem.Object)); ctor.Parameters.Add(new ParameterDefinition(Module.TypeSystem.IntPtr)); return ctor; }
-        internal void Delegate(ILProcessor il, GenericInstanceType type, MethodDefinition method)
+        internal void Delegate(ILProcessor il, GenericInstanceType type, MethodReference method)
         { il.Emit(OpCodes.Ldnull); il.Emit(OpCodes.Ldftn, method); il.Emit(OpCodes.Newobj, DelegateConstructor(type)); }
         internal MethodReference TypeHandle()
         { var type = new TypeReference("System", "Type", Module, Owner.BaseType.Scope); var method = new MethodReference("GetTypeFromHandle", type, type); method.Parameters.Add(new ParameterDefinition(new TypeReference("System", "RuntimeTypeHandle", Module, Owner.BaseType.Scope, true))); return method; }

@@ -8,37 +8,17 @@ namespace SoloDatabase.Metadata.Tools;
 
 internal static class CSharpCodecFacts
 {
-    private static void StringIndexer(ModuleDefinition module, TypeReference source, GeneratedModel model)
-    {
-        for (var current = source; current != null;)
-        {
-            var definition = current.Resolve();
-            TypeReference Closed(TypeReference value) => value is GenericParameter parameter && current is GenericInstanceType closed
-                ? closed.GenericArguments[parameter.Position] : value is GenericInstanceType instance ? CloseInstance(instance) : value;
-            GenericInstanceType CloseInstance(GenericInstanceType value)
-            {
-                var result = new GenericInstanceType(value.ElementType);
-                foreach (var argument in value.GenericArguments) result.GenericArguments.Add(Closed(argument));
-                return result;
-            }
-            var property = definition.Properties.SingleOrDefault(property => property.Name == "Item" && property.Parameters.Count == 1 && Closed(property.Parameters[0].ParameterType).FullName == "System.String");
-            if (property?.GetMethod != null)
-            {
-                model.StringIndexer = module.ImportReference(property.GetMethod);
-                model.StringIndexer.DeclaringType = ImportType(module,current);
-                model.StringIndexerValue = ImportType(module,Closed(property.PropertyType));
-                return;
-            }
-            current = definition.BaseType == null ? null : Closed(definition.BaseType);
-        }
-    }
-
     internal static TypeReference ImportType(ModuleDefinition module, TypeReference source)
     {
         if (source is ByReferenceType referenceType) return new ByReferenceType(ImportType(module,referenceType.ElementType));
         if (source is RequiredModifierType required) return new RequiredModifierType(ImportType(module,required.ModifierType),ImportType(module,required.ElementType));
         if (source is OptionalModifierType optional) return new OptionalModifierType(ImportType(module,optional.ModifierType),ImportType(module,optional.ElementType));
-        if (source is ArrayType array) return new ArrayType(ImportType(module,array.ElementType),array.Rank);
+        if (source is ArrayType array)
+        {
+            var result = new ArrayType(ImportType(module,array.ElementType),array.Rank);
+            for (var index = 0; index < array.Dimensions.Count; index++) result.Dimensions[index] = array.Dimensions[index];
+            return result;
+        }
         if (source is GenericInstanceType genericType)
         {
             var element = ImportType(module,genericType.ElementType);
@@ -47,7 +27,8 @@ internal static class CSharpCodecFacts
             return result;
         }
         var reference = module.ImportReference(source);
-        if (source is not GenericParameter) reference.IsValueType = source.Resolve().IsValueType;
+        if (source is not GenericParameter && reference is not TypeDefinition)
+            reference.IsValueType = source.Resolve().IsValueType;
         return reference;
     }
 
@@ -82,6 +63,12 @@ internal static class CSharpCodecFacts
 
             var definition = sourceType.Resolve();
             var type = ImportType(sourceType);
+            if (type is GenericInstanceType closedSource)
+            {
+                var original = new GenericInstanceType(definition);
+                foreach (var argument in closedSource.GenericArguments) original.GenericArguments.Add(argument);
+                sourceType = original;
+            }
             if (sourceType is not ArrayType) type.IsValueType = definition.IsValueType;
             if (type is GenericInstanceType generic) generic.ElementType.IsValueType = definition.IsValueType;
             T[] Array<T>(int ordinal) => ((CustomAttributeArgument[])arguments[ordinal].Value).Select(value => (T)value.Value).ToArray();
@@ -97,24 +84,28 @@ internal static class CSharpCodecFacts
             var write = Array<bool>(9);
             var ignored = Array<bool>(10);
             var many = Array<bool>(11);
-            var references = Property<bool>("References"); var customIds = Property<bool>("CustomIds");
-            var indexes = Property<bool>("Indexes"); var uniqueIndexes = Property<bool>("IndexUnique");
+            var references = Property<bool>("References");
             var policies = Property<bool>("HasPolicies"); var onDelete = Property<int>("OnDelete");
             var onOwnerDelete = Property<int>("OnOwnerDelete"); var unique = Property<bool>("Unique"); var order = Property<int>("OrderBy");
             if (new[] { declaring.Length,values.Length,fields.Length,read.Length,write.Length,ignored.Length,many.Length }.Any(count => count != names.Length))
                 throw new InvalidOperationException("Inconsistent generated codec member facts.");
             var facts = new Member[names.Length];
             var members = new GeneratedMember[names.Length];
+            var originalProperties = GeneratedRowFields.Properties(module,sourceType,access);
             for (var i = 0; i < names.Length; i++)
             {
                 var declared = declaring[i];
                 var memberOwner = sourceDeclaring[i].Resolve();
                 declared.IsValueType = memberOwner.IsValueType;
                 if (declared is GenericInstanceType closed) closed.ElementType.IsValueType = memberOwner.IsValueType;
+                var effective = fields[i] ? null : originalProperties.SingleOrDefault(property =>
+                    property.Member.Name == names[i] && GeneratedJsonDefinitions.SameType(property.Member.Type,values[i]) &&
+                    GeneratedRowFields.IndexParameters(property.Member).Length == 0 &&
+                    GeneratedJsonDefinitions.SameType(property.Member.Getter?.Value.DeclaringType ?? property.Member.Setter!.Value.DeclaringType,declared));
+                if (!fields[i]) { read[i] &= effective?.Member.Getter != null; write[i] &= effective?.Member.Setter != null; }
                 facts[i] = new Member(names[i],values[i].FullName,fields[i],read[i],write[i],ignored[i]) {
                     ManyReference = many[i], DeclaringType = declared.FullName,
-                    Reference = references.Length != 0 && references[i], CustomIdentity = customIds.Length != 0 && customIds[i],
-                    Indexed = indexes.Length != 0 && indexes[i], IndexUnique = uniqueIndexes.Length != 0 && uniqueIndexes[i],
+                    Reference = references.Length != 0 && references[i],
                     HasReferencePolicy = policies.Length != 0 && policies[i], OnDelete = onDelete.Length == 0 ? 0 : onDelete[i],
                     OnOwnerDelete = onOwnerDelete.Length == 0 ? 3 : onOwnerDelete[i], Unique = unique.Length != 0 && unique[i],
                     OrderBy = order.Length == 0 ? 0 : order[i] };
@@ -136,17 +127,10 @@ internal static class CSharpCodecFacts
                 }
                 else
                 {
-                    var selected = memberOwner.Properties.Single(property => property.Name == names[i]);
-                    if (selected.GetMethod != null) { getter = module.ImportReference(selected.GetMethod); getter.DeclaringType = module.ImportReference(declared); }
-                    if (selected.SetMethod != null) { setter = module.ImportReference(selected.SetMethod); setter.DeclaringType = module.ImportReference(declared); }
+                    getter = effective?.Member.Getter?.Value;
+                    setter = effective?.Member.Setter?.Value;
                 }
                 members[i] = new GeneratedMember(module.ImportReference(values[i]),getter,setter,field) { StaticField = staticField, QueryWritable = setter != null || (field != null && !memberOwner.Fields.Single(candidate => candidate.Name == names[i]).IsInitOnly && !memberOwner.Fields.Single(candidate => candidate.Name == names[i]).IsLiteral) };
-                if (facts[i].CustomIdentity)
-                {
-                    var identityConstructor = HelperAssembly.IdentityConstructor(module,memberOwner.Properties.Single(property => property.Name == names[i]),out var generatorAssembly);
-                    members[i].IdentityGenerator = identityConstructor;
-                    access(generatorAssembly);
-                }
                 access(memberOwner.Module.Assembly.Name.Name);
             }
             var construct = (bool)arguments[3].Value;
@@ -179,7 +163,7 @@ internal static class CSharpCodecFacts
             var policy = new Model(type.FullName,type.FullName,shape,type.IsValueType,(bool)arguments[1].Value,
                 constructor != null && !construct,null,facts) { AbstractType = (bool)arguments[2].Value, ConstructFromMembers = construct, PopulateCollection = populate,
                     RecordType = recordFields != null, RecordFields = recordFields ?? System.Array.Empty<string>(),
-                    RequiresTypeInformation = Flag("RequiresTypeInformation"), SupportsValuesWrapper = Flag("SupportsValuesWrapper"),
+                    RequiresTypeInformation = (bool)arguments[2].Value || HelperAssembly.InheritedAttribute(sourceType,"SoloDatabase.Attributes.PolymorphicAttribute"), SupportsValuesWrapper = Flag("SupportsValuesWrapper"),
                     NonGenericEnumerable = Flag("NonGenericEnumerable"),
                     DictionaryReadOnly = Flag("DictionaryReadOnly"), Formattable = Flag("Formattable"),
                     IndexedRead = attribute.Properties.FirstOrDefault(property => property.Name == "IndexedRead").Argument.Value as string,
@@ -191,8 +175,13 @@ internal static class CSharpCodecFacts
             var generatedModel = new GeneratedModel(policy,type,constructorReference,members) {
                 AssignableTo = Property<string>("AssignableTo").Select(identity => ImportType(SourceTypeIdentity.Resolve(consumer.MainModule,identity))).ToArray(),
                 CollectionArguments = collection, ElementType = OptionalType("Element"), SequenceElement = OptionalType("SequenceElement"),
-                DefaultConstructor = defaultReference };
-            if (sourceType is not ArrayType) StringIndexer(module,sourceType,generatedModel);
+                DefaultConstructor = defaultReference,
+                CloneConstructor = GeneratedRowFields.DefaultConstructor(module,sourceType) };
+            generatedModel.OriginalProperties = originalProperties;
+            if (shape == TypeShape.Object) {
+                if (TypeSupport.SqlRowFieldFallback(type.IsValueType,policy.RecordType,generatedModel.OriginalProperties.Count(property => property.Member.Setter != null)))
+                    generatedModel.SqlFields = GeneratedRowFields.Read(module,sourceType);
+            }
             if (helperOnly) helperModels.Add(generatedModel); else models.Add(generatedModel);
             access(definition.Module.Assembly.Name.Name);
         }
@@ -229,7 +218,7 @@ internal static class CSharpCodecFacts
                     var constructor = module.ImportReference(definition.Methods.Single(method => method.IsConstructor && !method.IsStatic));
                     constructor.DeclaringType = actual;
                     var carrier = new GeneratedModel(new Model(actual.FullName,actual.FullName,TypeShape.Object,false,true,false,null,facts)
-                        { ConstructFromMembers = true },actual,constructor,members);
+                        { ConstructFromMembers = true },actual,constructor,members) { OriginalProperties = GeneratedRowFields.Properties(module,type,access) };
                     if (sourceCarriers.Contains(type.FullName)) helperModels.Add(carrier); else models.Add(carrier);
                     access(definition.Module.Assembly.Name.Name);
                 }

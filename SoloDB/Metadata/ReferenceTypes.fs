@@ -1,7 +1,7 @@
 namespace SoloDatabase
 
 open System
-open System.Collections.Concurrent
+open SoloDatabase.Metadata.Generation
 
 /// Publishes the closed reference contract without inspecting generic arguments at runtime.
 [<AbstractClass; Sealed>]
@@ -13,34 +13,16 @@ type internal ReferenceTypeMetadata private () =
         MetadataValue.tryValue (TypeMetadataCache.Get(referenceType).ReferenceType)
 
 module internal DBRefTypeHelpers =
-    [<Literal>]
-    let private dbRef1Name = "SoloDatabase.DBRef`1"
-    [<Literal>]
-    let private dbRef2Name = "SoloDatabase.DBRef`2"
-    [<Literal>]
-    let private dbRefManyName = "SoloDatabase.DBRefMany`1"
-    [<Literal>]
-    let private dbRefMany2Name = "SoloDatabase.DBRefMany`2"
-    [<Literal>]
-    let private fsharpOptionName = "Microsoft.FSharp.Core.FSharpOption`1"
+    let private shape (typ: Type) =
+        if isNull typ then TypeShape.Object else TypeSupport.ReferenceShape typ.FullName
 
-    let internal isDBRefSingleDefinition (t: Type) =
-        not (isNull t) && StringComparer.Ordinal.Equals(t.FullName, dbRef1Name)
-
-    let internal isDBRefTypedDefinition (t: Type) =
-        not (isNull t) && StringComparer.Ordinal.Equals(t.FullName, dbRef2Name)
-
-    let internal isDBRefDefinition (t: Type) =
-        isDBRefSingleDefinition t || isDBRefTypedDefinition t
-
-    let internal isDBRefManyDefinition (t: Type) =
-        not (isNull t) && (StringComparer.Ordinal.Equals(t.FullName, dbRefManyName) || StringComparer.Ordinal.Equals(t.FullName, dbRefMany2Name))
-
-    let internal isDBRefManyTypedDefinition (t: Type) =
-        not (isNull t) && StringComparer.Ordinal.Equals(t.FullName, dbRefMany2Name)
-
-    let internal isFSharpOptionDefinition (t: Type) =
-        not (isNull t) && StringComparer.Ordinal.Equals(t.FullName, fsharpOptionName)
+    let internal isDBRefSingleDefinition (typ: Type) = shape typ = TypeShape.DocumentReference
+    let internal isDBRefTypedDefinition (typ: Type) = shape typ = TypeShape.TypedDocumentReference
+    let internal isDBRefDefinition typ = isDBRefSingleDefinition typ || isDBRefTypedDefinition typ
+    let internal isDBRefManyDefinition (typ: Type) =
+        match shape typ with TypeShape.ManyReference | TypeShape.TypedManyReference -> true | _ -> false
+    let internal isDBRefManyTypedDefinition (typ: Type) = shape typ = TypeShape.TypedManyReference
+    let internal isFSharpOptionDefinition (typ: Type) = not(isNull typ) && TypeSupport.IsOption typ
 
     let internal isDBRefType (t: Type) =
         match ReferenceTypeMetadata.TryGet(t) with
@@ -58,10 +40,10 @@ module internal DBRefTypeHelpers =
         | ValueNone -> not (isNull t) && t.IsGenericType && isDBRefManyDefinition (t.GetGenericTypeDefinition())
 
     let internal isFileRefType (t: Type) =
-        not (isNull t) && (t.FullName = "SoloDatabase.FileRef" || t.FullName = "SoloDatabase.DirectoryRef")
+        match shape t with TypeShape.FileReference | TypeShape.DirectoryReference -> true | _ -> false
 
     let internal isFileRefManyType (t: Type) =
-        not (isNull t) && (t.FullName = "SoloDatabase.FileRefMany" || t.FullName = "SoloDatabase.DirectoryRefMany")
+        match shape t with TypeShape.FileMany | TypeShape.DirectoryMany -> true | _ -> false
 
     let internal isSingleReferenceType t = isDBRefType t || isFileRefType t
     let internal isManyReferenceType t = isDBRefManyType t || isFileRefManyType t
@@ -70,9 +52,9 @@ module internal DBRefTypeHelpers =
       match ReferenceTypeMetadata.TryGet(t) with
       | ValueSome facts -> facts.Target
       | ValueNone ->
-        match t.FullName with
-        | "SoloDatabase.FileRef" | "SoloDatabase.FileRefMany" -> typeof<SoloDatabase.Types.SoloDBFileHeader>
-        | "SoloDatabase.DirectoryRef" | "SoloDatabase.DirectoryRefMany" -> typeof<SoloDatabase.Types.SoloDBDirectoryHeader>
+        match shape t with
+        | TypeShape.FileReference | TypeShape.FileMany -> typeof<SoloDatabase.Types.SoloDBFileHeader>
+        | TypeShape.DirectoryReference | TypeShape.DirectoryMany -> typeof<SoloDatabase.Types.SoloDBDirectoryHeader>
         | _ -> t.GetGenericArguments().[0]
 
     let internal referenceIdentityType (t: Type) =

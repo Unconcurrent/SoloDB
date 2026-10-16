@@ -64,11 +64,9 @@ internal static partial class GeneratedRawCodec
                 return method;
             }
             if (model.Facts.Shape != TypeShape.Object && model.Facts.Shape != TypeShape.Tuple) {
-                var il = method.Body.GetILProcessor();
-                il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Ldarg_1); il.Emit(OpCodes.Ldarg_2);
                 var direct=module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonRawWrite`4").Methods.Single(operation=>operation.Name=="Write"));
                 direct.DeclaringType=api.RawType("JsonRawWrite",model.Type,encoding,writer);
-                il.Emit(OpCodes.Call,direct); il.Emit(OpCodes.Ret);
+                CodecEmitter.directCall(new CecilCodecIL(method),direct,3);
                 return method;
             }
             CodecRawWriterApi<TypeReference,MethodReference> raw = null!;
@@ -126,11 +124,12 @@ internal static partial class GeneratedRawCodec
         var equals=new MethodReference("Equals",module.TypeSystem.Boolean,runtimeType){HasThis=true};equals.Parameters.Add(new ParameterDefinition(runtimeType));
         return new CodecPolymorphicApi<TypeReference,MethodReference>(runtimeType,equals,Method("IncludeType"),Method("SetIncludeType"),Method("Actual"),
             Function<TypeReference,CodecKnownWriter<TypeReference,MethodReference>[]>(declared=>models.Select((candidate,index)=>(candidate,index))
-                .Where(item=>!item.candidate.Facts.AbstractType && !GeneratedJsonDefinitions.SameType(item.candidate.Type,declared) && (item.candidate.AssignableTo.Any(target=>GeneratedJsonDefinitions.SameType(target,declared)) ||
+                .Where(item=>TypeSupport.KnownWriterCandidate(item.candidate.Facts.AbstractType,GeneratedJsonDefinitions.SameType(item.candidate.Type,declared)) &&
+                    (item.candidate.AssignableTo.Any(target=>GeneratedJsonDefinitions.SameType(target,declared)) ||
                     item.candidate.UnknownInterfaces.Any(target=>GeneratedJsonDefinitions.SameType(target,declared))))
                 .Select(item=> {
                     var candidate=item.candidate;
-                    var candidateDefinitions=definitions.Stored && TypeSupport.StoredNumeric(candidate.Type.FullName) != null
+                    var candidateDefinitions=TypeSupport.PolymorphicNative(definitions.Stored,candidate.Type.FullName)
                         ? definitions.NativeView : definitions;
                     var body=GeneratedChildCodec.WriteCall(candidateDefinitions,module,owner,product,candidate.Type,encoding,output,"WriteKnown"+suffix+item.index,models,false)
                         ?? Writer(definitions,module,owner,product,candidate,item.index,models,encoding,output,suffix,true);

@@ -89,12 +89,8 @@ public sealed class MetadataGenerator : IIncrementalGenerator
                         public bool HelperOnly { get; set; }
                         public string Element { get; set; }
                         public string SequenceElement { get; set; }
-                        public bool RequiresTypeInformation { get; set; }
                         public bool SupportsValuesWrapper { get; set; }
                         public bool[] References { get; set; }
-                        public bool[] CustomIds { get; set; }
-                        public bool[] Indexes { get; set; }
-                        public bool[] IndexUnique { get; set; }
                         public bool[] HasPolicies { get; set; }
                         public int[] OnDelete { get; set; }
                         public int[] OnOwnerDelete { get; set; }
@@ -327,6 +323,25 @@ public sealed class MetadataGenerator : IIncrementalGenerator
         string? indexedRead = null, indexedWrite = null;
         var members = new List<Member>();
         var names = new HashSet<string>(StringComparer.Ordinal);
+        void PropertyPolicy(IPropertySymbol property,Member fact)
+        {
+            var referenceShape = TypeSupport.ReferenceShape(Definition(property.Type));
+            fact.Reference = referenceShape != TypeShape.Object;
+            fact.ManyReference = TypeSupport.ReferenceMany(referenceShape);
+            var policy = property.GetAttributes().FirstOrDefault(attribute => attribute.AttributeClass?.ToDisplayString() == "SoloDatabase.Attributes.SoloRefAttribute");
+            if (policy != null)
+            {
+                fact.HasReferencePolicy = true;
+                foreach (var argument in policy.NamedArguments)
+                    switch (argument.Key)
+                    {
+                        case "OnDelete": fact.OnDelete = (int)argument.Value.Value!; break;
+                        case "OnOwnerDelete": fact.OnOwnerDelete = (int)argument.Value.Value!; break;
+                        case "Unique": fact.Unique = (bool)argument.Value.Value!; break;
+                        case "OrderBy": fact.OrderBy = (int)argument.Value.Value!; break;
+                    }
+            }
+        }
         for (INamedTypeSymbol? current = named; current != null; current = current.BaseType)
         {
             foreach (var member in current.GetMembers())
@@ -361,6 +376,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
                         if (getter != null && !property.GetAttributes().Any(attribute => attribute.AttributeClass?.ToDisplayString() == "System.Runtime.Serialization.IgnoreDataMemberAttribute")) indexedWrite ??= signature;
                         members.Add(new Member(property.MetadataName, property.Type.ToDisplayString(TypeDisplay), false, false, false, false)
                         { DeclaringType = property.ContainingType.ToDisplayString(TypeDisplay) });
+                        PropertyPolicy(property,members[members.Count - 1]);
                         dependencies.Enqueue(property.Type);
                         continue;
                     }
@@ -373,28 +389,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
                         HelperRead = read && (!SymbolEqualityComparer.Default.Equals(property.ContainingType, named) || !compilation.IsSymbolAccessibleWithin(property.GetMethod!, compilation.Assembly)),
                         HelperWrite = write && (!SymbolEqualityComparer.Default.Equals(property.ContainingType, named) || property.SetMethod!.IsInitOnly || !compilation.IsSymbolAccessibleWithin(property.SetMethod, compilation.Assembly))
                     });
-                    var fact = members[members.Count - 1];
-                    fact.CustomIdentity = property.GetAttributes().Any(attribute => attribute.AttributeClass?.ToDisplayString() == "SoloDatabase.Attributes.SoloId");
-                    var indexed = property.GetAttributes().FirstOrDefault(attribute => attribute.AttributeClass?.ToDisplayString() == "SoloDatabase.Attributes.IndexedAttribute");
-                    fact.Indexed = fact.CustomIdentity || indexed != null;
-                    fact.IndexUnique = fact.CustomIdentity || indexed?.ConstructorArguments.FirstOrDefault().Value is true;
-                    fact.Reference = property.Type is INamedTypeSymbol reference && reference.ContainingNamespace.ToDisplayString() == "SoloDatabase" &&
-                        reference.OriginalDefinition.MetadataName is "DBRef`1" or "DBRef`2" or "DBRefMany`1" or "DBRefMany`2" or "FileRef" or "DirectoryRef" or "FileRefMany" or "DirectoryRefMany";
-                    fact.ManyReference = property.Type is INamedTypeSymbol many && many.ContainingNamespace.ToDisplayString() == "SoloDatabase" &&
-                        many.OriginalDefinition.MetadataName is "DBRefMany`1" or "DBRefMany`2" or "FileRefMany" or "DirectoryRefMany";
-                    var policy = property.GetAttributes().FirstOrDefault(attribute => attribute.AttributeClass?.ToDisplayString() == "SoloDatabase.Attributes.SoloRefAttribute");
-                    if (policy != null)
-                    {
-                        fact.HasReferencePolicy = true;
-                        foreach (var argument in policy.NamedArguments)
-                            switch (argument.Key)
-                            {
-                                case "OnDelete": fact.OnDelete = (int)argument.Value.Value!; break;
-                                case "OnOwnerDelete": fact.OnOwnerDelete = (int)argument.Value.Value!; break;
-                                case "Unique": fact.Unique = (bool)argument.Value.Value!; break;
-                                case "OrderBy": fact.OrderBy = (int)argument.Value.Value!; break;
-                            }
-                    }
+                    PropertyPolicy(property,members[members.Count - 1]);
                     dependencies.Enqueue(property.Type);
                 }
                 else if (member is IFieldSymbol field)
@@ -409,6 +404,12 @@ public sealed class MetadataGenerator : IIncrementalGenerator
         members = members.OrderBy(member => member.Field ? 0 : 1).ToList();
         var properties = members.Where(member => !member.Field).ToArray();
         var recordType = Kind(named,"RecordType");
+        var sqlProperties = named.GetMembers().OfType<IPropertySymbol>().Count(property =>
+            property.DeclaredAccessibility == Accessibility.Public && property.SetMethod != null);
+        if (TypeSupport.SqlRowFieldFallback(named.IsValueType,recordType,sqlProperties))
+            foreach (var field in named.GetMembers().OfType<IFieldSymbol>().Where(field => !field.IsStatic &&
+                field.DeclaredAccessibility != Accessibility.Public && field.DeclaredAccessibility != Accessibility.Private))
+                dependencies.Enqueue(field.Type);
         var recordFields = recordType ? named.GetMembers().OfType<IPropertySymbol>()
             .Select(property => (property, mapping: property.GetAttributes().FirstOrDefault(attribute =>
                 attribute.AttributeClass?.ToDisplayString() == "Microsoft.FSharp.Core.CompilationMappingAttribute")))
@@ -435,9 +436,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
             IndexedRead = indexedRead, IndexedWrite = indexedWrite,
             DictionaryReadOnly = ReadOnlyMatches(),
             Formattable = Contract("System.IFormattable") != null,
-            NonGenericEnumerable = !bsonDocument && contracts.Any(contract => contract.ToDisplayString() == "System.Collections.IEnumerable"),
-            RequiresTypeInformation = abstractType || named.GetAttributes().Any(attribute =>
-                attribute.AttributeClass?.ToDisplayString() == "SoloDatabase.Attributes.PolymorphicAttribute")
+            NonGenericEnumerable = !bsonDocument && contracts.Any(contract => contract.ToDisplayString() == "System.Collections.IEnumerable")
         };
 
         Model New(TypeShape shape, ITypeSymbol? element = null) => new(name, type.MetadataName, shape, type.IsValueType, type.IsSealed,

@@ -29,7 +29,7 @@ module internal QueryOperationEmitter =
                 il.EmitMethod(OpCodes.Call,address)
             | None -> il.EmitType(OpCodes.Unbox_Any,types[index])
 
-    let call (il: CodecIL<'T,'M,'F>) referenceType referenceMethod ownerAddress owner ownerValueType nullable isStatic method (types: 'T[]) result resultValueType returnsVoid boxed =
+    let private callBody (il: CodecIL<'T,'M,'F>) referenceType ownerAddress owner ownerValueType nullable isStatic method emitArguments result resultValueType returnsVoid boxed =
         if not isStatic then
             match ownerAddress with
             | Some address ->
@@ -45,11 +45,19 @@ module internal QueryOperationEmitter =
                 receiver il owner ownerValueType nullable
                 il.Mark ready
             | None -> receiver il owner ownerValueType nullable
-        arguments il referenceType referenceMethod 1 types
+        emitArguments()
         il.EmitMethod((if isStatic || ownerValueType then OpCodes.Call else OpCodes.Callvirt),method)
         if returnsVoid then il.Emit OpCodes.Ldnull
         elif boxed && resultValueType then il.EmitType(OpCodes.Box,result)
         il.Emit OpCodes.Ret
+
+    let call il referenceType referenceMethod ownerAddress owner ownerValueType nullable isStatic method types result resultValueType returnsVoid boxed =
+        callBody il referenceType ownerAddress owner ownerValueType nullable isStatic method
+            (fun () -> arguments il referenceType referenceMethod 1 types) result resultValueType returnsVoid boxed
+
+    let stringIndexer (il: CodecIL<'T,'M,'F>) owner ownerValueType nullable isStatic method result resultValueType =
+        callBody il owner None owner ownerValueType nullable isStatic method
+            (fun () -> il.Emit OpCodes.Ldarg_1) result resultValueType false true
 
     let memberRead (il: CodecIL<'T,'M,'F>) owner ownerValueType nullable (memberValue: CodecMember<'T,'M,'F>) valueType boxedReceiver boxed =
         if not memberValue.Static then
@@ -119,4 +127,10 @@ module internal QueryOperationEmitter =
             il.Emit OpCodes.Ldelem_I4
         if rank = 1 then il.EmitType(OpCodes.Ldelema,element)
         else il.EmitMethod(OpCodes.Call,address)
+        il.Emit OpCodes.Ret
+
+    let withoutReceiver (il: CodecIL<'T,'M,'F>) method =
+        il.Emit OpCodes.Ldnull
+        il.Emit OpCodes.Ldarg_0
+        il.EmitMethod(OpCodes.Call,method)
         il.Emit OpCodes.Ret

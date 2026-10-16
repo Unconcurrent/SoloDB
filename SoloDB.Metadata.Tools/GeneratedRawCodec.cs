@@ -68,42 +68,42 @@ internal static partial class GeneratedRawCodec
         void Reader(string suffix, TypeReference reader)
         {
             var shape = model.Facts.Shape;
-            var collection = TypeSupport.Collection(shape);
-            if (shape == TypeShape.BsonDocument)
+            var operation = CodecPreparation.reader(model.Type.FullName,TypeSupport.ForDefinition(shape,model.Type.FullName),definitions.Stored);
+            if (operation == RawRootOperation.Bson)
             {
                 var create = Body("RawTreeConstruct" + suffix + index,model.Type,api.Json);
-                var il = create.Body.GetILProcessor(); il.Emit(OpCodes.Ldarg_0); il.Emit(OpCodes.Newobj,module.ImportReference(model.Constructor!)); il.Emit(OpCodes.Ret);
+                CodecEmitter.typedConstruction(new CecilCodecIL(create),module.ImportReference(model.Constructor!),1);
                 Delegate(api.Function(api.Json,model.Type),create);
                 entry.Emit(OpCodes.Call,Method("JsonRawCollections","TreeReader",model.Type,reader));
                 return;
             }
-            if (TypeSupport.DictionaryShape(shape))
+            if (operation == RawRootOperation.Dictionary)
             {
                 var body=GeneratedDictionaryCodec.Reader(definitions,module,owner,product,model,reader,"ReadDictionary"+suffix+index,models!);
                 Delegate(Closed("JsonDirectReader`2",model.Type,reader),body);
                 return;
             }
-            if (collection)
+            if (operation == RawRootOperation.Sequence)
             {
                 var body=GeneratedSequenceCodec.CustomReader(definitions,module,owner,product,model,reader,"ReadSequence"+suffix+index,models!);
                 Delegate(Closed("JsonDirectReader`2",model.Type,reader),body);
                 return;
             }
-            if (model.Type is ArrayType { Rank: 1 } rootArray)
+            if (operation == RawRootOperation.Array && model.Type is ArrayType rootArray)
             {
                 var arrayMethod = ArrayReader(definitions,module,owner,product,rootArray,reader,"Read"+suffix+index,models!);
                 Delegate(Closed("JsonDirectReader`2",model.Type,reader),arrayMethod);
                 entry.Emit(OpCodes.Call,api.Operation("JsonRawInput","Wrap",model.Type,reader));
                 return;
             }
-            if(shape==TypeShape.Tuple && definitions.TryGet("tuple-read",model.Type,reader,"",out var tupleReader))
+            if(operation==RawRootOperation.Tuple && definitions.TryGet("tuple-read",model.Type,reader,"",out var tupleReader))
             {
                 Delegate(Closed("JsonDirectReader`2",model.Type,reader),tupleReader);return;
             }
             var context = Closed("JsonReadContext`1", reader);
             var method = Body("Read" + suffix + index,module.ImportReference(model.Type),new ByReferenceType(context));
             MethodReference Input(string name, params TypeReference[] arguments) => Method("JsonRawInput",name,arguments.Concat(new[] { reader }).ToArray());
-            if (model.Facts.Shape == TypeShape.Tuple)
+            if (operation == RawRootOperation.Tuple)
             {
                 definitions.Add("tuple-read",model.Type,reader,"",method);
                 var tupleInput=new CodecTupleReaderApi<TypeReference,MethodReference>(context,
@@ -166,22 +166,23 @@ internal static partial class GeneratedRawCodec
         void Writer(string suffix, TypeReference encoding, TypeReference writer)
         {
             var shape = model.Facts.Shape;
-            if (shape == TypeShape.BsonDocument)
+            var operation = CodecPreparation.writer(model.Type.FullName,TypeSupport.ForDefinition(shape,model.Type.FullName),definitions.Stored,
+                model.Facts.AbstractType,model.SequenceElement?.FullName == "System.Byte",model.Facts.NonGenericEnumerable);
+            if (operation == RawRootOperation.Bson)
             {
                 var get = Body("RawTreeValue" + suffix + index,api.Json,model.Type);
-                var il = get.Body.GetILProcessor(); il.Emit(OpCodes.Ldarg_0);
-                il.Emit(OpCodes.Call,new MethodReference("get_Json",api.Json,module.ImportReference(model.Type)) { HasThis = true }); il.Emit(OpCodes.Ret);
+                CodecEmitter.directCall(new CecilCodecIL(get),new MethodReference("get_Json",api.Json,module.ImportReference(model.Type)) { HasThis = true },1);
                 Delegate(api.Function(model.Type,api.Json),get);
                 entry.Emit(OpCodes.Call,Method("JsonRawCollections","TreeWriter",model.Type,encoding,writer)); return;
             }
-            if(TypeSupport.DictionaryShape(shape) && !TypeSupport.RawPolymorphicFactory(shape,model.Facts.AbstractType))
+            if(operation == RawRootOperation.Dictionary)
             {
                 var body=GeneratedDictionaryCodec.Writer(definitions,module,owner,product,model,encoding,writer,"WriteDictionary"+suffix+index,models!);
                 Delegate(Closed("JsonDirectWriter`2",model.Type,encoding),body);
                 return;
             }
             var collectionWriter = TypeSupport.RawCollectionWriter(shape,model.Facts.AbstractType,model.Facts.NonGenericEnumerable);
-            if (collectionWriter.Length != 0 && collectionWriter != "AbstractWriter")
+            if (operation == RawRootOperation.Sequence && collectionWriter.Length != 0)
             {
                 if (collectionWriter == "SequenceWriter" || collectionWriter == "NonGenericSequenceWriter")
                 {

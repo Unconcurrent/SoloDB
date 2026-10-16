@@ -2,29 +2,22 @@ namespace SoloDatabase
 
 open System
 open System.Reflection
+open System.Reflection.Emit
+open SoloDatabase.Metadata.CodecGeneration
 open Utils
-open SQLiteToolsRowConversions
 
 module internal SQLiteToolsMapperQuery =
     type private TupleDefault<'T>() =
         static member private Build() =
             if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "SQL tuple default" typeof<'T>
-            let rec construct (tupleType: Type) =
-                let elements = TypeMetadata.GenericTypeArgCache.Get tupleType
-                let defaults = elements |> Array.mapi (fun index element ->
-                    if index = 7 && elements.Length = 8 && isTuple element then construct element
-                    elif element.IsValueType then
-                        let constructor = Option.ofObj(element.GetConstructor(Type.EmptyTypes))
-                        let create = QueryMethodDiscovery.defaultConstruction element constructor
-                        Func<obj>(fun () ->
-                            try create.Invoke() with error -> raise(TargetInvocationException(error)))
-                    else Func<obj>(fun () -> null))
-                let create = QueryValueMetadata.Constructor(tupleType,Array.toList elements)
-                Func<obj>(fun () ->
-                    let values = defaults |> Array.map(fun create -> create.Invoke())
-                    try create.Invoke values with error -> raise(TargetInvocationException(error)))
-            let create = construct typeof<'T>
-            Func<'T>(fun () -> unbox<'T>(create.Invoke()))
+            let create = SqlTupleDefaultEmitter.prepare (RuntimeTupleFacts.model typeof<'T>)
+                            (Func<Type,bool>(fun typ -> typ.IsValueType))
+                            (Func<Type,MethodBase option>(fun typ -> Option.ofObj(typ.GetConstructor(Type.EmptyTypes)) |> Option.map(fun constructor -> constructor :> MethodBase)))
+                            typeof<Exception> (typeof<TargetInvocationException>.GetConstructor([|typeof<Exception>|]) :> MethodBase)
+                            (Func<Type,CodecIL<Type,MethodBase,FieldInfo> * MethodBase>(fun typ ->
+                                let method = DynamicMethod("SqlTupleDefault",typ,Type.EmptyTypes,typ.Module,true)
+                                (RuntimeCodecIL(method.GetILGenerator()) :> CodecIL<Type,MethodBase,FieldInfo>), (method :> MethodBase)))
+            (create :?> DynamicMethod).CreateDelegate(typeof<Func<'T>>) :?> Func<'T>
 
         static member Create() =
             let factory = TypeMetadataCache.Discover(typeof<'T>, (fun metadata -> metadata.TupleDefault),
