@@ -16,7 +16,10 @@ public static class GeneratedUnionMetadata
     private static bool Kind(ICustomAttributeProvider owner, SourceConstructFlags kind) => Mapping(owner) is { } mapping &&
         ((SourceConstructFlags)Convert.ToInt32(mapping.ConstructorArguments[0].Value) & SourceConstructFlags.KindMask) == kind;
 
-    public static GeneratedModel[] Collect(ModuleDefinition module, TypeReference source, bool? hostedReferences = null)
+    public static GeneratedModel[] Collect(ModuleDefinition module, TypeReference source, bool? hostedReferences = null) =>
+        Collect(module,source,hostedReferences,null);
+
+    internal static GeneratedModel[] Collect(ModuleDefinition module,TypeReference source,bool? hostedReferences,Func<TypeReference,string>? signature)
     {
         var root = source.Resolve();
         var actual = module.ImportReference(source);
@@ -96,7 +99,7 @@ public static class GeneratedUnionMetadata
                 foreach (var argument in originalArguments.GenericArguments) closed.GenericArguments.Add(argument);
                 original = closed;
             }
-            model.OriginalProperties = GeneratedRowFields.Properties(module,original,name => model.AccessAssemblies.Add(name));
+            model.OriginalProperties = GeneratedRowFields.Properties(module,original,name => model.AccessAssemblies.Add(name),signature: signature);
             model.CloneConstructor = GeneratedRowFields.DefaultConstructor(module,original);
             if (model.CloneConstructor != null) model.AccessAssemblies.Add(root.Module.Assembly.Name.Name);
             if (!definition.IsPublic && !definition.IsNestedPublic) model.AccessAssemblies.Add(root.Module.Assembly.Name.Name);

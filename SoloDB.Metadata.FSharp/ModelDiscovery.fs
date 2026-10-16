@@ -668,7 +668,7 @@ module internal ModelDiscovery =
                                 | None -> invalidOp ("The compiler did not supply an enum width: " + fullName)
                         generated.ElementType <- width
                     if shape = TypeShape.Object && entity.IsFSharpUnion then
-                        for unionModel in UnionDiscovery.collect moduleDefinition typ actual memberType signature generated.OriginalProperties declaration do models.Add(unionModel)
+                        for unionModel in UnionDiscovery.collect moduleDefinition typ actual memberType signature generated.OriginalProperties declaration (CompilerPropertyFacts.signatureIdentity metadataResolver reference typ) do models.Add(unionModel)
                     else
                         models.Add(generated)
                         sources.Add(generated,typ)

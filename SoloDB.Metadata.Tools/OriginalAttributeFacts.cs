@@ -59,7 +59,7 @@ internal static class OriginalAttributeFacts
                 FSharpOption<FieldReference>.Some(reference),null!,null!,selected.Field.IsStatic,true,true,false,false);
         }
         var member = GeneratedRowFields.Properties(output,owner,access,identities:false)
-            .Single(candidate => candidate.Member.Name == name && GeneratedRowFields.SameSignatureType(candidate.Member.Type,valueType) && GeneratedRowFields.IndexParameters(candidate.Member).Length == 0).Member;
+            .Single(candidate => candidate.Member.Name == name && SourceTypeIdentity.SameSignature(candidate.Member.Type,valueType,owner.Module.AssemblyResolver) && GeneratedRowFields.IndexParameters(candidate.Member).Length == 0).Member;
         return member.Setter == null || !new MetadataResolver(owner.Module.AssemblyResolver).Resolve(member.Setter.Value).IsPublic ? null : member;
     }
 

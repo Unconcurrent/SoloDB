@@ -35,7 +35,9 @@ public static class OriginalArgumentSources
         return value;
     }
 
-    public static GeneratedArgumentSource? Read(ModuleDefinition module,TypeReference original)
+    public static GeneratedArgumentSource? Read(ModuleDefinition module,TypeReference original) => Read(module,original,null);
+
+    internal static GeneratedArgumentSource? Read(ModuleDefinition module,TypeReference original,Func<TypeReference,string>? signature)
     {
         if (original is GenericInstanceType nullable && nullable.ElementType.FullName == "System.Nullable`1") original=nullable.GenericArguments[0];
         var dictionary = new HashSet<string>(StringComparer.Ordinal);
@@ -53,7 +55,7 @@ public static class OriginalArgumentSources
         var access=new HashSet<string>(StringComparer.Ordinal);
         var first = original is ArrayType
             ? new TypeReference("System","Array",original.Module,original.Module.TypeSystem.CoreLibrary) : original;
-        var members = GeneratedRowFields.Properties(module,first,name => access.Add(name),identities: false)
+        var members = GeneratedRowFields.Properties(module,first,name => access.Add(name),identities: false,signature: signature)
             .Select(property => property.Member)
             .Where(member => TypeSupport.SqlArgumentProperty(true,member.Getter != null,member.Static,
                 GeneratedRowFields.IndexParameters(member).Length != 0)).ToArray();

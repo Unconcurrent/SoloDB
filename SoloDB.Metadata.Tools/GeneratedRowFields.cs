@@ -14,7 +14,7 @@ internal static class GeneratedRowFields
         new Func<GeneratedProperty,string>(property => property.Member.Name),
         new Func<GeneratedProperty,bool>(property => property.Member.Static));
 
-    internal static GeneratedProperty[] Merge(params GeneratedProperty[][] sources)
+    internal static GeneratedProperty[] Merge(Func<TypeReference,string> identity,params GeneratedProperty[][] sources)
     {
         var result = new System.Collections.Generic.List<GeneratedProperty>();
         var seen = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
@@ -23,7 +23,7 @@ internal static class GeneratedRowFields
         {
             var member = property.Member;
             if (property.VirtualSlot != null && !slots.Add(property.VirtualSlot)) continue;
-            var key = Signature(member);
+            var key = Signature(member,identity);
             if (seen.Add(key)) result.Add(property);
         }
         return result.ToArray();
@@ -38,27 +38,25 @@ internal static class GeneratedRowFields
                 getter,setter,false,getter != null,setter != null,member.Ignored,member.Many),property.Identity,property.PrivateGetter,property.PrivateSetter,property.VirtualSlot,property.Attributes,property.DeferredSchema);
         }).ToArray();
 
-    internal static bool SameSignatureType(TypeReference left,TypeReference right) => GeneratedJsonDefinitions.SignatureIdentity(left) == GeneratedJsonDefinitions.SignatureIdentity(right);
-
-    internal static string Signature(CodecMember<TypeReference,MethodReference,FieldReference> member)
+    private static string Signature(CodecMember<TypeReference,MethodReference,FieldReference> member,Func<TypeReference,string> identity)
     {
         var method = member.Getter?.Value ?? member.Setter?.Value;
         var value = member.Getter != null ? method!.ReturnType : method?.Parameters.Last().ParameterType ?? member.Type;
         var parameters = method == null ? Array.Empty<TypeReference>() : (member.Getter != null ? method.Parameters : method.Parameters.Take(method.Parameters.Count - 1)).Select(parameter => parameter.ParameterType);
-        return member.Name + ":" + (method?.CallingConvention.ToString() ?? "Default") + ":" + !member.Static + ":" + GeneratedJsonDefinitions.SignatureIdentity(value) + ":" + string.Join(";",parameters.Select(GeneratedJsonDefinitions.SignatureIdentity));
+        return member.Name + ":" + (method?.CallingConvention.ToString() ?? "Default") + ":" + !member.Static + ":" + identity(value) + ":" + string.Join(";",parameters.Select(identity));
     }
 
-    internal static string? VirtualSlot(PropertyDefinition property,TypeReference owner)
+    internal static string? VirtualSlot(PropertyDefinition property,TypeReference owner,Func<TypeReference,string> identity)
     {
         var accessor = property.GetMethod ?? property.SetMethod;
         if (accessor == null || !accessor.IsVirtual) return null;
         while (HelperAssembly.ParentProperty(property,owner) is { } parent) { property = parent.Property; owner = parent.Owner; }
         accessor = property.GetMethod ?? property.SetMethod!;
-        return SlotIdentity(owner,accessor.Name,accessor.ReturnType,accessor.Parameters.Select(parameter => parameter.ParameterType).ToArray());
+        return SlotIdentity(owner,accessor.Name,accessor.ReturnType,accessor.Parameters.Select(parameter => parameter.ParameterType).ToArray(),identity);
     }
 
-    internal static string SlotIdentity(TypeReference owner,string name,TypeReference result,TypeReference[] parameters) =>
-        GeneratedJsonDefinitions.Identity(owner) + ":" + name + ":" + GeneratedJsonDefinitions.SignatureIdentity(result) + ":" + string.Join(";",parameters.Select(GeneratedJsonDefinitions.SignatureIdentity));
+    internal static string SlotIdentity(TypeReference owner,string name,TypeReference result,TypeReference[] parameters,Func<TypeReference,string> identity) =>
+        identity(owner) + ":" + name + ":" + identity(result) + ":" + string.Join(";",parameters.Select(identity));
 
     internal static TypeReference[] IndexParameters(CodecMember<TypeReference,MethodReference,FieldReference> member)
     {
@@ -99,10 +97,11 @@ internal static class GeneratedRowFields
                     !field.IsInitOnly && !field.IsLiteral,false,false);
             }).ToArray();
     }
-    internal static GeneratedProperty[] Properties(ModuleDefinition module,TypeReference type,Action<string> access,bool inherited = false,Func<TypeReference,bool?>? many = null,bool identities = true)
+    internal static GeneratedProperty[] Properties(ModuleDefinition module,TypeReference type,Action<string> access,bool inherited = false,Func<TypeReference,bool?>? many = null,bool identities = true,Func<TypeReference,string>? signature = null)
     {
         if (type is ArrayType) return Array.Empty<GeneratedProperty>();
         var members = new System.Collections.Generic.List<GeneratedProperty>();
+        var identity = signature ?? new Func<TypeReference,string>(value => SourceTypeIdentity.Signature(value,type.Module.AssemblyResolver));
         TypeReference? current = type;
         while (current != null && current.FullName != "System.Object")
         {
@@ -131,11 +130,11 @@ internal static class GeneratedRowFields
                     getter != null,setter != null,false,identities && getter != null && setter != null && !accessor.IsStatic &&
                         Many(Closed(definition.Module,property.PropertyType,current),many)),
                     identities ? HelperAssembly.IdentityGenerator(module,property,access) : null,
-                    property.GetMethod?.IsPrivate == true,property.SetMethod?.IsPrivate == true,VirtualSlot(property,current),identities ? OriginalAttributeFacts.Read(module,property,access) : null));
+                    property.GetMethod?.IsPrivate == true,property.SetMethod?.IsPrivate == true,VirtualSlot(property,current,identity),identities ? OriginalAttributeFacts.Read(module,property,access) : null));
             }
             current = definition.BaseType == null ? null : Closed(definition.Module,definition.BaseType,current);
         }
-        return Merge(members.ToArray());
+        return Merge(identity,members.ToArray());
     }
 
     private static TypeReference Closed(ModuleDefinition module,TypeReference value,TypeReference owner) =>

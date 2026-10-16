@@ -40,19 +40,20 @@ module internal ArgumentSourceFacts =
         let rec closed (typ: FSharpType) = not typ.IsGenericParameter && (typ.GenericArguments |> Seq.forall closed)
         let rec read reference (typ: FSharpType) =
             let typ = typ.StripAbbreviations()
+            let identity () = CompilerPropertyFacts.signatureIdentity resolver reference typ
             if not(closed typ) || typ.IsFunctionType || not(typ.HasTypeDefinition || typ.IsAnonRecordType || typ.IsTupleType) then None
             elif typ.HasTypeDefinition && typ.TypeDefinition.TryFullName = Some "System.Object" then None
             elif typ.HasTypeDefinition && typ.TypeDefinition.TryFullName = Some "System.Nullable`1" then read reference typ.GenericArguments[0]
             elif typ.IsAnonRecordType then Some(anonymous mapper reference typ.AnonRecordTypeDetails (CompilerReferences.isValueType typ) (Seq.toArray typ.GenericArguments))
             elif typ.HasTypeDefinition && typ.TypeDefinition.IsArrayType then
                 let original = SourceTypeIdentity.Original(reference typ.BaseType.Value,resolver)
-                let properties = OriginalArgumentSources.Read(moduleDefinition,original)
+                let properties = OriginalArgumentSources.Read(moduleDefinition,original,identity())
                 let result = GeneratedArgumentSource(reference typ,properties.Members)
                 for name in properties.AccessAssemblies do result.AccessAssemblies.Add name |> ignore
                 Some result
             elif typ.IsTupleType then
                 let original = SourceTypeIdentity.Original(reference typ,resolver)
-                Option.ofObj(OriginalArgumentSources.Read(moduleDefinition,original))
+                Option.ofObj(OriginalArgumentSources.Read(moduleDefinition,original,identity()))
             elif typ.HasTypeDefinition && (typ.TypeDefinition.IsInterface || typ.TypeDefinition.IsAbstractClass) then None
             elif typ.HasTypeDefinition && typ.TypeDefinition.Assembly.FileName.IsSome && not(String.IsNullOrEmpty typ.TypeDefinition.Assembly.QualifiedName) then
                 let actual: TypeReference = reference typ
@@ -67,7 +68,7 @@ module internal ArgumentSourceFacts =
                         for argument in instance.GenericArguments do value.GenericArguments.Add argument
                         value :> TypeReference
                     | _ -> definition :> TypeReference
-                Option.ofObj(OriginalArgumentSources.Read(moduleDefinition,original))
+                Option.ofObj(OriginalArgumentSources.Read(moduleDefinition,original,identity()))
             elif typ.HasTypeDefinition then
                 let actual = reference typ
                 let access = HashSet<string>(StringComparer.Ordinal)

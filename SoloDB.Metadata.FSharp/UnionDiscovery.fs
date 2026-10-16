@@ -12,7 +12,7 @@ open SoloDatabase.Metadata.Tools
 module internal UnionDiscovery =
     let collect (moduleDefinition: ModuleDefinition) (typ: FSharpType) (actual: TypeReference)
                 (memberType: FSharpType -> TypeReference) (signature: FSharpType -> TypeReference) (originalProperties: GeneratedProperty[])
-                (declaration: CodecMember<TypeReference,MethodReference,FieldReference> -> seq<FSharpAttribute> -> seq<FSharpAttribute> -> GeneratedProperty) =
+                (declaration: CodecMember<TypeReference,MethodReference,FieldReference> -> seq<FSharpAttribute> -> seq<FSharpAttribute> -> GeneratedProperty) (identity: Func<TypeReference,string>) =
         let hasNoArguments (memberValue: FSharpMemberOrFunctionOrValue) =
             memberValue.CurriedParameterGroups |> Seq.collect id |> Seq.forall(fun argument ->
                 let actual = argument.Type.StripAbbreviations()
@@ -88,7 +88,7 @@ module internal UnionDiscovery =
             cases |> Seq.collect _.Fields |> Seq.tryFind(fun field -> field.Name = rootFacts[index].Name)
             |> Option.map(fun field -> field.PropertyAttributes :> seq<_>) |> Option.defaultValue Seq.empty
         let rootDeclarations = declarations rootFacts rootMembers rootAttributes
-        generated.OriginalProperties <- GeneratedRowFields.Merge(originalProperties,rootDeclarations)
+        generated.OriginalProperties <- GeneratedRowFields.Merge(identity,originalProperties,rootDeclarations)
         if not entity.IsValueType && (runtimeTypes || nullBacked || cases.Length = 1 && emptyCases = 1) then
             generated.CloneConstructor <- MethodReference(".ctor",moduleDefinition.TypeSystem.Void,actual,HasThis = true)
             generated.AccessAssemblies.Add(entity.Assembly.SimpleName) |> ignore
@@ -160,7 +160,7 @@ module internal UnionDiscovery =
                 for memberValue in rootMembers do members.Add memberValue
                 let model = Model(caseType.FullName,entity.FullName,TypeShape.Object,false,false,false,null,facts)
                 let caseModel = GeneratedModel(model,caseType,null,members.ToArray())
-                caseModel.OriginalProperties <- GeneratedRowFields.Merge(
+                caseModel.OriginalProperties <- GeneratedRowFields.Merge(identity,
                     localDeclarations,
                     GeneratedRowFields.Inherited(generated.OriginalProperties))
                 if item.Fields.Count = 0 then
@@ -189,5 +189,5 @@ module internal UnionDiscovery =
                         for argument in closed.GenericArguments do source.GenericArguments.Add(argument)
                         source :> TypeReference
                     | _ -> original
-                GeneratedUnionMetadata.Collect(moduleDefinition, source, hosted)
+                GeneratedUnionMetadata.Collect(moduleDefinition, source, hosted,identity)
             | None -> invalidOp ("The compiler union input has no metadata path: " + entity.FullName)

@@ -81,7 +81,7 @@ internal static class HelperAssembly
                 var method = property.GetMethod != null ? candidate.GetMethod : candidate.SetMethod;
                 if (method == null || !method.IsVirtual || method.Name != accessor.Name || method.Parameters.Count != accessor.Parameters.Count) continue;
                 if (method.Parameters.Select(parameter => OriginalArgumentSources.Close(parameter.ParameterType,symbolic!))
-                    .Zip(accessor.Parameters,(left,right) => GeneratedRowFields.SameSignatureType(left,right.ParameterType)).All(equal => equal)) return (candidate,parent);
+                    .Zip(accessor.Parameters,(left,right) => SourceTypeIdentity.SameSignature(left,right.ParameterType,property.Module.AssemblyResolver)).All(equal => equal)) return (candidate,parent);
             }
             symbolic = definition.BaseType == null ? null : OriginalArgumentSources.Close(definition.BaseType,symbolic!);
             parent = definition.BaseType == null ? null : OriginalArgumentSources.Close(definition.BaseType,parent);
@@ -96,7 +96,7 @@ internal static class HelperAssembly
         var parent = ParentProperty(property,property.DeclaringType);
         if (!parent.HasValue || parent.Value.Property.Name != property.Name) return null;
         var value = OriginalArgumentSources.Close(parent.Value.Property.PropertyType,parent.Value.Owner);
-        return GeneratedRowFields.SameSignatureType(value,property.PropertyType) ? IdentityAttribute(parent.Value.Property) : null;
+        return SourceTypeIdentity.SameSignature(value,property.PropertyType,property.Module.AssemblyResolver) ? IdentityAttribute(parent.Value.Property) : null;
     }
 
     internal static bool InheritedAttribute(TypeReference type,string name)

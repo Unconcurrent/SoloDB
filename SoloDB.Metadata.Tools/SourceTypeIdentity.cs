@@ -13,6 +13,14 @@ internal static class SourceTypeIdentity
         assembly.MainModule.ExportedTypes.SingleOrDefault(type => type.FullName == name)?.Resolve() ??
         throw new InvalidOperationException("The exact generated type is absent from current inputs: " + name + ", " + assembly.Name.FullName);
 
+    internal static string Signature(TypeReference reference,IAssemblyResolver resolver,string? sourceAssembly = null) =>
+        GeneratedJsonDefinitions.SignatureIdentity(reference,type => type is TypeDefinition ||
+            sourceAssembly != null && type.Scope is AssemblyNameReference assembly && assembly.FullName == sourceAssembly
+                ? type : Original(type,resolver));
+
+    internal static bool SameSignature(TypeReference left,TypeReference right,IAssemblyResolver resolver) =>
+        Signature(left,resolver) == Signature(right,resolver);
+
     internal static TypeReference Original(TypeReference reference,IAssemblyResolver resolver)
     {
         var root = reference is GenericInstanceType closed ? closed.ElementType : reference;

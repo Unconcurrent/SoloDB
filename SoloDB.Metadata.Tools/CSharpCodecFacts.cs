@@ -99,9 +99,9 @@ internal static class CSharpCodecFacts
                 declared.IsValueType = memberOwner.IsValueType;
                 if (declared is GenericInstanceType closed) closed.ElementType.IsValueType = memberOwner.IsValueType;
                 var effective = fields[i] ? null : originalProperties.SingleOrDefault(property =>
-                    property.Member.Name == names[i] && GeneratedJsonDefinitions.SameType(property.Member.Type,values[i]) &&
+                    property.Member.Name == names[i] && SourceTypeIdentity.SameSignature(property.Member.Type,values[i],consumer.MainModule.AssemblyResolver) &&
                     GeneratedRowFields.IndexParameters(property.Member).Length == 0 &&
-                    GeneratedJsonDefinitions.SameType(property.Member.Getter?.Value.DeclaringType ?? property.Member.Setter!.Value.DeclaringType,declared));
+                    SourceTypeIdentity.SameSignature(property.Member.Getter?.Value.DeclaringType ?? property.Member.Setter!.Value.DeclaringType,declared,consumer.MainModule.AssemblyResolver));
                 if (!fields[i]) { read[i] &= effective?.Member.Getter != null; write[i] &= effective?.Member.Setter != null; }
                 facts[i] = new Member(names[i],values[i].FullName,fields[i],read[i],write[i],ignored[i]) {
                     ManyReference = many[i], DeclaringType = declared.FullName,
