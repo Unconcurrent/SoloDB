@@ -771,6 +771,12 @@ var highestPrice = pooledConnection.QueryFirst<decimal>("SELECT MAX(Price) FROM 
 var cheapProducts = pooledConnection.Query<Product>("SELECT * FROM Product WHERE Price < @MaxPrice", new { MaxPrice = 10.0 });
 ```
 
+### ADO.NET emulation
+
+SoloDB includes ADO.NET emulation for compatibility in the same project, assembly and NuGet package. `GetInternalConnection()` and pooled `Borrow()` return it automatically; no extra package or wrapper is required. Its types are in `SoloDatabase.Data.Sqlite`.
+
+This is a limited compatibility layer, not a full ADO.NET provider. Stored procedures and output parameters are unsupported; async calls perform synchronous SQLite work, and `Cancel()` does not interrupt execution. See [supported operations and ownership](docs/native-sql.md#adonet-emulation).
+
 ### F# Example
 
 SoloDB works seamlessly with F#.

@@ -73,9 +73,11 @@ Failed parameter capture, row mapping or required-row checks abort unread statem
 
 Catch `SoloDatabase.NativeSqliteException` for engine errors. Its `SqliteErrorCode` and `SqliteExtendedErrorCode` expose the primary and extended result codes. Connection state uses `SqliteConnectionState`.
 
-## Standard ADO.NET access
+<a id="standard-adonet-access"></a>
 
-The existing SoloDB package also provides standard ADO.NET connections, commands, parameters, readers and transactions in `SoloDatabase.Data.Sqlite`. `GetInternalConnection`, pooled `Borrow` and transaction connection properties return this presentation automatically and share their native connection. Internal SoloDB operations use native execution directly.
+## ADO.NET emulation
+
+SoloDB includes a limited ADO.NET compatibility layer in its existing project, assembly and package. It emulates connections, commands, parameters, readers and transactions in `SoloDatabase.Data.Sqlite`; it is not a full ADO.NET provider. `GetInternalConnection`, pooled `Borrow` and transaction connection properties return this presentation automatically and share their native connection. Internal SoloDB operations use native execution directly.
 
 ```csharp
 using System.Data;
@@ -92,6 +94,8 @@ var value = (long)command.ExecuteScalar();
 ```
 
 Existing inferred connection and standard-interface code keeps its acquisition syntax. Code naming the former provider types must use `SoloDatabase.Data.Sqlite`; the original `Microsoft.Data.Sqlite` package can coexist. Engine errors from this presentation use `SoloDatabase.Data.Sqlite.SqliteException`. Stored procedures and output parameters are unsupported.
+
+Async entry points perform synchronous SQLite work on the calling thread. Cancellation tokens can reject a call before execution; `Cancel()` does not interrupt SQLite execution. Standard `DbTransaction` savepoint overrides are provided by the .NET 6 asset. The .NET Standard assets expose savepoints on the concrete transaction type, without adding virtual methods absent from their target framework.
 
 Explicit `Close` ends the connection and its transactions. Disposing a transaction or event connection presentation leaves the surrounding scope's connection open; disposing an owned pooled acquisition returns it only after its raw SQL transaction is finished. An unsuccessful return can be retried after explicit rollback. Commands and readers cannot revive an expired acquisition or callback scope.
 
