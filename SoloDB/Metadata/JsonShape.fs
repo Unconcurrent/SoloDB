@@ -31,7 +31,15 @@ module internal JsonHelper =
     /// <param name="t">The type to check.</param>
     /// <returns>True if the type is a supported array type, false otherwise.</returns>
     let internal isSupportedNewtownsoftArrayType (t: Type) =
-        t.IsArray && SoloDatabase.Metadata.Generation.TypeSupport.SupportsValuesWrapper(t.GetElementType().FullName)
+        // For now support only primitive arrays.
+        t.IsArray &&
+        match t.GetElementType () with
+        | elementType when elementType.IsPrimitive -> true  // Covers Boolean, Byte, SByte, Int16, UInt16, Int32, UInt32, Int64, UInt64, IntPtr, UIntPtr, Char, Double, and Single.
+        | elementType when elementType = typeof<decimal> -> true
+        | elementType when elementType = typeof<DateTime> -> true
+        | elementType when elementType = typeof<TimeSpan> -> true
+        | elementType when elementType = typeof<string> -> true
+        | _ -> false
 
     /// <summary>
     /// A cache for the results of the implementsGeneric function.
