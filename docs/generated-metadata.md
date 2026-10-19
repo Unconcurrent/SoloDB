@@ -1,10 +1,12 @@
 # Generated metadata registration
 
+> This guide describes the upcoming SoloDB 1.4.0. The published NuGet release is 1.3.0; see the [README](../README.md#installation) for the release distinction.
+
 Package-backed C# and F# examples and generated query controls have passed JIT and linux-x64 NativeAOT checks. These results do not establish every native platform or warning-free publication. F# NativeAOT queries use `CompileQuotation` as described below.
 
 The `SoloDB` package includes a C# source generator, an F# type provider and their build integration. Keep the package's build assets enabled; no separate generator package or manual build-target import is required for package consumers.
 
-Both routes generate operations for your original model types. They preserve model visibility, CLR identity and the existing JSON format. You do not need replacement models or `partial` declarations on models. Generated operations can also be used in ordinary JIT applications; they share conversion policies with ordinary runtime-discovered operations.
+Both routes generate operations for your original model types, preserving their visibility and CLR identity. They share conversion and storage policies with ordinary runtime-discovered operations; registration does not select a different database format. The [numerical storage upgrade](#numerical-storage-and-migration) applies to both routes. You do not need replacement models or `partial` declarations on models. Generated operations can also be used in ordinary JIT applications.
 
 Private nested C# model controls, including closed generics, arrays, captured fields and anonymous client results, pass package-backed JIT with dynamic discovery disabled and linux-x64 NativeAOT checks.
 
@@ -212,9 +214,13 @@ List overloads append to existing contents and return only the number of element
 
 Direct numeric conversion uses the declared integer, `double`, `float` or `decimal` type. Floating values avoid the decimal-backed tree's rounding and range limitations, so values previously rounded or rejected cannot have a blanket byte-identical-output guarantee. Direct floating-point writers use invariant numeric formatting, preserve negative zero as `-0`, and emit the JSON5 literals `NaN`, `Infinity` and `-Infinity` for nonfinite values. Explicit `JsonValue.Number` keeps its decimal representation. .NET Standard 2.0 UTF-16 numeric formatting may allocate a number-only string; direct output is not an allocation-free guarantee.
 
-Typed document persistence stores Decimal and BigInteger values as canonical comparable strings; public direct JSON writes native numeric values. Typed numerical queries retain exact coefficients and exponents until the requested operation or conversion applies its native rounding and range rules. Ordinary string properties and numerical dictionary names retain their original meaning.
+### Numerical storage and migration
+
+Typed document persistence stores Decimal and BigInteger values as canonical comparable strings; public direct JSON writes native numeric values. Typed numerical queries retain exact coefficients and exponents until the requested operation or conversion applies its native rounding and range rules. Ordinary string properties and numerical dictionary names retain their original meaning. Raw SQL extraction exposes the encoded text; SQLite's native casts and arithmetic do not decode that representation.
 
 When an existing typed collection requires numerical migration, initialization converts its declared numerical fields in one transaction before returning the collection. A migration failure rolls back those changes and fails initialization. Stored numerical reads use the new representation after successful initialization; they do not retry a legacy representation. Canonical storage retains numerical value rather than Decimal scale bits.
+
+### Earlier direct JSON measurements
 
 Both packaged frontends have JIT and linux-x64 NativeAOT coverage. Other native platforms were not executed; existing native warning qualifications remain.
 

@@ -1,5 +1,7 @@
 # Direct SQL connections
 
+> This guide describes the upcoming SoloDB 1.4.0. The published NuGet release is 1.3.0; see the [README](../README.md#installation) for the release distinction.
+
 SoloDB exposes a native SQLite connection in `SoloDatabase`. Named SQL execution, typed results, transactions, callbacks and backups use the configured SQLitePCL engine.
 
 ```csharp

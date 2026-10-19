@@ -1,5 +1,7 @@
 # Filesystem events
 
+> This guide describes the upcoming SoloDB 1.4.0. The published NuGet release is 1.3.0; see the [README](../README.md#installation) for the release distinction.
+
 Subscribe through `db.FileSystem`. Registrations also apply to filesystem operations through a transaction or an event context from the same database instance.
 
 | Change | Before | After | Context |

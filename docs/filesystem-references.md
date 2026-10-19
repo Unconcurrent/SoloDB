@@ -1,5 +1,7 @@
 # Filesystem references
 
+> This guide describes the upcoming SoloDB 1.4.0. The published NuGet release is 1.3.0; see the [README](../README.md#installation) for the release distinction.
+
 Documents can reference existing files and directories with `FileRef`, `DirectoryRef`, `FileRefMany` and `DirectoryRefMany`. Saving a reference requires its target to exist in the same database. A target cannot be deleted until every protecting reference is removed. This also prevents deleting an ancestor directory or replacing a protected destination. Deleting a document or dropping its collection removes its references and preserves the targets.
 
 ## C#

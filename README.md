@@ -1,14 +1,8 @@
-# SoloDB - A Document Database With Full LINQ Support
+# SoloDB
 
-**Version 1.0** - [Stable Release](https://unconcurrent.com/articles/SoloDB100.html) and **Version 1.1** - [Relational Support](https://unconcurrent.com/articles/SoloDB110.html)
+Store your C# and F# objects, query them with LINQ, and keep related documents and files together in one SQLite database. SoloDB runs inside your application, with transactions and SQL available when you need them.
 
-[SoloDB](https://solodb.org/) is a high-performance, lightweight, and robust embedded .NET database that elegantly combines the power of a NoSQL document store with the reliability of SQL. Built directly on top of SQLite and its native [JSONB](https://sqlite.org/jsonb.html) support, SoloDB offers a serverless, feature-rich experience, combining a simple [MongoDB](https://www.mongodb.com/)-like API with full LINQ support for expressive, strongly-typed queries.
-
-SoloDB includes native relational-document support via `DBRef<T>`, `DBRefMany<T>`, and `[SoloRef(...)]`, so you can model references and graph-like data while staying in a strongly-typed document API.
-
-It is designed for developers who need a fast, reliable, and easy-to-use database solution without the overhead of a separate server. It's perfect for desktop applications, mobile apps (via .NET MAUI), and web applications.
-
-I wrote a detailed comparison with a popular alternative, [LiteDB](https://github.com/litedb-org/LiteDB) — including benchmarks, API differences, and developer experience. [Read the article here](https://unconcurrent.com/articles/SoloDBvsLiteDB.html).
+> This branch documents the upcoming **SoloDB 1.4.0**. The latest published NuGet release is **1.3.0**. Generated operations, direct typed JSON, and filesystem events and references described here require 1.4 when it is released.
 
 ## Table of Contents
 
@@ -28,8 +22,10 @@ I wrote a detailed comparison with a popular alternative, [LiteDB](https://githu
   - [Storing Polymorphic Data](#storing-polymorphic-data)
   - [Custom ID Generation](#custom-id-generation)
   - [Integrated File Storage](#integrated-file-storage)
+  - [Filesystem References](#filesystem-references)
   - [Events API](#events-api)
   - [Direct SQL Access](#direct-sql-access)
+  - [ADO.NET Emulation](#adonet-emulation)
   - [F# Example](#f-example)
 - [Database Management](#database-management)
   - [Backups](#backups)
@@ -52,7 +48,7 @@ SoloDB is packed with features that provide a seamless and powerful developer ex
 - **Thread-Safe**: A built-in connection pool ensures safe, concurrent access from multiple threads.
 - **Customizable ID Generation**: Use the default long primary key, or implement your own custom ID generation strategy (e.g., string, Guid).
 - **.NET Standard 2.0 & 2.1**: Broad compatibility with .NET Framework, .NET Core, and modern .NET runtimes.
-- **Open Source**: Licensed under the permissive LGPL-3.0.
+- **Open Source**: Licensed under LGPL-3.0, with the bundling permission described below.
 - **Documentation**: See the [official documentation](https://solodb.org/docs.html) for detailed guides.
 
 ## Why SoloDB?
@@ -61,11 +57,13 @@ In a world of countless database solutions, SoloDB was created to fill a specifi
 
 ## Installation
 
-Install SoloDB directly from the NuGet Package Manager.
+Install the published stable release from NuGet:
 
 ```bash
-dotnet add package SoloDB
+dotnet add package SoloDB --version 1.3.0
 ```
+
+The 1.4 APIs below describe this development branch and are not included in that package. The [website documentation](https://solodb.org/docs.html) currently covers the earlier published API; its 1.4 update will accompany the package release.
 
 ## Generated Metadata Registration
 
@@ -87,7 +85,7 @@ int[] values = JsonValue.ParseInto<int[]>(json);
 
 An empty span grows automatically; `written` counts bytes for UTF-8 and characters for UTF-16. Writable-list overloads append and return the added count. See the [direct JSON guide](docs/generated-metadata.md#direct-typed-json) for custom growth/release callbacks, final-buffer ownership and failure behavior. NativeAOT uses the generated registration described above. `Serialize<T>` and `Parse` remain available when you need a `JsonValue` tree.
 
-Direct floating-point conversion avoids the decimal-backed tree's rounding and range limits. Output for values previously rounded or rejected can differ. The forward typed-reader implementation passes current functional controls: setters and conversions run in input order, an invalid earlier duplicate fails, and user effects can remain after later malformed or trailing input. Exceptional late runtime-type selection can replay conversion and add effects. See the [direct JSON behavior and ownership guide](docs/generated-metadata.md#direct-typed-json). A single checked round-trip comparison reduced elapsed time and managed allocation for small and large integer arrays in both encodings; see the guide for exact scope. It establishes no general speedup, allocation-free behavior or competitor advantage.
+Direct floating-point conversion avoids the decimal-backed tree's rounding and range limits. Output for values previously rounded or rejected can differ. Forward object readers run setters and conversions in input order: an invalid earlier duplicate fails, and user effects can remain after later malformed or trailing input. Exceptional late runtime-type selection can replay conversion and add effects. See the [direct JSON behavior and ownership guide](docs/generated-metadata.md#direct-typed-json).
 
 ## Getting Started: A 60-Second Guide
 
@@ -756,20 +754,33 @@ A: No. `ctx.Item` is a read-only copy. To reject an operation, throw an exceptio
 
 ### Direct SQL Access
 
-For complex scenarios not easily covered by LINQ, you can execute raw SQL commands directly.
+Use raw SQL for your own tables alongside document collections. This example creates a separate SQL table; collection properties live inside JSONB and are not ordinary SQL columns.
 
 ```csharp
+using SoloDatabase;
+using static SoloDatabase.NativeSQLiteTools.IDbConnectionExtensions;
+
+using var db = new SoloDB("memory:sql-example");
 using var pooledConnection = db.Connection.Borrow();
 
-// Execute a command that doesn't return data
-pooledConnection.Execute("UPDATE Product SET Price = Price * 1.1 WHERE Category = 'Electronics'");
+pooledConnection.Execute("CREATE TABLE Inventory(Name TEXT, PriceInCents INTEGER)");
+pooledConnection.Execute("INSERT INTO Inventory VALUES(@name, @price)",
+    new { name = "Notebook", price = 500L });
+pooledConnection.Execute("UPDATE Inventory SET PriceInCents = PriceInCents + @amount",
+    new { amount = 50L });
 
-// Execute a query and map the first result to a value
-var highestPrice = pooledConnection.QueryFirst<decimal>("SELECT MAX(Price) FROM Product");
+long highestPrice = pooledConnection.QueryFirst<long>("SELECT MAX(PriceInCents) FROM Inventory");
 
-// Execute a query and map results to objects
-var cheapProducts = pooledConnection.Query<Product>("SELECT * FROM Product WHERE Price < @MaxPrice", new { MaxPrice = 10.0 });
+// Enumerate while the pooled connection remains alive.
+foreach (var item in pooledConnection.Query<(string Name, long PriceInCents)>(
+    "SELECT Name, PriceInCents FROM Inventory WHERE PriceInCents < @maximum",
+    new { maximum = 1000L }))
+{
+    Console.WriteLine($"{item.Name}: {item.PriceInCents}");
+}
 ```
+
+Typed Decimal and BigInteger document fields use the [stored numerical representation](docs/generated-metadata.md#numerical-storage-and-migration); raw SQL keeps SQLite's own value and arithmetic rules.
 
 ### ADO.NET emulation
 
