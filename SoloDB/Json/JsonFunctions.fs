@@ -207,7 +207,7 @@ module internal JsonFunctions =
 
     [<MethodImpl(MethodImplOptions.NoInlining)>]
     let private fromSQLiteValue<'R when 'R :> obj> (row: DbObjectRow) : 'R =
-        let inline genericReinterpret (a: 'a when 'a : unmanaged) =
+        let inline genericReinterpret (a: 'a) =
             // No allocations.
             Unsafe.As<'a, 'R>(&Unsafe.AsRef(&a))
 

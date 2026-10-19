@@ -187,6 +187,10 @@ module internal QueryableBuildQueryGroupByOps =
             Some (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some "o", syntheticGroupKeyAlias)))
         else None
 
+    let private nullSensitiveKeyLeaf (expr: Expression) =
+        let isNullable = expr.Type.IsGenericType && typedefof<Nullable<_>>.Equals(expr.Type.GetGenericTypeDefinition())
+        if isNullable || DateTimeFunctions.isDateTimeLikeType expr.Type then [expr] else []
+
     let rec private collectNullSensitiveKeyParts (expr: Expression) : Expression list =
         let expr =
             match expr with
@@ -194,6 +198,10 @@ module internal QueryableBuildQueryGroupByOps =
                 ue.Operand
             | _ -> expr
         match expr with
+        | :? BlockExpression as block ->
+            match QueryConstructionExpressions.orderedMembers block with
+            | ValueSome(struct(_, _, expressions, _)) -> expressions |> Array.toList |> List.collect collectNullSensitiveKeyParts
+            | ValueNone -> nullSensitiveKeyLeaf expr
         | :? BoundValueCallExpression as call when not(isNull call.ProjectionNames) ->
             call.Inputs |> Array.toList |> List.collect collectNullSensitiveKeyParts
         | :? NewExpression as ne when not (DateTimeFunctions.isDateTimeLikeType ne.Type) ->
@@ -206,11 +214,7 @@ module internal QueryableBuildQueryGroupByOps =
                 |> Seq.toList
                 |> List.collect (fun binding -> collectNullSensitiveKeyParts binding.Expression)
             fromNew @ fromBindings
-        | _ ->
-            let isNullable =
-                expr.Type.IsGenericType
-                && typedefof<Nullable<_>>.Equals(expr.Type.GetGenericTypeDefinition())
-            if isNullable || DateTimeFunctions.isDateTimeLikeType expr.Type then [ expr ] else []
+        | _ -> nullSensitiveKeyLeaf expr
 
     let private buildNullKeyFilter
         (sourceCtx: QueryContext)

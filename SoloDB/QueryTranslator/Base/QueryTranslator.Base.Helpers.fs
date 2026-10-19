@@ -218,13 +218,30 @@ module internal QueryTranslatorBaseHelpers =
         | null -> true
         | _ -> false
 
+    let internal unwrapStructCopy (expr: Expression) =
+        match expr with
+        | :? BlockExpression as block when block.Variables.Count = 1 && block.Expressions.Count = 2
+                                              && block.Variables.[0].Type.IsValueType ->
+            let variable = block.Variables.[0]
+            match block.Expressions.[0], block.Expressions.[1] with
+            | (:? BinaryExpression as assignment), (:? MemberExpression as access)
+                when assignment.NodeType = ExpressionType.Assign
+                     && Object.ReferenceEquals(assignment.Left, variable)
+                     && Object.ReferenceEquals(access.Expression, variable) ->
+                // A self-dependent assignment must not leave a free local after reduction.
+                let readsLocal = QueryConstructionExpressions.referencesParameter (fun parameter -> Object.ReferenceEquals(parameter, variable)) assignment.Right
+                if readsLocal then expr
+                else Expression.MakeMemberAccess(assignment.Right, access.Member) :> Expression
+            | _ -> expr
+        | _ -> expr
+
     /// <summary>
     /// Recursively checks if any part of an expression tree is a constant.
     /// </summary>
     /// <param name="expr">The expression to check.</param>
     /// <returns>True if any node in the expression is a ConstantExpression.</returns>
     let rec isAnyConstant (expr: Expression) : bool =
-        match expr with
+        match unwrapStructCopy expr with
         | :? IndexExpression as ie -> isAnyConstant ie.Object
         | :? ParameterExpression -> false
         | :? BinaryExpression as binExpr ->
@@ -302,40 +319,37 @@ module internal QueryTranslatorBaseHelpers =
             | :? LambdaExpression as lambda -> inlineLambdaInvocation lambda call.Arguments |> normalizeStoredConstruction
             | _ -> value
         | :? BlockExpression as block ->
-            match tryStoredLocal block with
-            | Some body -> normalizeStoredConstruction body
-            | None -> value
+            match QueryConstructionExpressions.memberInitializer block with
+            | ValueSome initializer -> initializer
+            | ValueNone when QueryConstructionExpressions.hasConstructionTail block -> value
+            | ValueNone ->
+                match tryStoredLocal block with
+                | Some body -> normalizeStoredConstruction body
+                | None -> value
         | _ -> value
 
 
-    let internal unwrapStructCopy (expr: Expression) =
-        match expr with
-        | :? BlockExpression as block when block.Variables.Count = 1 && block.Expressions.Count = 2
-                                              && block.Variables.[0].Type.IsValueType ->
-            let variable = block.Variables.[0]
-            match block.Expressions.[0], block.Expressions.[1] with
-            | (:? BinaryExpression as assignment), (:? MemberExpression as access)
-                when assignment.NodeType = ExpressionType.Assign
-                     && Object.ReferenceEquals(assignment.Left, variable)
-                     && Object.ReferenceEquals(access.Expression, variable) ->
-                // A self-dependent assignment must not leave a free local after reduction.
-                let mutable readsLocal = false
-                let visitor =
-                    { new ExpressionVisitor() with
-                        override _.VisitParameter parameter =
-                            if Object.ReferenceEquals(parameter, variable) then readsLocal <- true
-                            parameter :> Expression }
-                visitor.Visit assignment.Right |> ignore
-                if readsLocal then expr
-                else Expression.MakeMemberAccess(assignment.Right, access.Member) :> Expression
-            | _ -> expr
-        | _ -> expr
+    let internal isIntrinsicBox (call: MethodCallExpression) =
+        let method = call.Method
+        let owner = method.DeclaringType
+        if method.Name <> "Box" || not method.IsStatic || not method.IsGenericMethod || method.ContainsGenericParameters ||
+           call.Arguments.Count <> 1 || not(typeof<obj>.Equals method.ReturnType) || isNull owner ||
+           owner.FullName <> "Microsoft.FSharp.Core.Operators" || not(owner.Assembly.Equals(typeof<unit>.Assembly)) then false
+        else
+            let types = TypeMetadata.GenericMethodArgCache.Get method
+            let parameters = method.GetParameters()
+            types.Length = 1 && parameters.Length = 1 && types[0].Equals(call.Arguments[0].Type) && types[0].Equals(parameters[0].ParameterType)
 
     /// Unwrap the conversion or struct-copy wrapper used around a source expression.
     let internal unwrapConvert (expr: Expression) =
         match expr with
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> unwrapStructCopy ue.Operand
         | e -> unwrapStructCopy e
+
+    let rec internal unwrapConversions (expr: Expression) =
+        match unwrapStructCopy expr with
+        | :? UnaryExpression as conversion when conversion.NodeType = ExpressionType.Convert -> unwrapConversions conversion.Operand
+        | value -> value
 
     /// Reference equality uses the scalar identity even when projections carry a loaded snapshot.
     let internal fileSystemReferenceIdentity (visit: Expression -> QueryBuilder -> SqlExpr) (qb: QueryBuilder) (value: Expression) =

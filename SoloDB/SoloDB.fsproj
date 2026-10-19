@@ -23,7 +23,6 @@
     <VersionPrefix>1.4.0</VersionPrefix>
     <EnablePackageValidation>true</EnablePackageValidation>
     <LangVersion>10</LangVersion>
-    <ParallelCompilation>true</ParallelCompilation>
     <Deterministic>false</Deterministic>
 	<GenerateDocumentationFile>true</GenerateDocumentationFile>
 	<TreatWarningsAsErrors>True</TreatWarningsAsErrors>
@@ -282,6 +281,7 @@
     <Compile Include="QueryTranslator/Equality/EqualityComparison.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.PhysicalSource.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.ReferenceJoin.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.ConstructionExpressions.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.Helpers.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.SerializationSql.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.SerializationChildren.fs" />

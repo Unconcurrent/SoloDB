@@ -39,7 +39,7 @@ module internal HelperSchema =
     /// (DBRefMany member access or DBRef.Value navigation) that cannot produce a
     /// valid SQLite index expression.
     let rec private containsRelationSubExpression (expr: Expression) =
-        match expr with
+        match QueryTranslatorBaseHelpers.unwrapStructCopy expr with
         | :? MemberExpression as me ->
             // DBRefMany.Count / DBRefMany.IsLoaded etc — member on a DBRefMany-typed expression.
             if not (isNull me.Expression) && DBRefTypeHelpers.isDBRefManyType me.Expression.Type then
@@ -70,8 +70,9 @@ module internal HelperSchema =
     let internal getIndexWhereAndNameShared<'T, 'R> (name: string) (expression: Expression<System.Func<'T, 'R>>) =
         if isNull expression then raise (ArgumentNullException(nameof(expression)))
 
+        let expressionBody = QueryTranslatorBaseHelpers.unwrapStructCopy expression.Body
         let isDirectIdAccess =
-            match expression.Body with
+            match expressionBody with
             | :? MemberExpression as me ->
                 me.Member.Name = "Id" &&
                 match me.Expression with
@@ -83,7 +84,7 @@ module internal HelperSchema =
 
         // Expression-tree structural guard: reject relation-derived expressions BEFORE calling translate,
         // because the translator may silently fall through to jsonb_extract for unresolved relation metadata.
-        if containsRelationSubExpression expression.Body then
+        if containsRelationSubExpression expressionBody then
             raise (ArgumentException "Cannot index a relation expression that resolves through link tables (e.g. DBRefMany.Count, DBRef.Value.Property). Only direct column expressions and DBRef.Id are supported.")
 
         // Use translateWhereExpr → DU → strip aliases → emit.
@@ -100,7 +101,6 @@ module internal HelperSchema =
             | SqlExpr.FunctionCall(name, _) -> name = QueryTranslatorSpanSource.name
             | _ -> false) then raise (ArgumentException "Cannot index span membership.")
         let emitted = emitExprToSqlLocal stripped
-        let expressionBody = expression.Body
 
         if QueryTranslatorBaseHelpers.isAnyConstant expressionBody then
             raise (InvalidOperationException

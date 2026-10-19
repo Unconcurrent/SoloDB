@@ -23,14 +23,27 @@ open SoloDatabase.QuerySerializationSql
 module internal QueryTranslatorVisitCoreConstruction =
     type private TuplePart = Element of QueryProducedValue | Rest of Type * QueryProducedValue
 
-    let internal members (visitProduced: Expression -> QueryBuilder -> QueryProducedValue) target (names: string array) (expressions: Expression array) (qb: QueryBuilder) =
+    let private membersInOrder (visitProduced: Expression -> QueryBuilder -> QueryProducedValue) target (names: string array) (expressions: Expression array) (slots: int array voption) (qb: QueryBuilder) =
         let fieldQb = { qb with InsideJsonObjectProjection = true }
         let components = expressions |> Array.map (fun expression -> visitProduced expression fieldQb)
+        let memberTypes =
+            match slots with
+            | ValueSome slots -> slots |> Array.map (fun index -> expressions[index].Type)
+            | ValueNone -> expressions |> Array.map _.Type
         QueryProduced.construct qb.SourceContext.NextAlias (fun components ->
-            let components = components |> Array.map QueryProduced.embedded
+            let components =
+                match slots with
+                | ValueSome slots -> slots |> Array.map (fun index -> QueryProduced.embedded components[index])
+                | ValueNone -> components |> Array.map QueryProduced.embedded
             let values = components |> Array.mapi (fun index (value, _) -> struct(names[index], value))
-            let input = QuerySerializationInput.Members(target, names, expressions |> Array.map _.Type, components |> Array.map snd)
+            let input = QuerySerializationInput.Members(target, names, memberTypes, components |> Array.map snd)
             DirectValue(SqlExpr.JsonObjectExpr(values |> Array.map (fun struct(name, value) -> name, value) |> Array.toList), input)) components
+
+    let internal members visitProduced target names expressions qb =
+        membersInOrder visitProduced target names expressions ValueNone qb
+
+    let internal orderedMembers visitProduced target names expressions slots qb =
+        membersInOrder visitProduced target names expressions (ValueSome slots) qb
 
     let internal tuple (visitProduced: Expression -> QueryBuilder -> QueryProducedValue) (expression: Expression) (qb: QueryBuilder) =
         let rec parts expression =

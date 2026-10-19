@@ -198,7 +198,7 @@ module internal QueryableHelperJoin =
             let exactlyTwoBindings count ok =
                 count = 2 && ok && outerMember.IsSome && groupMember.IsSome
 
-            match lambda.Body with
+            match QueryTranslatorBaseHelpers.normalizeStoredConstruction lambda.Body with
             | :? NewExpression as n when not (isNull n.Members) ->
                 let ok =
                     [ for i in 0 .. n.Arguments.Count - 1 -> recordBinding n.Members.[i] n.Arguments.[i] ]
@@ -224,7 +224,7 @@ module internal QueryableHelperJoin =
         if lambda.Parameters.Count <> 1 then
             false
         else
-            match lambda.Body with
+            match QueryTranslatorBaseHelpers.normalizeStoredConstruction lambda.Body with
             | :? MethodCallExpression as mce when mce.Method.Name = "DefaultIfEmpty" && mce.Arguments.Count = 1 ->
                 match mce.Arguments.[0] with
                 | :? MemberExpression as me ->

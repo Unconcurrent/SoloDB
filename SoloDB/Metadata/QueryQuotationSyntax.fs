@@ -154,55 +154,10 @@ module internal QueryQuotationSyntax =
             lower variables expected (body.Substitute(fun candidate -> if candidate = variable then Some value else None))
         | Sequential(first,second) -> Expression.Block(child first,lower variables expected second) :> Expression
         | Let(variable, value, body) ->
-            // F# captures record arguments in source order before passing them in
-            // field order. Keep that order in the existing named construction node.
-            let rec capture bindings quotation =
-                match quotation with
-                | Let(variable,value,body) when not variable.IsMutable -> capture ((variable,value)::bindings) body
-                | NewRecord(typ,arguments) -> Some(typ,List.rev bindings,arguments)
-                | _ -> None
-            let captured =
-                match capture [] quotation with
-                | Some(typ,bindings,arguments) ->
-                    let variables = bindings |> List.map fst |> List.toArray
-                    let contains variable = variables |> Array.exists(fun current -> obj.ReferenceEquals(current,variable))
-                    let independent = bindings |> List.forall(fun (_,value) -> value.GetFreeVars() |> Seq.forall(contains >> not))
-                    let direct = arguments |> List.forall(function
-                        | Var variable when contains variable -> true
-                        | argument -> argument.GetFreeVars() |> Seq.forall(contains >> not))
-                    let once = variables |> Array.forall(fun variable ->
-                        arguments |> List.filter(function Var current -> obj.ReferenceEquals(current,variable) | _ -> false) |> List.length = 1)
-                    if independent && direct && once then Some(typ,bindings,arguments) else None
-                | None -> None
-            match captured with
-            | Some(typ,bindings,arguments) ->
-                let fields =
-                    match TypeMetadata.recordFields typ with
-                    | ValueSome fields -> fields
-                    | ValueNone -> raise(NotSupportedException($"Query record construction for '{typ.FullName}' has no registered fields."))
-                let inputs = ResizeArray<Expression>()
-                let names = ResizeArray<string>()
-                let positions = Array.zeroCreate arguments.Length
-                for variable,value in bindings do
-                    let index = arguments |> List.findIndex(function Var current -> obj.ReferenceEquals(current,variable) | _ -> false)
-                    positions.[index] <- inputs.Count
-                    inputs.Add(child value)
-                    names.Add(fields.[index])
-                for index,argument in arguments |> List.indexed do
-                    match argument with
-                    | Var variable when bindings |> List.exists(fun (current,_) -> obj.ReferenceEquals(current,variable)) -> ()
-                    | _ ->
-                        positions.[index] <- inputs.Count
-                        inputs.Add(child argument)
-                        names.Add(fields.[index])
-                let create = QueryValueMetadata.Constructor(typ,arguments |> List.map _.Type)
-                BoundValueCallExpression(inputs.ToArray(),typ,
-                    Func<obj[],obj>(fun values -> create.Invoke(positions |> Array.map(fun index -> values.[index]))),names.ToArray()) :> Expression
-            | None ->
-                let local = Expression.Variable(variable.Type, variable.Name)
-                let next = Dictionary<Var, Expression>(variables, HashIdentity.Reference)
-                next.Add(variable, local)
-                Expression.Block([|local|], [|Expression.Assign(local, child value) :> Expression; lower next expected body|]) :> Expression
+            let local = Expression.Variable(variable.Type, variable.Name)
+            let next = Dictionary<Var, Expression>(variables, HashIdentity.Reference)
+            next.Add(variable, local)
+            Expression.Block([|local|], [|Expression.Assign(local, child value) :> Expression; lower next expected body|]) :> Expression
         | AddressOf location -> child location
         | AddressSet(location,value) -> Expression.Block(Expression.Assign(child location,child value),Expression.Default(typeof<unit>)) :> Expression
         | WhileLoop _ | ForIntegerRangeLoop _ -> raise(NotSupportedException("Query quotation loops must run in a supplied client function, outside the SQL expression."))

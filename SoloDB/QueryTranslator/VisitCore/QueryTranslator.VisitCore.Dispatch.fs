@@ -104,7 +104,8 @@ module internal QueryTranslatorVisitCore =
         QueryTranslatorVisitCoreBinary.visitBinaryDu visitDu visitComparisonDu visitStoredValueDu visitPresenceDu b qb
 
     and private visitMethodCallDu valueUse (m: MethodCallExpression) (qb: QueryBuilder) : QueryProducedValue =
-        QueryTranslatorVisitCoreMethodCall.visitMethodCallDu visitProduced visitTextProduced (visitValueDu valueUse) visitComparisonProduced visitDu visitStoredValueDu visitPresenceDu visitMathMethodDu arrayIndexDu visitPropertyDu visitPreparedPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu membersProduced emitStringOperandDu m qb
+        if isIntrinsicBox m then visitValueDu valueUse m.Arguments[0] qb
+        else QueryTranslatorVisitCoreMethodCall.visitMethodCallDu visitProduced visitTextProduced (visitValueDu valueUse) visitComparisonProduced visitDu visitStoredValueDu visitPresenceDu visitMathMethodDu arrayIndexDu visitPropertyDu visitPreparedPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu membersProduced emitStringOperandDu m qb
 
     /// Scalar consumers project the value from the canonical paired lowerer.
     and internal visitDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
@@ -122,6 +123,7 @@ module internal QueryTranslatorVisitCore =
     and private visitTextProduced (exp: Expression) (qb: QueryBuilder) =
         let original =
             match exp with
+            | :? MethodCallExpression as boxing when isIntrinsicBox boxing -> boxing.Arguments[0]
             | :? UnaryExpression as boxing when boxing.NodeType = ExpressionType.Convert && typeof<obj>.Equals boxing.Type -> boxing.Operand
             | _ -> exp
         if typeof<char>.Equals original.Type then visitComparisonProduced original qb else visitProduced exp qb
@@ -133,6 +135,8 @@ module internal QueryTranslatorVisitCore =
     and private visitStoredValueDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
         let rec withoutBoxing (value: Expression) =
             match value with
+            | :? MethodCallExpression as boxing when isIntrinsicBox boxing && boxing.Arguments[0].Type.IsValueType ->
+                withoutBoxing boxing.Arguments[0]
             | :? UnaryExpression as conversion when conversion.NodeType=ExpressionType.Convert &&
                                                     typeof<obj>.Equals(conversion.Type) && conversion.Operand.Type.IsValueType ->
                 withoutBoxing conversion.Operand
@@ -252,20 +256,10 @@ module internal QueryTranslatorVisitCore =
             match DateTimeFunctions.translateDateTimeLikeConstructor m (fun arg -> visitDu arg qb) with
             | Some translated -> QueryProduced.typed m.Type translated
             | None when isTuple m.Type -> tupleProduced m qb
-            | None when not (isNull m.Members) && m.Members.Count = m.Arguments.Count ->
-                membersProduced m.Type (m.Members |> Seq.map _.Name |> Seq.toArray) (m.Arguments |> Seq.toArray) qb
-            | None when isNull m.Members ->
-                match TypeMetadata.recordFields m.Type with
-                | ValueSome fields when fields.Length = m.Arguments.Count &&
-                                        (fields |> Array.mapi (fun index name ->
-                                            let memberType = ModelMetadata.MemberType(m.Type, name, false)
-                                            let argumentType = m.Arguments.[index].Type
-                                            match memberType with
-                                            | Some valueType -> if isNull valueType then isNull argumentType else valueType.Equals(argumentType)
-                                            | None -> false) |> Array.forall id) ->
-                    membersProduced m.Type fields (m.Arguments |> Seq.toArray) qb
+            | None ->
+                match QueryConstructionExpressions.memberNames m with
+                | ValueSome fields -> membersProduced m.Type fields (m.Arguments |> Seq.toArray) qb
                 | _ -> raise (NotSupportedException(sprintf "Cannot construct new in SQL query %A" m.Type))
-            | None -> raise (NotSupportedException(sprintf "Cannot construct new in SQL query %A" m.Type))
         | ExpressionType.Parameter -> visitParameterDu valueUse (exp :?> ParameterExpression) qb
         | ExpressionType.ArrayIndex ->
             match exp with
@@ -301,12 +295,14 @@ module internal QueryTranslatorVisitCore =
             | _ -> raise (NotSupportedException("Error: Invoke expression is not reducible.\nReason: The invoked expression cannot be inlined or treated as a constant for SQL translation.\nFix: Inline the lambda or move the invocation after AsEnumerable()."))
         | ExpressionType.Block ->
             let block = exp :?> BlockExpression
-            // Quotation pattern matching first binds the stored value to a local.
-            // Only stored accesses can be substituted; executable client bindings
-            // retain their evaluation and storage owner.
-            match tryStoredLocal block with
-            | Some body -> visitValueDu valueUse body qb
-            | None -> raise(NotSupportedException("Only local bindings of stored values can be translated to SQL. Move executable bindings after AsEnumerable()."))
+            match QueryConstructionExpressions.orderedMembers block with
+            | ValueSome(struct(target, names, expressions, slots)) ->
+                QueryTranslatorVisitCoreConstruction.orderedMembers visitProduced target names expressions slots qb
+            | ValueNone ->
+                // Quotation pattern matching can separately bind a stored receiver.
+                match tryStoredLocal block with
+                | Some body -> visitValueDu valueUse body qb
+                | None -> raise(NotSupportedException("Only local bindings of stored values can be translated to SQL. Move executable bindings after AsEnumerable()."))
         | ExpressionType.Conditional ->
             let c = exp :?> ConditionalExpression
             let condition = visitDu c.Test qb

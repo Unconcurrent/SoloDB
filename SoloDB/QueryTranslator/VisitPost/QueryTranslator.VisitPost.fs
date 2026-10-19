@@ -62,13 +62,8 @@ module internal QueryTranslatorVisitPost =
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote -> ue.Operand
         | _ -> expr
 
-    let rec private unwrapConvertAll (expr: Expression) =
-        match expr with
-        | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Convert -> unwrapConvertAll ue.Operand
-        | _ -> expr
-
     let rec private normalizeUpdateManyBody (expr: Expression) =
-        let expr = unwrapConvertAll expr
+        let expr = QueryTranslatorBaseHelpers.unwrapConversions expr
         match expr with
         | :? MethodCallExpression as mc when mc.Method.Name = "op_PipeRight" && mc.Arguments.Count >= 1 ->
             // F# "(x |> ignore)" wraps side-effecting call in op_PipeRight; keep the source call.
@@ -93,7 +88,7 @@ module internal QueryTranslatorVisitPost =
             with _ ->
                 ValueNone
 
-        match unwrapConvertAll expr with
+        match QueryTranslatorBaseHelpers.unwrapConversions expr with
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote || ue.NodeType = ExpressionType.Convert ->
             tryExtractLambdaExpression ue.Operand
         | :? LambdaExpression as le ->
@@ -147,13 +142,13 @@ module internal QueryTranslatorVisitPost =
             let isBoundary =
                 me.Member.Name = "Value" &&
                 not (isNull me.Expression) &&
-                DBRefTypeHelpers.isDBRefType (unwrapConvertAll me.Expression).Type
+                DBRefTypeHelpers.isDBRefType (QueryTranslatorBaseHelpers.unwrapConversions me.Expression).Type
             isBoundary || containsDBRefValueMutationPath me.Expression
         | :? MethodCallExpression as mc ->
             let isBoundaryCall =
                 mc.Method.Name = "get_Value" &&
-                ((not (isNull mc.Object) && DBRefTypeHelpers.isDBRefType (unwrapConvertAll mc.Object).Type)
-                 || (mc.Arguments.Count > 0 && DBRefTypeHelpers.isDBRefType (unwrapConvertAll mc.Arguments.[0]).Type))
+                ((not (isNull mc.Object) && DBRefTypeHelpers.isDBRefType (QueryTranslatorBaseHelpers.unwrapConversions mc.Object).Type)
+                 || (mc.Arguments.Count > 0 && DBRefTypeHelpers.isDBRefType (QueryTranslatorBaseHelpers.unwrapConversions mc.Arguments.[0]).Type))
             isBoundaryCall ||
             containsDBRefValueMutationPath mc.Object ||
             (mc.Arguments |> Seq.exists containsDBRefValueMutationPath)
@@ -184,7 +179,7 @@ module internal QueryTranslatorVisitPost =
         | _ -> ValueNone
 
     let private tryGetRootRelationMember (expr: Expression) =
-        let expr = unwrapConvertAll expr
+        let expr = QueryTranslatorBaseHelpers.unwrapConversions expr
         match expr with
         | :? MemberExpression as me when not (isNull me.Expression) && isRootParameter me.Expression -> ValueSome me
         | _ -> ValueNone
@@ -201,16 +196,16 @@ module internal QueryTranslatorVisitPost =
     /// expression, or the equivalent get_Value method call. Returns the underlying DBRef
     /// expression on success, ValueNone otherwise.
     let private tryAsDbRefValueAccessor (expr: Expression) =
-        let expr = unwrapConvertAll expr
+        let expr = QueryTranslatorBaseHelpers.unwrapConversions expr
         match expr with
         | :? MemberExpression as me when me.Member.Name = "Value" && not (isNull me.Expression)
-                                          && DBRefTypeHelpers.isDBRefType (unwrapConvertAll me.Expression).Type ->
-            ValueSome (unwrapConvertAll me.Expression)
+                                          && DBRefTypeHelpers.isDBRefType (QueryTranslatorBaseHelpers.unwrapConversions me.Expression).Type ->
+            ValueSome (QueryTranslatorBaseHelpers.unwrapConversions me.Expression)
         | :? MethodCallExpression as mc when mc.Method.Name = "get_Value" ->
-            if not (isNull mc.Object) && DBRefTypeHelpers.isDBRefType (unwrapConvertAll mc.Object).Type then
-                ValueSome (unwrapConvertAll mc.Object)
-            elif mc.Arguments.Count > 0 && DBRefTypeHelpers.isDBRefType (unwrapConvertAll mc.Arguments.[0]).Type then
-                ValueSome (unwrapConvertAll mc.Arguments.[0])
+            if not (isNull mc.Object) && DBRefTypeHelpers.isDBRefType (QueryTranslatorBaseHelpers.unwrapConversions mc.Object).Type then
+                ValueSome (QueryTranslatorBaseHelpers.unwrapConversions mc.Object)
+            elif mc.Arguments.Count > 0 && DBRefTypeHelpers.isDBRefType (QueryTranslatorBaseHelpers.unwrapConversions mc.Arguments.[0]).Type then
+                ValueSome (QueryTranslatorBaseHelpers.unwrapConversions mc.Arguments.[0])
             else ValueNone
         | _ -> ValueNone
 
@@ -227,7 +222,7 @@ module internal QueryTranslatorVisitPost =
         let rec walk (relMe: MemberExpression) (acc: ChainHopSpec list) (hopIndex: int) : ChainHopSpec list =
             if isNull relMe.Expression then
                 raise (NotSupportedException updateManyRelationUnsupportedMessage)
-            let ownerExpr = unwrapConvertAll relMe.Expression
+            let ownerExpr = QueryTranslatorBaseHelpers.unwrapConversions relMe.Expression
             let ownerType = ownerExpr.Type
             let propName = relMe.Member.Name
             if not (relMe.Member :? PropertyInfo) then
@@ -244,14 +239,14 @@ module internal QueryTranslatorVisitPost =
             | :? MethodCallExpression ->
                 match tryAsDbRefValueAccessor ownerExpr with
                 | ValueSome priorRelExpr ->
-                    match unwrapConvertAll priorRelExpr with
+                    match QueryTranslatorBaseHelpers.unwrapConversions priorRelExpr with
                     | :? MemberExpression as priorRelMe -> walk priorRelMe acc (hopIndex + 1)
                     | :? MethodCallExpression -> raise (NotSupportedException(chainMethodCallMidChainMessage (hopIndex + 1)))
                     | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
                 | ValueNone -> raise (NotSupportedException(chainMethodCallMidChainMessage hopIndex))
             | :? IndexExpression -> raise (NotSupportedException(chainPositionalMidChainMessage hopIndex))
             | _ -> raise (NotSupportedException updateManyRelationUnsupportedMessage)
-        match unwrapConvertAll innerDbRefExpr with
+        match QueryTranslatorBaseHelpers.unwrapConversions innerDbRefExpr with
         | :? MemberExpression as relMe ->
             let hops = walk relMe [] 0
             if hops.IsEmpty then raise (NotSupportedException updateManyRelationUnsupportedMessage)
@@ -270,18 +265,18 @@ module internal QueryTranslatorVisitPost =
         // a `.Value` accessor. The presence of a `.Value` means the user expressed a
         // chain intent; an unsupported shape after that is a mid-chain violation.
         let rec scan (expr: Expression) (sawValue: bool) : unit =
-            let expr = unwrapConvertAll expr
+            let expr = QueryTranslatorBaseHelpers.unwrapConversions expr
             match expr with
             | null -> ()
             | :? MemberExpression as me ->
                 if me.Member.Name = "Value" && not (isNull me.Expression) &&
-                   DBRefTypeHelpers.isDBRefType (unwrapConvertAll me.Expression).Type then
+                   DBRefTypeHelpers.isDBRefType (QueryTranslatorBaseHelpers.unwrapConversions me.Expression).Type then
                     scan me.Expression true
                 elif sawValue then
                     // Mid-chain plain CLR property (or non-relation property continuation).
                     let ownerName =
                         if isNull me.Expression then "<unknown>"
-                        else (unwrapConvertAll me.Expression).Type.Name
+                        else (QueryTranslatorBaseHelpers.unwrapConversions me.Expression).Type.Name
                     raise (NotSupportedException(chainPlainPropertyMidChainMessage 0 ownerName me.Member.Name))
                 else
                     scan me.Expression sawValue
@@ -299,7 +294,7 @@ module internal QueryTranslatorVisitPost =
     /// Single-hop is just a chain with one hop; routing it through this parser unifies the
     /// emit/execute path through the SqlDu pipeline.
     let private tryParseRefChainAssignmentLhs (lhs: Expression) : voption<ChainHopSpec list * string> =
-        let lhs = unwrapConvertAll lhs
+        let lhs = QueryTranslatorBaseHelpers.unwrapConversions lhs
         match lhs with
         | :? MemberExpression as me when not (isNull me.Expression) ->
             match tryAsDbRefValueAccessor me.Expression with
@@ -327,14 +322,14 @@ module internal QueryTranslatorVisitPost =
     /// `p.A.Value.B.Value. … .<RelMany>` where `<RelMany>` is DBRefMany-shape and depth >= 1.
     /// On success returns (hops, leafManyPropertyName, leafTargetType).
     let private tryParseRefChainManySource (sourceExpr: Expression) : voption<ChainHopSpec list * string * Type> =
-        let sourceExpr = unwrapConvertAll sourceExpr
+        let sourceExpr = QueryTranslatorBaseHelpers.unwrapConversions sourceExpr
         match sourceExpr with
         | :? MemberExpression as leafMe when
                 not (isNull leafMe.Expression) &&
                 DBRefTypeHelpers.isManyReferenceType leafMe.Type ->
             let leafManyName = leafMe.Member.Name
             let leafTargetType = DBRefTypeHelpers.referenceTargetType leafMe.Type
-            let parent = unwrapConvertAll leafMe.Expression
+            let parent = QueryTranslatorBaseHelpers.unwrapConversions leafMe.Expression
             // If parent is the root parameter, this is the single-hop DBRefMany shape — defer.
             if parent :? ParameterExpression then ValueNone
             else
@@ -353,7 +348,7 @@ module internal QueryTranslatorVisitPost =
         let dbRefDef = dbRefType.GetGenericTypeDefinition()
         let args = TypeMetadata.GenericTypeArgCache.Get dbRefType
         let targetType = args.[0]
-        let valueExpr = unwrapConvertAll valueExpr
+        let valueExpr = QueryTranslatorBaseHelpers.unwrapConversions valueExpr
 
         let mutation =
             match valueExpr with
@@ -493,13 +488,13 @@ module internal QueryTranslatorVisitPost =
                 buildChainPropertyMutation hops leafPropName rhsExpr |> ValueSome
             | ValueNone ->
                 if mc.Method.Name = "set_Item" && not (isNull mc.Object) then
-                    let obj = unwrapConvertAll mc.Object
+                    let obj = QueryTranslatorBaseHelpers.unwrapConversions mc.Object
                     let rec hasValueInChain (e: Expression) =
                         match e with
                         | null -> false
                         | :? MemberExpression as me when me.Member.Name = "Value" &&
                                                          not (isNull me.Expression) &&
-                                                         DBRefTypeHelpers.isDBRefType (unwrapConvertAll me.Expression).Type -> true
+                                                         DBRefTypeHelpers.isDBRefType (QueryTranslatorBaseHelpers.unwrapConversions me.Expression).Type -> true
                         | :? MemberExpression as me -> hasValueInChain me.Expression
                         | :? MethodCallExpression as inner -> hasValueInChain inner.Object
                         | _ -> false

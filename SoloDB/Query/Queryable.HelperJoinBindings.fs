@@ -77,6 +77,7 @@ Fix: Rewrite the query to use direct lambda arguments or move it after AsEnumera
 
     let internal isCompositeJoinKeyBody (expr: Expression) =
         match expr with
+        | :? BlockExpression when QueryConstructionExpressions.hasConstructionTail expr -> true
         | :? BoundValueCallExpression as call when not(isNull call.ProjectionNames) || isTuple call.Type -> true
         | :? NewExpression
         | :? MemberInitExpression
@@ -168,6 +169,7 @@ Fix: Rewrite the query to use direct lambda arguments or move it after AsEnumera
         | MixedJoinSource ->
             match expr with
             | :? NewExpression | :? MemberInitExpression -> ()
+            | :? BlockExpression when QueryConstructionExpressions.hasConstructionTail expr -> ()
             | :? BoundValueCallExpression as call when isTuple call.Type || not(isNull call.ProjectionNames) -> ()
             | _ ->
                 raise (NotSupportedException(

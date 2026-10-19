@@ -2,7 +2,6 @@ namespace SoloDatabase.Numerics
 
 open System
 open System.Numerics
-open System.Runtime.CompilerServices
 
 [<Struct>]
 type internal BigIntegerRadixDigits =
@@ -10,22 +9,16 @@ type internal BigIntegerRadixDigits =
       Count: int
       Sign: int }
 
-/// Fixed decimal-radix preparation borrows immutable managed magnitude limbs.
+/// Fixed decimal-radix preparation copies immutable magnitude words once.
 [<AbstractClass; Sealed>]
 type internal BigIntegerRadix private () =
     static member inline private Prepare(value: BigInteger, radix: uint64, digits: int, extra: int) =
-        let mutable value = value
-        let source = &Unsafe.As<BigInteger,BigIntegerLayout>(&value)
-        let sign = source.Sign
+        let struct(sign,limbs,sourceCount) = BigIntegerMagnitude.Read(value)
         if sign = 0 then { Chunks = null; Count = 0; Sign = 0 }
         else
-            let limbs = source.Limbs
-            let sourceCount = if isNull limbs then 1 else limbs.Length
             let capacity = Checked.int (Checked.(+) (int64 sourceCount * 10L / int64 digits + 1L) (int64 extra))
             let chunks = Array.zeroCreate<uint32> capacity
-            if isNull limbs then
-                chunks[0] <- uint32 (if sign < 0 then -int64 sign else int64 sign)
-            else Array.Copy(limbs, chunks, sourceCount)
+            BigIntegerMagnitude.Copy(sign,limbs,sourceCount,chunks)
             let mutable remaining = sourceCount
             let mutable used = 0
             // Binary quotient occupies the front; completed remainders occupy the back.
