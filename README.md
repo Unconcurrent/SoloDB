@@ -158,6 +158,8 @@ using var onDiskDB = new SoloDB("path/to/database.db");
 using var sharedMemoryDB = new SoloDB("memory:my-shared-db");
 ```
 
+When several workers will share a new database file, initialize it before starting them; independent simultaneous first opens can contend during journal and schema setup.
+
 ### Working with Collections
 
 A collection is a container for your documents, analogous to a table in SQL.
@@ -171,6 +173,8 @@ var untypedProducts = db.GetUntypedCollection("Product");
 
 public class Product { /* ... */ }
 ```
+
+Untyped JSON exposes the physical document representation. For Decimal and BigInteger fields, use typed collection operations or preserve the [stored numerical representation](docs/generated-metadata.md#numerical-storage-and-migration) when writing through untyped JSON or SQL.
 
 ### Relations (DBRef, DBRefMany, SoloRef)
 
@@ -701,6 +705,8 @@ bool exists = fs.Exists("/reports/report-2024.txt"); // true
 fs.DeleteFileAt("/reports/report-2024.txt");
 ```
 
+Outside an explicit transaction, `Download` and `DownloadAsync` are nonblocking reads rather than whole-file snapshots. If an upload commits during a download, different reads can observe different file versions. Coordinate the operations or use an explicit transaction when one consistent view is required.
+
 ### Filesystem references
 
 Documents can protect existing files and directories with Single and Many references. See [Filesystem references](docs/filesystem-references.md) for C# and F# examples, loading and mutation behavior.
@@ -786,7 +792,7 @@ Typed Decimal and BigInteger document fields use the [stored numerical represent
 
 ### ADO.NET emulation
 
-SoloDB includes ADO.NET emulation for compatibility in the same project, assembly and NuGet package. `GetInternalConnection()` and pooled `Borrow()` return it automatically; no extra package or wrapper is required. Its types are in `SoloDatabase.Data.Sqlite`.
+SoloDB includes ADO.NET emulation for compatibility in the same project, assembly and NuGet package. `GetInternalConnection()` and pooled `Borrow()` return it automatically; no extra package or wrapper is required. Its types are in `SoloDatabase.Data.Sqlite`. Recompile applications and dependent libraries against 1.4; preserved source syntax does not imply binary compatibility with assemblies built against 1.3.
 
 This is a limited compatibility layer, not a full ADO.NET provider. Stored procedures and output parameters are unsupported; async calls perform synchronous SQLite work, and `Cancel()` does not interrupt execution. See [supported operations and ownership](docs/native-sql.md#adonet-emulation).
 

@@ -38,6 +38,8 @@ Database startup checks the features required by SoloDB: JSONB and trigger RAISE
 
 Direct `NativeSqliteConnection` and ADO use is independent of the document-store startup feature check. Provider selection remains with the application; generated registration neither selects nor upgrades that provider.
 
+Initialize a new database file once before starting independent concurrent users of that file. The first SoloDB opening configures the journal and schema; successful simultaneous creation by every instance is not guaranteed. This setup boundary is separate from ordinary access to an initialized database.
+
 ## Typed arguments and direct mapping
 
 A reusable parameter plan captures typed state once when execution begins, before SQL effects. Its binder writes primitives directly for each statement in a batch. The parameter writer is valid only during that binder invocation.
@@ -67,7 +69,11 @@ Raw SQL Decimal and BigInteger parameters and function results use invariant num
 
 ## Transactions, batches and ownership
 
-Dispose borrowed connections when their operation finishes. Public transaction scopes own a separate connection; handles escaped from a completed scope cannot execute further operations. An unfinished explicitly owned transaction rolls back on disposal. Finish raw SQL transactions before returning a connection to the pool.
+Dispose readers, lazy enumerators and streams before returning their borrowed connection. Dispose the acquisition when its operation finishes; do not use `Close`/`Open` to recycle a connection owned by SoloDB. Explicit closing ends the physical handle and can end an in-memory database when no other handle retains it. Reopening does not rerun SoloDB initialization.
+
+Connection-local PRAGMAs and TEMP objects can remain on a pooled physical connection. Pool return does not reset that application state; manage it in the code that creates it. TEMP names can shadow main-database objects.
+
+Public transaction scopes own a separate connection; handles escaped from a completed scope cannot execute further operations. An unfinished explicitly owned transaction rolls back on disposal. Finish raw SQL transactions before returning a connection to the pool.
 
 SQL batches use SQLite parser boundaries, including trigger bodies and quoted semicolons. Later statements can use schema created by earlier statements. `NextResult` executes subsequent statements. Early lease disposal completes the current result and attempts unread statements, preserving earlier writes if an unread tail fails. Use explicit result advancement or `Execute` to observe subsequent statement errors. Use a transaction when all batch effects must be atomic.
 
@@ -95,7 +101,7 @@ command.Parameters.Add(parameter);
 var value = (long)command.ExecuteScalar();
 ```
 
-Existing inferred connection and standard-interface code keeps its acquisition syntax. Code naming the former provider types must use `SoloDatabase.Data.Sqlite`; the original `Microsoft.Data.Sqlite` package can coexist. Engine errors from this presentation use `SoloDatabase.Data.Sqlite.SqliteException`. Stored procedures and output parameters are unsupported.
+After recompilation, code using inferred connection types or standard interfaces can keep its acquisition syntax. Rebuild dependent assemblies against 1.4: signatures exposing native or ADO types differ from 1.3 and are not binary compatible. Code naming the former provider types must use `SoloDatabase.Data.Sqlite`; the original `Microsoft.Data.Sqlite` package can coexist. Engine errors from this presentation use `SoloDatabase.Data.Sqlite.SqliteException`. Stored procedures and output parameters are unsupported.
 
 Async entry points perform synchronous SQLite work on the calling thread. Cancellation tokens can reject a call before execution; `Cancel()` does not interrupt SQLite execution. Standard `DbTransaction` savepoint overrides are provided by the .NET 6 asset. The .NET Standard assets expose savepoints on the concrete transaction type, without adding virtual methods absent from their target framework.
 
