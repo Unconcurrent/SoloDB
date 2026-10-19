@@ -132,6 +132,10 @@ module internal QueryTranslatorNumeric =
     let convertWriter target argument descriptor =
         jsonConversion "WRITER_VALUE" target [jsonInput argument; SqlExpr.FunctionCall("json", [descriptor])]
 
+    let nativeJsonOutput argument descriptor =
+        SqlExpr.FunctionCall("jsonb", [call NumericKind.Decimal "NATIVE_JSON_OUTPUT"
+            [SqlExpr.FunctionCall("json", [argument]); SqlExpr.FunctionCall("json", [descriptor])]])
+
     let storedUnsigned target argument =
         if unsigned64 target then
             let checkedValue=call NumericKind.ArbitraryInteger "TO_UINT64" [argument]

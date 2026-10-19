@@ -29,8 +29,9 @@ module internal QueryTranslatorVisitCoreCastAggregate =
         let convert argument input =
           let framed = framed input
           let originalInput =
-              if typeof<JsonSerializator.JsonValue>.IsAssignableFrom o.Type || o.Type.FullName = "SoloDatabase.MongoDB.BsonDocument" then ValueSome input
+              if typeof<obj>.Equals o.Type || typeof<JsonSerializator.JsonValue>.IsAssignableFrom o.Type || o.Type.FullName = "SoloDatabase.MongoDB.BsonDocument" then ValueSome input
               else ValueNone
+          let originalToken = input.Source |> ValueOption.defaultWith (fun () -> framed argument)
           let converted =
             match originalInput with
             | ValueSome original when original.Operand.IsSome &&
@@ -38,7 +39,7 @@ module internal QueryTranslatorVisitCoreCastAggregate =
                                        not(QuerySerializationSql.isConstantDescriptor
                                                (QuerySerializationSql.serializationOperand original.Operand.Value))) ->
                 let descriptor = QuerySerializationSql.serializationOperand original.Operand.Value
-                QueryTranslatorNumeric.convertWriter castToType (framed argument) descriptor
+                QueryTranslatorNumeric.convertWriter castToType originalToken descriptor
                 |> ValueOption.map (fun result ->
                     match sqlType, QueryTranslatorNumeric.domain castToType with
                     | ValueSome sqlType, ValueNone ->
@@ -47,10 +48,10 @@ module internal QueryTranslatorVisitCoreCastAggregate =
                         SqlExpr.Cast(SqlExpr.FunctionCall("jsonb_extract", [result; SqlExpr.Literal(SqlLiteral.String "$")]), sqlType)
                     | _ -> result)
             | ValueSome original when QueryTranslatorSerialization.isStoredNumericalInput original.OriginalType ->
-                QueryTranslatorNumeric.convertStored castToType (framed argument)
+                QueryTranslatorNumeric.convertStored castToType originalToken
             | ValueSome _ ->
                 match QueryTranslatorNumeric.domain castToType with
-                | ValueSome _ -> QueryTranslatorNumeric.convertNativeJson castToType (framed argument)
+                | ValueSome _ -> QueryTranslatorNumeric.convertNativeJson castToType originalToken
                 | ValueNone when sqlType.IsSome ->
                     ValueSome(QueryTranslatorNumeric.conversion checkedConversion castToType o.Type (QueryTranslatorNumeric.nativeScalar (framed argument)))
                 | _ -> ValueNone

@@ -110,6 +110,29 @@ module internal NumericalFunctions =
                     // In particular, a String exponent retains the native CAST contract.
                     context.SetText(text)
 
+    let private nativeText domain value =
+        if domain = NumericKind.Decimal then
+            (ExactNumber.toDecimal value).ToString(Globalization.CultureInfo.InvariantCulture)
+        else (ExactNumber.toBigInteger value).ToString(Globalization.CultureInfo.InvariantCulture)
+
+    /// Only a selected exact writer can turn its comparable String back into a native number.
+    let private nativeJsonOutput (context: byref<SqliteRawContext>) (arguments: ReadOnlySpan<SqliteRawValue>) =
+        if arguments[1].IsNull then context.SetNull()
+        else
+            let text = arguments[1].CopyToString()
+            let input = NumericalJson.readInput text
+            if NumericalJson.isNullInput input then context.SetNull()
+            elif not(NumericalJson.isStringInput input) then context.SetText(text)
+            else
+                let writer = JsonSerializator.JsonValue.Parse(arguments[2].CopyToString())
+                             |> QuerySerializationDescriptor.resolveInputDescriptor
+                match QueryTranslatorNumeric.domain writer with
+                | ValueSome domain ->
+                    match NumericalJson.storedInput input with
+                    | ValueSome number -> context.SetText(nativeText domain number)
+                    | ValueNone -> context.SetNull()
+                | ValueNone -> context.SetText(text)
+
     let private scalarInput domain (value: SqliteRawValue) =
         if value.IsInteger then ExactNumber.ofBigInteger(BigInteger(value.GetInt64()))
         elif value.IsFloat then
@@ -129,8 +152,7 @@ module internal NumericalFunctions =
                 | ExactNumericOperation.BinaryLogarithm -> context.SetDouble(BigInteger.Log(ExactNumber.toBigInteger value))
                 | ExactNumericOperation.BinaryLog10 -> context.SetDouble(BigInteger.Log10(ExactNumber.toBigInteger value))
                 | ExactNumericOperation.Text ->
-                    context.SetText(if domain = NumericKind.Decimal then (ExactNumber.toDecimal value).ToString(Globalization.CultureInfo.InvariantCulture)
-                                    else (ExactNumber.toBigInteger value).ToString(Globalization.CultureInfo.InvariantCulture))
+                    context.SetText(nativeText domain value)
                 | ExactNumericOperation.ToDouble | ExactNumericOperation.ToSingle
                 | ExactNumericOperation.ToInt64 | ExactNumericOperation.ToInt32 | ExactNumericOperation.ToInt16
                 | ExactNumericOperation.ToSByte | ExactNumericOperation.ToUInt64 | ExactNumericOperation.ToUInt32
@@ -222,6 +244,7 @@ module internal NumericalFunctions =
                 | ExactNumericOperation.NativeValue -> nativeValue &context arguments
                 | ExactNumericOperation.StoredValue -> storedValue domain &context arguments
                 | ExactNumericOperation.NativeJsonValue -> nativeJsonValue domain &context arguments
+                | ExactNumericOperation.NativeJsonOutput -> nativeJsonOutput &context arguments
                 | _ -> binary domain &context arguments),SqliteFunctionFlags.Deterministic)
             connection.RegisterNumericalScalar(name,5,RawScalarFunc(fun context arguments -> binary domain &context arguments),SqliteFunctionFlags.Deterministic)
             let finish value = finish domain value

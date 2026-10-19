@@ -101,7 +101,7 @@ module internal QueryTranslatorVisitCore =
         QueryTranslatorVisitCoreArrayPredicates.nested visitProduced visitDu qb array predicate isAll
 
     and private visitBinaryDu (b: BinaryExpression) (qb: QueryBuilder) : SqlExpr =
-        QueryTranslatorVisitCoreBinary.visitBinaryDu visitDu visitComparisonDu visitStoredValueDu visitPresenceDu b qb
+        QueryTranslatorVisitCoreBinary.visitBinaryDu visitProduced visitDu visitComparisonDu visitStoredValueDu visitPresenceDu b qb
 
     and private visitMethodCallDu valueUse (m: MethodCallExpression) (qb: QueryBuilder) : QueryProducedValue =
         if isIntrinsicBox m then visitValueDu valueUse m.Arguments[0] qb
@@ -130,9 +130,14 @@ module internal QueryTranslatorVisitCore =
 
     and private visitComparisonDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
         visitComparisonProduced exp qb
-        |> QueryProduced.consume qb.SourceContext.NextAlias (QueryTranslatorCharacters.comparable exp.Type)
+        |> QueryProduced.consume qb.SourceContext.NextAlias (fun value input ->
+            if typeof<obj>.Equals exp.Type && input.Facts = JsonSerializator.JsonSerializationShape.Dynamic then
+                match input.Source with
+                | ValueSome token -> QueryTranslatorNumeric.nativeScalar token
+                | ValueNone -> value
+            else QueryTranslatorCharacters.comparable exp.Type value input)
 
-    and private visitStoredValueDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
+    and private visitStoredValueDu (destination: QuerySerializationInput) (exp: Expression) (qb: QueryBuilder) : SqlExpr =
         let rec withoutBoxing (value: Expression) =
             match value with
             | :? MethodCallExpression as boxing when isIntrinsicBox boxing && boxing.Arguments[0].Type.IsValueType ->
@@ -142,11 +147,49 @@ module internal QueryTranslatorVisitCore =
                 withoutBoxing conversion.Operand
             | _ -> value
         let exp=withoutBoxing exp
-        match unwrapConvert exp with
-        // A bare entity assignment retains the update root-path representation.
-        // Computed values read their operands before writing the result.
-        | :? ParameterExpression -> visitValueDu Stored exp qb |> QueryProduced.consume qb.SourceContext.NextAlias (QueryTranslatorCharacters.comparable exp.Type)
-        | _ -> visitValueDu Stored exp { qb with UpdateMode = false } |> QueryProduced.consume qb.SourceContext.NextAlias (QueryTranslatorCharacters.comparable exp.Type)
+        let operation = JsonSerializator.JsonValue.WriterOperation(destination.OriginalType,true)
+        let dynamicTarget =
+            (operation = Metadata.CodecGeneration.RawRootOperation.Dynamic ||
+             operation = Metadata.CodecGeneration.RawRootOperation.Abstract) &&
+            JsonSerializator.JsonValue.WriterOperation(exp.Type,true) <> Metadata.CodecGeneration.RawRootOperation.Tree
+        let targetPayload = Utils.optionalPayloadType destination.OriginalType
+        let storedNumericTarget = (TypeSupport.StoredNumeric targetPayload.FullName).IsSome
+        let valueUse = if dynamicTarget then Value else Stored
+        let produced =
+            match unwrapConvert exp with
+            // Bare entity assignments retain their original update root path.
+            | :? ParameterExpression -> visitValueDu valueUse exp qb
+            | _ -> visitValueDu valueUse exp { qb with UpdateMode = false }
+        QueryProduced.consume qb.SourceContext.NextAlias (fun value input ->
+            if not dynamicTarget then
+                let sourcePayload = Utils.optionalPayloadType input.OriginalType
+                let sourceNumeric = if sourcePayload.IsEnum then TypeMetadata.enumUnderlying sourcePayload else sourcePayload
+                let restoreExact =
+                    storedNumericTarget && not(targetPayload.Equals sourcePayload) &&
+                    ((TypeSupport.NumericCore sourceNumeric.FullName).IsSome ||
+                     (let operation = JsonSerializator.JsonValue.WriterOperation(input.OriginalType,true)
+                      operation = Metadata.CodecGeneration.RawRootOperation.Dynamic ||
+                      operation = Metadata.CodecGeneration.RawRootOperation.Abstract))
+                if restoreExact then
+                    if typeof<char>.Equals sourcePayload then
+                        QueryTranslatorNumeric.convertNativeJson targetPayload (jsonToken(QueryTranslatorCharacters.comparable exp.Type value input))
+                        |> ValueOption.defaultWith (fun () -> invalidOp "The declared numerical writer requires a numerical target.")
+                    else
+                        let source = input.Source |> ValueOption.defaultWith (fun () -> jsonToken value)
+                        QueryTranslatorNumeric.convertWriter targetPayload source (QuerySerializationSql.writerDescriptor input)
+                        |> ValueOption.defaultWith (fun () -> invalidOp "The declared numerical writer requires a numerical target.")
+                else QueryTranslatorCharacters.comparable exp.Type value input
+            else
+                match QueryTranslatorNumeric.domain input.OriginalType with
+                | ValueSome domain -> SqlExpr.FunctionCall("jsonb", [QueryTranslatorNumeric.call domain "TEXT" [value]])
+                | ValueNone ->
+                    let sourceOperation = JsonSerializator.JsonValue.WriterOperation(input.OriginalType,true)
+                    if sourceOperation = Metadata.CodecGeneration.RawRootOperation.Dynamic ||
+                       sourceOperation = Metadata.CodecGeneration.RawRootOperation.Abstract then
+                        let source = input.Source |> ValueOption.defaultWith (fun () ->
+                            if input.Carrier = CanonicalToken then value else jsonToken value)
+                        QueryTranslatorNumeric.nativeJsonOutput source (QuerySerializationSql.writerDescriptor input)
+                    else QueryTranslatorCharacters.comparable exp.Type value input) produced
 
     // Comparison mode belongs to this operand only. Recursive expression visits
     // use visitDu, preserving the released kinds inside arithmetic and functions.
@@ -239,7 +282,7 @@ module internal QueryTranslatorVisitCore =
             membersProduced call.Type call.ProjectionNames call.Inputs qb
         | ExpressionType.Convert | ExpressionType.ConvertChecked | ExpressionType.TypeAs ->
             let m = exp :?> UnaryExpression
-            if typeof<obj>.Equals(m.Type) || typeof<obj>.Equals(m.Operand.Type) then
+            if typeof<obj>.Equals(m.Type) then
                 visitValueDu valueUse m.Operand qb
             elif isReferenceUpcast m then visitValueDu valueUse m.Operand qb
             else QueryTranslatorVisitCoreCastAggregate.castToDu visitProduced qb m.Type m.Operand (m.NodeType = ExpressionType.ConvertChecked)

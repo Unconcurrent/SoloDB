@@ -373,6 +373,13 @@ type JsonValue =
         JsonRawWrite<'T,char,JsonUtf16Writer,JsonStoredContract>.Write(value,&destination,&state)
         ArraySegment<char>(state.Storage,0,state.Written)
 
+    /// Runtime and query assignment use the same declared stored writer selection.
+    static member internal WriterOperation(target: Type, stored: bool) =
+        let decision = JsonCodecDiscovery.Decision target
+        CodecPreparation.writer(target.FullName,decision,stored,target.IsAbstract,
+            typeof<IEnumerable<byte>>.IsAssignableFrom target,
+            typeof<IEnumerable>.IsAssignableFrom target && not(typeof<string>.Equals target))
+
     /// Runtime tree values retain their explicit writer rather than a union-case implementation type.
     static member internal RuntimeWriterType(value: obj, actual: Type) =
         if value :? JsonValue then typeof<JsonValue> else actual
@@ -2976,9 +2983,7 @@ and private JsonRawWrite<'T,'E,'O,'Contract when 'O : struct and 'O :> IJsonValu
 
     static member private Build(): JsonRawWriteOperations =
         let target = typeof<'T>
-        let decision = JsonCodecDiscovery.Decision target
-        let operation = CodecPreparation.writer(target.FullName,decision,JsonOperationPolicy<'Contract>.IsStored,
-                            target.IsAbstract,typeof<IEnumerable<byte>>.IsAssignableFrom target,typeof<IEnumerable>.IsAssignableFrom target && not(typeof<string>.Equals target))
+        let operation = JsonValue.WriterOperation(target,JsonOperationPolicy<'Contract>.IsStored)
         let writer =
             match operation with
             | RawRootOperation.StoredNumeric ->

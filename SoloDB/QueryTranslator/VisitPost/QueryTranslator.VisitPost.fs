@@ -416,6 +416,7 @@ module internal QueryTranslatorVisitPost =
     let private buildChainPropertyMutation
             (hops: ChainHopSpec list)
             (leafTargetPropertyName: string)
+            (leafValueType: Type)
             (rhsExpr: Expression) =
         let leafTargetType = (List.last hops).TargetType
         let targetSoloIdMembers = CustomIdMetadata.GetMembers leafTargetType
@@ -439,8 +440,11 @@ module internal QueryTranslatorVisitPost =
                     raise (InvalidOperationException(
                         sprintf "Error: UpdateMany Ref-chain mutation of '%s' requires a closure-captured constant on the right-hand side.\nReason: The expression references the lambda parameter or a target-state value that cannot be reduced at translate time.\nFix: Hoist the value into a local variable above the UpdateMany call and reference that local in the lambda body."
                             leafTargetPropertyName))
-            let jsonLiteral = JsonSerializator.JsonValue.WriteText<obj>(rhsValue,false,false)
-            let leafJsonPath = "$." + leafTargetPropertyName
+            let json = JsonSerializator.JsonValue.WriteRuntimeBuffer(leafValueType,rhsValue,false,false)
+            let jsonLiteral = System.String(json.Array,json.Offset,json.Count)
+            let parent = QuerySerializationInput.ForType leafTargetType
+            let struct(_, path) = QueryTranslatorSerialization.serializationAccess parent (ClrMember(leafTargetPropertyName,leafValueType))
+            let leafJsonPath = SoloDatabase.SqlModel.JsonPathOps.text path
             MutateRefChainProperty(hops, leafTargetType, leafJsonPath, jsonLiteral)
 
     let private extractTargetIdForDbRefManyOrThrow (expr: Expression) =
@@ -469,7 +473,7 @@ module internal QueryTranslatorVisitPost =
         | :? BinaryExpression as be when be.NodeType = ExpressionType.Assign ->
             match tryParseRefChainAssignmentLhs be.Left with
             | ValueSome (hops, leafPropName) ->
-                buildChainPropertyMutation hops leafPropName be.Right |> ValueSome
+                buildChainPropertyMutation hops leafPropName (QueryTranslatorBaseHelpers.unwrapConversions be.Left).Type be.Right |> ValueSome
             | ValueNone ->
                 // Classify mid-chain violations (plain CLR property, method call, positional
                 // indexer past a `.Value` accessor) so each unsupported shape gets a specific
@@ -485,7 +489,7 @@ module internal QueryTranslatorVisitPost =
         | :? MethodCallExpression as mc when mc.Method.Name.StartsWith "set_" ->
             match tryParseRefChainSetterMethodCall mc with
             | ValueSome (hops, leafPropName, rhsExpr) ->
-                buildChainPropertyMutation hops leafPropName rhsExpr |> ValueSome
+                buildChainPropertyMutation hops leafPropName ((mc.Method.GetParameters()).[0].ParameterType) rhsExpr |> ValueSome
             | ValueNone ->
                 if mc.Method.Name = "set_Item" && not (isNull mc.Object) then
                     let obj = QueryTranslatorBaseHelpers.unwrapConversions mc.Object
@@ -520,7 +524,7 @@ module internal QueryTranslatorVisitPost =
             | ValueSome me when DBRefTypeHelpers.isSingleReferenceType me.Type ->
                 match tryParseRefChainAssignmentLhs oldValue with
                 | ValueSome (hops, property) ->
-                    buildChainPropertyMutation hops property newValue |> ValueSome
+                    buildChainPropertyMutation hops property (QueryTranslatorBaseHelpers.unwrapConversions oldValue).Type newValue |> ValueSome
                 | _ ->
                     let propertyPath = computePathKeyForUpdate me
                     parseDbRefSetValue [] me.Type propertyPath newValue |> ValueSome

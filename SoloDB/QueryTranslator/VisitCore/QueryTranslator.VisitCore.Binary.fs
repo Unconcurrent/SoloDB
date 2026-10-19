@@ -16,14 +16,15 @@ open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.SqlModel
 
 module internal QueryTranslatorVisitCoreBinary =
-    let internal visitBinaryDu (visitDu: Expression -> QueryBuilder -> SqlExpr) (visitComparisonDu: Expression -> QueryBuilder -> SqlExpr) (visitStoredValueDu: Expression -> QueryBuilder -> SqlExpr) (visitPresenceDu: Expression -> QueryBuilder -> SqlExpr) (b: BinaryExpression) (qb: QueryBuilder) : SqlExpr =
+    let internal visitBinaryDu (visitProduced: Expression -> QueryBuilder -> QueryProducedValue) (visitDu: Expression -> QueryBuilder -> SqlExpr) (visitComparisonDu: Expression -> QueryBuilder -> SqlExpr) (visitStoredValueDu: QuerySerializationInput -> Expression -> QueryBuilder -> SqlExpr) (visitPresenceDu: Expression -> QueryBuilder -> SqlExpr) (b: BinaryExpression) (qb: QueryBuilder) : SqlExpr =
         // In UpdateMode an `Assign` on a member access lowers to the same
         // assignment that the `Extensions.Set(member, value)` path records.
         // This accepts the F# canonical owner-side property-mutation form
         // `o.Field <- value` alongside `o.Field.Set value`.
         if b.NodeType = ExpressionType.Assign && qb.UpdateMode then
-            let pathExpr = visitDu b.Left qb
-            let valueExpr = visitStoredValueDu b.Right qb
+            let destination = visitProduced b.Left qb
+            let pathExpr = QueryProduced.value qb.SourceContext.NextAlias destination
+            let valueExpr = visitStoredValueDu destination.Input b.Right qb
             qb.UpdateAssignments.Add(pathExpr, valueExpr)
             SqlExpr.Literal(SqlLiteral.Null)
         elif (b.NodeType = ExpressionType.Equal || b.NodeType = ExpressionType.NotEqual)

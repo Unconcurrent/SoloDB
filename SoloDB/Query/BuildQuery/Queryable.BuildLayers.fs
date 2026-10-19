@@ -250,7 +250,10 @@ module internal QueryableLayerBuild =
                         if preserveErrors then
                             let missing = SqlExpr.Unary(UnaryOperator.IsNull, idColumnExpr)
                             match produced with
-                            | DirectValue(value, facts) -> DirectValue(SqlExpr.CaseExpr((missing, valueColumnExpr), [], Some value), facts)
+                            | DirectValue(value, facts) ->
+                                let preserve value = SqlExpr.CaseExpr((missing, valueColumnExpr), [], Some value)
+                                let facts = { facts with Source = facts.Source |> ValueOption.map preserve }
+                                DirectValue(preserve value, facts)
                             | PackedValue(packet, facts) ->
                                 let error = SqlExpr.JsonArrayExpr [jsonToken valueColumnExpr; SqlExpr.Literal SqlLiteral.Null]
                                 PackedValue(SqlExpr.CaseExpr((missing, error), [], Some packet), facts)

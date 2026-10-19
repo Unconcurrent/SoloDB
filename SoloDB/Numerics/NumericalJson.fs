@@ -29,6 +29,9 @@ module internal NumericalJson =
         cursor.codeUnitIndex <- input.Finish
         match JsonLexer.readNext &cursor with EndOfInput -> () | _ -> failwith "Malformed json."
 
+    let isStringInput input =
+        match input.Token with StringToken _ -> true | _ -> false
+
     let isNullInput input =
         match input.Token with
         | NullToken -> complete input; true

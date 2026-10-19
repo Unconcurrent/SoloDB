@@ -23,7 +23,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
          | ValueSome binder -> not(binder.IsValue argument)
          | _ -> not(isFullyConstant argument))
 
-    let private visitScalarMethodCallDu (visitDu: Expression -> QueryBuilder -> SqlExpr) (visitStoredValueDu: Expression -> QueryBuilder -> SqlExpr) (visitPresenceDu: Expression -> QueryBuilder -> SqlExpr) (visitMathMethodDu: MethodCallExpression -> QueryBuilder -> SqlExpr voption) (containsImplDu: QueryBuilder -> Expression -> Expression -> SqlExpr) (visitNestedArrayPredicateDu: QueryBuilder -> Expression -> Expression -> bool -> SqlExpr) (emitStringOperandDu: QueryBuilder -> bool -> Expression -> SqlExpr) (m: MethodCallExpression) (qb: QueryBuilder) : SqlExpr =
+    let private visitScalarMethodCallDu (visitProduced: Expression -> QueryBuilder -> QueryProducedValue) (visitDu: Expression -> QueryBuilder -> SqlExpr) (visitStoredValueDu: QuerySerializationInput -> Expression -> QueryBuilder -> SqlExpr) (visitPresenceDu: Expression -> QueryBuilder -> SqlExpr) (visitMathMethodDu: MethodCallExpression -> QueryBuilder -> SqlExpr voption) (containsImplDu: QueryBuilder -> Expression -> Expression -> SqlExpr) (visitNestedArrayPredicateDu: QueryBuilder -> Expression -> Expression -> bool -> SqlExpr) (emitStringOperandDu: QueryBuilder -> bool -> Expression -> SqlExpr) (m: MethodCallExpression) (qb: QueryBuilder) : SqlExpr =
         match visitMathMethodDu m qb with
         | ValueSome result -> result
         | ValueNone ->
@@ -58,30 +58,35 @@ module internal QueryTranslatorVisitCoreMethodCall =
             SqlExpr.Binary(visitDu str qb, BinaryOperator.Like, visitDu likeWhat qb)
         // Update methods collect target paths and stored values.
         | OfShape1 null null "Set" null (oldValue, newValue) when qb.UpdateMode ->
-            let pathExpr = visitDu oldValue qb
-            let valueExpr = visitStoredValueDu newValue qb
+            let destination = visitProduced oldValue qb
+            let pathExpr = QueryProduced.value qb.SourceContext.NextAlias destination
+            let valueExpr = visitStoredValueDu destination.Input newValue qb
             qb.UpdateAssignments.Add(pathExpr, valueExpr)
             SqlExpr.Literal(SqlLiteral.Null)
 
         | OfShape1 null null "Append" null (array, newValue)
         | OfShape1 null null "Add" null (array, newValue) when qb.UpdateMode ->
-            let arrayPathExpr = visitDu array qb
+            let destination = visitProduced array qb
+            let arrayPathExpr = QueryProduced.value qb.SourceContext.NextAlias destination
             let modifiedPath =
                 match arrayPathExpr with
                 | SqlExpr.Literal(SqlLiteral.String path) -> SqlExpr.Literal(SqlLiteral.String $"{path}[#]")
                 | other -> other
-            let valueExpr = visitStoredValueDu newValue qb
+            let struct(element, _) = QueryTranslatorSerialization.serializationAccess destination.Input (StoredLabel(box 0))
+            let valueExpr = visitStoredValueDu element newValue qb
             qb.UpdateAssignments.Add(modifiedPath, valueExpr)
             SqlExpr.Literal(SqlLiteral.Null)
 
         | OfShape2 null null "SetAt" null null (array, indexExpr, newValue) when qb.UpdateMode ->
-            let arrayPathExpr = visitDu array qb
+            let destination = visitProduced array qb
+            let arrayPathExpr = QueryProduced.value qb.SourceContext.NextAlias destination
             let indexVal = ExpressionEvaluation.evaluateExpr<obj> indexExpr
             let modifiedPath =
                 match arrayPathExpr with
                 | SqlExpr.Literal(SqlLiteral.String path) -> SqlExpr.Literal(SqlLiteral.String $"{path}[{indexVal}]")
                 | other -> other
-            let valueExpr = visitStoredValueDu newValue qb
+            let struct(element, _) = QueryTranslatorSerialization.serializationAccess destination.Input (StoredLabel(box 0))
+            let valueExpr = visitStoredValueDu element newValue qb
             qb.UpdateAssignments.Add(modifiedPath, valueExpr)
             SqlExpr.Literal(SqlLiteral.Null)
 
@@ -104,14 +109,16 @@ module internal QueryTranslatorVisitCoreMethodCall =
             // The intermediate SELECT applies ORDER BY k LIMIT -1 — a documented
             // SQLite idiom that preserves subquery row order through the outer
             // aggregate consumer.
-            let arrayPathExpr = visitDu array qb
+            let destination = visitProduced array qb
+            let arrayPathExpr = QueryProduced.value qb.SourceContext.NextAlias destination
             let indexVal = Convert.ToInt64(ExpressionEvaluation.evaluateExpr<obj> indexExpr)
             if indexVal < 0L then
                 raise (ArgumentOutOfRangeException(
                     "indexExpr",
                     indexVal,
                     "Insert: negative index is not supported. Use a non-negative index."))
-            let newValueExpr = visitStoredValueDu newValue qb
+            let struct(element, _) = QueryTranslatorSerialization.serializationAccess destination.Input (StoredLabel(box 0))
+            let newValueExpr = visitStoredValueDu element newValue qb
             let alias = qb.SourceAlias
             let extractArrayExpr =
                 SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.Column(alias, "Value"); arrayPathExpr])
@@ -309,7 +316,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
         (visitRequested: Expression -> QueryBuilder -> QueryProducedValue)
         (visitComparisonProduced: Expression -> QueryBuilder -> QueryProducedValue)
         (visitDu: Expression -> QueryBuilder -> SqlExpr)
-        (visitStoredValueDu: Expression -> QueryBuilder -> SqlExpr)
+        (visitStoredValueDu: QuerySerializationInput -> Expression -> QueryBuilder -> SqlExpr)
         (visitPresenceDu: Expression -> QueryBuilder -> SqlExpr)
         (visitMathMethodDu: MethodCallExpression -> QueryBuilder -> SqlExpr voption)
         (arrayIndexDu: Expression -> Expression -> Type -> QueryBuilder -> QueryProducedValue)
@@ -328,7 +335,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
             else visitProduced expression builder
         let operationOperand expression builder = visitOperation expression builder |> QueryProduced.value builder.SourceContext.NextAlias
         let render operand stringOperand call =
-            visitScalarMethodCallDu operand visitStoredValueDu visitPresenceDu visitMathMethodDu containsImplDu visitNestedArrayPredicateDu stringOperand call qb
+            visitScalarMethodCallDu visitProduced operand visitStoredValueDu visitPresenceDu visitMathMethodDu containsImplDu visitNestedArrayPredicateDu stringOperand call qb
         match QueryTranslatorVisitCorePreparedCall.tryProduced visitOperation visitComparisonProduced m qb render with
         | Some result -> result
         | None -> visitFormattedMethodCallDu visitProduced visitTextProduced visitRequested (if characterOperation then operationOperand else visitDu) visitStoredValueDu visitPresenceDu visitMathMethodDu arrayIndexDu visitPropertyDu visitPreparedPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu membersProduced emitStringOperandDu m qb
@@ -390,7 +397,7 @@ module internal QueryTranslatorVisitCoreMethodCall =
         | OfShape0 null null "Items" source when source.Type.IsConstructedGenericType && typedefof<System.Linq.IGrouping<_,_>>.Equals(source.Type.GetGenericTypeDefinition()) ->
             visitPropertyDu source "Items" m qb
         | _ ->
-            let value = visitScalarMethodCallDu visitDu visitStoredValueDu visitPresenceDu visitMathMethodDu containsImplDu visitNestedArrayPredicateDu emitStringOperandDu m qb
+            let value = visitScalarMethodCallDu visitProduced visitDu visitStoredValueDu visitPresenceDu visitMathMethodDu containsImplDu visitNestedArrayPredicateDu emitStringOperandDu m qb
             let produced = QueryProduced.typed m.Type value
             if QueryTranslatorCharacters.indexArguments m.Method then
                 let index = if m.Method.IsStatic then m.Arguments[1] else m.Arguments[0]

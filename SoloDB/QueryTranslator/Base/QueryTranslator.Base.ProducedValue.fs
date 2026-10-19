@@ -24,8 +24,14 @@ module internal QueryProduced =
             DirectValue(expression, { produced.Input with Source = ValueSome token;
                                                         Operand = ValueSome { Descriptor = descriptor; Accesses = Array.empty } })
 
+    /// Dynamic publication retains the original token beside its native scalar facet.
+    let private publicationToken value (input: QuerySerializationInput) =
+        match input.Facts, input.Source with
+        | JsonSerializator.JsonSerializationShape.Dynamic, ValueSome token -> token
+        | _ -> jsonToken value
+
     let packet = function
-        | DirectValue(value, input) -> SqlExpr.JsonArrayExpr [jsonToken value; inputDescriptor input]
+        | DirectValue(value, input) -> SqlExpr.JsonArrayExpr [publicationToken value input; inputDescriptor input]
         | PackedValue(packet, _) -> packet
 
     let private extracted column position =
@@ -117,6 +123,9 @@ module internal QueryProduced =
         | ValueSome owner when typeof<JsonSerializator.JsonValue>.IsAssignableFrom input.OriginalType ->
             let value = withTreeRowIdentity value owner.Identity
             value, { input with Source = ValueSome(jsonToken value) }
+        | _ when input.Facts = JsonSerializator.JsonSerializationShape.Dynamic ->
+            let token = publicationToken value input
+            token, { input with Source = ValueSome token; Carrier = CanonicalToken }
         | _ -> value, input
 
     /// Component packets are evaluated in their authored construction order.
@@ -169,7 +178,11 @@ module internal QueryProduced =
 
     /// Ordered stages publish a canonical token while retaining its writer facts.
     let canonical nextName produced =
-        bind nextName (fun value input -> DirectValue(canonicalToken input.Carrier value, { input with Carrier = CanonicalToken })) produced
+        bind nextName (fun value input ->
+            let token =
+                if input.Facts = JsonSerializator.JsonSerializationShape.Dynamic then publicationToken value input
+                else canonicalToken input.Carrier value
+            DirectValue(token, { input with Carrier = CanonicalToken })) produced
 
     /// A serialized grouping publishes its sequence under its authored Items child.
     let sequence nextName produced =
@@ -204,6 +217,9 @@ module internal QueryProduced =
             if projection.Alias = Some slot then { projection with Expr = value } else publishIdentity input projection)
         match produced with
         | DirectValue(value, input) ->
+            let value =
+                if input.Facts = JsonSerializator.JsonSerializationShape.Dynamic then publicationToken value input
+                else value
             let companions, output = publishInput nextName input
             struct({ Ctes = []; Body = SingleSelect { core with Projections = ProjectionSetOps.ofList(replaceValue value input @ companions) } }, output)
         | PackedValue(packet, input) ->
@@ -224,6 +240,9 @@ module internal QueryProduced =
                     OrderBy = List.map2 (fun name ordering -> { ordering with Expr = SqlExpr.Column(None, name) }) orderNames core.OrderBy }
             let inner = { Ctes = []; Body = SingleSelect innerCore }
             let selected, selectedInput = bound tokenValue elementAlias input
+            let selected =
+                if selectedInput.Facts = JsonSerializator.JsonSerializationShape.Dynamic then publicationToken selected selectedInput
+                else selected
             let selected =
                 if preserveErrors then
                     let error = extracted (SqlExpr.Column(Some elementAlias, "value")) 0

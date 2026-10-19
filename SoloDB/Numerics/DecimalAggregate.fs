@@ -21,7 +21,7 @@ type internal ExactNumericOperation =
     | Sine = 33 | Cosine = 34 | Tangent = 35 | Asin = 36 | Acos = 37 | Atan = 38 | Atan2 = 39
     | Sinh = 40 | Cosh = 41 | Tanh = 42 | Asinh = 43 | Acosh = 44 | Atanh = 45
     | Degrees = 46 | Radians = 47 | Text = 48 | BinaryLogarithm = 49 | BinaryLog10 = 50 | NativeValue = 51
-    | IntegerPower = 52 | StoredValue = 53 | NativeJsonValue = 54 | WriterValue = 55
+    | IntegerPower = 52 | StoredValue = 53 | NativeJsonValue = 54 | WriterValue = 55 | NativeJsonOutput = 56
 
 module internal ExactNumericNames =
     let prefix = function
@@ -49,6 +49,7 @@ module internal ExactNumericNames =
         | "STORED_VALUE" -> ExactNumericOperation.StoredValue
         | "NATIVE_JSON_VALUE" -> ExactNumericOperation.NativeJsonValue
         | "WRITER_VALUE" -> ExactNumericOperation.WriterValue
+        | "NATIVE_JSON_OUTPUT" -> ExactNumericOperation.NativeJsonOutput
         | "TO_DOUBLE" -> ExactNumericOperation.ToDouble | "TO_SINGLE" -> ExactNumericOperation.ToSingle
         | "TO_INT64" -> ExactNumericOperation.ToInt64 | "TO_INT32" -> ExactNumericOperation.ToInt32
         | "TO_INT16" -> ExactNumericOperation.ToInt16 | "TO_SBYTE" -> ExactNumericOperation.ToSByte
