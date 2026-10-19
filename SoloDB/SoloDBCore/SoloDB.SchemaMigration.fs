@@ -96,6 +96,9 @@ module internal SchemaMigration =
         | null -> true
         | handle -> raw.sqlite3_get_autocommit handle <> 0
 
+    let internal unsupportedVersion (version: int) (supported: int) =
+        NotSupportedException($"Error: Schema version {version} is not supported.\nReason: Current supported version is {supported}.\nFix: Open the database with a compatible SoloDB version. Do not lower PRAGMA user_version.")
+
     let internal readVersion (connection: NativeSqliteConnection) =
         let mutable statement = connection.OpenStatement("PRAGMA user_version;")
         try
@@ -245,7 +248,7 @@ module internal SchemaMigration =
                 | NotApplied ->
                     raise (InvalidOperationException $"Error: migration {plan.Label} found schema version {versionUnderLock} under the lock.\nReason: it is neither the expected {plan.FromVersion} nor an advance to {plan.TargetVersion} or beyond.\nFix: investigate what wrote this version.")
                 | BeyondSupported ->
-                    raise (NotSupportedException $"Error: Schema version {versionUnderLock} is not supported.\nReason: Current supported version is {plan.SupportedCeiling}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
+                    raise (unsupportedVersion versionUnderLock plan.SupportedCeiling)
 
             executeBoundary connection plan.Label "COMMIT TRANSACTION;"
          with ex ->

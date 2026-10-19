@@ -218,6 +218,8 @@ Direct numeric conversion uses the declared integer, `double`, `float` or `decim
 
 Typed document persistence stores Decimal and BigInteger values as canonical comparable strings; public direct JSON writes native numeric values. Typed numerical queries retain exact coefficients and exponents until the requested operation or conversion applies its native rounding and range rules. Ordinary string properties and numerical dictionary names retain their original meaning. Raw SQL extraction exposes the encoded text; SQLite's native casts and arithmetic do not decode that representation.
 
+Before upgrading, stop every older SoloDB process using the database. Opening with SoloDB 1.4 advances `PRAGMA user_version` to 6 in the schema initialization transaction, so SoloDB 1.3 refuses a later opening. This does not revoke connections already held by an older process. Do not lower the version stamp to bypass the check. The database version is established at opening; numerical fields are converted later as their typed collections are initialized.
+
 When an existing typed collection requires numerical migration, initialization converts its declared numerical fields in one transaction before returning the collection. A migration failure rolls back those changes and fails initialization. Stored numerical reads use the new representation after successful initialization; they do not retry a legacy representation. Canonical storage retains numerical value rather than Decimal scale bits.
 
 ### Earlier direct JSON measurements

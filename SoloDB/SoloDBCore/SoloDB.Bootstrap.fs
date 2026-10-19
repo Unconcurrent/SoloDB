@@ -266,7 +266,7 @@ module internal Bootstrap =
     /// <summary>
     /// The current supported schema version. The database will refuse to open future versions.
     /// </summary>
-    let [<Literal>] currentSupportedSchemaVersion = 5
+    let [<Literal>] currentSupportedSchemaVersion = 6
 
     /// <summary>
     /// The minimum required SQLite version.
@@ -308,8 +308,7 @@ module internal Bootstrap =
 
         // Edge case 2: future schema version
         if dbSchemaVersion > currentSupportedSchemaVersion then
-            raise (NotSupportedException
-                $"Error: Schema version {dbSchemaVersion} is not supported.\nReason: Current supported version is {currentSupportedSchemaVersion}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
+            raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
         // Schema creation: version 0 -> 1
         if dbSchemaVersion = 0 then
@@ -321,8 +320,7 @@ module internal Bootstrap =
                 | SchemaMigration.Established -> ()
                 | SchemaMigration.NotApplied -> raise (migrationVerificationError "v0->v1" 1 dbSchemaVersion)
                 | SchemaMigration.BeyondSupported ->
-                    raise (NotSupportedException
-                        $"Error: Schema version {dbSchemaVersion} is not supported.\nReason: Current supported version is {currentSupportedSchemaVersion}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
+                    raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
         // Migration: version 1 -> 2
         if dbSchemaVersion = 1 then
@@ -345,8 +343,7 @@ module internal Bootstrap =
                 | SchemaMigration.Established -> ()
                 | SchemaMigration.NotApplied -> raise (migrationVerificationError "v1->v2" 2 dbSchemaVersion)
                 | SchemaMigration.BeyondSupported ->
-                    raise (NotSupportedException
-                        $"Error: Schema version {dbSchemaVersion} is not supported.\nReason: Current supported version is {currentSupportedSchemaVersion}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
+                    raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
         // Migration: version 2 -> 3
         if dbSchemaVersion = 2 then
@@ -364,8 +361,7 @@ module internal Bootstrap =
                 | SchemaMigration.Established -> ()
                 | SchemaMigration.NotApplied -> raise (migrationVerificationError "v2->v3" 3 dbSchemaVersion)
                 | SchemaMigration.BeyondSupported ->
-                    raise (NotSupportedException
-                        $"Error: Schema version {dbSchemaVersion} is not supported.\nReason: Current supported version is {currentSupportedSchemaVersion}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
+                    raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
         // Migration: version 3 -> 4
         // v3 = triggers/Event API. v4 = Relational API.
@@ -406,8 +402,7 @@ module internal Bootstrap =
                 | SchemaMigration.Established -> ()
                 | SchemaMigration.NotApplied -> raise (migrationVerificationError "v3->v4" 4 dbSchemaVersion)
                 | SchemaMigration.BeyondSupported ->
-                    raise (NotSupportedException
-                        $"Error: Schema version {dbSchemaVersion} is not supported.\nReason: Current supported version is {currentSupportedSchemaVersion}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
+                    raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
         // Migration: version 4 -> 5
         // v5 enforces unique SoloDBCollections.Name for deterministic metadata behavior.
@@ -431,18 +426,23 @@ module internal Bootstrap =
                 | SchemaMigration.Established -> ()
                 | SchemaMigration.NotApplied -> raise (migrationVerificationError "v4->v5" 5 dbSchemaVersion)
                 | SchemaMigration.BeyondSupported ->
-                    raise (NotSupportedException
-                        $"Error: Schema version {dbSchemaVersion} is not supported.\nReason: Current supported version is {currentSupportedSchemaVersion}.\nFix: Migrate the database or update PRAGMA user_version to a compatible version.")
+                    raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
         let fileSystemEvents = FileSystemEventSchema.forExistingTables dbConnection
-        if fileSystemEvents.Length <> 0 then
+        if dbSchemaVersion = 5 || fileSystemEvents.Length <> 0 then
+            let label = if dbSchemaVersion = 5 then "v5->v6" else "filesystem event initialization"
             SchemaMigration.run dbConnection
-                { Label = "filesystem event initialization"
+                { Label = label
                   Setup = ""; Body = fileSystemEvents
-                  FromVersion = currentSupportedSchemaVersion
+                  FromVersion = dbSchemaVersion
                   TargetVersion = currentSupportedSchemaVersion
                   SupportedCeiling = currentSupportedSchemaVersion
                   LegacyTextPolicy = SchemaMigration.Strict }
+            dbSchemaVersion <- SchemaMigration.readVersion dbConnection
+            match SchemaMigration.classifyVersion dbSchemaVersion currentSupportedSchemaVersion currentSupportedSchemaVersion with
+            | SchemaMigration.Established -> ()
+            | SchemaMigration.NotApplied -> raise (migrationVerificationError label currentSupportedSchemaVersion dbSchemaVersion)
+            | SchemaMigration.BeyondSupported -> raise (SchemaMigration.unsupportedVersion dbSchemaVersion currentSupportedSchemaVersion)
 
         // https://www.sqlite.org/pragma.html#pragma_optimize
         let mutable statement = dbConnection.OpenStatement("PRAGMA optimize=0x10002;")
