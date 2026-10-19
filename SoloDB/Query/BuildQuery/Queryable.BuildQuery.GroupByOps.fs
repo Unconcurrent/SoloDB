@@ -178,11 +178,6 @@ module internal QueryableBuildQueryGroupByOps =
             { Expr = orderExpr
               Direction = if descending then SortDirection.Desc else SortDirection.Asc })
 
-    let private nullableKeyFilter (keyType: Type) : SqlExpr option =
-        if keyType.IsGenericType && typedefof<Nullable<_>>.Equals(keyType.GetGenericTypeDefinition()) then
-            Some (SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some "o", syntheticGroupKeyAlias)))
-        else None
-
     let private nullSensitiveKeyLeaf (expr: Expression) =
         let isNullable = expr.Type.IsGenericType && typedefof<Nullable<_>>.Equals(expr.Type.GetGenericTypeDefinition())
         if isNullable || DateTimeFunctions.isDateTimeLikeType expr.Type then [expr] else []
@@ -218,8 +213,15 @@ module internal QueryableBuildQueryGroupByOps =
         (vars: Dictionary<string, obj>)
         (keyLambdaExpr: Expression) : SqlExpr option =
         let keyLambda = extractLambdaFromExpr keyLambdaExpr
+        let nullableResult = not (isNull (Nullable.GetUnderlyingType keyLambda.ReturnType))
+        let boxedNullable =
+            match keyLambda.Body with
+            | :? UnaryExpression as conversion when conversion.NodeType = ExpressionType.Convert && isNull conversion.Method
+                                                   && typeof<obj>.Equals(conversion.Type) ->
+                not (isNull (Nullable.GetUnderlyingType conversion.Operand.Type))
+            | _ -> false
         let predicates =
-            collectNullSensitiveKeyParts keyLambda.Body
+            (if nullableResult || boxedNullable then [] else collectNullSensitiveKeyParts keyLambda.Body)
             |> List.map (fun keyPart ->
                 let keyPartExpr =
                     QueryTranslator.translateBodyToSqlExpr sourceCtx ctxTableName keyPart keyLambda.Parameters vars
@@ -302,7 +304,6 @@ module internal QueryableBuildQueryGroupByOps =
             let rowCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input; Joins = completion.RowJoins }
             let nullKeyFilter =
                 (if group.Element.IsSome then None else buildNullKeyFilter rowCtx ctx.TableName ctx.Vars group.Key)
-                |> Option.orElseWith (fun () -> nullableKeyFilter keyType)
             let produced = completedGrouping completion sourceCtx.NextAlias groupType key ctx.Input
             let struct(query, output) = completion.Publish(groupRows rows equalityName nullKeyFilter, completedRows having orderBy, produced)
             { Query = { query with Ctes = bindings @ query.Ctes }; SerializationInput = output; KeyInput = ValueNone })
@@ -331,7 +332,6 @@ module internal QueryableBuildQueryGroupByOps =
             let rowCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input; Joins = completion.RowJoins }
             let nullKeyFilter =
                 (if group.Element.IsSome then None else buildNullKeyFilter rowCtx ctx.TableName ctx.Vars group.Key)
-                |> Option.orElseWith (fun () -> nullableKeyFilter keyType)
             let orderBy = translateGroupOrders completion groupCtx rows ctx.Vars groupOrders
             let struct(query, output) = completion.Publish(groupRows rows equalityName nullKeyFilter, completedRows having orderBy, produced)
             { Query = { query with Ctes = bindings @ query.Ctes }; SerializationInput = output; KeyInput = ValueNone })
