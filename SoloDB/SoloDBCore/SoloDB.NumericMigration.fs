@@ -92,14 +92,14 @@ module internal NumericMigration =
                 statements.Prefix +
                 ", matches AS (SELECT w.rowid,w.path,MIN(l.kind) kind FROM walk w JOIN leaves l ON l.state=w.state " +
                 "WHERE w.type IS NOT NULL AND w.type<>'null' GROUP BY w.rowid,w.path), " +
-                "changes AS (SELECT rowid,path,kind,row_number() OVER(PARTITION BY rowid ORDER BY path) ordinal FROM matches), " +
-                "patched(rowid,ordinal,value) AS (SELECT d.Id,0,d.Value FROM " + quoted table +
-                " d WHERE EXISTS(SELECT 1 FROM changes c WHERE c.rowid=d.Id) UNION ALL " +
-                "SELECT p.rowid,c.ordinal,jsonb_set(p.value,c.path,NUMERIC_NORMALIZE(c.kind,d.Value -> c.path)) " +
+                "changes AS (SELECT rowid,path,kind,row_number() OVER change_order ordinal," +
+                "lead(0,1,1) OVER change_order finished FROM matches WINDOW change_order AS (PARTITION BY rowid ORDER BY path)), " +
+                "patched(rowid,ordinal,value,finished) AS (SELECT d.Id,0,d.Value,0 FROM changes c JOIN " + quoted table +
+                " d ON d.Id=c.rowid WHERE c.ordinal=1 UNION ALL " +
+                "SELECT p.rowid,c.ordinal,jsonb_set(p.value,c.path,NUMERIC_NORMALIZE(c.kind,d.Value -> c.path)),c.finished " +
                 "FROM patched p JOIN changes c ON c.rowid=p.rowid AND c.ordinal=p.ordinal+1 JOIN " + quoted table +
-                " d ON d.Id=p.rowid) UPDATE " + quoted table +
-                " SET Value=(SELECT p.value FROM patched p WHERE p.rowid=Id ORDER BY p.ordinal DESC LIMIT 1) " +
-                "WHERE Id IN (SELECT rowid FROM changes)"
+                " d ON d.Id=p.rowid) UPDATE " + quoted table + " AS target " +
+                "SET Value=p.value FROM patched p WHERE p.finished=1 AND target.Id=p.rowid"
 
             let mutable statement = (connection: NativeSqliteConnection).OpenStatement(sql)
             try
