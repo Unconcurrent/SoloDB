@@ -171,17 +171,28 @@ module internal HelperSchema =
         | Some(Some entry) when matchesDeclaredIndex name expression unique entry -> Some indexName
         | _ -> raise(InvalidOperationException($"The declared numerical index '{indexName}' has an unsupported schema definition."))
 
+    let private storedIndexState name conn valueType property unique =
+        let expression =
+            SqlExpr.JsonExtractExpr(None,"Value",JsonPathOps.ofList [property])
+            |> StoredValueParameter.declaredExpression valueType
+        let indexName,_ = indexExpressionName name expression
+        let exists =
+            match IndexModel.readIndexForSchema conn name indexName with
+            | None -> false
+            | Some(Some entry) when matchesDeclaredIndex name expression unique entry -> true
+            | _ -> raise(InvalidOperationException($"The declared numerical index '{indexName}' does not match its required expression."))
+        struct (exists, legacyUnsignedIndex name conn valueType property unique)
+
     let private ensureStoredIndex name (conn: NativeSqliteConnection) valueType property unique =
         let expression =
             SqlExpr.JsonExtractExpr(None,"Value",JsonPathOps.ofList [property])
             |> StoredValueParameter.declaredExpression valueType
         let indexName,whereSQL = indexExpressionName name expression
         let create (connection: NativeSqliteConnection) =
-            let before = IndexModel.readIndexForSchema connection name indexName
-            let old = legacyUnsignedIndex name connection valueType property unique
-            if SQLiteToolsHandlerFaultState.isInEventHandlerScope connection && (before.IsNone || old.IsSome) then
+            let struct (exists, old) = storedIndexState name connection valueType property unique
+            if SQLiteToolsHandlerFaultState.isInEventHandlerScope connection && (not exists || old.IsSome) then
                 raise(InvalidOperationException("The numerical index must be initialized before use in an event callback."))
-            if before.IsNone then
+            if not exists then
                 let uniqueSQL = if unique then "UNIQUE " else ""
                 let mutable statement = connection.OpenStatement($"CREATE {uniqueSQL}INDEX IF NOT EXISTS {indexName} ON \"{name}\"{whereSQL}")
                 try
@@ -200,9 +211,11 @@ module internal HelperSchema =
                     statement.Dispose()
                 with error -> statement.Abort(error); reraise()
             | None -> ()
-            if before.IsNone || old.IsSome then RuntimeIndexModelCache.invalidate conn.ConnectionString name
+            if not exists || old.IsSome then RuntimeIndexModelCache.invalidate conn.ConnectionString name
         if QueryTranslatorNumeric.unsigned64 valueType then
-            Connections.NativeTransactional(conn).WithTransaction create
+            let struct (exists, old) = storedIndexState name conn valueType property unique
+            if not exists || old.IsSome then
+                Connections.NativeTransactional(conn).WithTransaction create
         else
             let uniqueSQL = if unique then "UNIQUE " else ""
             let mutable statement = conn.OpenStatement($"CREATE {uniqueSQL}INDEX IF NOT EXISTS {indexName} ON \"{name}\"{whereSQL}")
@@ -233,9 +246,13 @@ module internal HelperSchema =
     let private usesDeclaredIndexes<'T> () =
         not(typeof<JsonSerializator.JsonValue>.IsAssignableFrom typeof<'T>)
 
-    let internal hasUnsignedIndexes<'T> () =
+    let internal unsignedIndexesRequireEnsure<'T> name conn =
         usesDeclaredIndexes<'T>() &&
-        (IndexMetadata.fields<'T>() |> Array.exists(fun index -> QueryTranslatorNumeric.unsigned64 index.ValueType))
+        (IndexMetadata.fields<'T>() |> Array.exists(fun index ->
+            if not (QueryTranslatorNumeric.unsigned64 index.ValueType) then false
+            else
+                let struct (exists, old) = storedIndexState name conn index.ValueType index.Name index.Unique
+                not exists || old.IsSome))
 
     let internal ensureUnsignedIndexes<'T> name conn =
         if usesDeclaredIndexes<'T>() then

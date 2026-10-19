@@ -24,7 +24,6 @@ module internal NumericMigrationPlan =
         Edges: Edge[]
         Dynamic: struct (int * Type)[]
         Paths: Selection list[]
-        Recursive: bool
     }
 
     let create (rootType: Type) (actualTypes: Type -> Selection list -> Type seq) =
@@ -34,7 +33,6 @@ module internal NumericMigrationPlan =
         let dynamic = ResizeArray<struct (int * Type)>()
         let paths = ResizeArray<Selection list>()
         let mutable nextState = 0
-        let mutable recursive = false
 
         let allocate path =
             let state = nextState
@@ -44,9 +42,7 @@ module internal NumericMigrationPlan =
 
         let rec prepare path (target: Type) =
             match states.TryGetValue target with
-            | true, state ->
-                recursive <- true
-                state
+            | true, state -> state
             | _ ->
                 let state = allocate path
                 states.Add(target, state)
@@ -128,4 +124,4 @@ module internal NumericMigrationPlan =
 
         let root = prepare [] rootType
         { Root = root; Leaves = leaves.ToArray(); Edges = edges.ToArray(); Dynamic = dynamic.ToArray()
-          Paths = paths.ToArray(); Recursive = recursive }
+          Paths = paths.ToArray() }

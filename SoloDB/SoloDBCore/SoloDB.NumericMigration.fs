@@ -64,26 +64,6 @@ module internal NumericMigration =
     let sample connection table target =
         NumericMigrationProbe.sample connection table target
 
-    let requireCurrent connection table target =
-        let plan = prepare connection table target
-        if plan.Leaves.Length <> 0 then
-            let statements = query table plan
-            let sql =
-                statements.Prefix + " SELECT 1 FROM walk w JOIN leaves l ON l.state=w.state " +
-                "WHERE w.type IS NOT NULL AND w.type NOT IN ('null','text') LIMIT 1"
-
-            let mutable statement = connection.OpenStatement(sql)
-            try
-                try
-                    statement.BindValues(statements.Parameters)
-                    if statement.Step() then
-                        raise(InvalidOperationException("A numerical collection must finish migration before it can be opened from an event handler."))
-                with error ->
-                    statement.Abort(error)
-                    reraise()
-            finally
-                statement.Dispose()
-
     let migrate connection table target =
         let plan = prepare connection table target
         if plan.Leaves.Length <> 0 then

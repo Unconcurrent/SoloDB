@@ -26,7 +26,7 @@ module internal SoloDBRootOps =
             let needsMigration,needsIndexes =
                 use connection=connectionManager.BorrowNative()
                 (NumericMigration.sample connection name typeof<'T> |> NumericMigration.legacy),
-                HelperSchema.hasUnsignedIndexes<'T>()
+                HelperSchema.unsignedIndexesRequireEnsure<'T> name connection
             if needsMigration || needsIndexes then
                 lock ddlLock (fun () ->
                     connectionManager.WithTransaction(fun connection ->

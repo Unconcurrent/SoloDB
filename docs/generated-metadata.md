@@ -222,6 +222,10 @@ Before upgrading, stop every older SoloDB process using the database. Opening wi
 
 When an existing typed collection requires numerical migration, initialization converts its declared numerical fields in one transaction before returning the collection. A migration failure rolls back those changes and fails initialization. Stored numerical reads use the new representation after successful initialization; they do not retry a legacy representation. Canonical storage retains numerical value rather than Decimal scale bits.
 
+Normal collection initialization samples the first present, non-null Decimal or BigInteger value. A number selects the transactional conversion; text identifies the current representation and stops the check. This relies on the atomic format upgrade, rather than checking every document or repairing arbitrary mixed representations. Changing an application property from a native type to Decimal or BigInteger can require your own data migration.
+
+Initialize collections that need conversion before accessing them from event handlers. Handler-context collection lookup does not scan or convert numerical fields. Callbacks run inside the active statement and transaction, so they can observe in-flight writes; ordinary collection initialization returns after conversion completes.
+
 ### Earlier direct JSON measurements
 
 Both packaged frontends have JIT and linux-x64 NativeAOT coverage. Other native platforms were not executed; existing native warning qualifications remain.

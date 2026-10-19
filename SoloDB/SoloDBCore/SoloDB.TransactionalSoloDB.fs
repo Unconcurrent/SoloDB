@@ -71,12 +71,12 @@ type TransactionalSoloDB internal (connection: NativeCachingDbConnection, parent
         checkScope ()
         if not (Helper.existsCollection name connection) then
             Helper.createTableInner<'T> name connection
-        elif connection.EventDispatchState.Depth<>0 then
-            NumericMigration.requireCurrent connection name typeof<'T>
-        elif NumericMigration.sample connection name typeof<'T> |> NumericMigration.legacy then
+        elif connection.EventDispatchState.Depth = 0 &&
+             (NumericMigration.sample connection name typeof<'T> |> NumericMigration.legacy) then
             NumericMigration.migrate connection name typeof<'T>
 
-        if HelperSchema.hasUnsignedIndexes<'T>() then
+        if connection.EventDispatchState.Depth = 0 &&
+           HelperSchema.unsignedIndexesRequireEnsure<'T> name connection then
             HelperSchema.ensureUnsignedIndexes<'T> name connection
 
         Helper.registerTypeCollection<'T> name connection

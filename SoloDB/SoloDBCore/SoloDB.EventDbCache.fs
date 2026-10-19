@@ -51,7 +51,6 @@ type internal EventDbCache(connectionString: string, directConnection: NativeSql
         else if not (Helper.existsCollection collectionName directConnection) then
             Helper.createTableInner<'U> collectionName directConnection
 
-        NumericMigration.requireCurrent directConnection collectionName typeof<'U>
         Helper.registerTypeCollection<'U> collectionName directConnection
 
         let hasRelations = RelationsSchemaValidator.hasReferenceProperties typeof<'U>
