@@ -19,41 +19,44 @@ open SoloDatabase.SqlModel
 
 module internal QueryableHelperBase =
     /// A null Id carries a typed runtime error; ordinary base rowids cannot carry one.
-    let rec internal canExposeNullId (query: SqlSelect) =
-        let coreCanExposeNullId (core: SelectCore) =
-            let rec nullableId = function
-                | SqlExpr.Literal SqlLiteral.Null -> true
-                | SqlExpr.Literal _ -> false
-                | SqlExpr.CaseExpr((_, first), rest, otherwise) ->
-                    nullableId first || List.exists (snd >> nullableId) rest
-                    || Option.fold (fun _ expr -> nullableId expr) true otherwise
-                | SqlExpr.Coalesce(first, rest) -> nullableId first && List.forall nullableId rest
-                | SqlExpr.Column(qualifier, "Id") ->
-                    let matches (name: string) = qualifier |> Option.forall (fun q -> q.Trim('"') = name.Trim('"'))
-                    match core.Source with
-                    | Some(BaseTable(name, alias)) when matches (defaultArg alias name) ->
-                        query.Ctes |> List.exists (fun cte -> cte.Name = name)
-                    | Some(DerivedTable(inner, alias)) when matches alias -> canExposeNullId inner
+    let internal canExposeNullId (query: SqlSelect) =
+        let rec inspect (scopes: CteBinding list list) (query: SqlSelect) =
+            let scopes = if query.Ctes.IsEmpty then scopes else query.Ctes :: scopes
+            let fromTable name =
+                scopes |> List.tryPick (List.tryFind (fun binding -> binding.Name = name))
+                |> Option.exists (fun binding -> inspect scopes binding.Query)
+            let coreCanExposeNullId (core: SelectCore) =
+                let rec nullableId = function
+                    | SqlExpr.Literal SqlLiteral.Null -> true
+                    | SqlExpr.Literal _ -> false
+                    | SqlExpr.CaseExpr((_, first), rest, otherwise) ->
+                        nullableId first || List.exists (snd >> nullableId) rest
+                        || Option.fold (fun _ expr -> nullableId expr) true otherwise
+                    | SqlExpr.Coalesce(first, rest) -> nullableId first && List.forall nullableId rest
+                    | SqlExpr.Column(qualifier, "Id") ->
+                        let matches (name: string) = qualifier |> Option.forall (fun q -> q.Trim('"') = name.Trim('"'))
+                        match core.Source with
+                        | Some(BaseTable(name, alias)) when matches (defaultArg alias name) -> fromTable name
+                        | Some(DerivedTable(inner, alias)) when matches alias -> inspect scopes inner
+                        | _ -> true
                     | _ -> true
-                | _ -> true
-            match core.Projections with
-            | AllColumns ->
-                match core.Source with
-                | Some(DerivedTable(inner, _)) -> canExposeNullId inner
-                | Some(BaseTable(name, _)) -> query.Ctes |> List.exists (fun cte -> cte.Name = name)
-                | _ -> true
-            | Explicit(head, tail) ->
-                head :: tail
-                |> List.tryFind (fun projection ->
-                    match projection.Alias, projection.Expr with
-                    | Some "Id", _ | None, SqlExpr.Column(_, "Id") -> true
-                    | _ -> false)
-                |> Option.exists (fun projection -> nullableId projection.Expr)
-        if not query.Ctes.IsEmpty then true
-        else
+                match core.Projections with
+                | AllColumns ->
+                    match core.Source with
+                    | Some(DerivedTable(inner, _)) -> inspect scopes inner
+                    | Some(BaseTable(name, _)) -> fromTable name
+                    | _ -> true
+                | Explicit(head, tail) ->
+                    head :: tail
+                    |> List.tryFind (fun projection ->
+                        match projection.Alias, projection.Expr with
+                        | Some "Id", _ | None, SqlExpr.Column(_, "Id") -> true
+                        | _ -> false)
+                    |> Option.exists (fun projection -> nullableId projection.Expr)
             match query.Body with
             | SingleSelect core -> coreCanExposeNullId core
             | UnionAllSelect(head, tail) -> coreCanExposeNullId head || List.exists coreCanExposeNullId tail
+        inspect [] query
 
     let internal preserveRuntimeErrorValue id value projected =
         SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNull, id), value), [], Some projected)

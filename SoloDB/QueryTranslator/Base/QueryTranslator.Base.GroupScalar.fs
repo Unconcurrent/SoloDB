@@ -11,9 +11,9 @@ open SoloDatabase.QueryTranslatorVisitPost
 module internal QueryGroupScalar =
     type private Demand = {
         Kind: AggregateKind
-        Predicate: LambdaExpression option
-        Selector: LambdaExpression option
-        DiscardedProjection: LambdaExpression option
+        Predicate: ChainExpr.Selector option
+        Selector: ChainExpr.Selector option
+        DiscardedProjection: ChainExpr.Selector option
         Distinct: bool
         Quantifier: bool option
     }
@@ -31,7 +31,7 @@ module internal QueryGroupScalar =
         | _ -> false
 
     let private lambda expression =
-        match tryExtractLambdaExpression expression with ValueSome value -> Some value | _ -> None
+        match tryExtractLambdaExpression expression with ValueSome value -> Some(ChainExpr.selector value) | _ -> None
 
     let private describe parameter (call: MethodCallExpression) =
         if call.Arguments.Count = 0 ||
@@ -81,6 +81,15 @@ module internal QueryGroupScalar =
                     predicate <- lambda stage.Arguments[1]
                     valid <- valid && predicate.IsSome
                     source <- stage.Arguments[0]
+                | _ -> ()
+            if kind <> AggregateKind.Count && selector.IsNone && isSource parameter source then
+                let inputType = QueryTranslatorNumeric.aggregateInput call.Method
+                let payload = QueryTranslatorNumeric.underlying inputType
+                match Metadata.Generation.TypeSupport.Numeric payload.FullName with
+                | Some shape when
+                    shape.Kind = Metadata.Generation.NumericKind.Integer || shape.Kind = Metadata.Generation.NumericKind.Binary
+                    || shape.Kind = Metadata.Generation.NumericKind.Decimal || shape.Kind = Metadata.Generation.NumericKind.ArbitraryInteger ->
+                    selector <- Some(ChainExpr.identitySelector inputType)
                 | _ -> ()
             if not valid || not(isSource parameter source) || (kind = AggregateKind.Count && distinct)
                || (quantifier.IsSome && (selector.IsSome || predicate.IsSome)) || (kind <> AggregateKind.Count && selector.IsNone) then None
@@ -135,7 +144,7 @@ module internal QueryGroupScalar =
         supported
 
     /// LEFT padding is excluded through the actual matched-row presence fact.
-    let internal tryTranslate parameter present (translate: LambdaExpression -> SqlExpr) (expression: Expression) =
+    let internal tryTranslate parameter present (translate: ChainExpr.Selector -> SqlExpr) (expression: Expression) =
         match expression with
         | :? MethodCallExpression as call ->
             match describe parameter call with

@@ -19,6 +19,7 @@ type internal TreeValueFormat = Subject = 0 | EqualityKey = 1
 
 module internal JsonFunctions =
     let [<Literal>] treeValueFunction = "TREE_VALUE"
+    let [<Literal>] rowErrorFunction = "ROW_ERROR"
     /// Result types whose established materializer consumes SQLite scalar text directly.
     let internal consumesSqlScalar (resultType: Type) =
         typeof<string>.Equals(resultType)
@@ -141,8 +142,8 @@ module internal JsonFunctions =
     // A null Id carries the translator-generated exception payload. Keep its
     // decoder outside successful row materialization.
     [<MethodImpl(MethodImplOptions.NoInlining)>]
-    let private raiseRowError (row: DbObjectRow) : unit =
-        match JsonValue.Parse row.ValueJSON with
+    let internal raiseRowError (text: string) : unit =
+        match JsonValue.Parse text with
         | Object o ->
             let kind =
                 match o.TryGetValue "kind" with
@@ -151,7 +152,7 @@ module internal JsonFunctions =
             let msg =
                 match o.TryGetValue "msg" with
                 | true, String s -> s
-                | _ -> row.ValueJSON
+                | _ -> text
             match kind with
             | "CardinalityError" -> raise (InvalidOperationException msg)
             | "CastError" -> raise (InvalidCastException msg)
@@ -163,7 +164,7 @@ module internal JsonFunctions =
                 raise (InvalidOperationException msg)
         | _ ->
             // Internal invariant violation: Id=NULL row payload is not a JSON object.
-            raise (InvalidOperationException row.ValueJSON)
+            raise (InvalidOperationException text)
 
 
     let private needsPhysicalTreeId id isObject hasId = isObject && not hasId && id >= 0L
@@ -246,7 +247,7 @@ module internal JsonFunctions =
     let internal fromSQLite<'R when 'R :> obj> (row: DbObjectRow) : 'R =
         if isNull (row :> obj) then Unchecked.defaultof<'R>
         else
-            if not row.Id.HasValue then raiseRowError row
+            if not row.Id.HasValue then raiseRowError row.ValueJSON
             if typeof<'R>.Equals(typeof<string>) then row.ValueJSON :> obj :?> 'R
             elif typeof<'R>.IsValueType then fromSQLiteValue<'R> row
             elif isNull row.ValueJSON && DBRefTypeHelpers.isFileRefManyType typeof<'R> then fromJson<'R> JsonValue.Null

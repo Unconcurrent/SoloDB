@@ -19,7 +19,7 @@ module internal OrderedChain =
             p.Stages |> List.forall (function Set(_, r, _) -> (parse adapter.IsRoot r |> Option.exists valid) || adapter.IsValue r | _ -> true)
         valid { Root=Expression.Constant(null);Stages=stages }
 
-    let private materialize (adapter: Adapter) rows completedInput resultType elementType =
+    let private materialize (adapter: Adapter) rows completedInput resultType =
         let alias = adapter.Alias()
         let selected = QueryTranslatorSerialization.scopeSerializationInput (Some alias) BaseLayer completedInput
         let payload, selected = QueryProduced.embedded (col alias "Value", selected)
@@ -36,15 +36,15 @@ module internal OrderedChain =
     /// A consumed group parameter requests its actual completed sequence once.
     let internal collection (adapter: Adapter) (expression: Expression) resultType =
         let struct(rows, input) = build adapter FullValue { Root = expression; Stages = [] }
-        materialize adapter rows input resultType (sequenceElementType expression.Type)
+        materialize adapter rows input resultType
 
     let private groupedQuantifier (adapter: Adapter) (plan: Plan) bounded =
         let rec split preceding = function
-            | Group(key, false, producedType) :: remaining -> Some(List.rev preceding, key, producedType, remaining)
+            | Group(key, element, false, producedType) :: remaining -> Some(List.rev preceding, key, element, producedType, remaining)
             | stage :: remaining -> split (stage :: preceding) remaining
             | [] -> None
         match split [] plan.Stages with
-        | Some(preceding, key, producedType, remaining) when
+        | Some(preceding, key, element, producedType, remaining) when
             remaining |> List.mapi (fun index -> function Filter predicate -> QueryGroupScalar.supportsPredicate predicate.Parameters[0] predicate.Body (index > 0) | _ -> false) |> List.forall id ->
             let struct(rows, input) = build adapter FullValue { plan with Stages = preceding }
             let alias = adapter.Alias()
@@ -52,18 +52,19 @@ module internal OrderedChain =
                           { Alias = Some "Value"; Expr = col alias "Value" }
                           { Alias = Some "__ord"; Expr = col alias "__ord" }]
                          @ QueryTranslatorSerialization.companionProjections (Some alias) input
-            let struct(keyRows, keyInput, keyName, equalityNames) =
-                prepareGrouping adapter plan.Root input alias (core (Some(DerivedTable(rows, alias))) fields) key
+            let struct(keyRows, input, keyInput, keyName, equalityNames) =
+                prepareGrouping adapter plan.Root input alias (core (Some(DerivedTable(rows, alias))) fields) key element
+            let bindings, keyRows = if element.IsSome then keyRows.Ctes, { keyRows with Ctes = [] } else [], keyRows
             let groupAlias = adapter.Alias()
-            let item = QueryTranslatorSerialization.scopeSerializationInput (Some groupAlias) BaseLayer input
+            let item = QueryTranslatorSerialization.scopeSerializationInput (Some groupAlias) (if element.IsSome then OuterLayer else BaseLayer) input
             let keyInput = QueryTranslatorSerialization.scopeSerializationInput (Some groupAlias) OuterLayer keyInput
             let groupInput = QuerySerializationInput.Grouping(producedType, keyInput, item)
             let joins = ResizeArray<JoinShape>()
             let predicates = remaining |> List.map (function
                 | Filter predicate ->
                     let parameter = predicate.Parameters[0]
-                    let argument (lambda: LambdaExpression) =
-                        let produced, edges = adapter.Translate plan.Root item groupAlias (selector lambda) ValueNone
+                    let argument (lambda: ChainExpr.Selector) =
+                        let produced, edges = adapter.Translate plan.Root item groupAlias lambda ValueNone
                         joins.AddRange edges
                         QueryProduced.value adapter.Alias produced
                     let handler expression =
@@ -77,9 +78,10 @@ module internal OrderedChain =
             let having = predicates |> function
                 | [] -> None
                 | first :: remaining -> Some(List.fold (fun left right -> SqlExpr.Binary(left, BinaryOperator.And, right)) first remaining)
-            Some { core (Some(DerivedTable(keyRows, groupAlias))) [proj "v" (integer 1L)] with
-                        Joins = List.ofSeq joins; GroupBy = equalityNames |> List.map (col groupAlias)
-                        Having = having; Limit = if bounded then Some(integer 1L) else None }
+            let grouped = { core (Some(DerivedTable(keyRows, groupAlias))) [proj "v" (integer 1L)] with
+                                Joins = List.ofSeq joins; GroupBy = equalityNames |> List.map (col groupAlias)
+                                Having = having; Limit = if bounded then Some(integer 1L) else None }
+            Some { Ctes = bindings; Body = SingleSelect grouped }
         | _ -> None
 
     /// Returns None before any translation when the complete chain is not owned here.
@@ -110,7 +112,7 @@ module internal OrderedChain =
                 let sequenceResult =
                     match name with
                     | "Select" | "Distinct" | "DistinctBy" | "Order" | "OrderDescending"
-                    | "DefaultIfEmpty" | "Cast" | "OfType" | "CountBy"
+                    | "DefaultIfEmpty" | "Cast" | "OfType" | "CountBy" | "GroupBy"
                     | "UnionBy" | "IntersectBy" | "ExceptBy" -> true
                     | _ -> false
                 match if sequenceResult then parse adapter.IsRoot expression else None with
@@ -205,7 +207,7 @@ module internal OrderedChain =
                     else None
                 let struct(rows, completedInput) =
                     match grouped with
-                    | Some row -> struct(select row, (QueryProduced.typed call.Type (integer 1L)).Input)
+                    | Some row -> struct(row, (QueryProduced.typed call.Type (integer 1L)).Input)
                     | None when name = "Any" -> existenceRows rowAdapter (if identityOnly then IdentityOnly else FullValue) plan
                     | None -> build rowAdapter (if identityOnly then IdentityOnly else FullValue) plan
                 let value expression = adapter.Value expression |> QueryProduced.value adapter.Alias
@@ -242,7 +244,7 @@ module internal OrderedChain =
                         @ [{ Expr = key; Direction = direction }; { Expr = col a "__ord"; Direction = SortDirection.Asc }]
                     Some(selected selectedValue { core source [] with Joins = joins; OrderBy = order; Limit = Some(integer 1L) })
                 | "Count" | "LongCount" -> Some(typed(scalar (SqlExpr.AggregateCall(AggregateKind.Count,None,false,None))))
-                | "ToArray" | "ToList" -> Some(materialize adapter rows completedInput call.Type elementType)
+                | "ToArray" | "ToList" -> Some(materialize adapter rows completedInput call.Type)
                 | ("First"|"FirstOrDefault"|"Last"|"LastOrDefault"|"Single"|"SingleOrDefault"|"ElementAt"|"ElementAtOrDefault") ->
                     let direction = if name.StartsWith("Last",StringComparison.Ordinal) then SortDirection.Desc else SortDirection.Asc
                     let offset = if name.StartsWith("ElementAt",StringComparison.Ordinal) then arg |> Option.map value else None

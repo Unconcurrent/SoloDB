@@ -13,10 +13,12 @@ module internal QueryTranslatorVisitGrouping =
     let private actualGrouping (builder: QueryBuilder) (parameter: ParameterExpression) =
         let input = (builder.ResolveParameterSource parameter).SerializationInput
         if isNull input.OriginalType then false else
-        match JsonSerializator.JsonValue.SerializedValueFacts(Utils.optionalPayloadType input.OriginalType), input.Shape with
-        | JsonSerializator.JsonSerializationShape.GroupingValues _, ValueSome(JsonSerializator.JsonSerializationShape.GroupingValues _) -> false
-        | JsonSerializator.JsonSerializationShape.GroupingValues _, _ -> true
-        | _ -> false
+        match input.Shape with
+        | ValueSome(JsonSerializator.JsonSerializationShape.GroupingValues _) -> false
+        | _ ->
+            match JsonSerializator.JsonValue.SerializedValueFacts(Utils.optionalPayloadType input.OriginalType) with
+            | JsonSerializator.JsonSerializationShape.GroupingValues _ -> true
+            | _ -> false
 
     let internal handle (builder: QueryBuilder) (expression: Expression) =
         let rec root (expression: Expression) =

@@ -223,7 +223,7 @@ module internal NumericalFunctions =
                 context.SetText result
 
     let register (connection: NativeSqliteConnection) =
-        connection.RegisterNumericalScalar("NUMERIC_NORMALIZE",2,RawScalarFunc(fun context arguments ->
+        connection.RegisterManagedScalar("NUMERIC_NORMALIZE",2,RawScalarFunc(fun context arguments ->
             if arguments[1].IsNull then context.SetNull()
             else
                 match enum<NumericKind>(arguments[0].GetInt32()) with
@@ -234,19 +234,19 @@ module internal NumericalFunctions =
                 | _ -> invalidArg "kind" "An exact numerical type is required."),SqliteFunctionFlags.Deterministic)
         for domain in [NumericKind.Decimal;NumericKind.ArbitraryInteger] do
             let name = ExactNumericNames.scalar domain
-            connection.RegisterNumericalScalar(name,2,RawScalarFunc(fun context arguments -> unary domain &context arguments),SqliteFunctionFlags.Deterministic)
-            connection.RegisterNumericalScalar(name,4,RawScalarFunc(fun context arguments ->
+            connection.RegisterManagedScalar(name,2,RawScalarFunc(fun context arguments -> unary domain &context arguments),SqliteFunctionFlags.Deterministic)
+            connection.RegisterManagedScalar(name,4,RawScalarFunc(fun context arguments ->
                 match enum<ExactNumericOperation>(arguments[0].GetInt32()) with
                 | ExactNumericOperation.WriterValue -> writerValue domain &context arguments
                 | _ -> unary domain &context arguments),SqliteFunctionFlags.Deterministic)
-            connection.RegisterNumericalScalar(name,3,RawScalarFunc(fun context arguments ->
+            connection.RegisterManagedScalar(name,3,RawScalarFunc(fun context arguments ->
                 match enum<ExactNumericOperation>(arguments[0].GetInt32()) with
                 | ExactNumericOperation.NativeValue -> nativeValue &context arguments
                 | ExactNumericOperation.StoredValue -> storedValue domain &context arguments
                 | ExactNumericOperation.NativeJsonValue -> nativeJsonValue domain &context arguments
                 | ExactNumericOperation.NativeJsonOutput -> nativeJsonOutput &context arguments
                 | _ -> binary domain &context arguments),SqliteFunctionFlags.Deterministic)
-            connection.RegisterNumericalScalar(name,5,RawScalarFunc(fun context arguments -> binary domain &context arguments),SqliteFunctionFlags.Deterministic)
+            connection.RegisterManagedScalar(name,5,RawScalarFunc(fun context arguments -> binary domain &context arguments),SqliteFunctionFlags.Deterministic)
             let finish value = finish domain value
             for kind in [DecimalAggregateKind.Sum;DecimalAggregateKind.Average;DecimalAggregateKind.Minimum;DecimalAggregateKind.Maximum] do
                 if domain = NumericKind.Decimal then

@@ -68,7 +68,7 @@ module internal EqualityComparison =
                 Source = Some(BaseTable(name, None))
                 Where = Some(SqlExpr.Unary(UnaryOperator.Not, comparison)) }
         let query =
-            { Ctes = [{ Name = name; Query = { Ctes = []; Body = SingleSelect rowSource } }]
+            { Ctes = [{ Name = name; Materialized = false; Query = { Ctes = []; Body = SingleSelect rowSource } }]
               Body = SingleSelect core }
         SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists query)
 

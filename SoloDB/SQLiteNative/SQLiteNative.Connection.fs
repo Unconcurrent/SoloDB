@@ -89,8 +89,8 @@ type NativeSqliteConnection(connectionString: string) =
     let registerScalar name arity callback flags =
         registerFunction name arity (if isNull callback then ValueNone else ValueSome(Scalar(callback, flags)))
     member internal _.RegisterScalar(name, arity, callback, flags) = registerScalar name arity callback flags
-    member internal _.RegisterNumericalScalar(name, arity, callback, flags) =
-        registerFunction name arity (if isNull callback then ValueNone else ValueSome(NumericalScalar(callback, flags)))
+    member internal _.RegisterManagedScalar(name, arity, callback, flags) =
+        registerFunction name arity (if isNull callback then ValueNone else ValueSome(ManagedScalar(callback, flags)))
     member internal _.RegisterAggregate(name, arity, callback: NativeAggregateFunction, flags) =
         registerFunction name arity (if isNull (box callback) then ValueNone else ValueSome(Aggregate(callback, flags)))
     member internal _.EnableExtensions(enable) =

@@ -93,7 +93,7 @@ and private appendSelect ctx (sql: StringBuilder) parameters (query: SqlSelect) 
         for cte in query.Ctes do
             if not first then sql.Append(", ") |> ignore
             first <- false
-            sql.Append(EmitJson.quoteIdentifier ctx cte.Name).Append(" AS ") |> ignore
+            sql.Append(EmitJson.quoteIdentifier ctx cte.Name).Append(if cte.Materialized then " AS MATERIALIZED " else " AS ") |> ignore
             sql.Append('(') |> ignore
             appendSelect ctx sql parameters cte.Query
             sql.Append(')') |> ignore

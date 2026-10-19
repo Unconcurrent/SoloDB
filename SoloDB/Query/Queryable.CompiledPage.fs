@@ -9,7 +9,7 @@ module internal CompiledPage =
     let private binary op left right = Binary(left, op, right)
     let private project name expr = { Alias = Some name; Expr = expr }
     let private select core = { Ctes = []; Body = SingleSelect core }
-    let private cte name core = { Name = name; Query = select core }
+    let private cte name core = { Name = name; Materialized = false; Query = select core }
 
     let private qualify source =
         SqlExpr.map (function

@@ -165,7 +165,7 @@ module internal QueryableBuildQueryGroupJoinOps =
                             match OrderedChainPlan.parse orderedAdapter.IsRoot call.Arguments.[0] with
                             | Some plan when plan.Stages.IsEmpty ->
                                 let present = SqlExpr.Unary(UnaryOperator.IsNotNull, SqlExpr.Column(Some innerAlias, "Id"))
-                                let translateArgument (selector: LambdaExpression) =
+                                let translateArgument (selector: ChainExpr.Selector) =
                                     let captures = Dictionary<ParameterExpression, ParameterSource>()
                                     captures[outerParam] <- { Alias = Some outerAlias; Context = rowOuterCtx; Value = SourceParameter }
                                     QueryTranslator.translateCapturedBody innerAggCtx innerAlias selector.Body

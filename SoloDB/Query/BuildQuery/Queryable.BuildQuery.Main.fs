@@ -86,7 +86,7 @@ module internal QueryableBuildQueryMain =
         validateIncludeExcludeConflicts sourceCtx
 
         let reversed = preprocessed
-        let mutable pendingGroupByExprs : struct(Expression array * Type) option = None
+        let mutable pendingGroupByExprs : struct(ChainExpr.GroupBySelectors * Type) option = None
         let mutable pendingGroupByHavingPreds : Expression list = []
         let mutable pendingGroupByOrders : (Expression * bool) list = []
         let mutable idx = 0
@@ -200,14 +200,14 @@ module internal QueryableBuildQueryMain =
                             installTerminalOrdering
                             m
                     | SupportedLinqMethods.GroupBy ->
-                        let last = m.OriginalMethod.GetParameters() |> Array.last
-                        if last.ParameterType.IsGenericType
-                           && typedefof<System.Collections.Generic.IEqualityComparer<_>>.Equals(last.ParameterType.GetGenericTypeDefinition()) then
-                            ChainExpr.validateGroupingComparer "GroupBy" (m.OriginalMethod.GetGenericArguments().[1]) (Array.last m.Expressions)
-                        QueryableBuildQueryGroupByOps.applyGroupByKeyOnly<'T>
-                            sourceCtx tableName statements m.Expressions
-                        let groupType = m.OriginalMethod.ReturnType.GetGenericArguments()[0]
-                        pendingGroupByExprs <- Some(struct(m.Expressions, groupType))
+                        let group = ChainExpr.groupBySelectors m.OriginalMethod m.Expressions
+                        QueryableBuildQueryGroupByOps.applyGroupByInput sourceCtx statements group
+                        match group.Result with
+                        | None -> pendingGroupByExprs <- Some(struct(group, group.GroupType))
+                        | Some result ->
+                            let selector = ChainExpr.groupingResult group.GroupType result
+                            QueryableBuildQueryGroupByOps.applyGroupBySelect<'T>
+                                sourceCtx tableName statements group [] [] [|selector :> Expression|] group.GroupType
                     | SupportedLinqMethods.Count
                     | SupportedLinqMethods.LongCount
                     | SupportedLinqMethods.SelectMany

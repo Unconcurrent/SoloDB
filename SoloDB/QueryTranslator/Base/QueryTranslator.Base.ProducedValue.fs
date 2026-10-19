@@ -187,8 +187,12 @@ module internal QueryProduced =
     /// A serialized grouping publishes its sequence under its authored Items child.
     let sequence nextName produced =
         bind nextName (fun value input ->
-            match JsonSerializator.JsonValue.SerializedValueFacts(Utils.optionalPayloadType input.OriginalType) with
-            | JsonSerializator.JsonSerializationShape.GroupingValues(_, element) ->
+            let shape =
+                match input.Shape with
+                | ValueSome(JsonSerializator.JsonSerializationShape.GroupingValues _ as shape) -> shape
+                | _ -> JsonSerializator.JsonValue.SerializedValueFacts(Utils.optionalPayloadType input.OriginalType)
+            match shape with
+            | JsonSerializator.JsonSerializationShape.GroupingValues _ ->
                 let input = { input with Source = ValueSome(jsonToken value) }
                 let struct(child, _) = serializationAccess input (StoredLabel(box "Items"))
                 DirectValue(child.Source.Value, { child with Carrier = CanonicalToken })
@@ -269,6 +273,53 @@ module internal QueryProduced =
                         Limit = None; Offset = None } }, output)
 
     let publishCore nextName core produced preserveErrors = publishSlot nextName "Value" core produced preserveErrors
+
+    /// A projection retains an existing error before evaluating its selected value.
+    let preserveError identity errorValue produced =
+        let missing = SqlExpr.Unary(UnaryOperator.IsNull, identity)
+        match produced with
+        | DirectValue(value, input) ->
+            let preserve value = SqlExpr.CaseExpr((missing, errorValue), [], Some value)
+            DirectValue(preserve value, { input with Source = input.Source |> ValueOption.map preserve })
+        | PackedValue(packet, input) ->
+            let error = SqlExpr.JsonArrayExpr [jsonToken errorValue; SqlExpr.Literal SqlLiteral.Null]
+            PackedValue(SqlExpr.CaseExpr((missing, error), [], Some packet), input)
+
+    /// A grouping element retains its source occurrence and binds its actual writer.
+    let publishGroupElement nextName core produced preserveErrors =
+        let name = "_element" + nextName()
+        let rename original replacement (projection: Projection) =
+            if projection.Alias = Some original then { projection with Alias = Some replacement } else projection
+        let produced =
+            if preserveErrors then
+                let fields = ProjectionSetOps.toList core.Projections
+                let field name = fields |> List.find (fun field -> field.Alias = Some name) |> _.Expr
+                preserveError (field "Id") (field "Value") produced
+            else produced
+        let core = { core with Projections = core.Projections |> ProjectionSetOps.map (rename "Value" name) }
+        let struct(query, input) = publishSlot nextName name core produced preserveErrors
+        match query.Body with
+        | SingleSelect core ->
+            struct({ query with Body = SingleSelect { core with Projections = core.Projections |> ProjectionSetOps.map (rename name "Value") } }, input)
+        | _ -> invalidOp "A grouping element requires its completed row source."
+
+    /// Selected grouping rows are evaluated before post-group consumers.
+    let materializeGroupElements nextName position (query: SqlSelect) =
+        let name = "_elements" + nextName()
+        match query.Body with
+        | SingleSelect core ->
+            let fields = core.Projections |> ProjectionSetOps.map (fun projection ->
+                let label =
+                    match projection.Alias, projection.Expr with
+                    | Some label, _ | None, SqlExpr.Column(_, label) -> label
+                    | _ -> invalidOp "A grouping element requires named published columns."
+                { Alias = Some label; Expr = SqlExpr.Column(Some name, label) })
+            { Ctes = [{ Name = name; Materialized = true; Query = query }]
+              Body = SingleSelect { Distinct = false; Projections = fields; Source = Some(BaseTable(name, Some name))
+                                    Joins = []; Where = None; GroupBy = []; Having = None
+                                    OrderBy = [{ Expr = SqlExpr.Column(Some name, position); Direction = SortDirection.Asc }]
+                                    Limit = None; Offset = None } }
+        | _ -> invalidOp "A grouping element requires its completed row source."
 
     /// Presence reads null without invoking an unused numerical target conversion.
     let presence nextName = function

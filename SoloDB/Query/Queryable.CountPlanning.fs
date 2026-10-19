@@ -86,7 +86,7 @@ module internal QueryCountPlanning =
                                     Source = Some(BaseTable(name, None))
                                     Projections = projection (Column(None, result.Alias |> Option.defaultValue "Value")) }
                             let value = ScalarSubquery(select readCount)
-                            { Name = name; Query = select count }, binary BinaryOperator.Add used value) (integer 0L)
+                            { Name = name; Materialized = false; Query = select count }, binary BinaryOperator.Add used value) (integer 0L)
                         // Each probe spends only the remaining shared budget.
                         // A sum below the cap proves every group was fully read;
                         // saturation leaves zero budget and selects intersection.
@@ -133,8 +133,8 @@ module internal QueryCountPlanning =
                             Some full)
                         let resultCore = { core with Source = None; Projections = ProjectionSetOps.ofList [{ result with Expr = value }] }
                         { Ctes = query.Ctes @ [
-                            {Name=directName;Query=directCount}
-                            {Name=excludedName;Query=excludedCount}]
+                            {Name=directName;Materialized=false;Query=directCount}
+                            {Name=excludedName;Materialized=false;Query=excludedCount}]
                           Body = SingleSelect resultCore }
             | _ -> query
         | _ -> query

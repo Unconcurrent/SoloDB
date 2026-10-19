@@ -16,7 +16,7 @@ module internal QueryTranslatorSpanSource =
         let valid = call false available start length absent
         SqlExpr.CaseExpr((valid,source), [], Some absent)
     let register (connection: NativeSqliteConnection) =
-        connection.RegisterNumericalScalar(name, 5, RawScalarFunc(fun context arguments ->
+        connection.RegisterManagedScalar(name, 5, RawScalarFunc(fun context arguments ->
             let isString = arguments[0].GetInt32() <> 0
             let text = if isString then arguments[1].CopyToString() else null
             let available = if isString then (if isNull text then 0L else int64 text.Length) else arguments[1].GetInt64()

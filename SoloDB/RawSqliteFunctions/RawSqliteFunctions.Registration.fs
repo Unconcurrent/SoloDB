@@ -108,7 +108,7 @@ module internal RawFunctionRegistration =
         if result <> raw.SQLITE_OK then failwithf "Failed to create function '%s': error code %d" name result
 
     let create database name count func flags = createWithFailureTransport database name count func flags false
-    let createNumerical database name count func flags = createWithFailureTransport database name count func flags true
+    let createManaged database name count func flags = createWithFailureTransport database name count func flags true
 
     let remove (db: sqlite3) name count =
         let result =

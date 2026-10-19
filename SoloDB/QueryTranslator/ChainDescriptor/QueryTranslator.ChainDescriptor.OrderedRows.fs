@@ -52,14 +52,25 @@ module internal OrderedChainRows =
                 Some(row, rewrite)
             else None
         | _ -> None
-    let internal prepareGrouping (adapter: Adapter) root input alias (source: SelectCore) selector =
+    let internal prepareGrouping (adapter: Adapter) root input alias (source: SelectCore) selector element =
         let keyProduced, joins = adapter.Translate root input alias selector ValueNone
         let keyName = "_key" + adapter.Alias()
         let projections = ProjectionSetOps.toList source.Projections @ [proj keyName (SqlExpr.Literal SqlLiteral.Null)]
         let keyCore = { source with Joins = source.Joins @ joins; Projections = ProjectionSetOps.ofList projections }
         let struct(keyRows, keyInput) = QueryProduced.publishSlot adapter.Alias keyName keyCore keyProduced false
         let struct(keyRows, keyInput, equalityNames) = QueryDefaultEquality.prepareGroups adapter.Alias keyName selector.ReturnType keyRows input keyInput "__ord"
-        struct(keyRows, keyInput, keyName, equalityNames)
+        match element with
+        | None -> struct(keyRows, input, keyInput, keyName, equalityNames)
+        | Some element ->
+            let alias = adapter.Alias()
+            let produced, joins = adapter.Translate root input alias element ValueNone
+            let projections = payloadFields alias
+                              @ QueryTranslatorSerialization.companionProjections (Some alias) keyInput
+                              @ [proj keyName (col alias keyName)]
+                              @ (equalityNames |> List.filter ((<>) keyName) |> List.map (fun name -> proj name (col alias name)))
+            let row = { core (Some(DerivedTable(keyRows, alias))) projections with Joins = joins; OrderBy = ordered alias }
+            let struct(rows, output) = QueryProduced.publishGroupElement adapter.Alias row produced false
+            struct(QueryProduced.materializeGroupElements adapter.Alias "__ord" rows, output, keyInput, keyName, equalityNames)
 
     let private pureLookupExpression expression =
         SqlExpr.fold (fun valid node ->
@@ -247,11 +258,12 @@ module internal OrderedChainRows =
                                      { core (Some(DerivedTable(prepared, alias))) (fields input alias) with OrderBy = ordered alias }
                                      key [col alias "__ord", SortDirection.Asc]
                     lower ranked input [] rest
-                | Group(selector, countOnly, producedType) ->
-                    let struct(keyRows, keyInput, keyName, equalityName) = prepareGrouping adapter plan.Root input a baseCore selector
+                | Group(selector, element, countOnly, producedType) ->
+                    let struct(keyRows, input, keyInput, keyName, equalityName) = prepareGrouping adapter plan.Root input a baseCore selector element
+                    let bindings, keyRows = if element.IsSome then keyRows.Ctes, { keyRows with Ctes = [] } else [], keyRows
                     let a = adapter.Alias()
                     let from = Some(DerivedTable(keyRows, a))
-                    let input = QueryTranslatorSerialization.scopeSerializationInput (Some a) BaseLayer input
+                    let input = QueryTranslatorSerialization.scopeSerializationInput (Some a) OuterLayer input
                     let key = col a keyName
                     let keyInput = QueryTranslatorSerialization.scopeSerializationInput (Some a) OuterLayer
                                        { keyInput with Source = ValueSome(QueryTranslatorBaseTypes.jsonToken key) }
@@ -274,7 +286,7 @@ module internal OrderedChainRows =
                     let groupCore = { core from [proj "Id" (integer -1L); proj "Value" value; proj "__ord" first] with
                                         GroupBy = equalityName |> List.map (col a); OrderBy = [{ Expr = first; Direction = SortDirection.Asc }] }
                     let struct(grouped, output) = QueryProduced.publishCore adapter.Alias groupCore (DirectValue(value, producedInput)) false
-                    lower grouped output [] rest
+                    lower { grouped with Ctes = bindings @ grouped.Ctes } output [] rest
                 | While(l,take) ->
                     let pred,joins=translate plan.Root input a l
                     let failed=SqlExpr.CaseExpr((pred,integer 0L),[],Some(integer 1L))

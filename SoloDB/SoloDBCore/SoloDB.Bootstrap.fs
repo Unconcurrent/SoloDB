@@ -46,6 +46,10 @@ module internal Bootstrap =
             NumericalFunctions.register connection
             QueryTranslatorCharacters.register lower connection
             QueryTranslatorSpanSource.register connection
+            connection.RegisterManagedScalar(JsonFunctions.rowErrorFunction, 1,
+                RawSqliteFunctions.RawScalarFunc(fun _ arguments ->
+                    JsonFunctions.raiseRowError (arguments[0].CopyToString())),
+                RawSqliteFunctions.SqliteFunctionFlags.Deterministic)
             connection.RegisterScalar(JsonFunctions.treeValueFunction, 3,
                 RawSqliteFunctions.RawScalarFunc(fun context arguments ->
                     if arguments[0].IsNull then context.SetNull()

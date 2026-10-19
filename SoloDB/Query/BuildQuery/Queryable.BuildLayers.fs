@@ -248,15 +248,7 @@ module internal QueryableLayerBuild =
                     let preserveErrors = not isBaseTable && canExposeNullId input.Query
                     let produced =
                         if preserveErrors then
-                            let missing = SqlExpr.Unary(UnaryOperator.IsNull, idColumnExpr)
-                            match produced with
-                            | DirectValue(value, facts) ->
-                                let preserve value = SqlExpr.CaseExpr((missing, valueColumnExpr), [], Some value)
-                                let facts = { facts with Source = facts.Source |> ValueOption.map preserve }
-                                DirectValue(preserve value, facts)
-                            | PackedValue(packet, facts) ->
-                                let error = SqlExpr.JsonArrayExpr [jsonToken valueColumnExpr; SqlExpr.Literal SqlLiteral.Null]
-                                PackedValue(SqlExpr.CaseExpr((missing, error), [], Some packet), facts)
+                            QueryProduced.preserveError idColumnExpr valueColumnExpr produced
                         else produced
                     let struct(query, output) = QueryProduced.publishCore currentCtx.NextAlias core produced preserveErrors
                     { Query = query; SerializationInput = output; KeyInput = ValueNone }
@@ -265,8 +257,9 @@ module internal QueryableLayerBuild =
                     let preserveErrors = not isBaseTable && canExposeNullId input.Query
                     let key =
                         if preserveErrors then
-                            let absent = QueryProduced.typed producedKey.Value.Input.OriginalType (SqlExpr.Literal SqlLiteral.Null)
-                            QueryProduced.choose producedKey.Value.Input.OriginalType (SqlExpr.Unary(UnaryOperator.IsNull, idColumnExpr)) absent producedKey.Value
+                            let failure = SqlExpr.FunctionCall(JsonFunctions.rowErrorFunction, [SqlExpr.FunctionCall("json", [valueColumnExpr])])
+                            let failure = QueryProduced.typed producedKey.Value.Input.OriginalType failure
+                            QueryProduced.choose producedKey.Value.Input.OriginalType (SqlExpr.Unary(UnaryOperator.IsNull, idColumnExpr)) failure producedKey.Value
                         else producedKey.Value
                     let struct(query, key) = QueryProduced.publishSlot currentCtx.NextAlias syntheticGroupKeyAlias core key preserveErrors
                     { Query = query; SerializationInput = outputInput; KeyInput = ValueSome key }

@@ -45,13 +45,13 @@ type internal NativeAggregateFunction<'State, 'Result>(seed: 'State, accumulate:
 [<Struct>]
 type internal NativeRegisteredFunction =
     | Scalar of scalar: RawScalarFunc * scalarFlags: SqliteFunctionFlags
-    | NumericalScalar of scalar: RawScalarFunc * scalarFlags: SqliteFunctionFlags
+    | ManagedScalar of scalar: RawScalarFunc * scalarFlags: SqliteFunctionFlags
     | Aggregate of aggregate: NativeAggregateFunction * aggregateFlags: SqliteFunctionFlags
 
 module internal NativeCallbackRegistration =
     let install database name arity = function
         | Scalar(callback, flags) -> RawFunctionRegistration.create database name arity callback flags
-        | NumericalScalar(callback, flags) -> RawFunctionRegistration.createNumerical database name arity callback flags
+        | ManagedScalar(callback, flags) -> RawFunctionRegistration.createManaged database name arity callback flags
         | Aggregate(callback, flags) -> callback.Install(database, name, arity, flags)
     let collation (database: NativeDatabase) name (comparison: Comparison<string>) =
         let generation = database.Generation

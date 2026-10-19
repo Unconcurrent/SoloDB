@@ -21,7 +21,7 @@ module internal OrderedChainPlan =
         | Take of Expression
         | Distinct of Type
         | DistinctBy of Selector
-        | Group of Selector * bool * Type
+        | Group of Selector * Selector option * bool * Type
         | Set of string * Expression * Selector option
         | Default of Expression option
         | While of Selector * bool
@@ -54,16 +54,13 @@ module internal OrderedChainPlan =
     let validateOverload (call: MethodCallExpression) =
         if call.Method.Name = "CountBy" && call.Arguments.Count = 3 then
             validateGroupingComparer "CountBy" (call.Method.GetGenericArguments().[1]) call.Arguments.[2]
-        if call.Method.Name = "GroupBy" then
-            let last = call.Method.GetParameters() |> Array.last
-            if last.ParameterType.IsGenericType
-               && typedefof<System.Collections.Generic.IEqualityComparer<_>>.Equals(last.ParameterType.GetGenericTypeDefinition()) then
-                validateGroupingComparer "GroupBy" (call.Method.GetGenericArguments().[1]) call.Arguments.[call.Arguments.Count - 1]
         validateDefaultComparerArity call.Method.Name call.Arguments.Count
     let parse isRoot (expr: Expression) =
         let rec loop (expr: Expression) stages =
             if isRoot expr then Some { Root = expr; Stages = stages } else
             match expr with
+            | :? UnaryExpression as conversion when QueryTranslatorBaseHelpers.isReferenceUpcast conversion ->
+                loop conversion.Operand stages
             | :? MethodCallExpression as c when c.Arguments.Count = 1
                                                     && ((typeof<Queryable>.Equals(c.Method.DeclaringType) && c.Method.Name = "AsQueryable")
                                                         || (typeof<Enumerable>.Equals(c.Method.DeclaringType) && c.Method.Name = "AsEnumerable")) ->
@@ -81,6 +78,7 @@ module internal OrderedChainPlan =
             | :? MethodCallExpression as c when typeof<Enumerable>.Equals(c.Method.DeclaringType) || typeof<Queryable>.Equals(c.Method.DeclaringType) ->
                 validateOverload c
                 let arg = getArg c
+                let mutable following = []
                 let stage =
                     match c.Method.Name, arg with
                     | "Where", Some a -> lambda a |> Option.map Filter
@@ -95,11 +93,12 @@ module internal OrderedChainPlan =
                     | "Take", Some a -> Some(Take a)
                     | "Distinct", None -> Some(Distinct(sequenceElementType (getSource c).Type))
                     | "DistinctBy", Some a -> lambda a |> Option.map DistinctBy
-                    | "GroupBy", Some a when c.Arguments.Count = 2
-                                                || (c.Arguments.Count = 3 && c.Method.GetParameters().[2].ParameterType.IsGenericType
-                                                    && typedefof<System.Collections.Generic.IEqualityComparer<_>>.Equals(c.Method.GetParameters().[2].ParameterType.GetGenericTypeDefinition())) -> lambda a |> Option.map (fun key -> Group(key, false, sequenceElementType c.Type))
+                    | "GroupBy", Some _ ->
+                        let group = groupBySelectors c.Method (c.Arguments |> Seq.skip 1 |> Seq.toArray)
+                        following <- group.Result |> Option.map (fun result -> [Project(selector (groupingResult group.GroupType result))]) |> Option.defaultValue []
+                        lambda group.Key |> Option.map (fun key -> Group(key, group.Element |> Option.bind lambda, false, group.GroupType))
                     | "CountBy", Some a when c.Arguments.Count = 2 || c.Arguments.Count = 3 ->
-                        lambda a |> Option.map (fun key -> Group(key, true, sequenceElementType c.Type))
+                        lambda a |> Option.map (fun key -> Group(key, None, true, sequenceElementType c.Type))
                     | ("Order" | "OrderDescending"), None ->
                         Some(Order(identitySelectorForSequence (getSource c), (if c.Method.Name = "OrderDescending" then SortDirection.Desc else SortDirection.Asc), false))
                     | ("Concat" | "Union" | "Intersect" | "Except"), Some a -> Some(Set(c.Method.Name, a, None))
@@ -110,7 +109,7 @@ module internal OrderedChainPlan =
                         Some(Default(Some(a |> Option.defaultWith (fun () -> Expression.Constant((if elementType.IsValueType then RelationsAccessorCache.activateDefault elementType else null),elementType) :> Expression))))
                     | _ -> None
                 match stage with
-                | Some s -> loop (getSource c) (s :: stages)
+                | Some s -> loop (getSource c) (s :: (following @ stages))
                 | None -> None
             | _ -> None
         loop expr []

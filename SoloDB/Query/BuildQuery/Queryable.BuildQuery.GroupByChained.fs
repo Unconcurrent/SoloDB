@@ -19,7 +19,7 @@ module internal QueryableBuildQueryGroupByChained =
             match sourceCtx.SerializationInput.Facts with
             | JsonSerializator.JsonSerializationShape.GroupingValues _ -> QueryTranslatorSerialization.serializationElement sourceCtx.SerializationInput
             | _ -> sourceCtx.SerializationInput
-        let rowCtx = { sourceCtx with LayerPosition = BaseLayer; SerializationInput = itemInput }
+        let rowCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = itemInput }
         let adapter: OrderedChainPlan.Adapter = {
             MembershipContext = DefaultMembership
             LambdaContext = "group"

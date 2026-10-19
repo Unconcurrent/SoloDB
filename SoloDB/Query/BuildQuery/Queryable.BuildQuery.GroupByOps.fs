@@ -23,10 +23,6 @@ module internal QueryableBuildQueryGroupByOps =
     open QueryableLayerBuild
     open QueryableHelperBase
 
-    let internal applyGroupByKeyOnly<'T>
-        (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>) (expressions: Expression array) =
-        addSelector statements (KeyProjection expressions.[0])
-
     // ── GroupBy aggregate translation helpers ──
 
     let private extractLambdaFromExpr (expr: Expression) : LambdaExpression =
@@ -143,7 +139,7 @@ module internal QueryableBuildQueryGroupByOps =
         let rawGrouping = lazy(groupingValue sourceCtx.NextAlias groupParam.Type rawKey
                                 (QueryableBuildQueryGroupByChained.collection rawContext innerSelect "o" groupParam vars rawSources rawProducer (item.OriginalType.MakeArrayType())))
         rawSources[groupParam] <- { Alias = Some "o"; Context = rawContext; Value = DeferredParameter rawGrouping }
-        let translateArgument (lambda: LambdaExpression) =
+        let translateArgument (lambda: ChainExpr.Selector) =
             QueryTranslator.translateScopedBody itemCtx "o" lambda.Body lambda.Parameters
                 (ValueSome rawSources) (ValueSome rawProducer) false vars |> QueryProduced.value sourceCtx.NextAlias
         let rec producer (expr: Expression) : QueryProducedValue voption =
@@ -232,6 +228,36 @@ module internal QueryableBuildQueryGroupByOps =
         | [] -> None
         | head :: tail -> Some (tail |> List.fold (fun acc pred -> SqlExpr.Binary(acc, BinaryOperator.And, pred)) head)
 
+    let internal applyGroupByInput (sourceCtx: QueryContext) (statements: ResizeArray<SQLSubquery>) (group: ChainExpr.GroupBySelectors) =
+        addSelector statements (KeyProjection group.Key)
+        match group.Element with
+        | None -> ()
+        | Some element ->
+            addComplexFinal statements (fun ctx ->
+                let alias = sourceCtx.NextAlias()
+                let current = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input; Joins = ResizeArray() }
+                let key = ctx.KeyInput |> ValueOption.defaultWith (fun () -> invalidOp "A selected group element requires its original key.")
+                let preserveErrors = canExposeNullId ctx.Inner
+                let nullKeyFilter =
+                    buildNullKeyFilter current alias ctx.Vars group.Key
+                    |> Option.map (fun predicate ->
+                        if preserveErrors then
+                            SqlExpr.Binary(SqlExpr.Unary(UnaryOperator.IsNull, SqlExpr.Column(Some alias, "Id")), BinaryOperator.Or, predicate)
+                        else predicate)
+                let produced = QueryTranslator.translateProduced current alias element ctx.Vars
+                let rows = QueryProduced.completedKeyRows sourceCtx.NextAlias ctx.Inner ctx.Input key
+                let projections =
+                    [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some alias, "Id") }
+                     { Alias = Some "Value"; Expr = SqlExpr.Column(Some alias, "Value") }
+                     { Alias = Some syntheticGroupKeyAlias; Expr = SqlExpr.Column(Some alias, syntheticGroupKeyAlias) }
+                     { Alias = Some "_tree_ordinal"; Expr = SqlExpr.Column(Some alias, "_tree_ordinal") }]
+                    @ QueryTranslatorSerialization.companionProjections (Some alias) key
+                let core = { mkCore projections (Some(DerivedTable(rows, alias))) with
+                                Joins = QueryTranslatorReferenceJoin.preparedJoinClauses current.Joins; Where = nullKeyFilter
+                                OrderBy = [{ Expr = SqlExpr.Column(Some alias, "_tree_ordinal"); Direction = SortDirection.Asc }] }
+                let struct(query, output) = QueryProduced.publishGroupElement sourceCtx.NextAlias core produced preserveErrors
+                { Query = QueryProduced.materializeGroupElements sourceCtx.NextAlias "_tree_ordinal" query; SerializationInput = output; KeyInput = ctx.KeyInput })
+
     let private groupFilter completion sourceCtx innerSelect vars predicates =
         predicates
         |> List.map (fun predicate ->
@@ -243,6 +269,11 @@ module internal QueryableBuildQueryGroupByOps =
             | first :: rest -> Some(List.fold (fun left right -> SqlExpr.Binary(left, BinaryOperator.And, right)) first rest)
 
     let private groupRows innerSelect equalityName nullKeyFilter =
+        let nullKeyFilter =
+            nullKeyFilter |> Option.map (fun predicate ->
+                if canExposeNullId innerSelect then
+                    SqlExpr.Binary(SqlExpr.Unary(UnaryOperator.IsNull, SqlExpr.Column(Some "o", "Id")), BinaryOperator.Or, predicate)
+                else predicate)
         { mkCore [{ Alias = Some syntheticGroupKeyAlias; Expr = SqlExpr.Column(Some "o", syntheticGroupKeyAlias) }]
                  (Some(DerivedTable(innerSelect, "o"))) with
             GroupBy = equalityName |> List.map (fun name -> SqlExpr.Column(Some "o", name))
@@ -255,35 +286,38 @@ module internal QueryableBuildQueryGroupByOps =
 
     let internal flushGroupByAsJsonGroupArray<'T>
         (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>)
-        (expressions: Expression array) (havingPreds: Expression list) (groupOrders: (Expression * bool) list)
+        (group: ChainExpr.GroupBySelectors) (havingPreds: Expression list) (groupOrders: (Expression * bool) list)
         (groupType: Type) =
         addComplexFinal statements (fun ctx ->
             let completion = QueryGroupCompletion("_groups" + sourceCtx.NextAlias(), sourceCtx.NextAlias)
+            let bindings, inner = if group.Element.IsSome then ctx.Inner.Ctes, { ctx.Inner with Ctes = [] } else [], ctx.Inner
             let key = ctx.KeyInput |> ValueOption.defaultWith (fun () -> invalidOp "Grouping requires its produced key.")
-            let keyType = (extractLambdaFromExpr expressions.[0]).Body.Type
-            let rows = if QueryDefaultEquality.requiresPrepared keyType key then QueryProduced.completedKeyRows sourceCtx.NextAlias ctx.Inner ctx.Input key else ctx.Inner
+            let keyType = (extractLambdaFromExpr group.Key).Body.Type
+            let rows = if QueryDefaultEquality.requiresPrepared keyType key then QueryProduced.completedKeyRows sourceCtx.NextAlias inner ctx.Input key else inner
             let struct(rows, key, equalityName) = QueryDefaultEquality.prepareGroups sourceCtx.NextAlias syntheticGroupKeyAlias keyType rows ctx.Input key "_tree_ordinal"
             let groupedInput = groupingInput groupType key ctx.Input
             let groupCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = groupedInput; Joins = completion.SelectorJoins }
             let having = groupFilter completion groupCtx rows ctx.Vars havingPreds
             let orderBy = translateGroupOrders completion groupCtx rows ctx.Vars groupOrders
             let rowCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input; Joins = completion.RowJoins }
-            let nullKeyFilter = buildNullKeyFilter rowCtx ctx.TableName ctx.Vars expressions.[0]
-                                |> Option.orElseWith (fun () -> nullableKeyFilter keyType)
+            let nullKeyFilter =
+                (if group.Element.IsSome then None else buildNullKeyFilter rowCtx ctx.TableName ctx.Vars group.Key)
+                |> Option.orElseWith (fun () -> nullableKeyFilter keyType)
             let produced = completedGrouping completion sourceCtx.NextAlias groupType key ctx.Input
             let struct(query, output) = completion.Publish(groupRows rows equalityName nullKeyFilter, completedRows having orderBy, produced)
-            { Query = query; SerializationInput = output; KeyInput = ValueNone })
+            { Query = { query with Ctes = bindings @ query.Ctes }; SerializationInput = output; KeyInput = ValueNone })
 
     let internal applyGroupBySelect<'T>
         (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>)
-        (groupByExpressions: Expression array) (havingPreds: Expression list) (groupOrders: (Expression * bool) list) (selectExpressions: Expression array)
+        (group: ChainExpr.GroupBySelectors) (havingPreds: Expression list) (groupOrders: (Expression * bool) list) (selectExpressions: Expression array)
         (groupType: Type) =
         let selectLambda = extractLambdaFromExpr selectExpressions[0]
         addComplexFinal statements (fun ctx ->
             let completion = QueryGroupCompletion("_groups" + sourceCtx.NextAlias(), sourceCtx.NextAlias)
+            let bindings, inner = if group.Element.IsSome then ctx.Inner.Ctes, { ctx.Inner with Ctes = [] } else [], ctx.Inner
             let keyInput = ctx.KeyInput |> ValueOption.defaultWith (fun () -> invalidOp "Grouping requires its produced key.")
-            let keyType = (extractLambdaFromExpr groupByExpressions[0]).ReturnType
-            let rows = if QueryDefaultEquality.requiresPrepared keyType keyInput then QueryProduced.completedKeyRows sourceCtx.NextAlias ctx.Inner ctx.Input keyInput else ctx.Inner
+            let keyType = (extractLambdaFromExpr group.Key).ReturnType
+            let rows = if QueryDefaultEquality.requiresPrepared keyType keyInput then QueryProduced.completedKeyRows sourceCtx.NextAlias inner ctx.Input keyInput else inner
             let struct(rows, keyInput, equalityName) = QueryDefaultEquality.prepareGroups sourceCtx.NextAlias syntheticGroupKeyAlias keyType rows ctx.Input keyInput "_tree_ordinal"
             let input = groupingInput groupType keyInput ctx.Input
             let groupCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = input; Joins = completion.SelectorJoins }
@@ -295,8 +329,9 @@ module internal QueryableBuildQueryGroupByOps =
                     QueryProduced.map sourceCtx.NextAlias (fun value -> SqlExpr.FunctionCall("printf", [SqlExpr.Literal(SqlLiteral.String "%!.17g"); value])) produced
                 else produced
             let rowCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input; Joins = completion.RowJoins }
-            let nullKeyFilter = buildNullKeyFilter rowCtx ctx.TableName ctx.Vars groupByExpressions[0]
-                                |> Option.orElseWith (fun () -> nullableKeyFilter keyType)
+            let nullKeyFilter =
+                (if group.Element.IsSome then None else buildNullKeyFilter rowCtx ctx.TableName ctx.Vars group.Key)
+                |> Option.orElseWith (fun () -> nullableKeyFilter keyType)
             let orderBy = translateGroupOrders completion groupCtx rows ctx.Vars groupOrders
             let struct(query, output) = completion.Publish(groupRows rows equalityName nullKeyFilter, completedRows having orderBy, produced)
-            { Query = query; SerializationInput = output; KeyInput = ValueNone })
+            { Query = { query with Ctes = bindings @ query.Ctes }; SerializationInput = output; KeyInput = ValueNone })

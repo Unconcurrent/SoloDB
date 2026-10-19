@@ -106,7 +106,7 @@ type internal QuerySerializationInput = {
         | ValueNone -> JsonSerializator.JsonValue.SerializedValueFacts (Utils.optionalPayloadType this.OriginalType)
     static member Grouping(target, key: QuerySerializationInput, item: QuerySerializationInput) =
         { OriginalType = target
-          Shape = ValueSome(JsonSerializator.JsonValue.SerializedValueFacts target)
+          Shape = ValueSome(JsonSerializator.JsonSerializationShape.GroupingValues(key.OriginalType, item.OriginalType))
           Children = [|key; item|]
           Operand = ValueNone; Source = ValueNone; SourceOffset = 0; Carrier = CanonicalToken; LegacyCharacterText = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
     static member Sequence(target, item: QuerySerializationInput) =
