@@ -21,6 +21,11 @@ module internal FileStorageHelpers =
         let struct (dir, name) = getPathAndName path
         combinePath dir name
 
+    let private isAncestorPath (ancestor: string) (path: string) =
+        path.Length > ancestor.Length
+        && path.StartsWith(ancestor, StringComparison.Ordinal)
+        && (ancestor = "/" || path.[ancestor.Length] = '/')
+
     let internal createFileAt (db: NativeSqliteConnection) (path: string) =
         let struct (dirPath, name) = getPathAndName path
         // The parent is needed only for its id; its header and metadata would be discarded.
@@ -357,7 +362,7 @@ module internal FileStorageHelpers =
         if newDirFullPath <> oldDirPath then
             // A directory cannot be moved inside itself. Compared as a path prefix, never as a
             // substring, so a sibling like /ab is not mistaken for a child of /a.
-            if newDirFullPath.StartsWith(oldDirPath + "/", StringComparison.Ordinal) then
+            if isAncestorPath oldDirPath newDirFullPath then
                 raise (IOException "Cannot move a directory into itself.")
             if pathExists db newDirFullPath then
                 raise (IOException "Directory or file already exists in the destination.")
@@ -594,8 +599,10 @@ module internal FileStorageHelpers =
         // Edge case: self-copy
         if fromNorm = toNorm then raise (ArgumentException("Cannot copy a directory to itself.", "toPath"))
         // Edge case: destination inside source subtree
-        if toNorm.StartsWith(fromNorm + "/", StringComparison.Ordinal) then
+        if isAncestorPath fromNorm toNorm then
             raise (ArgumentException("Cannot copy a directory into its own subtree.", "toPath"))
+        if replace && isAncestorPath toNorm fromNorm then
+            raise (ArgumentException("Cannot replace an ancestor of the source directory.", "toPath"))
         // Resolve source
         let srcDir = match tryGetDir db fromNorm with | Some d -> d | None -> raise (DirectoryNotFoundException("Directory not found at: " + fromPath))
         // Directory copy requires destination parent to exist.
