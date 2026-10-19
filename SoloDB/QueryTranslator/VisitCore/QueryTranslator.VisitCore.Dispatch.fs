@@ -21,7 +21,7 @@ open SoloDatabase.QueryTranslatorSerialization
 open SoloDatabase.QuerySerializationSql
 
 module internal QueryTranslatorVisitCore =
-    type private ValueUse = Value | Comparison | Stored | Presence
+    type private ValueUse = Value | Comparison | Stored | Presence | PresenceComparison
 
     let rec private emitStringOperandDu (qb: QueryBuilder) (ignoreCase: bool) (expr: Expression) : SqlExpr =
         if ignoreCase then SqlExpr.FunctionCall("TO_LOWER", [visitDu expr qb])
@@ -74,7 +74,7 @@ module internal QueryTranslatorVisitCore =
             let value =
                 if qb.UpdateMode then SqlExpr.Literal(SqlLiteral.String "$")
                 elif qb.JsonExtractSelfValue then
-                    if valueUse = Presence then rootInput source.Position source.Alias "Value"
+                    if valueUse = Presence || valueUse = PresenceComparison then rootInput source.Position source.Alias "Value"
                     else rootValue m.Type source.Position source.Alias "Value"
                 else SqlExpr.Column(source.Alias, "Value")
             let input =
@@ -85,7 +85,7 @@ module internal QueryTranslatorVisitCore =
                 if qb.UpdateMode then SqlScalar
                 elif not qb.JsonExtractSelfValue then input.Carrier
                 elif source.Position = OuterLayer then input.Carrier
-                elif valueUse = Presence || isSqlScalarResult m.Type then SqlScalar else CanonicalToken
+                elif valueUse = Presence || valueUse = PresenceComparison || isSqlScalarResult m.Type then SqlScalar else CanonicalToken
             DirectValue(value, { input with Carrier = carrier })
 
     and private visitAccessDu parent access resultType qb =
@@ -101,7 +101,7 @@ module internal QueryTranslatorVisitCore =
         QueryTranslatorVisitCoreArrayPredicates.nested visitProduced visitDu qb array predicate isAll
 
     and private visitBinaryDu (b: BinaryExpression) (qb: QueryBuilder) : SqlExpr =
-        QueryTranslatorVisitCoreBinary.visitBinaryDu visitProduced visitDu visitComparisonDu visitStoredValueDu visitPresenceDu b qb
+        QueryTranslatorVisitCoreBinary.visitBinaryDu visitProduced visitDu visitComparisonDu visitStoredValueDu visitPresenceDu (visitValueCoreDu PresenceComparison) b qb
 
     and private visitMethodCallDu valueUse (m: MethodCallExpression) (qb: QueryBuilder) : QueryProducedValue =
         if isIntrinsicBox m then visitValueDu valueUse m.Arguments[0] qb
@@ -130,12 +130,7 @@ module internal QueryTranslatorVisitCore =
 
     and private visitComparisonDu (exp: Expression) (qb: QueryBuilder) : SqlExpr =
         visitComparisonProduced exp qb
-        |> QueryProduced.consume qb.SourceContext.NextAlias (fun value input ->
-            if typeof<obj>.Equals exp.Type && input.Facts = JsonSerializator.JsonSerializationShape.Dynamic then
-                match input.Source with
-                | ValueSome token -> QueryTranslatorNumeric.nativeScalar token
-                | ValueNone -> value
-            else QueryTranslatorCharacters.comparable exp.Type value input)
+        |> QueryProduced.consume qb.SourceContext.NextAlias (QueryProduced.comparisonValue exp.Type)
 
     and private visitStoredValueDu (destination: QuerySerializationInput) (exp: Expression) (qb: QueryBuilder) : SqlExpr =
         let rec withoutBoxing (value: Expression) =
@@ -195,7 +190,7 @@ module internal QueryTranslatorVisitCore =
     // use visitDu, preserving the released kinds inside arithmetic and functions.
     and private visitValueDu valueUse (exp: Expression) (qb: QueryBuilder) : QueryProducedValue =
         let produced = visitValueCoreDu valueUse exp qb
-        if qb.UpdateMode || valueUse = Presence then produced
+        if qb.UpdateMode || valueUse = Presence || valueUse = PresenceComparison then produced
         else
             let produced =
                 if produced.Input.Carrier = CanonicalToken && isSqlScalarResult exp.Type then
@@ -230,14 +225,14 @@ module internal QueryTranslatorVisitCore =
             | ValueNone -> raise (InvalidOperationException "Pre-expression handler returned true but did not set DuHandlerResult")
         else
 
-        match qb.SourceContext.BindQueryValue |> ValueOption.bind (fun bind -> bind.TryBind (valueUse = Comparison || valueUse = Stored && typeof<char>.Equals(Utils.optionalPayloadType exp.Type)) exp) with
+        match qb.SourceContext.BindQueryValue |> ValueOption.bind (fun bind -> bind.TryBind ((valueUse = Comparison || valueUse = PresenceComparison) || valueUse = Stored && typeof<char>.Equals(Utils.optionalPayloadType exp.Type)) exp) with
         | ValueSome value -> value
         | ValueNone ->
 
         // Fully-constant early-out
         if isConstantParameter exp then
             let value = ExpressionEvaluation.evaluateExpr<obj> exp
-            let struct(value, writerType) = StoredValueParameter.allocateProduced (valueUse = Comparison || valueUse = Stored && typeof<char>.Equals(Utils.optionalPayloadType exp.Type)) qb.Variables exp.Type value
+            let struct(value, writerType) = StoredValueParameter.allocateProduced ((valueUse = Comparison || valueUse = PresenceComparison) || valueUse = Stored && typeof<char>.Equals(Utils.optionalPayloadType exp.Type)) qb.Variables exp.Type value
             QueryProduced.typed writerType value
         else
 
@@ -255,9 +250,10 @@ module internal QueryTranslatorVisitCore =
             visitBinaryDu (exp :?> BinaryExpression) qb |> QueryProduced.typed exp.Type
         | ExpressionType.Coalesce ->
             let b = exp :?> BinaryExpression
-            let left = visitProduced b.Left qb
-            let right = visitProduced b.Right qb
-            QueryProduced.coalesce qb.SourceContext.NextAlias exp.Type left right
+            let left = visitValueDu valueUse b.Left qb
+            let right = visitValueDu valueUse b.Right qb
+            let coalesce = if valueUse = Presence || valueUse = PresenceComparison then QueryProduced.coalesceRaw else QueryProduced.coalesce
+            coalesce qb.SourceContext.NextAlias exp.Type left right
         | ExpressionType.Not ->
             // SARGABLE form: NOT(expr) → (expr = 0) for boolean operands.
             // LINQ only generates NOT on boolean expressions, so this is safe.
@@ -351,7 +347,8 @@ module internal QueryTranslatorVisitCore =
             let condition = visitDu c.Test qb
             let whenTrue = visitValueDu valueUse c.IfTrue qb
             let whenFalse = visitValueDu valueUse c.IfFalse qb
-            QueryProduced.choose c.Type condition whenTrue whenFalse
+            let choose = if valueUse = Presence || valueUse = PresenceComparison then QueryProduced.chooseRaw else QueryProduced.choose
+            choose c.Type condition whenTrue whenFalse
         | ExpressionType.TypeIs ->
             let typeIsExp = exp :?> TypeBinaryExpression
             if not (TypeMetadata.requiresTypeInformation typeIsExp.Expression.Type) then

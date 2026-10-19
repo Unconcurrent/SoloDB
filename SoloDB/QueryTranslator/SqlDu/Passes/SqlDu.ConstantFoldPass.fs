@@ -140,6 +140,16 @@ let private foldNode (node: SqlExpr) : SqlExpr =
 
 let private same left right = obj.ReferenceEquals(left, right)
 
+let rec private positivePredicate (changed: bool ref) expression =
+    match expression with
+    | Coalesce((Binary(_, (Lt | Le | Gt | Ge), _) as head), [Literal(Integer 0L)]) ->
+        changed.Value <- true
+        head
+    | Binary(left, ((And | Or) as operation), right) ->
+        let l, r = positivePredicate changed left, positivePredicate changed right
+        if same l left && same r right then expression else Binary(l, operation, r)
+    | _ -> expression
+
 /// Fold expressions through the shared child mapper, retaining unchanged subtrees.
 let rec private foldExpr (changed: bool ref) (expr: SqlExpr) : SqlExpr =
     let rec loop node =
@@ -149,8 +159,20 @@ let rec private foldExpr (changed: bool ref) (expr: SqlExpr) : SqlExpr =
         folded
     loop expr
 
+and private foldPredicate changed expression =
+    foldExpr changed expression |> positivePredicate changed
+
 and private foldCore changed (core: SelectCore) =
-    mapCoreExpressions (foldExpr changed) (foldSelect changed) core
+    let mapped = mapCoreExpressions (foldExpr changed) (foldSelect changed) core
+    let where = mapOption (positivePredicate changed) mapped.Where
+    let having = mapOption (positivePredicate changed) mapped.Having
+    let joins = mapList (function
+        | ConditionedJoin(kind, source, predicate) as original ->
+            let folded = positivePredicate changed predicate
+            if same folded predicate then original else ConditionedJoin(kind, source, folded)
+        | original -> original) mapped.Joins
+    if same where mapped.Where && same having mapped.Having && same joins mapped.Joins then mapped
+    else { mapped with Where = where; Having = having; Joins = joins }
 
 and private foldSelect changed (query: SqlSelect) =
     mapSelectParts (mapCores (foldCore changed)) (foldSelect changed) query
@@ -179,11 +201,11 @@ let private foldStatement (statement: SqlStatement) : struct(SqlStatement * bool
             let clauses = SqlExprCombinators.mapList (fun ((column, expression) as original) ->
                 let mapped = foldExpr changed expression
                 if same mapped expression then original else column, mapped) update.SetClauses
-            let where = SqlExprCombinators.mapOption (foldExpr changed) update.Where
+            let where = SqlExprCombinators.mapOption (foldPredicate changed) update.Where
             if same clauses update.SetClauses && same where update.Where then statement
             else UpdateStmt { update with SetClauses = clauses; Where = where }
         | DeleteStmt delete ->
-            let where = SqlExprCombinators.mapOption (foldExpr changed) delete.Where
+            let where = SqlExprCombinators.mapOption (foldPredicate changed) delete.Where
             if same where delete.Where then statement else DeleteStmt { delete with Where = where }
     struct(result, changed.Value)
 

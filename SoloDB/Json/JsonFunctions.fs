@@ -38,7 +38,7 @@ module internal JsonFunctions =
         let t = match TypeMetadata.nullableUnderlying valueType with null -> valueType | underlying -> underlying
         not (t.IsPrimitive || t.IsEnum || typeof<string>.Equals(t))
 
-    let internal toSQLParameterForComparison comparison (item: obj) =
+    let rec internal toSQLParameterForComparison comparison (item: obj) =
         match item with
         | null -> struct (null, false)
 
@@ -89,8 +89,11 @@ module internal JsonFunctions =
         // Structured values use the shared raw writer and scalar storage policy.
         // This path handles arrays, lists, custom objects, and any other structured types.
         | _other ->
-            let value, json = JsonValue.StoredParameter(typeof<obj>,item)
-            struct (value, json)
+            let value, json =
+                if comparison then JsonValue.StoredComparisonParameter(typeof<obj>,item)
+                else JsonValue.StoredParameter(typeof<obj>,item)
+            if comparison && (value :? uint64) then toSQLParameterForComparison true value
+            else struct (value, json)
 
 
     /// The untyped parameter converter selects the actual value's writer.

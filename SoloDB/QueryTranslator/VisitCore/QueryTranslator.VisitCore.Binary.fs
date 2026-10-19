@@ -16,7 +16,7 @@ open SoloDatabase.QueryTranslatorBase
 open SoloDatabase.SqlModel
 
 module internal QueryTranslatorVisitCoreBinary =
-    let internal visitBinaryDu (visitProduced: Expression -> QueryBuilder -> QueryProducedValue) (visitDu: Expression -> QueryBuilder -> SqlExpr) (visitComparisonDu: Expression -> QueryBuilder -> SqlExpr) (visitStoredValueDu: QuerySerializationInput -> Expression -> QueryBuilder -> SqlExpr) (visitPresenceDu: Expression -> QueryBuilder -> SqlExpr) (b: BinaryExpression) (qb: QueryBuilder) : SqlExpr =
+    let internal visitBinaryDu (visitProduced: Expression -> QueryBuilder -> QueryProducedValue) (visitDu: Expression -> QueryBuilder -> SqlExpr) (visitComparisonDu: Expression -> QueryBuilder -> SqlExpr) (visitStoredValueDu: QuerySerializationInput -> Expression -> QueryBuilder -> SqlExpr) (visitPresenceDu: Expression -> QueryBuilder -> SqlExpr) (visitRaw: Expression -> QueryBuilder -> QueryProducedValue) (b: BinaryExpression) (qb: QueryBuilder) : SqlExpr =
         // In UpdateMode an `Assign` on a member access lowers to the same
         // assignment that the `Extensions.Set(member, value)` path records.
         // This accepts the F# canonical owner-side property-mutation form
@@ -63,6 +63,73 @@ module internal QueryTranslatorVisitCoreBinary =
             let knownObject = ExpressionEvaluation.evaluateExpr<obj> constant
             SqlExpr.Unary(UnaryOperator.Not, EqualityComparison.known qb targetExpr expression.Type knownObject)
         | _ ->
+        let optionComparison =
+            let method = b.Method
+            relationalOperator.IsSome && isOptionType b.Left.Type && b.Left.Type.Equals(b.Right.Type) &&
+            not(isNull method) && method.IsStatic && not method.ContainsGenericParameters &&
+            method.DeclaringType.Assembly.Equals(typeof<unit>.Assembly) &&
+            method.DeclaringType.FullName = "Microsoft.FSharp.Core.Operators" &&
+            QueryTranslatorNumericMethods.originalComparison b.NodeType method b.Left.Type b.Right.Type
+        let equality = b.NodeType = ExpressionType.Equal || b.NodeType = ExpressionType.NotEqual
+        let scalarEquality = equality && not b.IsLiftedToNull && not complexTypes &&
+                             (b.IsLifted || not b.Left.Type.IsValueType || not b.Right.Type.IsValueType)
+        let liftedRelation = relationalOperator.IsSome && not equality && b.IsLifted && not b.IsLiftedToNull
+        if optionComparison || not isAnyNull && scalarEquality then
+            let first = visitRaw b.Left qb
+            let second = visitRaw b.Right qb
+            QueryProduced.constructRaw qb.SourceContext.NextAlias (fun operands ->
+                let left, leftInput = operands[0]
+                let right, rightInput = operands[1]
+                let presence value (input: QuerySerializationInput) =
+                    if optionComparison then
+                        input.Source |> ValueOption.map (nullCarrier CanonicalToken) |> ValueOption.defaultWith (fun () -> nullCarrier input.Carrier value)
+                    else nullCarrier input.Carrier value
+                let leftPresence = presence left leftInput
+                let rightPresence = presence right rightInput
+                let payload (target: Type) = if optionComparison then target.GetGenericArguments()[0] else target
+                let leftType, rightType = payload b.Left.Type, payload b.Right.Type
+                let comparable target value (input: QuerySerializationInput) =
+                    if optionComparison then
+                        match input.Source with
+                        | ValueSome token -> QueryProduced.comparisonValue target token { input with Carrier = CanonicalToken }
+                        | ValueNone -> QueryProduced.comparisonValue target value input
+                    else QueryProduced.comparisonValue target value input
+                let leftValue = comparable leftType left leftInput
+                let rightValue = comparable rightType right rightInput
+                let struct(leftValue, rightValue) =
+                    if DateTimeFunctions.isDateTimeLikeType leftType || DateTimeFunctions.isDateTimeLikeType rightType then
+                        DateTimeFunctions.ensureComparableDateTimeLikeTypes leftType rightType
+                        struct(DateTimeFunctions.canonicalizeForCompareOrOrder leftType leftValue, DateTimeFunctions.canonicalizeForCompareOrOrder rightType rightValue)
+                    else
+                        match QueryTranslatorNumericMethods.comparison b.NodeType (if optionComparison then null else b.Method) leftType rightType with
+                        | ValueSome comparison -> QueryTranslatorNumericMethods.comparableOperands comparison leftType rightType leftValue rightValue
+                        | ValueNone -> struct(leftValue, rightValue)
+                let operation =
+                    if equality then (if b.NodeType = ExpressionType.Equal then BinaryOperator.Is else BinaryOperator.IsNot)
+                    else relationalOperator.Value
+                let comparison = SqlExpr.Binary(leftValue, operation, rightValue)
+                let result =
+                    if optionComparison && not equality then
+                        let absentLeft =
+                            match operation with
+                            | BinaryOperator.Lt -> SqlExpr.Unary(UnaryOperator.IsNotNull, rightPresence)
+                            | BinaryOperator.Le -> SqlExpr.Literal(SqlLiteral.Boolean true)
+                            | BinaryOperator.Gt -> SqlExpr.Literal(SqlLiteral.Boolean false)
+                            | _ -> SqlExpr.Unary(UnaryOperator.IsNull, rightPresence)
+                        let absentRight = SqlExpr.Literal(SqlLiteral.Boolean(operation = BinaryOperator.Gt || operation = BinaryOperator.Ge))
+                        SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNull, leftPresence), absentLeft),
+                            [SqlExpr.Unary(UnaryOperator.IsNull, rightPresence), absentRight], Some comparison)
+                    elif (leftValue = left || typeof<char>.Equals(Utils.optionalPayloadType leftType)) &&
+                         (rightValue = right || typeof<char>.Equals(Utils.optionalPayloadType rightType)) then comparison
+                    else
+                        // Presence-only equality must not consume an unused numerical target.
+                        SqlExpr.CaseExpr((SqlExpr.Unary(UnaryOperator.IsNull, rightPresence),
+                            SqlExpr.Binary(leftPresence, operation, SqlExpr.Literal SqlLiteral.Null)),
+                            [SqlExpr.Unary(UnaryOperator.IsNull, leftPresence),
+                             SqlExpr.Literal(SqlLiteral.Boolean(b.NodeType = ExpressionType.NotEqual))], Some comparison)
+                QueryProduced.typed b.Type result) [|first; second|]
+            |> QueryProduced.value qb.SourceContext.NextAlias
+        else
         let visitOperand =
             if isAnyNull && (b.NodeType=ExpressionType.Equal || b.NodeType=ExpressionType.NotEqual) then visitPresenceDu
             elif relationalOperator.IsSome then visitComparisonDu
@@ -94,6 +161,8 @@ module internal QueryTranslatorVisitCoreBinary =
             match b.NodeType with
             | ExpressionType.And | ExpressionType.AndAlso -> BinaryOperator.And
             | ExpressionType.Or | ExpressionType.OrElse -> BinaryOperator.Or
+            | ExpressionType.Equal when b.IsLiftedToNull -> BinaryOperator.Eq
+            | ExpressionType.NotEqual when b.IsLiftedToNull -> BinaryOperator.Ne
             | ExpressionType.Equal when isAnyNull || isOptionType left.Type || isOptionType right.Type || involvesDBRefValueAccess left || involvesDBRefValueAccess right -> BinaryOperator.Is
             | ExpressionType.NotEqual when isAnyNull || isOptionType left.Type || isOptionType right.Type || involvesDBRefValueAccess left || involvesDBRefValueAccess right -> BinaryOperator.IsNot
             | _ when relationalOperator.IsSome -> relationalOperator.Value
@@ -103,4 +172,5 @@ module internal QueryTranslatorVisitCoreBinary =
             | ExpressionType.Divide -> BinaryOperator.Div
             | ExpressionType.Modulo -> BinaryOperator.Mod
             | _ -> raise (NotSupportedException(sprintf "Error: Binary operator '%O' is not supported.\nReason: The operator cannot be translated to SQL for this expression.\nFix: Simplify the expression or move it after AsEnumerable()." b.NodeType))
-        SqlExpr.Binary(leftDu, op, rightDu)
+        let result = SqlExpr.Binary(leftDu, op, rightDu)
+        if liftedRelation then SqlExpr.Coalesce(result, [SqlExpr.Literal(SqlLiteral.Integer 0L)]) else result

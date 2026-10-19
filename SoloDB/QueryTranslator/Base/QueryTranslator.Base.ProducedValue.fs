@@ -29,11 +29,15 @@ module internal QueryProduced =
         match input.Facts, input.Source with
         | JsonSerializator.JsonSerializationShape.Dynamic, ValueSome token -> token
         | _ -> jsonToken value
-
     let packet = function
         | DirectValue(value, input) -> SqlExpr.JsonArrayExpr [publicationToken value input; inputDescriptor input]
         | PackedValue(packet, _) -> packet
-
+    let private rawValue = function
+        | DirectValue(value, input) ->
+            let token = input.Source |> ValueOption.defaultWith (fun () -> canonicalToken input.Carrier value)
+            DirectValue(token, { input with Carrier = CanonicalToken; Source = ValueSome token })
+        | produced -> produced
+    let private rawPacket produced = packet (rawValue produced)
     let private extracted column position =
         SqlExpr.FunctionCall("jsonb_extract", [column; SqlExpr.Literal(SqlLiteral.String ("$[" + string position + "]"))])
 
@@ -46,17 +50,22 @@ module internal QueryProduced =
         if input.LegacyCharacterText && typeof<char>.Equals(Utils.optionalPayloadType target) then scalar
         else QueryTranslatorNumeric.storedValue target scalar
 
+    /// Comparison finishing retains the actual scalar producer behind transparent boxing.
+    let comparisonValue target value (input: QuerySerializationInput) =
+        let actual = if typeof<obj>.Equals target then input.OriginalType else target
+        let value = scalarValue actual value input
+        if typeof<obj>.Equals target && input.Facts = JsonSerializator.JsonSerializationShape.Dynamic then
+            match input.Source with ValueSome token -> QueryTranslatorNumeric.nativeScalar token | ValueNone -> value
+        else QueryTranslatorCharacters.comparable actual value input
     let private tokenValue (input: QuerySerializationInput) token =
         if input.Carrier = CanonicalToken then token
         elif isSqlScalarResult input.OriginalType then scalarValue input.OriginalType token { input with Carrier = CanonicalToken }
         else SqlExpr.FunctionCall("jsonb_extract", [token; SqlExpr.Literal(SqlLiteral.String "$")])
-
     let private bound consumeToken alias (input: QuerySerializationInput) =
         let column = SqlExpr.Column(Some alias, "value")
         let token = tupleLeafToken column 0
         let input = { fromDescriptor (extracted column 1) input with Source = ValueSome token; SourceOffset = 0 }
         consumeToken input token, input
-
     let private singleton alias packet expression =
         SqlExpr.ScalarSubquery {
             Ctes = []
@@ -66,7 +75,6 @@ module internal QueryProduced =
                 Source = Some(FromJsonEach(SqlExpr.JsonArrayExpr [packet], Some alias))
                 Joins = []; Where = None; GroupBy = []; Having = None; OrderBy = []
                 Limit = None; Offset = None } }
-
     let private invariantLeaf (input: QuerySerializationInput) =
         match input.Facts with
         | shape when shape.IsScalarCarrier -> true
@@ -82,17 +90,21 @@ module internal QueryProduced =
             singleton alias packet (consume value input)
 
     /// A transparent or child operation preserves its actual producer facts.
-    let bind nextName produce = function
+    let private bindCore raw nextName produce = function
         | DirectValue(value, input) -> produce value input
         | PackedValue(source, input) ->
             let alias = nextName()
-            let value, input = bound tokenValue alias input
+            let value, input =
+                if raw then
+                    let value, input = bound (fun _ token -> token) alias input
+                    value, { input with Carrier = CanonicalToken }
+                else bound tokenValue alias input
             let result: QueryProducedValue = produce value input
             match result with
             | DirectValue(value, resultInput) when invariantLeaf resultInput && isConstantDescriptor(inputDescriptor resultInput) ->
                 DirectValue(singleton alias source value, rebaseSerializationInput resultInput)
             | _ -> PackedValue(singleton alias source (packet result), rebaseSerializationInput result.Input)
-
+    let bind nextName produce produced = bindCore false nextName produce produced
     let map nextName map produced =
         match produced with
         | DirectValue(value, input) -> DirectValue(map value, input)
@@ -129,7 +141,7 @@ module internal QueryProduced =
         | _ -> value, input
 
     /// Component packets are evaluated in their authored construction order.
-    let construct nextName (produce: (SqlExpr * QuerySerializationInput) array -> QueryProducedValue) (components: QueryProducedValue array) =
+    let private constructCore raw nextName (produce: (SqlExpr * QuerySerializationInput) array -> QueryProducedValue) (components: QueryProducedValue array) =
         if components |> Array.exists (function PackedValue _ -> true | _ -> false) then
             let alias = nextName()
             let column = SqlExpr.Column(Some alias, "value")
@@ -137,13 +149,16 @@ module internal QueryProduced =
                 let child = extracted column index
                 let token = tupleLeafToken child 0
                 let input = { fromDescriptor (extracted child 1) part.Input with Source = ValueSome token; SourceOffset = 0 }
-                tokenValue input token, input)
+                if raw then token, { input with Carrier = CanonicalToken } else tokenValue input token, input)
             let result = produce values
-            let source = SqlExpr.JsonArrayExpr(components |> Array.map packet |> Array.toList)
+            let source = SqlExpr.JsonArrayExpr(components |> Array.map (if raw then rawPacket else packet) |> Array.toList)
             PackedValue(singleton alias source (packet result), rebaseSerializationInput result.Input)
         else
             produce (components |> Array.map (function DirectValue(value, input) -> value, input | _ -> invalidOp "A direct construction component is required."))
+    let construct nextName produce components = constructCore false nextName produce components
 
+    /// Presence-sensitive comparisons defer scalar conversion until their selected branch.
+    let constructRaw nextName produce components = constructCore true nextName produce components
     let private referenceToken value (input: QuerySerializationInput) =
         input.Source |> ValueOption.defaultWith (fun () -> jsonToken value)
 
@@ -151,7 +166,6 @@ module internal QueryProduced =
     let referenceIdentity nextName produced =
         consume nextName (fun value input ->
             QueryTranslatorReferenceJoin.identityFromToken QueryTranslatorReferenceJoin.StoredOrHydratedId (referenceToken value input)) produced
-
     let referenceOperand nextName referenceType produced =
         consume nextName (fun value input -> QueryTranslatorReferenceJoin.defaultOperand referenceType (referenceToken value input)) produced
 
@@ -166,14 +180,17 @@ module internal QueryProduced =
                 DirectValue(SqlExpr.CaseExpr((condition, first), [], Some last), rebaseSerializationInput firstInput)
             else PackedValue(SqlExpr.CaseExpr((condition, packet whenTrue), [], Some(packet whenFalse)), input)
         | _ -> PackedValue(SqlExpr.CaseExpr((condition, packet whenTrue), [], Some(packet whenFalse)), input)
+    let chooseRaw target condition whenTrue whenFalse =
+        choose target condition (rawValue whenTrue) (rawValue whenFalse)
 
     /// A nullable result chooses its fallback lazily from the bound left value.
-    let coalesce nextName target left right =
-        let left = PackedValue(packet left, rebaseSerializationInput left.Input)
-        bind nextName (fun value input ->
+    let private coalesceCore raw nextName target left right =
+        let left = PackedValue((if raw then rawPacket left else packet left), rebaseSerializationInput left.Input)
+        bindCore raw nextName (fun value input ->
             let present = SqlExpr.Unary(UnaryOperator.IsNotNull, nullCarrier input.Carrier value)
-            choose target present (DirectValue(value, input)) right) left
-
+            (if raw then chooseRaw else choose) target present (DirectValue(value, input)) right) left
+    let coalesce nextName target left right = coalesceCore false nextName target left right
+    let coalesceRaw nextName target left right = coalesceCore true nextName target left right
     let value nextName produced = consume nextName (fun value _ -> value) produced
 
     /// Ordered stages publish a canonical token while retaining its writer facts.
@@ -271,7 +288,6 @@ module internal QueryProduced =
                         Where = None; GroupBy = []; Having = None
                         OrderBy = List.map2 (fun name ordering -> { ordering with Expr = SqlExpr.Column(Some sourceAlias, name) }) orderNames core.OrderBy
                         Limit = None; Offset = None } }, output)
-
     let publishCore nextName core produced preserveErrors = publishSlot nextName "Value" core produced preserveErrors
 
     /// A projection retains an existing error before evaluating its selected value.
@@ -355,7 +371,6 @@ module internal QueryProduced =
             Distinct = false; Projections = ProjectionSetOps.ofList(fields @ companions)
             Source = Some(DerivedTable(source, alias)); Joins = []; Where = None; GroupBy = []; Having = None
             OrderBy = []; Limit = None; Offset = None }) }
-
     let completedKeyRows nextName source input keyInput =
         let rows = completedRows nextName source input
         match rows.Body with

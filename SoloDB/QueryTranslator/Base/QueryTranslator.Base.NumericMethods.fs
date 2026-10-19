@@ -40,23 +40,26 @@ module internal QueryTranslatorNumericMethods =
         | "op_GreaterThanOrEqual" -> ExpressionType.GreaterThanOrEqual
         | _ -> ExpressionType.Extension
 
+    let originalComparison operation (method: MethodInfo) (left: Type) (right: Type) =
+        if isNull method then left.Equals(right)
+        else
+            let parameters = method.GetParameters()
+            let owner = method.DeclaringType
+            method.IsStatic && not method.ContainsGenericParameters && typeof<bool>.Equals(method.ReturnType)
+            && comparisonOperation method.Name = operation && parameters.Length = 2
+            && parameters[0].ParameterType.Equals(left) && parameters[1].ParameterType.Equals(right)
+            && (typeof<BigInteger>.Equals(owner) || typeof<decimal>.Equals(owner)
+                || originalFSharpOwner "Microsoft.FSharp.Core.Operators" owner
+                || originalFSharpOwner "Microsoft.FSharp.Core.Operators+Checked" owner)
+
+
     /// Closed operator identity establishes operand promotion independently of its Boolean result.
     let comparison operation (method: MethodInfo) leftType rightType =
         match relationalOperator operation with
         | ValueNone -> ValueNone
         | ValueSome sqlOperator ->
             let left, right = underlying leftType, underlying rightType
-            let original =
-                if isNull method then left.Equals(right)
-                else
-                    let parameters = method.GetParameters()
-                    let owner = method.DeclaringType
-                    method.IsStatic && not method.ContainsGenericParameters && typeof<bool>.Equals(method.ReturnType)
-                    && comparisonOperation method.Name = operation && parameters.Length = 2
-                    && parameters[0].ParameterType.Equals(left) && parameters[1].ParameterType.Equals(right)
-                    && (typeof<BigInteger>.Equals(owner) || typeof<decimal>.Equals(owner)
-                        || originalFSharpOwner "Microsoft.FSharp.Core.Operators" owner
-                        || originalFSharpOwner "Microsoft.FSharp.Core.Operators+Checked" owner)
+            let original = originalComparison operation method left right
             if not original then ValueNone
             else
                 match domain left, domain right with

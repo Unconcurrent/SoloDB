@@ -45,8 +45,8 @@ let private canonicalizeExpr (model: IndexModel) (tableName: string) (expr: SqlE
     | None -> expr
 
 let private characterComparison = function
-    | Binary((FunctionCall("CHARACTER_VALUE",[Literal(Integer 7L);raw;Literal Null;Literal Null]) as operand),Eq,value)
-    | Binary(value,Eq,(FunctionCall("CHARACTER_VALUE",[Literal(Integer 7L);raw;Literal Null;Literal Null]) as operand)) ->
+    | Binary((FunctionCall("CHARACTER_VALUE",[Literal(Integer 7L);raw;Literal Null;Literal Null]) as operand),(Eq | Is),value)
+    | Binary(value,(Eq | Is),(FunctionCall("CHARACTER_VALUE",[Literal(Integer 7L);raw;Literal Null;Literal Null]) as operand)) ->
         let extraction = match raw with JsonExtractExpr(_,"Value",_) | JsonRootExtract(_,"Value") | FunctionCall("jsonb_extract",[Column(_,"Value");Literal(String _)]) -> true | _ -> false
         let acquired = match value with Literal(Integer _) | Literal Null | Parameter _ -> true | _ -> false
         if extraction && acquired then Some(operand,raw,value) else None
@@ -73,16 +73,25 @@ let private characterCandidates model tableName sourceAlias surrounding predicat
             let already = surrounding |> SqlExpr.exists (function
                 | InList(candidate,head,[tail]) when head = value && tail = alternate ->
                     expressionMatchesIndex tableName (forSource tableName sourceAlias candidate) definition
+                | Binary(Binary(first,Is,head),Or,Binary(Binary(tested,Eq,Literal(Integer unit)),And,Binary(second,Eq,Literal(Integer 0L))))
+                    when head = value && tested = value && unit = zeroUnit ->
+                    expressionMatchesIndex tableName (forSource tableName sourceAlias first) definition &&
+                    expressionMatchesIndex tableName (forSource tableName sourceAlias second) definition
                 | _ -> false)
             if already then predicate else
-            Binary(InList(old,value,[alternate]),And,predicate)
+            let candidates =
+                match predicate with
+                | Binary(_, Is, _) ->
+                    Binary(Binary(old,Is,value),Or,Binary(Binary(value,Eq,Literal(Integer zeroUnit)),And,Binary(old,Eq,Literal(Integer 0L))))
+                | _ -> InList(old,value,[alternate])
+            Binary(candidates,And,predicate)
         | _ -> predicate
 
 /// One predicate traversal serves canonical terms and the Char-only retained-index alignment.
 let private canonicalizePredicate model tableName sourceAlias allowCharacter characterOnly expr =
     let rec visit expression =
         match expression with
-        | Binary(l, (Eq | Ne | Lt | Le | Gt | Ge | Like | Glob | Regexp as op), r) ->
+        | Binary(l, (Eq | Ne | Is | IsNot | Lt | Le | Gt | Ge | Like | Glob | Regexp as op), r) ->
             let cl = if characterOnly then l else canonicalizeExpr model tableName l
             let cr = if characterOnly then r else canonicalizeExpr model tableName r
             let result = Binary(cl,op,cr)
@@ -117,10 +126,10 @@ let private partitionNativePredicate model tableName sourceAlias predicate =
                 System.String.Equals(term.Collation, "BINARY", System.StringComparison.OrdinalIgnoreCase)
                 && expressionMatchesIndex tableName expression term.Expression
             | [] -> false)
-    let nativeOperand = function
-        | FunctionCall("DECIMAL", [Literal(Integer operation); Literal(Integer target); raw]) as operand
+    let nativeInput = function
+        | FunctionCall("DECIMAL", [Literal(Integer operation); Literal(Integer target); raw])
             when operation = int64(int ExactNumericOperation.NativeValue)
-                 && target >= 0L && target <= int64 System.Int32.MaxValue && not(indexed operand) ->
+                 && target >= 0L && target <= int64 System.Int32.MaxValue ->
             let target = enum<ExactNumericOperation>(int target)
             let native =
                 match target with
@@ -135,13 +144,41 @@ let private partitionNativePredicate model tableName sourceAlias predicate =
                 | JsonExtractExpr(_, "Value", _) | JsonRootExtract(_, "Value")
                 | FunctionCall("jsonb_extract", [Column(_, "Value"); Literal(String _)]) -> true
                 | _ -> false
-            if native && extraction && indexed raw then Some raw else None
+            if native && extraction then Some raw else None
+        | _ -> None
+    let nativeOperand operand =
+        match nativeInput operand with
+        | Some raw when not(indexed operand) && indexed raw -> Some raw
+        | _ -> None
+    let nullableOperand operand =
+        match nativeInput operand with
+        | Some raw when indexed operand || indexed raw -> Some raw
         | _ -> None
     let direct = function Literal _ | Parameter _ -> true | _ -> false
     let withCandidates raw native original =
         let boundary = Literal(String "")
         Binary(Binary(Binary(raw, Lt, boundary), And, native), Or,
                Binary(Binary(raw, Ge, boundary), And, original))
+    let nullableEquality = function
+        | CaseExpr((Unary(IsNull, rightRaw), Binary(leftRaw, Is, Literal Null)),
+                   [(Unary(IsNull, leftAgain), Literal(Boolean false))],
+                   Some(Binary(left, Is, right))) when leftRaw = leftAgain ->
+            match nullableOperand left, nullableOperand right with
+            | Some raw, _ when raw = leftRaw && right = rightRaw && direct right -> Some(raw, left, right)
+            | _, Some raw when raw = rightRaw && left = leftRaw && direct left -> Some(raw, right, left)
+            | _ -> None
+        | _ -> None
+    let nullableCandidates original raw operand value =
+        // A full matching index admits every row to this fixed decoder, even if
+        // SQLite recomputes it. Partial indexes never enter the index model.
+        let candidates =
+            if indexed operand then Binary(operand, Is, value)
+            else Binary(Binary(raw, Is, value), Or, Binary(raw, Ge, Literal(String "")))
+        let normalized expression = forSource tableName sourceAlias expression
+        let already = predicate |> SqlExpr.exists (function
+            | Binary(existing, And, residual) when residual = original -> normalized existing = normalized candidates
+            | _ -> false)
+        if already then original else Binary(candidates, And, original)
     let rec rewrite original =
         match original with
         | Binary(left, And, right) ->
@@ -160,7 +197,10 @@ let private partitionNativePredicate model tableName sourceAlias predicate =
             match nativeOperand operand with
             | Some raw -> withCandidates raw (InList(raw, head, tail)) original
             | None -> original
-        | _ -> original
+        | _ ->
+            match nullableEquality original with
+            | Some(raw, operand, value) -> nullableCandidates original raw operand value
+            | None -> original
     rewrite predicate
 
 /// A protected consumer also protects its otherwise simple derived input.
