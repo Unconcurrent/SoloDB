@@ -249,7 +249,10 @@ module internal QueryValuePlan =
                     else call.Invoke(null,[|first;second|])
             | :? BinaryExpression as binary ->
                 let left, right = build binary.Left, build binary.Right
-                let apply = QueryValueMetadata.Binary(binary.NodeType, binary.Left.Type, binary.Right.Type, binary.Type)
+                let apply =
+                    match QueryScalarOperators.binaryMethod binary.Method with
+                    | ValueSome operation -> operation
+                    | ValueNone -> QueryValueMetadata.Binary(binary.NodeType, binary.Left.Type, binary.Right.Type, binary.Type)
                 fun values ->
                     let l = left values
                     let r = right values

@@ -2,9 +2,23 @@ namespace SoloDatabase
 
 open System
 open System.Linq.Expressions
+open System.Reflection
 
 /// Precompiled primitive operations used by ordinary query discovery.
 module internal QueryScalarOperators =
+    let private concatObjects = Func<obj,obj,obj>(fun left right -> box(String.Concat(left,right)))
+
+    /// The original callable owns boxed concatenation, including native null conversion.
+    let binaryMethod (method: MethodInfo) =
+        if isNull method || not method.IsStatic || method.IsGenericMethod ||
+           not(typeof<string>.Equals(method.DeclaringType)) || method.Name <> "Concat" ||
+           not(typeof<string>.Equals(method.ReturnType)) then ValueNone
+        else
+            let parameters = method.GetParameters()
+            if parameters.Length = 2 && typeof<obj>.Equals(parameters[0].ParameterType) && typeof<obj>.Equals(parameters[1].ParameterType) then
+                ValueSome concatObjects
+            else ValueNone
+
     let inline private convertNumber (_: ^T) kind (target: Type) =
         let checkedConversion = kind = ExpressionType.ConvertChecked
         let inline result convert = ValueSome(Func<obj,obj>(fun value -> box(convert (unbox< ^T> value))))
