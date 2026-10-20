@@ -40,6 +40,10 @@ Direct `NativeSqliteConnection` and ADO use is independent of the document-store
 
 Initialize a new database file once before starting independent concurrent users of that file. The first SoloDB opening configures the journal and schema; successful simultaneous creation by every instance is not guaranteed. This setup boundary is separate from ordinary access to an initialized database.
 
+Some collection expression indexes, including declared `ulong` indexes, call SoloDB's numerical functions to preserve exact comparison and uniqueness. SQLite registers [application-defined functions](https://www.sqlite.org/appfunc.html) separately on each connection; the database file does not contain those implementations. Connections obtained through SoloDB's `Connection.Borrow()` or a collection's `GetInternalConnection()` receive its function setup. Opening the same file through a standalone native or ADO connection does not supply that setup.
+
+A plain SQLite tool can inspect physical rows without those functions, while `PRAGMA integrity_check` and `VACUUM` can require functions used by expression indexes and fail when they are unavailable. Run complete integrity checking through a SoloDB-initialized acquisition and use `SoloDB.Vacuum()` or `SoloDB.VacuumTo(...)` for file maintenance. Preserve the expression indexes: they enforce their declared uniqueness and support exact indexed queries.
+
 ## Typed arguments and direct mapping
 
 A reusable parameter plan captures typed state once when execution begins, before SQL effects. Its binder writes primitives directly for each statement in a batch. The parameter writer is valid only during that binder invocation.
