@@ -35,11 +35,16 @@ module internal NativeColumnMetadata =
 /// Column names describe the statement, while storage classes remain facts of each row.
 [<Sealed>]
 type internal NativeColumnLayout(names: string[]) =
-    let ordinals = Dictionary<string, int>(names.Length, StringComparer.Ordinal)
+    let select (first: int) (finish: int) =
+        let selected = Dictionary<string, int>(finish - first, StringComparer.Ordinal)
+        for i = first to finish - 1 do selected.[names.[i]] <- i
+        selected
+    let ordinals = select 0 names.Length
     let mappings = Dictionary<struct (Type * int * int), obj>()
-    do for i = 0 to names.Length - 1 do ordinals.[names.[i]] <- i
     member _.Names = names
     member _.Count = names.Length
+    member _.NamedColumns(first: int, finish: int) =
+        if first = 0 && finish = names.Length then ordinals else select first finish
     member _.Ordinal(name: string) =
         match ordinals.TryGetValue name with true, value -> value | _ -> -1
     member _.Ordinal(name: string, first: int, finish: int) =

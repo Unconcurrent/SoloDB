@@ -80,7 +80,7 @@ module internal SQLiteToolsMapper =
                 ordinals
         method.CreateDelegate(typeof<Func<SqlRow,'T>>,ordinals) :?> Func<SqlRow,'T>
 
-    let private build<'T> (columns: NativeColumnLayout) start finish =
+    let private tryBuiltin<'T> (columns: NativeColumnLayout) start finish =
         let t = typeof<'T>
         let ordinal name = columns.Ordinal(name,start,finish)
         match t with
@@ -88,33 +88,43 @@ module internal SQLiteToolsMapper =
             let id = ordinal "Id"
             let value = ordinal "ValueJSON"
             let hydration = ordinal "HydrationJSON"
-            Func<SqlRow, 'T>(fun row ->
+            ValueSome(Func<SqlRow, 'T>(fun row ->
                 let document: Types.DbObjectRow = {
                     Id = if id >= 0 && not (row.IsDBNull id) then Nullable(row.GetInt64 id) else Nullable()
                     ValueJSON = textOrNull row value
                     HydrationJSON = textOrNull row hydration }
-                unbox<'T> (box document))
-        | _ when typeof<byte[]>.Equals(t) -> Func<SqlRow, 'T>(fun row -> unbox<'T> (row.GetValue(start)))
-        | _ when typeof<NativeArray.NativeArray>.Equals(t) -> Func<SqlRow, 'T>(fun row -> unbox<'T> (box (row.GetNativeArray(start))))
+                unbox<'T> (box document)))
+        | _ when typeof<byte[]>.Equals(t) -> ValueSome(Func<SqlRow, 'T>(fun row -> unbox<'T> (row.GetValue(start))))
+        | _ when typeof<NativeArray.NativeArray>.Equals(t) -> ValueSome(Func<SqlRow, 'T>(fun row -> unbox<'T> (box (row.GetNativeArray(start)))))
+        | _ when typeof<Dictionary<string, obj>>.Equals(t) ->
+            let named = columns.NamedColumns(start,finish)
+            ValueSome(Func<SqlRow, 'T>(fun row ->
+                let result = Dictionary<string, obj>(named.Count,StringComparer.Ordinal)
+                for KeyValue(name,i) in named do result.[name] <- row.GetValue(i)
+                unbox<'T> (box result)))
         | _ when typeof<obj>.Equals(t) || typeof<JsonValue>.Equals(t) ->
-            let segment = Dictionary<string, int>(finish - start, StringComparer.Ordinal)
-            for i = start to finish - 1 do segment.[columns.Names.[i]] <- i
-            let named = segment |> Seq.toArray
-            Func<SqlRow, 'T>(fun row ->
-                if typeof<obj>.Equals(t) && named.Length = 1 then
-                    let scalar = if row.IsDBNull(start) then null else row.GetValue(start)
+            let named = columns.NamedColumns(start,finish)
+            let singleton =
+                if named.Count = 1 then
+                    use mutable entries = named.GetEnumerator()
+                    entries.MoveNext() |> ignore
+                    entries.Current
+                else Unchecked.defaultof<KeyValuePair<string,int>>
+            ValueSome(Func<SqlRow, 'T>(fun row ->
+                if typeof<obj>.Equals(t) && named.Count = 1 then
+                    let scalar = if row.IsDBNull(singleton.Value) then null else row.GetValue(singleton.Value)
                     JsonValue.ParseInto<'T>(JsonValue.WriteText<obj>(scalar,false,false))
-                elif typeof<JsonValue>.Equals(t) && named.Length = 1 && named.[0].Key.StartsWith(jsonObjectFn) then
-                    let json = if row.CanBorrowUtf16 then JsonValue.Parse(row.TextUtf16(start)) else JsonValue.Parse(row.GetString(start))
+                elif typeof<JsonValue>.Equals(t) && named.Count = 1 && singleton.Key.StartsWith(jsonObjectFn) then
+                    let json = if row.CanBorrowUtf16 then JsonValue.Parse(row.TextUtf16(singleton.Value)) else JsonValue.Parse(row.GetString(singleton.Value))
                     unbox<'T> (box json)
                 elif typeof<JsonValue>.Equals(t) then
-                    let result = JsonValue.Object(Dictionary(named.Length))
+                    let result = JsonValue.Object(Dictionary(named.Count))
                     for KeyValue(name,i) in named do result.[name] <- JsonValue.Serialize<obj>(row.GetValue(i))
                     unbox<'T>(box result)
                 else
                     let values = seq { for KeyValue(name,i) in named do yield KeyValuePair(name,row.GetValue(i)) }
-                    JsonValue.ParseInto<'T>(JsonValue.WriteProperties values))
-        | _ -> buildShape<'T> columns start finish
+                    JsonValue.ParseInto<'T>(JsonValue.WriteProperties values)))
+        | _ -> ValueNone
 
     let internal bindRange<'T> (columns: NativeColumnLayout) start finish =
         let key = struct (typeof<'T>, start, finish)
@@ -133,11 +143,11 @@ module internal SQLiteToolsMapper =
                     let mapper = binder.Invoke(SqlRowShape(columns,start,finish))
                     if isNull mapper then raise (InvalidOperationException("The typed row factory returned no mapper."))
                     mapper
-                elif not (MetadataRuntime.supportsDynamicCode()) &&
-                     not (typeof<'T>.Equals(typeof<Types.DbObjectRow>)) && not (typeof<'T>.Equals(typeof<byte[]>)) &&
-                     not (typeof<'T>.Equals(typeof<NativeArray.NativeArray>)) && not (typeof<'T>.Equals(typeof<obj>)) && not (typeof<'T>.Equals(typeof<JsonValue>)) then
-                    MetadataRuntime.missing "SQL row mapping" typeof<'T>
-                else build<'T> columns start finish
+                else
+                    match tryBuiltin<'T> columns start finish with
+                    | ValueSome mapper -> mapper
+                    | ValueNone when not (MetadataRuntime.supportsDynamicCode()) -> MetadataRuntime.missing "SQL row mapping" typeof<'T>
+                    | ValueNone -> buildShape<'T> columns start finish
             columns.Mappings.[key] <- box (struct (binder :> Delegate,mapper))
             mapper
 

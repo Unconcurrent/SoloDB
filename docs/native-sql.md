@@ -67,6 +67,8 @@ Object capture uses original readable public instance CLR properties, including 
 
 Raw SQL Decimal and BigInteger parameters and function results use invariant numeric text. Typed BigInteger reads preserve full-width integer text, construct from SQLite INTEGER or REAL values, and retain native integer parsing rules. Untyped reads return the original SQLite value, including a string for TEXT; they do not interpret document numerical keys.
 
+`Dictionary<string, object>` row results retain native SQL values: `Int64`, `Double`, `String`, owned byte arrays for BLOBs, and `DBNull.Value` for SQL NULL. Each row returns a fresh dictionary. Column names are case-sensitive; a repeated name takes its last value within that result's selected columns, including a multi-map segment. These results do not apply the JSON inference used by `object` and `JsonValue` mapping.
+
 ## Transactions, batches and ownership
 
 Dispose readers, lazy enumerators and streams before returning their borrowed connection. Dispose the acquisition when its operation finishes; do not use `Close`/`Open` to recycle a connection owned by SoloDB. Explicit closing ends the physical handle and can end an in-memory database when no other handle retains it. Reopening does not rerun SoloDB initialization.
