@@ -110,7 +110,16 @@ module internal QueryStructuralRelations =
                     Bound(binder.Local guarded)
                 | Stored parent ->
                     let childType = target childShape
-                    Stored(QueryTranslatorVisitCoreMemberAccess.accessValue (QueryDefault.value qb.Variables) nextName false (ClrMember(name,childType)) childType parent)
+                    let finish = function
+                        | DirectValue(raw,input) when typeof<float>.Equals childType || typeof<single>.Equals childType ->
+                            match input.Source with
+                            | ValueSome token ->
+                                let fallback = QueryDefault.comparisonValue qb.Variables childType |> QueryProduced.value nextName
+                                let value = choose (sqlNull token) fallback (QueryProduced.comparisonValue childType raw input)
+                                DirectValue(value,{ input with Carrier = SqlScalar; Source = ValueSome(jsonToken value) })
+                            | ValueNone -> DirectValue(raw,input)
+                        | selected -> selected
+                    Stored(QueryTranslatorVisitCoreMemberAccess.accessValueFinishing (QueryDefault.value qb.Variables) nextName finish (ClrMember(name,childType)) childType parent)
             let payload childShape = function
                 | Bound _ as parent -> child "Value" childShape parent
                 | Stored parent ->

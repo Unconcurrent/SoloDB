@@ -21,7 +21,7 @@ open SoloDatabase.QuerySerializationSql
 
 /// Authored member identity produces the value and writer transition together.
 module internal QueryTranslatorVisitCoreMemberAccess =
-    let internal accessValue createDefault nextName updateMode access resultType (produced: QueryProducedValue) : QueryProducedValue =
+    let private accessCore createDefault nextName updateMode finish access resultType (produced: QueryProducedValue) : QueryProducedValue =
         QueryProduced.bind nextName (fun value input ->
             let input = if input.Source.IsSome then input else { input with Source = ValueSome(jsonToken value) }
             let struct(child, segments) = serializationAccess input access
@@ -76,7 +76,14 @@ module internal QueryTranslatorVisitCoreMemberAccess =
                 if packedScalar then
                     DirectValue(child.Source |> ValueOption.defaultWith (fun () -> jsonToken extracted), { child with Carrier = CanonicalToken })
                 else DirectValue(extracted, { child with Carrier = carrier })
-            if updateMode then selected else QueryDefault.memberResult createDefault resultType value input selected) produced
+            if updateMode then selected else QueryDefault.memberResult createDefault resultType value input (finish selected)) produced
+
+    let internal accessValue createDefault nextName updateMode access resultType produced =
+        accessCore createDefault nextName updateMode id access resultType produced
+
+    /// A consumed child can finish its raw presence before default choice publishes it.
+    let internal accessValueFinishing createDefault nextName finish access resultType produced =
+        accessCore createDefault nextName false finish access resultType produced
 
     let internal access visitProduced parent access resultType (qb: QueryBuilder) =
         accessValue (QueryDefault.value qb.Variables) qb.SourceContext.NextAlias qb.UpdateMode access resultType (visitProduced parent qb)
