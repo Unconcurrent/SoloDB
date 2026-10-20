@@ -71,6 +71,8 @@ Object capture uses original readable public instance CLR properties, including 
 
 Raw SQL Decimal and BigInteger parameters and function results use invariant numeric text. Typed BigInteger reads preserve full-width integer text, construct from SQLite INTEGER or REAL values, and retain native integer parsing rules. Untyped reads return the original SQLite value, including a string for TEXT; they do not interpret document numerical keys.
 
+Binding a native floating-point NaN parameter raises `InvalidOperationException`; use null or `DBNull.Value` for SQL NULL. This differs from passing a JSON document through SQLite JSONB, which normalizes a NaN number token to JSON null.
+
 `Dictionary<string, object>` row results retain native SQL values: `Int64`, `Double`, `String`, owned byte arrays for BLOBs, and `DBNull.Value` for SQL NULL. Each row returns a fresh dictionary. Column names are case-sensitive; a repeated name takes its last value within that result's selected columns, including a multi-map segment. These results do not apply the JSON inference used by `object` and `JsonValue` mapping.
 
 ## Transactions, batches and ownership
