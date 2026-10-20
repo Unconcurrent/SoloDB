@@ -48,9 +48,9 @@ internal static class QueryExpressionInputs
         arguments.Where(argument => argument.Parameter != null).Select(argument => (argument.Parameter!,argument.Value));
 
     internal static IEnumerable<(IParameterSymbol Parameter, Origin[] Origins)> Arguments(
-        Compilation compilation, IInvocationOperation invocation, QueryRegistrations.Symbols symbols, bool rawSources = false)
+        Compilation compilation, IEnumerable<IArgumentOperation> arguments, QueryRegistrations.Symbols symbols, bool rawSources = false)
     {
-        foreach (var argument in invocation.Arguments)
+        foreach (var argument in arguments)
             if (argument.Parameter is IParameterSymbol parameter)
             {
                 if (Contract(symbols.Type(parameter.Type)) != null)

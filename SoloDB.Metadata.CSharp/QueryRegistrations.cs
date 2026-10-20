@@ -149,11 +149,12 @@ internal static partial class QueryRegistrations
                         ParameterFacts(Callable(expression,site.Symbols));
                 }
             }
-            if (method.ContainingNamespace.ToDisplayString() != "SoloDatabase") continue;
+            if (method.ContainingNamespace.ToDisplayString() != "SoloDatabase" &&
+                method.ContainingType.ToDisplayString() != "System.Linq.Queryable") continue;
             var compiled = method.Name == "Compile";
             if (compiled && (method.ContainingType.TypeArguments.Length == 0 ||
                 !roots.Contains(Name(method.ContainingType.TypeArguments[0])))) continue;
-            foreach (var expressionInput in QueryExpressionInputs.Arguments(compilation,checkedCall,site.Symbols))
+            foreach (var expressionInput in QueryExpressionInputs.Arguments(compilation,checkedCall.Arguments,site.Symbols))
             {
                 var callable = Callable(QueryExpressionInputs.Contract(site.Symbols.Type(expressionInput.Parameter.Type)),site.Symbols);
                 if (callable?.DelegateInvokeMethod is not IMethodSymbol signature) continue;
@@ -185,7 +186,7 @@ internal static partial class QueryRegistrations
                             if (element is INamedTypeSymbol { IsAnonymousType: true } anonymous)
                             {
                                 if (signature.ReturnsVoid) TypedRegistration("RegisterAnonymous",anonymous);
-                                else Carrier(anonymous, sourceType, argumentType);
+                                else Carrier(anonymous, sourceType, compiled ? argumentType : null);
                             }
                             else if (Writable(element))
                             {
@@ -223,7 +224,7 @@ internal static partial class QueryRegistrations
                                 Operation(member is IFieldSymbol ? 0 : 1, memberOwner, member.Name, Array.Empty<ITypeSymbol>(), Array.Empty<ITypeSymbol>());
                             }
                         }
-                        if (node is ObjectCreationExpressionSyntax created && semantic.GetSymbolInfo(created).Symbol is IMethodSymbol originalConstructor &&
+                        if (node is BaseObjectCreationExpressionSyntax created && semantic.GetSymbolInfo(created).Symbol is IMethodSymbol originalConstructor &&
                             symbols.Method(originalConstructor) is IMethodSymbol constructor &&
                             Writable(constructor.ContainingType) && constructor.Parameters.All(parameter => Writable(parameter.Type)))
                         {
