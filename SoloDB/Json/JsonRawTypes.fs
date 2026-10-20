@@ -11,7 +11,7 @@ type internal JsonSqlNumber =
     val Encoded: bool
     new(value,encoded) = { Value = value; Encoded = encoded }
 
-/// Input remains borrowed for one synchronous conversion. Only offsets enter member maps.
+/// Input remains borrowed for one synchronous conversion. Only offsets and source depths enter member maps.
 [<Struct; IsByRefLike>]
 type internal JsonReadContext<'R when 'R : struct and 'R :> IJsonReader> =
     val mutable Cursor: ParserContext<'R>
@@ -48,17 +48,25 @@ type internal JsonOperationPolicy<'Contract> =
         SoloDatabase.Metadata.Generation.TypeSupport.OperationRole(JsonOperationPolicy<'Contract>.IsStored,name)
 
 module internal JsonReadCursor =
-    let numericStart<'R when 'R : struct and 'R :> IJsonReader> (context: byref<JsonReadContext<'R>>) =
+    let reset<'R when 'R : struct and 'R :> IJsonReader> (context: byref<JsonReadContext<'R>>) =
         context.Cursor.codeUnitIndex <- context.Range.Start
+        context.Cursor.containerDepth <- context.Range.Depth
+
+    let complete<'R when 'R : struct and 'R :> IJsonReader> (context: byref<JsonReadContext<'R>>) =
+        context.Cursor.codeUnitIndex <- context.Range.Start + context.Range.Length
+        context.Cursor.containerDepth <- context.Range.Depth
+
+    let numericStart<'R when 'R : struct and 'R :> IJsonReader> (context: byref<JsonReadContext<'R>>) =
+        reset &context
         let point = JsonLexer.nextSignificantCodePoint &context.Cursor
         let number = uint32(point - int '0') <= 9u || point = int '+' || point = int '-' || point = int '.'
         if number then
             let skipped = context.Cursor.codeUnitIndex - context.Range.Start
-            context.Range <- { Start = context.Cursor.codeUnitIndex; Length = context.Range.Length - skipped }
+            context.Range <- { context.Range with Start = context.Cursor.codeUnitIndex; Length = context.Range.Length - skipped }
         number
 
     let scan<'R when 'R : struct and 'R :> IJsonReader> (context: byref<JsonReadContext<'R>>) =
-        context.Cursor.codeUnitIndex <- context.Range.Start
+        reset &context
         let mutable sink = JsonRangeSink<'R>(context.Range.Start)
         let range = JsonGrammar.parse<JsonSourceRange,Dictionary<string,JsonSourceRange>,List<JsonSourceRange>,'R,JsonRangeSink<'R>> &sink &context.Cursor
         context.Range <- range
@@ -67,7 +75,7 @@ module internal JsonReadCursor =
         context.Consumed <- true
 
     let token<'R when 'R : struct and 'R :> IJsonReader> (context: byref<JsonReadContext<'R>>) =
-        context.Cursor.codeUnitIndex <- context.Range.Start
+        reset &context
         context.Cursor.decodeStrings <- true
         let token = JsonLexer.readNext &context.Cursor
         context.Consumed <- (match token with StringToken _ | NumberToken _ | BooleanToken _ | NullToken -> true | _ -> false)
@@ -92,7 +100,7 @@ module internal JsonReadCursor =
 
     let skip<'R when 'R : struct and 'R :> IJsonReader> (context: byref<JsonReadContext<'R>>) =
         let mutable sink = JsonDiscardSink<'R>()
-        context.Cursor.codeUnitIndex <- context.Range.Start
+        reset &context
         JsonGrammar.parse<int,int,int,'R,JsonDiscardSink<'R>> &sink &context.Cursor |> ignore
         context.Consumed <- true
 

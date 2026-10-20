@@ -7,9 +7,21 @@ open System.Runtime.CompilerServices
 open System.Runtime.InteropServices
 open System.Text
 
+type internal JsonNestingException(limit: int) =
+    inherit FormatException("JSON contains more than " + limit.ToString(CultureInfo.InvariantCulture) + " nested containers.")
+
 module internal JsonLexer =
     open JsonStringReader
     open JsonIdentifiers
+
+    let enterContainer<'R when 'R : struct and 'R :> IJsonReader> (ctx: byref<ParserContext<'R>>) =
+        let limit = 1000
+        if ctx.containerDepth >= limit then raise (JsonNestingException limit)
+        ctx.containerDepth <- ctx.containerDepth + 1
+
+    let leaveContainer<'R when 'R : struct and 'R :> IJsonReader> (ctx: byref<ParserContext<'R>>) =
+        if ctx.containerDepth > 0 then ctx.containerDepth <- ctx.containerDepth - 1
+
     let fromString (source: string) =
         let span = source.AsSpan()
         ParserContext(MemoryMarshal.AsBytes span, span.Length, Utf16Reader())
@@ -98,10 +110,10 @@ module internal JsonLexer =
             match (if next <= 0x7F then ValueSome(byte next) else ValueNone) with
             | ValueSome b ->
                 match b with
-                | '{'B -> ctx.codeUnitIndex <- ctx.codeUnitIndex + 1; OpenBrace
-                | '}'B -> ctx.codeUnitIndex <- ctx.codeUnitIndex + 1; CloseBrace
-                | '['B -> ctx.codeUnitIndex <- ctx.codeUnitIndex + 1; OpenBracket
-                | ']'B -> ctx.codeUnitIndex <- ctx.codeUnitIndex + 1; CloseBracket
+                | '{'B -> enterContainer &ctx; ctx.codeUnitIndex <- ctx.codeUnitIndex + 1; OpenBrace
+                | '}'B -> leaveContainer &ctx; ctx.codeUnitIndex <- ctx.codeUnitIndex + 1; CloseBrace
+                | '['B -> enterContainer &ctx; ctx.codeUnitIndex <- ctx.codeUnitIndex + 1; OpenBracket
+                | ']'B -> leaveContainer &ctx; ctx.codeUnitIndex <- ctx.codeUnitIndex + 1; CloseBracket
                 | ','B -> ctx.codeUnitIndex <- ctx.codeUnitIndex + 1; Comma
                 | ':'B -> ctx.codeUnitIndex <- ctx.codeUnitIndex + 1; Colon
                 | '"'B | '\''B as quote ->

@@ -24,14 +24,14 @@ type internal IJsonParserSink<'Value,'Object,'Array,'R when 'R : struct and 'R :
     abstract NeedsNames: 'Object -> bool
     abstract ObjectStart: int -> 'Object
     abstract ObjectSet: 'Object * string * 'Value -> unit
-    abstract ObjectEnd: int * int * 'Object -> 'Value
+    abstract ObjectEnd: int * int * int * 'Object -> 'Value
     abstract ArrayStart: int -> 'Array
     abstract ArrayAdd: 'Array * 'Value -> unit
-    abstract ArrayEnd: int * int * 'Array -> 'Value
+    abstract ArrayEnd: int * int * int * 'Array -> 'Value
     abstract Scalar: int * Token * byref<ParserContext<'R>> -> 'Value
 
 [<Struct>]
-type internal JsonSourceRange = { Start: int; Length: int }
+type internal JsonSourceRange = { Start: int; Length: int; Depth: int }
 
 module internal JsonGrammar =
     open JsonLexer
@@ -109,7 +109,7 @@ module internal JsonGrammar =
         if ended then -2
         else
             let point = nextSignificantCodePoint &ctx
-            if point = int '}' then ctx.codeUnitIndex <- ctx.codeUnitIndex + 1; -2
+            if point = int '}' then leaveContainer &ctx; ctx.codeUnitIndex <- ctx.codeUnitIndex + 1; -2
             else point
 
     // The caller has consumed the opening delimiter and each preceding value.
@@ -132,6 +132,7 @@ module internal JsonGrammar =
         if ended then false
         else
             if nextSignificantCodePoint &ctx = int ']' then
+                leaveContainer &ctx
                 ctx.codeUnitIndex <- ctx.codeUnitIndex + 1
                 false
             else true
@@ -147,7 +148,7 @@ module internal JsonGrammar =
                 let value = parse<'V,'O,'A,'R,'S> &sink &ctx
                 sink.ObjectSet(values,key,value)
                 first <- false
-        sink.ObjectEnd(start,ctx.codeUnitIndex,values)
+        sink.ObjectEnd(start,ctx.codeUnitIndex,ctx.containerDepth,values)
 
     and private elements<'V,'O,'A,'R,'S when 'R : struct and 'R :> IJsonReader and 'S : struct and 'S :> IJsonParserSink<'V,'O,'A,'R>>
         (sink: byref<'S>) (ctx: byref<ParserContext<'R>>) (start: int) (values: 'A) : 'V =
@@ -159,7 +160,7 @@ module internal JsonGrammar =
             let value = fromToken<'V,'O,'A,'R,'S> &sink &ctx elementStart token true
             sink.ArrayAdd(values,value)
             first <- false
-        sink.ArrayEnd(start,ctx.codeUnitIndex,values)
+        sink.ArrayEnd(start,ctx.codeUnitIndex,ctx.containerDepth,values)
 
     and internal fromToken<'V,'O,'A,'R,'S when 'R : struct and 'R :> IJsonReader and 'S : struct and 'S :> IJsonParserSink<'V,'O,'A,'R>>
         (sink: byref<'S>) (ctx: byref<ParserContext<'R>>) (start: int) (token: Token) (arrayElement: bool) : 'V =
@@ -191,10 +192,10 @@ type private JsonTreeSink<'T,'R when 'R : struct and 'R :> IJsonReader> =
         member _.NeedsNames _ = true
         member _.ObjectStart _ = JsonHelper.newDefaultDict<'T>()
         member _.ObjectSet(values,key,value) = values[key] <- value
-        member this.ObjectEnd(_,_,values) = this.api.Obj values
+        member this.ObjectEnd(_,_,_,values) = this.api.Obj values
         member _.ArrayStart _ = List<'T>()
         member _.ArrayAdd(values,value) = values.Add value
-        member this.ArrayEnd(_,_,values) = this.api.Arr values
+        member this.ArrayEnd(_,_,_,values) = this.api.Arr values
         member this.Scalar(_,token,ctx) =
             match token with
             | StringToken value -> this.api.Str value
@@ -219,7 +220,7 @@ type internal JsonRangeSink<'R when 'R : struct and 'R :> IJsonReader> =
                 values
             else null
         member _.ObjectSet(values,key,value) = if not(isNull values) then values[key] <- value
-        member _.ObjectEnd(start,finish,_) = { Start = start; Length = finish - start }
+        member _.ObjectEnd(start,finish,depth,_) = { Start = start; Length = finish - start; Depth = depth }
         member this.ArrayStart start =
             if start = this.root then
                 let values = List<JsonSourceRange>()
@@ -227,13 +228,13 @@ type internal JsonRangeSink<'R when 'R : struct and 'R :> IJsonReader> =
                 values
             else null
         member _.ArrayAdd(values,value) = if not(isNull values) then values.Add value
-        member _.ArrayEnd(start,finish,_) = { Start = start; Length = finish - start }
+        member _.ArrayEnd(start,finish,depth,_) = { Start = start; Length = finish - start; Depth = depth }
         member _.Scalar(start,token,ctx) =
             match token with
             | NumberToken number -> JsonGrammar.validateNumber &ctx number
             | StringToken _ | BooleanToken _ | NullToken -> ()
             | OpenBrace | CloseBrace | OpenBracket | CloseBracket | Comma | Colon | EndOfInput -> invalidOp "Expected a scalar JSON token."
-            { Start = start; Length = ctx.codeUnitIndex - start }
+            { Start = start; Length = ctx.codeUnitIndex - start; Depth = ctx.containerDepth }
 
 module internal JsonParser =
     let parse<'T,'R when 'R : struct and 'R :> IJsonReader> (api: JsonValueParserApi<'T>) (ctx: byref<ParserContext<'R>>) =
@@ -247,10 +248,10 @@ type internal JsonDiscardSink<'R when 'R : struct and 'R :> IJsonReader> =
         member _.NeedsNames _ = false
         member _.ObjectStart _ = 0
         member _.ObjectSet(_,_,_) = ()
-        member _.ObjectEnd(_,_,_) = 0
+        member _.ObjectEnd(_,_,_,_) = 0
         member _.ArrayStart _ = 0
         member _.ArrayAdd(_,_) = ()
-        member _.ArrayEnd(_,_,_) = 0
+        member _.ArrayEnd(_,_,_,_) = 0
         member _.Scalar(_,token,ctx) =
             match token with
             | NumberToken literal -> JsonGrammar.validateNumber &ctx literal

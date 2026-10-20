@@ -503,9 +503,10 @@ type internal ParserContext<'R when 'R : struct and 'R :> IJsonReader> =
     val input: ReadOnlySpan<byte>
     val codeUnitLength: int
     val mutable codeUnitIndex: int
+    val mutable containerDepth: int
     val mutable sb: StringBuilder
     val mutable decodeStrings: bool
     val reader: 'R
     new(input, length, reader) =
-        { input = input; codeUnitLength = length; codeUnitIndex = 0
+        { input = input; codeUnitLength = length; codeUnitIndex = 0; containerDepth = 0
           sb = null; decodeStrings = true; reader = reader }

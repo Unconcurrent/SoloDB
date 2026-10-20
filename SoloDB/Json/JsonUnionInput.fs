@@ -4,7 +4,7 @@ namespace SoloDatabase.JsonSerializator
 [<AbstractClass; Sealed>]
 type internal JsonUnionInput =
     static member Begin<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): bool =
-        context.Cursor.codeUnitIndex <- context.Range.Start
+        JsonReadCursor.reset &context
         context.Cursor.decodeStrings <- false
         let start = context.Cursor.codeUnitIndex
         let token = JsonLexer.readNext &context.Cursor
@@ -27,4 +27,4 @@ type internal JsonUnionInput =
         let mutable sink = JsonDiscardSink<'R>()
         JsonGrammar.fromToken<int,int,int,'R,JsonDiscardSink<'R>> &sink &context.Cursor start token false |> ignore
         truth <- (match token with BooleanToken true -> true | _ -> false)
-        { Start = start; Length = context.Cursor.codeUnitIndex - start }
+        { Start = start; Length = context.Cursor.codeUnitIndex - start; Depth = context.Cursor.containerDepth }

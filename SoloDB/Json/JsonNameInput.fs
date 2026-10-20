@@ -54,7 +54,7 @@ type internal JsonNameInput =
         JsonGrammar.completePropertyName &context.Cursor
 
     static member internal Value<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): unit =
-        context.Range <- { Start = context.Cursor.codeUnitIndex; Length = context.Cursor.codeUnitLength - context.Cursor.codeUnitIndex }
+        context.Range <- { Start = context.Cursor.codeUnitIndex; Length = context.Cursor.codeUnitLength - context.Cursor.codeUnitIndex; Depth = context.Cursor.containerDepth }
         context.Properties <- null
         context.Elements <- null
         context.Consumed <- false

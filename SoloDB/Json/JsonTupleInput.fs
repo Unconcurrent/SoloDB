@@ -21,10 +21,10 @@ type internal JsonTupleInput =
         let token = JsonLexer.readNext &context.Cursor
         let mutable sink = JsonDiscardSink<'R>()
         JsonGrammar.fromToken<int,int,int,'R,JsonDiscardSink<'R>> &sink &context.Cursor start token arrayElement |> ignore
-        { Start = start; Length = context.Cursor.codeUnitIndex - start }
+        { Start = start; Length = context.Cursor.codeUnitIndex - start; Depth = context.Cursor.containerDepth }
 
     static member Complete<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): unit =
-        context.Range <- { Start = context.Range.Start; Length = context.Cursor.codeUnitIndex - context.Range.Start }
+        context.Range <- { context.Range with Length = context.Cursor.codeUnitIndex - context.Range.Start; Depth = context.Cursor.containerDepth }
         context.Consumed <- true
 
     static member Missing(): unit = failwith "Property not found"

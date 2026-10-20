@@ -9,7 +9,7 @@ open System.Runtime.InteropServices
 type internal JsonNumericInput =
     static member internal Begin<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): int =
         context.Consumed <- false
-        context.Cursor.codeUnitIndex <- context.Range.Start
+        JsonReadCursor.reset &context
         JsonLexer.nextSignificantCodePoint &context.Cursor
 
     static member internal Reference<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): byref<byte> =

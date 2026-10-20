@@ -19,7 +19,7 @@ module internal HydrationManyPopulator =
             match hydrationMap.TryGetValue(ownerId) with
             | false, _ -> ()
             | true, hydrationJsonStr ->
-                let mutable hydration = JsonReadContext(JsonLexer.fromUtf16Span(hydrationJsonStr.AsSpan()),{ Start = 0; Length = hydrationJsonStr.Length })
+                let mutable hydration = JsonReadContext(JsonLexer.fromUtf16Span(hydrationJsonStr.AsSpan()),{ Start = 0; Length = hydrationJsonStr.Length; Depth = 0 })
                 JsonReadCursor.scan &hydration
                 if not(isNull hydration.Properties) then
                     for manyIndex in 0 .. descriptor.ManyCount - 1 do

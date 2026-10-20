@@ -413,7 +413,7 @@ type JsonValue =
         JsonRawRead<JsonNativeContract>.PhysicalId<'R> &context
 
     static member internal ParseRuntime(targetType: Type, text: ReadOnlySpan<char>): obj =
-        let mutable context = JsonReadContext(JsonLexer.fromUtf16Span(text),{ Start = 0; Length = text.Length })
+        let mutable context = JsonReadContext(JsonLexer.fromUtf16Span(text),{ Start = 0; Length = text.Length; Depth = 0 })
         let value = JsonRawReadMetadata<JsonStoredContract>.Runtime<Utf16Reader>(&context,targetType)
         JsonReadCursor.finish &context
         value
@@ -432,11 +432,11 @@ type JsonValue =
         value
 
     static member internal ParseStored<'T>(text: ReadOnlySpan<char>): 'T =
-        let mutable context = JsonReadContext(JsonLexer.fromUtf16Span(text),{ Start = 0; Length = text.Length })
+        let mutable context = JsonReadContext(JsonLexer.fromUtf16Span(text),{ Start = 0; Length = text.Length; Depth = 0 })
         JsonValue.ReadStored<'T,Utf16Reader>(&context)
 
     static member internal ParseStored<'T>(text: ReadOnlySpan<byte>): 'T =
-        let mutable context = JsonReadContext(JsonLexer.fromUtf8Span(text),{ Start = 0; Length = text.Length })
+        let mutable context = JsonReadContext(JsonLexer.fromUtf8Span(text),{ Start = 0; Length = text.Length; Depth = 0 })
         JsonValue.ReadStored<'T,Utf8Reader>(&context)
 
     static member internal ParseStored<'T>(text: string): 'T =
@@ -444,7 +444,7 @@ type JsonValue =
 
     static member private PrepareStoredParameter(targetType: Type, value: obj, comparison: bool): obj * bool =
         let text = JsonValue.WriteRuntimeBuffer(targetType,value,false,false)
-        let mutable context = JsonReadContext(JsonLexer.fromUtf16Span(ReadOnlySpan(text.Array,text.Offset,text.Count)),{ Start = 0; Length = text.Count })
+        let mutable context = JsonReadContext(JsonLexer.fromUtf16Span(ReadOnlySpan(text.Array,text.Offset,text.Count)),{ Start = 0; Length = text.Count; Depth = 0 })
         // The writer's actual output controls native storage, after its user effects.
         if JsonReadCursor.numericStart &context then
             let actual = if typeof<obj>.Equals(targetType) && not(isNull value) then value.GetType() else targetType
@@ -878,7 +878,7 @@ type JsonValue =
         if jsonSpan.IsEmpty then invalidArg (nameof jsonSpan) "Argument is empty" else
 
         let cursor = JsonLexer.fromUtf16Span jsonSpan
-        let mutable context = JsonReadContext(cursor,{ Start = 0; Length = jsonSpan.Length })
+        let mutable context = JsonReadContext(cursor,{ Start = 0; Length = jsonSpan.Length; Depth = 0 })
         let value = JsonRawRead<JsonNativeContract>.Read<'T,Utf16Reader> &context
         JsonReadCursor.finish &context
         value
@@ -895,7 +895,7 @@ type JsonValue =
         if jsonSpan.IsEmpty then invalidArg (nameof jsonSpan) "Argument is empty" else
 
         let cursor = JsonLexer.fromUtf8Span jsonSpan
-        let mutable context = JsonReadContext(cursor,{ Start = 0; Length = jsonSpan.Length })
+        let mutable context = JsonReadContext(cursor,{ Start = 0; Length = jsonSpan.Length; Depth = 0 })
         let value = JsonRawRead<JsonNativeContract>.Read<'T,Utf8Reader> &context
         JsonReadCursor.finish &context
         value
@@ -3321,23 +3321,30 @@ and private JsonRawRead<'Contract> =
         try
             let value = reader.Invoke &context
             if not context.Consumed then
-                if not(isNull context.Properties) || not(isNull context.Elements) then context.Cursor.codeUnitIndex <- context.Range.Start + context.Range.Length
+                if not(isNull context.Properties) || not(isNull context.Elements) then JsonReadCursor.complete &context
                 else JsonReadCursor.skip &context
             value
-        with
-        | JsonPrimitiveShapeMismatch target -> JsonImpl.DeserializeByType target (JsonRawInput<'Contract>.Tree<'R> &context) |> unbox<'T>
-        | JsonScalarShapeMismatch ->
-            // Invalid scalar shapes retain the established diagnostic, including its formatted value.
-            // Successful typed conversions never construct a tree.
-            JsonReadOperations<'T>.Deserialize(JsonRawInput<'Contract>.Tree<'R> &context)
+        // Nested type decisions retain a selective CLR exception filter.
+        with error when (
+            match error with
+            | JsonPrimitiveShapeMismatch _ -> true
+            | _ ->
+                match error with
+                | JsonScalarShapeMismatch -> true
+                | _ -> false) ->
+            match error with
+            | JsonPrimitiveShapeMismatch _ -> JsonRawRead<'Contract>.PrimitiveRetry<'T,'R>(error,&context)
+            | _ -> JsonRawRead<'Contract>.ScalarRetry<'T,'R>(&context)
 
     static member internal Prepare<'T,'R when 'R : struct and 'R :> IJsonReader>(): JsonRawReadOperations =
         TypeMetadataCache.Discover(typeof<'T>,JsonRawReadMetadata<'Contract>.Select<'R>,(fun operation metadata -> JsonRawReadMetadata<'Contract>.Store<'R>(operation,metadata)),
             Func<JsonRawReadOperations>(fun () -> JsonRawRead<'Contract>.Build<'T,'R>()))
+    [<MethodImpl(MethodImplOptions.NoInlining)>]
     static member internal PrimitiveRetry<'T,'R when 'R : struct and 'R :> IJsonReader>(error: exn, context: byref<JsonReadContext<'R>>): 'T =
         match error with
         | JsonPrimitiveShapeMismatch target -> JsonImpl.DeserializeByType target (JsonRawInput<'Contract>.Tree<'R> &context) |> unbox<'T>
         | _ -> raise error
+    [<MethodImpl(MethodImplOptions.NoInlining)>]
     static member internal ScalarRetry<'T,'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): 'T =
         JsonReadOperations<'T>.Deserialize(JsonRawInput<'Contract>.Tree<'R> &context)
     static member internal Ensure<'T,'R when 'R : struct and 'R :> IJsonReader>(): unit =
@@ -3403,7 +3410,7 @@ and private JsonRawInput<'Contract> =
         | _ -> raise JsonScalarShapeMismatch
     static member internal NextElement<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>, first: bool): bool =
         if JsonGrammar.nextElement &context.Cursor first then
-            context.Range <- { Start = context.Cursor.codeUnitIndex; Length = context.Cursor.codeUnitLength - context.Cursor.codeUnitIndex }
+            context.Range <- { Start = context.Cursor.codeUnitIndex; Length = context.Cursor.codeUnitLength - context.Cursor.codeUnitIndex; Depth = context.Cursor.containerDepth }
             context.Properties <- null; context.Elements <- null; context.Consumed <- false
             true
         else false
@@ -3425,41 +3432,53 @@ and private JsonRawInput<'Contract> =
         else let result = Array.zeroCreate<'Element> count in Array.Copy(values,result,count); result
     static member internal Skip<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): unit = JsonReadCursor.skip &context
     static member internal Complete<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>, origin: int): unit =
-        context.Range <- { Start = origin; Length = context.Cursor.codeUnitIndex - origin }
+        context.Range <- { Start = origin; Length = context.Cursor.codeUnitIndex - origin; Depth = context.Cursor.containerDepth }
         context.Consumed <- true
     static member internal SelectType<'T,'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): unit =
         if not context.TypeSelected then
             let value = JsonRawRead<'Contract>.Read<string,'R> &context
             let actual = if isNull value then null else TypeMetadata.nameToType value
             if not(isNull actual) && not (typeof<'T>.Equals(actual)) && typeof<'T>.IsAssignableFrom actual then raise JsonDifferentRuntimeType
+    [<MethodImpl(MethodImplOptions.NoInlining)>]
+    static member private Recover<'T,'R when 'R : struct and 'R :> IJsonReader>
+        (read: JsonDirectReader<'T,'R>, error: exn, original: inref<JsonReadContext<'R>>, context: byref<JsonReadContext<'R>>): 'T =
+        let mutable selected = original
+        let actual =
+            try JsonRawInput<'Contract>.ActualType<'T,'R> &selected
+            with _ -> typeof<'T>
+        if not (typeof<'T>.Equals(actual)) then
+            selected.TypeSelected <- true
+            let result = JsonRawInput<'Contract>.ToRuntimeObject<'R>(&selected,actual) |> unbox<'T>
+            context <- selected
+            result
+        else
+            match error with
+            | JsonDifferentRuntimeType ->
+                selected <- original
+                selected.TypeSelected <- true
+                let result = read.Invoke &selected
+                context <- selected
+                result
+            | _ -> reraiseAnywhere error
+
     static member internal Wrap<'T,'R when 'R : struct and 'R :> IJsonReader>(read: JsonDirectReader<'T,'R>): JsonDirectReader<'T,'R> =
         JsonDirectReader<'T,'R>(fun (context: byref<JsonReadContext<'R>>) ->
             if TypeMetadata.isSealed typeof<'T> || typeof<'T>.IsValueType || context.TypeSelected then read.Invoke &context
             else
                 let original = context
                 try read.Invoke &context
-                with error ->
-                    let mutable selected = original
-                    let actual =
-                        try JsonRawInput<'Contract>.ActualType<'T,'R> &selected
-                        with _ -> typeof<'T>
-                    if not (typeof<'T>.Equals(actual)) then
-                        selected.TypeSelected <- true
-                        let result = JsonRawInput<'Contract>.ToRuntimeObject<'R>(&selected,actual) |> unbox<'T>
-                        context <- selected
-                        result
-                    else
+                // Keep terminal failures outside the handler, without ancestor rethrows.
+                with error when (
+                    match error with
+                    | :? JsonNestingException -> false
+                    | _ ->
                         match error with
-                        | JsonDifferentRuntimeType ->
-                            selected <- original
-                            selected.TypeSelected <- true
-                            let result = read.Invoke &selected
-                            context <- selected
-                            result
-                        | _ -> System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw(); Unchecked.defaultof<'T>)
+                        | :? InsufficientExecutionStackException -> false
+                        | _ -> true) ->
+                    JsonRawInput<'Contract>.Recover<'T,'R>(read,error,&original,&context))
 
     static member internal Tree<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): JsonValue =
-        context.Cursor.codeUnitIndex <- context.Range.Start
+        JsonReadCursor.reset &context
         context.Cursor.decodeStrings <- true
         let value = JsonParser.parse JsonValue.ParserApi &context.Cursor
         context.Consumed <- true
@@ -3467,7 +3486,7 @@ and private JsonRawInput<'Contract> =
     static member internal IsNull<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): bool =
         match JsonReadCursor.token &context with NullToken -> true | _ -> false
     static member internal SequenceNull<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): bool =
-        context.Cursor.codeUnitIndex <- context.Range.Start
+        JsonReadCursor.reset &context
         if JsonLexer.tryReadNull &context.Cursor then
             context.Consumed <- true
             true
@@ -3877,8 +3896,9 @@ and private JsonRawCollections<'Contract> =
                 | ValueSome typedId -> DBRef<'T,'Id>.Loaded(id,unbox<'Id> typedId,value)
                 | ValueNone -> DBRef<'T,'Id>.Loaded(id,value)))
         JsonDirectReader<DBRef<'T,'Id>,'R>(fun context ->
-            context.Cursor.codeUnitIndex <- context.Range.Start
+            JsonReadCursor.reset &context
             if JsonLexer.nextSignificantCodePoint &context.Cursor = int '{' then
+                JsonLexer.enterContainer &context.Cursor
                 context.Cursor.codeUnitIndex <- context.Cursor.codeUnitIndex + 1
                 let marker = JsonMarkerCapture<'R>.Read &context
                 if marker.Present then

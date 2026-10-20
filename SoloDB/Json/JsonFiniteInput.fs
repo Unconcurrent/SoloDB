@@ -26,7 +26,7 @@ type internal JsonFiniteCapture<'T,'R when 'R : struct and 'R :> IJsonReader> =
 [<AbstractClass; Sealed>]
 type internal JsonFiniteInput =
     static member Begin<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>): bool =
-        context.Cursor.codeUnitIndex <- context.Range.Start
+        JsonReadCursor.reset &context
         context.Cursor.decodeStrings <- false
         let start = context.Cursor.codeUnitIndex
         let token = JsonLexer.readNext &context.Cursor

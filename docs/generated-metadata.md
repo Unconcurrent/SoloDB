@@ -160,6 +160,8 @@ int JsonValue.WriteJson<T>(T value, IList<char> destination);
 
 `ParseInto<T>(null)` with the string overload returns the default value of `T`; an empty byte or character span raises `ArgumentException`.
 
+`Parse` and `ParseInto<T>` accept at most 1000 nested object or array containers and raise `FormatException` beyond that limit. Sibling containers and braces inside strings do not increase nesting.
+
 Forward object readers convert recognized properties in input order. Mutable properties are assigned as encountered; immutable constructor arguments are held in typed locals and the model is constructed after the object ends. Missing mutable properties retain their constructor defaults, and missing constructor arguments use their typed defaults.
 
 In forward object readers, each duplicate occurrence is converted: the last successfully converted value wins, including names made equivalent by JSON escapes. An invalid earlier occurrence fails even if a later occurrence would be valid. Constructors and setters may already have run when a later malformed value or trailing input causes failure; their effects are not rolled back. Explicit tree parsing and subsequent tree conversion retain their separate duplicate and conversion-order behavior. Optional wrappers, unions and directional collection readers, including Stack, retain their established policies.

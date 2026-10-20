@@ -176,7 +176,7 @@ module internal JsonFunctions =
     let internal physicalTreeSubject (id: int64) (text: string) =
         if id < 0L then text
         else
-            let mutable input = JsonReadContext(JsonLexer.fromString text, { Start = 0; Length = text.Length })
+            let mutable input = JsonReadContext(JsonLexer.fromString text, { Start = 0; Length = text.Length; Depth = 0 })
             JsonReadCursor.scan &input
             let isObject = not(isNull input.Properties)
             let hasId = isObject && input.Properties.ContainsKey "Id"
