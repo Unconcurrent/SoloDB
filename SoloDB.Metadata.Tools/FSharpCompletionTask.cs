@@ -27,10 +27,6 @@ public sealed class CompleteFSharpAssembly : ITask
     [Required] public string Input { get; set; } = "";
     [Required] public string Context { get; set; } = "";
     [Required] public string OutputDirectory { get; set; } = "";
-    public bool SignAssembly { get; set; }
-    public bool PublicSign { get; set; }
-    public bool DelaySign { get; set; }
-    public string? KeyFile { get; set; }
     public ITaskItem[] References { get; set; } = Array.Empty<ITaskItem>();
     [Output] public string Assembly { get; private set; } = "";
     [Output] public string Symbols { get; private set; } = "";
@@ -108,12 +104,8 @@ public sealed class CompleteFSharpAssembly : ITask
                     ? new CompletionSymbolWriterProvider(consumer.MainModule.SymbolReader.GetWriterProvider(), output) : null,
                 SymbolStream = symbols
             };
-            if (SignAssembly && !PublicSign && !DelaySign)
-            {
-                if (string.IsNullOrEmpty(KeyFile)) throw new InvalidOperationException("Signed FSharp completion requires the current project signing key.");
-                var path = Path.IsPathRooted(KeyFile) ? KeyFile! : Path.Combine(Path.GetDirectoryName(Literal("Project"))!, KeyFile!);
-                writer.StrongNameKeyBlob = File.ReadAllBytes(path);
-            }
+            var fullSigningKeyFile = Literal("FullSigningKeyFile");
+            if (fullSigningKeyFile.Length != 0) writer.StrongNameKeyBlob = File.ReadAllBytes(fullSigningKeyFile);
             consumer.Write(image, writer);
             if (symbols != null) Publish(Path.ChangeExtension(output, ".pdb"), symbols.ToArray());
             Publish(output, image.ToArray());

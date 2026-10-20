@@ -93,6 +93,7 @@ type ProjectGeneration private () =
                 CompilerContext.Write(contextPath, project, "inactive", arguments)
                 ""
             | Some result ->
+                let current = CurrentAssembly.acquire result arguments (Path.GetDirectoryName(project)) assemblyName
                 let referencePaths =
                     arguments |> Array.choose(fun argument ->
                         let prefix = if argument.StartsWith("-r:", StringComparison.Ordinal) then 3 elif argument.StartsWith("--reference:", StringComparison.Ordinal) then 12 else 0
@@ -102,10 +103,10 @@ type ProjectGeneration private () =
                     |> function [|path|] -> path | _ -> invalidOp "SoloDB generation requires exactly one current runtime reference."
                 use product = AssemblyDefinition.ReadAssembly(productPath)
                 use references = ModuleDefinition.CreateModule("SoloDB.CompilerReferences", ModuleKind.Dll)
-                let queries, queryCalls, queryWitnesses, queryLambdas, inferredRoots, providerOperations, operationAccess, argumentSources = QueryDiscovery.collect result references parsedInputs (Path.GetDirectoryName(project)) (fun location methodName ->
+                let queries, queryCalls, queryWitnesses, queryLambdas, inferredRoots, providerOperations, operationAccess, argumentSources = QueryDiscovery.collect result references current.Identity parsedInputs (Path.GetDirectoryName(project)) (fun location methodName ->
                     report.Invoke(location.FileName,location.StartLine,location.StartColumn + 1,
                         sprintf "Cannot infer closed types for SoloDB use '%s'. Supply explicit SoloDBAOT model roots and a closed query signature for any runtime-selected use." methodName))
-                let models = ModelDiscovery.collect result references inferredRoots parsedInputs (Path.GetDirectoryName(project))
+                let models = ModelDiscovery.collect result references current.Identity inferredRoots parsedInputs (Path.GetDirectoryName(project))
                 let queryWitnesses, queryCalls =
                     if queryWitnesses.Length = 0 then queryWitnesses, queryCalls else
                     let core = result.ProjectContext.GetReferencedAssemblies() |> Seq.find(fun assembly -> assembly.SimpleName = "FSharp.Core")
@@ -119,11 +120,11 @@ type ProjectGeneration private () =
                     source.AppendLine("namespace System.Runtime.CompilerServices\nopen System\n[<Sealed; AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)>]\ntype internal IgnoresAccessChecksToAttribute(_target: string) =\n    inherit Attribute()\n") |> ignore
                 source.AppendLine("namespace SoloDatabase.Generated\n") |> ignore
                 source.AppendLine("do ()") |> ignore
-                let attribute = if access.Length = 0 then null else ModelDiscovery.accessAttribute result references assemblyName
+                let attribute = if access.Length = 0 then null else ModelDiscovery.accessAttribute references current.Identity
                 GeneratedJsonAssembly.Write(templatePath, "SoloDB.Generated.FSharp", "Template", product, models, attribute, queries, queryCalls, queryWitnesses, queryLambdas, providerOperations, referencePaths, operationAccess, argumentSources)
                 writeSource (source.ToString())
                 // Publish the provider context only after all current outputs succeed.
-                CompilerContext.Write(contextPath, project, "execute", arguments, Path.GetFullPath(templatePath))
+                CompilerContext.Write(contextPath, project, "execute", arguments, Path.GetFullPath(templatePath), current.FullSigningKeyFile)
                 Path.GetFullPath(templatePath)
         finally
             if Directory.Exists(workspace) then Directory.Delete(workspace, true)

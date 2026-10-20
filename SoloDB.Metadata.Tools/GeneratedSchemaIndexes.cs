@@ -85,15 +85,23 @@ internal static class GeneratedSchemaIndexes
                 throw new System.InvalidOperationException("Generated schema source operands are incomplete: " + method.FullName);
             if (!GeneratedJsonDefinitions.SameType(owner,accessor.DeclaringType))
                 throw new System.InvalidOperationException("Generated schema accessor has a different source owner: " + method.FullName);
-            return (owner,accessor,method.Name + ":" + GeneratedJsonDefinitions.Identity(owner) + ":" + Signature(accessor,OriginalIdentity));
+            var root = owner is GenericInstanceType closed ? closed.ElementType : owner;
+            var sourceAssembly = root.Scope is AssemblyNameReference assembly ? assembly.FullName
+                : root.Scope is ModuleDefinition sourceModule ? sourceModule.Assembly.Name.FullName : root.Scope.Name;
+            if (sourceAssembly != consumer.Name.FullName)
+                throw new System.InvalidOperationException("Generated schema source does not belong to the current compiler image: " + owner.FullName);
+            return (owner,accessor,method.Name + ":" + OriginalIdentity(owner) + ":" + Signature(accessor,OriginalIdentity));
         }
         TypeReference Definition(TypeReference reference)
         {
             var scope = reference.Scope is AssemblyNameReference assembly ? assembly.FullName
                 : reference.Scope is ModuleDefinition module ? module.Assembly.Name.FullName : reference.Scope.Name;
-            return scope == consumer.Name.FullName
-                ? consumer.MainModule.GetType(reference.FullName) ?? throw new System.InvalidOperationException("The current compiler image has no signature type: " + reference.FullName)
-                : SourceTypeIdentity.Definition(consumer.MainModule.AssemblyResolver.Resolve(AssemblyNameReference.Parse(scope)),reference.FullName);
+            if (scope == consumer.Name.FullName)
+                return consumer.MainModule.GetType(reference.FullName) ?? throw new System.InvalidOperationException("The current compiler image has no signature type: " + reference.FullName);
+            var original = consumer.MainModule.AssemblyResolver.Resolve(AssemblyNameReference.Parse(scope));
+            if (original.Name.FullName != scope)
+                throw new System.InvalidOperationException("The resolved schema signature assembly differs from its original identity: " + reference.FullName);
+            return SourceTypeIdentity.Definition(original,reference.FullName);
         }
         string OriginalIdentity(TypeReference reference) => GeneratedJsonDefinitions.SignatureIdentity(reference,Definition);
         var expected = template.MainModule.Types.SelectMany(Factories).Select(method => Source(method).Key).ToArray();
@@ -107,10 +115,6 @@ internal static class GeneratedSchemaIndexes
                 var source = Source(method);
                 var owner = source.Owner;
                 var root = owner is GenericInstanceType closed ? closed.ElementType : owner;
-                var sourceAssembly = root.Scope is AssemblyNameReference assembly ? assembly.FullName
-                    : root.Scope is ModuleDefinition sourceModule ? sourceModule.Assembly.Name.FullName : root.Scope.Name;
-                if (sourceAssembly != consumer.Name.FullName)
-                    throw new System.InvalidOperationException("Generated schema source does not belong to the current compiler image: " + owner.FullName);
                 var original = consumer.MainModule.GetType(root.FullName) ?? throw new System.InvalidOperationException("The current compiler image has no schema source type: " + root.FullName);
                 var signature = Signature(source.Accessor,OriginalIdentity);
                 var candidates = original.Properties.Where(property =>

@@ -8,6 +8,7 @@
     <NuGetAudit>true</NuGetAudit>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="CurrentAssembly.fs" />
     <Compile Include="CompilerReferences.fs" />
     <Compile Include="CompilerPropertyFacts.fs" />
     <Compile Include="UnionDiscovery.fs" />

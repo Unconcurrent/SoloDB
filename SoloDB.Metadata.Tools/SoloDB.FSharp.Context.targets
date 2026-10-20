@@ -75,7 +75,6 @@
     </PropertyGroup>
     <SoloDatabase.Metadata.Tools.CompleteFSharpAssembly Input="@(IntermediateAssembly)" Context="$(_SoloDBCompletionContext)"
         OutputDirectory="$(IntermediateOutputPath)SoloDB.Generated/consumer"
-        SignAssembly="$(SignAssembly)" PublicSign="$(PublicSign)" DelaySign="$(DelaySign)" KeyFile="$(KeyOriginatorFile)"
         References="@(ReferencePath);@(ReferenceCopyLocalPaths)">
       <Output TaskParameter="Assembly" PropertyName="_SoloDBCompletedAssembly" />
       <Output TaskParameter="Symbols" PropertyName="_SoloDBCompletedSymbols" />

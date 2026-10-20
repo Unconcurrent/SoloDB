@@ -26,12 +26,6 @@ module internal ModelDiscovery =
             yield! entities entity.NestedEntities
     }
 
-    let private version (project: FSharpCheckProjectResults) =
-        project.AssemblySignature.Attributes
-        |> Seq.tryFind(fun attribute -> attribute.AttributeType.FullName = "System.Reflection.AssemblyVersionAttribute")
-        |> Option.map(fun attribute -> Version(attribute.ConstructorArguments[0] |> snd |> unbox<string>))
-        |> Option.defaultValue(Version(0,0,0,0))
-
     let hasAccessAttribute (project: FSharpCheckProjectResults) =
         match entities project.AssemblySignature.Entities
               |> Seq.tryFind(fun entity -> entity.TryFullName = Some "System.Runtime.CompilerServices.IgnoresAccessChecksToAttribute") with
@@ -45,11 +39,11 @@ module internal ModelDiscovery =
             if not compatible then invalidOp "The existing IgnoresAccessChecksToAttribute must inherit Attribute and expose an accessible constructor accepting one string."
             true
 
-    let accessAttribute project moduleDefinition assemblyName =
+    let accessAttribute moduleDefinition (currentIdentity: AssemblyNameReference) =
         TypeReference("System.Runtime.CompilerServices","IgnoresAccessChecksToAttribute",moduleDefinition,
-            AssemblyNameReference(assemblyName,version project))
+            currentIdentity)
 
-    let collect (project: FSharpCheckProjectResults) (moduleDefinition: ModuleDefinition) (inferredRoots: FSharpType[])
+    let collect (project: FSharpCheckProjectResults) (moduleDefinition: ModuleDefinition) currentIdentity (inferredRoots: FSharpType[])
                 (parsedInputs: IReadOnlyDictionary<string,ParsedInput>) projectDirectory =
         // FCS reports effective accessibility inside private types. CLR constructors retain
         // their own declared visibility, unlike the properties emitted for those types.
@@ -74,7 +68,7 @@ module internal ModelDiscovery =
                        (location.StartLine,location.StartColumn) <= (declared.StartLine,declared.StartColumn) &&
                        (declared.EndLine,declared.EndColumn) <= (location.EndLine,location.EndColumn) then Some isPublic else None))
              |> Option.defaultValue memberValue.Accessibility.IsPublic)
-        let referenceWith = (CompilerReferences.create moduleDefinition (version project) (project.ProjectContext.GetReferencedAssemblies() |> Seq.find(fun assembly -> assembly.SimpleName = "FSharp.Core") |> _.QualifiedName)).Reference
+        let referenceWith = (CompilerReferences.create moduleDefinition currentIdentity (project.ProjectContext.GetReferencedAssemblies() |> Seq.find(fun assembly -> assembly.SimpleName = "FSharp.Core") |> _.QualifiedName)).Reference
         let sources = ResizeArray<GeneratedModel * FSharpType>()
         let reference typ = referenceWith (fun _ -> invalidOp "An open model type requires its actual closed use-site arguments.") typ
         let completeReferenceFacts (facts: ResizeArray<Member>) (members: ResizeArray<GeneratedMember>) =

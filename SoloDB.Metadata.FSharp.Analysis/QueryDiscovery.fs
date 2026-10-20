@@ -10,18 +10,13 @@ open Mono.Cecil
 open SoloDatabase.Metadata.Tools
 /// Checked substitutions own type facts; syntax bounds each supplied query call.
 module internal QueryDiscovery =
-    let collect (project: FSharpCheckProjectResults) (moduleDefinition: ModuleDefinition) (inputs: IDictionary<string, ParsedInput>) projectDirectory report =
+    let collect (project: FSharpCheckProjectResults) (moduleDefinition: ModuleDefinition) currentIdentity (inputs: IDictionary<string, ParsedInput>) projectDirectory report =
         let file (path: string) = Path.GetFullPath(if Path.IsPathRooted(path) then path else Path.Combine(projectDirectory, path))
         let contains (outer: range) (inner: range) =
             file outer.FileName = file inner.FileName && (outer.StartLine, outer.StartColumn) <= (inner.StartLine, inner.StartColumn)
             && (inner.EndLine, inner.EndColumn) <= (outer.EndLine, outer.EndColumn)
-        let currentVersion =
-            project.AssemblySignature.Attributes
-            |> Seq.tryFind(fun attribute -> attribute.AttributeType.FullName = "System.Reflection.AssemblyVersionAttribute")
-            |> Option.map(fun attribute -> Version(attribute.ConstructorArguments[0] |> snd |> unbox<string>))
-            |> Option.defaultValue(Version(0,0,0,0))
         let core = project.ProjectContext.GetReferencedAssemblies() |> Seq.find(fun assembly -> assembly.SimpleName = "FSharp.Core")
-        let mapper = CompilerReferences.create moduleDefinition currentVersion core.QualifiedName
+        let mapper = CompilerReferences.create moduleDefinition currentIdentity core.QualifiedName
         let referenceWith = mapper.Reference
         let runtimeMember (memberValue: FSharpMemberOrFunctionOrValue) =
             not(memberValue.CompiledName = "NameOf" &&

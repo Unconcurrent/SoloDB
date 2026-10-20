@@ -29,12 +29,10 @@ module internal CompilerReferences =
         { Reference: (FSharpGenericParameter -> TypeReference) -> FSharpType -> TypeReference
           Anonymous: FSharpAnonRecordTypeDetails -> bool -> TypeReference[] -> TypeReference }
 
-    let create (moduleDefinition: ModuleDefinition) (currentVersion: Version) (coreIdentity: string) =
+    let create (moduleDefinition: ModuleDefinition) (currentIdentity: AssemblyNameReference) (coreIdentity: string) =
         let typeReferences = Dictionary<string, TypeReference>(StringComparer.Ordinal)
         let anonymous (details: FSharpAnonRecordTypeDetails) valueType (arguments: TypeReference[]) =
-            let scope =
-                if String.IsNullOrEmpty(details.Assembly.QualifiedName) then AssemblyNameReference(details.Assembly.SimpleName,currentVersion)
-                else AssemblyNameReference.Parse(details.Assembly.QualifiedName)
+            let scope = CurrentAssembly.reference currentIdentity details.Assembly
             let identity = scope.FullName + ":" + String.concat "/" (details.EnclosingCompiledTypeNames @ [details.CompiledName])
             let root =
                 match typeReferences.TryGetValue identity with
@@ -94,9 +92,7 @@ module internal CompilerReferences =
                         match typeReferences.TryGetValue identity with
                         | true, value -> value
                         | _ ->
-                            let scope =
-                                if String.IsNullOrEmpty(entity.Assembly.QualifiedName) then AssemblyNameReference(entity.Assembly.SimpleName, currentVersion)
-                                else AssemblyNameReference.Parse(entity.Assembly.QualifiedName)
+                            let scope = CurrentAssembly.reference currentIdentity entity.Assembly
                             let parent =
                                 match entity.DeclaringEntity with
                                 | Some declaring when not declaring.IsNamespace -> Some(referenceWith parameter (declaring.AsType()))
