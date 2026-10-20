@@ -47,10 +47,10 @@ module internal QueryTranslatorVisitCore =
         match property with
         | :? string as property when property = "Id" && isRootParameter o && (typeof<int64>.Equals(m.Type) || typeof<int32>.Equals(m.Type)) ->
             if not qb.UpdateMode && receiver.Input.PhysicalOwner.IsSome then
-                QueryTranslatorVisitCoreMemberAccess.accessValue qb.SourceContext.NextAlias false (StoredLabel(box property)) m.Type receiver
+                QueryTranslatorVisitCoreMemberAccess.accessValue (QueryDefault.value qb.Variables) qb.SourceContext.NextAlias false (StoredLabel(box property)) m.Type receiver
             else QueryProduced.typed m.Type (SqlExpr.Column(resolveAliasForParameter (unwrapConvert o :?> ParameterExpression) qb, "Id"))
-        | :? string as property -> QueryTranslatorVisitCoreMemberAccess.accessValue qb.SourceContext.NextAlias qb.UpdateMode (StoredLabel(box property)) m.Type receiver
-        | :? int as index -> QueryTranslatorVisitCoreMemberAccess.accessValue qb.SourceContext.NextAlias qb.UpdateMode (StoredLabel(box index)) m.Type receiver
+        | :? string as property -> QueryTranslatorVisitCoreMemberAccess.accessValue (QueryDefault.value qb.Variables) qb.SourceContext.NextAlias qb.UpdateMode (StoredLabel(box property)) m.Type receiver
+        | :? int as index -> QueryTranslatorVisitCoreMemberAccess.accessValue (QueryDefault.value qb.Variables) qb.SourceContext.NextAlias qb.UpdateMode (StoredLabel(box index)) m.Type receiver
         | _ -> raise(NotSupportedException("Unable to translate property access."))
 
     and private visitPropertyDu o property m qb = propertyProduced o property m qb (visitProduced o qb)

@@ -101,7 +101,7 @@ module internal OrderedChain =
                     | ValueSome OptionalAccess.Payload -> QueryProduced.bind adapter.Alias (fun value input -> DirectValue(value, QueryTranslatorSerialization.serializationPayload input)) value
                     | ValueSome OptionalAccess.Present -> QueryProduced.typed memberAccess.Type (SqlExpr.Unary(UnaryOperator.IsNotNull, QueryProduced.presence adapter.Alias value))
                     | ValueSome OptionalAccess.Absent -> QueryProduced.typed memberAccess.Type (SqlExpr.Unary(UnaryOperator.IsNull, QueryProduced.presence adapter.Alias value))
-                    | _ -> QueryTranslatorVisitCoreMemberAccess.accessValue adapter.Alias false (ClrMember(memberAccess.Member.Name, memberAccess.Type)) memberAccess.Type value)
+                    | _ -> QueryTranslatorVisitCoreMemberAccess.accessValue adapter.DefaultValue adapter.Alias false (ClrMember(memberAccess.Member.Name, memberAccess.Type)) memberAccess.Type value)
         | :? MethodCallExpression as call when typeof<Enumerable>.Equals(call.Method.DeclaringType) || typeof<Queryable>.Equals(call.Method.DeclaringType) ->
             validateOverload call
             let name = call.Method.Name
@@ -254,9 +254,7 @@ module internal OrderedChain =
                             Limit = Some(integer 1L); Offset = offset }
                     let one = selected selectedValue selectedCore
                     let needsDefault = call.Type.IsValueType && isNull(TypeMetadata.nullableUnderlying call.Type)
-                    let absent =
-                        if needsDefault then adapter.Value(Expression.Constant(QueryValueMetadata.Default call.Type, call.Type))
-                        else QueryProduced.typed call.Type (SqlExpr.Literal SqlLiteral.Null)
+                    let absent = adapter.DefaultValue call.Type
                     let fallback =
                         match name with
                         | "FirstOrDefault" | "LastOrDefault" | "SingleOrDefault" ->

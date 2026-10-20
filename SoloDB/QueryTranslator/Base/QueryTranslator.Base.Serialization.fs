@@ -70,6 +70,7 @@ module internal QueryTranslatorSerialization =
             Children = children
             Carrier = if inputs |> Array.forall (fun input -> input.Carrier = first.Carrier) then first.Carrier else CanonicalToken
             LegacyCharacterText = inputs |> Array.exists _.LegacyCharacterText
+            StructuralDefault = inputs |> Array.exists _.StructuralDefault
             PhysicalOwner = sharedPhysicalOwner inputs
             ReferenceOwner = sharedReferenceOwner inputs
             Navigation = inputs |> Array.collect _.Navigation |> Array.distinct }

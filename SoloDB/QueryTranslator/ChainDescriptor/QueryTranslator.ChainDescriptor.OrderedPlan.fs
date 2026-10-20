@@ -36,6 +36,7 @@ module internal OrderedChainPlan =
         Source: SourceColumns -> Expression -> struct(SqlSelect * QuerySerializationInput)
         Translate: Expression -> QuerySerializationInput -> string -> Selector -> (Expression -> QueryProducedValue voption) voption -> QueryProducedValue * JoinShape list
         Value: Expression -> QueryProducedValue
+        DefaultValue: Type -> QueryProducedValue
         Comparison: Expression -> QueryProducedValue
         Alias: unit -> string
     }

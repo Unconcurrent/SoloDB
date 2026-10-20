@@ -27,6 +27,7 @@ module internal QueryableBuildQueryGroupByChained =
             IsRoot = fun e -> obj.ReferenceEquals(e, groupParam)
             IsValue = fun e -> QueryTranslatorBaseHelpers.isFullyConstant e || (sourceCtx.BindQueryValue |> ValueOption.exists (fun b -> b.IsValue e))
             Alias = fun () -> GroupByAliases.nextSubquery sourceCtx
+            DefaultValue = QueryDefault.value vars
             Value = fun e -> QueryTranslator.translateScopedBody rowCtx groupRowAlias e
                                 (System.Collections.ObjectModel.ReadOnlyCollection<ParameterExpression>(Array.empty))
                                 (ValueSome captures) (ValueSome producer) false vars

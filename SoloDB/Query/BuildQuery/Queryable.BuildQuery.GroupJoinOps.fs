@@ -137,6 +137,7 @@ module internal QueryableBuildQueryGroupJoinOps =
                     IsRoot = fun e -> obj.ReferenceEquals(e, groupParam)
                     IsValue = fun e -> QueryTranslatorBaseHelpers.isFullyConstant e || (innerCtx.BindQueryValue |> ValueOption.exists (fun b -> b.IsValue e))
                     Alias = fun () -> GroupJoinAliases.nextRowset innerCtx
+                    DefaultValue = QueryDefault.value ctx.Vars
                     Value = fun e -> translateJoinSingleSourceProduced outerCtx completion.Alias ctx.Vars (Some outerParam) e
                     Comparison = fun e -> QueryTranslator.translateComparisonScopedBody outerCtx completion.Alias e
                                                (System.Collections.ObjectModel.ReadOnlyCollection<ParameterExpression>(Array.empty))

@@ -38,6 +38,7 @@ module internal QueryTranslatorVisitGrouping =
                 IsRoot = fun source -> obj.ReferenceEquals(source, parameter)
                 IsValue = fun source -> isFullyConstant source || (builder.SourceContext.BindQueryValue |> ValueOption.exists (fun binder -> binder.IsValue source))
                 Alias = builder.SourceContext.NextAlias
+                DefaultValue = QueryDefault.value builder.Variables
                 Value = fun value -> visitProduced value builder
                 Comparison = fun value -> visitComparisonProduced value builder
                 Translate = fun _ input alias selector handler ->

@@ -291,6 +291,7 @@
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.SpanSource.fs" />
     <Compile Include="Query/BuildQuery/Queryable.BuildQuery.WindowHelpers.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.ProducedValue.fs" />
+    <Compile Include="QueryTranslator/Base/QueryTranslator.Base.DefaultValue.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.CastAggregate.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.DateTimeFunctions.fs" />

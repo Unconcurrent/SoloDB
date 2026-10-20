@@ -21,7 +21,7 @@ open SoloDatabase.QuerySerializationSql
 
 /// Authored member identity produces the value and writer transition together.
 module internal QueryTranslatorVisitCoreMemberAccess =
-    let internal accessValue nextName updateMode access resultType (produced: QueryProducedValue) : QueryProducedValue =
+    let internal accessValue createDefault nextName updateMode access resultType (produced: QueryProducedValue) : QueryProducedValue =
         QueryProduced.bind nextName (fun value input ->
             let input = if input.Source.IsSome then input else { input with Source = ValueSome(jsonToken value) }
             let struct(child, segments) = serializationAccess input access
@@ -72,12 +72,14 @@ module internal QueryTranslatorVisitCoreMemberAccess =
             // A packed child retains its original scalar token until the actual
             // value or presence consumer chooses the owning scalar operation.
             let packedScalar = not updateMode && isSqlScalarResult resultType && (match produced with PackedValue _ -> true | _ -> false)
-            if packedScalar then
-                DirectValue(child.Source |> ValueOption.defaultWith (fun () -> jsonToken extracted), { child with Carrier = CanonicalToken })
-            else DirectValue(extracted, { child with Carrier = carrier })) produced
+            let selected =
+                if packedScalar then
+                    DirectValue(child.Source |> ValueOption.defaultWith (fun () -> jsonToken extracted), { child with Carrier = CanonicalToken })
+                else DirectValue(extracted, { child with Carrier = carrier })
+            if updateMode then selected else QueryDefault.memberResult createDefault resultType value input selected) produced
 
     let internal access visitProduced parent access resultType (qb: QueryBuilder) =
-        accessValue qb.SourceContext.NextAlias qb.UpdateMode access resultType (visitProduced parent qb)
+        accessValue (QueryDefault.value qb.Variables) qb.SourceContext.NextAlias qb.UpdateMode access resultType (visitProduced parent qb)
 
     /// Identity and join consumers prepare the same authored reference input.
     let internal referenceInput (visitProduced: Expression -> QueryBuilder -> QueryProducedValue) (reference: Expression) (qb: QueryBuilder) =
@@ -89,7 +91,7 @@ module internal QueryTranslatorVisitCoreMemberAccess =
                 let parent = visitProduced memberValue.Expression qb
                 let access = ClrMember(memberValue.Member.Name, memberValue.Type)
                 let struct(_, segments) = serializationAccess parent.Input access
-                struct(accessValue qb.SourceContext.NextAlias qb.UpdateMode access memberValue.Type parent, segments, parent.Input.PhysicalOwner.IsSome)
+                struct(accessValue (QueryDefault.value qb.Variables) qb.SourceContext.NextAlias qb.UpdateMode access memberValue.Type parent, segments, parent.Input.PhysicalOwner.IsSome)
             | _ -> struct(visitProduced reference qb, [], false)
 
     let internal memberAccess (visitProduced: Expression -> QueryBuilder -> QueryProducedValue) (visitDu: Expression -> QueryBuilder -> SqlExpr) (visitPresenceDu: Expression -> QueryBuilder -> SqlExpr) (visitPayload: Expression -> QueryBuilder -> QueryProducedValue) (m: MemberAccess) (qb: QueryBuilder) : QueryProducedValue =
@@ -133,7 +135,7 @@ module internal QueryTranslatorVisitCoreMemberAccess =
                 let access =
                     if typeof<JsonSerializator.JsonValue>.Equals m.Expression.Type || m.Expression.Type.FullName = "SoloDatabase.MongoDB.BsonDocument" then StoredLabel(box m.MemberName)
                     else ClrMember(m.MemberName, m.ReturnType)
-                accessValue qb.SourceContext.NextAlias false access m.ReturnType parent
+                accessValue (QueryDefault.value qb.Variables) qb.SourceContext.NextAlias false access m.ReturnType parent
             else scalar(SqlExpr.Column(alias, "Id"))
         else
             match m.OriginalExpression with

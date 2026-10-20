@@ -78,6 +78,7 @@ module internal QueryTranslatorVisitDbRef =
                     IsRoot = isRoot
                     IsValue = fun e -> QueryTranslatorBaseHelpers.isFullyConstant e || (qb.SourceContext.BindQueryValue |> ValueOption.exists (fun b -> b.IsValue e))
                     Alias = fun () -> DBRefManyBuilderCore.nextAlias qb.SourceContext "_chain"
+                    DefaultValue = QueryDefault.value qb.Variables
                     Value = fun e -> visitProduced e qb
                     Comparison = fun e -> visitComparisonProduced e qb
                     Translate = fun source input alias lambda handler ->

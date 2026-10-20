@@ -75,10 +75,7 @@ module internal QueryableBuildQueryGroupJoinElements =
             if packed then PackedValue(value, QueryTranslatorSerialization.rebaseSerializationInput produced.Input)
             else DirectValue(value, QueryTranslatorSerialization.rebaseSerializationInput produced.Input)
         let absent =
-            if needsDefault then
-                let element = Expression.Constant(QueryValueMetadata.Default elementType, elementType)
-                let projection = rt.ReplaceExpression (groupCall.Call :> Expression) element projectionBody
-                QueryableHelperJoinBindings.translateJoinSingleSourceProduced freshInnerCtx scalarAlias rt.Vars (Some innerParam) projection
+            if needsDefault then QueryDefault.value rt.Vars projectionBody.Type
             else QueryProduced.typed projectionBody.Type (SqlExpr.Literal(SqlLiteral.Null))
         let selectedOrDefault core =
             let selected = mkValue core

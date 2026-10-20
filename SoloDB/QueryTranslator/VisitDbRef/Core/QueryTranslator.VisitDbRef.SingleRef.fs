@@ -108,7 +108,7 @@ module internal QueryTranslatorVisitDbRefSingleRef =
                 | Some alias when isFileRefType reference.Type && memberName <> "Metadata" ->
                     QueryProduced.typed resultType (SqlExpr.Column(Some alias, memberName))
                 | _ ->
-                    QueryTranslatorVisitCoreMemberAccess.accessValue qb.SourceContext.NextAlias false
+                    QueryTranslatorVisitCoreMemberAccess.accessValue (QueryDefault.value qb.Variables) qb.SourceContext.NextAlias false
                         (ClrMember(memberName, resultType)) resultType target
                     |> QueryProduced.bind qb.SourceContext.NextAlias (fun value input ->
                         if isSqlScalarResult resultType then
