@@ -117,7 +117,8 @@ module internal QueryStructuralRelations =
                     else BinaryOperator.Ge
                 let raw = match raw with SqlExpr.Coalesce(value,_) -> value | value -> value
                 let canonical value = if DateTimeFunctions.isDateTimeLikeType t then DateTimeFunctions.canonicalizeForCompareOrOrder t value else value
-                ValueSome(binary BinaryOperator.Or (sqlNull raw) (binary direction (canonical raw) (canonical bound)))
+                let raw = canonical raw
+                ValueSome(binary BinaryOperator.Or (sqlNull raw) (binary direction raw (canonical bound)))
             let rec render shape left right onEqual =
                 let absent present =
                     let leftMissing,rightMissing = missing left,missing right
