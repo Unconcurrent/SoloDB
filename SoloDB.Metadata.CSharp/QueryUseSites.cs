@@ -109,10 +109,14 @@ internal static partial class QueryRegistrations
             parameter.Type.SpecialType == SpecialType.System_Object ? "System.Object" : parameter.Type.ToDisplayString());
     }
 
-    internal static IReadOnlyList<Site> Analyze(Compilation compilation, Action<Location,string> missing)
+    private enum InferenceEntry { Repeat, Visit, Limited }
+
+    internal static IReadOnlyList<Site> Analyze(Compilation compilation, Action<Location,string> missing, Action<Location,string> limited)
     {
+        const int recursiveReentries = 10;
         var sites = new List<Site>();
         var unresolved = new Dictionary<InvocationExpressionSyntax,IMethodSymbol>();
+        var limitedCalls = new Dictionary<SyntaxNode,IMethodSymbol>();
         var relevant = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         var rawInputs = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         var callers = new Dictionary<ISymbol,HashSet<ISymbol>>(SymbolEqualityComparer.Default);
@@ -161,12 +165,21 @@ internal static partial class QueryRegistrations
                     foreach (var caller in values) if (selected.Add(caller)) pending.Enqueue(caller);
         }
         var visited = new Dictionary<ISymbol,List<Symbols>>(SymbolEqualityComparer.Default);
+        var active = new Dictionary<ISymbol,int>(SymbolEqualityComparer.Default);
+        var activeContexts = new HashSet<Symbols>();
+        var truncated = false;
         var empty = new Symbols(compilation);
         foreach (var tree in compilation.SyntaxTrees)
-            foreach (var invocation in Calls(tree.GetRoot())) Inspect(invocation, empty);
+            foreach (var invocation in Calls(tree.GetRoot()))
+            {
+                Inspect(invocation,empty);
+                if (truncated) visited.Clear();
+                truncated = false;
+            }
         var resolved = new HashSet<InvocationExpressionSyntax>(sites.Select(site => site.Invocation));
         foreach (var item in unresolved)
             if (!resolved.Contains(item.Key)) missing(item.Key.GetLocation(),item.Value.ToDisplayString());
+        foreach (var item in limitedCalls) limited(item.Key.GetLocation(),item.Value.ToDisplayString());
         return sites;
 
         void AddCaller(ISymbol target, ISymbol caller)
@@ -175,23 +188,52 @@ internal static partial class QueryRegistrations
             values.Add(caller);
         }
 
-        void Inspect(SyntaxNode invocation, Symbols symbols)
+        InferenceEntry Enter(ISymbol symbol, Symbols actual, out List<Symbols> contexts)
+        {
+            if (!visited.TryGetValue(symbol,out contexts!)) visited.Add(symbol,contexts = new List<Symbols>());
+            if (contexts.Any(previous => (!truncated || activeContexts.Contains(previous)) && previous.Same(actual))) return InferenceEntry.Repeat;
+            var original = symbol.OriginalDefinition;
+            active.TryGetValue(original,out var count);
+            if (count > recursiveReentries)
+            {
+                truncated = true;
+                return InferenceEntry.Limited;
+            }
+            active[original] = count + 1;
+            contexts.Add(actual);
+            activeContexts.Add(actual);
+            return InferenceEntry.Visit;
+        }
+
+        void Leave(ISymbol symbol, Symbols actual, List<Symbols> contexts, bool complete)
+        {
+            var original = symbol.OriginalDefinition;
+            var count = active[original] - 1;
+            if (count == 0) active.Remove(original);
+            else active[original] = count;
+            activeContexts.Remove(actual);
+            // A later root must be able to revisit a context whose descendants
+            // were truncated with a smaller remaining allowance.
+            if (!complete || truncated) contexts.Remove(actual);
+        }
+
+        bool Inspect(SyntaxNode invocation, Symbols symbols)
         {
             var semantic = compilation.GetSemanticModel(invocation.SyntaxTree);
             if (semantic.GetSymbolInfo(invocation).Symbol is not IMethodSymbol original ||
                 !(invocation is InvocationExpressionSyntax && IsSoloDBUse(original)) &&
-                !relevant.Contains((original.ReducedFrom ?? original).OriginalDefinition)) return;
+                !relevant.Contains((original.ReducedFrom ?? original).OriginalDefinition)) return true;
             var method = symbols.Method(original);
             if (invocation is InvocationExpressionSyntax use && IsSoloDBUse(method))
             {
                 if (method.ContainingType.TypeArguments.All(Closed) && method.TypeArguments.All(Closed))
                     sites.Add(new Site(use,method,symbols));
                 else unresolved[use] = method;
-                return;
+                return true;
             }
             var construction = SourceConstructor(method);
             if (!construction && method.DeclaringSyntaxReferences.Length == 0 ||
-                !method.TypeArguments.All(Closed) || !Closed(method.ContainingType)) return;
+                !method.TypeArguments.All(Closed) || !Closed(method.ContainingType)) return true;
             var arguments = semantic.GetOperation(invocation) switch
             {
                 IInvocationOperation checkedCall => checkedCall.Arguments,
@@ -201,26 +243,34 @@ internal static partial class QueryRegistrations
             var boundInputs = QueryExpressionInputs.Arguments(compilation,arguments,symbols,
                 rawInputs.Contains(method.OriginalDefinition)).ToArray();
             if (method.MethodKind != MethodKind.LocalFunction && !method.IsGenericMethod && !method.ContainingType.IsGenericType &&
-                boundInputs.All(input => input.Origins.Length == 0)) return;
+                boundInputs.All(input => input.Origins.Length == 0)) return true;
             var actual = new Symbols(compilation,method,symbols);
             foreach (var input in boundInputs) actual.BindInput(input.Parameter,input.Origins);
-            if (!visited.TryGetValue(method,out var contexts)) visited.Add(method,contexts = new List<Symbols>());
-            if (contexts.Any(previous => previous.Same(actual))) return;
-            contexts.Add(actual);
-            if (construction)
+            var entry = Enter(method,actual,out var contexts);
+            if (entry == InferenceEntry.Limited) limitedCalls[invocation] = original;
+            if (entry != InferenceEntry.Visit) return entry == InferenceEntry.Repeat;
+            var complete = false;
+            try
             {
-                InspectOwner(method.ContainingType,actual);
-                return;
+                if (construction) return complete = InspectOwner(method.ContainingType,actual,invocation,original);
+                complete = true;
+                foreach (var declaration in method.DeclaringSyntaxReferences)
+                {
+                    var root = declaration.GetSyntax();
+                    foreach (var call in Calls(root,node => ReferenceEquals(node,root) || node is not LocalFunctionStatementSyntax))
+                        complete &= Inspect(call,actual);
+                }
+                return complete;
             }
-            foreach (var declaration in method.DeclaringSyntaxReferences)
+            finally
             {
-                var root = declaration.GetSyntax();
-                foreach (var call in Calls(root,node => ReferenceEquals(node,root) || node is not LocalFunctionStatementSyntax)) Inspect(call,actual);
+                Leave(method,actual,contexts,complete);
             }
         }
 
-        void InspectOwner(INamedTypeSymbol owner, Symbols symbols)
+        bool InspectOwner(INamedTypeSymbol owner, Symbols symbols, SyntaxNode invocation, IMethodSymbol original)
         {
+            var complete = true;
             for (var containing = owner; containing != null; containing = containing.ContainingType)
                 for (var current = containing; current != null; current = current.BaseType)
                 {
@@ -228,11 +278,22 @@ internal static partial class QueryRegistrations
                     var actual = SymbolEqualityComparer.Default.Equals(current,owner)
                         ? symbols.WithOwner(current)
                         : new Symbols(compilation).WithOwner((INamedTypeSymbol)symbols.Type(current));
-                    if (!visited.TryGetValue(current,out var contexts)) visited.Add(current,contexts = new List<Symbols>());
-                    if (contexts.Any(previous => previous.Same(actual))) continue;
-                    contexts.Add(actual);
-                    foreach (var call in calls) Inspect(call,actual);
+                    var entry = Enter(current,actual,out var contexts);
+                    if (entry == InferenceEntry.Repeat) continue;
+                    if (entry == InferenceEntry.Limited) { limitedCalls[invocation] = original; complete = false; continue; }
+                    var ownerComplete = false;
+                    try
+                    {
+                        ownerComplete = true;
+                        foreach (var call in calls) ownerComplete &= Inspect(call,actual);
+                        complete &= ownerComplete;
+                    }
+                    finally
+                    {
+                        Leave(current,actual,contexts,ownerComplete);
+                    }
                 }
+            return complete;
         }
         static bool SourceConstructor(IMethodSymbol method) => method.MethodKind == MethodKind.Constructor &&
             method.ContainingType.DeclaringSyntaxReferences.Length != 0;

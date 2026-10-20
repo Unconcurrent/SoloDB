@@ -19,6 +19,9 @@ public sealed class MetadataGenerator : IIncrementalGenerator
     private static readonly DiagnosticDescriptor InferenceUnavailable = new("SOLO003", "Generated coverage cannot be inferred",
         "Cannot infer closed types for SoloDB use '{0}'. Supply explicit SoloDBAOT model roots and a closed query signature for any runtime-selected use.", "SoloDB", DiagnosticSeverity.Warning, true);
 
+    private static readonly DiagnosticDescriptor InferenceLimited = new("SOLO003", "Generated coverage cannot be inferred",
+        "Generated coverage inference through '{0}' stopped after ten recursive re-entries. Deeper coverage was not inferred; supply explicit SoloDBAOT model roots and closed query signatures for those uses.", "SoloDB", DiagnosticSeverity.Warning, true);
+
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
         var contexts = context.SyntaxProvider.ForAttributeWithMetadataName(
@@ -126,7 +129,8 @@ public sealed class MetadataGenerator : IIncrementalGenerator
                 }
                 """);
         var sites = QueryRegistrations.Analyze(compilation,(location,method) =>
-            context.ReportDiagnostic(Diagnostic.Create(InferenceUnavailable,location,method)));
+            context.ReportDiagnostic(Diagnostic.Create(InferenceUnavailable,location,method)),(location,method) =>
+            context.ReportDiagnostic(Diagnostic.Create(InferenceLimited,location,method)));
         var selectedRoots = contexts.Distinct(SymbolEqualityComparer.Default).Cast<INamedTypeSymbol>()
             .SelectMany(type => type.GetAttributes().Where(attribute => attribute.AttributeClass?.ToDisplayString() == "SoloDatabase.SoloDBAOTAttribute")
                 .Select(attribute => attribute.ConstructorArguments.Length == 0 ? (ITypeSymbol)type : attribute.ConstructorArguments[0].Value as ITypeSymbol))
