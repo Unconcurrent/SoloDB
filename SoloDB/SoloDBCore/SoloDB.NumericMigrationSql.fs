@@ -61,17 +61,16 @@ module internal NumericMigrationSql =
         text.Append(')') |> ignore
         { Prefix = text.ToString(); Parameters = parameters }
 
-    let walk table plan correlated =
+    let private walk table plan rowParameter =
         let text = StringBuilder("walk(rowid,state,path,type) AS (")
-        let rowId, value, source, lookup =
-            if correlated then
-                "d.Id", "d.Value", "", ""
-            else
-                "Id", "Value", " FROM " + quoted table,
-                " JOIN " + quoted table + " d ON d.Id=w.rowid"
+        let source =
+            match rowParameter with
+            | ValueSome parameter -> " FROM " + quoted table + " WHERE Id=" + parameter
+            | ValueNone -> " FROM " + quoted table
+        let lookup = " JOIN " + quoted table + " d ON d.Id=w.rowid"
 
-        text.Append("SELECT ").Append(rowId).Append(',').Append(plan.Root)
-            .Append(",'$',json_type(").Append(value).Append(')').Append(source) |> ignore
+        text.Append("SELECT Id").Append(',').Append(plan.Root)
+            .Append(",'$',json_type(Value").Append(')').Append(source) |> ignore
         text.Append(" UNION SELECT w.rowid,e.target,j.fullkey,j.type FROM walk w ")
             .Append("JOIN edges e ON e.source=w.state").Append(lookup)
             .Append(" JOIN json_each(d.Value,w.path) j WHERE ") |> ignore
@@ -87,8 +86,9 @@ module internal NumericMigrationSql =
 
     let query table plan =
         let graph = definitions plan
-        { graph with Prefix = "WITH RECURSIVE " + graph.Prefix + ", " + walk table plan false }
+        { graph with Prefix = "WITH RECURSIVE " + graph.Prefix + ", " + walk table plan ValueNone }
 
-    let correlated table plan =
+    let document table plan =
         let graph = definitions plan
-        { graph with Prefix = "WITH RECURSIVE " + graph.Prefix + " " }
+        graph.Parameters.Add("@document", null)
+        { graph with Prefix = "WITH RECURSIVE " + graph.Prefix + ", " + walk table plan (ValueSome "@document") }
