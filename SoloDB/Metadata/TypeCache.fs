@@ -169,6 +169,13 @@ type internal RelationHydrationDescriptor(singles: RelationMember[], manyRelatio
 [<Struct>]
 type internal MetadataValue<'T> = { Generated: bool; Value: 'T }
 
+/// Original member signatures retain formal slots independently of closed argument values.
+type internal ModelTypeTemplate =
+    | UnavailableType
+    | FormalType of int
+    | NamedType of Type * ModelTypeTemplate[]
+    | ElementType of int * ModelTypeTemplate
+
 /// Compiler-supplied delegates remain callable facts until ordinary dynamic preparation needs an operand.
 type internal JsonDefaultMethod =
     | EmittedMethod of MethodBase
@@ -185,6 +192,8 @@ type internal TypeMetadataRecord = {
     NullableUnderlying: MetadataValue<Type> voption
     EnumUnderlying: MetadataValue<Type> voption
     MemberTypes: MetadataValue<struct(string * Type * bool)[]> voption
+    MemberTemplates: Dictionary<int,MetadataValue<ModelTypeTemplate>> option
+    DefinitionRepresentative: Type voption
     StringIndexer: MetadataValue<StringIndexerOperations> voption
     SequenceElement: MetadataValue<Type> voption
     EqualityComparer: MetadataValue<obj> voption
@@ -274,7 +283,8 @@ type internal TypeMetadataCache private () =
     static let names = Dictionary<string, TypeNameEntry>(StringComparer.Ordinal)
     static let empty = {
         TypeFacts = ValueNone; NullableUnderlying = ValueNone; EnumUnderlying = ValueNone
-        MemberTypes = ValueNone; StringIndexer = ValueNone; SequenceElement = ValueNone; EqualityComparer = ValueNone
+        MemberTypes = ValueNone; MemberTemplates = None; DefinitionRepresentative = ValueNone
+        StringIndexer = ValueNone; SequenceElement = ValueNone; EqualityComparer = ValueNone
         ObjectModel = ValueNone; JsonDefaultMethods = None; JsonUtf8Read = ValueNone; JsonUtf16Read = ValueNone; JsonUtf8Write = ValueNone; JsonUtf16Write = ValueNone; PhysicalIdentity = ValueNone
         StoredJsonUtf8Read = ValueNone; StoredJsonUtf16Read = ValueNone; StoredJsonUtf8Write = ValueNone; StoredJsonUtf16Write = ValueNone
         JsonReader = ValueNone; JsonWriter = ValueNone

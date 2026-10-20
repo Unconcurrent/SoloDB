@@ -55,64 +55,95 @@ module internal QueryStructuralShape =
                 for argument in current.GetGenericArguments() do pending.Push argument
         found
 
+    type private Description = Scalar | Payload of Type | Members of (string * Type)[]
+
+    let private intrinsic (t: Type) =
+        let payload = Utils.unwrapNullableType t
+        if not(payload.Equals t) then ValueSome(Payload payload)
+        elif typeof<string>.Equals t || typeof<char>.Equals t || typeof<bool>.Equals t ||
+             t.IsEnum || (QueryTranslatorNumeric.nativeCastType t).IsSome ||
+             (QueryTranslatorNumeric.domain t).IsSome || DateTimeFunctions.isDateTimeLikeType t then ValueSome Scalar
+        elif tuple t then
+            let arguments = t.GetGenericArguments()
+            ValueSome(Members(Array.init arguments.Length (fun index ->
+                (if index = 7 then "Rest" else "Item" + string(index+1)),arguments[index])))
+        else ValueNone
+
+    let private describe t =
+        match intrinsic t with
+        | ValueSome description -> ValueSome description
+        | ValueNone when TypeMetadata.standardComparison t ->
+            TypeMetadata.recordFields t |> ValueOption.map(fun names -> Members(names |> Array.map(fun name ->
+                let target = ModelMetadata.MemberType(t,name,false)
+                             |> Option.orElseWith(fun () -> ModelMetadata.MemberType(t,name,true))
+                             |> Option.defaultWith(fun () -> invalidOp "A structural component requires its original member type.")
+                name,target)))
+        | _ -> ValueNone
+
+    let private originalMembers definition =
+        match intrinsic definition with
+        | ValueSome Scalar -> ValueSome [||]
+        | ValueSome(Payload payload) -> ValueSome [|ModelMetadata.TypeTemplate payload|]
+        | ValueSome(Members members) -> ValueSome(members |> Array.map(fun (_,target) -> ModelMetadata.TypeTemplate target))
+        | ValueNone ->
+            match ModelMetadata.DefinitionOwner definition with
+            | ValueNone -> ValueNone
+            | ValueSome owner ->
+                match describe owner with
+                | ValueSome(Members members) ->
+                    let templates = ResizeArray<ModelTypeTemplate>(members.Length)
+                    let mutable known = true
+                    for name,_ in members do
+                        let field = (ModelMetadata.MemberType(owner,name,false)).IsNone
+                        match ModelMetadata.MemberTemplate(owner,name,field) with
+                        | ValueSome template -> templates.Add template
+                        | ValueNone -> known <- false
+                    if known then ValueSome(templates.ToArray()) else ValueNone
+                | _ -> ValueNone
+
+    let finiteClosure root = QueryStructuralClosure.finite originalMembers (ModelMetadata.TypeTemplate root)
+
     let tryCreate root =
         let types = Dictionary<Type,Node>()
         let nodes = ResizeArray<Node>()
         let active = HashSet<Type>()
         let mutable recursive = false
+        let finite = lazy(finiteClosure root)
         let rec build (t: Type) =
             match types.TryGetValue t with
             | true,node ->
                 if active.Contains t then recursive <- true
                 ValueSome node
             | _ ->
-                // Preserve proved finite argument descent; other changed closings
-                // retain the existing translator until their closure is established.
                 let changing = t.IsGenericType && (active |> Seq.exists(fun owner ->
                     owner.IsGenericType && owner.GetGenericTypeDefinition().Equals(t.GetGenericTypeDefinition()) &&
                     not(properSubterm t owner)))
-                if changing then ValueNone else
+                if changing && not finite.Value then ValueNone else
                 let node = { Index = nodes.Count; Target = t; Kind = ScalarNode }
                 nodes.Add node
                 types.Add(t,node)
                 active.Add t |> ignore
-                let payload = Utils.unwrapNullableType t
                 let result =
-                    if not(payload.Equals t) then
+                    match describe t with
+                    | ValueSome(Payload payload) ->
                         build payload |> ValueOption.map(fun child ->
                             node.Kind <- OptionalNode(child,reader t "Value" payload)
                             node)
-                    elif typeof<string>.Equals t || typeof<char>.Equals t || typeof<bool>.Equals t ||
-                         t.IsEnum || (QueryTranslatorNumeric.nativeCastType t).IsSome ||
-                         (QueryTranslatorNumeric.domain t).IsSome || DateTimeFunctions.isDateTimeLikeType t then ValueSome node
-                    else
-                        let members =
-                            if tuple t then
-                                let arguments = t.GetGenericArguments()
-                                ValueSome(Array.init arguments.Length (fun index ->
-                                    (if index = 7 then "Rest" else "Item" + string(index+1)),arguments[index]))
-                            elif TypeMetadata.standardComparison t then
-                                TypeMetadata.recordFields t |> ValueOption.map(fun names -> names |> Array.map(fun name ->
-                                    let target = ModelMetadata.MemberType(t,name,false)
-                                                 |> Option.orElseWith(fun () -> ModelMetadata.MemberType(t,name,true))
-                                                 |> Option.defaultWith(fun () -> invalidOp "A structural component requires its original member type.")
-                                    name,target))
-                            else ValueNone
-                        match members with
-                        | ValueNone -> ValueNone
-                        | ValueSome members ->
-                            let fields = ResizeArray<Field>(members.Length)
-                            let mutable admitted = true
-                            let mutable index = 0
-                            while admitted && index < members.Length do
-                                let name,target = members[index]
-                                match build target with
-                                | ValueSome child -> fields.Add { Name = name; Node = child; Reader = reader t name target }
-                                | ValueNone -> admitted <- false
-                                index <- index + 1
-                            if not admitted then ValueNone else
-                            node.Kind <- ComponentNode(fields.ToArray())
-                            ValueSome node
+                    | ValueSome Scalar -> ValueSome node
+                    | ValueNone -> ValueNone
+                    | ValueSome(Members members) ->
+                        let fields = ResizeArray<Field>(members.Length)
+                        let mutable admitted = true
+                        let mutable index = 0
+                        while admitted && index < members.Length do
+                            let name,target = members[index]
+                            match build target with
+                            | ValueSome child -> fields.Add { Name = name; Node = child; Reader = reader t name target }
+                            | ValueNone -> admitted <- false
+                            index <- index + 1
+                        if not admitted then ValueNone else
+                        node.Kind <- ComponentNode(fields.ToArray())
+                        ValueSome node
                 active.Remove t |> ignore
                 result
         match build root with

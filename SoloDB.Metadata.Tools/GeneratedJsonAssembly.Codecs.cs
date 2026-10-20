@@ -200,8 +200,13 @@ public static partial class GeneratedJsonAssembly
         GeneratedRawCodec.Register(definitions,module,owner,il,product,model,index,models);
     }
 
-    internal static void RegisterFacts(ILProcessor il, TypeReference type, string[] names, TypeReference[] values, bool[] fields, TypeReference? element, Api api)
+    private static void RegisterFacts(ILProcessor il, GeneratedModel model, Api api)
     {
+        var type = model.Type;
+        var names = model.Facts.Members.Select(member => member.Name).ToArray();
+        var values = model.Members.Select(member => member.Type).ToArray();
+        var fields = model.Facts.Members.Select(member => member.Field).ToArray();
+        var element = model.SequenceElement;
         api.TypeToken(il,type);
         il.Emit(OpCodes.Ldc_I4,names.Length); il.Emit(OpCodes.Newarr,api.Module.TypeSystem.String);
         for (var index = 0; index < names.Length; index++)
@@ -212,8 +217,45 @@ public static partial class GeneratedJsonAssembly
         il.Emit(OpCodes.Ldc_I4,fields.Length); il.Emit(OpCodes.Newarr,api.Module.TypeSystem.Boolean);
         for (var index = 0; index < fields.Length; index++)
         { il.Emit(OpCodes.Dup); il.Emit(OpCodes.Ldc_I4,index); il.Emit(fields[index] ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0); il.Emit(OpCodes.Stelem_I1); }
-        il.Emit(OpCodes.Call,api.ModelRegistration("RegisterMembers"));
+        if (model.Facts.StandardComparison) MemberTemplates(il,model,api);
+        il.Emit(OpCodes.Call,api.ModelRegistration(model.Facts.StandardComparison ? "RegisterOriginalMembers" : "RegisterMembers"));
         if (element != null) { api.TypeToken(il,type); api.TypeToken(il,element); il.Emit(OpCodes.Call,api.ModelRegistration("RegisterSequence")); }
+    }
+
+    private static void MemberTemplates(ILProcessor il, GeneratedModel model, Api api)
+    {
+        var template = api.ModelRegistration("TemplateParameter").ReturnType;
+        void Original(TypeReference value)
+        {
+            if (value is GenericParameter parameter)
+            {
+                il.Emit(OpCodes.Ldc_I4,parameter.Position);
+                il.Emit(OpCodes.Call,api.ModelRegistration("TemplateParameter"));
+            }
+            else if (value is ArrayType array)
+            {
+                il.Emit(OpCodes.Ldc_I4,array.Rank); Original(array.ElementType);
+                il.Emit(OpCodes.Call,api.ModelRegistration("TemplateElement"));
+            }
+            else
+            {
+                var arguments = value is GenericInstanceType closed ? closed.GenericArguments.ToArray() : Array.Empty<TypeReference>();
+                api.TypeToken(il,value is GenericInstanceType instance ? instance.ElementType : value);
+                il.Emit(OpCodes.Ldc_I4,arguments.Length); il.Emit(OpCodes.Newarr,template);
+                for (var index = 0; index < arguments.Length; index++)
+                { il.Emit(OpCodes.Dup); il.Emit(OpCodes.Ldc_I4,index); Original(arguments[index]); il.Emit(OpCodes.Stelem_Ref); }
+                il.Emit(OpCodes.Call,api.ModelRegistration("TemplateNamed"));
+            }
+        }
+        il.Emit(OpCodes.Ldc_I4,model.Members.Length); il.Emit(OpCodes.Newarr,template);
+        for (var index = 0; index < model.Members.Length; index++)
+        {
+            var member = model.Members[index];
+            var original = member.Getter?.ReturnType ?? member.Field?.FieldType ?? member.Setter?.Parameters.Last().ParameterType;
+            il.Emit(OpCodes.Dup); il.Emit(OpCodes.Ldc_I4,index);
+            if (original == null) il.Emit(OpCodes.Call,api.ModelRegistration("TemplateUnavailable")); else Original(original);
+            il.Emit(OpCodes.Stelem_Ref);
+        }
     }
 
     private static MethodDefinition Writer(TypeDefinition owner, GeneratedModel model, int index, Api api)

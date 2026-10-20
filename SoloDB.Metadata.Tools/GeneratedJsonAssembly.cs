@@ -158,8 +158,7 @@ public static partial class GeneratedJsonAssembly
             il.Emit(OpCodes.Call,api.Metadata("RegisterRecordFields",type));
             il.Emit(model.Facts.StandardComparison ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
             il.Emit(OpCodes.Call,api.Metadata("RegisterStandardComparison",type));
-            RegisterFacts(il,model.Type,model.Facts.Members.Select(member => member.Name).ToArray(),model.Members.Select(member => member.Type).ToArray(),
-                model.Facts.Members.Select(member => member.Field).ToArray(),model.SequenceElement,api);
+            RegisterFacts(il,model,api);
             var memberWitnesses = model.Facts.Members.Select((member,memberIndex) => new GeneratedQueryWitness(member.Name,
                 model.Members[memberIndex].Getter?.DeclaringType ?? model.Members[memberIndex].Field?.DeclaringType ?? type));
             var definition = type is GenericInstanceType original ? original.ElementType.FullName : type.FullName;

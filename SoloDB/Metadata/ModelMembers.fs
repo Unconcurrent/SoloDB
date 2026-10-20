@@ -10,10 +10,49 @@ open SoloDatabase.Metadata.Generation
 /// Declared shape facts shared by translation and generated registration.
 [<AbstractClass; Sealed>]
 type internal ModelMetadata private () =
-    static member RegisterMembers(owner: Type, names: string[], types: Type[], fields: bool[]) =
+    static member TemplateUnavailable() = UnavailableType
+    static member TemplateParameter(position: int) = FormalType position
+    static member TemplateNamed(owner: Type, arguments: ModelTypeTemplate[]) = NamedType(owner,arguments)
+    static member TemplateElement(rank: int, element: ModelTypeTemplate) = ElementType(rank,element)
+
+    static member TypeTemplate(target: Type) =
+        let rec original (value: Type) =
+            if value.IsGenericParameter then FormalType value.GenericParameterPosition
+            elif value.HasElementType then
+                ElementType((if value.IsArray then value.GetArrayRank() else 0),original(value.GetElementType()))
+            elif value.IsGenericType then
+                NamedType(value.GetGenericTypeDefinition(),value.GetGenericArguments() |> Array.map original)
+            else NamedType(value,[||])
+        original target
+
+    static member private PublishMembers(owner: Type, names: string[], types: Type[], fields: bool[], templates: ModelTypeTemplate[] option) =
         if names.Length <> types.Length || names.Length <> fields.Length then invalidArg "types" "Member facts have inconsistent lengths."
         let facts = Array.init names.Length (fun index -> struct(names[index],types[index],fields[index]))
-        TypeMetadataCache.Register(owner,fun metadata -> { metadata with MemberTypes = MetadataValue.generated facts })
+        let originals = templates |> Option.map(fun values ->
+            if facts.Length <> values.Length then invalidArg "templates" "Original member signatures require the same declared member facts."
+            let result = Dictionary<int,MetadataValue<ModelTypeTemplate>>(values.Length)
+            for index = 0 to values.Length - 1 do result.Add(index,{ Generated = true; Value = values[index] })
+            result)
+        TypeMetadataCache.Register(owner,fun metadata ->
+            { metadata with MemberTypes = MetadataValue.generated facts; MemberTemplates = originals })
+        if originals.IsSome then
+            let definition = if owner.IsGenericType then owner.GetGenericTypeDefinition() else owner
+            TypeMetadataCache.Register(definition,fun metadata ->
+                if metadata.DefinitionRepresentative.IsSome then metadata
+                else { metadata with DefinitionRepresentative = ValueSome owner })
+
+    static member RegisterMembers(owner: Type, names: string[], types: Type[], fields: bool[]) =
+        ModelMetadata.PublishMembers(owner,names,types,fields,None)
+
+    /// Publishes original signatures and their selected member inventory together.
+    static member RegisterOriginalMembers(owner: Type, names: string[], types: Type[], fields: bool[], templates: ModelTypeTemplate[]) =
+        ModelMetadata.PublishMembers(owner,names,types,fields,Some templates)
+
+    static member DefinitionOwner(definition: Type) =
+        match TypeMetadataCache.Read(definition,fun metadata -> metadata.DefinitionRepresentative) with
+        | ValueSome owner -> ValueSome owner
+        | ValueNone when MetadataRuntime.supportsDynamicCode() -> ValueSome definition
+        | _ -> ValueNone
 
     static member RegisterSequence(owner: Type, element: Type) =
         TypeMetadataCache.Register(owner,fun metadata -> { metadata with SequenceElement = MetadataValue.generated element })
@@ -21,15 +60,49 @@ type internal ModelMetadata private () =
     static member RegisterComparer<'T>() =
         TypeMetadataCache.Register(typeof<'T>,fun metadata -> { metadata with EqualityComparer = MetadataValue.generated (box EqualityComparer<'T>.Default) })
 
-    static member MemberType(owner: Type, name: string, field: bool) =
-        let members = TypeMetadataCache.Discover(owner,(fun metadata -> metadata.MemberTypes),
+    static member private Members(owner: Type) =
+        TypeMetadataCache.Discover(owner,(fun metadata -> metadata.MemberTypes),
             (fun value metadata -> { metadata with MemberTypes = ValueSome value }),Func<struct(string * Type * bool)[]>(fun () ->
                 if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "declared members" owner
                 [| for property in owner.GetProperties(BindingFlags.Public ||| BindingFlags.Instance) do
                        yield struct(property.Name,property.PropertyType,false)
                    for memberField in owner.GetFields(BindingFlags.Public ||| BindingFlags.Instance) do
                        yield struct(memberField.Name,memberField.FieldType,true) |]))
+
+    static member MemberType(owner: Type, name: string, field: bool) =
+        let members = ModelMetadata.Members owner
         members |> Array.tryPick(fun struct(memberName,valueType,isField) -> if memberName = name && isField = field then Some valueType else None)
+
+    static member MemberTemplate(owner: Type, name: string, field: bool) =
+        ModelMetadata.Members owner |> ignore
+        let selected = TypeMetadataCache.Read(owner,fun metadata ->
+            match MetadataValue.tryValue metadata.MemberTypes with
+            | ValueNone -> ValueNone
+            | ValueSome members ->
+                match members |> Array.tryFindIndex(fun struct(memberName,_,isField) -> memberName = name && isField = field) with
+                | None -> ValueNone
+                | Some index -> ValueSome(members,index,MetadataMap.tryFind index metadata.MemberTemplates |> ValueOption.map _.Value))
+        match selected with
+        | ValueNone -> ValueNone
+        | ValueSome(members,index,known) ->
+            let sameInventory metadata =
+                match MetadataValue.tryValue metadata.MemberTypes with
+                | ValueSome current -> Object.ReferenceEquals(current,members)
+                | _ -> false
+            match known with
+            | ValueSome UnavailableType -> ValueNone
+            | ValueSome template -> ValueSome template
+            | ValueNone when not(MetadataRuntime.supportsDynamicCode()) -> ValueNone
+            | ValueNone ->
+                let template = TypeMetadataCache.Discover(owner,
+                    (fun metadata -> if sameInventory metadata then MetadataMap.tryFind index metadata.MemberTemplates else ValueNone),
+                    (fun value metadata -> if sameInventory metadata then { metadata with MemberTemplates = MetadataMap.set index value metadata.MemberTemplates } else metadata),Func<ModelTypeTemplate>(fun () ->
+                        let definition = if owner.IsGenericType then owner.GetGenericTypeDefinition() else owner
+                        let target =
+                            if field then definition.GetField(name,BindingFlags.Public ||| BindingFlags.Instance).FieldType
+                            else definition.GetProperty(name,BindingFlags.Public ||| BindingFlags.Instance).PropertyType
+                        ModelMetadata.TypeTemplate target))
+                ValueSome template
 
     static member internal RegisterStringIndexer(owner: Type, valueType: Type, read: Func<obj,string,obj>, ambiguous: bool, missingGetter: bool, restrictedMethod: string) =
         let operation = { Value = if isNull read then ValueNone else ValueSome(struct(valueType,read))
