@@ -2,6 +2,21 @@
   <UsingTask TaskName="SoloDatabase.Metadata.Tools.PrepareNativeUnionMetadata" AssemblyFile="$(SoloDBMetadataToolsPath)" />
   <Target Name="SoloDBPrepareNativeUnionMetadata" BeforeTargets="WriteIlcRspFileForCompilation"
           Condition="'$(PublishAot)' == 'true' and '$(DesignTimeBuild)' != 'true'">
+    <PropertyGroup Condition="'$(_SoloDBCompletionChanged)' == 'true'">
+      <_SoloDBCompilerNativeMainPath>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', '$(TargetName)$(TargetExt)'))</_SoloDBCompilerNativeMainPath>
+    </PropertyGroup>
+    <ItemGroup Condition="'$(_SoloDBCompletionChanged)' == 'true'">
+      <!-- Older native SDK targets select the compiler image instead of IntermediateAssembly. -->
+      <_SoloDBCompilerNativeMain Include="@(ManagedBinary)" Condition="'%(ManagedBinary.FullPath)' == '$(_SoloDBCompilerNativeMainPath)'" />
+      <_SoloDBCompilerNativeInputs Include="@(IlcCompileInput)" Condition="'%(IlcCompileInput.FullPath)' == '$(_SoloDBCompilerNativeMainPath)'" />
+      <_SoloDBCompilerNativeReferences Include="@(IlcReference)" Condition="'%(IlcReference.FullPath)' == '$(_SoloDBCompilerNativeMainPath)'" />
+      <ManagedBinary Remove="@(_SoloDBCompilerNativeMain)" />
+      <ManagedBinary Include="@(_SoloDBCompilerNativeMain->'$(_SoloDBCompletedAssembly)')" />
+      <IlcCompileInput Remove="@(_SoloDBCompilerNativeInputs)" />
+      <IlcCompileInput Include="@(_SoloDBCompilerNativeInputs->'$(_SoloDBCompletedAssembly)')" />
+      <IlcReference Remove="@(_SoloDBCompilerNativeReferences)" />
+      <IlcReference Include="@(_SoloDBCompilerNativeReferences->'$(_SoloDBCompletedAssembly)')" />
+    </ItemGroup>
     <ItemGroup>
       <_SoloDBOriginalNativeInputs Include="@(ManagedBinary)" />
     </ItemGroup>

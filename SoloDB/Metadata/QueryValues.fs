@@ -235,6 +235,17 @@ type internal QueryValueMetadata private () =
             Func<Action<obj,obj>>(fun () ->
                 if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "query assignment" memberInfo.DeclaringType
                 QueryMethodDiscovery.setter memberInfo))
+    [<System.Diagnostics.CodeAnalysis.DynamicDependency(
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicConstructors, typeof<string * int * int * int * int>);
+      System.Diagnostics.CodeAnalysis.DynamicDependency(
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicConstructors, typeof<string * (string * int * int * int * int)>)>]
+    static member private QuotationDebugTypeHandle(range: bool) : RuntimeTypeHandle =
+        // NativeAOT 8 member dependencies retain definitions, so retain a body with both closed type handles too.
+        // This method is never called: its dependency supplies quotation debug metadata without runtime work.
+        if range then typeof<string * int * int * int * int>.TypeHandle
+        else typeof<string * (string * int * int * int * int)>.TypeHandle
+
+    [<System.Diagnostics.CodeAnalysis.DynamicDependency("QuotationDebugTypeHandle(System.Boolean)", typeof<QueryValueMetadata>)>]
     static member internal RegisterQuotedParameter<'Value>() =
         let owner = typeof<StrongBox<'Value>>
         QueryValueMetadata.RegisterStorage<'Value>()
