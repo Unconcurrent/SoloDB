@@ -73,7 +73,7 @@ type internal CollectionReadDeleteOps<'T>() =
                     match readHydratedDocument connection sql vars with
                     | json when Object.ReferenceEquals(json, null) -> None
                     | json ->
-                        let entity = fromSQLite<'T> json
+                        let entity = fromSQLiteDocument<'T> json
                         // Populate DBRefMany trackers from HydrationJSON.
                         if manyHydrated && not (isNull json.HydrationJSON) then
                             let hydMap = Dictionary<int64, string>()
@@ -92,7 +92,7 @@ type internal CollectionReadDeleteOps<'T>() =
                 match readDocumentById connection name id with
                 | json when Object.ReferenceEquals(json, null) -> None
                 | json ->
-                    let entity = fromSQLite<'T> json
+                    let entity = fromSQLiteDocument<'T> json
                     if hasRelations then
                         hydrateRelations connection id (box entity)
                     Some entity
@@ -121,7 +121,7 @@ type internal CollectionReadDeleteOps<'T>() =
                 if isNull oldRow then
                     0
                 else
-                    let owner = fromSQLite<'T> oldRow
+                    let owner = fromSQLiteDocument<'T> oldRow
                     syncDeleteOwner tx id (box owner)
                     deleteDocumentById conn name id
             else
@@ -163,7 +163,7 @@ type internal CollectionReadDeleteOps<'T>() =
                     match readHydratedDocument connection sql vars with
                     | json when Object.ReferenceEquals(json, null) -> None
                     | json ->
-                        let entity = fromSQLite<'T> json
+                        let entity = fromSQLiteDocument<'T> json
                         if manyHydrated && not (isNull json.HydrationJSON) then
                             let hydMap = Dictionary<int64, string>()
                             hydMap.[json.Id.Value] <- json.HydrationJSON
@@ -194,7 +194,7 @@ type internal CollectionReadDeleteOps<'T>() =
                 match readHydratedDocument connection sql vars with
                 | json when Object.ReferenceEquals(json, null) -> None
                 | json ->
-                    let entity = fromSQLite<'T> json
+                    let entity = fromSQLiteDocument<'T> json
                     Some entity
         with error ->
             SQLiteToolsHandlerFaultState.tryRecordHandlerFault connection error
@@ -247,7 +247,7 @@ type internal CollectionReadDeleteOps<'T>() =
                 if isNull oldRow then
                     0
                 else
-                    let owner = fromSQLite<'T> oldRow
+                    let owner = fromSQLiteDocument<'T> oldRow
                     syncDeleteOwner tx oldRow.Id.Value (box owner)
                     deleteDocumentById conn name oldRow.Id.Value
             else

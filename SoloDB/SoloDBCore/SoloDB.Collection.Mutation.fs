@@ -223,7 +223,7 @@ type internal CollectionMutationOps<'T>() =
                 if isNull oldRow then
                     raise (KeyNotFoundException "Could not Update any entities with specified Id.")
 
-                let oldOwner = fromSQLite<'T> oldRow
+                let oldOwner = fromSQLiteDocument<'T> oldRow
                 if manyHydrated && not (isNull oldRow.HydrationJSON) then
                     let hydMap = Dictionary<int64, string>()
                     hydMap.[oldRow.Id.Value] <- oldRow.HydrationJSON
@@ -394,7 +394,7 @@ type internal CollectionMutationOps<'T>() =
                 if oldRows.Length = 0 then
                     0
                 else
-                    let oldOwners = oldRows |> Array.map (fun row -> fromSQLite<'T> row |> box)
+                    let oldOwners = oldRows |> Array.map (fun row -> fromSQLiteDocument<'T> row |> box)
                     let ownerIds = oldRows |> Array.map (fun row -> row.Id.Value)
                     let ownerPairs = Array.zip ownerIds oldOwners
                     if manyHydrated then
@@ -409,7 +409,7 @@ type internal CollectionMutationOps<'T>() =
                     // would receive the same supplied entity content.
                     match oldRows |> Array.tryHead with
                     | Some row ->
-                        let oldOwner = fromSQLite<'T> row
+                        let oldOwner = fromSQLiteDocument<'T> row
                         CollectionMutationOps<'T>.RejectEmptyMutationOfNonEmptySoloId "ReplaceMany" oldOwner item
                     | None -> ()
                     RelationsSync.syncReplaceMany tx (ownerIds :> seq<_>) (oldOwners :> seq<_>) (box item)
@@ -469,7 +469,7 @@ type internal CollectionMutationOps<'T>() =
                 if isNull oldRow then
                     0
                 else
-                    let oldOwner = fromSQLite<'T> oldRow
+                    let oldOwner = fromSQLiteDocument<'T> oldRow
                     if manyHydrated && not (isNull oldRow.HydrationJSON) then
                         let hydMap = Dictionary<int64, string>()
                         hydMap.[oldRow.Id.Value] <- oldRow.HydrationJSON

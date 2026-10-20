@@ -15,11 +15,16 @@ type internal JsonStoredNumeric private () =
     static member internal Length(value: NumericKeyDigits) = NumericKey.length value
     static member internal Utf8Length(value: NumericKeyDigits) = NumericKey.utf8Length value
     static member internal Unit(value: NumericKeyDigits, index: int) = NumericKey.unitAt value index
+    static member internal InvalidFormat(inner: Exception) =
+        FormatException("A stored Decimal or BigInteger value must use the encoded string format. Missing data migration from SoloDB 1.3.0 to 1.4.0 in an edge case may be the cause. See https://github.com/Unconcurrent/SoloDB/blob/master/docs/numeric-migration.md.", inner)
+    static member internal Decode(key: string) =
+        try NumericKey.decode key
+        with :? FormatException as error -> raise(JsonStoredNumeric.InvalidFormat(error))
     static member private Read<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>) =
         match JsonReadCursor.token &context with
-        | StringToken key -> ValueSome(NumericKey.decode key)
+        | StringToken key -> ValueSome(JsonStoredNumeric.Decode key)
         | NullToken -> ValueNone
-        | _ -> raise(FormatException("A stored numerical key is required."))
+        | _ -> raise(JsonStoredNumeric.InvalidFormat(null))
     static member private Key<'R when 'R : struct and 'R :> IJsonReader>(context: byref<JsonReadContext<'R>>) =
         match JsonStoredNumeric.Read<'R> &context with
         | ValueSome value -> value

@@ -207,7 +207,7 @@ type internal Collection<'T>(connection: NativeConnection, name: string, connect
                 | None -> ValueNone
 
         match oldRow with
-        | ValueSome row -> ValueSome (fromSQLite<'T> row |> box), ValueSome row.Id.Value
+        | ValueSome row -> ValueSome (fromSQLiteDocument<'T> row |> box), ValueSome row.Id.Value
         | ValueNone -> ValueNone, ValueNone
 
     member this.Insert(item: 'T) =

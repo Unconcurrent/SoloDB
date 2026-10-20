@@ -201,7 +201,8 @@ module internal JsonFunctions =
             EntityDocumentId<'R>.WithId value id
         else value
 
-    let private fromSQLiteJson<'R when 'R :> obj> (row: DbObjectRow) : 'R =
+    /// Materializes complete stored JSON after its producing statement has completed.
+    let internal fromSQLiteDocument<'R when 'R :> obj> (row: DbObjectRow) : 'R =
         if typeof<JsonValue>.Equals(typeof<'R>) then
             // A requested JsonValue is the explicit tree boundary, including physical Id injection.
             let json = JsonValue.Parse row.ValueJSON
@@ -228,10 +229,10 @@ module internal JsonFunctions =
         | OfType float when row.ValueJSON <> null -> (genericReinterpret << float) row.ValueJSON
         | OfType float32 when row.ValueJSON <> null -> (genericReinterpret << float32) row.ValueJSON
         | _ when isNull row.ValueJSON -> Unchecked.defaultof<'R>
-        | OfType decimal -> (genericReinterpret << ExactNumber.toDecimal << NumericKey.decode) row.ValueJSON
-        | _ when typeof<BigInteger>.Equals(typeof<'R>) -> genericReinterpret(ExactNumber.toBigInteger(NumericKey.decode row.ValueJSON))
-        | _ when typeof<Nullable<decimal>>.Equals(typeof<'R>) -> genericReinterpret(Nullable(ExactNumber.toDecimal(NumericKey.decode row.ValueJSON)))
-        | _ when typeof<Nullable<BigInteger>>.Equals(typeof<'R>) -> genericReinterpret(Nullable(ExactNumber.toBigInteger(NumericKey.decode row.ValueJSON)))
+        | OfType decimal -> (genericReinterpret << ExactNumber.toDecimal << JsonStoredNumeric.Decode) row.ValueJSON
+        | _ when typeof<BigInteger>.Equals(typeof<'R>) -> genericReinterpret(ExactNumber.toBigInteger(JsonStoredNumeric.Decode row.ValueJSON))
+        | _ when typeof<Nullable<decimal>>.Equals(typeof<'R>) -> genericReinterpret(Nullable(ExactNumber.toDecimal(JsonStoredNumeric.Decode row.ValueJSON)))
+        | _ when typeof<Nullable<BigInteger>>.Equals(typeof<'R>) -> genericReinterpret(Nullable(ExactNumber.toBigInteger(JsonStoredNumeric.Decode row.ValueJSON)))
 
         | OfType int8 -> (genericReinterpret << int8) row.ValueJSON
         | OfType uint8 -> (genericReinterpret << uint8) row.ValueJSON
@@ -245,7 +246,7 @@ module internal JsonFunctions =
         | OfType unativeint -> (genericReinterpret << unativeint) row.ValueJSON
 
         | _ ->
-        fromSQLiteJson<'R> row
+        fromSQLiteDocument<'R> row
 
     let internal fromSQLite<'R when 'R :> obj> (row: DbObjectRow) : 'R =
         if isNull (row :> obj) then Unchecked.defaultof<'R>
@@ -255,10 +256,14 @@ module internal JsonFunctions =
             elif typeof<'R>.IsValueType then fromSQLiteValue<'R> row
             elif isNull row.ValueJSON && DBRefTypeHelpers.isFileRefManyType typeof<'R> then fromJson<'R> JsonValue.Null
             elif isNull row.ValueJSON then Unchecked.defaultof<'R>
-            else fromSQLiteJson<'R> row
+            else fromSQLiteDocument<'R> row
 
     let internal fromSQLiteCaptured<'R when 'R :> obj> storageClass (row: DbObjectRow): 'R =
         let resultType=typeof<'R>
+        if row.Id.HasValue && not(isNull row.ValueJSON) && storageClass<>SQLitePCL.raw.SQLITE_TEXT &&
+           (typeof<decimal>.Equals(resultType) || typeof<BigInteger>.Equals(resultType) ||
+            typeof<Nullable<decimal>>.Equals(resultType) || typeof<Nullable<BigInteger>>.Equals(resultType)) then
+            raise(JsonStoredNumeric.InvalidFormat(null))
         if row.Id.HasValue && not(isNull row.ValueJSON) &&
            (typeof<uint64>.Equals(resultType) || typeof<unativeint>.Equals(resultType)) &&
            storageClass=SQLitePCL.raw.SQLITE_TEXT then
