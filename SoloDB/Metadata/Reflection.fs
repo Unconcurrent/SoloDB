@@ -53,6 +53,21 @@ module internal TypeMetadata =
                     ValueSome(Microsoft.FSharp.Reflection.FSharpType.GetRecordFields modelType |> Array.map _.Name)
                 else ValueNone))
 
+    let internal registerStandardComparison modelType standard =
+        TypeMetadataCache.Register(modelType, fun metadata -> { metadata with StandardComparison = MetadataValue.generated standard })
+
+    let internal standardComparison (modelType: Type) =
+        let known = TypeMetadataCache.Read(modelType,fun metadata -> MetadataValue.tryValue metadata.StandardComparison)
+        match known with
+        | ValueSome standard -> standard
+        | ValueNone when not(MetadataRuntime.supportsDynamicCode()) -> false
+        | ValueNone -> TypeMetadataCache.Discover(modelType, (fun metadata -> metadata.StandardComparison),
+            (fun value metadata -> { metadata with StandardComparison = ValueSome value }), Func<bool>(fun () ->
+                if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "structural comparison" modelType
+                Microsoft.FSharp.Reflection.FSharpType.IsRecord modelType &&
+                not(modelType.IsDefined(typeof<Microsoft.FSharp.Core.CustomComparisonAttribute>, false)) &&
+                not(modelType.IsDefined(typeof<Microsoft.FSharp.Core.NoComparisonAttribute>, false))))
+
     let internal isSealed (modelType: Type) =
         match MetadataValue.tryValue (TypeMetadataCache.Get(modelType).TypeFacts) with
         | ValueSome facts -> facts.IsSealed

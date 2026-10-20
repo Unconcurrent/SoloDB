@@ -231,6 +231,7 @@ type internal TypeMetadataRecord = {
     TrivialInt64: MetadataValue<bool> voption
     GenericArguments: MetadataValue<Type[]> voption
     RecordFields: MetadataValue<string[] voption> voption
+    StandardComparison: MetadataValue<bool> voption
     ListConstruction: MetadataValue<obj seq -> obj> voption
     TupleDefault: MetadataValue<Delegate> voption
     CascadeIdentity: MetadataValue<Delegate> voption
@@ -296,6 +297,7 @@ type internal TypeMetadataCache private () =
         TrivialInt64 = ValueNone
         GenericArguments = ValueNone
         RecordFields = ValueNone
+        StandardComparison = ValueNone
         ListConstruction = ValueNone
         TupleDefault = ValueNone
         CascadeIdentity = ValueNone

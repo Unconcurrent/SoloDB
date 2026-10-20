@@ -1648,6 +1648,8 @@ and [<AbstractClass; Sealed>] JsonMetadata =
     /// Supplies ordered record constructor fields, or null for a non-record type.
     static member internal RegisterRecordFields<'T>(fields: string[]) =
         TypeMetadata.registerRecordFields typeof<'T> fields
+    static member internal RegisterStandardComparison<'T>(standard: bool) =
+        TypeMetadata.registerStandardComparison typeof<'T> standard
     /// Uses the same object admission and diagnostics as ordinary deserialization.
     static member internal ObjectProperties(json: JsonValue) = JsonImpl.AsDictOrFail json
     /// Uses the existing union predicate precedence without member discovery.

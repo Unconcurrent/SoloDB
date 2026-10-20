@@ -25,6 +25,7 @@ public static class CSharpEmitter
                 output.Append("new bool[]{").Append(string.Join(",",model.Members.Select(member => facts(member) ? "true" : "false"))).Append("},");
             output.Append((int)model.Shape).Append(',').Append(Types(model.CollectionArguments)).Append(',').Append(model.PopulateCollection ? "true" : "false").Append(",UnionType=").Append(model.UnionType ? "true" : "false").Append(",RecordFields=").Append(model.RecordType ? "new string[]{" + string.Join(",",model.RecordFields.Select(Quote)) + "}" : "null").Append(",NonGenericEnumerable=").Append(model.NonGenericEnumerable ? "true" : "false").Append(",IndexedRead=").Append(model.IndexedRead == null ? "null" : Quote(model.IndexedRead)).Append(",IndexedWrite=").Append(model.IndexedWrite == null ? "null" : Quote(model.IndexedWrite)).Append(",HelperOnly=").Append(model.HelperOnly ? "true" : "false")
                 .Append(",DictionaryReadOnly=").Append(model.DictionaryReadOnly ? "true" : "false")
+                .Append(",StandardComparison=").Append(model.StandardComparison ? "true" : "false")
                 .Append(",Formattable=").Append(model.Formattable ? "true" : "false")
                 .Append(",AssignableTo=new string[]{").Append(string.Join(",",model.AssignableTo.Select(Quote))).Append("}")
                 .Append(",SupportsValuesWrapper=").Append(model.SupportsValuesWrapper ? "true" : "false")

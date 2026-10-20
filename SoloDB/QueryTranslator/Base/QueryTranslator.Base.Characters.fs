@@ -8,11 +8,22 @@ open SoloDatabase.SqlModel
 
 /// Character operations consume UTF16 units, separately from ordinary SQL text.
 module internal QueryTranslatorCharacters =
-    type Operation = Index = 0 | Contains = 1 | StartsWith = 2 | EndsWith = 3 | Replace = 4 | IndexOf = 5 | Concat = 6 | Comparable = 7 | Trim = 8 | TrimStart = 9 | TrimEnd = 10
+    type Operation = Index = 0 | Contains = 1 | StartsWith = 2 | EndsWith = 3 | Replace = 4 | IndexOf = 5 | Concat = 6 | Comparable = 7 | Trim = 8 | TrimStart = 9 | TrimEnd = 10 | OrdinalKey = 11
 
     let private nullValue = SqlExpr.Literal SqlLiteral.Null
     let private call operation source first second =
         SqlExpr.FunctionCall("CHARACTER_VALUE", [SqlExpr.Literal(SqlLiteral.Integer(int64 operation)); source; first; second])
+
+    let ordinalKey source = call Operation.OrdinalKey source nullValue nullValue
+
+    let ordinalBytes (text: string) =
+        if isNull text then null else
+        let bytes = Array.zeroCreate<byte> (text.Length * 2)
+        for index in 0 .. text.Length - 1 do
+            let unit = uint16 text[index]
+            bytes[index * 2] <- byte (unit >>> 8)
+            bytes[index * 2 + 1] <- byte unit
+        bytes
 
     let hasLegacyIndex (originalIndex: Expression) =
         match originalIndex with
@@ -118,7 +129,11 @@ module internal QueryTranslatorCharacters =
             let operation = enum<Operation>(arguments[0].GetInt32())
             let characterText (value: SqliteRawValue) =
                 if value.IsInteger then string(char(value.GetInt32())) else value.CopyToString()
-            if operation = Operation.Comparable then
+            if operation = Operation.OrdinalKey then
+                if arguments[1].IsNull then context.SetNull()
+                else
+                    context.SetBlob(ordinalBytes(arguments[1].CopyToString()))
+            elif operation = Operation.Comparable then
                 let value = arguments[1]
                 if value.IsNull then context.SetNull()
                 elif value.IsInteger then context.SetInt64(value.GetInt64())

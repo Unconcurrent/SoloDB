@@ -163,6 +163,7 @@ internal static class CSharpCodecFacts
             var policy = new Model(type.FullName,type.FullName,shape,type.IsValueType,(bool)arguments[1].Value,
                 constructor != null && !construct,null,facts) { AbstractType = (bool)arguments[2].Value, ConstructFromMembers = construct, PopulateCollection = populate,
                     RecordType = recordFields != null, RecordFields = recordFields ?? System.Array.Empty<string>(),
+                    StandardComparison = Flag("StandardComparison"),
                     RequiresTypeInformation = (bool)arguments[2].Value || HelperAssembly.InheritedAttribute(sourceType,"SoloDatabase.Attributes.PolymorphicAttribute"), SupportsValuesWrapper = Flag("SupportsValuesWrapper"),
                     NonGenericEnumerable = Flag("NonGenericEnumerable"),
                     DictionaryReadOnly = Flag("DictionaryReadOnly"), Formattable = Flag("Formattable"),

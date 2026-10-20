@@ -295,11 +295,12 @@
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.CastAggregate.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.DateTimeFunctions.fs" />
+    <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.MemberAccess.fs" />
+    <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.StructuralComparison.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.Binary.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.StringFormatting.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.PreparedCall.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.MethodCall.fs" />
-    <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.MemberAccess.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.Construction.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.ArrayPredicates.fs" />
     <Compile Include="QueryTranslator/Base/QueryTranslator.Base.ExpressionAdmission.fs" />

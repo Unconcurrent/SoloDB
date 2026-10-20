@@ -67,6 +67,7 @@ public sealed class Model
     public bool AbstractType { get; set; }
     public bool ConstructFromMembers { get; set; }
     public bool RecordType { get; set; }
+    public bool StandardComparison { get; set; }
     public bool UnionType { get; set; }
     public string[] RecordFields { get; set; } = System.Array.Empty<string>();
     public bool IdentityTrivialGetter { get; set; }

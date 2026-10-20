@@ -183,6 +183,7 @@ module internal ModelDiscovery =
                     let model = Model(actual.FullName,actual.FullName,TypeShape.Object,CompilerReferences.isValueType typ,true,names.Length = 0,null,facts)
                     model.ConstructFromMembers <- true
                     model.RecordType <- true
+                    model.StandardComparison <- true
                     model.RecordFields <- names
                     let generated = GeneratedModel(model,actual,constructor,members.ToArray())
                     generated.OriginalProperties <-
@@ -574,6 +575,9 @@ module internal ModelDiscovery =
                     model.RequiresTypeInformation <- model.AbstractType || CompilerPropertyFacts.polymorphic typ
                     model.ConstructFromMembers <- constructFromMembers
                     model.RecordType <- entity.IsFSharpRecord
+                    model.StandardComparison <- entity.IsFSharpRecord &&
+                        not(hasAttribute "Microsoft.FSharp.Core.CustomComparisonAttribute" entity.Attributes) &&
+                        not(hasAttribute "Microsoft.FSharp.Core.NoComparisonAttribute" entity.Attributes)
                     if entity.IsFSharpRecord then model.RecordFields <- entity.FSharpFields |> Seq.map _.Name |> Seq.toArray
                     model.IdentityTrivialGetter <-
                         if entity.IsFSharpRecord then

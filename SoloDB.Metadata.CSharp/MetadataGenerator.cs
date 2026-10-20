@@ -106,6 +106,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
                         public bool DictionaryReadOnly { get; set; }
                         public bool Formattable { get; set; }
                         public string[] RecordFields { get; set; }
+                        public bool StandardComparison { get; set; }
                         public bool UnionType { get; set; }
                         public string IndexedRead { get; set; }
                         public string IndexedWrite { get; set; }
@@ -437,6 +438,8 @@ public sealed class MetadataGenerator : IIncrementalGenerator
             AbstractType = abstractType,
             ConstructFromMembers = !abstractType && memberConstructor,
             RecordType = recordType, RecordFields = recordFields, UnionType = unionType,
+            StandardComparison = recordType && !named.GetAttributes().Any(attribute =>
+                attribute.AttributeClass?.ToDisplayString() is "Microsoft.FSharp.Core.CustomComparisonAttribute" or "Microsoft.FSharp.Core.NoComparisonAttribute"),
             IndexedRead = indexedRead, IndexedWrite = indexedWrite,
             DictionaryReadOnly = ReadOnlyMatches(),
             Formattable = Contract("System.IFormattable") != null,

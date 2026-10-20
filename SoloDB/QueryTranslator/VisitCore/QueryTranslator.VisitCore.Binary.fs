@@ -33,6 +33,9 @@ module internal QueryTranslatorVisitCoreBinary =
             let right = fileSystemReferenceIdentity visitDu qb b.Right
             SqlExpr.Binary(left, (if b.NodeType = ExpressionType.Equal then BinaryOperator.Eq else BinaryOperator.Ne), right)
         else
+        match QueryStructuralRelations.tryTranslate visitRaw b qb with
+        | ValueSome comparison -> comparison
+        | ValueNone ->
         let isLeftNull = match b.Left with :? ConstantExpression as c when c.Value = null -> true | _ -> false
         let isRightNull = match b.Right with :? ConstantExpression as c when c.Value = null -> true | _ -> false
         let isAnyNull = isLeftNull || isRightNull
