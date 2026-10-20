@@ -42,11 +42,11 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
     new(source: string) =
         let connectionString, location = Bootstrap.parseSource source
         let eventSystem = EventSystem ()
-        let setup = Bootstrap.createSetup eventSystem
+        let struct (setup, setupAsync) = Bootstrap.createSetups eventSystem
         let defaultConfig: SoloDBConfiguration = { CachingEnabled = true }
         let struct (releaseIndexOwner, beginIndexTransaction) = RuntimeIndexModelCache.acquireOwner connectionString
         let manager =
-            try new ConnectionManager(connectionString, setup, defaultConfig, releaseIndexOwner, beginIndexTransaction)
+            try new ConnectionManager(connectionString, setup, defaultConfig, releaseIndexOwner, beginIndexTransaction, setupAsync)
             with _ ->
                 releaseIndexOwner ()
                 reraise ()

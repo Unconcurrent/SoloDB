@@ -124,6 +124,19 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
         clearHandlerFault connection
         executeBoundary connection "BEGIN IMMEDIATE;"
 
+    let internal beginImmediateWithRetryAsync (connection: NativeSqliteConnection) = task {
+        clearHandlerFault connection
+        let! prepared = connection.OpenStatementAsync("BEGIN IMMEDIATE;")
+        let mutable statement = prepared
+        try
+            let! struct (updated, _) = statement.StepTransactionBoundaryAsync()
+            statement <- updated
+            statement.Dispose()
+        with error ->
+            statement.Abort(error)
+            return reraiseAnywhere error
+    }
+
     let internal resolveTxOutcome (primaryEx: exn option) (cleanupEx: exn option) : exn option =
         match primaryEx, cleanupEx with
         | Some p, Some c ->

@@ -2,7 +2,14 @@ namespace SoloDatabase
 
 open System
 open System.Runtime.ExceptionServices
+open System.Threading.Tasks
 open SQLitePCL
+
+[<Struct>]
+type private NativeScriptAdvance =
+    | EndOfScript
+    | CurrentStatement
+    | ParserTail of source: NativeStatementSource * offset: int
 
 /// Parser-tail progression belongs to dynamic SQL consumers, independently of statement ownership.
 [<Struct>]
@@ -38,6 +45,16 @@ type internal NativeSqlScript =
             try root.Statement.Capture(plan, input)
             with error -> root.Abort(error); reraise()
         NativeSqlScript(cache, root, arguments)
+    static member CreateAsync(cache: NativeStatementCache, source: NativeStatementSource, parameters: obj, timeout, checkReader) = task {
+        let! prepared = NativeStatementScope.CreateAsync(cache, source, 0, NativeExecutionBudget(timeout), checkReader)
+        let mutable root = prepared
+        try
+            let arguments = root.Statement.Capture(parameters)
+            return NativeSqlScript(cache, root, arguments)
+        with error ->
+            root.Abort(error)
+            return (ExceptionDispatchInfo.Capture(error).Throw(); Unchecked.defaultof<_>)
+    }
     static member Continue(cache: NativeStatementCache, root: NativeStatementScope, arguments: INativeArgumentBinding) =
         let mutable script = NativeSqlScript(cache, root, arguments)
         script.initialized <- true
@@ -81,42 +98,103 @@ type internal NativeSqlScript =
         with error ->
             this.failure <- error
             reraise()
+    member private this.Advance(result: NativeBlobResult) =
+        if not this.initialized then
+            this.initialized <- true
+            CurrentStatement
+        else
+            let entry = this.current.Statement
+            let next = entry.EndOffset
+            let bytes = entry.Bytes
+            if not (isNull result) then result.Dispose()
+            this.ResetCurrent()
+            if next >= bytes.Length - 1 || bytes.[next] = 0uy then
+                this.available <- false
+                EndOfScript
+            else
+                this.offset <- next
+                this.available <- false
+                ParserTail(NativeStatementSource.Prepared entry, next)
+    member private this.SetCurrent(scope: NativeStatementScope) =
+        this.current <- scope
+        this.available <- true
+    member private this.BeginResult(result: NativeBlobResult) =
+        if not this.current.HasStatement then
+            if this.offset <> 0 then
+                try this.current.Finish(null, false)
+                with error -> this.failure <- error; reraise()
+            this.available <- false
+            false
+        else
+            this.current.Bind(this.arguments)
+            if not (isNull result) then result.Begin(this.cache, &this.current)
+            true
+    member private this.CompleteResult(row: bool, result: NativeBlobResult) =
+        if not (isNull result) then result.Complete(&this.current)
+        this.doneState <- not row
+        if this.current.Statement.ColumnCount > 0 then
+            this.pending <- row
+            true
+        else false
     member this.NextResult(result: NativeBlobResult) =
         this.Check()
         let mutable found = false
         let mutable more = this.available
         while more && not found do
-            if this.initialized then
-                let entry = this.current.Statement
-                let next = entry.EndOffset
-                let bytes = entry.Bytes
-                if not (isNull result) then result.Dispose()
-                this.ResetCurrent()
-                if next >= bytes.Length - 1 || bytes.[next] = 0uy then
-                    this.available <- false
-                    more <- false
-                else
-                    this.offset <- next
-                    this.current <- new NativeStatementScope(this.cache, NativeStatementSource.Prepared entry, next, this.budget, false)
-                    this.available <- true
-            else this.initialized <- true
+            match this.Advance(result) with
+            | EndOfScript -> more <- false
+            | ParserTail(source, offset) ->
+                this.SetCurrent(new NativeStatementScope(this.cache, source, offset, this.budget, false))
+            | CurrentStatement -> ()
             if more then
-                if not this.current.HasStatement then
-                    if this.offset <> 0 then
-                        try this.current.Finish(null, false)
-                        with error -> this.failure <- error; reraise()
-                    this.available <- false
-                    more <- false
-                else
-                    this.current.Bind(this.arguments)
-                    if not (isNull result) then result.Begin(this.cache, &this.current)
-                    let row = this.current.Step()
-                    if not (isNull result) then result.Complete(&this.current)
-                    this.doneState <- not row
-                    if this.current.Statement.ColumnCount > 0 then
-                        this.pending <- row
-                        found <- true
+                if this.BeginResult(result) then
+                    found <- this.CompleteResult(this.current.Step(), result)
+                else more <- false
         found
+    static member private NextResultAsync(initialScript: NativeSqlScript) = task {
+        let mutable script = initialScript
+        try
+            script.Check()
+            let mutable found = false
+            let mutable more = script.available
+            while more && not found do
+                match script.Advance(null) with
+                | EndOfScript -> more <- false
+                | ParserTail(source, offset) ->
+                    let! scope = NativeStatementScope.CreateAsync(script.cache, source, offset, script.budget, false, script.Generation)
+                    script.SetCurrent(scope)
+                | CurrentStatement -> ()
+                if more then
+                    if script.BeginResult(null) then
+                        let! struct (scope, row) = script.current.StepAsync()
+                        script.current <- scope
+                        found <- script.CompleteResult(row, null)
+                    else more <- false
+            return struct (script, found)
+        with error ->
+            script.Abort(error)
+            return (ExceptionDispatchInfo.Capture(error).Throw(); Unchecked.defaultof<_>)
+    }
+    static member private ConsumeAsync(initialScript: NativeSqlScript) = task {
+        let mutable script = initialScript
+        try
+            let mutable more = true
+            while more do
+                script.Check()
+                if script.pending then script.pending <- false
+                while script.available && not script.doneState do
+                    let! struct (scope, row) = script.current.StepAsync()
+                    script.current <- scope
+                    script.doneState <- not row
+                let! struct (updated, found) = NativeSqlScript.NextResultAsync(script)
+                script <- updated
+                more <- found
+            return struct (script, script.affected)
+        with error ->
+            script.Abort(error)
+            return (ExceptionDispatchInfo.Capture(error).Throw(); Unchecked.defaultof<_>)
+    }
+    member this.ConsumeAsync() = NativeSqlScript.ConsumeAsync(this)
     member this.NextResult() = this.NextResult(null)
     member this.Read() =
         this.Check()

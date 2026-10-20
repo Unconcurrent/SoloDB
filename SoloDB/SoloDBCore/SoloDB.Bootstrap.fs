@@ -38,11 +38,14 @@ module internal Bootstrap =
     /// </summary>
     /// <param name="eventSystem">The event system to register functions on each connection.</param>
     /// <returns>A setup function for NativeSqliteConnection.</returns>
-    let createSetup (eventSystem: EventSystem) =
+    [<Literal>]
+    let private setupSql = "PRAGMA recursive_triggers = ON; PRAGMA foreign_keys = on; PRAGMA cache_size = -65536;"
+
+    let createSetups (eventSystem: EventSystem) =
         let usCultureInfo = CultureInfo.GetCultureInfo("en-us")
         let lower (value: string) = value.ToLower(usCultureInfo)
         let regexpTimeout = TimeSpan.FromMilliseconds(100)
-        fun (connection: NativeSqliteConnection) ->
+        let register (connection: NativeSqliteConnection) =
             NumericalFunctions.register connection
             QueryTranslatorCharacters.register lower connection
             QueryTranslatorSpanSource.register connection
@@ -78,13 +81,20 @@ module internal Bootstrap =
                         false), true)
             eventSystem.CreateFunctions(connection)
             connection.CreateFunction("base64", Func<obj, obj>(Utils.sqlBase64), true) // https://www.sqlite.org/base64.html
-            // These settings belong to each physical connection. Lock waiting remains
-            // owned by the native execution budget; do not install a second busy timer.
-            let mutable setup = connection.AcquireScript(NativeStatementSource.Text ("PRAGMA recursive_triggers = ON; PRAGMA foreign_keys = on; PRAGMA cache_size = -65536;"), null)
+        // Lock waiting belongs to each native command budget, including cold setup.
+        let setup (connection: NativeSqliteConnection) =
+            register connection
+            let mutable execution = connection.AcquireScript(NativeStatementSource.Text setupSql, null)
             try
-                setup.Consume() |> ignore
-                setup.Dispose()
-            with error -> setup.Abort(error); reraise()
+                execution.Consume() |> ignore
+                execution.Dispose()
+            with error -> execution.Abort(error); reraise()
+        let setupAsync (connection: NativeSqliteConnection) = task {
+            register connection
+            let! _ = connection.ExecuteScriptAsync(setupSql)
+            return ()
+        }
+        struct (setup, setupAsync)
 
     /// <summary>
     /// Parses the SQLite version string and returns a comparable Version value.

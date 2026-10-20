@@ -148,6 +148,20 @@ type NativeSqliteConnection(connectionString: string) =
         new NativeStatementScope(statements, NativeStatementSource.Text sql, 0, NativeExecutionBudget(database.DefaultTimeout), true)
     member internal _.OpenStatementSource(source: NativeStatementSource) =
         new NativeStatementScope(statements, source, 0, NativeExecutionBudget(database.DefaultTimeout), true)
+    member internal _.OpenStatementAsync(sql: string) =
+        NativeStatementScope.CreateAsync(statements, NativeStatementSource.Text sql, 0, NativeExecutionBudget(database.DefaultTimeout), true)
+    member internal _.ExecuteScriptAsync(sql: string) = task {
+        let! prepared = NativeSqlScript.CreateAsync(statements, NativeStatementSource.Text sql, null, database.DefaultTimeout, true)
+        let mutable script = prepared
+        try
+            let! struct (updated, affected) = script.ConsumeAsync()
+            script <- updated
+            script.Dispose()
+            return affected
+        with error ->
+            script.Abort(error)
+            return (System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw(); Unchecked.defaultof<_>)
+    }
     member internal _.AcquireScript(source: NativeStatementSource, parameters: obj) =
         let mutable script = NativeSqlScript(statements, source, parameters, database.DefaultTimeout, true)
         try script.NextResult() |> ignore; script

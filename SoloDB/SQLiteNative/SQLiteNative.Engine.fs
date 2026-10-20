@@ -219,4 +219,7 @@ module internal NativeExecution =
         // A stale WAL snapshot cannot become writable by waiting. Its owner must
         // decide whether to restart the transaction; never replay it here.
         result <> 517 && (primary = raw.SQLITE_BUSY || primary = raw.SQLITE_LOCKED)
-    let wait () = Thread.Sleep(150)
+    [<Literal>]
+    let private waitMilliseconds = 150
+    let wait () = Thread.Sleep(waitMilliseconds)
+    let waitAsync () = Threading.Tasks.Task.Delay(waitMilliseconds)

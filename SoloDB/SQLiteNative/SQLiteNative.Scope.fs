@@ -4,6 +4,7 @@ open System
 open System.Collections.Generic
 open System.Diagnostics
 open System.Runtime.ExceptionServices
+open System.Threading.Tasks
 open SQLitePCL
 
 [<Struct>]
@@ -11,6 +12,47 @@ type private NativeStatementStepMode =
     | Ordinary
     | TransactionBoundary
     | Maintenance
+
+/// Admission retains one observer checkpoint while preparation is pending.
+[<Struct>]
+type private NativeStatementAdmission =
+    val Cache: NativeStatementCache
+    val CheckReader: bool
+    val Observer: INativeExecutionObserver
+    val Generation: int64
+    val mutable Checkpoint: int
+    val mutable Admitted: bool
+    new(cache: NativeStatementCache, checkReader, generation) =
+        { Cache = cache; CheckReader = checkReader; Observer = cache.Database.Observer
+          Generation = generation; Checkpoint = 0; Admitted = false }
+    new(cache: NativeStatementCache, checkReader) = NativeStatementAdmission(cache, checkReader, cache.Database.Generation)
+    member this.Check() =
+        let database = this.Cache.Database
+        database.EnsureGeneration(this.Generation)
+        if this.CheckReader && database.ReaderActive then
+            raise (InvalidOperationException("A raw SQL reader is already active on this connection."))
+    member this.Enter() =
+        this.Check()
+        this.Checkpoint <- if isNull this.Observer then 0 else this.Observer.Checkpoint()
+        this.Admitted <- true
+    member this.Fail(error: exn, owned: NativePreparedStatement) =
+        let database = this.Cache.Database
+        if database.IsOpen && database.Generation = this.Generation && not (isNull this.Observer) then
+            try this.Observer.Failed(error) with _ -> ()
+            if this.Admitted then
+                try this.Observer.Restore(this.Checkpoint) with _ -> ()
+        if not (isNull (box owned)) then
+            try this.Cache.Release(owned, owned.Borrow) with _ -> ()
+
+/// Only the current native attempt is carried through a lock wait.
+[<Struct>]
+type private NativeStatementStepAttempt =
+    val Mode: NativeStatementStepMode
+    val Callbacks: int64
+    val Started: int64
+    val mutable Result: int
+    new(mode, callbacks, started) =
+        { Mode = mode; Callbacks = callbacks; Started = started; Result = 0 }
 
 /// One checked borrow of a prepared statement. Consumers own binding and progression.
 [<Struct>]
@@ -25,33 +67,50 @@ type internal NativeStatementScope =
     val mutable private result: int
     val mutable private affected: int
     val mutable private closed: bool
+    private new(cache: NativeStatementCache, statement: NativePreparedStatement, admission: NativeStatementAdmission, budget: NativeExecutionBudget) =
+        { cache = cache; statement = statement; observer = admission.Observer; generation = admission.Generation
+          borrow = statement.Borrow; checkpoint = admission.Checkpoint; budget = budget; result = 0; affected = -1
+          closed = false }
     new(cache: NativeStatementCache, source: NativeStatementSource, offset: int, budget: NativeExecutionBudget, checkReader: bool) =
-        let database = cache.Database
-        let observer = database.Observer
-        let generation = database.Generation
-        let mutable checkpoint = 0
-        let mutable admitted = false
-        let mutable owned: NativePreparedStatement = Unchecked.defaultof<_>
+        let mutable admission = NativeStatementAdmission(cache, checkReader)
+        let mutable owned = Unchecked.defaultof<NativePreparedStatement>
         let mutable budget = budget
         let statement =
             try
-                database.EnsureOpen()
-                if checkReader && database.ReaderActive then raise (InvalidOperationException("A raw SQL reader is already active on this connection."))
-                checkpoint <- if isNull observer then 0 else observer.Checkpoint()
-                admitted <- true
+                admission.Enter()
                 owned <- cache.Acquire(source, offset, &budget)
                 owned
-            with error ->
-                if database.IsOpen && database.Generation = generation && not (isNull observer) then
-                    try observer.Failed(error) with _ -> ()
-                    if admitted then
-                        try observer.Restore(checkpoint) with _ -> ()
-                if not (isNull (box owned)) then
-                    try cache.Release(owned, owned.Borrow) with _ -> ()
-                reraise()
-        { cache = cache; statement = statement; observer = observer; generation = generation
-          borrow = statement.Borrow; checkpoint = checkpoint; budget = budget; result = 0; affected = -1
-          closed = false }
+            with error -> admission.Fail(error, owned); reraise()
+        new NativeStatementScope(cache, statement, admission, budget)
+    static member private WaitForPreparationAsync(cache: NativeStatementCache, initialAdmission: NativeStatementAdmission, pending: ValueTask<struct (NativePreparedStatement * NativeExecutionBudget)>) = task {
+        let mutable admission = initialAdmission
+        let mutable owned = Unchecked.defaultof<NativePreparedStatement>
+        try
+            let! struct (statement, budget) = pending
+            owned <- statement
+            admission.Check()
+            return new NativeStatementScope(cache, statement, admission, budget)
+        with error ->
+            admission.Fail(error, owned)
+            return (ExceptionDispatchInfo.Capture(error).Throw(); Unchecked.defaultof<_>)
+    }
+    static member CreateAsync(cache: NativeStatementCache, source: NativeStatementSource, offset: int, budget: NativeExecutionBudget, checkReader: bool, generation: int64) =
+        let mutable admission = NativeStatementAdmission(cache, checkReader, generation)
+        let mutable owned = Unchecked.defaultof<NativePreparedStatement>
+        try
+            admission.Enter()
+            let pending = cache.AcquireAsync(source, offset, budget, admission.Generation)
+            if pending.IsCompletedSuccessfully then
+                let struct (statement, budget) = pending.Result
+                owned <- statement
+                admission.Check()
+                ValueTask<NativeStatementScope>(new NativeStatementScope(cache, statement, admission, budget))
+            else ValueTask<NativeStatementScope>(NativeStatementScope.WaitForPreparationAsync(cache, admission, pending))
+        with error ->
+            admission.Fail(error, owned)
+            ValueTask<NativeStatementScope>(Task.FromException<NativeStatementScope>(error))
+    static member CreateAsync(cache: NativeStatementCache, source: NativeStatementSource, offset: int, budget: NativeExecutionBudget, checkReader: bool) =
+        NativeStatementScope.CreateAsync(cache, source, offset, budget, checkReader, cache.Database.Generation)
     member private this.Owns = not this.closed && this.statement.InUse && this.statement.Borrow = this.borrow
     member internal this.IsCurrent = this.Owns && this.cache.Database.IsOpen && this.cache.Database.Generation = this.generation
     member private this.Check() =
@@ -113,47 +172,80 @@ type internal NativeStatementScope =
     member this.Bind(arguments: INativeArgumentBinding) =
         this.CheckStatement()
         this.statement.Bind(arguments)
-    member private this.Step(mode: NativeStatementStepMode) =
+    member private this.StepNative(attempt: byref<NativeStatementStepAttempt>) =
+        attempt.Result <- raw.sqlite3_step(this.statement.Handle)
         this.Check()
-        if not this.statement.HasStatement then false
-        else
-            let database = this.cache.Database
-            this.statement.AdvanceRow()
-            let callbacksBefore = database.CallbackEpoch
-            let started = Stopwatch.GetTimestamp()
-            let mutable result = raw.sqlite3_step(this.statement.Handle)
-            this.Check()
-            if database.CallbackEpoch <> callbacksBefore then database.RaiseCallbackFailure()
-            // Continuing a running VM does not replay its callbacks. A halted VM
-            // needs explicit restart admission, and no mode may replay an exposed row.
-            while NativeExecution.isLocked result && this.result = 0 &&
-                  (match mode with
-                   | TransactionBoundary -> true
-                   | Maintenance -> raw.sqlite3_stmt_busy(this.statement.Handle) <> 0 || database.CallbackEpoch = callbacksBefore
-                   | Ordinary -> raw.sqlite3_stmt_busy(this.statement.Handle) <> 0 || (result = 262 && database.CallbackEpoch = callbacksBefore)) &&
-                  this.budget.CanRetry(started) do
+        let database = this.cache.Database
+        if database.CallbackEpoch <> attempt.Callbacks then database.RaiseCallbackFailure()
+    member private this.StartStep(mode: NativeStatementStepMode) =
+        this.Check()
+        if not this.statement.HasStatement then ValueNone else
+        this.statement.AdvanceRow()
+        let mutable attempt = NativeStatementStepAttempt(mode, this.cache.Database.CallbackEpoch, Stopwatch.GetTimestamp())
+        this.StepNative(&attempt)
+        ValueSome attempt
+    member private this.CanRetry(attempt: byref<NativeStatementStepAttempt>) =
+        NativeExecution.isLocked attempt.Result && this.result = 0 &&
+        (match attempt.Mode with
+         | TransactionBoundary -> true
+         | Maintenance -> raw.sqlite3_stmt_busy(this.statement.Handle) <> 0 || this.cache.Database.CallbackEpoch = attempt.Callbacks
+         | Ordinary -> raw.sqlite3_stmt_busy(this.statement.Handle) <> 0 || (attempt.Result = 262 && this.cache.Database.CallbackEpoch = attempt.Callbacks)) &&
+        this.budget.CanRetry(attempt.Started)
+    member private this.CompleteStep(attempt: byref<NativeStatementStepAttempt>) =
+        let database = this.cache.Database
+        this.budget.Record(attempt.Started)
+        // A running result retains its compiled shape. Capture actual reprepare
+        // at execution admission while every step still expires borrowed rows.
+        if this.result <> raw.SQLITE_ROW then this.statement.ObserveResultShape()
+        database.ObserveStatementCompletion()
+        if attempt.Result <> raw.SQLITE_ROW && attempt.Result <> raw.SQLITE_DONE then
+            let error = NativeSqliteException.FromResult(database.Handle, attempt.Result)
+            error.Data.["Statement"] <- this.statement.Description
+            raise error
+        this.result <- attempt.Result
+        if attempt.Result = raw.SQLITE_DONE && (this.statement.ColumnCount = 0 || raw.sqlite3_stmt_readonly(this.statement.Handle) = 0) then
+            this.affected <- raw.sqlite3_changes(database.Handle)
+        attempt.Result = raw.SQLITE_ROW
+    member private this.Step(mode: NativeStatementStepMode) =
+        match this.StartStep(mode) with
+        | ValueNone -> false
+        | ValueSome initial ->
+            let mutable attempt = initial
+            while this.CanRetry(&attempt) do
                 NativeExecution.wait()
                 this.Check()
-                result <- raw.sqlite3_step(this.statement.Handle)
-                this.Check()
-                if database.CallbackEpoch <> callbacksBefore then database.RaiseCallbackFailure()
-            this.budget.Record(started)
-            // A running result retains its compiled shape. Capture actual reprepare
-            // at execution admission while every step still expires borrowed rows.
-            if this.result <> raw.SQLITE_ROW then this.statement.ObserveResultShape()
-            database.ObserveStatementCompletion()
-            if result <> raw.SQLITE_ROW && result <> raw.SQLITE_DONE then
-                let error = NativeSqliteException.FromResult(database.Handle, result)
-                error.Data.["Statement"] <- this.statement.Description
-                raise error
-            this.result <- result
-            if result = raw.SQLITE_DONE && (this.statement.ColumnCount = 0 || raw.sqlite3_stmt_readonly(this.statement.Handle) = 0) then
-                this.affected <- raw.sqlite3_changes(database.Handle)
-            result = raw.SQLITE_ROW
+                this.StepNative(&attempt)
+            this.CompleteStep(&attempt)
+    static member private WaitForStepAsync(initialScope: NativeStatementScope, initialAttempt: NativeStatementStepAttempt) = task {
+        let mutable scope = initialScope
+        let mutable attempt = initialAttempt
+        try
+            while scope.CanRetry(&attempt) do
+                do! NativeExecution.waitAsync()
+                scope.Check()
+                scope.StepNative(&attempt)
+            let row = scope.CompleteStep(&attempt)
+            return struct (scope, row)
+        with error ->
+            scope.Abort(error)
+            return (ExceptionDispatchInfo.Capture(error).Throw(); Unchecked.defaultof<_>)
+    }
+    member private this.StepAsync(mode: NativeStatementStepMode) =
+        match this.StartStep(mode) with
+        | ValueNone -> ValueTask<struct (NativeStatementScope * bool)>(struct (this, false))
+        | ValueSome initial ->
+            let mutable attempt = initial
+            if this.CanRetry(&attempt) then
+                ValueTask<struct (NativeStatementScope * bool)>(NativeStatementScope.WaitForStepAsync(this, attempt))
+            else
+                let row = this.CompleteStep(&attempt)
+                ValueTask<struct (NativeStatementScope * bool)>(struct (this, row))
     member this.Step() = this.Step(Ordinary)
+    member this.StepAsync() = this.StepAsync(Ordinary)
     // Only transaction-owner SQL without application expressions may restart a halted VM.
     // Shared-cache BEGIN can halt on LOCKED before acquiring its transaction.
     member this.StepTransactionBoundary() = this.Step(TransactionBoundary)
+    member this.StepTransactionBoundaryAsync() = this.StepAsync(TransactionBoundary)
     // Fixed in-place maintenance may restart a halted VM before application callbacks.
     member this.StepMaintenance() = this.Step(Maintenance)
     member this.Reset() =

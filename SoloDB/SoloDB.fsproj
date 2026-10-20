@@ -440,6 +440,7 @@
   <ItemGroup>
     <PackageReference Include="Portable.System.DateTimeOnly" Version="8.0.1" />
     <PackageReference Include="System.Reflection.Emit.Lightweight" Version="4.7.0" Condition="'$(TargetFramework)' == 'netstandard2.0'" />
+    <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.3" Condition="'$(TargetFramework)' == 'netstandard2.0'" />
     <PackageReference Include="Snappier" Version="1.3.1" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.11" />
     <!-- The native 2.1.12 package carries SQLite 3.53.3, including the WAL-reset fix.

@@ -34,7 +34,7 @@ module Connections =
     /// <param name="connectionStr">The database connection string.</param>
     /// <param name="setup">An action to perform initial setup on a newly created connection.</param>
     /// <param name="config">The database configuration settings.</param>
-    type ConnectionManager internal (connectionStr: string, setup: NativeSqliteConnection -> unit, config: Types.SoloDBConfiguration, releaseIndexOwner: unit -> unit, beginIndexTransaction: unit -> IDisposable) =
+    type ConnectionManager internal (connectionStr: string, setup: NativeSqliteConnection -> unit, config: Types.SoloDBConfiguration, releaseIndexOwner: unit -> unit, beginIndexTransaction: unit -> IDisposable, setupAsync: NativeSqliteConnection -> Task<unit>) =
         /// <summary>A collection of all connections ever created by this manager, for disposal purposes.</summary>
         let all = ConcurrentStack<NativeCachingDbConnection>()
         /// <summary>The pool of available, ready-to-use connections.</summary>
@@ -51,6 +51,9 @@ module Connections =
         let checkDisposed () =
             if Volatile.Read(&disposed) then raise (ObjectDisposedException(nameof(ConnectionManager)))
 
+        internal new(connectionStr: string, setup: NativeSqliteConnection -> unit, config: Types.SoloDBConfiguration, releaseIndexOwner: unit -> unit, beginIndexTransaction: unit -> IDisposable) =
+            new ConnectionManager(connectionStr, setup, config, releaseIndexOwner, beginIndexTransaction,
+                fun connection -> setup connection; Task.FromResult(()))
         internal new(connectionStr: string, setup: NativeSqliteConnection -> unit, config: Types.SoloDBConfiguration) =
             new ConnectionManager(connectionStr, setup, config, ignore, fun () -> null)
 
@@ -87,36 +90,53 @@ module Connections =
         /// Borrows a connection from the pool. If the pool is empty, a new connection is created.
         /// </summary>
         /// <returns>A ready-to-use <see cref="NativeCachingDbConnection"/>.</returns>
-        member internal this.BorrowNative() =
+        member private this.TryBorrowNative() =
             checkDisposed()
             match pool.TryPop() with
-            | true, c -> 
-                if not c.IsEventDispatchStateClean then
-                    c.ResetEventDispatchState()
+            | true, connection ->
+                if not connection.IsEventDispatchStateClean then
+                    connection.ResetEventDispatchState()
                     raise (InvalidOperationException("Borrowed pooled connection had residual event dispatch state."))
-
-                if c.Inner.State <> SqliteConnectionState.Open then
-                    c.Inner.Open()
-                c.RenewAcquisition()
-                c
-            | false, _ ->
-                let createAndSetup () =
-                    let c = new NativeCachingDbConnection(connectionStr, this.TakeBack, config, this.EnterEventHandlerScope, this.ExitEventHandlerScope)
-                    let mutable primaryEx: exn option = None
-                    let mutable cleanupEx: exn option = None
-                    try
-                        c.Inner.Open()
-                        setup c.Inner
-                        all.Push c
-                        c
-                    with ex ->
-                        primaryEx <- Some ex
-                        try c.DisposeReal() with d -> cleanupEx <- Some d
-                        match resolveTxOutcome primaryEx cleanupEx with
-                        | Some resolved -> reraiseAnywhere resolved
-                        | None -> raise (InvalidOperationException("Connection setup failed."))
-                createAndSetup()
-
+                if connection.Inner.State <> SqliteConnectionState.Open then connection.Inner.Open()
+                connection.RenewAcquisition()
+                ValueSome connection
+            | false, _ -> ValueNone
+        member private this.NewConnection(pooled: bool) =
+            checkDisposed()
+            new NativeCachingDbConnection(connectionStr, (if pooled then this.TakeBack else ignore), config, this.EnterEventHandlerScope, this.ExitEventHandlerScope)
+        member private _.CreationFailed(connection: NativeCachingDbConnection, error: exn) =
+            let mutable cleanup = None
+            try connection.DisposeReal() with failure -> cleanup <- Some failure
+            match resolveTxOutcome (Some error) cleanup with
+            | Some failure -> reraiseAnywhere failure
+            | None -> raise (InvalidOperationException("Connection setup failed."))
+        member private this.CreateConnection(pooled: bool) =
+            let connection = this.NewConnection(pooled)
+            try
+                connection.Inner.Open()
+                setup connection.Inner
+                if pooled then all.Push connection
+                connection
+            with error -> this.CreationFailed(connection, error)
+        member private this.CreateConnectionAsync(pooled: bool) = task {
+            let connection = this.NewConnection(pooled)
+            try
+                connection.Inner.Open()
+                do! setupAsync connection.Inner
+                if pooled then
+                    checkDisposed()
+                    all.Push connection
+                return connection
+            with error -> return this.CreationFailed(connection, error)
+        }
+        member internal this.BorrowNative() =
+            match this.TryBorrowNative() with
+            | ValueSome connection -> connection
+            | ValueNone -> this.CreateConnection(true)
+        member private this.BorrowNativeAsync() =
+            match this.TryBorrowNative() with
+            | ValueSome connection -> ValueTask<NativeCachingDbConnection>(connection)
+            | ValueNone -> ValueTask<NativeCachingDbConnection>(this.CreateConnectionAsync(true))
         /// <summary>
         /// Gets a collection of all connections (both in-pool and in-use) created by this manager.
         /// Used for final disposal.
@@ -132,21 +152,9 @@ module Connections =
         /// <c>use</c> binding inside the callback cannot close a live transaction; the owning
         /// runner destroys it at scope exit.
         /// </summary>
-        member internal this.CreateDedicatedTransactionConnection() =
-            checkDisposed()
-            let c = new NativeCachingDbConnection(connectionStr, ignore, config, this.EnterEventHandlerScope, this.ExitEventHandlerScope)
-            let mutable primaryEx: exn option = None
-            let mutable cleanupEx: exn option = None
-            try
-                c.Inner.Open()
-                setup c.Inner
-                c
-            with ex ->
-                primaryEx <- Some ex
-                try c.DisposeReal() with d -> cleanupEx <- Some d
-                match resolveTxOutcome primaryEx cleanupEx with
-                | Some resolved -> reraiseAnywhere resolved
-                | None -> raise (InvalidOperationException("Transactional connection setup failed."))
+        member internal this.CreateDedicatedTransactionConnection() = this.CreateConnection(false)
+        member private this.CreateDedicatedTransactionConnectionAsync() =
+            ValueTask<NativeCachingDbConnection>(this.CreateConnectionAsync(false))
 
         /// <summary>
         /// The core implementation for executing a synchronous function within a database transaction.
@@ -183,14 +191,14 @@ module Connections =
         /// </summary>
         /// <param name="f">The asynchronous function to execute within the transaction.</param>
         /// <returns>A task that represents the asynchronous operation, containing the result of the function <paramref name="f"/>.</returns>
-        member private this.RunTransactionAsync(acquire: unit -> NativeCachingDbConnection, release: NativeCachingDbConnection -> exn option ref -> unit, f: NativeCachingDbConnection -> Task<'T>) = task {
+        member private this.RunTransactionAsync(acquire: unit -> ValueTask<NativeCachingDbConnection>, release: NativeCachingDbConnection -> exn option ref -> unit, f: NativeCachingDbConnection -> Task<'T>) = task {
             use indexLifetime = beginIndexTransaction ()
-            let conn = acquire ()
+            let! conn = acquire ()
             let primaryEx = ref None
             let cleanupEx = ref None
             let mutable result = Unchecked.defaultof<'T>
             try
-                beginImmediateWithRetry conn
+                do! ConnectionsTransactionHelpers.beginImmediateWithRetryAsync conn
                 conn.InsideTransaction <- true
                 try
                     let! ret = f conn
@@ -207,7 +215,7 @@ module Connections =
         }
 
         member private this.WithTransactionBorrowedAsync(f: NativeCachingDbConnection -> Task<'T>) =
-            this.RunTransactionAsync(this.BorrowNative, cleanupBorrowedTransaction, f)
+            this.RunTransactionAsync(this.BorrowNativeAsync, cleanupBorrowedTransaction, f)
 
         /// <summary>
         /// Executes a synchronous function within a database transaction using a pooled connection.
@@ -228,7 +236,7 @@ module Connections =
         /// Asynchronous counterpart of <see cref="WithDedicatedTransaction"/>.
         /// </summary>
         member internal this.WithDedicatedAsyncTransaction(f: NativeCachingDbConnection -> Task<'T>) =
-            this.RunTransactionAsync(this.CreateDedicatedTransactionConnection, cleanupDedicatedTransaction, f)
+            this.RunTransactionAsync(this.CreateDedicatedTransactionConnectionAsync, cleanupDedicatedTransaction, f)
 
         /// <summary>
         /// Executes an asynchronous function within a database transaction using a pooled connection.
