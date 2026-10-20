@@ -73,13 +73,17 @@ module internal QueryStructuralTraversal =
                 let index = contexts.Count
                 contexts.Add { Node = node; Left = left; Right = right }
                 index
+        let roots = ResizeArray<CteBinding * string>()
         let ctes = ResizeArray<CteBinding>()
         let joins = ResizeArray<JoinShape>()
         let prepared = Dictionary<string, string * string>()
         let root side = function
             | Selected(value,input) ->
                 let token = input.Source |> ValueOption.defaultWith(fun () -> canonicalToken input.Carrier value)
-                token,ValueSome { Input = scopeInput input; Access = Current },text "$"
+                let name,alias = nextName(),nextName()
+                let binding = { Name = name; Materialized = true; Query = query(core None [projection "value" token]) }
+                roots.Add(binding,alias)
+                SqlExpr.Column(Some alias,"value"),ValueSome { Input = scopeInput input; Access = Current },text "$"
             | Prepared value ->
                 let name = nextName()
                 let rows = nextName()
@@ -131,10 +135,10 @@ module internal QueryStructuralTraversal =
         let absent leftMissing rightMissing present =
             choose leftMissing (choose rightMissing resume (terminal(boolean(relation = BinaryOperator.Lt || relation = BinaryOperator.Le))))
                 (choose rightMissing (terminal(boolean(relation = BinaryOperator.Gt || relation = BinaryOperator.Ge))) present)
-        let boundChild side ordinal =
+        let boundField side ordinal field =
             let name,_ = prepared[side]
             let alias = nextName()
-            let body = core (Some(BaseTable(name,Some alias))) [projection "node" (SqlExpr.Column(Some alias,"node"))]
+            let body = core (Some(BaseTable(name,Some alias))) [projection field (SqlExpr.Column(Some alias,field))]
             let body =
                 { body with
                     Where = Some(binary BinaryOperator.And
@@ -142,6 +146,7 @@ module internal QueryStructuralTraversal =
                         (binary BinaryOperator.Eq (SqlExpr.Column(Some alias,"ordinal")) (integer ordinal)))
                     Limit = Some(integer 1) }
             SqlExpr.ScalarSubquery(query body)
+        let boundChild side ordinal = boundField side ordinal "node"
         let childContext side context child name ordinal stored =
             match stored with
             | ValueNone -> ValueNone,boundChild side ordinal
@@ -183,6 +188,14 @@ module internal QueryStructuralTraversal =
                 let _,alias = prepared[side]
                 let raw = SqlExpr.Column(Some alias,"payload")
                 preparedScalar context.Node.Target raw
+        let compareScalar (target: Type) left right onEqual finish =
+            let result = choose (binary BinaryOperator.Eq left right) onEqual (finish(binary relation left right))
+            let leftNull,rightNull = SqlExpr.Unary(UnaryOperator.IsNull,left),SqlExpr.Unary(UnaryOperator.IsNull,right)
+            if typeof<float>.Equals target || typeof<single>.Equals target then
+                choose (binary BinaryOperator.Or leftNull rightNull) (finish(boolean false)) result
+            elif target.IsValueType then result else
+                choose leftNull (choose rightNull onEqual (finish(boolean(relation = BinaryOperator.Lt || relation = BinaryOperator.Le))))
+                    (choose rightNull (finish(boolean(relation = BinaryOperator.Gt || relation = BinaryOperator.Ge))) result)
         // The first scalar precedes every recursive continuation. Its prepared
         // occurrence is fixed at one, so the direct prefix needs no second walk.
         let prefix =
@@ -212,15 +225,7 @@ module internal QueryStructuralTraversal =
                     | Prepared _,Selected _ -> operations.NecessaryRange field.Node.Target true rightRaw leftRaw
                     | _ -> ValueNone
                 let finish residual =
-                    let present = choose (binary BinaryOperator.Eq leftValue rightValue) residual (binary relation leftValue rightValue)
-                    let present =
-                        if typeof<float>.Equals field.Node.Target || typeof<single>.Equals field.Node.Target then
-                            choose (binary BinaryOperator.Or (SqlExpr.Unary(UnaryOperator.IsNull,leftValue)) (SqlExpr.Unary(UnaryOperator.IsNull,rightValue)))
-                                (boolean false) present
-                        elif field.Node.Target.IsValueType then present else
-                            choose (SqlExpr.Unary(UnaryOperator.IsNull,leftValue))
-                                (choose (SqlExpr.Unary(UnaryOperator.IsNull,rightValue)) residual (boolean(relation = BinaryOperator.Lt || relation = BinaryOperator.Le)))
-                                (choose (SqlExpr.Unary(UnaryOperator.IsNull,rightValue)) (boolean(relation = BinaryOperator.Gt || relation = BinaryOperator.Ge)) present)
+                    let present = compareScalar field.Node.Target leftValue rightValue residual id
                     let result =
                         if graph.Root.Target.IsValueType then present else
                         choose (missing left)
@@ -238,16 +243,7 @@ module internal QueryStructuralTraversal =
                 match context.Node.Kind with
                 | ScalarNode ->
                     let leftValue,rightValue = scalar "left" context context.Left,scalar "right" context context.Right
-                    let result = choose (binary BinaryOperator.Eq leftValue rightValue) resume
-                                        (terminal(binary relation leftValue rightValue))
-                    let target = context.Node.Target
-                    let result =
-                        if typeof<float>.Equals target || typeof<single>.Equals target then
-                            choose (binary BinaryOperator.Or (SqlExpr.Unary(UnaryOperator.IsNull,leftValue)) (SqlExpr.Unary(UnaryOperator.IsNull,rightValue)))
-                                (terminal(boolean false)) result
-                        else result
-                    if target.IsValueType then result else
-                    absent (missing "left" context context.Left) (missing "right" context context.Right) result
+                    compareScalar context.Node.Target leftValue rightValue resume terminal
                 | OptionalNode(child,_) ->
                     let left,leftCoordinate = payloadContext "left" context child context.Left
                     let right,rightCoordinate = payloadContext "right" context child context.Right
@@ -255,15 +251,30 @@ module internal QueryStructuralTraversal =
                     absent (missing "left" context context.Left) (missing "right" context context.Right)
                         (advance child 0 leftCoordinate rightCoordinate stack)
                 | ComponentNode fields ->
-                    let choices = fields |> Array.mapi(fun ordinal field ->
-                        let left,leftCoordinate = childContext "left" context field.Node field.Name ordinal context.Left
-                        let right,rightCoordinate = childContext "right" context field.Node field.Name ordinal context.Right
-                        let child = register field.Node left right
-                        let pending =
-                            if ordinal + 1 = fields.Length then stack else
-                            SqlExpr.FunctionCall("jsonb_insert",[stack;text "$[#]";
-                                SqlExpr.JsonArrayExpr [integer index;integer(ordinal+1);column "left";column "right"]])
-                        binary BinaryOperator.Eq (column "slot") (integer ordinal),advance child 0 leftCoordinate rightCoordinate pending)
+                    let rec continuation ordinal =
+                        if ordinal = fields.Length then resume else
+                        let field = fields[ordinal]
+                        if field.Node.Kind = ScalarNode then
+                            let value side = function
+                                | ValueSome stored -> operations.Child field.Name field.Node (produced side stored) |> operations.Scalar field.Node.Target
+                                | ValueNone -> preparedScalar field.Node.Target (boundField side ordinal "payload")
+                            compareScalar field.Node.Target (value "left" context.Left) (value "right" context.Right)
+                                (continuation(ordinal+1)) terminal
+                        else
+                            let left,leftCoordinate = childContext "left" context field.Node field.Name ordinal context.Left
+                            let right,rightCoordinate = childContext "right" context field.Node field.Name ordinal context.Right
+                            let child = register field.Node left right
+                            let pending =
+                                if ordinal + 1 = fields.Length then stack else
+                                SqlExpr.FunctionCall("jsonb_insert",[stack;text "$[#]";
+                                    SqlExpr.JsonArrayExpr [integer index;integer(ordinal+1);column "left";column "right"]])
+                            advance child 0 leftCoordinate rightCoordinate pending
+                    // Finite scalar runs remain lazy SQL in one state. Only a
+                    // structural child needs a pending sibling continuation.
+                    let choices = fields |> Array.mapi(fun ordinal _ -> ordinal) |> Array.choose(fun ordinal ->
+                        if ordinal = 0 || fields[ordinal-1].Node.Kind <> ScalarNode || (index = rootContext && ordinal = initialSlot) then
+                            Some(binary BinaryOperator.Eq (column "slot") (integer ordinal),continuation ordinal)
+                        else None)
                     let present =
                         if choices.Length = 0 then resume else
                         SqlExpr.CaseExpr(choices[0],choices[1..] |> Array.toList,Some resume)
@@ -290,4 +301,13 @@ module internal QueryStructuralTraversal =
             { result with
                 Where = Some(binary BinaryOperator.Ge (SqlExpr.Column(None,"status")) (integer 0))
                 Limit = Some(integer 1) }
-        SqlExpr.ScalarSubquery { Ctes = List.ofSeq ctes; Body = SingleSelect result } |> finish
+        let traversal = SqlExpr.ScalarSubquery { Ctes = List.ofSeq ctes; Body = SingleSelect result }
+        let bound =
+            if roots.Count = 0 then traversal else
+            // Each selected token is one scalar operand, bound outside the
+            // recursive scope; pending states never carry a subtree copy.
+            let first,alias = roots[0]
+            let body = core (Some(BaseTable(first.Name,Some alias))) [projection "value" traversal]
+            let body = { body with Joins = roots |> Seq.skip 1 |> Seq.map(fun (binding,alias) -> CrossJoin(BaseTable(binding.Name,Some alias))) |> Seq.toList }
+            SqlExpr.ScalarSubquery { Ctes = roots |> Seq.map fst |> Seq.toList; Body = SingleSelect body }
+        finish bound
