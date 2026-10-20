@@ -60,8 +60,10 @@ module internal QueryableBuildQueryGroupJoinElements =
         let rewrittenProjection = rt.ReplaceExpression (groupCall.Call :> Expression) (innerParam :> Expression) projectionBody
         let rows = groupRows rt scalarAlias |> wrapCore
         let produced = QueryableHelperJoinBindings.translateJoinSingleSourceProduced freshInnerCtx scalarAlias rt.Vars (Some innerParam) rewrittenProjection
+        let elementType = groupCall.Call.Type
+        let needsDefault = elementType.IsValueType && isNull(TypeMetadata.nullableUnderlying elementType)
         let descriptor = QuerySerializationSql.inputDescriptor produced.Input
-        let packed = produced.Input.PhysicalOwner.IsSome || not(QuerySerializationSql.isConstantDescriptor descriptor) || (match produced with PackedValue _ -> true | _ -> false)
+        let packed = needsDefault || produced.Input.PhysicalOwner.IsSome || not(QuerySerializationSql.isConstantDescriptor descriptor) || (match produced with PackedValue _ -> true | _ -> false)
         let projectedExpr = if packed then QueryProduced.packet produced else QueryProduced.value freshInnerCtx.NextAlias produced
         let baseScalarCore =
             { mkCore [{ Alias = None; Expr = projectedExpr }] (Some (DerivedTable(rows, scalarAlias)))
@@ -72,34 +74,38 @@ module internal QueryableBuildQueryGroupJoinElements =
             let value = SqlExpr.ScalarSubquery (wrapCore core)
             if packed then PackedValue(value, QueryTranslatorSerialization.rebaseSerializationInput produced.Input)
             else DirectValue(value, QueryTranslatorSerialization.rebaseSerializationInput produced.Input)
-        let nullLit = QueryProduced.typed projectionBody.Type (SqlExpr.Literal(SqlLiteral.Null))
+        let absent =
+            if needsDefault then
+                let element = Expression.Constant(QueryValueMetadata.Default elementType, elementType)
+                let projection = rt.ReplaceExpression (groupCall.Call :> Expression) element projectionBody
+                QueryableHelperJoinBindings.translateJoinSingleSourceProduced freshInnerCtx scalarAlias rt.Vars (Some innerParam) projection
+            else QueryProduced.typed projectionBody.Type (SqlExpr.Literal(SqlLiteral.Null))
+        let selectedOrDefault core =
+            let selected = mkValue core
+            if not needsDefault then selected else
+                QueryProduced.defaultIfEmpty projectionBody.Type selected absent
         match groupCall.Kind with
         | FirstLike _ ->
-            mkValue { baseScalarCore with OrderBy = ascPosition; Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
+            selectedOrDefault { baseScalarCore with OrderBy = ascPosition; Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
         | LastLike _ ->
-            mkValue
+            selectedOrDefault
                 { baseScalarCore with
                     OrderBy = descPosition
                     Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
-        | SingleLike orDefault ->
+        | SingleLike _ ->
             let valueCore =
                 { baseScalarCore with
                     OrderBy = ascPosition
                     Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L)) }
             let countExpr = buildCountSubquery rt { baseScalarCore with OrderBy = ascPosition } (Some 2)
             let baseValue = mkValue valueCore
-            if orDefault then
-                QueryProduced.choose projectionBody.Type (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L))) nullLit baseValue
-            else
-                let invalid = SqlExpr.Binary(SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 0L)), BinaryOperator.Or,
-                                            SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 2L)))
-                QueryProduced.choose projectionBody.Type invalid nullLit baseValue
+            QueryProduced.choose projectionBody.Type (SqlExpr.Binary(countExpr, BinaryOperator.Eq, SqlExpr.Literal(SqlLiteral.Integer 1L))) baseValue absent
         | ElementAtLike(indexExpr, _orDefault) ->
             let idx = Convert.ToInt64(ExpressionEvaluation.evaluateExpr<obj> indexExpr)
             if idx < 0L then
-                nullLit
+                absent
             else
-                mkValue
+                selectedOrDefault
                     { baseScalarCore with
                         OrderBy = ascPosition
                         Limit = Some (SqlExpr.Literal(SqlLiteral.Integer 1L))

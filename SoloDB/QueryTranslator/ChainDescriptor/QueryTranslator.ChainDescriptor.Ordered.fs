@@ -253,12 +253,10 @@ module internal OrderedChain =
                             OrderBy = [{ Expr = col a "__ord"; Direction = direction }]
                             Limit = Some(integer 1L); Offset = offset }
                     let one = selected selectedValue selectedCore
-                    let one =
-                        if name.EndsWith("OrDefault", StringComparison.Ordinal)
-                           && call.Type.IsValueType && isNull(TypeMetadata.nullableUnderlying call.Type) then
-                            let zero = adapter.Value(Expression.Constant(RelationsAccessorCache.activateDefault call.Type, call.Type))
-                            QueryProduced.coalesce adapter.Alias call.Type one zero
-                        else one
+                    let needsDefault = call.Type.IsValueType && isNull(TypeMetadata.nullableUnderlying call.Type)
+                    let absent =
+                        if needsDefault then adapter.Value(Expression.Constant(QueryValueMetadata.Default call.Type, call.Type))
+                        else QueryProduced.typed call.Type (SqlExpr.Literal SqlLiteral.Null)
                     let fallback =
                         match name with
                         | "FirstOrDefault" | "LastOrDefault" | "SingleOrDefault" ->
@@ -268,16 +266,15 @@ module internal OrderedChain =
                         | _ -> None
                     if name.StartsWith("Single", StringComparison.Ordinal) then
                         let n = scalar(SqlExpr.AggregateCall(AggregateKind.Count, None, false, None))
-                        let absent = QueryProduced.typed call.Type (SqlExpr.Literal SqlLiteral.Null)
                         let empty = fallback |> Option.defaultValue absent
                         let emptyOrMultiple = QueryProduced.choose call.Type (SqlExpr.Binary(n, BinaryOperator.Eq, integer 0L)) empty absent
                         Some(QueryProduced.choose call.Type (SqlExpr.Binary(n, BinaryOperator.Eq, integer 1L)) one emptyOrMultiple)
                     else
                         match fallback with
-                        | None -> Some one
-                        | Some fallback ->
-                            let present = SqlExpr.Exists(select { core source [proj "v" (integer 1L)] with Limit = Some(integer 1L) })
-                            Some(QueryProduced.choose call.Type present one fallback)
+                        | None when not needsDefault -> Some one
+                        | _ ->
+                            let fallback = fallback |> Option.defaultValue absent
+                            Some(QueryProduced.defaultIfEmpty call.Type one fallback)
                 | "Any" ->
                     match rows.Body with
                     | SingleSelect row when (orderUnobserved || not row.GroupBy.IsEmpty) && rows.Ctes.IsEmpty ->

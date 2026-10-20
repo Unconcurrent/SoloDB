@@ -183,6 +183,13 @@ module internal QueryProduced =
     let chooseRaw target condition whenTrue whenFalse =
         choose target condition (rawValue whenTrue) (rawValue whenFalse)
 
+    /// A selected row has a packet even when its payload is null.
+    let defaultIfEmpty target selected fallback =
+        match selected with
+        | PackedValue(selected, input) ->
+            PackedValue(SqlExpr.Coalesce(selected, [packet fallback]), mergeInputs target [|input; fallback.Input|])
+        | _ -> invalidArg (nameof selected) "A default selection requires a row packet."
+
     /// A nullable result chooses its fallback lazily from the bound left value.
     let private coalesceCore raw nextName target left right =
         let left = PackedValue((if raw then rawPacket left else packet left), rebaseSerializationInput left.Input)
