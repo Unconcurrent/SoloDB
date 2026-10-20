@@ -70,7 +70,7 @@ internal static class QueryExpressionInputs
         var known = source && value != null && value is not IParenthesizedOperation &&
             (value is not IConversionOperation conversionValue || conversionValue.OperatorMethod != null)
                 ? KnownSource(value.Type,value.Syntax,symbols) : null;
-        if (known != null && value is IArrayCreationOperation or ICollectionExpressionOperation) return new[] { known };
+        if (known != null && (value is IArrayCreationOperation || value?.Syntax is CollectionExpressionSyntax)) return new[] { known };
         var origins = ReadOrigins(compilation,value,symbols,visited,source,stored).ToArray();
         return origins.Length != 0 || known == null ? origins : new[] { known };
     }
@@ -102,10 +102,11 @@ internal static class QueryExpressionInputs
                 return Read(compilation, array.Initializer, symbols, visited,source);
             case IArrayInitializerOperation initializer:
                 return initializer.ElementValues.SelectMany(element => Read(compilation, element, symbols, visited,source)).ToArray();
-            case ICollectionExpressionOperation collection:
-                return collection.Elements.SelectMany(element => Read(compilation, element, symbols, visited,source)).ToArray();
-            case ISpreadOperation spread:
-                return Read(compilation, spread.Operand, symbols, visited,source);
+            case { Syntax: CollectionExpressionSyntax collection }:
+                var model = compilation.GetSemanticModel(collection.SyntaxTree);
+                return collection.Elements.SelectMany(element => Read(compilation, model.GetOperation(
+                    element is ExpressionElementSyntax expression ? expression.Expression : ((SpreadElementSyntax)element).Expression),
+                    symbols, visited,source)).ToArray();
             case IConditionalOperation conditional:
                 return Read(compilation, conditional.WhenTrue, symbols, visited,source)
                     .Concat(Read(compilation, conditional.WhenFalse, symbols, visited,source)).ToArray();

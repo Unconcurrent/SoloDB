@@ -30,7 +30,7 @@ module internal DBRefManyBuilderCore =
         (lnkAlias: string)
         : OrderBy list voption =
         let declaredOrders = ownerRef.Reference.Input.ReferenceOwner.Value.Sources |> Array.choose (fun source ->
-            source.Owner |> ValueOption.toOption |> Option.map (fun owner ->
+            source.Owner |> Utils.valueOptionToOption |> Option.map (fun owner ->
                 RelationMetadata.Get(owner.OwnerType)
                 |> Array.tryFind(fun memberInfo -> memberInfo.Name = source.PropertyName)
                 |> Option.map(fun memberInfo -> if isNull memberInfo.Policy then DBRefOrder.Undefined else memberInfo.Policy.OrderBy)

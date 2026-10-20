@@ -50,7 +50,7 @@ module internal QuerySerializationChildren =
             match JsonSerializator.JsonValue.SerializationShape parent with
             | JsonSerializator.JsonSerializationShape.ArrayMembers members ->
                 members |> Array.tryFindIndex (fun memberInfo -> memberInfo.ClrName = name && memberInfo.ValueType.Equals target)
-                |> ValueOption.ofOption |> ValueOption.bind position
+                |> Utils.optionToValueOption |> ValueOption.bind position
             | _ -> ValueNone
         | _ -> ValueNone
 
@@ -65,7 +65,7 @@ module internal QuerySerializationChildren =
                 | ClrMember(name, valueType) -> memberInfo.ClrName = name && memberInfo.ValueType.Equals valueType
                 | StoredLabel(:? string as name) -> memberInfo.StoredName = name
                 | _ -> false)
-            |> ValueOption.ofOption
+            |> Utils.optionToValueOption
             |> ValueOption.bind (fun index -> child members[index].ValueType (ValueSome index) (box members[index].StoredName)
                                              |> ValueOption.map (fun selected -> { selected with ClrName = ValueSome members[index].ClrName }))
             |> ValueOption.orElseWith (fun () ->
@@ -86,7 +86,7 @@ module internal QuerySerializationChildren =
             selectPositionChild parent members.Length (fun index -> members[index].ValueType) access
         | JsonSerializator.JsonSerializationShape.ArrayMembers members, ClrMember(name, valueType) ->
             members |> Array.tryFindIndex (fun memberInfo -> memberInfo.ClrName = name && memberInfo.ValueType.Equals valueType)
-            |> ValueOption.ofOption
+            |> Utils.optionToValueOption
             |> ValueOption.bind (fun index -> child members[index].ValueType (ValueSome index) (box index))
         | JsonSerializator.JsonSerializationShape.DeclaredArrayMembers members, _ ->
             selectPositionChild parent members.Length (fun index -> members[index]) access

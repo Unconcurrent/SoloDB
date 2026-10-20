@@ -3,6 +3,9 @@
     <SoloDBMetadataToolsPath Condition="'$(SoloDBMetadataToolsPath)' == ''">$(MSBuildThisFileDirectory)../tools/netstandard2.0/SoloDB.Metadata.Tools.dll</SoloDBMetadataToolsPath>
     <SoloDBContextMode Condition="'$(SoloDBContextMode)' == ''">check</SoloDBContextMode>
     <SoloDBFSharpProviderPath Condition="'$(SoloDBFSharpProviderPath)' == ''">$(MSBuildThisFileDirectory)../tools/netstandard2.0/SoloDB.Metadata.FSharp.dll</SoloDBFSharpProviderPath>
+    <_SoloDBDotNetHost>$(DotNetHostPath)</_SoloDBDotNetHost>
+    <_SoloDBDotNetHost Condition="'$(_SoloDBDotNetHost)' == ''">$(DOTNET_HOST_PATH)</_SoloDBDotNetHost>
+    <_SoloDBDotNetHost Condition="'$(_SoloDBDotNetHost)' == '' and '$(NetCoreRoot)' != ''">$(NetCoreRoot)dotnet</_SoloDBDotNetHost>
     <NonExistentFile Condition="'$(DesignTimeBuild)' == 'true' and '$(SkipCompilerExecution)' == 'true' and '$(ProvideCommandLineArgs)' == 'true'">$(IntermediateOutputPath)SoloDB.Generated/command-line-only</NonExistentFile>
   </PropertyGroup>
   <UsingTask TaskName="SoloDatabase.Metadata.Tools.CaptureProjectContext" AssemblyFile="$(SoloDBMetadataToolsPath)" />
@@ -23,7 +26,7 @@
     <SoloDatabase.Metadata.Tools.CaptureProjectContext Output="$(_SoloDBProjectContext)" Project="$(MSBuildProjectFullPath)"
         Mode="$(SoloDBContextMode)" Arguments="@(FscCommandLineArgs)" />
     <SoloDatabase.Metadata.Tools.PrepareFSharpProject Condition="'$(SoloDBContextMode)' == 'execute'"
-        Provider="$(SoloDBFSharpProviderPath)"
+        Provider="$(SoloDBFSharpProviderPath)" DotNetHost="$(_SoloDBDotNetHost)"
         Context="$(_SoloDBProjectContext)" AssemblyName="$(AssemblyName)"
         AttributeSource="$(_SoloDBAttributeSource)" Template="$(_SoloDBTemplate)" />
     <ItemGroup>

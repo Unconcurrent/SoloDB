@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><DefineConstants>$(DefineConstants);METADATA_TOOLING</DefineConstants><TargetFramework>netstandard2.0</TargetFramework><GenerateDocumentationFile>true</GenerateDocumentationFile><TreatWarningsAsErrors>true</TreatWarningsAsErrors><NuGetAudit>true</NuGetAudit></PropertyGroup>
   <ItemGroup>
-    <PackageReference Update="FSharp.Core" Version="10.0.100" />
+    <PackageReference Update="FSharp.Core" Version="8.0.100" />
     <Compile Include="AssemblyInfo.fs" />
     <Compile Include="../SoloDB/Json/JsonStringLiteral.fs" Link="JsonStringLiteral.fs" />
     <Compile Include="../SoloDB/Metadata/CodecModel.fs" Link="CodecModel.fs" />

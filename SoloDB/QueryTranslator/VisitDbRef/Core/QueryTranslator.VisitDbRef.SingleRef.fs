@@ -94,7 +94,7 @@ module internal QueryTranslatorVisitDbRefSingleRef =
                         header, header, Some alias, ValueNone
                     else
                         let loading = referenceInput.Input.ReferenceOwner |> ValueOption.bind (fun owner -> owner.Sources[0].Owner |> ValueOption.map _.Loading)
-                        let owner = (QuerySerializationInput.ForOwner(target, edge.TargetTable, SqlExpr.Column(Some alias, "Id"), ?loading = ValueOption.toOption loading)).PhysicalOwner
+                        let owner = (QuerySerializationInput.ForOwner(target, edge.TargetTable, SqlExpr.Column(Some alias, "Id"), ?loading = Utils.valueOptionToOption loading)).PhysicalOwner
                         groupedRowValue target alias,
                         SqlExpr.FunctionCall("jsonb", [SqlExpr.Column(Some alias, "Value")]), Some alias, owner
                 let input = { QuerySerializationInput.ForType target with Source = ValueSome source; PhysicalOwner = physicalOwner; Navigation = navigation }

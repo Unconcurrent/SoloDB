@@ -11,7 +11,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../SoloDB.Metadata.Codecs/SoloDB.Metadata.Codecs.fsproj" PrivateAssets="all" />
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" PrivateAssets="all" />
     <Compile Include="../SoloDB.Metadata.Generation/Model.cs" Link="Generation/Model.cs" />
     <Compile Include="../SoloDB.Metadata.Generation/CSharpEmitter.cs" Link="Generation/CSharpEmitter.cs" />
   </ItemGroup>

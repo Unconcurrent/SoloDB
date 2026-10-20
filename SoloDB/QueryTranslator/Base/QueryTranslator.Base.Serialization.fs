@@ -66,7 +66,7 @@ module internal QueryTranslatorSerialization =
         { QuerySerializationInput.ForType target with
             Shape = match sequence with
                     | ValueSome element -> ValueSome(JsonSerializator.JsonSerializationShape.SequenceValues element)
-                    | ValueNone -> layout |> ValueOption.ofOption |> ValueOption.bind _.Shape
+                    | ValueNone -> layout |> Utils.optionToValueOption |> ValueOption.bind _.Shape
             Children = children
             Carrier = if inputs |> Array.forall (fun input -> input.Carrier = first.Carrier) then first.Carrier else CanonicalToken
             LegacyCharacterText = inputs |> Array.exists _.LegacyCharacterText

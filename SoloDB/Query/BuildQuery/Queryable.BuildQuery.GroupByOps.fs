@@ -135,7 +135,7 @@ module internal QueryableBuildQueryGroupByOps =
         let rec rawProducer expression =
             match expression with
             | expression when isGroupKey groupParam expression -> ValueSome rawKey
-            | _ -> QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr rawContext innerSelect "o" groupParam vars rawSources rawProducer expression |> ValueOption.ofOption
+            | _ -> QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr rawContext innerSelect "o" groupParam vars rawSources rawProducer expression |> Utils.optionToValueOption
         let rawGrouping = lazy(groupingValue sourceCtx.NextAlias groupParam.Type rawKey
                                 (QueryableBuildQueryGroupByChained.collection rawContext innerSelect "o" groupParam vars rawSources rawProducer (item.OriginalType.MakeArrayType())))
         rawSources[groupParam] <- { Alias = Some "o"; Context = rawContext; Value = DeferredParameter rawGrouping }
@@ -153,8 +153,8 @@ module internal QueryableBuildQueryGroupByOps =
                 let scalar = QueryGroupScalar.tryTranslate groupParam None translateArgument expr
                 match scalar with
                 | Some value -> ValueSome(completion.Bind(QueryProduced.typed mc.Type value))
-                | None -> QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr sourceCtx innerSelect completion.Alias groupParam vars sources producer expr |> ValueOption.ofOption
-            | _ -> QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr sourceCtx innerSelect completion.Alias groupParam vars sources producer expr |> ValueOption.ofOption
+                | None -> QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr sourceCtx innerSelect completion.Alias groupParam vars sources producer expr |> Utils.optionToValueOption
+            | _ -> QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr sourceCtx innerSelect completion.Alias groupParam vars sources producer expr |> Utils.optionToValueOption
         producer
 
     let private translateGroupBody completion sourceCtx innerSelect groupParam parameters vars expression =

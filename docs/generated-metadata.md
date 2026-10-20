@@ -114,6 +114,8 @@ When generation is inactive, ordinary JIT execution discovers supported type ope
 
 The compiler and provider tooling are build-time dependencies and are not copied into application output. Keep generated runtime helper assemblies delivered by the package build integration: those contain application operations rather than the compiler tooling.
 
+The build integration supports .NET SDK 8 and later; installing SDK 10 separately is unnecessary. F# analysis uses the installed SDK's .NET host. The runtime library requires FSharp.Core 8.0.100 or later, and projects can retain a newer FSharp.Core version.
+
 Registration prepares type operations and query execution routes; it does not pregenerate SQL. LINQ translation and `collection.Compile` retain their existing responsibilities. Validate the actual queries and deployment target you use.
 
 ## F# query quotations

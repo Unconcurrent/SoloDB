@@ -7,7 +7,7 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
   <ItemGroup>
-    <InternalsVisibleTo Include="SoloDB.Metadata.FSharp" />
+    <InternalsVisibleTo Include="SoloDB.Metadata.FSharp.Analysis" />
     <ProjectReference Include="../SoloDB.Metadata.Codecs/SoloDB.Metadata.Codecs.fsproj" />
     <Compile Include="../SoloDB.Metadata.Generation/Model.cs" Link="Generation/Model.cs" />
     <PackageReference Include="System.Reflection.Metadata" Version="9.0.0" PrivateAssets="all" />

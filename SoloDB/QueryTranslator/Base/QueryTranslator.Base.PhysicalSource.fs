@@ -40,7 +40,7 @@ module internal QueryTranslatorPhysicalSource =
             match reference.Descriptor with
             | SqlExpr.JsonArrayExpr [owner; _] -> owner
             | _ -> SqlExpr.FunctionCall("jsonb_extract", [reference.Descriptor; SqlExpr.Literal(SqlLiteral.String "$[0]")])
-        { Sources = reference.Sources |> Array.choose (fun source -> source.Owner |> ValueOption.toOption) |> Array.distinct; Descriptor = descriptor }
+        { Sources = reference.Sources |> Array.choose (fun source -> source.Owner |> Utils.valueOptionToOption) |> Array.distinct; Descriptor = descriptor }
 
     let internal selectsReferenceSource (reference: QueryReferenceOwner) (source: QueryReferenceSource) =
         let property =

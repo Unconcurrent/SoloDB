@@ -23,6 +23,12 @@ module internal Utils =
 
     let isNull x = Object.ReferenceEquals(x, null)
 
+    let inline optionToValueOption value =
+        match value with Some item -> ValueSome item | None -> ValueNone
+
+    let inline valueOptionToOption value =
+        match value with ValueSome item -> Some item | ValueNone -> None
+
     /// Returns a deterministic variable name based on a int.
     let internal getVarName (l: int) =
         $"V{l}"

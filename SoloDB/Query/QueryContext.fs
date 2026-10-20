@@ -319,7 +319,7 @@ type internal QueryContext = {
 
     /// Query navigation retains one owner-qualified target and fallback policy.
     member this.ResolveQueryRelationTarget(ownerCollection: string voption, propertyName: string, targetType: System.Type) =
-        let mapped = ownerCollection |> ValueOption.toOption |> Option.bind (fun owner -> this.TryResolveRelationTarget(owner, propertyName))
+        let mapped = ownerCollection |> Utils.valueOptionToOption |> Option.bind (fun owner -> this.TryResolveRelationTarget(owner, propertyName))
         match mapped with
         | Some mapped when not(System.String.IsNullOrWhiteSpace mapped) -> Utils.formatName mapped
         | _ -> this.ResolveCollectionForType(TypeMetadata.typeIdentityKey targetType, Utils.formatName targetType.Name)

@@ -15,6 +15,8 @@ Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "SoloDB.Metadata.Codecs", "S
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SoloDB.Metadata.CSharp", "SoloDB.Metadata.CSharp\SoloDB.Metadata.CSharp.csproj", "{92AD1E3F-9AE3-48DF-AAD1-204B94728B9C}"
 EndProject
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "SoloDB.Metadata.FSharp.Analysis", "SoloDB.Metadata.FSharp.Analysis\SoloDB.Metadata.FSharp.Analysis.fsproj", "{C86C1331-5DCA-4D74-AAA5-F526C0E18BE2}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -85,6 +87,18 @@ Global
 		{92AD1E3F-9AE3-48DF-AAD1-204B94728B9C}.Release|x64.Build.0 = Release|Any CPU
 		{92AD1E3F-9AE3-48DF-AAD1-204B94728B9C}.Release|x86.ActiveCfg = Release|Any CPU
 		{92AD1E3F-9AE3-48DF-AAD1-204B94728B9C}.Release|x86.Build.0 = Release|Any CPU
+		{C86C1331-5DCA-4D74-AAA5-F526C0E18BE2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C86C1331-5DCA-4D74-AAA5-F526C0E18BE2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C86C1331-5DCA-4D74-AAA5-F526C0E18BE2}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{C86C1331-5DCA-4D74-AAA5-F526C0E18BE2}.Debug|x64.Build.0 = Debug|Any CPU
+		{C86C1331-5DCA-4D74-AAA5-F526C0E18BE2}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{C86C1331-5DCA-4D74-AAA5-F526C0E18BE2}.Debug|x86.Build.0 = Debug|Any CPU
+		{C86C1331-5DCA-4D74-AAA5-F526C0E18BE2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C86C1331-5DCA-4D74-AAA5-F526C0E18BE2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C86C1331-5DCA-4D74-AAA5-F526C0E18BE2}.Release|x64.ActiveCfg = Release|Any CPU
+		{C86C1331-5DCA-4D74-AAA5-F526C0E18BE2}.Release|x64.Build.0 = Release|Any CPU
+		{C86C1331-5DCA-4D74-AAA5-F526C0E18BE2}.Release|x86.ActiveCfg = Release|Any CPU
+		{C86C1331-5DCA-4D74-AAA5-F526C0E18BE2}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

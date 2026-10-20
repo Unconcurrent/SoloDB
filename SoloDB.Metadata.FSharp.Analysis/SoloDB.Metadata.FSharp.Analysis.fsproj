@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <UseAppHost>false</UseAppHost>
+    <RollForward>Major</RollForward>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <NuGetAudit>true</NuGetAudit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="CompilerReferences.fs" />
+    <Compile Include="CompilerPropertyFacts.fs" />
+    <Compile Include="UnionDiscovery.fs" />
+    <Compile Include="ModelDiscovery.fs" />
+    <Compile Include="QueryMemberWitnesses.fs" />
+    <Compile Include="QueryExpressionInputs.fs" />
+    <Compile Include="ArgumentSourceFacts.fs" />
+    <Compile Include="RawSqlInputs.fs" />
+    <Compile Include="QueryDiscovery.fs" />
+    <Compile Include="ProjectGeneration.fs" />
+    <Compile Include="Program.fs" />
+    <ProjectReference Include="../SoloDB.Metadata.Tools/SoloDB.Metadata.Tools.csproj" />
+    <PackageReference Include="FSharp.Compiler.Service" Version="43.10.100" PrivateAssets="all" />
+    <PackageReference Include="Mono.Cecil" Version="0.11.6" PrivateAssets="all" />
+    <PackageReference Update="FSharp.Core" Version="10.0.100" />
+  </ItemGroup>
+  <Target Name="RecordFSharpAnalysisFiles" AfterTargets="CopyFilesToOutputDirectory">
+    <ItemGroup>
+      <_SoloDBAnalysisFile Include="$(TargetPath);$(ProjectDepsFilePath);$(ProjectRuntimeConfigFilePath)" />
+      <_SoloDBAnalysisFile Include="@(ReferenceCopyLocalPaths)" Condition="'%(Extension)' == '.dll'" />
+      <FileWrites Include="$(TargetDir)SoloDB.Analysis.files" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(TargetDir)SoloDB.Analysis.files"
+                      Lines="@(_SoloDBAnalysisFile->'%(DestinationSubDirectory)%(Filename)%(Extension)')"
+                      Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
+</Project>

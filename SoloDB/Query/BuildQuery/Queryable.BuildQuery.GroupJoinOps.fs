@@ -187,8 +187,8 @@ module internal QueryableBuildQueryGroupJoinOps =
                         | :? MemberExpression as memberAccess when not(isNull memberAccess.Expression) ->
                             match tryMatchGroupElementCall runtime memberAccess.Expression with
                             | Some call -> ValueSome(buildGroupElementDispatch runtime call expr)
-                            | None -> OrderedChain.tryBuild orderedAdapter expr |> ValueOption.ofOption
-                        | _ -> OrderedChain.tryBuild orderedAdapter expr |> ValueOption.ofOption
+                            | None -> OrderedChain.tryBuild orderedAdapter expr |> Utils.optionToValueOption
+                        | _ -> OrderedChain.tryBuild orderedAdapter expr |> Utils.optionToValueOption
                 let captures = Dictionary<ParameterExpression, ParameterSource>()
                 captures[outerParam] <- { Alias = Some completion.Alias; Context = outerCtx; Value = SourceParameter }
                 let groupContext =

@@ -55,7 +55,7 @@ module internal SQLiteToolsMapper =
                 Array.init count (fun index -> start + index)
             else
                 let model = JsonModelDiscovery.Model typ
-                let fields = TypeMetadata.recordFields typ |> ValueOption.toOption
+                let fields = TypeMetadata.recordFields typ |> Utils.valueOptionToOption
                 let properties, fallback =
                     match fields with
                     | Some _ -> model.Members,[||]

@@ -70,7 +70,7 @@ module internal OrderedChain =
                     let handler expression =
                         if QueryGroupScalar.isKey parameter expression then ValueSome(DirectValue(col groupAlias keyName, keyInput))
                         else QueryGroupScalar.tryTranslate parameter None argument expression
-                             |> Option.map (QueryProduced.typed expression.Type) |> ValueOption.ofOption
+                             |> Option.map (QueryProduced.typed expression.Type) |> Utils.optionToValueOption
                     let produced, edges = adapter.Translate plan.Root groupInput groupAlias predicate (ValueSome handler)
                     joins.AddRange edges
                     QueryProduced.value adapter.Alias produced

@@ -460,18 +460,21 @@
   </ItemGroup>
 
   <Target Name="SoloDBCollectMetadataTools" BeforeTargets="_GetPackageFiles">
+    <ReadLinesFromFile File="../SoloDB.Metadata.FSharp/bin/$(Configuration)/netstandard2.0/SoloDB.FSharp.files">
+      <Output TaskParameter="Lines" ItemName="_SoloDBFSharpFile" />
+    </ReadLinesFromFile>
     <ItemGroup>
       <None Include="../SoloDB.Metadata.CSharp/bin/$(Configuration)/netstandard2.0/SoloDB.Metadata.CSharp.dll;../SoloDB.Metadata.CSharp/bin/$(Configuration)/netstandard2.0/SoloDB.Metadata.Codecs.dll;../SoloDB.Metadata.CSharp/bin/$(Configuration)/netstandard2.0/FSharp.Core.dll"
             Pack="true" PackagePath="analyzers/dotnet/cs" />
-      <None Include="../SoloDB.Metadata.FSharp/bin/$(Configuration)/netstandard2.0/*.dll"
-            Pack="true" PackagePath="tools/netstandard2.0" />
+      <None Include="../SoloDB.Metadata.FSharp/bin/$(Configuration)/netstandard2.0/%(_SoloDBFSharpFile.Identity)"
+            Pack="true" PackagePath="tools/netstandard2.0/%(_SoloDBFSharpFile.Identity)" />
       <None Include="../SoloDB.Metadata.FSharp/FSharp.TypeProviders.SDK.LICENSE.txt"
             Pack="true" PackagePath="tools/netstandard2.0" />
     </ItemGroup>
   </Target>
 
   <ItemGroup>
-    <PackageReference Update="FSharp.Core" Version="9.0.300" />
+    <PackageReference Update="FSharp.Core" Version="8.0.100" />
   </ItemGroup>
 
 </Project>

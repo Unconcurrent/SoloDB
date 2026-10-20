@@ -65,7 +65,7 @@ module internal ModelDiscovery =
                     valData = SynValData(memberFlags = Some flags); range = location), _)) when flags.MemberKind = SynMemberKind.Constructor ->
                     constructorVisibility.Add(location,isPublic access)
                 | _ -> ()) () input
-        let path file = Path.GetFullPath(if Path.IsPathRooted(file) then file else Path.Combine(projectDirectory,file))
+        let path (file: string) = Path.GetFullPath(if Path.IsPathRooted(file) then file else Path.Combine(projectDirectory,file))
         let publicConstructor (memberValue: FSharpMemberOrFunctionOrValue) =
             memberValue.IsConstructor &&
             ((memberValue :> FSharpSymbol).DeclarationLocation |> Option.bind(fun declared ->

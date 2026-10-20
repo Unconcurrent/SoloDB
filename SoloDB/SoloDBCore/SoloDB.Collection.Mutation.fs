@@ -526,8 +526,8 @@ type internal CollectionMutationOps<'T>() =
         (selectMutationRows: NativeSqliteConnection -> Expression<Func<'T, bool>> -> bool -> DbObjectRow array)
         (executeJsonUpdateManyByRows: NativeSqliteConnection -> RelationMutationStatements.SelectedOwners -> ResizeArray<Expression<System.Action<'T>>> -> int) =
 
-        let transform = nullArgCheck (nameof transform) transform
-        let filter = nullArgCheck (nameof filter) filter
+        if isNull transform then nullArg (nameof transform)
+        if isNull filter then nullArg (nameof filter)
         if transform |> Array.exists isNull then
             raise (ArgumentException("transform cannot contain null elements.", nameof(transform)))
 

@@ -12,8 +12,7 @@ open SoloDatabase.Metadata.Tools
 
 /// Produces the executable template and its final compiler inputs together.
 type ProjectGeneration private () =
-    static member Write(contextPath: string, assemblyName: string, attributeSource: string, templatePath: string, report: Action<string,int,int,string>) =
-        let workspace = Path.Combine(Path.GetDirectoryName(contextPath), Guid.NewGuid().ToString("N"))
+    static member Write(contextPath: string, assemblyName: string, attributeSource: string, templatePath: string, workspace: string, report: Action<string,int,int,string>) =
         try
             Directory.CreateDirectory(workspace) |> ignore
             let project, arguments =
@@ -51,7 +50,7 @@ type ProjectGeneration private () =
                 let providerIdentity = result.ProjectContext.GetReferencedAssemblies()
                                        |> Seq.find(fun assembly -> assembly.SimpleName = "SoloDB.Metadata.FSharp")
                                        |> fun assembly -> "SoloDatabase.SoloDBAOT, " + assembly.QualifiedName
-                let file path = Path.GetFullPath(if Path.IsPathRooted(path) then path else Path.Combine(Path.GetDirectoryName(project),path))
+                let file (path: string) = Path.GetFullPath(if Path.IsPathRooted(path) then path else Path.Combine(Path.GetDirectoryName(project),path))
                 let contains (outer: range) (inner: range) =
                     file outer.FileName = file inner.FileName && (outer.StartLine,outer.StartColumn) <= (inner.StartLine,inner.StartColumn) &&
                     (inner.EndLine,inner.EndColumn) <= (outer.EndLine,outer.EndColumn)

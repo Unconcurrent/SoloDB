@@ -5,21 +5,26 @@
     <NuGetAudit>true</NuGetAudit>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="CompilerReferences.fs" />
-    <Compile Include="CompilerPropertyFacts.fs" />
-    <Compile Include="UnionDiscovery.fs" />
-    <Compile Include="ModelDiscovery.fs" />
-    <Compile Include="QueryMemberWitnesses.fs" />
-    <Compile Include="QueryExpressionInputs.fs" />
-    <Compile Include="ArgumentSourceFacts.fs" />
-    <Compile Include="RawSqlInputs.fs" />
-    <Compile Include="QueryDiscovery.fs" />
-    <Compile Include="ProjectGeneration.fs" />
     <Compile Include="Provider.fs" />
     <ProjectReference Include="../SoloDB.Metadata.Tools/SoloDB.Metadata.Tools.csproj" />
+    <ProjectReference Include="../SoloDB.Metadata.FSharp.Analysis/SoloDB.Metadata.FSharp.Analysis.fsproj" ReferenceOutputAssembly="false" PrivateAssets="all" SkipGetTargetFrameworkProperties="true" />
     <PackageReference Include="FSharp.TypeProviders.SDK" Version="8.11.0" PrivateAssets="all" />
-    <PackageReference Include="FSharp.Compiler.Service" Version="43.10.100" PrivateAssets="all" />
     <PackageReference Include="Mono.Cecil" Version="0.11.6" PrivateAssets="all" />
-    <PackageReference Update="FSharp.Core" Version="10.0.100" />
+    <PackageReference Update="FSharp.Core" Version="8.0.100" />
   </ItemGroup>
+  <Target Name="CopyFSharpAnalysis" AfterTargets="CopyFilesToOutputDirectory">
+    <ReadLinesFromFile File="../SoloDB.Metadata.FSharp.Analysis/bin/$(Configuration)/net8.0/SoloDB.Analysis.files">
+      <Output TaskParameter="Lines" ItemName="_SoloDBAnalysisFile" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <_SoloDBProviderFile Include="$(TargetPath)" />
+      <_SoloDBProviderFile Include="@(ReferenceCopyLocalPaths)" Condition="'%(Extension)' == '.dll'" />
+      <FileWrites Include="$(TargetDir)SoloDB.FSharp.files;@(_SoloDBAnalysisFile->'$(TargetDir)analysis/%(Identity)')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_SoloDBAnalysisFile->'../SoloDB.Metadata.FSharp.Analysis/bin/$(Configuration)/net8.0/%(Identity)')"
+          DestinationFiles="@(_SoloDBAnalysisFile->'$(TargetDir)analysis/%(Identity)')" />
+    <WriteLinesToFile File="$(TargetDir)SoloDB.FSharp.files"
+                      Lines="@(_SoloDBProviderFile->'%(DestinationSubDirectory)%(Filename)%(Extension)');@(_SoloDBAnalysisFile->'analysis/%(Identity)')"
+                      Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
 </Project>
