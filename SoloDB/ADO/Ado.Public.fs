@@ -501,7 +501,11 @@ and [<AllowNullLiteral>] SqliteConnection private (session: AdoSession) as this 
                     borrowed <- new SqliteTransaction(this, session, transaction, false)
                     borrowedEpoch <- epoch
                 borrowed)
-    member _.CreateCommand() = session.GuardPresentation(fun () -> new SqliteCommand(this, session))
+    member _.CreateCommand() = session.GuardPresentation(fun () ->
+        let command = new SqliteCommand(this, session)
+        if session.State = ConnectionState.Open && session.Native.HasOwnedTransaction then
+            command.Transaction <- this.CurrentTransaction
+        command)
     override _.CreateDbCommand() = this.CreateCommand() :> DbCommand
     override _.DbProviderFactory = SqliteFactory.Instance
     override _.ConnectionString
