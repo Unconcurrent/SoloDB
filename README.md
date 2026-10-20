@@ -2,8 +2,6 @@
 
 Store your C# and F# objects, query them with LINQ, and keep related documents and files together in one SQLite database. SoloDB runs inside your application, with transactions and SQL available when you need them.
 
-> This branch documents the upcoming **SoloDB 1.4.0**. The latest published NuGet release is **1.3.0**. Generated operations, direct typed JSON, and filesystem events and references described here require 1.4 when it is released.
-
 ## Table of Contents
 
 - [Core Features](#core-features)
@@ -57,19 +55,17 @@ In a world of countless database solutions, SoloDB was created to fill a specifi
 
 ## Installation
 
-Install the published stable release from NuGet:
+Install SoloDB from NuGet:
 
 ```bash
-dotnet add package SoloDB --version 1.3.0
+dotnet add package SoloDB
 ```
-
-The 1.4 APIs below describe this development branch and are not included in that package. The [website documentation](https://solodb.org/docs.html) currently covers the earlier published API; its 1.4 update will accompany the package release.
 
 Before upgrading a database to 1.4, stop every older SoloDB process using it. Opening the file advances its database version to 6; SoloDB 1.3 then refuses to reopen it. Do not lower `PRAGMA user_version` to bypass that protection. See [numerical storage and migration](docs/generated-metadata.md#numerical-storage-and-migration).
 
 ## Generated Metadata Registration
 
-C# and F# projects can register build-generated operations for their original model types. See the [registration guide](docs/generated-metadata.md) for inferred roots, explicit registration, conditional activation and current NativeAOT validation limits.
+C# and F# projects can register build-generated operations for their original model types. See the [registration guide](docs/generated-metadata.md) for inferred roots, explicit registration, conditional activation and NativeAOT requirements.
 
 ## Direct Typed JSON
 

@@ -1,7 +1,5 @@
 # Direct SQL connections
 
-> This guide describes the upcoming SoloDB 1.4.0. The published NuGet release is 1.3.0; see the [README](../README.md#installation) for the release distinction.
-
 SoloDB exposes a native SQLite connection in `SoloDatabase`. Named SQL execution, typed results, transactions, callbacks and backups use the configured SQLitePCL engine.
 
 ```csharp
@@ -26,7 +24,7 @@ A `SqlRow` borrows its current execution lease. Read it before advancing, dispos
 
 ## SQLite engine and WAL compatibility
 
-The bundled native dependency supplies SQLite 3.53.3, including the upstream WAL-reset fix. Packaged JIT and linux-x64 NativeAOT controls report that engine; static asset inspection on other platforms establishes provenance rather than execution.
+The bundled native dependency supplies SQLite 3.53.3, including the upstream WAL-reset fix.
 
 SoloDB honors a SQLitePCL provider selected by the application before its first connection. A package version is not the loaded SQLite version. Query the actual connection with:
 

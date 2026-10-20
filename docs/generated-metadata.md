@@ -1,14 +1,8 @@
 # Generated metadata registration
 
-> This guide describes the upcoming SoloDB 1.4.0. The published NuGet release is 1.3.0; see the [README](../README.md#installation) for the release distinction.
-
-Package-backed C# and F# examples and generated query controls have passed JIT and linux-x64 NativeAOT checks. These results do not establish every native platform or warning-free publication. F# NativeAOT queries use `CompileQuotation` as described below.
-
 The `SoloDB` package includes a C# source generator, an F# type provider and their build integration. Keep the package's build assets enabled; no separate generator package or manual build-target import is required for package consumers.
 
 Both routes generate operations for your original model types, preserving their visibility and CLR identity. They share conversion and storage policies with ordinary runtime-discovered operations; registration does not select a different database format. The [numerical storage upgrade](#numerical-storage-and-migration) applies to both routes. You do not need replacement models or `partial` declarations on models. Generated operations can also be used in ordinary JIT applications.
-
-Private nested C# model controls, including closed generics, arrays, captured fields and anonymous client results, pass package-backed JIT with dynamic discovery disabled and linux-x64 NativeAOT checks.
 
 ## C#
 
@@ -110,7 +104,7 @@ This example activates generation in Release and omits it in Debug. Any user-def
 
 ## JIT and NativeAOT deployment
 
-When generation is inactive, ordinary JIT execution discovers supported type operations lazily at runtime. Registered generated operations take precedence when present. Captured generic fields, nullable comparisons, exact constructors and nested predicates pass current compatibility controls. NativeAOT needs generated coverage; runtime discovery is not a substitute for missing operations. PublishAot belongs on the consuming executable project, including when its models live in a .NET Standard library.
+When generation is inactive, ordinary JIT execution discovers supported type operations lazily at runtime. Registered generated operations take precedence when present. NativeAOT needs generated coverage; runtime discovery is not a substitute for missing operations. PublishAot belongs on the consuming executable project, including when its models live in a .NET Standard library.
 
 The compiler and provider tooling are build-time dependencies and are not copied into application output. Keep generated runtime helper assemblies delivered by the package build integration: those contain application operations rather than the compiler tooling.
 
@@ -118,7 +112,7 @@ The build integration supports .NET SDK 8 and later; installing SDK 10 separatel
 
 Application APIs have separate NativeAOT requirements. On .NET 8 linux-x64 with FSharp.Core 8.0.403, formatted `printfn` can fail with missing native generic code even in an executable without SoloDB. Model registration does not supply that framework code. Use compatible application output, such as `Console.WriteLine`, for that deployment.
 
-Registration prepares type operations and query execution routes; it does not pregenerate SQL. LINQ translation and `collection.Compile` retain their existing responsibilities. Validate the actual queries and deployment target you use.
+Registration prepares type operations and query execution routes; it does not pregenerate SQL. LINQ translation and `collection.Compile` retain their existing responsibilities.
 
 ## F# query quotations
 
@@ -137,13 +131,11 @@ let person = find.Invoke(id)
 
 Keep query construction, including `Where`, `OrderBy` and `Select` lambdas, inside the outer `CompileQuotation` lambda. Changing only the final method cannot repair conversion that already happened while building a query. Sequence, ordered sequence, scalar and client-result forms accept zero through three invocation arguments and retain their existing delegate and result semantics.
 
-Package-backed expanded F# quotation controls pass on linux-x64 NativeAOT with dynamic discovery disabled. Record construction uses registered field order and direct constructor operations, without runtime constructor discovery or constructor-handle lookup. F# quotation construction still has its own metadata requirements; generated execution support does not imply application-wide zero reflection. These checks do not establish all-platform query coverage.
-
 Some F# union field accessors need a metadata flag correction for NativeAOT quotation deserialization. For affected unsigned model libraries, the package automatically prepares private native compiler inputs with the necessary flag; original assemblies, model signatures and method bodies remain unchanged. No manual patch or extra package is required, and `FSharp.Core` is not modified. A signed model library needing this correction remains unchanged and stops the native build with a `SOLO005` error because signed-library correction is unsupported. Signed assemblies that do not need the correction remain supported.
 
 ## Direct typed JSON
 
-Direct JSON operations share model conversion policies across ordinary execution and generated support. Package-backed C# and F# checks cover linux-x64 NativeAOT; these checks do not establish every native platform or warning-free publication.
+Direct JSON operations share model conversion policies across ordinary execution and generated support.
 
 `JsonValue.ParseInto<T>` reads a string, `ReadOnlySpan<byte>` containing UTF-8, or `ReadOnlySpan<char>` containing UTF-16 directly into a supported type. `JsonValue.WriteJson<T>` writes that type to a destination. Existing `Serialize<T>` still returns a `JsonValue` tree, and `Parse` still creates a tree.
 
@@ -176,7 +168,7 @@ Typed byte-sequence writers materialize the sequence before destination callback
 
 ### Internal SQLite JSON reads
 
-Immediate internal materialization on the bundled engine parses borrowed native UTF-16 text through the existing JSON reader. SQLite's text conversion occurs before user callbacks; typed materialization uses the declared stored-value policy. Configured providers without this native UTF-16 access retain owning text. This applies to ordinary and compiled query enumeration, Many relation row loops, and native JSON-tree projections. The text is consumed synchronously while the private producing statement remains active; no native span or pointer escapes into returned models or lazy results. Public UTF-8 codecs remain separate. Earlier package-backed checks covered JIT and linux-x64 NativeAOT; other native platforms were not executed.
+Immediate internal materialization on the bundled engine parses borrowed native UTF-16 text through the existing JSON reader. SQLite's text conversion occurs before user callbacks; typed materialization uses the declared stored-value policy. Configured providers without this native UTF-16 access retain owning text. This applies to ordinary and compiled query enumeration, Many relation row loops, and native JSON-tree projections. The text is consumed synchronously while the private producing statement remains active; no native span or pointer escapes into returned models or lazy results. Public UTF-8 codecs remain separate.
 
 Deferred paths retain owning payloads where required by existing behavior: collection and scalar operations whose statement completion or cardinality checks precede construction, Single relation batches that gather rows before constructing per-owner instances, mutation payloads, and deferred hydration. Those copies preserve constructor and notification order and relation identity. Typed optional JSON reads through caller-controlled ADO readers also retain owning input: application code can advance or dispose that exact producer, so the private-statement lifetime proof does not apply. They are deliberate exceptions, not a claim that every internal read avoids a copy.
 
@@ -188,9 +180,7 @@ Insert, update/replacement and cascade writes retain the shared writer's default
 
 Compiled calls use one independent invocation frame and a bounded named-parameter range. Overlapping, lazy and recursive executions retain separate state; ref/out locations and exception writes remain intact. This changes internal transport, not public object parameter APIs or span/list writer callbacks and buffer ownership.
 
-Unicode compatibility fallback can still create owning strings. SQLite's transient text binding copies the supplied text before returning; removal of an intermediate managed JSON string is not zero-copy native binding or allocation-free execution. Existing TEXT/JSONB storage semantics remain. Package-backed checks cover JIT and linux-x64 NativeAOT; other native platforms were not executed, and existing native warning qualifications remain.
-
-One checked comparison of 300 operations measured document update/read allocation falling from 21,912 to 17,376 bytes per operation in ordinary execution and 21,320 to 16,784 bytes in generated execution. Total times were 38.897 to 42.032 ms and 35.972 to 35.366 ms respectively. Compiled scalar allocation fell from 264 to 248 bytes in both routes; times rose from 5.010 to 5.452 ms and 5.161 to 5.577 ms. Client-tail allocation remained 20,040 bytes, with times 38.576 to 38.808 ms and 38.136 to 38.441 ms. This single nonstatistical sample has mixed timing results; it establishes no universal speedup, zero-allocation behavior or competitor advantage.
+Unicode compatibility fallback can still create owning strings. SQLite's transient text binding copies the supplied text before returning; removal of an intermediate managed JSON string is not zero-copy native binding or allocation-free execution. Existing TEXT/JSONB storage semantics remain.
 
 The callback types are in `SoloDatabase.JsonSerializator`:
 
@@ -240,23 +230,23 @@ Initialize collections that need conversion before accessing them from event han
 
 ### Earlier direct JSON measurements
 
-Both packaged frontends have JIT and linux-x64 NativeAOT coverage. Other native platforms were not executed; existing native warning qualifications remain.
+One historical sequential comparison measured 1,000 complete write/read round trips after 100 warmups, using escaped Unicode text and integer arrays of 9 or 4,096 elements. UTF-16 elapsed times fell from 29.852 to 16.868 ms for the small array and 1,316.985 to 637.164 ms for the large array; UTF-8 fell from 26.852 to 16.416 ms and 1,158.034 to 517.965 ms. Managed allocation per operation fell from 6,288 to 4,008 bytes and 1,526,160 to 690,128 bytes for UTF-16, and from 6,048 to 3,768 bytes and 1,460,896 to 624,864 bytes for UTF-8. Destination growth, typed arrays and lexical work still allocate.
 
-One checked comparison against the preceding implementation measured 1,000 complete write/read round trips after 100 warmups, using escaped Unicode text and integer arrays of 9 or 4,096 elements. UTF-16 elapsed times fell from 29.852 to 16.868 ms for the small array and 1,316.985 to 637.164 ms for the large array; UTF-8 fell from 26.852 to 16.416 ms and 1,158.034 to 517.965 ms. Managed allocation per operation fell from 6,288 to 4,008 bytes and 1,526,160 to 690,128 bytes for UTF-16, and from 6,048 to 3,768 bytes and 1,460,896 to 624,864 bytes for UTF-8. This single sequential sample is diagnostic, not a statistical or general speedup guarantee. Destination growth, typed arrays and lexical work still allocate. These results do not compare System.Text.Json or Newtonsoft.Json.
+A separate historical sample of 300 operations measured document update/read allocation falling from 21,912 to 17,376 bytes per operation in ordinary execution and 21,320 to 16,784 bytes in generated execution. Total times were 38.897 to 42.032 ms and 35.972 to 35.366 ms respectively. Compiled scalar allocation fell from 264 to 248 bytes in both routes; times rose from 5.010 to 5.452 ms and 5.161 to 5.577 ms. Client-tail allocation remained 20,040 bytes, with times 38.576 to 38.808 ms and 38.136 to 38.441 ms. The sample showed mixed timing results.
 
 ## JSON comparison scope
 
-An earlier implementation passed the full functional gate and packaged JIT and linux-x64 NativeAOT comparison, forward-reader and collection checks. These retained results do not establish validation of later numerical changes. Other native platforms were not executed. A narrow typed workload on .NET 10 compares separately owned UTF-8 byte arrays and UTF-16 strings, and separate reads, against System.Text.Json generated serialization/metadata readers and Newtonsoft.Json 13.0.4 with reused contracts. Required output copying and transcoding are included. Strict common inputs preserve declared wide integer, decimal and finite double values. Five rotated warm samples per cell expose variability; setup observations are first calls in an already initialized process, not comparative cold-start measurements.
+The historical .NET 10 comparison used separately owned UTF-8 byte arrays and UTF-16 strings, and separate reads, against System.Text.Json generated serialization/metadata readers and Newtonsoft.Json 13.0.4 with reused contracts. Required output copying and transcoding were included. Strict common inputs preserved declared wide integer, decimal and finite double values. It used five rotated warm samples per cell; setup observations were first calls in an already initialized process.
 
-ASCII model, string and array outputs match exactly across the tested writers. Escape-rich output differs by encoder policy, so those cells compare equivalent values with different wire work. The supplied System.Text.Json writer invokes its actual generated handler where available; default owned APIs remain distinct measured routes. Applicable native checks compare SoloDB and System.Text.Json only; Newtonsoft native reflection support is not established.
+ASCII model, string and array outputs matched exactly across the tested writers. Escape-rich output differed by encoder policy, so those cells compared equivalent values with different wire work. The supplied System.Text.Json writer invoked its actual generated handler where available; default owned APIs were distinct measured routes. The native comparison used SoloDB and System.Text.Json.
 
-The corrected ordinary 4,096-element array reads allocate 295,288 rather than 688,504 managed bytes per operation. Final ordinary median times change from 621.826 to 623.345 microseconds for UTF-16 and 521.054 to 517.675 for UTF-8, showing mixed, near-baseline array timing; generated-route observations are also near baseline with the same allocation reduction. Ordinary plain-string write medians change from 4.778 to 0.871 microseconds for UTF-16 and 4.358 to 0.720 for UTF-8. System.Text.Json remains faster in many cells. These bounded observations establish neither a universal fastest serializer nor allocation-free execution, statistical timing certainty, exact escape-rich compatibility or all-platform results. Exceptional model effects and output callbacks are covered separately from these plain-property performance models.
+The corrected ordinary 4,096-element array reads allocated 295,288 rather than 688,504 managed bytes per operation. Final ordinary median times changed from 621.826 to 623.345 microseconds for UTF-16 and 521.054 to 517.675 for UTF-8, showing mixed, near-baseline array timing; generated-route observations are also near baseline with the same allocation reduction. Ordinary plain-string write medians changed from 4.778 to 0.871 microseconds for UTF-16 and 4.358 to 0.720 for UTF-8. System.Text.Json was faster in many cells.
 
 ## SQLite provider compatibility
 
 SoloDB preserves a SQLitePCL provider selected by the application before its first connection. Database startup checks required JSONB and trigger RAISE() message-expression support (SQLite 3.47.0 and later); it does not reject an engine based on vulnerability-version labels or override a vendor backport.
 
-The default native dependency supplies SQLite 3.53.3, including the WAL-reset fix. Packaged JIT and linux-x64 NativeAOT controls report that engine. Static inspection of other platform assets establishes provenance, not execution on every platform; existing NativeAOT warning qualifications remain. Package numbers alone do not identify the loaded engine; use `SELECT sqlite_version()` on the actual connection.
+The default native dependency supplies SQLite 3.53.3, including the WAL-reset fix. Package numbers alone do not identify the loaded engine; use `SELECT sqlite_version()` on the actual connection.
 
 The document-store feature check does not govern direct `NativeSqliteConnection` or ADO use. Generated registration does not select or upgrade SQLite. See [direct SQL engine guidance](native-sql.md#sqlite-engine-and-wal-compatibility).
 
