@@ -27,9 +27,7 @@ module internal SoloDBEventsHelpers =
                 se.SqliteErrorCode = 6 ||
                 se.SqliteExtendedErrorCode = 6 ||
                 se.SqliteErrorCode = 5 ||
-                se.SqliteExtendedErrorCode = 5 ||
-                message.IndexOf("database is locked", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                message.IndexOf("database table is locked", StringComparison.OrdinalIgnoreCase) >= 0
+                se.SqliteExtendedErrorCode = 5
 
             if isLocked then
                 let wrapped = InvalidOperationException(
