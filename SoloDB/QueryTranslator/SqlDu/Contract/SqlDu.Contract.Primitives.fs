@@ -65,6 +65,23 @@ module internal JsonPathOps =
 type internal SortDirection =
     | Asc
     | Desc
+    | AscNullsLast
+    | DescNullsFirst
+
+module internal SortDirection =
+    let ofDescending descending = if descending then Desc else Asc
+
+    let reverse = function
+        | Asc -> Desc
+        | Desc -> Asc
+        | AscNullsLast -> DescNullsFirst
+        | DescNullsFirst -> AscNullsLast
+
+    let sql = function
+        | Asc -> "ASC"
+        | Desc -> "DESC"
+        | AscNullsLast -> "ASC NULLS LAST"
+        | DescNullsFirst -> "DESC NULLS FIRST"
 
 type internal JoinKind =
     | Inner

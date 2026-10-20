@@ -203,22 +203,28 @@ let private rowIdTrailer = [{ Expression = rowIdColumn; Direction = Asc; Collati
 let private orderingMatcher tableName predicate (ordering: OrderBy list) =
     let fixedKeys = equalityKeys predicate
     let isFixed expression = fixedKeys |> List.exists (fun key -> expressionMatchesIndex tableName key expression)
-    let direction reverse direction = if not reverse then direction else if direction = Asc then Desc else Asc
-    let rec matches reverse terms orders =
+    let direction reverse direction = if reverse then SortDirection.reverse direction else direction
+    let rec matches reverse first terms orders =
         match terms, orders with
         | _, [] -> true
-        | _, order :: rest when isFixed order.Expr -> matches reverse terms rest
-        | term :: rest, _ when isFixed term.Expression -> matches reverse rest orders
+        | _, order :: rest when isFixed order.Expr -> matches reverse first terms rest
+        | term :: rest, _ when isFixed term.Expression -> matches reverse first rest orders
         | term :: rest, order :: remaining ->
-            direction reverse term.Direction = order.Direction
+            let scanDirection = direction reverse term.Direction
+            // SQLite can visit the leading key's NULL partition separately while
+            // retaining index order within each partition, including all tie terms.
+            (scanDirection = order.Direction ||
+             (first && match scanDirection, order.Direction with
+                       | Asc, AscNullsLast | Desc, DescNullsFirst -> true
+                       | _ -> false))
             && expressionMatchesIndex tableName order.Expr term.Expression
-            && matches reverse rest remaining
+            && matches reverse false rest remaining
         | [], _ -> false
     fun (entry: IndexEntry) ->
         entry.TableName = tableName && not entry.Terms.IsEmpty
         && (entry.Terms |> List.forall binaryCollation)
         && (let terms = entry.Terms @ rowIdTrailer
-            matches false terms ordering || matches true terms ordering)
+            matches false true terms ordering || matches true true terms ordering)
 
 let findOrderingIndex (model: IndexModel) tableName predicate ordering =
     model.Indexes |> List.tryFind (orderingMatcher tableName predicate ordering)

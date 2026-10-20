@@ -214,7 +214,7 @@ module internal QueryableHelperPreprocess =
                     match o.RawExpr with
                     | Some duExpr -> duExpr
                     | None -> translateExprDu sourceCtx contextTable o.OrderingRule vars
-                { Expr = normalizeOrderKeyExpr expr (orderKeyClrType o.OrderingRule); Direction = if o.Descending then SortDirection.Desc else SortDirection.Asc }
+                { Expr = normalizeOrderKeyExpr expr (orderKeyClrType o.OrderingRule); Direction = o.Direction }
             ) |> Seq.toList
 
         let bindBound bound =

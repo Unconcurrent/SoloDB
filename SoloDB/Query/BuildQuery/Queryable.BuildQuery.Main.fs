@@ -118,13 +118,13 @@ module internal QueryableBuildQueryMain =
             | Relation _ -> ()
             | Method m ->
                 let inline simpleCurrent() = simpleCurrent statements
-                let inline installTerminalOrdering (ordering: Expression) (descending: bool) (rawExpr: SqlExpr option) =
+                let inline installTerminalOrdering (ordering: Expression) (direction: SortDirection) (rawExpr: SqlExpr option) =
                     let current = ifSelectorNewStatement statements
                     let existingOrders = current.Orders |> Seq.toList
                     current.Orders.Clear()
-                    current.Orders.Add({ OrderingRule = ordering; Descending = descending; RawExpr = rawExpr })
+                    current.Orders.Add({ OrderingRule = ordering; Direction = direction; RawExpr = rawExpr })
                     if List.isEmpty existingOrders then
-                        current.Orders.Add({ OrderingRule = TypeMetadata.ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id")); Descending = false; RawExpr = None })
+                        current.Orders.Add({ OrderingRule = TypeMetadata.ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id")); Direction = SortDirection.Asc; RawExpr = None })
                     else
                         for order in existingOrders do
                             current.Orders.Add(order)

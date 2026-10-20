@@ -211,7 +211,7 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                     match statements.Last() with
                     | Simple x when x.Orders.Count <> 0 ->
                         for order in x.Orders do
-                            order.Descending <- not order.Descending
+                            order.Direction <- SortDirection.reverse order.Direction
                     | _ ->
                         addOrder statements (TypeMetadata.ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id"))) true
                     addTake statements (TypeMetadata.ExpressionHelper.constant 1)

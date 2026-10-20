@@ -109,7 +109,7 @@ type internal PreprocessedQuery =
 /// </summary>
 type internal PreprocessedOrder = {
     OrderingRule: Expression;
-    mutable Descending: bool
+    mutable Direction: SortDirection
     /// When set, used as DU expression instead of translating OrderingRule.
     RawExpr: SqlExpr option
 }

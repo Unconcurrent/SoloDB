@@ -39,7 +39,7 @@ module internal QueryableBuildQueryDistinct =
                         s.Orders
                         |> Seq.map (fun o ->
                             { OrderingRule = o.OrderingRule
-                              Descending = o.Descending
+                              Direction = o.Direction
                               RawExpr = o.RawExpr })
                         |> Seq.toArray
                 | _ -> ()
@@ -80,7 +80,7 @@ module internal QueryableBuildQueryDistinct =
                         order.RawExpr
                 orderedLayer.Orders.Add({
                     OrderingRule = order.OrderingRule
-                    Descending = order.Descending
+                    Direction = order.Direction
                     RawExpr = rawExpr
                 })
             statements.Add(Simple orderedLayer)

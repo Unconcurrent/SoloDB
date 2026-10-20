@@ -65,7 +65,7 @@ module internal QueryableHelperState =
     let addOrder (statements: ResizeArray<SQLSubquery>) (ordering: Expression) (descending: bool) =
         let current = ifSelectorNewStatement statements
         current.Orders.Clear()
-        current.Orders.Add({ OrderingRule = ordering; Descending = descending; RawExpr = None })
+        current.Orders.Add({ OrderingRule = ordering; Direction = SortDirection.ofDescending descending; RawExpr = None })
 
     let addSelector (statements: ResizeArray<SQLSubquery>) (selector: SQLSelector) =
         let last = statements.Last()

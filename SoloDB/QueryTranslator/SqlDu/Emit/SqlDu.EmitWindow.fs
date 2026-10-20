@@ -28,7 +28,7 @@ let emitWindowCall (ctx: EmitContext) (emitExprFn: EmitContext -> SqlExpr -> Emi
         spec.OrderBy
         |> List.map (fun (expr, dir) ->
             let e = emitExprFn ctx expr
-            let dirStr = match dir with Asc -> "ASC" | Desc -> "DESC"
+            let dirStr = SortDirection.sql dir
             { Sql = e.Sql + " " + dirStr; Parameters = e.Parameters })
     let orderSql =
         match orderParts with

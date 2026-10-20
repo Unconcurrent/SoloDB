@@ -197,7 +197,7 @@ module internal QueryableBuildQuerySequenceOps =
                         match o.RawExpr with
                         | Some duExpr -> duExpr
                         | None -> translateExprDu currentCtx ctx.TableName o.OrderingRule ctx.Vars
-                    { Expr = normalizeOrderKeyExpr expr (orderKeyClrType o.OrderingRule); Direction = if o.Descending then SortDirection.Desc else SortDirection.Asc }
+                    { Expr = normalizeOrderKeyExpr expr (orderKeyClrType o.OrderingRule); Direction = o.Direction }
                 ) |> Array.toList
             // SUM(NOT pred) OVER (ORDER BY key) — cumulative failure window.
             let windowSpec = {
@@ -239,7 +239,7 @@ module internal QueryableBuildQuerySequenceOps =
         (pendingDistinctByScalarReuse: byref<LoweredKeySelector option>)
         (isPostScalarProjection: byref<bool>)
         (simpleCurrent: unit -> UsedSQLStatements)
-        (installTerminalOrdering: Expression -> bool -> SqlExpr option -> unit)
+        (installTerminalOrdering: Expression -> SortDirection -> SqlExpr option -> unit)
         (m: {| Value: SupportedLinqMethods; OriginalMethod: MethodInfo; Expressions: Expression array |}) =
                 match m.Value with
                 | SupportedLinqMethods.Where -> 
@@ -255,7 +255,7 @@ module internal QueryableBuildQuerySequenceOps =
                     | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = expressionFingerprint m.Expressions.[0] ->
                         let current = ifSelectorNewStatement statements
                         current.Orders.Clear()
-                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = Some (SqlExpr.Column(None, (syntheticScalarSlotAlias 0))) })
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Direction = SortDirection.ofDescending descending; RawExpr = Some (SqlExpr.Column(None, (syntheticScalarSlotAlias 0))) })
                     | _ ->
                         addOrder statements m.Expressions.[0] descending
                 | SupportedLinqMethods.ThenBy | SupportedLinqMethods.ThenByDescending ->
@@ -263,9 +263,9 @@ module internal QueryableBuildQuerySequenceOps =
                     let current = simpleCurrent()
                     match pendingDistinctByScalarReuse with
                     | Some lowered when lowered.RelationAccess = HasRelationAccess && lowered.Fingerprint = expressionFingerprint m.Expressions.[0] ->
-                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = Some (SqlExpr.Column(None, (syntheticScalarSlotAlias 0))) })
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Direction = SortDirection.ofDescending descending; RawExpr = Some (SqlExpr.Column(None, (syntheticScalarSlotAlias 0))) })
                     | _ ->
-                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Descending = descending; RawExpr = None })
+                        current.Orders.Add({ OrderingRule = m.Expressions.[0]; Direction = SortDirection.ofDescending descending; RawExpr = None })
                 | SupportedLinqMethods.Skip ->
                     let current = simpleCurrent()
                     match current.Skip with
@@ -290,7 +290,12 @@ module internal QueryableBuildQuerySequenceOps =
                                 Some (SqlExpr.Column(None, (syntheticScalarSlotAlias 0)))
                             | _ ->
                                 None
-                        installTerminalOrdering m.Expressions.[0] descending rawExpr
+                        let keyType = orderKeyClrType m.Expressions.[0]
+                        let direction =
+                            if not descending && (not keyType.IsValueType || not (isNull (Nullable.GetUnderlyingType keyType))) then
+                                SortDirection.AscNullsLast
+                            else SortDirection.ofDescending descending
+                        installTerminalOrdering m.Expressions.[0] direction rawExpr
                         addTake statements (TypeMetadata.ExpressionHelper.constant 1)
                     | 2 ->
                         raise (NotSupportedException("MinBy/MaxBy comparer overloads are not supported."))

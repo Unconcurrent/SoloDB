@@ -81,7 +81,7 @@ and private appendCore ctx (sql: StringBuilder) parameters (core: SelectCore) =
             if not first then sql.Append(", ") |> ignore
             first <- false
             appendExpr ctx sql parameters ordering.Expr
-            sql.Append(if ordering.Direction = Asc then " ASC" else " DESC") |> ignore
+            sql.Append(' ').Append(SortDirection.sql ordering.Direction) |> ignore
     clause " LIMIT " core.Limit
     clause " OFFSET " core.Offset
 
