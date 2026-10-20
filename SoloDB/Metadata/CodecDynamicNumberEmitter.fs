@@ -13,6 +13,8 @@ type internal CodecDynamicNumberApi<'Type,'Method> = {
 
 /// Type inference uses numeric facts, not a discarded successful Decimal conversion.
 module internal CodecDynamicNumberEmitter =
+    let private maximumInferredExpansion = 32768L
+
     let private returnNative (il: CodecIL<'T,'M,'F>) parameter =
         match parameter with
         | Some constructor -> il.EmitInt(OpCodes.Ldc_I4,0); il.EmitMethod(OpCodes.Newobj,constructor)
@@ -95,7 +97,7 @@ module internal CodecDynamicNumberEmitter =
                 CodecDecimalArithmeticEmitter.append il number.UInt64 coefficient (Some state.Digit)
                 increment kept
                 il.Mark complete
-        CodecNumberEmitter.scan il number.Int32 number.Int64 number.OffsetByte utf16 32768L state invalid 19 collect
+        CodecNumberEmitter.scan il number.Int32 number.Int64 number.OffsetByte utf16 (maximumInferredExpansion + 1L) state invalid 19 collect
         let widePrefix = il.Label()
         load state.SignificantDigits; constant 19; il.EmitBranch(OpCodes.Bgt,widePrefix)
         load coefficient.Low; save prefix
@@ -175,6 +177,9 @@ module internal CodecDynamicNumberEmitter =
         match api.Parameter with
         | Some constructor -> CodecNumberEmitter.publish il state; returnEncoded il constructor
         | None ->
+            // Bound implicit zero expansion, retaining digits already present in the input.
+            load point; load state.SignificantDigits; il.Emit OpCodes.Conv_I8; il.Emit OpCodes.Sub
+            il.EmitInt64 maximumInferredExpansion; il.EmitBranch(OpCodes.Bgt,binary)
             // Rare arbitrary-width inference resumes the concrete native target, never a tree.
             il.Emit OpCodes.Ldarg_3; il.EmitMethod(OpCodes.Call,api.BigReader)
             il.EmitType(OpCodes.Box,api.BigInteger); il.Emit OpCodes.Ret
