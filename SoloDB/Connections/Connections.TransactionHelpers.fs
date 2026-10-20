@@ -29,19 +29,22 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
             Some commitEx
         | None -> None
 
-    let private executeBoundary (connection: NativeSqliteConnection) sql =
+    let private executeBoundaryWithNotification notifyAfter (connection: NativeSqliteConnection) sql =
         let mutable statement = connection.OpenStatement(sql)
         try
             statement.StepTransactionBoundary() |> ignore
-            statement.Dispose()
+            statement.Finish(null, notifyAfter)
         with error -> statement.Abort(error); reraise()
+
+    let private executeBoundary connection sql = executeBoundaryWithNotification true connection sql
+    let private executeCleanupBoundary connection sql = executeBoundaryWithNotification false connection sql
 
     let cleanupSavepointRollback (conn: NativeSqliteConnection) (sp: string) (ex: exn) =
         let faultDepth = tryGetRecordedHandlerFaultDepth conn ex
         let mutable rollbackFailure: exn option = None
         let mutable releaseFailure: exn option = None
-        try executeBoundary conn (sprintf "ROLLBACK TO \"%s\";" sp) with rb -> rollbackFailure <- Some rb
-        try executeBoundary conn (sprintf "RELEASE \"%s\";" sp) with rel -> releaseFailure <- Some rel
+        try executeCleanupBoundary conn (sprintf "ROLLBACK TO \"%s\";" sp) with rb -> rollbackFailure <- Some rb
+        try executeCleanupBoundary conn (sprintf "RELEASE \"%s\";" sp) with rel -> releaseFailure <- Some rel
         match rollbackFailure, releaseFailure with
         | None, None ->
             match faultDepth with
@@ -63,7 +66,7 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
 
     let rollbackBorrowedTransaction (conn: NativeCachingDbConnection) (primaryEx: exn option ref) (cleanupEx: exn option ref) (ex: exn) =
         primaryEx := Some ex
-        try executeBoundary conn "ROLLBACK;" with rb -> cleanupEx := Some rb
+        try executeCleanupBoundary conn "ROLLBACK;" with rb -> cleanupEx := Some rb
 
     let commitOrRollbackBorrowedTransaction (conn: NativeCachingDbConnection) (primaryEx: exn option ref) (cleanupEx: exn option ref) =
         match takeHandlerFaultCommitException conn with
@@ -99,6 +102,7 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
         executeBoundary conn (sprintf "SAVEPOINT \"%s\";" sp)
         try
             let ret = f conn
+            raiseIfHandlerFaultRecorded conn
             executeBoundary conn (sprintf "RELEASE \"%s\";" sp)
             ret
         with ex ->
@@ -110,6 +114,7 @@ Fix: Let handler-side database faults abort the outer transaction, or avoid swal
         executeBoundary conn (sprintf "SAVEPOINT \"%s\";" sp)
         try
             let! ret = f conn
+            raiseIfHandlerFaultRecorded conn
             executeBoundary conn (sprintf "RELEASE \"%s\";" sp)
             return ret
         with ex ->
