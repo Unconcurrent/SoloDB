@@ -392,6 +392,10 @@ type JsonValue =
         JsonRawWriteMetadata<char,JsonUtf16Writer,JsonStoredContract>.ForType(targetType,value,&destination,&state)
         ArraySegment<char>(state.Storage,0,state.Written)
 
+    /// Query operand preparation streams its known primitive roles through existing writers.
+    static member internal WriteQueryOperandLeaf(target: Type, value: obj, destination: byref<Span<char>>, state: byref<JsonWriteState<char>>): unit =
+        JsonRawWriteMetadata<char,JsonUtf16Writer,JsonStoredContract>.ForType(target,value,&destination,&state)
+
     static member internal WriteText<'T>(value: 'T, includeType: bool, omitId: bool): string =
         let text = JsonValue.WriteBuffer(value,includeType,omitId)
         System.String(text.Array,text.Offset,text.Count)

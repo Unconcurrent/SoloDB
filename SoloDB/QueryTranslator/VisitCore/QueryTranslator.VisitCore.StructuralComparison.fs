@@ -7,14 +7,10 @@ open SoloDatabase.SqlModel
 open SoloDatabase.QueryTranslatorBaseTypes
 open SoloDatabase.QueryTranslatorBaseHelpers
 open SoloDatabase.QueryTranslatorSerialization
+open SoloDatabase.QueryStructuralShape
 
-/// Standard finite structural relations retain authored component order and operand roles.
+/// Standard structural relations retain authored component order and operand roles.
 module internal QueryStructuralRelations =
-    type private Shape =
-        | Leaf of Type
-        | Optional of Type * Shape
-        | Components of Type * (string * Shape) array
-
     type private Operand = Bound of Expression | Stored of QueryProducedValue
 
     let private target = function Leaf t | Optional(t,_) | Components(t,_) -> t
@@ -22,50 +18,6 @@ module internal QueryStructuralRelations =
     let private sqlNull value = SqlExpr.Unary(UnaryOperator.IsNull,value)
     let private binary op left right = SqlExpr.Binary(left,op,right)
     let private choose condition yes no = SqlExpr.CaseExpr((condition,yes),[],Some no)
-
-    let private tuple (t: Type) =
-        if not t.IsGenericType then false else
-        let definition = t.GetGenericTypeDefinition()
-        let name = definition.FullName
-        definition.Assembly = typeof<Tuple<int>>.Assembly &&
-        (name.StartsWith("System.Tuple`",StringComparison.Ordinal) || name.StartsWith("System.ValueTuple`",StringComparison.Ordinal))
-
-    let private shape (root: Type) =
-        let active = HashSet<Type>()
-        let rec build (t: Type) =
-            let payload = Utils.unwrapNullableType t
-            if not(payload.Equals t) then build payload |> ValueOption.map(fun child -> Optional(t,child))
-            elif typeof<string>.Equals t || typeof<char>.Equals t || typeof<bool>.Equals t ||
-                 t.IsEnum || (QueryTranslatorNumeric.nativeCastType t).IsSome ||
-                 (QueryTranslatorNumeric.domain t).IsSome || DateTimeFunctions.isDateTimeLikeType t then ValueSome(Leaf t)
-            elif not(active.Add t) then ValueNone
-            else
-                let fields =
-                    if tuple t then
-                        let arguments = t.GetGenericArguments()
-                        ValueSome(Array.init arguments.Length (fun i -> (if i = 7 then "Rest" else "Item" + string(i+1)),arguments[i]))
-                    elif TypeMetadata.standardComparison t then
-                        TypeMetadata.recordFields t |> ValueOption.map(fun names ->
-                            names |> Array.map(fun name ->
-                                let valueType =
-                                    match ModelMetadata.MemberType(t,name,false) with
-                                    | Some valueType -> valueType
-                                    | None -> ModelMetadata.MemberType(t,name,true) |> Option.defaultWith(fun () -> invalidOp "A structural component requires its original member type.")
-                                name,valueType))
-                    else ValueNone
-                let result =
-                    match fields with
-                    | ValueNone -> ValueNone
-                    | ValueSome fields ->
-                        let children = fields |> Array.map(fun (name,t) -> build t |> ValueOption.map(fun child -> name,child))
-                        if children |> Array.exists ValueOption.isNone then ValueNone
-                        else ValueSome(Components(t,children |> Array.map ValueOption.get))
-                active.Remove t |> ignore
-                result
-        // Scalar operators retain their existing owner.
-        match build root with
-        | ValueSome(Components _ as result) | ValueSome(Optional(_,Components _) as result) -> ValueSome result
-        | _ -> ValueNone
 
     let tryTranslate visitRaw (expression: BinaryExpression) (qb: QueryBuilder) =
         let method = expression.Method
@@ -82,8 +34,9 @@ module internal QueryStructuralRelations =
             method.DeclaringType.FullName = "Microsoft.FSharp.Core.Operators" &&
             QueryTranslatorNumericMethods.originalComparison expression.NodeType method expression.Left.Type expression.Right.Type
         if not original then ValueNone else
-        match qb.SourceContext.BindQueryValue,shape expression.Left.Type with
-        | ValueSome binder,ValueSome shape ->
+        match qb.SourceContext.BindQueryValue,QueryStructuralShape.tryCreate expression.Left.Type with
+        | ValueSome binder,ValueSome graph ->
+            let shape = graph.Root
             let nextName = qb.SourceContext.NextAlias
             let relation = relation.Value
             let equalResult = boolean(relation = BinaryOperator.Le || relation = BinaryOperator.Ge)
@@ -101,10 +54,7 @@ module internal QueryStructuralRelations =
             let child name childShape = function
                 | Bound parent ->
                     let childType = target childShape
-                    let read =
-                        match ModelMetadata.NamedMember(parent.Type,name) with
-                        | Some struct(valueType,read) when valueType.Equals childType -> read
-                        | _ -> invalidOp "A structural component requires its original bound reader."
+                    let read = QueryStructuralShape.memberReader graph parent.Type name childType
                     let access = BoundValueAccessExpression(parent,childType,read,name) :> Expression
                     let guarded = Expression.Condition(boundMissing parent,Expression.Default childType,access)
                     Bound(binder.Local guarded)
@@ -131,7 +81,7 @@ module internal QueryStructuralRelations =
                     let operand =
                         match operand with
                         | Bound value -> Bound(BoundValueAccessExpression(value,underlying,Func<obj,obj>(fun value ->
-                            Convert.ChangeType(value,underlying,Globalization.CultureInfo.InvariantCulture))))
+                            (QueryStructuralShape.enumValue t value |> snd))))
                         | Stored _ -> operand
                     underlying,operand
                 match operand with
@@ -154,6 +104,20 @@ module internal QueryStructuralRelations =
                             let defaultValue = QueryDefault.comparisonValue qb.Variables t |> QueryProduced.value nextName
                             SqlExpr.Coalesce(value,[defaultValue])
                         else value) produced
+            let prepareScalar t operand value =
+                if typeof<string>.Equals t then
+                    match operand with Bound _ -> value | Stored _ -> QueryTranslatorCharacters.ordinalKey value
+                elif DateTimeFunctions.isDateTimeLikeType t then DateTimeFunctions.canonicalizeForCompareOrOrder t value
+                else value
+            let preparedScalar t operand = prepareScalar t operand (scalar t operand)
+            let necessaryRange (t: Type) reversed raw bound =
+                if not t.IsValueType || typeof<float>.Equals t || typeof<single>.Equals t then ValueNone else
+                let direction =
+                    if (relation = BinaryOperator.Lt || relation = BinaryOperator.Le) <> reversed then BinaryOperator.Le
+                    else BinaryOperator.Ge
+                let raw = match raw with SqlExpr.Coalesce(value,_) -> value | value -> value
+                let canonical value = if DateTimeFunctions.isDateTimeLikeType t then DateTimeFunctions.canonicalizeForCompareOrOrder t value else value
+                ValueSome(binary BinaryOperator.Or (sqlNull raw) (binary direction (canonical raw) (canonical bound)))
             let rec render shape left right onEqual =
                 let absent present =
                     let leftMissing,rightMissing = missing left,missing right
@@ -171,26 +135,12 @@ module internal QueryStructuralRelations =
                     if t.IsValueType then result,candidate else absent result,ValueNone
                 | Leaf t ->
                     let leftValue,rightValue = scalar t left,scalar t right
-                    let prepare operand value =
-                        if typeof<string>.Equals t then
-                            match operand with Bound _ -> value | Stored _ -> QueryTranslatorCharacters.ordinalKey value
-                        elif DateTimeFunctions.isDateTimeLikeType t then DateTimeFunctions.canonicalizeForCompareOrOrder t value
-                        else value
                     let candidate =
-                        let raw = function SqlExpr.Coalesce(value,_) -> value | value -> value
-                        let direction = if relation = BinaryOperator.Lt || relation = BinaryOperator.Le then BinaryOperator.Le else BinaryOperator.Ge
-                        let reverse = if direction = BinaryOperator.Le then BinaryOperator.Ge else BinaryOperator.Le
-                        let range raw bound direction =
-                            let raw = if DateTimeFunctions.isDateTimeLikeType t then DateTimeFunctions.canonicalizeForCompareOrOrder t raw else raw
-                            let bound = if DateTimeFunctions.isDateTimeLikeType t then DateTimeFunctions.canonicalizeForCompareOrOrder t bound else bound
-                            binary BinaryOperator.Or (sqlNull raw) (binary direction raw bound)
-                        if not t.IsValueType || typeof<float>.Equals t || typeof<single>.Equals t then ValueNone
-                        else
-                            match left,right with
-                            | Stored _,Bound _ -> ValueSome(range (raw leftValue) rightValue direction)
-                            | Bound _,Stored _ -> ValueSome(range (raw rightValue) leftValue reverse)
-                            | _ -> ValueNone
-                    let leftValue,rightValue = prepare left leftValue,prepare right rightValue
+                        match left,right with
+                        | Stored _,Bound _ -> necessaryRange t false leftValue rightValue
+                        | Bound _,Stored _ -> necessaryRange t true rightValue leftValue
+                        | _ -> ValueNone
+                    let leftValue,rightValue = prepareScalar t left leftValue,prepareScalar t right rightValue
                     let equal = binary BinaryOperator.Eq leftValue rightValue
                     let ordered = binary relation leftValue rightValue
                     let result = if onEqual = equalResult then ordered else choose equal onEqual ordered
@@ -207,9 +157,30 @@ module internal QueryStructuralRelations =
                     Choice2Of2 index
             let left,right = acquire expression.Left,acquire expression.Right
             let result = QueryProduced.constructRaw nextName (fun parts ->
-                let operand = function Choice1Of2 value -> value | Choice2Of2 index -> Stored(DirectValue parts[index])
-                let result,candidate = render shape (operand left) (operand right) equalResult
-                let result = match candidate with ValueSome candidate -> binary BinaryOperator.And candidate result | ValueNone -> result
-                QueryProduced.typed typeof<bool> result) (operands.ToArray())
+                if graph.Recursive then
+                    let root = function
+                        | Choice1Of2(Bound value) ->
+                            let prepared = BoundValueAccessExpression(value,typeof<string>,Func<obj,obj>(fun value -> box(QueryStructuralShape.prepare graph value)))
+                            QueryStructuralTraversal.Prepared(binder.Scalar prepared)
+                        | Choice2Of2 index -> QueryStructuralTraversal.Selected parts[index]
+                        | _ -> invalidOp "A recursive bound root requires its original value."
+                    let operations: QueryStructuralTraversal.Operations = {
+                        Child = fun name node produced ->
+                            match child name node (Stored produced) with
+                            | Stored produced -> produced
+                            | _ -> invalidOp "A stored component requires its produced value."
+                        Payload = fun node produced ->
+                            match payload node (Stored produced) with
+                            | Stored produced -> produced
+                            | _ -> invalidOp "A stored payload requires its produced value."
+                        Scalar = fun target produced -> preparedScalar target (Stored produced)
+                        RawScalar = fun target produced -> scalar target (Stored produced)
+                        NecessaryRange = necessaryRange }
+                    QueryProduced.typed typeof<bool> (QueryStructuralTraversal.translate nextName relation operations graph (root left) (root right))
+                else
+                    let operand = function Choice1Of2 value -> value | Choice2Of2 index -> Stored(DirectValue parts[index])
+                    let result,candidate = render shape (operand left) (operand right) equalResult
+                    let result = match candidate with ValueSome candidate -> binary BinaryOperator.And candidate result | ValueNone -> result
+                    QueryProduced.typed typeof<bool> result) (operands.ToArray())
             ValueSome(QueryProduced.value nextName result)
         | _ -> ValueNone
