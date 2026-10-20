@@ -10,6 +10,18 @@ namespace SoloDatabase.Metadata.Tools;
 /// Completes assembly-level access after normal provider linking; compiler output remains pristine.
 public sealed class CompleteFSharpAssembly : ITask
 {
+    private sealed class CompletionSymbolWriterProvider : ISymbolWriterProvider
+    {
+        private readonly ISymbolWriterProvider provider;
+        private readonly string output;
+        public CompletionSymbolWriterProvider(ISymbolWriterProvider provider, string output)
+        { this.provider = provider; this.output = output; }
+        public ISymbolWriter GetSymbolWriter(ModuleDefinition module, string fileName) =>
+            provider.GetSymbolWriter(module, output);
+        public ISymbolWriter GetSymbolWriter(ModuleDefinition module, Stream stream) =>
+            provider.GetSymbolWriter(module, stream);
+    }
+
     public IBuildEngine BuildEngine { get; set; } = null!;
     public ITaskHost HostObject { get; set; } = null!;
     [Required] public string Input { get; set; } = "";
@@ -84,10 +96,17 @@ public sealed class CompleteFSharpAssembly : ITask
                 method.Parameters.Count == 1 && method.Parameters[0].ParameterType.FullName == "System.String");
             HelperAssembly.AllowAccess(consumer.MainModule, missing,
                 definition.BaseType.Scope, constructor);
+            Directory.CreateDirectory(OutputDirectory);
+            var output = Path.Combine(OutputDirectory, Path.GetFileName(Input));
+            using var image = new MemoryStream();
+            // Native PDB providers require their original filename operation.
+            using var symbols = consumer.MainModule.SymbolReader is PortablePdbReader ? new MemoryStream() : null;
             var writer = new WriterParameters
             {
                 WriteSymbols = consumer.MainModule.HasSymbols,
-                SymbolWriterProvider = consumer.MainModule.HasSymbols ? new DefaultSymbolWriterProvider() : null
+                SymbolWriterProvider = consumer.MainModule.HasSymbols
+                    ? new CompletionSymbolWriterProvider(consumer.MainModule.SymbolReader.GetWriterProvider(), output) : null,
+                SymbolStream = symbols
             };
             if (SignAssembly && !PublicSign && !DelaySign)
             {
@@ -95,9 +114,9 @@ public sealed class CompleteFSharpAssembly : ITask
                 var path = Path.IsPathRooted(KeyFile) ? KeyFile! : Path.Combine(Path.GetDirectoryName(Literal("Project"))!, KeyFile!);
                 writer.StrongNameKeyBlob = File.ReadAllBytes(path);
             }
-            Directory.CreateDirectory(OutputDirectory);
-            var output = Path.Combine(OutputDirectory, Path.GetFileName(Input));
-            consumer.Write(output, writer);
+            consumer.Write(image, writer);
+            if (symbols != null) Publish(Path.ChangeExtension(output, ".pdb"), symbols.ToArray());
+            Publish(output, image.ToArray());
             Assembly = output;
             Symbols = sidecarSymbols ? Path.ChangeExtension(output, ".pdb") : "";
             Changed = true;
@@ -109,5 +128,10 @@ public sealed class CompleteFSharpAssembly : ITask
                 error.ToString(), null, nameof(CompleteFSharpAssembly)));
             return false;
         }
+    }
+
+    private static void Publish(string path, byte[] content)
+    {
+        if (!File.Exists(path) || !File.ReadAllBytes(path).SequenceEqual(content)) File.WriteAllBytes(path, content);
     }
 }

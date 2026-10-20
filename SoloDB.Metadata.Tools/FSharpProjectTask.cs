@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Xml;
 using System.Xml.Linq;
 using Microsoft.Build.Framework;
 
@@ -17,10 +18,13 @@ public sealed class PrepareFSharpProject : ICancelableTask
     public ITaskHost HostObject { get; set; } = null!;
     [Required] public string Provider { get; set; } = "";
     [Required] public string Context { get; set; } = "";
+    public string Project { get; set; } = "";
+    public ITaskItem[] Arguments { get; set; } = Array.Empty<ITaskItem>();
     [Required] public string AssemblyName { get; set; } = "";
     [Required] public string AttributeSource { get; set; } = "";
     [Required] public string Template { get; set; } = "";
     [Required] public string DotNetHost { get; set; } = "";
+    [Output] public string ActiveTemplate { get; private set; } = "";
 
     public void Cancel()
     {
@@ -37,16 +41,27 @@ public sealed class PrepareFSharpProject : ICancelableTask
 
     public bool Execute()
     {
+        ActiveTemplate = "";
         var directory = Path.Combine(Path.GetDirectoryName(Context)!, Guid.NewGuid().ToString("N"));
         var request = Path.Combine(directory, "project.xml");
         var response = request + ".result";
         try
         {
             Directory.CreateDirectory(directory);
-            new XDocument(new XElement("project",
+            if ((Project.Length == 0) != (Arguments.Length == 0))
+                throw new InvalidOperationException("Current FSharp project and compiler arguments must be supplied together.");
+            var input = new XElement("project",
                 new XAttribute("context", Context), new XAttribute("assembly", AssemblyName),
-                new XAttribute("attributes", AttributeSource), new XAttribute("template", Template)))
-                .Save(request);
+                new XAttribute("attributes", AttributeSource), new XAttribute("template", Template));
+            if (Project.Length != 0)
+            {
+                input.Add(new XAttribute("project", Project));
+                var arguments = new XElement("arguments");
+                foreach (var argument in Arguments) arguments.Add(new XElement("argument", argument.ItemSpec));
+                input.Add(arguments);
+            }
+            using (var xml = XmlWriter.Create(request, new XmlWriterSettings { NewLineHandling = NewLineHandling.Entitize }))
+                new XDocument(input).Save(xml);
             var worker = Path.Combine(Path.GetDirectoryName(Provider)!, "analysis", "SoloDB.Metadata.FSharp.Analysis.dll");
             using var process = new Process
             {
@@ -98,6 +113,7 @@ public sealed class PrepareFSharpProject : ICancelableTask
                         process.ExitCode + Environment.NewLine + text);
                     return false;
                 }
+                if (!failed) ActiveTemplate = (string?)result.Attribute("template") ?? "";
                 return !failed;
             }
             finally

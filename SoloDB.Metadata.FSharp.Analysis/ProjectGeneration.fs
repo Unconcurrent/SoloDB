@@ -13,13 +13,21 @@ open SoloDatabase.Metadata.Tools
 /// Produces the executable template and its final compiler inputs together.
 type ProjectGeneration private () =
     static member Write(contextPath: string, assemblyName: string, attributeSource: string, templatePath: string, workspace: string, report: Action<string,int,int,string>) =
+        let project, arguments =
+            use context = AssemblyDefinition.ReadAssembly(contextPath)
+            let typ = context.MainModule.GetType("SoloDatabase.Tooling.ProjectContext")
+            let literal name = typ.Fields |> Seq.find(fun field -> field.Name = name) |> fun field -> field.Constant :?> string
+            literal "Project", (literal "Arguments").Split([|'\000'|], StringSplitOptions.None)
+        ProjectGeneration.Write(contextPath, project, arguments, assemblyName, attributeSource, templatePath, workspace, report)
+
+    static member Write(contextPath: string, project: string, arguments: string[], assemblyName: string, attributeSource: string, templatePath: string, workspace: string, report: Action<string,int,int,string>) =
         try
             Directory.CreateDirectory(workspace) |> ignore
-            let project, arguments =
-                use context = AssemblyDefinition.ReadAssembly(contextPath)
-                let typ = context.MainModule.GetType("SoloDatabase.Tooling.ProjectContext")
-                let literal name = typ.Fields |> Seq.find(fun field -> field.Name = name) |> fun field -> field.Constant :?> string
-                literal "Project", (literal "Arguments").Split([|'\000'|], StringSplitOptions.None)
+            let arguments = arguments |> Array.filter(CompilerContext.IsContextArgument >> not)
+            let writeSource content =
+                Directory.CreateDirectory(Path.GetDirectoryName(attributeSource)) |> ignore
+                if not(File.Exists(attributeSource)) || File.ReadAllText(attributeSource) <> content then
+                    File.WriteAllText(attributeSource, content)
             let analysis = Path.Combine(workspace, "SoloDB.ProjectContext.dll")
             CompilerContext.Write(analysis, project, "analysis", arguments)
             let checker = FSharpChecker.Create(keepAssemblyContents = true)
@@ -81,9 +89,9 @@ type ProjectGeneration private () =
             match checkedProject with
             | None ->
                 File.Delete(templatePath)
-                Directory.CreateDirectory(Path.GetDirectoryName(attributeSource)) |> ignore
-                File.WriteAllText(attributeSource, "namespace SoloDatabase.Generated\ndo ()\n")
+                writeSource "namespace SoloDatabase.Generated\ndo ()\n"
                 CompilerContext.Write(contextPath, project, "inactive", arguments)
+                ""
             | Some result ->
                 let referencePaths =
                     arguments |> Array.choose(fun argument ->
@@ -111,13 +119,11 @@ type ProjectGeneration private () =
                     source.AppendLine("namespace System.Runtime.CompilerServices\nopen System\n[<Sealed; AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)>]\ntype internal IgnoresAccessChecksToAttribute(_target: string) =\n    inherit Attribute()\n") |> ignore
                 source.AppendLine("namespace SoloDatabase.Generated\n") |> ignore
                 source.AppendLine("do ()") |> ignore
-                let template = Path.Combine(workspace, "Template.dll")
                 let attribute = if access.Length = 0 then null else ModelDiscovery.accessAttribute result references assemblyName
-                GeneratedJsonAssembly.Write(template, "SoloDB.Generated.FSharp", "Template", product, models, attribute, queries, queryCalls, queryWitnesses, queryLambdas, providerOperations, referencePaths, operationAccess, argumentSources)
-                Directory.CreateDirectory(Path.GetDirectoryName(attributeSource)) |> ignore
-                File.Copy(template, templatePath, true)
-                File.WriteAllText(attributeSource, source.ToString())
-                // Context publication is last. A failed producer never advertises an old template.
+                GeneratedJsonAssembly.Write(templatePath, "SoloDB.Generated.FSharp", "Template", product, models, attribute, queries, queryCalls, queryWitnesses, queryLambdas, providerOperations, referencePaths, operationAccess, argumentSources)
+                writeSource (source.ToString())
+                // Publish the provider context only after all current outputs succeed.
                 CompilerContext.Write(contextPath, project, "execute", arguments, Path.GetFullPath(templatePath))
+                Path.GetFullPath(templatePath)
         finally
             if Directory.Exists(workspace) then Directory.Delete(workspace, true)

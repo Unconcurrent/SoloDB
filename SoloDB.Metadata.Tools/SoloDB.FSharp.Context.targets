@@ -16,24 +16,31 @@
       <Compile Remove="$(IntermediateOutputPath)SoloDB.Generated/SoloDB.Access.fs" />
     </ItemGroup>
   </Target>
-  <Target Name="SoloDBCaptureProjectContext" AfterTargets="CoreCompile" Returns="$(_SoloDBProjectContext)"
+  <Target Name="SoloDBCaptureProjectContext" AfterTargets="CoreCompile" Returns="@(_SoloDBProjectContextOutput)"
           Condition="'$(DesignTimeBuild)' == 'true' and '$(ProvideCommandLineArgs)' == 'true'">
     <PropertyGroup>
       <_SoloDBProjectContext>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', 'SoloDB.Generated', 'SoloDB.ProjectContext.dll'))</_SoloDBProjectContext>
+      <_SoloDBProjectContext Condition="'$(SoloDBContextMode)' != 'execute'">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', 'SoloDB.Generated', 'Surface', 'SoloDB.ProjectContext.dll'))</_SoloDBProjectContext>
       <_SoloDBAttributeSource>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', 'SoloDB.Generated', 'SoloDB.Access.fs'))</_SoloDBAttributeSource>
       <_SoloDBTemplate>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', 'SoloDB.Generated', 'SoloDB.Template.dll'))</_SoloDBTemplate>
     </PropertyGroup>
-    <SoloDatabase.Metadata.Tools.CaptureProjectContext Output="$(_SoloDBProjectContext)" Project="$(MSBuildProjectFullPath)"
+    <SoloDatabase.Metadata.Tools.CaptureProjectContext Condition="'$(SoloDBContextMode)' != 'execute'"
+        Output="$(_SoloDBProjectContext)" Project="$(MSBuildProjectFullPath)"
         Mode="$(SoloDBContextMode)" Arguments="@(FscCommandLineArgs)" />
     <SoloDatabase.Metadata.Tools.PrepareFSharpProject Condition="'$(SoloDBContextMode)' == 'execute'"
         Provider="$(SoloDBFSharpProviderPath)" DotNetHost="$(_SoloDBDotNetHost)"
-        Context="$(_SoloDBProjectContext)" AssemblyName="$(AssemblyName)"
-        AttributeSource="$(_SoloDBAttributeSource)" Template="$(_SoloDBTemplate)" />
+        Context="$(_SoloDBProjectContext)" Project="$(MSBuildProjectFullPath)" Arguments="@(FscCommandLineArgs)"
+        AssemblyName="$(AssemblyName)" AttributeSource="$(_SoloDBAttributeSource)" Template="$(_SoloDBTemplate)">
+      <Output TaskParameter="ActiveTemplate" PropertyName="_SoloDBActiveTemplate" />
+    </SoloDatabase.Metadata.Tools.PrepareFSharpProject>
     <ItemGroup>
+      <_SoloDBProjectContextOutput Include="$(_SoloDBProjectContext)">
+        <Template>$(_SoloDBActiveTemplate)</Template>
+      </_SoloDBProjectContextOutput>
       <FscCommandLineArgs Include="-r:$(_SoloDBProjectContext)" />
     </ItemGroup>
   </Target>
-  <Target Name="SoloDBExecutableInputs" DependsOnTargets="Compile;SoloDBCaptureProjectContext" Returns="$(_SoloDBProjectContext)" />
+  <Target Name="SoloDBExecutableInputs" DependsOnTargets="Compile;SoloDBCaptureProjectContext" Returns="@(_SoloDBProjectContextOutput)" />
   <Target Name="SoloDBExecutableProjectContext" BeforeTargets="FSharpSourceCodeCompileOrder" Condition="'$(DesignTimeBuild)' != 'true'">
     <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="SoloDBExecutableInputs"
         Properties="DesignTimeBuild=true;SkipCompilerExecution=true;ProvideCommandLineArgs=true;SoloDBContextMode=execute"
@@ -50,6 +57,9 @@
       </_SoloDBExecutableContextReference>
       <ReferencePath Include="@(_SoloDBExecutableContextReference)" />
       <ReferencePathWithRefAssemblies Include="@(_SoloDBExecutableContextReference)" />
+      <CustomAdditionalCompileInputs Include="@(_SoloDBExecutableContext->'%(Template)')" />
+      <FileWrites Include="@(_SoloDBExecutableContext);@(_SoloDBExecutableContext->'%(Template)')" />
+      <FileWrites Include="$(IntermediateOutputPath)SoloDB.Generated/SoloDB.Access.fs;$(IntermediateOutputPath)SoloDB.Generated/Surface/SoloDB.ProjectContext.dll" />
       <Compile Remove="$(IntermediateOutputPath)SoloDB.Generated/SoloDB.Access.fs" />
       <Compile Include="$(IntermediateOutputPath)SoloDB.Generated/SoloDB.Access.fs">
         <CompileOrder>CompileBefore</CompileOrder>

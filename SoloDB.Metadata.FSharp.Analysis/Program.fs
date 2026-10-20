@@ -24,9 +24,15 @@ module internal Program =
                 let request = XDocument.Load(requestPath).Root
                 let field name = request.Attribute(XName.Get name).Value
                 contextPath <- field "context"
-                ProjectGeneration.Write(contextPath, field "assembly", field "attributes", field "template",
-                    Path.Combine(Path.GetDirectoryName(requestPath), "analysis"),
-                    Action<string,int,int,string>(fun file line column message -> add "warning" file line column message))
+                let workspace = Path.Combine(Path.GetDirectoryName(requestPath), "analysis")
+                let report = Action<string,int,int,string>(fun file line column message -> add "warning" file line column message)
+                let template =
+                    match request.Attribute(XName.Get "project") with
+                    | null -> ProjectGeneration.Write(contextPath, field "assembly", field "attributes", field "template", workspace, report)
+                    | project ->
+                        let arguments = request.Element(XName.Get "arguments").Elements(XName.Get "argument") |> Seq.map(fun item -> item.Value) |> Seq.toArray
+                        ProjectGeneration.Write(contextPath, project.Value, arguments, field "assembly", field "attributes", field "template", workspace, report)
+                diagnostics.Add(XAttribute(XName.Get "template", template))
                 true
             with error ->
                 add "error" contextPath 0 0 (error.ToString())
