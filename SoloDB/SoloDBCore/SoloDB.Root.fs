@@ -265,7 +265,7 @@ type SoloDB private (connectionManager: ConnectionManager, connectionString: str
         use dbConnection = connectionManager.BorrowNative()
         let mutable statement = dbConnection.OpenStatement("VACUUM;")
         try
-            statement.Step() |> ignore
+            statement.StepMaintenance() |> ignore
             let affected = statement.RecordsAffected
             statement.Dispose()
             affected

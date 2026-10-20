@@ -6,6 +6,12 @@ open System.Diagnostics
 open System.Runtime.ExceptionServices
 open SQLitePCL
 
+[<Struct>]
+type private NativeStatementStepMode =
+    | Ordinary
+    | TransactionBoundary
+    | Maintenance
+
 /// One checked borrow of a prepared statement. Consumers own binding and progression.
 [<Struct>]
 type internal NativeStatementScope =
@@ -107,7 +113,7 @@ type internal NativeStatementScope =
     member this.Bind(arguments: INativeArgumentBinding) =
         this.CheckStatement()
         this.statement.Bind(arguments)
-    member private this.Step(restartBoundary: bool) =
+    member private this.Step(mode: NativeStatementStepMode) =
         this.Check()
         if not this.statement.HasStatement then false
         else
@@ -118,9 +124,14 @@ type internal NativeStatementScope =
             let mutable result = raw.sqlite3_step(this.statement.Handle)
             this.Check()
             if database.CallbackEpoch <> callbacksBefore then database.RaiseCallbackFailure()
-            // A shared-cache lock may halt before obtaining a table lock. Restart only
-            // before any row or application callback, otherwise propagate the failure.
-            while NativeExecution.isLocked result && this.result = 0 && (restartBoundary || raw.sqlite3_stmt_busy(this.statement.Handle) <> 0 || (result = 262 && database.CallbackEpoch = callbacksBefore)) && this.budget.CanRetry(started) do
+            // Continuing a running VM does not replay its callbacks. A halted VM
+            // needs explicit restart admission, and no mode may replay an exposed row.
+            while NativeExecution.isLocked result && this.result = 0 &&
+                  (match mode with
+                   | TransactionBoundary -> true
+                   | Maintenance -> raw.sqlite3_stmt_busy(this.statement.Handle) <> 0 || database.CallbackEpoch = callbacksBefore
+                   | Ordinary -> raw.sqlite3_stmt_busy(this.statement.Handle) <> 0 || (result = 262 && database.CallbackEpoch = callbacksBefore)) &&
+                  this.budget.CanRetry(started) do
                 NativeExecution.wait()
                 this.Check()
                 result <- raw.sqlite3_step(this.statement.Handle)
@@ -139,10 +150,12 @@ type internal NativeStatementScope =
             if result = raw.SQLITE_DONE && (this.statement.ColumnCount = 0 || raw.sqlite3_stmt_readonly(this.statement.Handle) = 0) then
                 this.affected <- raw.sqlite3_changes(database.Handle)
             result = raw.SQLITE_ROW
-    member this.Step() = this.Step(false)
+    member this.Step() = this.Step(Ordinary)
     // Only transaction-owner SQL without application expressions may restart a halted VM.
     // Shared-cache BEGIN can halt on LOCKED before acquiring its transaction.
-    member this.StepTransactionBoundary() = this.Step(true)
+    member this.StepTransactionBoundary() = this.Step(TransactionBoundary)
+    // Fixed in-place maintenance may restart a halted VM before application callbacks.
+    member this.StepMaintenance() = this.Step(Maintenance)
     member this.Reset() =
         this.Check()
         if this.statement.HasStatement then
