@@ -81,7 +81,7 @@ SQL batches use SQLite parser boundaries, including trigger bodies and quoted se
 
 Failed parameter capture, row mapping or required-row checks abort unread statements. Cleanup failures are still reported during disposal. Database failures caught inside event handlers still prevent the surrounding transaction from committing.
 
-Catch `SoloDatabase.NativeSqliteException` for engine errors. Its `SqliteErrorCode` and `SqliteExtendedErrorCode` expose the primary and extended result codes. Connection state uses `SqliteConnectionState`.
+Native engine errors use `SoloDatabase.NativeSqliteException`, derived from `System.Data.Common.DbException`. Catch the standard base for database failures or the native type to inspect `SqliteErrorCode` and `SqliteExtendedErrorCode`, which expose the primary and extended SQLite result codes. Connection state uses `SqliteConnectionState`.
 
 <a id="standard-adonet-access"></a>
 
@@ -103,7 +103,7 @@ command.Parameters.Add(parameter);
 var value = (long)command.ExecuteScalar();
 ```
 
-After recompilation, code using inferred connection types or standard interfaces can keep its acquisition syntax. Rebuild dependent assemblies against 1.4: signatures exposing native or ADO types differ from 1.3 and are not binary compatible. Code naming the former provider types must use `SoloDatabase.Data.Sqlite`; the original `Microsoft.Data.Sqlite` package can coexist. Engine errors from this presentation use `SoloDatabase.Data.Sqlite.SqliteException`. Stored procedures and output parameters are unsupported.
+After recompilation, code using inferred connection types or standard interfaces can keep its acquisition syntax. Rebuild dependent assemblies against 1.4: signatures exposing native or ADO types differ from 1.3 and are not binary compatible. Code naming the former provider types must use `SoloDatabase.Data.Sqlite`; the original `Microsoft.Data.Sqlite` package can coexist. Engine errors from this presentation use `SoloDatabase.Data.Sqlite.SqliteException`, also derived from `DbException`, with the native failure retained as `InnerException`. Stored procedures and output parameters are unsupported.
 
 Async entry points perform synchronous SQLite work on the calling thread. Cancellation tokens can reject a call before execution; `Cancel()` does not interrupt SQLite execution. Standard `DbTransaction` savepoint overrides are provided by the .NET 6 asset. The .NET Standard assets expose savepoints on the concrete transaction type, without adding virtual methods absent from their target framework.
 

@@ -21,7 +21,7 @@ type internal ISqliteError =
 
 /// A SQLite failure with its primary and extended engine result codes.
 type NativeSqliteException(message: string, errorCode: int, extendedErrorCode: int) =
-    inherit Exception(message)
+    inherit DbException(message)
     new(message: string, errorCode: int) = NativeSqliteException(message, errorCode, errorCode)
     member _.SqliteErrorCode = errorCode
     member _.SqliteExtendedErrorCode = extendedErrorCode
