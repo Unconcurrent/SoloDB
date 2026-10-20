@@ -219,21 +219,24 @@ type SqlParameterWriter =
 /// A stable binding shape with typed acquisition and typed captured state.
 /// Capture runs once when execution starts; every statement binds from that same state.
 [<Sealed>]
-type SqlParameterPlan<'Input, 'State> private (names: string[], capture: Func<'Input, 'State>, reusableCapture: Func<'Input, 'State, 'State>, bind: Action<SqlParameterWriter, 'State>, clear: Action<'State>, duplicateIsOperationError: bool) =
+type SqlParameterPlan<'Input, 'State> private (names: string[], capture: Func<'Input, 'State>, reusableCapture: Func<'Input, 'State, 'State>, bind: Action<SqlParameterWriter, 'State>, clear: Action<'State>, operationErrors: bool) =
     do
         if isNull names then nullArg "names"
         if isNull capture && isNull reusableCapture then nullArg "capture"
         if isNull bind then nullArg "bind"
     let layout =
-        if duplicateIsOperationError then NativeOperationArgumentLayout(Array.copy names) :> NativeArgumentLayout
+        if operationErrors then NativeOperationArgumentLayout(Array.copy names) :> NativeArgumentLayout
         else NativeArgumentLayout(Array.copy names)
+    let validNames = not operationErrors || not (Array.exists String.IsNullOrEmpty layout.Names)
     new(names: string[], capture: Func<'Input, 'State>, bind: Action<SqlParameterWriter, 'State>) =
         SqlParameterPlan(names, capture, null, bind, null, false)
     internal new(names: string[], capture: Func<'Input, 'State, 'State>, bind: Action<SqlParameterWriter, 'State>, clear: Action<'State>) =
         SqlParameterPlan(names, null, capture, bind, clear, false)
-    internal new(names: string[], capture: Func<'Input, 'State, 'State>, bind: Action<SqlParameterWriter, 'State>, clear: Action<'State>, duplicateIsOperationError: bool) =
-        SqlParameterPlan(names, null, capture, bind, clear, duplicateIsOperationError)
-    member internal _.Layout = layout
+    internal new(names: string[], capture: Func<'Input, 'State, 'State>, bind: Action<SqlParameterWriter, 'State>, clear: Action<'State>, operationErrors: bool) =
+        SqlParameterPlan(names, null, capture, bind, clear, operationErrors)
+    member internal _.Layout =
+        if not validNames then raise (InvalidOperationException("ParameterName must be set."))
+        layout
     member internal _.Capture(input: 'Input, previous: 'State) =
         if isNull reusableCapture then capture.Invoke(input) else reusableCapture.Invoke(input, previous)
     member internal _.Clear(state: 'State) =

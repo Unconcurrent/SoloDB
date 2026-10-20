@@ -33,6 +33,8 @@ type SqliteDataReader internal (session: AdoSession, rows: SqlRows, admission: N
     let mutable recordsAffected = rows.RecordsAffected
     let mutable observedNames: string[] = null
     let mutable observedTypes: Type[] = null
+    let requireResult () =
+        if rows.FieldCount = 0 then raise (InvalidOperationException("No data exists for the result."))
     let storageType ordinal =
         let names = rows.Columns.Names
         if not (Object.ReferenceEquals(names, observedNames)) then
@@ -84,8 +86,9 @@ type SqliteDataReader internal (session: AdoSession, rows: SqlRows, admission: N
         let found = rows.NextResult(admission)
         hasRows <- found && rows.HasPendingRow
         found)
-    override _.GetName(ordinal) = AdoReaderAccess.guard session version closed (fun () -> rows.GetName(ordinal))
+    override _.GetName(ordinal) = AdoReaderAccess.guard session version closed (fun () -> requireResult(); rows.GetName(ordinal))
     override _.GetOrdinal(name) = AdoReaderAccess.guard session version closed (fun () ->
+        requireResult()
         if isNull name then nullArg "name"
         let names = rows.Columns.Names
         let mutable result = rows.Columns.Ordinal(name)
@@ -99,8 +102,9 @@ type SqliteDataReader internal (session: AdoSession, rows: SqlRows, admission: N
                     result <- index
         if result < 0 then raise (ArgumentOutOfRangeException("name", name, null))
         result)
-    override _.GetFieldType(ordinal) = AdoReaderAccess.guard session version closed (fun () -> storageType ordinal)
+    override _.GetFieldType(ordinal) = AdoReaderAccess.guard session version closed (fun () -> requireResult(); storageType ordinal)
     override _.GetDataTypeName(ordinal) = AdoReaderAccess.guard session version closed (fun () ->
+        requireResult()
         let declared = rows.GetDeclaredType(ordinal)
         if not (String.IsNullOrEmpty declared) then
             let size = declared.IndexOf('(')
@@ -171,12 +175,15 @@ type SqliteDataReader internal (session: AdoSession, rows: SqlRows, admission: N
             else textReader ordinal :> TextReader)
     override _.GetEnumerator() = new DbEnumerator(this, false) :> IEnumerator
     override _.GetSchemaTable() = AdoReaderAccess.guard session version closed (fun () ->
+        requireResult()
         let table = new DataTable("SchemaTable")
         for name, t in [|"ColumnName", typeof<string>; "ColumnOrdinal", typeof<int>; "ColumnSize", typeof<int>;
+                         "NumericPrecision", typeof<int16>; "NumericScale", typeof<int16>; "IsUnique", typeof<bool>;
+                         "IsKey", typeof<bool>; "BaseServerName", typeof<string>; "BaseCatalogName", typeof<string>;
+                         "BaseColumnName", typeof<string>; "BaseSchemaName", typeof<string>; "BaseTableName", typeof<string>;
                          "DataType", typeof<Type>; "DataTypeName", typeof<string>; "AllowDBNull", typeof<bool>;
-                         "IsLong", typeof<bool>; "IsUnique", typeof<bool>;
-                         "IsKey", typeof<bool>; "BaseCatalogName", typeof<string>; "BaseSchemaName", typeof<string>;
-                         "BaseTableName", typeof<string>; "BaseColumnName", typeof<string>|] do
+                         "IsAliased", typeof<bool>; "IsExpression", typeof<bool>; "IsAutoIncrement", typeof<bool>;
+                         "IsLong", typeof<bool>|] do
             table.Columns.Add(name, t) |> ignore
         for i = 0 to rows.FieldCount - 1 do
             let item = table.NewRow()
@@ -185,14 +192,16 @@ type SqliteDataReader internal (session: AdoSession, rows: SqlRows, admission: N
             item.["ColumnSize"] <- -1
             item.["DataType"] <- storageType i
             item.["DataTypeName"] <- this.GetDataTypeName i
-            item.["IsLong"] <- false
             let facts = rows.DescribeColumn i
+            item.["BaseServerName"] <- session.DataSource
             if not (isNull facts.DatabaseName) then item.["BaseCatalogName"] <- facts.DatabaseName
-            item.["BaseSchemaName"] <- ""
             if not (isNull facts.TableName) then item.["BaseTableName"] <- facts.TableName
             if not (isNull facts.OriginName) then item.["BaseColumnName"] <- facts.OriginName
+            item.["IsAliased"] <- facts.OriginName <> rows.GetName i
+            item.["IsExpression"] <- isNull facts.OriginName
             if facts.NotNull >= 0 then item.["AllowDBNull"] <- facts.NotNull = 0
             if facts.PrimaryKey >= 0 then item.["IsKey"] <- facts.PrimaryKey <> 0
+            if facts.AutoIncrement >= 0 then item.["IsAutoIncrement"] <- facts.AutoIncrement <> 0
             table.Rows.Add(item)
         table)
     override _.Close() =

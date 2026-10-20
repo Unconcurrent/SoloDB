@@ -13,7 +13,7 @@ open SQLitePCL
 [<Struct>]
 type internal NativeColumnDescription =
     { DatabaseName: string; TableName: string; OriginName: string
-      DeclaredType: string; NotNull: int; PrimaryKey: int }
+      DeclaredType: string; NotNull: int; PrimaryKey: int; AutoIncrement: int }
 
 module internal NativeColumnMetadata =
     let describe (database: NativeDatabase) (handle: sqlite3_stmt) ordinal =
@@ -24,13 +24,13 @@ module internal NativeColumnMetadata =
         let mutable declared = raw.sqlite3_column_decltype(handle, ordinal).utf8_to_string()
         let mutable notNull = -1
         let mutable primary = -1
+        let mutable autoIncrement = -1
         if not (isNull databaseName || isNull tableName || isNull origin) then
             let mutable collation = null
-            let mutable autoIncrement = 0
             database.Check(raw.sqlite3_table_column_metadata(database.Handle, databaseName, tableName, origin,
                                                             &declared, &collation, &notNull, &primary, &autoIncrement))
         { DatabaseName = databaseName; TableName = tableName; OriginName = origin
-          DeclaredType = declared; NotNull = notNull; PrimaryKey = primary }
+          DeclaredType = declared; NotNull = notNull; PrimaryKey = primary; AutoIncrement = autoIncrement }
 
 /// Column names describe the statement, while storage classes remain facts of each row.
 [<Sealed>]

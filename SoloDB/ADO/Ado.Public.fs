@@ -104,7 +104,6 @@ and [<Sealed; AllowNullLiteral>] SqliteCommand internal (initialConnection: DbCo
         if disposed then raise (ObjectDisposedException("SqliteCommand"))
         if isNull connection then raise (InvalidOperationException("A command requires a connection."))
         session.Check()
-        if String.IsNullOrWhiteSpace text then raise (InvalidOperationException("The command text is empty."))
         if not (isNull reader) && not reader.IsClosed then raise (InvalidOperationException("The command already has an active reader."))
         if not (isNull transaction) then transaction.CheckFor(session.Native)
         elif session.Native.HasOwnedTransaction then raise (InvalidOperationException("The command requires its active transaction association."))

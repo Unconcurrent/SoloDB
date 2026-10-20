@@ -145,8 +145,6 @@ type SqliteParameterCollection internal () as this =
         values
     member internal _.Plan =
         if isNull (box plan) then
-            for parameter in items do
-                if String.IsNullOrEmpty(parameter.ParameterName) then raise (InvalidOperationException("ParameterName must be set."))
             plan <- SqlParameterPlan<SqliteParameterCollection, AdoParameterSlot[]>(
                 Array.init items.Count (fun i -> items.[i].ParameterName),
                 Func<_, _, _>(fun source previous -> source.Capture(previous)),
