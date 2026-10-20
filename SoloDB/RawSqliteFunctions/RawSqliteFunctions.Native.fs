@@ -109,23 +109,25 @@ module internal NativeSqlite =
     let private copyUtf16 pointer bytes =
         if bytes = 0 then String.Empty else Marshal.PtrToStringUni(pointer, bytes / 2)
 
+    let private isUtf16Text storageClass value =
+        storageClass = SQLitePCL.raw.SQLITE_TEXT && sqlite3_value_encoding(value) <> SQLitePCL.raw.SQLITE_UTF8
+
     let ColumnText(statement: SQLitePCL.sqlite3_stmt, ordinal: int) =
-        // Read each native representation directly before copying the managed string.
-        // This preserves stored text and avoids an extra native encoding conversion.
-        if sqlite3_value_encoding(sqlite3_column_value(statement, ordinal)) = 1 then
-            let pointer = sqlite3_column_text(statement, ordinal)
-            SoloDatabase.NativeTextEncoding.copyUtf8(pointer, sqlite3_column_bytes(statement, ordinal))
-        else
+        // Encoding describes actual TEXT; other storage classes use SQLite's UTF8 conversion.
+        if isUtf16Text (SQLitePCL.raw.sqlite3_column_type(statement, ordinal)) (sqlite3_column_value(statement, ordinal)) then
             let pointer = sqlite3_column_text16(statement, ordinal)
             copyUtf16 pointer (sqlite3_column_bytes16(statement, ordinal))
+        else
+            let pointer = sqlite3_column_text(statement, ordinal)
+            SoloDatabase.NativeTextEncoding.copyUtf8(pointer, sqlite3_column_bytes(statement, ordinal))
 
     let ValueText(value: nativeint) =
-        if sqlite3_value_encoding(value) = 1 then
-            let pointer = sqlite3_value_text(value)
-            SoloDatabase.NativeTextEncoding.copyUtf8(pointer, sqlite3_value_bytes(value))
-        else
+        if isUtf16Text (sqlite3_value_type(value)) value then
             let pointer = sqlite3_value_text16(value)
             copyUtf16 pointer (sqlite3_value_bytes16(value))
+        else
+            let pointer = sqlite3_value_text(value)
+            SoloDatabase.NativeTextEncoding.copyUtf8(pointer, sqlite3_value_bytes(value))
 
     let SetBlob(context: nativeint, value: ReadOnlySpan<byte>) =
         if value.IsEmpty then sqlite3_result_zeroblob(context, 0)

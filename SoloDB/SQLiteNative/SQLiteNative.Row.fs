@@ -44,10 +44,6 @@ type SqlRow =
         else NativeTextEncoding.copyConfiguredUtf8(raw.sqlite3_column_text(this.statement.Handle, ordinal), raw.sqlite3_column_bytes(this.statement.Handle, ordinal))
     // Internal consumers finish conversion inside their private producing borrow.
     // Do not mix text representations or retain these spans after that conversion.
-    member internal this.TextIsUtf16(ordinal: int) =
-        this.NonNull ordinal
-        this.statement.Database.UsesNativeUtf16
-        && RawSqliteFunctions.NativeSqlite.sqlite3_value_encoding(RawSqliteFunctions.NativeSqlite.sqlite3_column_value(this.statement.Handle, ordinal)) <> 1
     member internal this.CanBorrowUtf16 = this.Check(); this.statement.Database.UsesNativeUtf16
     member internal this.TextUtf16(ordinal: int) =
         this.NonNull ordinal
