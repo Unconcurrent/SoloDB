@@ -175,7 +175,8 @@ module internal QueryableBuildQueryMain =
                         pendingGroupByHavingPreds <- []
                         pendingGroupByOrders <- []
                         QueryableBuildQueryGroupByOps.applyGroupBySelect<'T>
-                            sourceCtx tableName statements groupByExprs havingPreds groupOrders m.Expressions groupType
+                            sourceCtx tableName statements groupByExprs havingPreds groupOrders
+                            (ChainExpr.selector (QueryableBuildQueryGroupByOps.extractLambdaFromExpr m.Expressions[0])) groupType
                         pendingGroupByHandled <- true
                     | _ ->
                         let struct(groupByExprs, groupType) = pendingGroupByExprs.Value
@@ -227,7 +228,7 @@ module internal QueryableBuildQueryMain =
                         | Some result ->
                             let selector = ChainExpr.groupingResult group.GroupType result
                             QueryableBuildQueryGroupByOps.applyGroupBySelect<'T>
-                                sourceCtx tableName statements group [] [] [|selector :> Expression|] group.GroupType
+                                sourceCtx tableName statements group [] [] selector group.GroupType
                     | SupportedLinqMethods.Count
                     | SupportedLinqMethods.LongCount
                     | SupportedLinqMethods.SelectMany

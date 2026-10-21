@@ -109,4 +109,4 @@ module internal ChainExpr =
         let group = Expression.Parameter(groupType, "group")
         let items = Expression.Convert(group, result.Parameters[1].Type) :> Expression
         let body = inlineLambdaInvocation result [|Expression.Property(group, "Key") :> Expression; items|]
-        Expression.Lambda(body, group)
+        { Body = body; Parameters = Array.AsReadOnly [|group|] }

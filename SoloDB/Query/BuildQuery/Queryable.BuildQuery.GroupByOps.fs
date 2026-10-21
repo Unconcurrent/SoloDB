@@ -25,7 +25,7 @@ module internal QueryableBuildQueryGroupByOps =
 
     // ── GroupBy aggregate translation helpers ──
 
-    let private extractLambdaFromExpr (expr: Expression) : LambdaExpression =
+    let internal extractLambdaFromExpr (expr: Expression) : LambdaExpression =
         match expr with
         | :? UnaryExpression as ue when ue.NodeType = ExpressionType.Quote -> ue.Operand :?> LambdaExpression
         | :? LambdaExpression as le -> le
@@ -312,9 +312,8 @@ module internal QueryableBuildQueryGroupByOps =
 
     let internal applyGroupBySelect<'T>
         (sourceCtx: QueryContext) (tableName: string) (statements: ResizeArray<SQLSubquery>)
-        (group: ChainExpr.GroupBySelectors) (havingPreds: Expression list) (groupOrders: (Expression * bool) list) (selectExpressions: Expression array)
+        (group: ChainExpr.GroupBySelectors) (havingPreds: Expression list) (groupOrders: (Expression * bool) list) (selectLambda: ChainExpr.Selector)
         (groupType: Type) =
-        let selectLambda = extractLambdaFromExpr selectExpressions[0]
         addComplexFinal statements (fun ctx ->
             let completion = QueryGroupCompletion("_groups" + sourceCtx.NextAlias(), sourceCtx.NextAlias)
             let bindings, inner = if group.Element.IsSome then ctx.Inner.Ctes, { ctx.Inner with Ctes = [] } else [], ctx.Inner
@@ -324,7 +323,7 @@ module internal QueryableBuildQueryGroupByOps =
             let struct(rows, keyInput, equalityName) = QueryDefaultEquality.prepareGroups sourceCtx.NextAlias syntheticGroupKeyAlias keyType rows ctx.Input keyInput "_tree_ordinal"
             let input = groupingInput groupType keyInput ctx.Input
             let groupCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = input; Joins = completion.SelectorJoins }
-            let translate (lambda: LambdaExpression) = translateGroupBody completion groupCtx rows lambda.Parameters[0] lambda.Parameters ctx.Vars lambda.Body
+            let translate (lambda: ChainExpr.Selector) = translateGroupBody completion groupCtx rows lambda.Parameters[0] lambda.Parameters ctx.Vars lambda.Body
             let having = groupFilter completion groupCtx rows ctx.Vars havingPreds
             let produced = translate selectLambda
             let produced =

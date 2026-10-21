@@ -98,7 +98,7 @@ module internal OrderedChainPlan =
                     | "DistinctBy", Some a -> lambda a |> Option.map DistinctBy
                     | "GroupBy", Some _ ->
                         let group = groupBySelectors c.Method (c.Arguments |> Seq.skip 1 |> Seq.toArray)
-                        following <- group.Result |> Option.map (fun result -> [Project(selector (groupingResult group.GroupType result))]) |> Option.defaultValue []
+                        following <- group.Result |> Option.map (fun result -> [Project(groupingResult group.GroupType result)]) |> Option.defaultValue []
                         lambda group.Key |> Option.map (fun key -> Group(key, group.Element |> Option.bind lambda, false, group.GroupType))
                     | "CountBy", Some a when c.Arguments.Count = 2 || c.Arguments.Count = 3 ->
                         lambda a |> Option.map (fun key -> Group(key, None, true, sequenceElementType c.Type))
