@@ -210,6 +210,7 @@ module internal QueryableHelperPreprocess =
 
         let orderBy =
             statement.Orders |> Seq.map (fun o ->
+                QueryStructuralShape.requireComparison (orderKeyClrType o.OrderingRule)
                 let expr =
                     match o.RawExpr with
                     | Some duExpr -> duExpr

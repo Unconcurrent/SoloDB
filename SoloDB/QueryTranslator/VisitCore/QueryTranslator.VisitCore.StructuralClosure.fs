@@ -7,17 +7,20 @@ open System.Collections.Generic
 module internal QueryStructuralClosure =
     type private Rule = { Fields: ModelTypeTemplate[]; Exposed: bool[]; FirstSlot: int }
 
-    let finite (resolve: Type -> ModelTypeTemplate[] voption) (seed: ModelTypeTemplate) =
+    let analyze (resolve: Type -> struct(ModelTypeTemplate[] voption * Type voption)) (seed: ModelTypeTemplate) =
         let indices = Dictionary<Type,int>()
         let rules = ResizeArray<Rule>()
         let mutable slots = 0
         let mutable known = true
+        let mutable unsupported = ValueNone
         let mutable changed = true
         let rule owner =
             match indices.TryGetValue owner with
             | true,index -> rules[index]
             | _ ->
-                let fields = match resolve owner with ValueSome fields -> fields | ValueNone -> known <- false; [||]
+                let struct(facts,custom) = resolve owner
+                if unsupported.IsNone then unsupported <- custom
+                let fields = match facts with ValueSome fields -> fields | ValueNone -> known <- false; [||]
                 let count = if owner.IsGenericType then owner.GetGenericArguments().Length else 0
                 let result = { Fields = fields; Exposed = Array.zeroCreate count; FirstSlot = slots }
                 indices.Add(owner,rules.Count)
@@ -36,11 +39,11 @@ module internal QueryStructuralClosure =
                     if current.Exposed[index] then expose arguments[index] accept
         // Only heads and exposed argument constructors become component owners.
         // This also discovers closed constant heads that have no formal occurrences.
-        while known && changed do
+        while changed do
             changed <- false
             expose seed ignore
             let mutable index = 0
-            while known && index < rules.Count do
+            while index < rules.Count do
                 let current = rules[index]
                 for field in current.Fields do
                     expose field (fun slot ->
@@ -48,7 +51,7 @@ module internal QueryStructuralClosure =
                             current.Exposed[slot] <- true
                             changed <- true)
                 index <- index + 1
-        if not known then false else
+        if not known || unsupported.IsSome then struct(false,unsupported) else
         let edges = Array.init slots (fun _ -> HashSet<struct(int * bool)>())
         let rec occurrences source destination nested template =
             match template with
@@ -68,7 +71,7 @@ module internal QueryStructuralClosure =
             | _ -> ()
         for current in rules do
             for field in current.Fields do flow current.FirstSlot field
-        if not known then false else
+        if not known then struct(false,unsupported) else
         let numbers = Array.create slots -1
         let low = Array.zeroCreate slots
         let components = Array.create slots -1
@@ -105,4 +108,8 @@ module internal QueryStructuralClosure =
         // condensation path. Seeds and constant fragments have finite height;
         // projection creates no constructors. A finite alphabet at bounded height
         // therefore gives finitely many closed Types. A positive SCC is unknown.
+        struct(bounded,unsupported)
+
+    let finite resolve seed =
+        let struct(bounded,_) = analyze (fun owner -> struct(resolve owner,ValueNone)) seed
         bounded

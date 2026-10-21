@@ -138,6 +138,17 @@ module internal QueryableBuildQueryMain =
                             for order in existingOrders do
                                 current.Orders.Add(order)
 
+                match m.Value with
+                | SupportedLinqMethods.Order | SupportedLinqMethods.OrderDescending ->
+                    TypeMetadata.GenericMethodArgCache.Get m.OriginalMethod |> Array.head |> QueryStructuralShape.requireComparison
+                | SupportedLinqMethods.OrderBy | SupportedLinqMethods.OrderByDescending
+                | SupportedLinqMethods.ThenBy | SupportedLinqMethods.ThenByDescending
+                | SupportedLinqMethods.MinBy | SupportedLinqMethods.MaxBy when m.Expressions.Length = 1 ->
+                    QueryStructuralShape.requireComparison (orderKeyClrType m.Expressions[0])
+                | SupportedLinqMethods.Min | SupportedLinqMethods.Max ->
+                    QueryStructuralShape.requireComparison (QueryTranslatorNumeric.aggregateInput m.OriginalMethod)
+                | _ -> ()
+
                 if m.Value <> SupportedLinqMethods.Select && m.Value <> SupportedLinqMethods.DistinctBy
                    && m.Value <> SupportedLinqMethods.OrderBy && m.Value <> SupportedLinqMethods.OrderByDescending
                    && m.Value <> SupportedLinqMethods.ThenBy && m.Value <> SupportedLinqMethods.ThenByDescending then

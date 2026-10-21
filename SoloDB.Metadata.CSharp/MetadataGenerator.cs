@@ -107,6 +107,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
                         public bool Formattable { get; set; }
                         public string[] RecordFields { get; set; }
                         public bool StandardComparison { get; set; }
+                        public bool CustomComparison { get; set; }
                         public bool UnionType { get; set; }
                         public string IndexedRead { get; set; }
                         public string IndexedWrite { get; set; }
@@ -440,6 +441,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
             RecordType = recordType, RecordFields = recordFields, UnionType = unionType,
             StandardComparison = recordType && !named.GetAttributes().Any(attribute =>
                 attribute.AttributeClass?.ToDisplayString() is "Microsoft.FSharp.Core.CustomComparisonAttribute" or "Microsoft.FSharp.Core.NoComparisonAttribute"),
+            CustomComparison = type.GetAttributes().Any(attribute => attribute.AttributeClass?.ToDisplayString() == "Microsoft.FSharp.Core.CustomComparisonAttribute"),
             IndexedRead = indexedRead, IndexedWrite = indexedWrite,
             DictionaryReadOnly = ReadOnlyMatches(),
             Formattable = Contract("System.IFormattable") != null,
@@ -449,6 +451,7 @@ public sealed class MetadataGenerator : IIncrementalGenerator
         Model New(TypeShape shape, ITypeSymbol? element = null) => new(name, type.MetadataName, shape, type.IsValueType, type.IsSealed,
             false, element?.ToDisplayString(TypeDisplay), Array.Empty<Member>()) {
                 TypeArguments = Arguments(type),
+                CustomComparison = type.GetAttributes().Any(attribute => attribute.AttributeClass?.ToDisplayString() == "Microsoft.FSharp.Core.CustomComparisonAttribute"),
                 AbstractType = type is INamedTypeSymbol original && (original.IsAbstract || original.TypeKind == TypeKind.Interface),
                 DictionaryReadOnly = ReadOnlyMatches(), Formattable = Contract("System.IFormattable") != null
             };

@@ -13,6 +13,7 @@ module internal QueryStructuralShape =
         | ComponentNode of Field array
     and Field = { Name: string; Node: Node; Reader: Lazy<Func<obj,obj>> }
     type Graph = { Root: Node; Nodes: Node array; Recursive: bool; Types: Dictionary<Type,Node> }
+    type Admission<'T> = Available of 'T | Unavailable | Unsupported of Type
 
     let (|Leaf|Optional|Components|) node =
         match node.Kind with
@@ -55,7 +56,7 @@ module internal QueryStructuralShape =
                 for argument in current.GetGenericArguments() do pending.Push argument
         found
 
-    type private Description = Scalar | Payload of Type | Members of (string * Type)[]
+    type private Description = Scalar | Payload of Type | Members of (string * Type)[] | Custom
 
     let private intrinsic (t: Type) =
         let payload = Utils.unwrapNullableType t
@@ -72,6 +73,8 @@ module internal QueryStructuralShape =
     let private describe t =
         match intrinsic t with
         | ValueSome description -> ValueSome description
+        | ValueNone when DBRefTypeHelpers.isSingleReferenceType t -> ValueNone
+        | ValueNone when TypeMetadata.customComparison t = ValueSome true -> ValueSome Custom
         | ValueNone when TypeMetadata.standardComparison t ->
             TypeMetadata.recordFields t |> ValueOption.map(fun names -> Members(names |> Array.map(fun name ->
                 let target = ModelMetadata.MemberType(t,name,false)
@@ -85,6 +88,7 @@ module internal QueryStructuralShape =
         | ValueSome Scalar -> ValueSome [||]
         | ValueSome(Payload payload) -> ValueSome [|ModelMetadata.TypeTemplate payload|]
         | ValueSome(Members members) -> ValueSome(members |> Array.map(fun (_,target) -> ModelMetadata.TypeTemplate target))
+        | ValueSome Custom -> ValueNone
         | ValueNone ->
             match ModelMetadata.DefinitionOwner definition with
             | ValueNone -> ValueNone
@@ -101,58 +105,104 @@ module internal QueryStructuralShape =
                     if known then ValueSome(templates.ToArray()) else ValueNone
                 | _ -> ValueNone
 
-    let finiteClosure root = QueryStructuralClosure.finite originalMembers (ModelMetadata.TypeTemplate root)
+    let private closure root =
+        QueryStructuralClosure.analyze (fun definition ->
+            if TypeMetadata.customComparison definition = ValueSome true &&
+               not(DBRefTypeHelpers.isSingleReferenceType definition) then struct(ValueSome [||],ValueSome definition)
+            else struct(originalMembers definition,ValueNone)) (ModelMetadata.TypeTemplate root)
+
+    let finiteClosure root = let struct(bounded,_) = closure root in bounded
 
     let tryCreate root =
         let types = Dictionary<Type,Node>()
+        let failures = Dictionary<Type,Type voption>()
         let nodes = ResizeArray<Node>()
         let active = HashSet<Type>()
         let mutable recursive = false
-        let finite = lazy(finiteClosure root)
+        let finite = lazy(closure root)
         let rec build (t: Type) =
+            match failures.TryGetValue t with
+            | true,ValueSome custom -> Unsupported custom
+            | true,ValueNone -> Unavailable
+            | _ ->
             match types.TryGetValue t with
             | true,node ->
                 if active.Contains t then recursive <- true
-                ValueSome node
+                Available node
             | _ ->
+                let description = describe t
+                match description with
+                | ValueSome Custom -> failures.Add(t,ValueSome t); Unsupported t
+                | _ ->
                 let changing = t.IsGenericType && (active |> Seq.exists(fun owner ->
                     owner.IsGenericType && owner.GetGenericTypeDefinition().Equals(t.GetGenericTypeDefinition()) &&
                     not(properSubterm t owner)))
-                if changing && not finite.Value then ValueNone else
+                let struct(bounded,custom) = if changing then finite.Value else struct(true,ValueNone)
+                match custom with
+                | ValueSome target -> failures.Add(t,ValueSome target); Unsupported target
+                | ValueNone when not bounded -> failures.Add(t,ValueNone); Unavailable
+                | ValueNone ->
                 let node = { Index = nodes.Count; Target = t; Kind = ScalarNode }
                 nodes.Add node
                 types.Add(t,node)
                 active.Add t |> ignore
                 let result =
-                    match describe t with
+                    match description with
                     | ValueSome(Payload payload) ->
-                        build payload |> ValueOption.map(fun child ->
+                        match build payload with
+                        | Available child ->
                             node.Kind <- OptionalNode(child,reader t "Value" payload)
-                            node)
-                    | ValueSome Scalar -> ValueSome node
-                    | ValueNone -> ValueNone
+                            Available node
+                        | Unavailable -> Unavailable
+                        | Unsupported custom -> Unsupported custom
+                    | ValueSome Scalar -> Available node
+                    | ValueNone -> Unavailable
+                    | ValueSome Custom -> Unsupported t
                     | ValueSome(Members members) ->
                         let fields = ResizeArray<Field>(members.Length)
                         let mutable admitted = true
+                        let mutable custom = ValueNone
                         let mutable index = 0
-                        while admitted && index < members.Length do
+                        while custom.IsNone && index < members.Length do
                             let name,target = members[index]
                             match build target with
-                            | ValueSome child -> fields.Add { Name = name; Node = child; Reader = reader t name target }
-                            | ValueNone -> admitted <- false
+                            | Available child -> fields.Add { Name = name; Node = child; Reader = reader t name target }
+                            | Unavailable -> admitted <- false
+                            | Unsupported target -> custom <- ValueSome target
                             index <- index + 1
-                        if not admitted then ValueNone else
-                        node.Kind <- ComponentNode(fields.ToArray())
-                        ValueSome node
+                        match custom with
+                        | ValueSome target -> Unsupported target
+                        | ValueNone when not admitted -> Unavailable
+                        | _ ->
+                            node.Kind <- ComponentNode(fields.ToArray())
+                            Available node
                 active.Remove t |> ignore
+                match result with
+                | Unavailable -> failures.Add(t,ValueNone)
+                | Unsupported custom -> failures.Add(t,ValueSome custom)
+                | _ -> ()
                 result
         match build root with
-        | ValueSome node ->
+        | Available node ->
             match node.Kind with
             | ComponentNode _ | OptionalNode({ Kind = ComponentNode _ },_) ->
-                ValueSome { Root = node; Nodes = nodes.ToArray(); Recursive = recursive; Types = types }
-            | _ -> ValueNone
-        | _ -> ValueNone
+                Available { Root = node; Nodes = nodes.ToArray(); Recursive = recursive; Types = types }
+            | _ -> Unavailable
+        | Unavailable -> Unavailable
+        | Unsupported custom -> Unsupported custom
+
+    let unsupported (target: Type) =
+        raise (NotSupportedException(
+            $"Error: Cannot translate custom comparison for '{target}'.\nReason: Its authored comparison has no faithful SQL translation.\nFix: Compare supported scalar keys with the intended order, or call AsEnumerable before the comparison."))
+
+    let requireComparison target =
+        match intrinsic target with
+        | ValueSome Scalar -> ()
+        | _ when DBRefTypeHelpers.isSingleReferenceType target -> ()
+        | _ ->
+            match tryCreate target with
+            | Unsupported custom -> unsupported custom
+            | _ -> ()
 
     let enumValue target value =
         let underlying = TypeMetadata.enumUnderlying target

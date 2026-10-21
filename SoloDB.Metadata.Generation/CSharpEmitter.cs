@@ -31,6 +31,8 @@ public static class CSharpEmitter
                 .Append(",SupportsValuesWrapper=").Append(model.SupportsValuesWrapper ? "true" : "false")
                 .Append(",Element=").Append(model.ElementType == null ? "null" : Quote(model.TypeIdentities[model.ElementType]))
                 .Append(",SequenceElement=").Append(model.SequenceElementType == null ? "null" : Quote(model.TypeIdentities[model.SequenceElementType]));
+            if (model.CustomComparison.HasValue)
+                output.Append(",CustomComparison=").Append(model.CustomComparison.Value ? "true" : "false");
             foreach (var pair in new (string Name,Func<Member,bool> Value)[] {
                 ("References",member => member.Reference),
                 ("HasPolicies",member => member.HasReferencePolicy),("Unique",member => member.Unique) })

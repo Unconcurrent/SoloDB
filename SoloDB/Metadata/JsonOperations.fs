@@ -1654,6 +1654,8 @@ and [<AbstractClass; Sealed>] JsonMetadata =
         TypeMetadata.registerRecordFields typeof<'T> fields
     static member internal RegisterStandardComparison<'T>(standard: bool) =
         TypeMetadata.registerStandardComparison typeof<'T> standard
+    static member internal RegisterCustomComparison<'T>(custom: bool) =
+        TypeMetadata.registerCustomComparison typeof<'T> custom
     /// Uses the same object admission and diagnostics as ordinary deserialization.
     static member internal ObjectProperties(json: JsonValue) = JsonImpl.AsDictOrFail json
     /// Uses the existing union predicate precedence without member discovery.

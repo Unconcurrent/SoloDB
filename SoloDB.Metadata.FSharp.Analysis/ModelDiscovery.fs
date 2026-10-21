@@ -575,6 +575,7 @@ module internal ModelDiscovery =
                     model.RequiresTypeInformation <- model.AbstractType || CompilerPropertyFacts.polymorphic typ
                     model.ConstructFromMembers <- constructFromMembers
                     model.RecordType <- entity.IsFSharpRecord
+                    model.CustomComparison <- Nullable(hasAttribute "Microsoft.FSharp.Core.CustomComparisonAttribute" entity.Attributes)
                     model.StandardComparison <- entity.IsFSharpRecord &&
                         not(hasAttribute "Microsoft.FSharp.Core.CustomComparisonAttribute" entity.Attributes) &&
                         not(hasAttribute "Microsoft.FSharp.Core.NoComparisonAttribute" entity.Attributes)

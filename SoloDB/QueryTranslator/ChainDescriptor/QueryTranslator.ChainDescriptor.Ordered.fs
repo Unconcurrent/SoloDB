@@ -149,6 +149,13 @@ module internal OrderedChain =
                         { plan with Stages=plan.Stages @ [Filter inverted] }
                     | ("Count"|"LongCount"|"Any"|"First"|"FirstOrDefault"|"Last"|"LastOrDefault"|"Single"|"SingleOrDefault"), Some pred -> { plan with Stages=plan.Stages @ [Filter pred] }
                     | _ -> plan
+                for stage in plan.Stages do
+                    match stage with
+                    | Order(selector, _, _) -> QueryStructuralShape.requireComparison selector.ReturnType
+                    | _ -> ()
+                if name = "MinBy" || name = "MaxBy" || name = "Min" || name = "Max" then
+                    let target = argumentLambda |> Option.map _.ReturnType |> Option.defaultWith (fun () -> sequenceElementType (getSource call).Type)
+                    QueryStructuralShape.requireComparison target
                 // A filter-only cardinality terminal does not observe input order.
                 // Keep bounds, projections and set stages on their ordered rowset path.
                 let simpleCardinality =

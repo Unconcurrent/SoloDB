@@ -88,6 +88,10 @@ module internal OrderedChainRows =
         valid
 
     let rec private buildRows (adapter: Adapter) columns (plan: Plan) retainFinalRepresentative =
+        for stage in plan.Stages do
+            match stage with
+            | Order(selector, _, _) -> QueryStructuralShape.requireComparison selector.ReturnType
+            | _ -> ()
         adapter.Validate plan
         let struct(start, sourceInput) = adapter.Source columns plan.Root
         let bound (source: SqlSelect) fallback limit offset =

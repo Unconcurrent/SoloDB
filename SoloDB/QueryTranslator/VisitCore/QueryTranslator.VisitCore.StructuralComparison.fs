@@ -35,7 +35,7 @@ module internal QueryStructuralRelations =
             QueryTranslatorNumericMethods.originalComparison expression.NodeType method expression.Left.Type expression.Right.Type
         if not original then ValueNone else
         match qb.SourceContext.BindQueryValue,QueryStructuralShape.tryCreate expression.Left.Type with
-        | ValueSome binder,ValueSome graph ->
+        | ValueSome binder,QueryStructuralShape.Available graph ->
             let shape = graph.Root
             let nextName = qb.SourceContext.NextAlias
             let relation = relation.Value
@@ -184,4 +184,5 @@ module internal QueryStructuralRelations =
                     let result = match candidate with ValueSome candidate -> binary BinaryOperator.And candidate result | ValueNone -> result
                     QueryProduced.typed typeof<bool> result) (operands.ToArray())
             ValueSome(QueryProduced.value nextName result)
+        | _,QueryStructuralShape.Unsupported custom -> QueryStructuralShape.unsupported custom
         | _ -> ValueNone

@@ -92,6 +92,18 @@ module internal QueryTranslatorVisitCoreCastAggregate =
             SqlExpr.FunctionCall(funcName, args)
 
     let internal visitMathMethodDu (visitDu: Expression -> QueryBuilder -> SqlExpr) (visitComparisonDu: Expression -> QueryBuilder -> SqlExpr) (m: MethodCallExpression) (qb: QueryBuilder) : SqlExpr voption =
+        let operation = QueryTranslatorNumericMethods.comparisonOperation m.Method.Name
+        match operation with
+        | ExpressionType.LessThan | ExpressionType.LessThanOrEqual | ExpressionType.GreaterThan | ExpressionType.GreaterThanOrEqual when m.Arguments.Count = 2 ->
+            if not(QueryTranslatorNumericMethods.supportsRelationalMethod operation m.Method m.Arguments[0].Type m.Arguments[1].Type) then
+                QueryStructuralShape.unsupported m.Method.DeclaringType
+            QueryStructuralShape.requireComparison m.Arguments[0].Type
+            QueryStructuralShape.requireComparison m.Arguments[1].Type
+        | _ -> ()
+        match QueryTranslatorNumericMethods.minMaxCall m.Method m.Arguments.Count with
+        | QueryTranslatorNumericMethods.DefaultMinMax target -> QueryStructuralShape.requireComparison target
+        | QueryTranslatorNumericMethods.UnsupportedMinMax -> QueryStructuralShape.unsupported m.Method.DeclaringType
+        | _ -> ()
         match QueryTranslatorNumericMethods.tryComparisonCall m.Method m.Arguments.Count (fun index -> m.Arguments[index]) (fun index -> visitComparisonDu m.Arguments[index] qb) with
         | ValueSome result -> ValueSome result
         | ValueNone ->

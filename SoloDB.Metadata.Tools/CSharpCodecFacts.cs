@@ -164,6 +164,7 @@ internal static class CSharpCodecFacts
                 constructor != null && !construct,null,facts) { AbstractType = (bool)arguments[2].Value, ConstructFromMembers = construct, PopulateCollection = populate,
                     RecordType = recordFields != null, RecordFields = recordFields ?? System.Array.Empty<string>(),
                     StandardComparison = Flag("StandardComparison"),
+                    CustomComparison = attribute.Properties.Any(property => property.Name == "CustomComparison") ? Flag("CustomComparison") : (bool?)null,
                     RequiresTypeInformation = (bool)arguments[2].Value || HelperAssembly.InheritedAttribute(sourceType,"SoloDatabase.Attributes.PolymorphicAttribute"), SupportsValuesWrapper = Flag("SupportsValuesWrapper"),
                     NonGenericEnumerable = Flag("NonGenericEnumerable"),
                     DictionaryReadOnly = Flag("DictionaryReadOnly"), Formattable = Flag("Formattable"),

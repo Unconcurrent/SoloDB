@@ -56,6 +56,21 @@ module internal TypeMetadata =
     let internal registerStandardComparison modelType standard =
         TypeMetadataCache.Register(modelType, fun metadata -> { metadata with StandardComparison = MetadataValue.generated standard })
 
+    let internal registerCustomComparison (modelType: Type) custom =
+        let register owner =
+            TypeMetadataCache.Register(owner, fun metadata -> { metadata with CustomComparison = MetadataValue.generated custom })
+        register modelType
+        if modelType.IsConstructedGenericType then register (modelType.GetGenericTypeDefinition())
+
+    let internal customComparison (modelType: Type) =
+        match TypeMetadataCache.Read(modelType,fun metadata -> MetadataValue.tryValue metadata.CustomComparison) with
+        | ValueSome custom -> ValueSome custom
+        | ValueNone when not(MetadataRuntime.supportsDynamicCode()) -> ValueNone
+        | ValueNone ->
+            ValueSome(TypeMetadataCache.Discover(modelType, (fun metadata -> metadata.CustomComparison),
+                (fun value metadata -> { metadata with CustomComparison = ValueSome value }), Func<bool>(fun () ->
+                    modelType.IsDefined(typeof<Microsoft.FSharp.Core.CustomComparisonAttribute>, false))))
+
     let internal standardComparison (modelType: Type) =
         let known = TypeMetadataCache.Read(modelType,fun metadata -> MetadataValue.tryValue metadata.StandardComparison)
         match known with

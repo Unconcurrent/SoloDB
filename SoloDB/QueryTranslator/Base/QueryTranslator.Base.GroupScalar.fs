@@ -150,6 +150,8 @@ module internal QueryGroupScalar =
             match describe parameter call with
             | None -> None
             | Some demand ->
+                if demand.Kind = AggregateKind.Min || demand.Kind = AggregateKind.Max then
+                    demand.Selector |> Option.iter (fun selector -> QueryStructuralShape.requireComparison selector.ReturnType)
                 let zero = SqlExpr.Literal(SqlLiteral.Integer 0L)
                 let one = SqlExpr.Literal(SqlLiteral.Integer 1L)
                 demand.DiscardedProjection |> Option.iter (fun projection -> translate projection |> ignore)

@@ -31,7 +31,7 @@ module internal QueryTranslatorNumericMethods =
         | ExpressionType.GreaterThanOrEqual -> ValueSome BinaryOperator.Ge
         | _ -> ValueNone
 
-    let private comparisonOperation = function
+    let comparisonOperation = function
         | "op_Equality" -> ExpressionType.Equal
         | "op_Inequality" -> ExpressionType.NotEqual
         | "op_LessThan" -> ExpressionType.LessThan
@@ -52,6 +52,35 @@ module internal QueryTranslatorNumericMethods =
                 || originalFSharpOwner "Microsoft.FSharp.Core.Operators" owner
                 || originalFSharpOwner "Microsoft.FSharp.Core.Operators+Checked" owner)
 
+
+    let supportsRelationalMethod operation (method: MethodInfo) left right =
+        let left,right = underlying left,underlying right
+        if isNull method || originalComparison operation method left right then true else
+        let owner = method.DeclaringType
+        let parameters = method.GetParameters()
+        method.IsStatic && not method.ContainsGenericParameters && typeof<bool>.Equals(method.ReturnType) &&
+        comparisonOperation method.Name = operation && parameters.Length = 2 &&
+        parameters[0].ParameterType.Equals(left) && parameters[1].ParameterType.Equals(right) &&
+        left.Equals(right) && owner.Equals(left) &&
+        ((nativeCastType owner).IsSome || (TypeSupport.RawNumericCore owner.FullName).IsSome || Utils.isDateTimeLikeType owner)
+
+    type MinMaxCall = OtherMethod | NativeMinMax | DefaultMinMax of Type | UnsupportedMinMax
+
+    let minMaxCall (method: MethodInfo) argumentCount =
+        let comparison =
+            match method.Name with
+            | "Min" | "Max" | "min" | "max" | "Min$W" | "Max$W" | "min$W" | "max$W" -> true
+            | _ -> false
+        if not comparison then OtherMethod else
+        let owner = method.DeclaringType
+        let parameters = method.GetParameters()
+        let signature = method.IsStatic && not method.ContainsGenericParameters && argumentCount = 2 && parameters.Length = 2 &&
+                        parameters[0].ParameterType.Equals(parameters[1].ParameterType) && method.ReturnType.Equals(parameters[0].ParameterType)
+        if signature && originalFSharpOwner "Microsoft.FSharp.Core.Operators" owner && (method.Name = "Min" || method.Name = "Max") then
+            DefaultMinMax parameters[0].ParameterType
+        elif signature && (typeof<Math>.Equals(owner) || typeof<decimal>.Equals(owner) || typeof<BigInteger>.Equals(owner) ||
+                           typeof<DecimalMath>.Equals(owner) || (owner.FullName = "System.MathF" && owner.Assembly.Equals(typeof<Math>.Assembly))) then NativeMinMax
+        else UnsupportedMinMax
 
     /// Closed operator identity establishes operand promotion independently of its Boolean result.
     let comparison operation (method: MethodInfo) leftType rightType =

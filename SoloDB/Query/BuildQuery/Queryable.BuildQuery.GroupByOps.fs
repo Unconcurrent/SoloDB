@@ -172,6 +172,7 @@ module internal QueryableBuildQueryGroupByOps =
         groupOrders
         |> List.map (fun (orderingExpr, descending) ->
             let lambda = extractLambdaFromExpr orderingExpr
+            QueryStructuralShape.requireComparison lambda.ReturnType
             let orderExpr =
                 translateGroupBody completion sourceCtx innerSelect lambda.Parameters[0] lambda.Parameters vars lambda.Body
                 |> QueryProduced.value sourceCtx.NextAlias

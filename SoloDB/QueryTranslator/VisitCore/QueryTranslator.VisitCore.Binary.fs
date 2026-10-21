@@ -33,6 +33,11 @@ module internal QueryTranslatorVisitCoreBinary =
             let right = fileSystemReferenceIdentity visitDu qb b.Right
             SqlExpr.Binary(left, (if b.NodeType = ExpressionType.Equal then BinaryOperator.Eq else BinaryOperator.Ne), right)
         else
+        match b.NodeType with
+        | ExpressionType.LessThan | ExpressionType.LessThanOrEqual | ExpressionType.GreaterThan | ExpressionType.GreaterThanOrEqual
+            when not(QueryTranslatorNumericMethods.supportsRelationalMethod b.NodeType b.Method b.Left.Type b.Right.Type) ->
+            QueryStructuralShape.unsupported b.Method.DeclaringType
+        | _ -> ()
         match QueryStructuralRelations.tryTranslate visitRaw b qb with
         | ValueSome comparison -> comparison
         | ValueNone ->
