@@ -54,8 +54,8 @@ module internal QueryTranslatorNumericMethods =
 
 
     let supportsRelationalMethod operation (method: MethodInfo) left right =
-        let left,right = underlying left,underlying right
         if isNull method || originalComparison operation method left right then true else
+        let left,right = underlying left,underlying right
         let owner = method.DeclaringType
         let parameters = method.GetParameters()
         method.IsStatic && not method.ContainsGenericParameters && typeof<bool>.Equals(method.ReturnType) &&
