@@ -105,6 +105,9 @@ module internal QueryDiscovery =
             if typ.HasTypeDefinition && typ.GenericArguments.Count = 1 &&
                (typ.TypeDefinition.TryFullName = Some "System.Linq.IQueryable`1" || typ.TypeDefinition.TryFullName = Some "System.Linq.IOrderedQueryable`1")
             then Some typ.GenericArguments[0] else None
+        let addTupleResult (typ: FSharpType) =
+            let result = typ.GenericArguments[typ.GenericArguments.Count - 1].StripAbbreviations()
+            if result.IsTupleType && closed result then roots.Add result
         let rec addLambda (reference: FSharpType -> TypeReference) (typ: FSharpType) =
             let typ = typ.StripAbbreviations()
             if typ.HasTypeDefinition then
@@ -115,6 +118,7 @@ module internal QueryDiscovery =
                     let parameters = typ.GenericArguments |> Seq.take(typ.GenericArguments.Count - 1) |> Seq.map reference |> Seq.toArray
                     let lambda = GeneratedQueryLambda(actual,parameters)
                     lambdas[lambda.Identity] <- lambda
+                    addTupleResult typ
                 | _ -> ()
         let rec addParameterFacts (reference: FSharpType -> TypeReference) (typ: FSharpType) =
             let typ = typ.StripAbbreviations()
@@ -126,6 +130,7 @@ module internal QueryDiscovery =
                     let parameters = typ.GenericArguments |> Seq.take(typ.GenericArguments.Count - 1) |> Seq.map reference |> Seq.toArray
                     let lambda = GeneratedQueryLambda(actual,parameters,false)
                     if not(lambdas.ContainsKey lambda.Identity) then lambdas[lambda.Identity] <- lambda
+                    addTupleResult typ
                 | _ -> ()
         let add isSequence (source: TypeReference) (arguments: TypeReference) (result: TypeReference) =
             let key = string isSequence + "|" + source.FullName + "," + source.Scope.ToString() + "|" + arguments.FullName + "," + arguments.Scope.ToString() + "|" + result.FullName + "," + result.Scope.ToString()
@@ -308,7 +313,7 @@ module internal QueryDiscovery =
                     lambdas[lambda.Identity] <- lambda
                     parameters.ToArray()
                 else
-                    addLambda reference callable
+                    addLambda reference (instantiate (context @ useSite.GenericArguments) callable)
                     callable.GenericArguments |> Seq.toArray
             let querySource = callableArguments[0].StripAbbreviations()
             let source = reference querySource.GenericArguments[0]
@@ -336,7 +341,8 @@ module internal QueryDiscovery =
                     | :? FSharpMemberOrFunctionOrValue as operation when not part.IsFromDefinition && operation.IsMethod && runtimeMember operation ->
                         let reference = bound context part
                         let substitutions = context @ useSite.GenericArguments @ part.GenericArguments
-                        for parameter in operation.CurriedParameterGroups |> Seq.collect id do addLambda reference parameter.Type
+                        for parameter in operation.CurriedParameterGroups |> Seq.collect id do
+                            addLambda reference (instantiate substitutions parameter.Type)
                         for typ in seq { yield operation.ReturnParameter.Type
                                          for parameter in operation.CurriedParameterGroups |> Seq.collect id do yield parameter.Type } do
                             let actual = instantiate substitutions typ
