@@ -204,11 +204,11 @@ module internal QueryDiscovery =
             providerIndex <- providerIndex + 1
         for operation in providers do
             roots.Add providerTypes[typeKey operation.Result]
-        let addMemberWitness = QueryMemberWitnesses.create witnesses
+        use originalMembers = new QueryMemberWitnesses.OriginalMembers(moduleDefinition,currentIdentity,referenceWith,witnesses)
         let addWitness context (part: FSharpSymbolUse) =
             match part.Symbol with
             | :? FSharpMemberOrFunctionOrValue as memberValue when not part.IsFromDefinition && runtimeMember memberValue ->
-                addMemberWitness (bound context part) memberValue
+                originalMembers.Add(bound context part, memberValue)
             | _ -> ()
         let collectPart context (part: FSharpSymbolUse) =
             let requireAccess (operation: FSharpMemberOrFunctionOrValue) =
@@ -239,16 +239,8 @@ module internal QueryDiscovery =
                 let declaration, _ = CompilerReferences.compiledMember operation
                 requireAccess declaration
                 let declaring=reference declaration.ApparentEnclosingType
-                let target=MethodReference(".ctor",moduleDefinition.TypeSystem.Void,declaring,HasThis=true)
-                let definition=match declaring with :? GenericInstanceType as closed -> closed.ElementType | _ -> declaring
-                let signature=referenceWith(fun parameter ->
-                    let index=operation.DeclaringEntity.Value.GenericParameters |> Seq.findIndex(fun candidate -> candidate.Equals parameter)
-                    definition.GenericParameters[index] :> TypeReference)
-                let parameters=operation.CurriedParameterGroups |> Seq.collect id |> Seq.map _.Type
-                               |> Seq.filter(fun typ -> let actual=typ.StripAbbreviations() in not(actual.HasTypeDefinition && actual.TypeDefinition.TryFullName = Some "Microsoft.FSharp.Core.Unit")) |> Seq.toArray
-                for parameter in parameters do target.Parameters.Add(ParameterDefinition(signature parameter))
-                let arguments=parameters |> Array.map reference
-                calls[target.FullName] <- GeneratedQueryCall(target,declaring,arguments)
+                let target = originalMembers.Template(reference,declaration,declaring)
+                calls[target.FullName] <- originalMembers.Call(target,[||])
             | :? FSharpMemberOrFunctionOrValue as operation when (operation.IsMethod || operation.IsFunction) && not part.IsFromDefinition &&
                 operation.DeclaringEntity.IsSome && not operation.IsConstructor && runtimeMember operation ->
                 let declaration, slots = CompilerReferences.compiledMember operation
@@ -258,29 +250,12 @@ module internal QueryDiscovery =
                     original, (checkedBindings |> List.find(fun (candidate,_) -> candidate.Equals selected) |> snd)) |> Array.toList
                 let substitutions = declarationBindings @ checkedBindings
                 let reference = bound (declarationBindings @ context) part
-                let target = MethodReference(declaration.CompiledName, moduleDefinition.TypeSystem.Void,
-                                             reference declaration.ApparentEnclosingType, HasThis = declaration.IsInstanceMemberInCompiledCode)
-                for parameter in declaration.GenericParameters do target.GenericParameters.Add(GenericParameter(parameter.Name,target))
-                let signature = referenceWith(fun parameter ->
-                    match declaration.GenericParameters |> Seq.tryFindIndex(fun candidate -> candidate.Equals parameter) with
-                    | Some index -> target.GenericParameters[index] :> TypeReference
-                    | None ->
-                        substitutions
-                        |> List.find(fun (candidate,_) -> candidate.Equals parameter)
-                        |> snd |> reference)
-                target.ReturnType <- signature declaration.ReturnParameter.Type
-                let parameters = declaration.CurriedParameterGroups |> Seq.collect id |> Seq.map _.Type |> Seq.toArray
-                for parameter in parameters do target.Parameters.Add(ParameterDefinition(signature parameter))
-                let method =
-                    if declaration.GenericParameters.Count = 0 then target else
-                    let closed = GenericInstanceMethod(target)
-                    for parameter in declaration.GenericParameters do
-                        closed.GenericArguments.Add(reference (substitutions |> List.find(fun (candidate,_) -> candidate.Equals parameter) |> snd))
-                    closed :> MethodReference
-                let result = reference declaration.ReturnParameter.Type
-                let arguments = parameters |> Array.map reference
-                let key = method.FullName + "|" + result.FullName + "|" + String.Join(";",arguments |> Array.map _.FullName)
-                calls[key] <- GeneratedQueryCall(method,result,arguments)
+                let target = originalMembers.Template(reference,declaration,reference declaration.ApparentEnclosingType)
+                let generics = declaration.GenericParameters |> Seq.map(fun parameter ->
+                    reference (substitutions |> List.find(fun (candidate,_) -> candidate.Equals parameter) |> snd)) |> Seq.toArray
+                let call = originalMembers.Call(target,generics)
+                let key = call.Method.FullName + "|" + call.Result.FullName + "|" + String.Join(";",call.Arguments |> Array.map _.FullName)
+                calls[key] <- call
             | _ -> ()
         let sites =
             uses |> Array.choose(fun useSite ->

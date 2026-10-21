@@ -256,7 +256,7 @@ type internal TypeMetadataRecord = {
     QueryCases: Dictionary<int, MetadataValue<struct (Func<obj[],obj> * Func<obj,bool>)>> option
     QuerySetters: Dictionary<struct (string * bool * Type), MetadataValue<Action<obj,obj>>> option
     QueryConstructors: Dictionary<Type list, MetadataValue<Func<obj[],obj>>> option
-    QueryCalls: Dictionary<struct (string * Type list * Type list), MetadataValue<Func<obj,obj[],obj>>> option
+    QueryCalls: Dictionary<struct (string * Type list * Type list * Type voption), MetadataValue<Func<obj,obj[],obj>>> option
     QueryUnary: Dictionary<struct (ExpressionType * Type), MetadataValue<Func<obj,obj>>> option
     QueryBinary: Dictionary<struct (ExpressionType * Type * Type), MetadataValue<Func<obj,obj,obj>>> option
     PropertyGetters: Dictionary<PropertyInfo, MetadataValue<Func<obj,obj>>> option

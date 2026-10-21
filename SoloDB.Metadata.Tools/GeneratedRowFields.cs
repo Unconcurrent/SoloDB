@@ -80,7 +80,11 @@ internal static class GeneratedRowFields
     internal static MethodReference? DefaultConstructor(ModuleDefinition module,TypeReference type)
     {
         if (type is ArrayType) return null;
-        var constructor = type.Resolve().Methods.FirstOrDefault(method => method.IsConstructor && !method.IsStatic && method.Parameters.Count == 0);
+        var definition = type.Resolve();
+        var referenceAssembly = definition.Module.Assembly.CustomAttributes.Any(attribute =>
+            attribute.AttributeType.FullName == "System.Runtime.CompilerServices.ReferenceAssemblyAttribute");
+        var constructor = definition.Methods.FirstOrDefault(method => method.IsConstructor && !method.IsStatic && method.Parameters.Count == 0 &&
+            (!referenceAssembly || method.IsPublic || method.IsFamily || method.IsFamilyOrAssembly || method.IsFamilyAndAssembly));
         if (constructor == null) return null;
         var result = module.ImportReference(constructor); result.DeclaringType = module.ImportReference(type);
         return result;

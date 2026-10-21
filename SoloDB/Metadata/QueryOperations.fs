@@ -32,19 +32,13 @@ type internal QueryMetadata private () =
                 fun provider sql arguments hydration -> box (provider.ExecuteEnumetable<'Element> sql arguments hydration)))
     /// Registers an actual retained sequence part and its invocation argument type.
     static member RegisterCompiledSequence<'Source, 'Args, 'Element>() =
-        CompiledQueryMetadata<'Source, 'Args>.RegisterSequence(typeof<'Element>,
-            Func<ISoloDBCollection<'Source>, Expression, ParameterExpression array, ParameterExpression, Expression array, Func<'Args, obj>>(
-                fun source body parameters argument arguments ->
-                    let run = CompiledQueries.compileExpression<'Source, 'Args, 'Element> source body parameters argument arguments
-                    Func<'Args, obj>(fun args -> box (run args))))
+        CompiledQueryMetadata<'Source, 'Args>.RegisterScopedSequence(typeof<'Element>,
+            CompiledQueries.createSequenceDispatcher<'Source,'Args,'Element>())
         QueryMetadata.RegisterSequence<'Source, 'Element>()
 
     /// Registers an actual retained scalar part and its invocation argument type.
     static member RegisterCompiledResult<'Source, 'Args, 'Result>() =
-        CompiledQueryMetadata<'Source, 'Args>.RegisterResult(typeof<'Result>,
-            Func<ISoloDBCollection<'Source>, Expression, ParameterExpression array, ParameterExpression, Expression array, Func<'Args, obj>>(
-                fun source body parameters argument arguments ->
-                    let run = CompiledQueries.scalarExpression<'Source, 'Args, 'Result> source body parameters argument arguments
-                    Func<'Args, obj>(fun args -> box (run args))))
+        CompiledQueryMetadata<'Source, 'Args>.RegisterScopedResult(typeof<'Result>,
+            CompiledQueries.createResultDispatcher<'Source,'Args,'Result>())
         QueryMetadata.RegisterResult<'Source, 'Result>()
 

@@ -65,6 +65,7 @@ internal static class GeneratedQueryCalls
             TypeToken(il, target.DeclaringType); il.Emit(OpCodes.Ldstr, target.Name);
             Types(target is GenericInstanceMethod generic ? generic.GenericArguments.ToArray() : Array.Empty<TypeReference>());
             Types(call.Arguments);
+            TypeToken(il, call.Result);
             var function = new GenericInstanceType(new TypeReference("System", "Func`3", module, standard));
             function.GenericArguments.Add(module.TypeSystem.Object);
             function.GenericArguments.Add(new ArrayType(module.TypeSystem.Object));
@@ -74,7 +75,7 @@ internal static class GeneratedQueryCalls
             constructor.Parameters.Add(new ParameterDefinition(module.TypeSystem.IntPtr));
             il.Emit(OpCodes.Ldnull); il.Emit(OpCodes.Ldftn, invoke); il.Emit(OpCodes.Newobj, constructor);
             var register = new GenericInstanceMethod(module.ImportReference(product.MainModule.GetType("SoloDatabase.QueryValueMetadata")
-                .Methods.Single(method => method.Name == "RegisterCall")));
+                .Methods.Single(method => method.Name == "RegisterExactCall")));
             register.GenericArguments.Add(result); il.Emit(OpCodes.Call, register);
         }
     }

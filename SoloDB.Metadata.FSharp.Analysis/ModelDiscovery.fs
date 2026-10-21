@@ -595,18 +595,27 @@ module internal ModelDiscovery =
                         model.SupportsValuesWrapper <- TypeSupport.SupportsValuesWrapper elementName
                     let generated = GeneratedModel(model, actual, constructor, members.ToArray())
                     generated.OriginalProperties <- originalProperties
-                    if shape = TypeShape.Object then
-                        generated.CloneConstructor <-
-                            match originalType with
-                            | Some original ->
-                                let constructor = GeneratedRowFields.DefaultConstructor(moduleDefinition,original)
-                                if not(isNull constructor) then access.Add(original.Resolve().Module.Assembly.Name.Name) |> ignore
-                                constructor
-                            | None when not entity.IsArrayType &&
-                                        (mutableRecord || (entity.MembersFunctionsAndValues |> Seq.exists(fun memberValue -> memberValue.IsConstructor && (constructorParameters memberValue).Length = 0))) ->
-                                access.Add(entity.Assembly.SimpleName) |> ignore
+                    let defaultConstructor =
+                        if model.AbstractType then null else
+                        match originalType with
+                        | Some original -> GeneratedRowFields.DefaultConstructor(moduleDefinition,original)
+                        | None ->
+                            let declared = entity.MembersFunctionsAndValues |> Seq.exists(fun memberValue ->
+                                memberValue.IsConstructor && (constructorParameters memberValue).Length = 0 &&
+                                ((memberValue :> FSharpSymbol).DeclarationLocation |> Option.exists(fun declared ->
+                                    constructorVisibility |> Seq.exists(fun (location,_) ->
+                                        path location.FileName = path declared.FileName &&
+                                        (location.StartLine,location.StartColumn) <= (declared.StartLine,declared.StartColumn) &&
+                                        (declared.EndLine,declared.EndColumn) <= (location.EndLine,location.EndColumn)))))
+                            if not entity.IsArrayType && (declared || (mutableRecord && not model.ValueType)) then
                                 MethodReference(".ctor",moduleDefinition.TypeSystem.Void,actual,HasThis = true)
-                            | _ -> null
+                            else null
+                    if shape = TypeShape.Object then
+                        generated.CloneConstructor <- defaultConstructor
+                        if not(isNull defaultConstructor) then
+                            match originalType with
+                            | Some original -> access.Add(original.Resolve().Module.Assembly.Name.Name) |> ignore
+                            | None -> access.Add(entity.Assembly.SimpleName) |> ignore
                     if shape = TypeShape.Object && TypeSupport.SqlRowFieldFallback(entity.IsValueType,entity.IsFSharpRecord,(generated.OriginalProperties |> Array.sumBy(fun property -> if property.Member.Setter.IsSome then 1 else 0))) then
                         if not(String.IsNullOrEmpty(entity.Assembly.QualifiedName)) then
                             generated.SqlFields <- GeneratedRowFields.Read(moduleDefinition,originalType.Value)
@@ -621,10 +630,7 @@ module internal ModelDiscovery =
                                       Getter = None; Setter = None; Static = false; Readable = true
                                       Writable = field.IsMutable; Ignored = false; Many = false }) |> Seq.toArray
                     if model.ValueType then
-                        generated.DefaultConstructor <-
-                            publicConstructors |> Array.tryFind(fun memberValue -> (constructorParameters memberValue).Length = 0)
-                            |> Option.map(fun _ -> MethodReference(".ctor",moduleDefinition.TypeSystem.Void,actual,HasThis = true))
-                            |> Option.toObj
+                        generated.DefaultConstructor <- defaultConstructor
                     generated.CollectionArguments <- collectionArguments |> Array.map reference
                     if entity.IsArrayType then generated.SequenceElement <- reference typ.GenericArguments[0]
                     else

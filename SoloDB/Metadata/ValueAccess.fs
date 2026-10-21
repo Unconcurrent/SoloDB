@@ -63,10 +63,10 @@ type internal BoundValueCallExpression(inputs: Expression array, valueType: Type
 module internal QueryValuePlan =
     [<System.Diagnostics.CodeAnalysis.DynamicDependency("op_Equality(System.String,System.String)", typeof<string>);
       System.Diagnostics.CodeAnalysis.DynamicDependency("op_Inequality(System.String,System.String)", typeof<string>)>]
-    let rec bind (variables: IDictionary<ParameterExpression, int>) (replace: Expression -> (obj array -> obj) option) expression =
+    let rec bindScoped (variables: IDictionary<ParameterExpression, int>) (replace: IDictionary<ParameterExpression,int> -> Expression -> (obj array -> obj) option) expression =
         let rec build (expression: Expression) : obj array -> obj =
             if isNull expression then fun _ -> null else
-            match replace expression with
+            match replace variables expression with
             | Some run -> run
             | None ->
             match expression with
@@ -80,7 +80,7 @@ module internal QueryValuePlan =
                 let start = slots.Count
                 for variable in block.Variables do slots.Add(variable,slots.Count)
                 let defaults = block.Variables |> Seq.map(fun variable -> QueryValueMetadata.Default variable.Type) |> Seq.toArray
-                let statements = block.Expressions |> Seq.map(bind slots replace) |> Seq.toArray
+                let statements = block.Expressions |> Seq.map(bindScoped slots replace) |> Seq.toArray
                 fun values ->
                     let locals = Array.zeroCreate slots.Count
                     Array.Copy(values,locals,start)
@@ -272,7 +272,7 @@ module internal QueryValuePlan =
                 let slots = Dictionary<ParameterExpression, int>(variables)
                 let start = slots.Count
                 for i = 0 to lambda.Parameters.Count - 1 do slots.Add(lambda.Parameters.[i], start + i)
-                let body = bind slots replace lambda.Body
+                let body = bindScoped slots replace lambda.Body
                 let create = QueryValueMetadata.Lambda lambda.Type
                 fun values ->
                     create.Invoke(start, slots.Count, Func<obj array, obj>(fun locals ->
@@ -528,6 +528,9 @@ module internal QueryValuePlan =
                     let value = build expression
                     fun values -> struct(System.Runtime.CompilerServices.RuntimeHelpers.GetObjectValue(value values),noSave)
         build expression
+
+    let bind variables replace expression =
+        bindScoped variables (fun _ value -> replace value) expression
 
 /// Cold JIT discovery creates a real member function; invocation never uses GetValue.
 module internal DynamicMemberAccess =

@@ -1,14 +1,27 @@
 namespace SoloDatabase
 
 open System
+open System.Collections.Generic
 open System.Linq.Expressions
+
+type internal CompiledQueryFactory<'Source> =
+    Func<ISoloDBCollection<'Source>,Expression,ParameterExpression array,ParameterExpression,Expression array,IDictionary<ParameterExpression,int>,Func<obj[],obj>>
 
 /// Closed operations for retained SQL parts of a compiled client expression.
 [<AbstractClass; Sealed>]
 type internal CompiledQueryMetadata<'Source, 'Args> private () =
+    static member private Adapt(create: Func<ISoloDBCollection<'Source>,Expression,ParameterExpression array,ParameterExpression,Expression array,Func<'Args,obj>>) =
+        CompiledQueryFactory<'Source>(fun source body parameters argument arguments scope ->
+            if scope.Count <> 1 then MetadataRuntime.missing "compiled query lexical frame" typeof<'Args>
+            let run = create.Invoke(source,body,parameters,argument,arguments)
+            Func<obj[],obj>(fun values -> run.Invoke(unbox<'Args>(QueryStorage.value values[0]))))
     static member RegisterSequence(elementType: Type, create: Func<ISoloDBCollection<'Source>,Expression,ParameterExpression array,ParameterExpression,Expression array,Func<'Args,obj>>) =
-        TypeMetadataCache.Register(typeof<'Source>, fun metadata -> { metadata with CompiledSequences = MetadataMap.set (struct(typeof<'Args>,elementType)) { Generated = true; Value = create :> Delegate } metadata.CompiledSequences })
+        CompiledQueryMetadata<'Source,'Args>.RegisterScopedSequence(elementType,CompiledQueryMetadata<'Source,'Args>.Adapt create)
     static member RegisterResult(resultType: Type, create: Func<ISoloDBCollection<'Source>,Expression,ParameterExpression array,ParameterExpression,Expression array,Func<'Args,obj>>) =
+        CompiledQueryMetadata<'Source,'Args>.RegisterScopedResult(resultType,CompiledQueryMetadata<'Source,'Args>.Adapt create)
+    static member RegisterScopedSequence(elementType: Type, create: CompiledQueryFactory<'Source>) =
+        TypeMetadataCache.Register(typeof<'Source>, fun metadata -> { metadata with CompiledSequences = MetadataMap.set (struct(typeof<'Args>,elementType)) { Generated = true; Value = create :> Delegate } metadata.CompiledSequences })
+    static member RegisterScopedResult(resultType: Type, create: CompiledQueryFactory<'Source>) =
         TypeMetadataCache.Register(typeof<'Source>, fun metadata -> { metadata with CompiledResults = MetadataMap.set (struct(typeof<'Args>,resultType)) { Generated = true; Value = create :> Delegate } metadata.CompiledResults })
     static member Operation(sequence, resultType: Type) =
         let key = struct(typeof<'Args>, resultType)
@@ -24,7 +37,7 @@ type internal CompiledQueryMetadata<'Source, 'Args> private () =
                     let name = if sequence then "createSequenceDispatcher" else "createResultDispatcher"
                     owner.GetMethod(name, System.Reflection.BindingFlags.Public ||| System.Reflection.BindingFlags.NonPublic ||| System.Reflection.BindingFlags.Static)
                         .MakeGenericMethod(typeof<'Source>, typeof<'Args>, resultType).Invoke(null, Array.empty) :?> Delegate))
-        operation :?> Func<ISoloDBCollection<'Source>,Expression,ParameterExpression array,ParameterExpression,Expression array,Func<'Args,obj>>
+        operation :?> CompiledQueryFactory<'Source>
 
 /// Typed argument carriers publish their bound access operations once.
 module internal CompiledQueryArguments =

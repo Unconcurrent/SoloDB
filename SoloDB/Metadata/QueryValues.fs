@@ -75,9 +75,20 @@ type internal QueryValueMetadata private () =
         let operation = { Generated = true; Value = Func<obj[],obj>(fun values -> box(create.Invoke values)) }
         TypeMetadataCache.Register(typeof<'Value>, fun metadata -> { metadata with QueryConstructors = MetadataMap.set (Array.toList arguments) operation metadata.QueryConstructors })
 
-    static member RegisterCall<'Value>(owner: Type, name: string, typeArguments: Type array, arguments: Type array, call: Func<obj, obj array, 'Value>) =
+    static member private RegisterCallCore<'Value>(owner: Type, name: string, typeArguments: Type array, arguments: Type array, result: Type voption, call: Func<obj, obj array, 'Value>) =
         let operation = { Generated = true; Value = Func<obj,obj[],obj>(fun owner values -> box(call.Invoke(owner,values))) }
-        TypeMetadataCache.Register(owner, fun metadata -> { metadata with QueryCalls = MetadataMap.set (struct(name,Array.toList typeArguments,Array.toList arguments)) operation metadata.QueryCalls })
+        TypeMetadataCache.Register(owner, fun metadata -> { metadata with QueryCalls = MetadataMap.set (struct(name,Array.toList typeArguments,Array.toList arguments,result)) operation metadata.QueryCalls })
+
+    static member RegisterCall<'Value>(owner: Type, name: string, typeArguments: Type array, arguments: Type array, call: Func<obj, obj array, 'Value>) =
+        QueryValueMetadata.RegisterCallCore(owner,name,typeArguments,arguments,ValueNone,call)
+
+    static member RegisterExactCall<'Value>(owner: Type, name: string, typeArguments: Type array, arguments: Type array, result: Type, call: Func<obj, obj array, 'Value>) =
+        QueryValueMetadata.RegisterCallCore(owner,name,typeArguments,arguments,ValueSome result,call)
+
+    static member private FindCall(name, typeArguments, arguments, result, metadata: TypeMetadataRecord) =
+        match MetadataMap.tryFind (struct(name,typeArguments,arguments,ValueSome result)) metadata.QueryCalls with
+        | ValueSome operation -> ValueSome operation
+        | ValueNone -> MetadataMap.tryFind (struct(name,typeArguments,arguments,ValueNone)) metadata.QueryCalls
 
     static member RegisterUnary<'Input, 'Value>(kind: ExpressionType, apply: Func<'Input, 'Value>) =
         let operation = { Generated = true; Value = Func<obj,obj>(fun value -> box(apply.Invoke(unbox<'Input> value))) }
@@ -215,8 +226,8 @@ type internal QueryValueMetadata private () =
                 QueryOperationEmitter.unionTest (RuntimeCodecIL(method.GetILGenerator())) owner owner.IsValueType (tagMethod :> MethodBase) tagMethod.IsStatic tag
                 struct(create,method.CreateDelegate(typeof<Func<obj,bool>>) :?> Func<obj,bool>)))
     static member internal Function(functionType: Type, argument: Type, result: Type) =
-        let key=struct("Invoke",[],[argument])
-        TypeMetadataCache.Discover(functionType,(fun metadata -> MetadataMap.tryFind key metadata.QueryCalls),
+        let key=struct("Invoke",[],[argument],ValueSome result)
+        TypeMetadataCache.Discover(functionType,(fun metadata -> QueryValueMetadata.FindCall("Invoke",[],[argument],result,metadata)),
             (fun operation metadata -> { metadata with QueryCalls=MetadataMap.set key operation metadata.QueryCalls }),
             Func<Func<obj,obj[],obj>>(fun () ->
                 if not(MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "query function application" functionType
@@ -268,10 +279,6 @@ type internal QueryValueMetadata private () =
                     let constructor = valueType.GetConstructor(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance,null,Array.ofList arguments,null)
                     if isNull constructor then raise (NotSupportedException(sprintf "Query value constructor %s has no direct operation." valueType.FullName))
                     QueryMethodDiscovery.constructor constructor))
-    static member internal Call(owner: Type, name, typeArguments, arguments) =
-        match TypeMetadataCache.Read(owner, fun metadata -> MetadataMap.tryFind (struct(name,typeArguments,arguments)) metadata.QueryCalls) with
-        | ValueSome call -> call.Value
-        | _ -> raise (NotSupportedException(sprintf "Query value method %s.%s has no direct operation." owner.FullName name))
     static member internal Call(methodInfo: MethodInfo) =
         let owner = methodInfo.DeclaringType
         if isNull owner then
@@ -280,8 +287,8 @@ type internal QueryValueMetadata private () =
         else
             let typeArguments = if methodInfo.IsGenericMethod then methodInfo.GetGenericArguments() |> Array.toList else []
             let arguments = methodInfo.GetParameters() |> Array.map _.ParameterType |> Array.toList
-            let key = struct(methodInfo.Name,typeArguments,arguments)
-            TypeMetadataCache.Discover(owner, (fun metadata -> MetadataMap.tryFind key metadata.QueryCalls),
+            let key = struct(methodInfo.Name,typeArguments,arguments,ValueSome methodInfo.ReturnType)
+            TypeMetadataCache.Discover(owner, (fun metadata -> QueryValueMetadata.FindCall(methodInfo.Name,typeArguments,arguments,methodInfo.ReturnType,metadata)),
                 (fun operation metadata -> { metadata with QueryCalls = MetadataMap.set key operation metadata.QueryCalls }),
                 Func<Func<obj,obj[],obj>>(fun () ->
                     if not (MetadataRuntime.supportsDynamicCode()) then MetadataRuntime.missing "query method" owner

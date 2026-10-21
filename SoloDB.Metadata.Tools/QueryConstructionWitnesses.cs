@@ -58,6 +58,9 @@ public static class QueryConstructionWitnesses
         method.Name + (method.HasGenericParameters ? "``" + method.GenericParameters.Count : "") +
         "(" + string.Join(",", method.Parameters.Select(parameter => Signature(parameter.ParameterType))) + ")";
 
+    internal static string ReturnQualifiedSignature(MethodDefinition method) =>
+        MethodSignature(method) + "~" + Signature(method.ReturnType);
+
     private static string Signature(TypeReference type)
     {
         if (type is GenericParameter parameter) return (parameter.Type == GenericParameterType.Method ? "``" : "`") + parameter.Position;

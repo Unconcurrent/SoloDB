@@ -20,7 +20,8 @@ internal static class GeneratedCloning
             TypeSupport.IndexedProperty(member.Getter?.Value.Parameters.Count ?? 0,member.Setter?.Value.Parameters.Count ?? 0);
         var create = new MethodDefinition("CreateClone" + index, MethodAttributes.Private | MethodAttributes.Static, type);
         owner.Methods.Add(create);
-        var constructor = model.CloneConstructor == null ? null! : FSharpOption<MethodReference>.Some(module.ImportReference(model.CloneConstructor));
+        var constructible = !model.Facts.AbstractType && (model.Facts.ValueType || model.CloneConstructor != null);
+        var constructor = !constructible || model.CloneConstructor == null ? null! : FSharpOption<MethodReference>.Some(module.ImportReference(model.CloneConstructor));
         CodecEmitter.defaultConstruction(new CecilCodecIL(create),type,model.Facts.ValueType,constructor,false);
         var copy = new MethodDefinition("CopyCloneScalars" + index, MethodAttributes.Private | MethodAttributes.Static, module.TypeSystem.Void);
         copy.Parameters.Add(new ParameterDefinition(module.TypeSystem.Object)); copy.Parameters.Add(new ParameterDefinition(module.TypeSystem.Object));
@@ -28,7 +29,7 @@ internal static class GeneratedCloning
         OwnerCloneEmitter.copy(new CecilCodecIL(copy),type,model.Facts.ValueType,members.Where(member => !Indexed(member)).ToArray());
         Delegate(module, owner, il, "Func`1", create, type);
         Delegate(module, owner, il, "Action`2", copy, module.TypeSystem.Object, module.TypeSystem.Object);
-        il.Emit(model.Facts.ValueType || model.CloneConstructor != null ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
+        il.Emit(constructible ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
         il.Emit(members.Any(Indexed) ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
         var register = new GenericInstanceMethod(module.ImportReference(product.MainModule.GetType("SoloDatabase.CollectionCloneMetadata")
             .Methods.Single(method => method.Name == "Register")));

@@ -11,25 +11,29 @@ namespace SoloDatabase.Metadata.Tools;
 // Imported original CLR properties, independent of JSON member admission.
 public static class OriginalArgumentSources
 {
-    public static TypeReference Close(TypeReference value, TypeReference owner)
+    public static TypeReference Close(TypeReference value, TypeReference owner) => Close(value,owner,Array.Empty<TypeReference>());
+
+    internal static TypeReference Close(TypeReference value, TypeReference owner, TypeReference[] methodArguments)
     {
+        if (value is GenericParameter { Type: GenericParameterType.Method } methodParameter && methodArguments.Length != 0)
+            return methodArguments[methodParameter.Position];
         if (value is GenericParameter parameter && parameter.Type == GenericParameterType.Type && owner is GenericInstanceType closed)
             return closed.GenericArguments[parameter.Position];
         if (value is ArrayType array)
         {
-            var result = new ArrayType(Close(array.ElementType,owner),array.Rank);
+            var result = new ArrayType(Close(array.ElementType,owner,methodArguments),array.Rank);
             for(var i=0;i<array.Dimensions.Count;i++) result.Dimensions[i]=array.Dimensions[i];
             return result;
         }
-        if (value is ByReferenceType reference) return new ByReferenceType(Close(reference.ElementType,owner));
-        if (value is RequiredModifierType required) return new RequiredModifierType(Close(required.ModifierType,owner),Close(required.ElementType,owner));
-        if (value is OptionalModifierType optional) return new OptionalModifierType(Close(optional.ModifierType,owner),Close(optional.ElementType,owner));
+        if (value is ByReferenceType reference) return new ByReferenceType(Close(reference.ElementType,owner,methodArguments));
+        if (value is RequiredModifierType required) return new RequiredModifierType(Close(required.ModifierType,owner,methodArguments),Close(required.ElementType,owner,methodArguments));
+        if (value is OptionalModifierType optional) return new OptionalModifierType(Close(optional.ModifierType,owner,methodArguments),Close(optional.ElementType,owner,methodArguments));
         if (value is GenericInstanceType instance)
         {
             var element = instance.ElementType;
             if (element is not TypeDefinition) element.IsValueType = instance.IsValueType;
             var result = new GenericInstanceType(element) { IsValueType = instance.IsValueType };
-            foreach(var argument in instance.GenericArguments) result.GenericArguments.Add(Close(argument,owner));
+            foreach(var argument in instance.GenericArguments) result.GenericArguments.Add(Close(argument,owner,methodArguments));
             return result;
         }
         return value;

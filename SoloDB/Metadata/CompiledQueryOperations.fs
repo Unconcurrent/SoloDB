@@ -132,7 +132,7 @@ module internal CompiledQueries =
         EmptyPrefixHandle: RetainedPreparedHandle option
         Parameters: ParameterValues
         Hydration: QueryableTranslationCore.BatchLoadPlan voption
-        Bind: Func<'Args, struct (bool * 'State * obj array)>
+        Bind: Func<'Args, obj array, struct (bool * 'State * obj array)>
     }
 
     type private ParameterWriter =
@@ -145,6 +145,7 @@ module internal CompiledQueries =
     let private prepare<'Source, 'Args, 'State>
         (source: ISoloDBCollection<'Source>) (queryBody: Expression) (parameters: ParameterExpression array)
         (argument: ParameterExpression) (arguments: Expression array)
+        (scope: IDictionary<ParameterExpression,int>)
         (invocationState: Expression -> Expression option) =
         if isNull (box source) then nullArg "source"
         if isNull queryBody then nullArg "query"
@@ -157,8 +158,18 @@ module internal CompiledQueries =
         let expression = Substitute(replacements).Visit body
         let build (connection: NativeSqliteConnection) =
             let variables = Dictionary<ParameterExpression, int>()
-            variables.Add(argument, 0)
             let locals = ResizeArray<ParameterExpression>()
+            let seed () =
+                variables.Clear()
+                locals.Clear()
+                variables.Add(argument,0)
+                if not(isNull scope) then
+                    for KeyValue(parameter,slot) in scope do
+                        if not(obj.ReferenceEquals(parameter,argument)) then
+                            variables.Add(parameter,slot)
+                            locals.Add parameter
+            seed()
+            let seedCount = variables.Count
             let steps = ResizeArray<obj array -> int -> bool>()
             let bindingOrder = QueryValueBindingOrder()
             let addStep step =
@@ -279,14 +290,18 @@ module internal CompiledQueries =
             let slotNames = names.ToArray()
             let invocationSteps = bindingOrder.Indices() |> Array.map (fun index -> steps[index])
             let localCount = variables.Count
-            let run = Func<'Args, struct (bool * 'State * obj array)>(fun args ->
+            let run = Func<'Args, obj array, struct (bool * 'State * obj array)>(fun args parent ->
                 let locals = Array.zeroCreate (localCount + slotNames.Length)
-                locals.[0] <- box args
-                let mutable emptyPrefix = false
-                for step in invocationSteps do
-                    let empty = step locals localCount
-                    emptyPrefix <- emptyPrefix || empty
-                struct (emptyPrefix, state locals, locals))
+                if isNull scope then locals.[0] <- box args
+                else Array.Copy(parent,locals,seedCount)
+                try
+                    let mutable emptyPrefix = false
+                    for step in invocationSteps do
+                        let empty = step locals localCount
+                        emptyPrefix <- emptyPrefix || empty
+                    struct (emptyPrefix, state locals, locals)
+                finally
+                    if not(isNull scope) then Array.Copy(locals,parent,seedCount))
             let emptyPrefixSql =
                 if hasPrefix then
                     // Both translations allocate the same parameter names in the same order.
@@ -294,9 +309,7 @@ module internal CompiledQueries =
                     names.Clear()
                     steps.Clear()
                     bindingOrder.Clear()
-                    variables.Clear()
-                    variables.Add(argument, 0)
-                    locals.Clear()
+                    seed()
                     // Revisit the original expression so this translation owns all of
                     // its eager locals; no substituted local outlives its classifier.
                     let sql, _, _, _ = translate true
@@ -311,8 +324,8 @@ module internal CompiledQueries =
             use connection = (source :?> INativeConnectionSource).AcquireNativeConnection()
             build connection
 
-        let bind (args: 'Args) =
-            let struct (emptyPrefix, state, frame) = current.Bind.Invoke args
+        let bind (args: 'Args) parent =
+            let struct (emptyPrefix, state, frame) = current.Bind.Invoke(args,parent)
             let parameters =
                 if current.Parameters.Names.Length = 0 then current.Parameters
                 else { current.Parameters with Values = frame }
@@ -320,32 +333,34 @@ module internal CompiledQueries =
             struct (handle, parameters, current.Hydration, state)
         struct (expression, bind)
 
-    let compileExpression<'Source, 'Args, 'Elem>
+    let private sequenceExpression<'Source, 'Args, 'Elem>
         (source: ISoloDBCollection<'Source>) (body: Expression) (parameters: ParameterExpression array)
-        (argument: ParameterExpression) (arguments: Expression array) =
-        let struct (_, bind) = prepare<'Source, 'Args, unit> source body parameters argument arguments (fun _ -> None)
-        fun args ->
-            let struct (handle, parameters, hydration, _) = bind args
+        (argument: ParameterExpression) (arguments: Expression array) scope =
+        let struct (_, bind) = prepare<'Source, 'Args, unit> source body parameters argument arguments scope (fun _ -> None)
+        fun args parent ->
+            let struct (handle, parameters, hydration, _) = bind args parent
             QueryableExecution.enumerate<'Source, 'Elem> source (NativeStatementSource.Retained handle) parameters hydration
 
-    let scalarExpression<'Source, 'Args, 'Result>
+    let private resultExpression<'Source, 'Args, 'Result>
         (source: ISoloDBCollection<'Source>) (body: Expression) (parameters: ParameterExpression array)
-        (argument: ParameterExpression) (arguments: Expression array) =
+        (argument: ParameterExpression) (arguments: Expression array) scope =
         let struct (expression, bind) =
-            prepare<'Source, 'Args, 'Result> source body parameters argument arguments QueryableExecution.terminalDefaultExpression
+            prepare<'Source, 'Args, 'Result> source body parameters argument arguments scope QueryableExecution.terminalDefaultExpression
         let methodName =
             match expression with
             | :? MethodCallExpression as call -> call.Method.Name
             | _ -> "Execute"
-        fun (args: 'Args) ->
-            let struct (handle, parameters, hydration, fallback) = bind args
+        fun (args: 'Args) parent ->
+            let struct (handle, parameters, hydration, fallback) = bind args parent
             QueryableExecution.scalar<'Source, 'Result> source (NativeStatementSource.Retained handle) parameters hydration methodName (fun () -> fallback)
 
-    let compile<'Source, 'Args, 'Elem>
-        (source: ISoloDBCollection<'Source>) (query: LambdaExpression)
-        (argument: ParameterExpression) (arguments: Expression array) =
-        if isNull query then nullArg "query"
-        compileExpression<'Source, 'Args, 'Elem> source query.Body (Seq.toArray query.Parameters) argument arguments
+    let compileExpression<'Source, 'Args, 'Elem> source body parameters argument arguments =
+        let run = sequenceExpression<'Source,'Args,'Elem> source body parameters argument arguments null
+        fun args -> run args null
+
+    let scalarExpression<'Source, 'Args, 'Result> source body parameters argument arguments =
+        let run = resultExpression<'Source,'Args,'Result> source body parameters argument arguments null
+        fun args -> run args null
 
     let compileResult<'Source, 'Args, 'Result>
         (source: ISoloDBCollection<'Source>) (query: LambdaExpression)
@@ -369,7 +384,7 @@ module internal CompiledQueries =
         let body = Substitute(replacements).Visit body
         let variables = Dictionary<ParameterExpression, int>()
         variables.Add(argument, 0)
-        let replace (expression: Expression) =
+        let replace (scope: IDictionary<ParameterExpression,int>) (expression: Expression) =
             let sequence = typeof<IQueryable>.IsAssignableFrom expression.Type
             let terminal =
                 match expression with
@@ -381,20 +396,29 @@ module internal CompiledQueries =
                     if sequence then (TypeMetadata.GenericTypeArgCache.Get expression.Type).[0]
                     else expression.Type
                 let factory = CompiledQueryMetadata<'Source, 'Args>.Operation(sequence, resultType)
-                let run = factory.Invoke(source, expression, parameters, argument, arguments)
-                Some (fun (values: obj array) -> run.Invoke(unbox<'Args> (QueryStorage.value values.[0])))
+                let run = factory.Invoke(source, expression, parameters, argument, arguments,Dictionary<ParameterExpression,int>(scope))
+                Some (fun (values: obj array) -> run.Invoke values)
             else None
-        let run = QueryValuePlan.bind variables replace body
+        let run = QueryValuePlan.bindScoped variables replace body
         if not retained then invalid "the query must be rooted in the supplied source parameter."
         fun args -> unbox<'Result> (run [|box args|])
 
+    let compile<'Source, 'Args, 'Elem>
+        (source: ISoloDBCollection<'Source>) (query: LambdaExpression)
+        (argument: ParameterExpression) (arguments: Expression array) =
+        if isNull query then nullArg "query"
+        match query.Body with
+        | :? BlockExpression | :? ConditionalExpression ->
+            compileResult<'Source,'Args,IEnumerable<'Elem>> source query argument arguments
+        | _ -> compileExpression<'Source,'Args,'Elem> source query.Body (Seq.toArray query.Parameters) argument arguments
+
     // Ordinary discovery closes these existing executors once and caches the delegate.
     let createSequenceDispatcher<'Source, 'Args, 'Element>() =
-        Func<ISoloDBCollection<'Source>,Expression,ParameterExpression array,ParameterExpression,Expression array,Func<'Args,obj>>(fun source body parameters argument arguments ->
-            let run = compileExpression<'Source, 'Args, 'Element> source body parameters argument arguments
-            Func<'Args,obj>(fun values -> box(run values)))
+        CompiledQueryFactory<'Source>(fun source body parameters argument arguments scope ->
+            let run = sequenceExpression<'Source, 'Args, 'Element> source body parameters argument arguments scope
+            Func<obj[],obj>(fun values -> box(run (unbox<'Args>(QueryStorage.value values[0])) values)))
 
     let createResultDispatcher<'Source, 'Args, 'Result>() =
-        Func<ISoloDBCollection<'Source>,Expression,ParameterExpression array,ParameterExpression,Expression array,Func<'Args,obj>>(fun source body parameters argument arguments ->
-            let run = scalarExpression<'Source, 'Args, 'Result> source body parameters argument arguments
-            Func<'Args,obj>(fun values -> box(run values)))
+        CompiledQueryFactory<'Source>(fun source body parameters argument arguments scope ->
+            let run = resultExpression<'Source, 'Args, 'Result> source body parameters argument arguments scope
+            Func<obj[],obj>(fun values -> box(run (unbox<'Args>(QueryStorage.value values[0])) values)))
