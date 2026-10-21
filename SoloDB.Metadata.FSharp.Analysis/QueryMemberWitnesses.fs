@@ -30,6 +30,26 @@ module internal QueryMemberWitnesses =
                     invalidOp ("The callable input differs from its checked identity: " + entity.FullName)
                 Some input
 
+        let originalDeclaration (selected: FSharpMemberOrFunctionOrValue) =
+            let candidates = selected.DeclaringEntity.Value.MembersFunctionsAndValues |> Seq.filter(fun method ->
+                (method.IsMethod || method.IsFunction || method.IsConstructor) &&
+                method.IsConstructor = selected.IsConstructor && method.XmlDocSig = selected.XmlDocSig) |> Seq.toArray
+            let candidates = if candidates.Length <= 1 then candidates else
+                             candidates |> Array.filter(fun method -> method.ReturnParameter.Type.Equals selected.ReturnParameter.Type)
+            match candidates with
+            | [|method|] -> method
+            | _ -> invalidOp ("The original checked callable signature is not unique: " + selected.FullName + " requested " + selected.XmlDocSig)
+
+        let originalSignature (original: FSharpMemberOrFunctionOrValue) (declaring: TypeReference) (target: MethodReference) =
+            let parameters = if original.IsConstructor then [||] else original.GenericParameters |> Seq.toArray
+            let definition = declaring.GetElementType()
+            referenceWith(fun parameter ->
+                match parameters |> Seq.tryFindIndex(fun candidate -> candidate.Equals parameter) with
+                | Some index -> target.GenericParameters[index] :> TypeReference
+                | None ->
+                    let index = original.DeclaringEntity.Value.GenericParameters |> Seq.findIndex(fun candidate -> candidate.Equals parameter)
+                    definition.GenericParameters[index] :> TypeReference)
+
         member private this.SlotReturnsVoid(reference: FSharpType -> TypeReference, slot: FSharpAbstractSignature) =
             let declaring = reference slot.DeclaringType
             let definition = declaring.GetElementType()
@@ -90,26 +110,13 @@ module internal QueryMemberWitnesses =
                 if returnPosition < 0 then QueryConstructionWitnesses.MethodSignature method
                 else QueryConstructionWitnesses.ReturnQualifiedSignature method
             let same signature = signature = expected || signature = expected + "()"
-            let candidates = entity.MembersFunctionsAndValues |> Seq.filter(fun method ->
-                (method.IsMethod || method.IsFunction || method.IsConstructor) &&
-                method.IsConstructor = selected.IsConstructor && method.XmlDocSig = selected.XmlDocSig) |> Seq.toArray
-            let candidates = if candidates.Length <= 1 then candidates else
-                             candidates |> Array.filter(fun method -> method.ReturnParameter.Type.Equals selected.ReturnParameter.Type)
-            let original =
-                match candidates with
-                | [|method|] -> method
-                | _ -> invalidOp ("The original checked callable signature is not unique: " + selected.FullName + " requested " + selected.XmlDocSig)
+            let original = originalDeclaration selected
             let target = MethodReference((if original.IsConstructor then ".ctor" else original.CompiledName),
                 moduleDefinition.TypeSystem.Void,declaring,HasThis = (original.IsConstructor || original.IsInstanceMemberInCompiledCode))
             let methodParameters = if original.IsConstructor then [||] else original.GenericParameters |> Seq.toArray
             for parameter in methodParameters do target.GenericParameters.Add(GenericParameter(parameter.Name,target))
             let definition = declaring.GetElementType()
-            let signature = referenceWith(fun parameter ->
-                match methodParameters |> Seq.tryFindIndex(fun candidate -> candidate.Equals parameter) with
-                | Some index -> target.GenericParameters[index] :> TypeReference
-                | None ->
-                    let index = entity.GenericParameters |> Seq.findIndex(fun candidate -> candidate.Equals parameter)
-                    definition.GenericParameters[index] :> TypeReference)
+            let signature = originalSignature original declaring target
             let parameters = original.CurriedParameterGroups |> Seq.collect id |> Seq.toArray
             for parameter in parameters do target.Parameters.Add(ParameterDefinition(signature parameter.Type))
             let physical = MethodDefinition(target.Name,MethodAttributes.Public,target.ReturnType)
@@ -176,7 +183,7 @@ module internal QueryMemberWitnesses =
             let arguments = target.Parameters |> Seq.map(fun parameter -> close parameter.ParameterType) |> Seq.toArray
             GeneratedQueryCall(method,result,arguments)
 
-        member _.Add(reference: FSharpType -> TypeReference, memberValue: FSharpMemberOrFunctionOrValue) =
+        member this.Add(reference: FSharpType -> TypeReference, memberValue: FSharpMemberOrFunctionOrValue) =
             if memberValue.DeclaringEntity.IsSome &&
                (memberValue.IsProperty || memberValue.IsMethod || memberValue.IsFunction || memberValue.IsConstructor) then
                 let memberValue, _ = CompilerReferences.compiledMember memberValue
@@ -188,20 +195,30 @@ module internal QueryMemberWitnesses =
                     let signature = documentation.Substring(2 + prefix.Length)
                     let key = declaring.FullName + "," + declaring.Scope.ToString() + "|" + signature
                     if seen.Add key then
-                        witnesses[key] <- GeneratedQueryWitness(signature, declaring)
-                        // Inline documentation includes source witnesses, not the CLR parameter list.
                         if memberValue.IsFunction then
-                            match image entity with
-                            | Some input ->
-                                let definition = input.MainModule.GetType(declaring.GetElementType().FullName)
-                                if not(isNull definition) then
-                                    witnesses.Remove key |> ignore
-                                    for method in definition.Methods do
-                                        if method.Name = memberValue.CompiledName || method.Name = memberValue.CompiledName + "$W" then
-                                            let signature = QueryConstructionWitnesses.MethodSignature method
-                                            let key = declaring.FullName + "," + declaring.Scope.ToString() + "|" + signature
-                                            witnesses[key] <- GeneratedQueryWitness(signature, declaring)
+                            let original = originalDeclaration memberValue
+                            let target = this.Template(reference,memberValue,declaring)
+                            let physical name =
+                                let method = MethodDefinition(name,MethodAttributes.Public,target.ReturnType)
+                                for parameter in target.GenericParameters do method.GenericParameters.Add(GenericParameter(parameter.Name,method))
+                                for parameter in target.Parameters do method.Parameters.Add(ParameterDefinition(parameter.ParameterType))
+                                method
+                            let preserve (method: MethodDefinition) =
+                                method.Name <- method.Name.Replace('.','#')
+                                let signature = QueryConstructionWitnesses.MethodSignature method
+                                let key = declaring.FullName + "," + declaring.Scope.ToString() + "|" + signature
+                                witnesses[key] <- GeneratedQueryWitness(signature,declaring)
+                            preserve (physical target.Name)
+                            match original.GetWitnessPassingInfo() with
                             | None -> ()
+                            | Some(name,parameters) ->
+                                let witnessed = physical name
+                                witnessed.Parameters.Clear()
+                                let signature = originalSignature original declaring witnessed
+                                for parameter in parameters do witnessed.Parameters.Add(ParameterDefinition(signature parameter.Type))
+                                for parameter in target.Parameters do witnessed.Parameters.Add(ParameterDefinition(parameter.ParameterType))
+                                preserve witnessed
+                        else witnesses[key] <- GeneratedQueryWitness(signature, declaring)
 
         interface IDisposable with
             member _.Dispose() = for input in images.Values do input.Dispose()

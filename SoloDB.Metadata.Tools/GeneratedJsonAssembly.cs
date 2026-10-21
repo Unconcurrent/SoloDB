@@ -164,8 +164,11 @@ public static partial class GeneratedJsonAssembly
                 il.Emit(OpCodes.Call,api.Metadata("RegisterCustomComparison",type));
             }
             RegisterFacts(il,model,api);
-            var memberWitnesses = model.Facts.Members.Select((member,memberIndex) => new GeneratedQueryWitness(member.Name,
-                model.Members[memberIndex].Getter?.DeclaringType ?? model.Members[memberIndex].Field?.DeclaringType ?? type));
+            var memberWitnesses = model.Members.Select((member,index) => (
+                    Owner: member.Getter?.DeclaringType ?? member.Setter?.DeclaringType ?? member.Field?.DeclaringType,
+                    Name: model.Facts.Members[index].Name))
+                .Where(member => member.Owner != null)
+                .Select(member => new GeneratedQueryWitness(member.Name.Replace('.','#'),member.Owner!));
             var definition = type is GenericInstanceType original ? original.ElementType.FullName : type.FullName;
             var constructionWitnesses = TypeSupport.QueryConstructionMembers(model.Facts.Shape,definition)
                 .Select(name => new GeneratedQueryWitness(name,type));
