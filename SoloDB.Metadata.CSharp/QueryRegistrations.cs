@@ -83,6 +83,7 @@ internal static partial class QueryRegistrations
         bool Accessible(ITypeSymbol type) => SourceTypeIdentity.Accessible(compilation,type);
         void TypedRegistration(string method, params ITypeSymbol[] types)
         {
+            if (!queryOperations.Add("registration|" + method + "|" + SourceTypes(types))) return;
             descriptors.Append("[assembly: global::SoloDatabase.Generated.SourceQueryRegistration(").Append(Quote(method)).Append(',').Append(SourceTypes(types)).Append(")]\n");
         }
         INamedTypeSymbol? Callable(ITypeSymbol? original, Symbols symbols)
@@ -159,6 +160,29 @@ internal static partial class QueryRegistrations
                 var callable = Callable(QueryExpressionInputs.Contract(site.Symbols.Type(expressionInput.Parameter.Type)),site.Symbols);
                 if (callable?.DelegateInvokeMethod is not IMethodSymbol signature) continue;
                 ParameterFacts(callable);
+                if (compiled && !signature.ReturnsVoid && Closed(signature.ReturnType) &&
+                    signature.Parameters.All(parameter => parameter.RefKind == RefKind.None && Closed(parameter.Type)))
+                {
+                    var sourceType = site.Symbols.Type(method.ContainingType.TypeArguments[0]);
+                    var argumentSymbols = signature.Parameters.Skip(1).Select(parameter => site.Symbols.Type(parameter.Type)).ToArray();
+                    var argumentType = PackedArguments(argumentSymbols);
+                    var resultType = site.Symbols.Type(signature.ReturnType);
+                    var element = SequenceElement(resultType);
+                    var result = element ?? resultType;
+                    if (argumentType != null && Writable(sourceType) && Writable(argumentType))
+                    {
+                        if (result is INamedTypeSymbol { IsAnonymousType: true } anonymous)
+                        {
+                            Carrier(anonymous,sourceType,null,element != null);
+                            Carrier(anonymous,sourceType,argumentType,element != null);
+                        }
+                        else if (Writable(result))
+                        {
+                            TypedRegistration(element == null ? "RegisterResult" : "RegisterSequence",sourceType,result);
+                            TypedRegistration(element == null ? "RegisterCompiledResult" : "RegisterCompiledSequence",sourceType,argumentType,result);
+                        }
+                    }
+                }
                 foreach (var origin in expressionInput.Origins)
                 {
                     var lambda = origin.Lambda;
@@ -168,8 +192,7 @@ internal static partial class QueryRegistrations
                     var sourceType = symbols.Type(compiled ? method.ContainingType.TypeArguments[0] : signature.Parameters[0].Type);
                     var source = Name(sourceType);
                     var argumentSymbols = signature.Parameters.Skip(1).Select(parameter => symbols.Type(parameter.Type)).ToArray();
-                    var argumentType = argumentSymbols.Length == 0 ? compilation.GetTypeByMetadataName("Microsoft.FSharp.Core.Unit")! :
-                        argumentSymbols.Length == 1 ? argumentSymbols[0] : compilation.GetTypeByMetadataName("System.ValueTuple`" + argumentSymbols.Length)!.Construct(argumentSymbols);
+                    var argumentType = PackedArguments(argumentSymbols)!;
                     var arguments = signature.Parameters.Skip(1).Select(parameter => Name(parameter.Type)).ToArray();
                     var args = arguments.Length switch
                     {
@@ -336,10 +359,17 @@ internal static partial class QueryRegistrations
             if (!carriers.Add(key)) return;
             foreach (var property in type.GetMembers().OfType<IPropertySymbol>())
                 if (property.Type is INamedTypeSymbol { IsAnonymousType: true } nested) Carrier(nested, sourceType, argumentType);
-            TypedRegistration(argumentType == null ? (sequence ? "RegisterSequence" : "RegisterResult") : "RegisterCompiledSequence",
+            TypedRegistration(argumentType == null ? (sequence ? "RegisterSequence" : "RegisterResult") : (sequence ? "RegisterCompiledSequence" : "RegisterCompiledResult"),
                 argumentType == null ? new ITypeSymbol[] { sourceType,type } : new ITypeSymbol[] { sourceType,argumentType,type });
             descriptors.Append("[assembly: global::SoloDatabase.Generated.SourceQueryRegistration(\"RegisterAnonymous\",").Append(SourceTypes(new[] { type })).Append(")]\n");
         }
+
+        ITypeSymbol? PackedArguments(ITypeSymbol[] arguments) => arguments.Length switch
+        {
+            0 => compilation.GetTypeByMetadataName("Microsoft.FSharp.Core.Unit"),
+            1 => arguments[0],
+            _ => compilation.GetTypeByMetadataName("System.ValueTuple`" + arguments.Length)?.Construct(arguments)
+        };
 
     }
 
