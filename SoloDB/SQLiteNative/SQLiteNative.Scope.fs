@@ -191,6 +191,11 @@ type internal NativeStatementScope =
          | Maintenance -> raw.sqlite3_stmt_busy(this.statement.Handle) <> 0 || this.cache.Database.CallbackEpoch = attempt.Callbacks
          | Ordinary -> raw.sqlite3_stmt_busy(this.statement.Handle) <> 0 || (attempt.Result = 262 && this.cache.Database.CallbackEpoch = attempt.Callbacks)) &&
         this.budget.CanRetry(attempt.Started)
+    [<System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)>]
+    member private this.RaiseStepError(result: int) : unit =
+        let error = NativeSqliteException.FromResult(this.cache.Database.Handle, result)
+        error.Data.["Statement"] <- this.statement.Description
+        raise error
     member private this.CompleteStep(attempt: byref<NativeStatementStepAttempt>) =
         let database = this.cache.Database
         this.budget.Record(attempt.Started)
@@ -199,9 +204,7 @@ type internal NativeStatementScope =
         if this.result <> raw.SQLITE_ROW then this.statement.ObserveResultShape()
         database.ObserveStatementCompletion()
         if attempt.Result <> raw.SQLITE_ROW && attempt.Result <> raw.SQLITE_DONE then
-            let error = NativeSqliteException.FromResult(database.Handle, attempt.Result)
-            error.Data.["Statement"] <- this.statement.Description
-            raise error
+            this.RaiseStepError(attempt.Result)
         this.result <- attempt.Result
         if attempt.Result = raw.SQLITE_DONE && (this.statement.ColumnCount = 0 || raw.sqlite3_stmt_readonly(this.statement.Handle) = 0) then
             this.affected <- raw.sqlite3_changes(database.Handle)
