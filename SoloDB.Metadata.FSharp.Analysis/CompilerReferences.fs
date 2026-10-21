@@ -64,17 +64,7 @@ module internal CompilerReferences =
                 for argument in typ.GenericArguments do closed.GenericArguments.Add(referenceWith parameter argument)
                 closed :> TypeReference
             elif typ.IsTupleType then
-                let arguments = typ.GenericArguments |> Seq.map (referenceWith parameter) |> Seq.toArray
-                let standard = AssemblyNameReference.Parse("netstandard, Version=2.0.0.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51")
-                let rec tupleReference (parts: TypeReference[]) =
-                    let arity = min 8 parts.Length
-                    let root = TypeReference("System", (if typ.IsStructTupleType then "ValueTuple" else "Tuple") + "`" + string arity, moduleDefinition, standard, typ.IsStructTupleType)
-                    for index = 0 to arity - 1 do root.GenericParameters.Add(GenericParameter("T" + string index, root))
-                    let closed = GenericInstanceType(root)
-                    for index = 0 to min 7 parts.Length - 1 do closed.GenericArguments.Add(parts[index])
-                    if parts.Length > 7 then closed.GenericArguments.Add(tupleReference parts[7..])
-                    closed :> TypeReference
-                tupleReference arguments
+                referenceWith parameter typ.ErasedType
             elif typ.IsAnonRecordType then
                 anonymous typ.AnonRecordTypeDetails (isValueType typ) (typ.GenericArguments |> Seq.map (referenceWith parameter) |> Seq.toArray)
             else
