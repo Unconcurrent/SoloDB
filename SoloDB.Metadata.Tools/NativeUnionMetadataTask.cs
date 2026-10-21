@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection.PortableExecutable;
 using Microsoft.Build.Framework;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
@@ -39,7 +40,14 @@ public sealed class PrepareNativeUnionMetadata : ITask
             using var resolver = new DefaultAssemblyResolver();
             foreach (var directory in paths.Select(Path.GetDirectoryName).Distinct()) resolver.AddSearchDirectory(directory!);
             foreach (var path in paths)
+            {
+                using var stream = File.OpenRead(path);
+                using var image = new PEReader(stream);
+                var header = image.PEHeaders.PEHeader;
+                if (header != null && header.CorHeaderTableDirectory.RelativeVirtualAddress == 0 && header.CorHeaderTableDirectory.Size == 0)
+                    continue;
                 assemblies.Add(path, AssemblyDefinition.ReadAssembly(path, new ReaderParameters { AssemblyResolver = resolver }));
+            }
             // Authored dependencies and generated witnesses identify the selected union metadata.
             var targets = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
             foreach (var assembly in assemblies.Values.Where(assembly => assembly.Name.Name == "SoloDB" || assembly.MainModule.AssemblyReferences.Any(reference => reference.Name == "SoloDB")))
