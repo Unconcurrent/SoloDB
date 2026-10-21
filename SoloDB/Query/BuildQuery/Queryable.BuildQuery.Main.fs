@@ -119,15 +119,24 @@ module internal QueryableBuildQueryMain =
             | Method m ->
                 let inline simpleCurrent() = simpleCurrent statements
                 let inline installTerminalOrdering (ordering: Expression) (direction: SortDirection) (rawExpr: SqlExpr option) =
-                    let current = ifSelectorNewStatement statements
-                    let existingOrders = current.Orders |> Seq.toList
-                    current.Orders.Clear()
-                    current.Orders.Add({ OrderingRule = ordering; Direction = direction; RawExpr = rawExpr })
-                    if List.isEmpty existingOrders then
-                        current.Orders.Add({ OrderingRule = TypeMetadata.ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id")); Direction = SortDirection.Asc; RawExpr = None })
+                    if hasBoundedInput statements then
+                        addComplexFinal statements (fun ctx ->
+                            { Query = QueryProduced.completedRows sourceCtx.NextAlias ctx.Inner ctx.Input
+                              SerializationInput = ctx.Input; KeyInput = ctx.KeyInput })
+                        let current = simpleCurrent()
+                        current.Orders.Add({ OrderingRule = ordering; Direction = direction; RawExpr = rawExpr })
+                        current.Orders.Add({ OrderingRule = Expression.Parameter(typeof<int64>); Direction = SortDirection.Asc
+                                             RawExpr = Some(SqlExpr.Column(None, "_tree_ordinal")) })
                     else
-                        for order in existingOrders do
-                            current.Orders.Add(order)
+                        let current = ifSelectorNewStatement statements
+                        let existingOrders = current.Orders |> Seq.toList
+                        current.Orders.Clear()
+                        current.Orders.Add({ OrderingRule = ordering; Direction = direction; RawExpr = rawExpr })
+                        if List.isEmpty existingOrders then
+                            current.Orders.Add({ OrderingRule = TypeMetadata.ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id")); Direction = SortDirection.Asc; RawExpr = None })
+                        else
+                            for order in existingOrders do
+                                current.Orders.Add(order)
 
                 if m.Value <> SupportedLinqMethods.Select && m.Value <> SupportedLinqMethods.DistinctBy
                    && m.Value <> SupportedLinqMethods.OrderBy && m.Value <> SupportedLinqMethods.OrderByDescending

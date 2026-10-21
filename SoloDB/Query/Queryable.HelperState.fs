@@ -31,20 +31,27 @@ module internal QueryableHelperState =
             statements.Add (Simple n)
             n
 
-    let inline internal ifSelectorNewStatement (statements: ResizeArray<SQLSubquery>) =
-        match statements.Last() with
-        | Simple current ->
-            match current.Selector with
-            | Some _ ->
-                let n = emptySQLStatement ()
-                statements.Add (Simple n)
-                n
-            | None ->
-                current
-        | ComplexDu _ ->
+    let private hasBounds (statement: UsedSQLStatements) = statement.Skip.IsSome || statement.Take.IsSome
+
+    let internal hasBoundedInput (statements: ResizeArray<SQLSubquery>) =
+        statements |> Seq.exists (function Simple statement -> hasBounds statement | ComplexDu _ -> false)
+
+    /// Later consumers operate on the membership already selected by this bound.
+    let internal completeBounded (statements: ResizeArray<SQLSubquery>) =
+        let current = simpleCurrent statements
+        if hasBounds current then
             let n = emptySQLStatement ()
             statements.Add (Simple n)
             n
+        else current
+
+    let inline internal ifSelectorNewStatement (statements: ResizeArray<SQLSubquery>) =
+        let current = completeBounded statements
+        if current.Selector.IsSome then
+            let n = emptySQLStatement ()
+            statements.Add (Simple n)
+            n
+        else current
 
     let addFilter (statements: ResizeArray<SQLSubquery>) (filter: Expression) =
         let last = statements.Last()

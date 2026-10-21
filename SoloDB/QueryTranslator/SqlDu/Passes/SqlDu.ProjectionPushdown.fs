@@ -57,15 +57,56 @@ let private hasBaseTableInnerSource (innerSel: SqlSelect) : bool =
         | _ -> false
     | UnionAllSelect _ -> false
 
+/// A bounded identity read need not acquire its unused raw document payload.
+let private isBoundedRawPayloadWrapper (outer: SelectCore) (innerSel: SqlSelect) derivedAlias =
+    let plainBounds =
+        (outer.Limit.IsSome || outer.Offset.IsSome) && outer.Where.IsNone && outer.OrderBy.IsEmpty
+        && outer.Joins.IsEmpty && outer.GroupBy.IsEmpty && outer.Having.IsNone && not outer.Distinct
+    if not(plainBounds && innerSel.Ctes.IsEmpty) then false else
+    let columnsOnly =
+        outer.Projections |> ProjectionSetOps.toList |> List.forall (fun projection ->
+            match projection.Expr with
+            | Column(Some owner, _) -> normalizeSourceAlias owner = normalizeSourceAlias derivedAlias
+            | _ -> false)
+    if not columnsOnly then false else
+    match innerSel.Body with
+    | SingleSelect inner when inner.Joins.IsEmpty ->
+        match inner.Source with
+        | Some(BaseTable(table, alias)) ->
+            let source = alias |> Option.map normalizeSourceAlias |> Option.defaultValue table
+            let ownColumn name = function
+                | Column(Some owner, column) -> column = name && normalizeSourceAlias owner = source
+                | _ -> false
+            let fields = inner.Projections |> ProjectionSetOps.toList
+            let identity = fields |> List.exists (fun field -> projectionAlias field = Some "Id" && ownColumn "Id" field.Expr)
+            let payload = fields |> List.exists (fun field ->
+                match field.Alias, field.Expr with
+                | Some "Value", FunctionCall("jsonb", [value]) -> ownColumn "Value" value
+                | _ -> false)
+            let mutable independent = true
+            mapCoreExpressions (fun expression ->
+                if hasCorrelatedRef expression ||
+                   SqlExpr.fold (fun found -> function
+                       | Column(owner, column) when
+                           System.String.Equals(column, "Value", System.StringComparison.OrdinalIgnoreCase) &&
+                           (owner |> Option.forall (fun name -> normalizeSourceAlias name = "")) -> true
+                       | _ -> found) false expression then independent <- false
+                expression) id inner |> ignore
+            fields.Length = 2 && identity && payload && independent
+        | _ -> false
+    | _ -> false
+
 /// Narrow inner projections to only those that are live.
 /// Returns None if no narrowing is possible or allowed.
 let private narrowProjections
+    (allowBounded: bool)
     (outer: SelectCore)
     (innerSel: SqlSelect)
     (derivedAlias: string) : SelectCore option =
+    let boundedPayload = allowBounded && isBoundedRawPayloadWrapper outer innerSel derivedAlias
     if not (isProjectionPushdownAllowed innerSel) then None
     elif hasOuterEvaluationBoundary outer then None
-    elif not (isConservativeOuterWrapper outer) then None
+    elif not (isConservativeOuterWrapper outer || boundedPayload) then None
     // Provenance-backed source check: accept BaseTable OR DerivedTable with fully resolved projections.
     elif not (hasBaseTableInnerSource innerSel ||
               (match innerSel.Body with
@@ -77,6 +118,7 @@ let private narrowProjections
             match computeDeadProjections outer innerCore derivedAlias with
             | None -> None
             | Some dead ->
+                let dead = if boundedPayload then Set.intersect dead (Set.singleton "Value") else dead
                 if dead.IsEmpty then None
                 else
                     let narrowed =
@@ -94,10 +136,10 @@ let private narrowProjections
         | UnionAllSelect _ -> None
 
 /// Apply projection pushdown to a single SelectCore.
-let private pushdownInCore (changed: bool ref) (outer: SelectCore) : SelectCore =
+let private pushdownInCore (changed: bool ref) allowBounded (outer: SelectCore) : SelectCore =
     match outer.Source with
     | Some(DerivedTable(innerSel, alias)) ->
-        match narrowProjections outer innerSel alias with
+        match narrowProjections allowBounded outer innerSel alias with
         | Some narrowedOuter -> changed.Value <- true; narrowedOuter
         | None -> outer
     | _ -> outer
@@ -105,7 +147,8 @@ let private pushdownInCore (changed: bool ref) (outer: SelectCore) : SelectCore 
 /// Recursively apply projection pushdown to a SqlSelect at every nesting level.
 let rec pushdownProjectionSelect (changed: bool ref) (sel: SqlSelect) : SqlSelect =
     let recurse = pushdownProjectionSelect changed
-    let core = mapDerivedSources recurse >> pushdownInCore changed
+    let allowBounded = sel.Ctes.IsEmpty && (match sel.Body with SingleSelect _ -> true | _ -> false)
+    let core = mapDerivedSources recurse >> pushdownInCore changed allowBounded
     mapSelectParts (mapCores core) recurse sel
 
 /// Push projections in a SqlStatement.

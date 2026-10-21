@@ -208,13 +208,26 @@ Fix: Join on a single scalar key or move the join after AsEnumerable()."))
                         addFilter statements m.Expressions.[0]
                     | other -> raise (NotSupportedException(sprintf "Invalid number of arguments in %A: %A" m.Value other))
 
-                    match statements.Last() with
-                    | Simple x when x.Orders.Count <> 0 ->
-                        for order in x.Orders do
-                            order.Direction <- SortDirection.reverse order.Direction
-                    | _ ->
-                        addOrder statements (TypeMetadata.ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id"))) true
-                    addTake statements (TypeMetadata.ExpressionHelper.constant 1)
+                    if hasBoundedInput statements then
+                        addComplexFinal statements (fun ctx ->
+                            let rows = QueryProduced.completedRows sourceCtx.NextAlias ctx.Inner ctx.Input
+                            let projections =
+                                [{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") }
+                                 { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") }]
+                                @ QueryTranslatorSerialization.companionProjections (Some "o") ctx.Input
+                            let core =
+                                { mkCore projections (Some(DerivedTable(rows, "o"))) with
+                                    OrderBy = [{ Expr = SqlExpr.Column(Some "o", "_tree_ordinal"); Direction = SortDirection.Desc }]
+                                    Limit = Some(SqlExpr.Literal(SqlLiteral.Integer 1L)) }
+                            { Query = wrapCore core; SerializationInput = ctx.Input; KeyInput = ValueNone })
+                    else
+                        match statements.Last() with
+                        | Simple x when x.Orders.Count <> 0 ->
+                            for order in x.Orders do
+                                order.Direction <- SortDirection.reverse order.Direction
+                        | _ ->
+                            addOrder statements (TypeMetadata.ExpressionHelper.get(fun (x: obj) -> x.Dyn<int64>("Id"))) true
+                        addTake statements (TypeMetadata.ExpressionHelper.constant 1)
 
                 | _ -> ()
         ()

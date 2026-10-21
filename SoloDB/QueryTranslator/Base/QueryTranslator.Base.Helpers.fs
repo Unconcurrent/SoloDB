@@ -14,6 +14,13 @@ open SoloDatabase.JsonSerializator.JsonEqualitySupport
 open SoloDatabase.Metadata.Generation
 
 module internal QueryTranslatorBaseHelpers =
+    /// LINQ counts select no rows below zero; SQLite negative LIMIT means unlimited.
+    let nonnegativeCount value =
+        let integer n = SqlExpr.Literal(SqlLiteral.Integer n)
+        match value with
+        | SqlExpr.Literal(SqlLiteral.Integer n) -> integer (max 0L n)
+        | _ -> SqlExpr.FunctionCall("max", [integer 0L; value])
+
     /// Carry the separately stored physical identity into an admitted entity payload.
     let withRowIdentity value identity =
         SqlExpr.FunctionCall("jsonb_set", [value; SqlExpr.Literal(SqlLiteral.String "$.Id"); identity])

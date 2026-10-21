@@ -89,7 +89,13 @@ let computeLiveColumns (outer: SelectCore) (derivedAlias: string) : Set<string> 
         |> List.map (collectReferencedColumns derivedAlias)
         |> Set.unionMany
 
-    Set.unionMany [fromProjections; fromWhere; fromOrderBy; fromGroupBy; fromHaving; fromJoinOn]
+    let fromBounds =
+        [outer.Limit; outer.Offset]
+        |> List.choose id
+        |> List.map (collectReferencedColumns derivedAlias)
+        |> Set.unionMany
+
+    Set.unionMany [fromProjections; fromWhere; fromOrderBy; fromGroupBy; fromHaving; fromJoinOn; fromBounds]
 
 /// Check if the inner query uses implicit projections (SELECT *)
 /// that we cannot safely narrow. PROJ-3.

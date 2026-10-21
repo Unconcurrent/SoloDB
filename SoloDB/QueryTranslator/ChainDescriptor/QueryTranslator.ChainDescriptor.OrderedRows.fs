@@ -33,10 +33,6 @@ module internal OrderedChainRows =
         QueryableBuildQueryWindowHelpers.rowNumberOver order
     let private payloadFields a = [proj "Id" (col a "Id"); proj "Value" (col a "Value"); proj "__ord" (col a "__ord")]
     let private fields input a = payloadFields a @ QueryTranslatorSerialization.companionProjections (Some a) input
-    let private nonnegative v =
-        match v with
-        | SqlExpr.Literal(SqlLiteral.Integer n) -> integer (max 0L n)
-        | _ -> SqlExpr.FunctionCall("max", [integer 0L; v])
     let private inlineRow (source: SqlSelect) alias (joins: JoinShape list) expressions =
         match source.Body with
         | SingleSelect row when joins.IsEmpty && source.Ctes.IsEmpty
@@ -121,7 +117,7 @@ module internal OrderedChainRows =
                 let a=adapter.Alias()
                 let ps=fields input a @ (keys |> List.mapi (fun i _ -> proj ("__key"+string i) (col a ("__key"+string i))))
                 let fallback = {core (Some(DerivedTable(source,a))) ps with OrderBy=ordered a}
-                let bounded = bound source fallback (Some(nonnegative(value take))) (Some(nonnegative(value skip)))
+                let bounded = bound source fallback (Some(QueryTranslatorBaseHelpers.nonnegativeCount(value take))) (Some(QueryTranslatorBaseHelpers.nonnegativeCount(value skip)))
                 lower bounded input keys rest
             | stage :: rest ->
                 let a = adapter.Alias()
@@ -241,8 +237,8 @@ module internal OrderedChainRows =
                     lower (select { baseCore with Projections = ProjectionSetOps.ofList ps; Joins = joins
                                                   OrderBy = order |> List.map (fun (e,d) -> { Expr = e; Direction = d }) })
                           input (prior @ (terms |> List.map snd)) remaining
-                | Skip n -> lower (bound source baseCore (Some(integer -1L)) (Some(nonnegative (value n)))) input keys rest
-                | Take n -> lower (bound source baseCore (Some(nonnegative (value n))) None) input keys rest
+                | Skip n -> lower (bound source baseCore (Some(integer -1L)) (Some(QueryTranslatorBaseHelpers.nonnegativeCount(value n)))) input keys rest
+                | Take n -> lower (bound source baseCore (Some(QueryTranslatorBaseHelpers.nonnegativeCount(value n))) None) input keys rest
                 | Distinct elementType ->
                     let scoped = QueryTranslatorSerialization.scopeSerializationInput (Some a) BaseLayer input
                     distinctOn (QueryDefaultEquality.key adapter.Alias elementType (col a "Value") scoped) []

@@ -224,7 +224,7 @@ module internal QueryableHelperPreprocess =
 
         let limit =
             match statement.Take with
-            | Some take -> Some (bindBound take)
+            | Some take -> Some (QueryTranslatorBaseHelpers.nonnegativeCount (bindBound take))
             | None ->
                 match statement.Skip with
                 | Some _ -> Some (SqlExpr.Literal(SqlLiteral.Integer -1L))

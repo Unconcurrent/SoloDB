@@ -59,6 +59,7 @@ module internal QueryableBuildQuerySequenceOps =
             pendingDistinctByScalarReuse <- None
 
     let private applyAggregate (sourceCtx: QueryContext) (statements: ResizeArray<SQLSubquery>) (isPostScalarProjection: bool) (m: {| Value: SupportedLinqMethods; OriginalMethod: MethodInfo; Expressions: Expression array |}) =
+        completeBounded statements |> ignore
         let name =
             match m.Value with
             | SupportedLinqMethods.Sum -> "SUM"
@@ -173,15 +174,19 @@ module internal QueryableBuildQuerySequenceOps =
     let private applyWhile (sourceCtx: QueryContext) (statements: ResizeArray<SQLSubquery>) (m: {| Value: SupportedLinqMethods; OriginalMethod: MethodInfo; Expressions: Expression array |}) =
         let isTakeWhile = (m.Value = SupportedLinqMethods.TakeWhile)
         let opName = if isTakeWhile then "TakeWhile" else "SkipWhile"
+        let bounded = hasBoundedInput statements
         let mutable foundOrders : PreprocessedOrder array = Array.empty
+        let mutable foundOrdering = false
         for i = statements.Count - 1 downto 0 do
-            if foundOrders.Length = 0 then
+            if not foundOrdering then
                 match statements.[i] with
                 | Simple s when s.Orders.Count > 0 ->
-                    foundOrders <- s.Orders |> Seq.toArray
-                    s.Orders.Clear()
+                    foundOrdering <- true
+                    if not bounded then
+                        foundOrders <- s.Orders |> Seq.toArray
+                        s.Orders.Clear()
                 | _ -> ()
-        if foundOrders.Length = 0 then
+        if not foundOrdering then
             raise (InvalidOperationException(
                 "Error: TakeWhile/SkipWhile requires explicit ordering.\n" +
                 "Reason: TakeWhile/SkipWhile needs a deterministic row order.\n" +
@@ -189,9 +194,11 @@ module internal QueryableBuildQuerySequenceOps =
         let capturedOrders = foundOrders
         let predExpr = m.Expressions.[0]
         addComplexFinal statements (fun ctx ->
+            let source = if bounded then QueryProduced.completedRows sourceCtx.NextAlias ctx.Inner ctx.Input else ctx.Inner
             let currentCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input }
             let predDu = translateExprDu currentCtx ctx.TableName predExpr ctx.Vars
             let orderDus =
+                if bounded then [{ Expr = SqlExpr.Column(Some "o", "_tree_ordinal"); Direction = SortDirection.Asc }] else
                 capturedOrders |> Array.map (fun o ->
                     let expr =
                         match o.RawExpr with
@@ -212,8 +219,9 @@ module internal QueryableBuildQuerySequenceOps =
                     ([{ Alias = Some "Id"; Expr = SqlExpr.Column(Some "o", "Id") };
                      { Alias = Some "Value"; Expr = SqlExpr.Column(Some "o", "Value") };
                      { Alias = Some "_cf"; Expr = cfExpr }]
+                     @ (if bounded then [{ Alias = Some "_tree_ordinal"; Expr = SqlExpr.Column(Some "o", "_tree_ordinal") }] else [])
                      @ QueryTranslatorSerialization.companionProjections (Some "o") ctx.Input)
-                    (Some(DerivedTable(ctx.Inner, "o")))
+                    (Some(DerivedTable(source, "o")))
                   with OrderBy = orderDus }
             let innerSelect = wrapCore innerCore
             let twAlias = "_tw"
@@ -228,7 +236,8 @@ module internal QueryableBuildQuerySequenceOps =
                      { Alias = Some "Value"; Expr = SqlExpr.Column(Some twAlias, "Value") }]
                      @ QueryTranslatorSerialization.companionProjections (Some twAlias) ctx.Input)
                     (Some(DerivedTable(innerSelect, twAlias)))
-                  with Where = Some cfFilter }
+                  with Where = Some cfFilter
+                       OrderBy = if bounded then [{ Expr = SqlExpr.Column(Some twAlias, "_tree_ordinal"); Direction = SortDirection.Asc }] else [] }
             { Query = wrapCore outerCore; SerializationInput = ctx.Input; KeyInput = ValueNone }
         )
 
@@ -267,10 +276,8 @@ module internal QueryableBuildQuerySequenceOps =
                     | _ ->
                         current.Orders.Add({ OrderingRule = m.Expressions.[0]; Direction = SortDirection.ofDescending descending; RawExpr = None })
                 | SupportedLinqMethods.Skip ->
-                    let current = simpleCurrent()
-                    match current.Skip with
-                    | Some _ -> statements.Add(Simple { emptySQLStatement () with Skip = Some m.Expressions.[0] })
-                    | None   -> current.Skip <- Some m.Expressions.[0]
+                    let current = completeBounded statements
+                    current.Skip <- Some m.Expressions.[0]
                 | SupportedLinqMethods.Take ->
                     addTake statements m.Expressions.[0]
 
