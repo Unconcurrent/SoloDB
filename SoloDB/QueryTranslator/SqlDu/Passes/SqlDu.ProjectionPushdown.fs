@@ -62,13 +62,19 @@ let private isBoundedRawPayloadWrapper (outer: SelectCore) (innerSel: SqlSelect)
     let plainBounds =
         (outer.Limit.IsSome || outer.Offset.IsSome) && outer.Where.IsNone && outer.OrderBy.IsEmpty
         && outer.Joins.IsEmpty && outer.GroupBy.IsEmpty && outer.Having.IsNone && not outer.Distinct
+        && not (ProjectionSetOps.isAllColumns outer.Projections)
     if not(plainBounds && innerSel.Ctes.IsEmpty) then false else
+    let rowDependentBound =
+        [outer.Limit; outer.Offset] |> List.exists (Option.exists (SqlExpr.exists (function
+            | Column _ | JsonExtractExpr _ | JsonRootExtract _
+            | InSubquery _ | Exists _ | ScalarSubquery _ -> true
+            | _ -> false)))
     let columnsOnly =
         outer.Projections |> ProjectionSetOps.toList |> List.forall (fun projection ->
             match projection.Expr with
-            | Column(Some owner, _) -> normalizeSourceAlias owner = normalizeSourceAlias derivedAlias
+            | Column(Some owner, "Id") -> normalizeSourceAlias owner = normalizeSourceAlias derivedAlias
             | _ -> false)
-    if not columnsOnly then false else
+    if rowDependentBound || not columnsOnly then false else
     match innerSel.Body with
     | SingleSelect inner when inner.Joins.IsEmpty ->
         match inner.Source with
@@ -145,11 +151,13 @@ let private pushdownInCore (changed: bool ref) allowBounded (outer: SelectCore) 
     | _ -> outer
 
 /// Recursively apply projection pushdown to a SqlSelect at every nesting level.
-let rec pushdownProjectionSelect (changed: bool ref) (sel: SqlSelect) : SqlSelect =
-    let recurse = pushdownProjectionSelect changed
-    let allowBounded = sel.Ctes.IsEmpty && (match sel.Body with SingleSelect _ -> true | _ -> false)
+let rec private pushdownSelect allowBounded (changed: bool ref) (sel: SqlSelect) : SqlSelect =
+    let allowBounded = allowBounded && sel.Ctes.IsEmpty && (match sel.Body with SingleSelect _ -> true | _ -> false)
+    let recurse = pushdownSelect allowBounded changed
     let core = mapDerivedSources recurse >> pushdownInCore changed allowBounded
     mapSelectParts (mapCores core) recurse sel
+
+let pushdownProjectionSelect changed sel = pushdownSelect true changed sel
 
 /// Push projections in a SqlStatement.
 let pushdownProjectionStatement (stmt: SqlStatement) : struct(SqlStatement * bool) =
