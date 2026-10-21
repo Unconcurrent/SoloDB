@@ -299,6 +299,7 @@
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.StructuralClosure.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.StructuralShape.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.CastAggregate.fs" />
+    <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.StructuralOperand.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.StructuralAccess.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.StructuralTraversal.fs" />
     <Compile Include="QueryTranslator/VisitCore/QueryTranslator.VisitCore.OrderingPolicy.fs" />

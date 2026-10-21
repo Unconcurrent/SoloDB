@@ -31,11 +31,7 @@ module internal QueryStructuralRelations =
                 else Expression.ReferenceEqual(Expression.Convert(value,typeof<obj>),nullObject) :> Expression
             let missing = function
                 | Bound value -> binder.Scalar(boundMissing value)
-                | Stored produced ->
-                    QueryProduced.constructRaw nextName (fun parts ->
-                        let value,input = parts[0]
-                        QueryProduced.typed typeof<bool> (sqlNull(nullCarrier input.Carrier value))) [|produced|]
-                    |> QueryProduced.value nextName
+                | Stored produced -> QueryStructuralAccess.presence nextName produced
             let child name childShape = function
                 | Bound parent ->
                     let childType = target childShape
@@ -133,7 +129,8 @@ module internal QueryStructuralRelations =
             let result = QueryProduced.constructRaw nextName (fun parts ->
                 let operand = function Choice1Of2 value -> value | Choice2Of2 index -> Stored(DirectValue parts[index])
                 let compared =
-                  if graph.Recursive then
+                  let rec original input=input.OriginalComparisonOperand.IsSome || Array.exists original input.Children
+                  if graph.Recursive || (parts |> Array.exists(fun (_,input) -> original input)) then
                       let root = function
                           | Choice1Of2(Bound value) ->
                               let prepared = BoundValueAccessExpression(value,typeof<string>,Func<obj,obj>(fun value -> box(QueryStructuralShape.prepare graph value)))
@@ -151,6 +148,7 @@ module internal QueryStructuralRelations =
                               | _ -> invalidOp "A stored payload requires its produced value."
                           Scalar = fun target produced -> preparedScalar target (Stored produced)
                           RawScalar = fun target produced -> scalar target (Stored produced)
+                          Presence = QueryStructuralAccess.presence nextName
                           NecessaryRange = necessaryRange }
                       QueryStructuralTraversal.translate nextName relation operations graph (root left) (root right)
                   else

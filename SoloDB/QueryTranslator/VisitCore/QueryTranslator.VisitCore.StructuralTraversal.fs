@@ -10,12 +10,17 @@ open SoloDatabase.QueryStructuralShape
 
 /// SQL visits one typed component at a time and retains only pending coordinates.
 module internal QueryStructuralTraversal =
-    type Root = Prepared of SqlExpr | Selected of SqlExpr * QuerySerializationInput
+    type Root =
+        | Prepared of SqlExpr
+        | PreparedProjection of SqlExpr * SqlExpr
+        | PreparedRows of string * SqlExpr
+        | Selected of SqlExpr * QuerySerializationInput
     type Operations = {
         Child: string -> Node -> QueryProducedValue -> QueryProducedValue
         Payload: Node -> QueryProducedValue -> QueryProducedValue
         Scalar: Type -> QueryProducedValue -> SqlExpr
         RawScalar: Type -> QueryProducedValue -> SqlExpr
+        Presence: QueryProducedValue -> SqlExpr
         NecessaryRange: Type -> bool -> SqlExpr -> SqlExpr -> SqlExpr voption
     }
     type private Access = Current | Member of string | Payload
@@ -44,7 +49,7 @@ module internal QueryStructuralTraversal =
     let internal mapInput map (input: QuerySerializationInput) =
         let rec loop (input: QuerySerializationInput) =
             { input with
-                OriginalOrderOperand = input.OriginalOrderOperand |> ValueOption.map (fun original -> original.WithSource(lazy (map original.Data.Value), map original.Path))
+                OriginalComparisonOperand = input.OriginalComparisonOperand |> ValueOption.map (fun original -> original.WithSource(lazy (map original.Data.Value), map original.Path))
                 Operand = input.Operand |> ValueOption.map(fun operand ->
                     { Descriptor = map operand.Descriptor
                       Accesses = operand.Accesses |> Array.map(fun step ->
@@ -54,7 +59,21 @@ module internal QueryStructuralTraversal =
                 Children = input.Children |> Array.map loop }
         loop input
 
-    let translate nextName relation operations graph left right =
+    let rec private translateCore outcome nextName relation operations graph left right =
+        let original side value (input:QuerySerializationInput) other =
+            let original=input.OriginalComparisonOperand.Value
+            original.Demand()
+            let prepared=if original.Depth=0 then Prepared original.Data.Value else PreparedProjection(original.Data.Value,original.Path)
+            let stored=Selected(value,{input with OriginalComparisonOperand=ValueNone})
+            let apply value=if side then translateCore outcome nextName relation operations graph value other else translateCore outcome nextName relation operations graph other value
+            let candidate,fallback=apply prepared,apply stored
+            choose (SqlExpr.Unary(UnaryOperator.IsNotNull,original.Data.Value)) (SqlExpr.Coalesce(candidate,[fallback])) fallback
+        match left,right with
+        | Selected(value,input),_ when input.OriginalComparisonOperand.IsSome -> original true value input right
+        | _,Selected(value,input) when input.OriginalComparisonOperand.IsSome -> original false value input left
+        | _ -> translateWork outcome nextName relation operations graph left right
+
+    and private translateWork outcome nextName relation operations graph left right =
         let work = nextName()
         let current = nextName()
         let successor = nextName()
@@ -85,22 +104,28 @@ module internal QueryStructuralTraversal =
                 let binding = { Name = name; Materialized = true; Query = query(core None [projection "value" token]) }
                 roots.Add(binding,alias)
                 SqlExpr.Column(Some alias,"value"),ValueSome { Input = scopeInput input; Access = Current },text "$"
-            | Prepared value ->
-                let name = nextName()
-                let rows = nextName()
-                let alias = nextName()
-                let entry = SqlExpr.Column(Some rows,"value")
-                let body = core (Some(FromJsonEach(SqlExpr.FunctionCall("jsonb",[value]),Some rows)))
-                                [projection "node" (SqlExpr.Column(Some rows,"key"))
-                                 projection "parent" (at entry "$[0]")
-                                 projection "ordinal" (at entry "$[1]")
-                                 projection "absent" (at entry "$[2]")
-                                 projection "payload" (SqlExpr.FunctionCall("jsonb",[binary BinaryOperator.JsonText entry (text "$[3]")]))]
-                ctes.Add { Name = name; Materialized = true; Query = query body }
+            | PreparedRows(name,node) ->
+                let alias=nextName()
                 joins.Add(ConditionedJoin(JoinKind.Inner,BaseTable(name,Some alias),
                     binary BinaryOperator.Eq (SqlExpr.Column(Some alias,"node")) (column side)))
                 prepared.Add(side,(name,alias))
-                value,ValueNone,integer 0
+                SqlExpr.Literal SqlLiteral.Null,ValueNone,node
+            | (Prepared value | PreparedProjection(value,_)) as original ->
+                let alias = nextName()
+                let rows=QueryStructuralOperand.rows nextName value
+                let name=rows.Name
+                ctes.Add rows
+                joins.Add(ConditionedJoin(JoinKind.Inner,BaseTable(name,Some alias),
+                    binary BinaryOperator.Eq (SqlExpr.Column(Some alias,"node")) (column side)))
+                prepared.Add(side,(name,alias))
+                let initial=
+                    match original with
+                    | PreparedProjection(_,path) ->
+                        let cursor,node=QueryStructuralOperand.position nextName name path
+                        ctes.Add cursor
+                        node
+                    | _ -> integer 0
+                value,ValueNone,initial
         let leftRoot,leftInput,leftCoordinate = root "left" left
         let rightRoot,rightInput,rightCoordinate = root "right" right
         let rootContext = register graph.Root leftInput rightInput
@@ -119,7 +144,7 @@ module internal QueryStructuralTraversal =
         let missing side context stored =
             match stored with
             | ValueSome stored ->
-                QueryProduced.consume nextName (fun value input -> SqlExpr.Unary(UnaryOperator.IsNull,nullCarrier input.Carrier value)) (selected side context stored)
+                operations.Presence (selected side context stored)
             | ValueNone ->
                 let _,alias = prepared[side]
                 SqlExpr.Column(Some alias,"absent")
@@ -129,7 +154,8 @@ module internal QueryStructuralTraversal =
         let terminal result = SqlExpr.JsonArrayExpr [integer 0;integer 0;leftCoordinate;rightCoordinate;SqlExpr.JsonArrayExpr [];result]
         let advance context slot left right pending =
             SqlExpr.JsonArrayExpr [integer context;integer slot;left;right;pending;active]
-        let exhausted = terminal(boolean(relation = BinaryOperator.Le || relation = BinaryOperator.Ge))
+        let equalResult=if outcome then integer 2 else boolean(relation = BinaryOperator.Le || relation = BinaryOperator.Ge)
+        let exhausted = terminal equalResult
         let resume = choose (binary BinaryOperator.Gt (SqlExpr.FunctionCall("json_array_length",[stack])) (integer 0))
                         (SqlExpr.JsonArrayExpr [at frame "$[0]";at frame "$[1]";at frame "$[2]";at frame "$[3]";
                                                SqlExpr.FunctionCall("jsonb_remove",[stack;text "$[#-1]"]);active]) exhausted
@@ -164,7 +190,7 @@ module internal QueryStructuralTraversal =
                     let parentCoordinate =
                         if suffix.Length = 0 then column side else
                         SqlExpr.FunctionCall("substr",[column side;integer 1;
-                            binary BinaryOperator.Sub (SqlExpr.FunctionCall("length",[column side])) (integer suffix.Length)])
+                            binary BinaryOperator.Sub (SqlExpr.FunctionCall("length",[column side])) (SqlExpr.FunctionCall("length",[text suffix]))])
                     let map = SqlExpr.map(function
                         | SqlExpr.Column(Some alias,name) when alias = current && name = side -> parentCoordinate
                         | expression -> expression)
@@ -200,8 +226,9 @@ module internal QueryStructuralTraversal =
         // The first scalar precedes every recursive continuation. Its prepared
         // occurrence is fixed at one, so the direct prefix needs no second walk.
         let prefix =
+            let wholeRoot=function Prepared _ | Selected _ -> true | _ -> false
             match graph.Root.Kind with
-            | ComponentNode fields when fields.Length > 1 && fields[0].Node.Kind = ScalarNode ->
+            | ComponentNode fields when fields.Length > 1 && fields[0].Node.Kind = ScalarNode && wholeRoot left && wholeRoot right ->
                 let field = fields[0]
                 let value = function
                     | Prepared value ->
@@ -212,12 +239,14 @@ module internal QueryStructuralTraversal =
                         else
                             let produced = DirectValue(token,{ QuerySerializationInput.ForType field.Node.Target with Source = ValueSome token; Carrier = CanonicalToken })
                             operations.RawScalar field.Node.Target produced,operations.Scalar field.Node.Target produced
+                    | PreparedProjection _ | PreparedRows _ -> invalidOp "A projected prepared root has no fixed first occurrence."
                     | Selected(value,input) ->
                         let produced = operations.Child field.Name field.Node (DirectValue(value,input))
                         operations.RawScalar field.Node.Target produced,operations.Scalar field.Node.Target produced
                 let missing = function
                     | Prepared value -> at value "$[0][2]"
-                    | Selected(value,input) -> SqlExpr.Unary(UnaryOperator.IsNull,nullCarrier input.Carrier value)
+                    | Selected(value,input) -> operations.Presence(DirectValue(value,input))
+                    | PreparedProjection _ | PreparedRows _ -> invalidOp "A projected prepared root has no fixed presence occurrence."
                 let (leftRaw,leftValue),(rightRaw,rightValue) = value left,value right
                 let range =
                     if not graph.Root.Target.IsValueType then ValueNone else
@@ -230,9 +259,9 @@ module internal QueryStructuralTraversal =
                     let result =
                         if graph.Root.Target.IsValueType then present else
                         choose (missing left)
-                            (choose (missing right) (boolean(relation = BinaryOperator.Le || relation = BinaryOperator.Ge)) (boolean(relation = BinaryOperator.Lt || relation = BinaryOperator.Le)))
+                            (choose (missing right) equalResult (boolean(relation = BinaryOperator.Lt || relation = BinaryOperator.Le)))
                             (choose (missing right) (boolean(relation = BinaryOperator.Gt || relation = BinaryOperator.Ge)) present)
-                    match range with ValueSome range -> binary BinaryOperator.And range result | ValueNone -> result
+                    match range with ValueSome range -> choose range result (boolean false) | ValueNone -> result
                 1,finish
             | _ -> 0,id
         let initialSlot,finish = prefix
@@ -241,6 +270,22 @@ module internal QueryStructuralTraversal =
         while index < contexts.Count do
             let context = contexts[index]
             let body =
+                let hasOriginal=function ValueSome stored -> stored.Input.OriginalComparisonOperand.IsSome | _ -> false
+                if context.Node.Kind<>ScalarNode && (hasOriginal context.Left || hasOriginal context.Right) then
+                    let root side stored =
+                        match stored with
+                        | ValueSome stored ->
+                            match selected side context stored with
+                            | DirectValue(value,input) -> Selected(value,input)
+                            | _ -> invalidOp "A bound structural occurrence must be direct."
+                        | ValueNone -> let rows,_=prepared[side] in PreparedRows(rows,column side)
+                    let graph={graph with Root=context.Node}
+                    let result=translateCore true nextName relation operations graph (root "left" context.Left) (root "right" context.Right)
+                    let alias=nextName()
+                    let value=SqlExpr.Column(Some alias,"value")
+                    SqlExpr.ScalarSubquery(query(core (Some(FromJsonEach(SqlExpr.JsonArrayExpr [result],Some alias)))
+                        [projection "value" (choose (binary BinaryOperator.Eq value (integer 2)) resume (terminal value))]))
+                else
                 match context.Node.Kind with
                 | ScalarNode ->
                     let leftValue,rightValue = scalar "left" context context.Left,scalar "right" context context.Right
@@ -297,7 +342,11 @@ module internal QueryStructuralTraversal =
                             Joins = List.ofSeq joins @ [CrossJoin(FromJsonEach(SqlExpr.JsonArrayExpr [step],Some successor))]
                             Where = Some(binary BinaryOperator.Eq (column "status") active) }
         ctes.Add { Name = work; Materialized = false; Query = { Ctes = []; Body = UnionAllSelect(initial,[recursive]) } }
-        let result = core (Some(BaseTable(work,None))) [projection "status" (SqlExpr.Column(None,"status"))]
+        let valid=
+            [left,leftCoordinate;right,rightCoordinate]
+            |> List.choose(fun (root,coordinate) -> match root with PreparedProjection _ -> Some(SqlExpr.Unary(UnaryOperator.IsNotNull,coordinate)) | _ -> None)
+        let status=valid |> List.fold(fun status valid -> choose valid status (SqlExpr.Literal SqlLiteral.Null)) (SqlExpr.Column(None,"status"))
+        let result = core (Some(BaseTable(work,None))) [projection "status" status]
         let result =
             { result with
                 Where = Some(binary BinaryOperator.Ge (SqlExpr.Column(None,"status")) (integer 0))
@@ -312,3 +361,6 @@ module internal QueryStructuralTraversal =
             let body = { body with Joins = roots |> Seq.skip 1 |> Seq.map(fun (binding,alias) -> CrossJoin(BaseTable(binding.Name,Some alias))) |> Seq.toList }
             SqlExpr.ScalarSubquery { Ctes = roots |> Seq.map fst |> Seq.toList; Body = SingleSelect body }
         finish bound
+
+    let translate nextName relation operations graph left right =
+        translateCore false nextName relation operations graph left right

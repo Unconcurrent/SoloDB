@@ -182,13 +182,13 @@ module internal CompiledQueries =
                 let read = QueryValuePlan.bind variables (fun _ -> None) value
                 addStep(fun frame offset ->
                     let sampled = read frame
+                    let struct(empty, writer) = ParameterWriter.Add(frame, offset + slot, encoded, prefix, prepare, sampled)
                     match original with
                     | ValueSome struct(slot,demanded,prepareOriginal) ->
                         match slot.Value with
                         | ValueSome slot -> frame[offset+slot] <- if demanded.Count>0 then prepareOriginal demanded sampled else null
                         | ValueNone -> ()
                     | ValueNone -> ()
-                    let struct(empty, writer) = ParameterWriter.Add(frame, offset + slot, encoded, prefix, prepare, sampled)
                     if withInput then
                         let writer = writer.Value
                         TypeMetadata.registerType writer
@@ -210,20 +210,20 @@ module internal CompiledQueries =
                 let prepare sampled =
                     let struct(stored, encoded, writer) = JsonFunctions.prepareQueryParameter comparison value.Type sampled
                     struct(stored, encoded, ValueSome writer)
-                let preparation = QueryStructuralOrdering.originalPreparation value.Type
+                let preparation = QueryStructuralShape.originalPreparation value.Type
                 let original = preparation |> ValueOption.map(fun struct(prepare,_) -> struct(ref ValueNone,ResizeArray<int array>(),prepare))
                 let expression, writer = bindWithInput prepare encoded false false dynamic original value
                 let produced = QueryProduced.parameter value.Type expression writer
                 match original, preparation, produced with
-                | ValueSome struct(unitsSlot,demanded,_), ValueSome struct(_,project), DirectValue(expression, input) ->
-                    let units = lazy (
+                | ValueSome struct(originalSlot,demanded,_), ValueSome struct(_,project), DirectValue(expression, input) ->
+                    let originalData = lazy (
                         let slot = names.Count
-                        let unitsName = "cq" + string bindingCount + "u"
+                        let originalName = "cq" + string bindingCount + "u"
                         bindingCount <- bindingCount + 1
-                        names.Add unitsName
-                        unitsSlot.Value <- ValueSome slot
-                        SqlExpr.Parameter unitsName)
-                    DirectValue(expression, { input with OriginalOrderOperand = ValueSome(QueryOriginalOrderOperand(value.Type,units,SqlExpr.JsonArrayExpr [],0,(fun path -> demanded.Add path),project)) })
+                        names.Add originalName
+                        originalSlot.Value <- ValueSome slot
+                        SqlExpr.Parameter originalName)
+                    DirectValue(expression, { input with OriginalComparisonOperand = ValueSome(QueryOriginalComparisonOperand(value.Type,originalData,SqlExpr.JsonArrayExpr [],0,(fun path -> demanded.Add path),project)) })
                 | _ -> produced
             let local (value: Expression) =
                 let variable = Expression.Variable(value.Type, "value" + string locals.Count)

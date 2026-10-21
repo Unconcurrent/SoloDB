@@ -76,7 +76,7 @@ type internal QueryReferenceOwner = {
 
 /// Original comparison data follows authored projection independently of stored writers.
 [<Sealed>]
-type internal QueryOriginalOrderOperand(target: System.Type, data: System.Lazy<SqlExpr>, path: SqlExpr, depth: int,
+type internal QueryOriginalComparisonOperand(target: System.Type, data: System.Lazy<SqlExpr>, path: SqlExpr, depth: int,
                                         demand: int array -> unit,
                                         project: System.Type -> QuerySerializationAccess -> struct(System.Type * int array) voption) =
     member _.Target = target
@@ -86,9 +86,9 @@ type internal QueryOriginalOrderOperand(target: System.Type, data: System.Lazy<S
     member _.Demand() = demand Array.empty
     member _.Demand(path) = demand path
     member _.Projection = project
-    member _.WithSource(data,path) = QueryOriginalOrderOperand(target,data,path,depth,demand,project)
+    member _.WithSource(data,path) = QueryOriginalComparisonOperand(target,data,path,depth,demand,project)
     member _.Child(target,path,steps: int array) =
-        QueryOriginalOrderOperand(target,data,path,depth+steps.Length,(fun suffix -> demand(Array.append steps suffix)),project)
+        QueryOriginalComparisonOperand(target,data,path,depth+steps.Length,(fun suffix -> demand(Array.append steps suffix)),project)
 
 [<Struct>]
 type internal QuerySerializationInput = {
@@ -99,7 +99,7 @@ type internal QuerySerializationInput = {
     Source: SqlExpr voption
     SourceOffset: int
     /// Original ordering data remains independent of stored serialization.
-    OriginalOrderOperand: QueryOriginalOrderOperand voption
+    OriginalComparisonOperand: QueryOriginalComparisonOperand voption
     Carrier: QueryValueCarrier
     /// The authored index may retain its original exceptional text carrier.
     LegacyCharacterText: bool
@@ -110,7 +110,7 @@ type internal QuerySerializationInput = {
     Navigation: QueryNavigationScope array
 } with
     static member ForType(target) =
-        { OriginalType = target; Shape = ValueNone; Children = Array.empty; Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalOrderOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
+        { OriginalType = target; Shape = ValueNone; Children = Array.empty; Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
     static member ForOwner(target, table, identity, ?loading: QueryOwnerLoading) =
         let loading = defaultArg loading { Excluded = Array.empty; Included = Array.empty; Whitelist = false }
         let texts values = SqlExpr.JsonArrayExpr(values |> Array.map (SqlLiteral.String >> SqlExpr.Literal) |> Array.toList)
@@ -128,25 +128,25 @@ type internal QuerySerializationInput = {
         { OriginalType = target
           Shape = ValueSome(JsonSerializator.JsonSerializationShape.GroupingValues(key.OriginalType, item.OriginalType))
           Children = [|key; item|]
-          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalOrderOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
+          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
     static member Sequence(target, item: QuerySerializationInput) =
         { OriginalType = target
           Shape = ValueSome(JsonSerializator.JsonSerializationShape.SequenceValues(ModelMetadata.SequenceElement target))
           Children = [|item|]
-          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalOrderOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
+          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
     static member Members(target, names: string array, declared: System.Type array, children: QuerySerializationInput array) =
         { OriginalType = target
           Shape = ValueSome(JsonSerializator.JsonSerializationShape.DeclaredMembers(
               Array.mapi (fun index name -> struct(name, declared.[index])) names))
           Children = children
-          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalOrderOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
+          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
     static member Positions(target, children: QuerySerializationInput array) =
         { OriginalType = target
           Shape = ValueSome(
               if target.IsArray then JsonSerializator.JsonSerializationShape.DeclaredArrayMembers(Array.create children.Length (target.GetElementType()))
               else JsonSerializator.JsonValue.SerializedValueFacts target)
           Children = children
-          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalOrderOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
+          Operand = ValueNone; Source = ValueNone; SourceOffset = 0; OriginalComparisonOperand = ValueNone; Carrier = CanonicalToken; LegacyCharacterText = false; StructuralDefault = false; PhysicalOwner = ValueNone; ReferenceOwner = ValueNone; Navigation = Array.empty }
 
 /// A producer retains both its value and the original writer responsibility.
 /// Packed results select the value and descriptor in one SQL occurrence.

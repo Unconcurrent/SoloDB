@@ -27,11 +27,11 @@ module internal QueryOrderingTraversal =
 
     let rec encode nextName variables (node: Node) role root =
         match root with
-        | Selected(DirectValue(value,input)) when input.OriginalOrderOperand.IsSome ->
-            let original=input.OriginalOrderOperand.Value
+        | Selected(DirectValue(value,input)) when input.OriginalComparisonOperand.IsSome ->
+            let original=input.OriginalComparisonOperand.Value
             original.Demand()
             let prepared=encode nextName variables node role (Prepared(original.Data.Value,if original.Depth=0 then ValueNone else ValueSome original.Path))
-            let stored=encode nextName variables node role (Selected(DirectValue(value,{input with OriginalOrderOperand=ValueNone})))
+            let stored=encode nextName variables node role (Selected(DirectValue(value,{input with OriginalComparisonOperand=ValueNone})))
             let prepared=if original.Depth=0 then prepared else SqlExpr.Coalesce(prepared,[stored])
             choose (SqlExpr.Unary(UnaryOperator.IsNotNull,original.Data.Value)) prepared stored
         | _ -> encodeCore nextName variables node role root
@@ -64,34 +64,19 @@ module internal QueryOrderingTraversal =
                 ValueSome {Input=QueryStructuralTraversal.scopeInput input;Access=Current},text "$"
             | Selected _ -> invalidOp "An ordering traversal requires its once-bound key."
             | Prepared(value,path) ->
-                preparedRows<-nextName()
                 preparedAlias<-nextName()
-                let alias=nextName()
-                let entry=SqlExpr.Column(Some alias,"value")
-                bindings.Add {Name=preparedRows;Materialized=true;Query=query(core (Some(FromJsonEach(SqlExpr.FunctionCall("jsonb",[value]),Some alias)))
-                    [projection "node" (SqlExpr.Column(Some alias,"key"));projection "parent" (at entry "$[0]")
-                     projection "ordinal" (at entry "$[1]");projection "absent" (at entry "$[2]")
-                     projection "payload" (SqlExpr.FunctionCall("jsonb",[binary BinaryOperator.JsonText entry (text "$[3]")]))])}
+                let rows=QueryStructuralOperand.rows nextName value
+                preparedRows<-rows.Name
+                bindings.Add rows
                 joins.Add(ConditionedJoin(JoinKind.Inner,BaseTable(preparedRows,Some preparedAlias),
                     binary BinaryOperator.Eq (SqlExpr.Column(Some preparedAlias,"node")) coordinate))
                 let initial =
                     match path with
                     | ValueNone -> integer 0
                     | ValueSome path ->
-                        let cursor,parent,child=nextName(),nextName(),nextName()
-                        let depth=SqlExpr.Column(Some parent,"depth")
-                        let count=SqlExpr.FunctionCall("json_array_length",[path])
-                        let step=core (Some(BaseTable(cursor,Some parent)))
-                                    [projection "depth" (binary BinaryOperator.Add depth (integer 1));projection "node" (SqlExpr.Column(Some child,"node"))]
-                        let step={step with Joins=[ConditionedJoin(JoinKind.Inner,BaseTable(preparedRows,Some child),
-                                                binary BinaryOperator.And
-                                                    (binary BinaryOperator.Eq (SqlExpr.Column(Some child,"parent")) (SqlExpr.Column(Some parent,"node")))
-                                                    (binary BinaryOperator.Eq (SqlExpr.Column(Some child,"ordinal"))
-                                                        (SqlExpr.FunctionCall("jsonb_extract",[path;SqlExpr.FunctionCall("concat",[text "$[";depth;text "]"])]))))]
-                                            Where=Some(binary BinaryOperator.Lt depth count)}
-                        bindings.Add {Name=cursor;Materialized=false;Query={Ctes=[];Body=UnionAllSelect(core None [projection "depth" (integer 0);projection "node" (integer 0)],[step])}}
-                        let result=core (Some(BaseTable(cursor,Some parent))) [projection "node" (SqlExpr.Column(Some parent,"node"))]
-                        SqlExpr.ScalarSubquery(query {result with Where=Some(binary BinaryOperator.Eq depth count);Limit=Some(integer 1)})
+                        let cursor,node=QueryStructuralOperand.position nextName preparedRows path
+                        bindings.Add cursor
+                        node
                 ValueNone,initial
         let rootContext=register node role stored
         let rootColumn = SqlExpr.Column(Some rootAlias,"value")
@@ -169,7 +154,7 @@ module internal QueryOrderingTraversal =
             match context.Stored with
             | ValueSome stored ->
                 let value=selected context stored
-                if value.Input.OriginalOrderOperand.IsSome then encode nextName variables context.Node context.Role (Selected value)
+                if value.Input.OriginalComparisonOperand.IsSome then encode nextName variables context.Node context.Role (Selected value)
                 else QueryOrderingPolicy.chunk context.Role context.Node.Target (scalar context preparedPayload)
             | ValueNone -> QueryOrderingPolicy.chunk context.Role context.Node.Target (scalar context preparedPayload)
         let pending=column "pending"
@@ -195,7 +180,7 @@ module internal QueryOrderingTraversal =
             let childRole=QueryOrderingPolicy.children context.Role context.Node
             let body=
                 match context.Stored with
-                | ValueSome stored when stored.Access=Current && stored.Input.OriginalOrderOperand.IsSome ->
+                | ValueSome stored when stored.Access=Current && stored.Input.OriginalComparisonOperand.IsSome ->
                     resume(encode nextName variables context.Node context.Role (Selected(produced stored)))
                 | _ ->
                 match context.Node.Kind with

@@ -51,7 +51,7 @@ module internal QueryableValueBindings =
                     SqlExpr.CaseExpr((flag, token), [], Some value)
             value, writer
         let produced comparison (expression: Expression) =
-            let preparation = QueryStructuralOrdering.originalPreparation expression.Type
+            let preparation = QueryStructuralShape.originalPreparation expression.Type
             let original = preparation |> ValueOption.map(fun struct(prepare,_) -> struct(ref ValueNone,ResizeArray<int array>(),prepare))
             let value, writer = bind (JsonFunctions.prepareQueryParameter comparison expression.Type)
                                     (JsonFunctions.parameterMayNeedJson expression.Type) false
@@ -59,12 +59,12 @@ module internal QueryableValueBindings =
             let produced = QueryProduced.parameter expression.Type value writer
             match original, preparation, produced with
             | ValueSome struct(slot,demanded,_), ValueSome struct(_,project), DirectValue(value, input) ->
-                let units = lazy (
+                let originalData = lazy (
                     let name = "dp" + variables.Count.ToString(Globalization.CultureInfo.InvariantCulture)
                     let parameter = allocate name
                     slot.Value <- ValueSome name
                     parameter)
-                DirectValue(value, { input with OriginalOrderOperand = ValueSome(QueryOriginalOrderOperand(expression.Type,units,SqlExpr.JsonArrayExpr [],0,(fun path -> demanded.Add path),project)) })
+                DirectValue(value, { input with OriginalComparisonOperand = ValueSome(QueryOriginalComparisonOperand(expression.Type,originalData,SqlExpr.JsonArrayExpr [],0,(fun path -> demanded.Add path),project)) })
             | _ -> produced
         let scalar (expression: Expression) =
             bind (fun value -> struct(value, false, expression.Type)) false false false ValueNone expression |> fst

@@ -24,7 +24,7 @@ module internal QueryStructuralAccess =
     let payload nextName parent =
         QueryProduced.bind nextName (fun value input -> DirectValue(value,serializationPayload input)) parent
 
-    let scalar (variables: Dictionary<string,obj>) nextName (target: Type) produced =
+    let private storedScalar (variables: Dictionary<string,obj>) nextName (target: Type) produced =
         let target = if target.IsEnum then TypeMetadata.enumUnderlying target else target
         QueryProduced.consume nextName (fun raw input ->
             let value = QueryProduced.comparisonValue target raw input
@@ -32,3 +32,23 @@ module internal QueryStructuralAccess =
                 let fallback = QueryDefault.comparisonValue variables target |> QueryProduced.value nextName
                 SqlExpr.Coalesce(value,[fallback])
             else value) produced
+
+    let presence nextName produced =
+        QueryProduced.consume nextName (fun raw input ->
+            let stored=SqlExpr.Unary(UnaryOperator.IsNull,nullCarrier input.Carrier raw)
+            match input.OriginalComparisonOperand with
+            | ValueNone -> stored
+            | ValueSome original -> QueryStructuralOperand.consume nextName original (fun node -> SqlExpr.FunctionCall("jsonb_extract",[node;SqlExpr.Literal(SqlLiteral.String "$[2]")])) stored) produced
+
+    let scalar variables nextName target produced =
+        QueryProduced.consume nextName (fun raw input ->
+            let stored=storedScalar variables nextName target (DirectValue(raw,input))
+            match input.OriginalComparisonOperand with
+            | ValueNone -> stored
+            | ValueSome original ->
+                QueryStructuralOperand.consume nextName original (fun node ->
+                    if typeof<string>.Equals target then
+                        SqlExpr.FunctionCall("base64",[SqlExpr.FunctionCall("jsonb_extract",[node;SqlExpr.Literal(SqlLiteral.String "$[3]")])])
+                    else
+                        let payload=SqlExpr.FunctionCall("jsonb",[SqlExpr.Binary(node,BinaryOperator.JsonText,SqlExpr.Literal(SqlLiteral.String "$[3]"))])
+                        storedScalar variables nextName target (DirectValue(payload,{QuerySerializationInput.ForType target with Source=ValueSome payload;Carrier=CanonicalToken}))) stored) produced
