@@ -315,15 +315,25 @@ module internal QueryTranslatorBaseHelpers =
         not conversion.Operand.Type.IsValueType && conversion.Type.IsAssignableFrom(conversion.Operand.Type)
 
     let rec internal normalizeStoredConstruction (value: Expression) : Expression =
+        let inlineInvocation (lambda: LambdaExpression) (arguments: IReadOnlyList<Expression>) =
+            if lambda.Parameters.Count <> arguments.Count then inlineLambdaInvocation lambda arguments
+            else
+                let mutable ordered = normalizeStoredConstruction lambda.Body
+                for index = lambda.Parameters.Count - 1 downto 0 do
+                    let parameter = lambda.Parameters[index]
+                    ordered <- Expression.Block([|parameter|], Expression.Assign(parameter, arguments[index]), ordered)
+                match ordered with
+                | :? BlockExpression as block when (QueryConstructionExpressions.orderedMembers block).IsSome -> ordered
+                | _ -> inlineLambdaInvocation lambda arguments |> normalizeStoredConstruction
         match value with
         | :? UnaryExpression as conversion when isReferenceUpcast conversion -> normalizeStoredConstruction conversion.Operand
         | :? MethodCallExpression as call when call.Method.Name = "Invoke" && not(isNull call.Object) ->
             match normalizeStoredConstruction call.Object with
-            | :? LambdaExpression as lambda -> inlineLambdaInvocation lambda call.Arguments |> normalizeStoredConstruction
+            | :? LambdaExpression as lambda -> inlineInvocation lambda call.Arguments
             | _ -> value
         | :? InvocationExpression as call ->
             match normalizeStoredConstruction call.Expression with
-            | :? LambdaExpression as lambda -> inlineLambdaInvocation lambda call.Arguments |> normalizeStoredConstruction
+            | :? LambdaExpression as lambda -> inlineInvocation lambda call.Arguments
             | _ -> value
         | :? BlockExpression as block ->
             match QueryConstructionExpressions.memberInitializer block with
