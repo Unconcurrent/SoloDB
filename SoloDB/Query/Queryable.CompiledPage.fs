@@ -153,7 +153,7 @@ module internal CompiledPage =
                     (qualify source core.Where.Value)) }
         let count =
             { empty with Source = Some(BaseTable(hitsName, None))
-                         Projections = ProjectionSetOps.ofList [project "count" (AggregateCall(AggregateKind.Count, None, false, None))] }
+                         Projections = ProjectionSetOps.ofList [project "count" (AggregateCall(AggregateKind.Count, None, false, None, []))] }
         let enough = binary BinaryOperator.And allowed (binary BinaryOperator.Ge (ScalarSubquery(select count)) need)
         let state = { empty with Projections = ProjectionSetOps.ofList [project "enough" enough] }
         let fallbackGate =
@@ -187,7 +187,7 @@ module internal CompiledPage =
                                 Limit = Some(CaseExpr((validBounds, integer threshold), [], Some(integer 0L))) }
                 let size =
                     { empty with Source = Some(DerivedTable(select countRows, table + "_page_count_rows"))
-                                 Projections = ProjectionSetOps.ofList [project "count" (AggregateCall(AggregateKind.Count, None, false, None))] }
+                                 Projections = ProjectionSetOps.ofList [project "count" (AggregateCall(AggregateKind.Count, None, false, None, []))] }
                 let countValue =
                     ScalarSubquery(select {
                         empty with
@@ -216,7 +216,7 @@ module internal CompiledPage =
                                          Limit = Some(CaseExpr((broad, integer threshold), [], Some(integer 0L))) }
                         let excludedCount =
                             { empty with Source = Some(DerivedTable(select bounded, table + "_excluded_rows"))
-                                         Projections = ProjectionSetOps.ofList [project "count" (AggregateCall(AggregateKind.Count, None, false, None))] }
+                                         Projections = ProjectionSetOps.ofList [project "count" (AggregateCall(AggregateKind.Count, None, false, None, []))] }
                         let excludedValue = ScalarSubquery(select {
                             empty with Source = Some(BaseTable(excludedName, None))
                                        Projections = ProjectionSetOps.ofList [project "count" (column excludedName "count")] })

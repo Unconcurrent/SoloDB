@@ -19,26 +19,11 @@ module internal QueryStructuralRelations =
     let private binary op left right = SqlExpr.Binary(left,op,right)
     let private choose condition yes no = SqlExpr.CaseExpr((condition,yes),[],Some no)
 
-    let tryTranslate visitRaw (expression: BinaryExpression) (qb: QueryBuilder) =
-        let method = expression.Method
-        let relation =
-            match expression.NodeType with
-            | ExpressionType.LessThan -> ValueSome BinaryOperator.Lt
-            | ExpressionType.LessThanOrEqual -> ValueSome BinaryOperator.Le
-            | ExpressionType.GreaterThan -> ValueSome BinaryOperator.Gt
-            | ExpressionType.GreaterThanOrEqual -> ValueSome BinaryOperator.Ge
-            | _ -> ValueNone
-        let original =
-            relation.IsSome && expression.Left.Type.Equals expression.Right.Type && not(isNull method) &&
-            method.DeclaringType.Assembly.Equals(typeof<unit>.Assembly) &&
-            method.DeclaringType.FullName = "Microsoft.FSharp.Core.Operators" &&
-            QueryTranslatorNumericMethods.originalComparison expression.NodeType method expression.Left.Type expression.Right.Type
-        if not original then ValueNone else
-        match qb.SourceContext.BindQueryValue,QueryStructuralShape.tryCreate expression.Left.Type with
+    let private translate visitRaw (leftExpression: Expression) (rightExpression: Expression) relation selection (qb: QueryBuilder) =
+        match qb.SourceContext.BindQueryValue,QueryStructuralShape.tryCreate leftExpression.Type with
         | ValueSome binder,QueryStructuralShape.Available graph ->
             let shape = graph.Root
             let nextName = qb.SourceContext.NextAlias
-            let relation = relation.Value
             let equalResult = boolean(relation = BinaryOperator.Le || relation = BinaryOperator.Ge)
             let nullObject = Expression.Constant(null,typeof<obj>)
             let boundMissing (value: Expression) =
@@ -58,22 +43,10 @@ module internal QueryStructuralRelations =
                     let access = BoundValueAccessExpression(parent,childType,read,name) :> Expression
                     let guarded = Expression.Condition(boundMissing parent,Expression.Default childType,access)
                     Bound(binder.Local guarded)
-                | Stored parent ->
-                    let childType = target childShape
-                    let finish = function
-                        | DirectValue(raw,input) when typeof<float>.Equals childType || typeof<single>.Equals childType ->
-                            match input.Source with
-                            | ValueSome token ->
-                                let fallback = QueryDefault.comparisonValue qb.Variables childType |> QueryProduced.value nextName
-                                let value = choose (sqlNull token) fallback (QueryProduced.comparisonValue childType raw input)
-                                DirectValue(value,{ input with Carrier = SqlScalar; Source = ValueSome(jsonToken value) })
-                            | ValueNone -> DirectValue(raw,input)
-                        | selected -> selected
-                    Stored(QueryTranslatorVisitCoreMemberAccess.accessValueFinishing (QueryDefault.value qb.Variables) nextName finish (ClrMember(name,childType)) childType parent)
+                | Stored parent -> Stored(QueryStructuralAccess.child qb.Variables nextName name (target childShape) parent)
             let payload childShape = function
                 | Bound _ as parent -> child "Value" childShape parent
-                | Stored parent ->
-                    Stored(QueryProduced.bind nextName (fun value input -> DirectValue(value,serializationPayload input)) parent)
+                | Stored parent -> Stored(QueryStructuralAccess.payload nextName parent)
             let scalar (t: Type) operand =
                 let t,operand =
                     if not t.IsEnum then t,operand else
@@ -97,13 +70,7 @@ module internal QueryStructuralRelations =
                            typeof<single>.Equals t && Single.IsNaN(unbox<single> value) then null else value))
                     binder.Scalar safe
                 | Bound value -> binder.Produced true value |> QueryProduced.consume nextName (QueryProduced.comparisonValue t)
-                | Stored produced ->
-                    QueryProduced.consume nextName (fun raw input ->
-                        let value = QueryProduced.comparisonValue t raw input
-                        if t.IsValueType && not(typeof<float>.Equals t || typeof<single>.Equals t) then
-                            let defaultValue = QueryDefault.comparisonValue qb.Variables t |> QueryProduced.value nextName
-                            SqlExpr.Coalesce(value,[defaultValue])
-                        else value) produced
+                | Stored produced -> QueryStructuralAccess.scalar qb.Variables nextName t produced
             let prepareScalar t operand value =
                 if typeof<string>.Equals t then
                     match operand with Bound _ -> value | Stored _ -> QueryTranslatorCharacters.ordinalKey value
@@ -154,35 +121,74 @@ module internal QueryStructuralRelations =
                 if binder.IsValue value || isFullyConstant value then Choice1Of2(Bound(binder.Local value))
                 else
                     let index = operands.Count
-                    operands.Add(visitRaw value qb)
+                    let produced=visitRaw value qb
+                    let produced=
+                        match selection,produced with
+                        | Some _,DirectValue(value,input) when SqlExpr.exists (function SqlExpr.ScalarSubquery _ | SqlExpr.Exists _ | SqlExpr.InSubquery _ -> true | _ -> false) value ->
+                            PackedValue(QueryProduced.packet produced,QueryTranslatorSerialization.rebaseSerializationInput input)
+                        | _ -> produced
+                    operands.Add produced
                     Choice2Of2 index
-            let left,right = acquire expression.Left,acquire expression.Right
+            let left,right = acquire leftExpression,acquire rightExpression
             let result = QueryProduced.constructRaw nextName (fun parts ->
-                if graph.Recursive then
-                    let root = function
-                        | Choice1Of2(Bound value) ->
-                            let prepared = BoundValueAccessExpression(value,typeof<string>,Func<obj,obj>(fun value -> box(QueryStructuralShape.prepare graph value)))
-                            QueryStructuralTraversal.Prepared(binder.Scalar prepared)
-                        | Choice2Of2 index -> QueryStructuralTraversal.Selected parts[index]
-                        | _ -> invalidOp "A recursive bound root requires its original value."
-                    let operations: QueryStructuralTraversal.Operations = {
-                        Child = fun name node produced ->
-                            match child name node (Stored produced) with
-                            | Stored produced -> produced
-                            | _ -> invalidOp "A stored component requires its produced value."
-                        Payload = fun node produced ->
-                            match payload node (Stored produced) with
-                            | Stored produced -> produced
-                            | _ -> invalidOp "A stored payload requires its produced value."
-                        Scalar = fun target produced -> preparedScalar target (Stored produced)
-                        RawScalar = fun target produced -> scalar target (Stored produced)
-                        NecessaryRange = necessaryRange }
-                    QueryProduced.typed typeof<bool> (QueryStructuralTraversal.translate nextName relation operations graph (root left) (root right))
-                else
-                    let operand = function Choice1Of2 value -> value | Choice2Of2 index -> Stored(DirectValue parts[index])
-                    let result,candidate = render shape (operand left) (operand right) equalResult
-                    let result = match candidate with ValueSome candidate -> binary BinaryOperator.And candidate result | ValueNone -> result
-                    QueryProduced.typed typeof<bool> result) (operands.ToArray())
-            ValueSome(QueryProduced.value nextName result)
+                let operand = function Choice1Of2 value -> value | Choice2Of2 index -> Stored(DirectValue parts[index])
+                let compared =
+                  if graph.Recursive then
+                      let root = function
+                          | Choice1Of2(Bound value) ->
+                              let prepared = BoundValueAccessExpression(value,typeof<string>,Func<obj,obj>(fun value -> box(QueryStructuralShape.prepare graph value)))
+                              QueryStructuralTraversal.Prepared(binder.Scalar prepared)
+                          | Choice2Of2 index -> QueryStructuralTraversal.Selected parts[index]
+                          | _ -> invalidOp "A recursive bound root requires its original value."
+                      let operations: QueryStructuralTraversal.Operations = {
+                          Child = fun name node produced ->
+                              match child name node (Stored produced) with
+                              | Stored produced -> produced
+                              | _ -> invalidOp "A stored component requires its produced value."
+                          Payload = fun node produced ->
+                              match payload node (Stored produced) with
+                              | Stored produced -> produced
+                              | _ -> invalidOp "A stored payload requires its produced value."
+                          Scalar = fun target produced -> preparedScalar target (Stored produced)
+                          RawScalar = fun target produced -> scalar target (Stored produced)
+                          NecessaryRange = necessaryRange }
+                      QueryStructuralTraversal.translate nextName relation operations graph (root left) (root right)
+                  else
+                      let result,candidate = render shape (operand left) (operand right) equalResult
+                      let result = match candidate with ValueSome candidate -> binary BinaryOperator.And candidate result | ValueNone -> result
+                      result
+                match selection with
+                | None -> QueryProduced.typed typeof<bool> compared
+                | Some maximum ->
+                    let original = function Bound value -> binder.Produced false value | Stored produced -> produced
+                    let left,right=original(operand left),original(operand right)
+                    QueryProduced.choose leftExpression.Type compared (if maximum then right else left) (if maximum then left else right)) (operands.ToArray())
+            ValueSome result
         | _,QueryStructuralShape.Unsupported custom -> QueryStructuralShape.unsupported custom
+        | _ -> ValueNone
+
+    let tryTranslate visitRaw (expression: BinaryExpression) (qb: QueryBuilder) =
+        let method = expression.Method
+        let relation =
+            match expression.NodeType with
+            | ExpressionType.LessThan -> ValueSome BinaryOperator.Lt
+            | ExpressionType.LessThanOrEqual -> ValueSome BinaryOperator.Le
+            | ExpressionType.GreaterThan -> ValueSome BinaryOperator.Gt
+            | ExpressionType.GreaterThanOrEqual -> ValueSome BinaryOperator.Ge
+            | _ -> ValueNone
+        let original =
+            relation.IsSome && expression.Left.Type.Equals expression.Right.Type && not(isNull method) &&
+            method.DeclaringType.Assembly.Equals(typeof<unit>.Assembly) &&
+            method.DeclaringType.FullName = "Microsoft.FSharp.Core.Operators" &&
+            QueryTranslatorNumericMethods.originalComparison expression.NodeType method expression.Left.Type expression.Right.Type
+        if not original then ValueNone
+        else translate visitRaw expression.Left expression.Right relation.Value None qb
+             |> ValueOption.map (QueryProduced.value qb.SourceContext.NextAlias)
+
+    /// FSharp two-operand extrema choose an original operand through PER less-than.
+    let tryMinMax visitRaw (call: MethodCallExpression) (qb: QueryBuilder) =
+        match QueryTranslatorNumericMethods.minMaxCall call.Method call.Arguments.Count with
+        | QueryTranslatorNumericMethods.DefaultMinMax target ->
+            QueryStructuralShape.requireComparison target
+            translate visitRaw call.Arguments[0] call.Arguments[1] BinaryOperator.Lt (Some(call.Method.Name="Max")) qb
         | _ -> ValueNone

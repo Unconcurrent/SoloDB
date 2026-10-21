@@ -45,7 +45,7 @@ let rec isGroupMaterializationExpr (expr: SqlExpr) : bool =
     | JsonSetExpr(_, assignments) ->
         assignments |> List.exists (fun (_, v) ->
             match v with
-            | AggregateCall(JsonGroupArray, _, _, _) -> true
+            | AggregateCall(JsonGroupArray, _, _, _, _) -> true
             | _ -> false)
     | _ -> false
 

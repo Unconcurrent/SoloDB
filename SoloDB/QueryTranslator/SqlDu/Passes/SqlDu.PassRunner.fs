@@ -54,14 +54,13 @@ let rec private exprMetric (expr: SqlExpr) =
         | JsonObjectExpr properties ->
             properties
             |> List.fold (fun acc (_, valueExpr) -> addMetric acc (exprMetric valueExpr)) struct(0, 0, 0, 0)
-        | AggregateCall(_, argument, _, separator) ->
+        | AggregateCall(_, argument, _, separator, ordering) ->
             let acc =
                 match argument with
                 | Some arg -> exprMetric arg
                 | None -> struct(0, 0, 0, 0)
-            match separator with
-            | Some sep -> addMetric acc (exprMetric sep)
-            | None -> acc
+            let acc = match separator with Some sep -> addMetric acc (exprMetric sep) | None -> acc
+            ordering |> List.fold (fun acc (expression, _) -> addMetric acc (exprMetric expression)) acc
         | WindowCall spec ->
             let acc = recurseList spec.Arguments
             let acc = addMetric acc (recurseList spec.PartitionBy)

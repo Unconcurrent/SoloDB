@@ -93,6 +93,7 @@ module internal QueryGroupScalar =
                 | _ -> ()
             if not valid || not(isSource parameter source) || (kind = AggregateKind.Count && distinct)
                || (quantifier.IsSome && (selector.IsSome || predicate.IsSome)) || (kind <> AggregateKind.Count && selector.IsNone) then None
+            elif (kind=AggregateKind.Min || kind=AggregateKind.Max) && (selector |> Option.exists(fun selector -> QueryStructuralOrdering.supported selector.ReturnType)) then None
             else
                 Some { Kind = kind; Predicate = predicate
                        Selector = if kind = AggregateKind.Count then None else selector
@@ -171,7 +172,7 @@ module internal QueryGroupScalar =
                             match demand.Predicate, present with
                             | None, Some(SqlExpr.Unary(UnaryOperator.IsNotNull, value)) -> Some value
                             | _ -> predicate |> Option.map (fun predicate -> SqlExpr.CaseExpr((predicate, one), [], None))
-                        SqlExpr.AggregateCall(AggregateKind.Count, argument, false, None)
+                        SqlExpr.AggregateCall(AggregateKind.Count, argument, false, None, [])
                     else
                         let value =
                             match demand.Selector with

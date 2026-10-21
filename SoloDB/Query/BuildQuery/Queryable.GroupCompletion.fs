@@ -10,10 +10,12 @@ type internal QueryGroupCompletion(alias: string, nextName: unit -> string) =
     let projections = ResizeArray<Projection>()
     let rowJoins = ResizeArray<JoinEdge>()
     let selectorJoins = ResizeArray<JoinEdge>()
+    let orderBindings = ResizeArray<JoinShape>()
 
     member _.Alias = alias
     member _.RowJoins = rowJoins
     member _.SelectorJoins = selectorJoins
+    member _.OrderBindings = orderBindings
 
     /// Actual group producers supply both their value and their original input.
     member _.Bind(produced: QueryProducedValue) =
@@ -39,5 +41,5 @@ type internal QueryGroupCompletion(alias: string, nextName: unit -> string) =
         let completed =
             { completed with
                 Source = Some(DerivedTable(source, alias))
-                Joins = completed.Joins @ QueryTranslatorReferenceJoin.preparedJoinClauses selectorJoins }
+                Joins = completed.Joins @ QueryTranslatorReferenceJoin.preparedJoinClauses selectorJoins @ List.ofSeq orderBindings }
         QueryProduced.publishCore nextName completed produced false

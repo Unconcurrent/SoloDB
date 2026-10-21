@@ -235,7 +235,7 @@ let internal filesystemLinkDelete owner property column targetId selection =
 let internal ownerCount (connection: NativeSqliteConnection) owner selection =
     let variables = Dictionary<string, obj>()
     let predicate = bindOwnerSelection selection variables None "Id"
-    let select = SelectStmt(selectCore (BaseTable(owner, None)) [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }] predicate |> wrap)
+    let select = SelectStmt(selectCore (BaseTable(owner, None)) [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None, []) }] predicate |> wrap)
     let mutable statement = connection.OpenStatement(StatementExecution.emit select)
     try
         statement.BindValues(variables)

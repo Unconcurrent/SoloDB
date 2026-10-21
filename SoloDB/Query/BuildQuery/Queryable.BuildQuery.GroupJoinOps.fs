@@ -126,6 +126,13 @@ module internal QueryableBuildQueryGroupJoinOps =
                       Vars = ctx.Vars
                       ReplaceExpression = replaceExpression }
 
+                let translateWith lower _ input a (l: ChainExpr.Selector) handler =
+                    let sub = { innerCtx with LayerPosition = BaseLayer; SerializationInput = input; Joins=ResizeArray() }
+                    let captures = Dictionary<ParameterExpression, ParameterSource>()
+                    captures[outerParam] <- { Alias = Some completion.Alias; Context = outerCtx; Value = SourceParameter }
+                    let value = lower sub a l.Body l.Parameters (ValueSome captures) handler false ctx.Vars
+                    value, QueryTranslatorReferenceJoin.preparedJoinClauses sub.Joins
+
                 let orderedAdapter: OrderedChainPlan.Adapter = {
                     MembershipContext = DefaultMembership
                     LambdaContext = "group join"
@@ -137,18 +144,15 @@ module internal QueryableBuildQueryGroupJoinOps =
                     IsRoot = fun e -> obj.ReferenceEquals(e, groupParam)
                     IsValue = fun e -> QueryTranslatorBaseHelpers.isFullyConstant e || (innerCtx.BindQueryValue |> ValueOption.exists (fun b -> b.IsValue e))
                     Alias = fun () -> GroupJoinAliases.nextRowset innerCtx
+                    Variables = ctx.Vars
                     DefaultValue = QueryDefault.value ctx.Vars
                     Value = fun e -> translateJoinSingleSourceProduced outerCtx completion.Alias ctx.Vars (Some outerParam) e
                     Comparison = fun e -> QueryTranslator.translateComparisonScopedBody outerCtx completion.Alias e
                                                (System.Collections.ObjectModel.ReadOnlyCollection<ParameterExpression>(Array.empty))
                                                (ValueSome(dict [outerParam, { Alias = Some completion.Alias; Context = outerCtx; Value = SourceParameter }] |> fun values -> Dictionary<ParameterExpression, ParameterSource>(values)))
                                                ValueNone false ctx.Vars
-                    Translate = fun _ input a l handler ->
-                        let sub = { innerCtx with LayerPosition = BaseLayer; SerializationInput = input; Joins=ResizeArray() }
-                        let captures = Dictionary<ParameterExpression, ParameterSource>()
-                        captures[outerParam] <- { Alias = Some completion.Alias; Context = outerCtx; Value = SourceParameter }
-                        let value = QueryTranslator.translateScopedBody sub a l.Body l.Parameters (ValueSome captures) handler false ctx.Vars
-                        value, QueryTranslatorReferenceJoin.preparedJoinClauses sub.Joins
+                    Translate = translateWith QueryTranslator.translateScopedBody
+                    TranslateOrderKey = translateWith QueryTranslator.translateScopedOrderKey
                     Source = fun _ _ ->
                         let a = GroupJoinAliases.nextRowset innerCtx
                         let row = groupRows runtime a

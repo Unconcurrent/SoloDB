@@ -228,11 +228,12 @@ module internal OrderedChainRows =
                         | _ -> List.rev terms @ preceding, remaining
                     let terms, remaining = collect [l, direction] [] rest
                     let translated = terms |> List.map (fun (selector, direction) ->
-                        let expression, joins = translate plan.Root input a selector
-                        (expression, direction), joins)
+                        let key, joins = adapter.TranslateOrderKey plan.Root input a selector ValueNone
+                        let orders, bindings = QueryStructuralOrdering.prepare adapter.Alias adapter.Variables selector.ReturnType direction baseCore.Where key
+                        orders |> List.map (fun order -> order.Expr,order.Direction), joins @ bindings)
                     let prior = if append then keys else []
                     let exprs = prior |> List.mapi (fun i d -> col a ("__key" + string i), d)
-                    let order = exprs @ (translated |> List.map fst)
+                    let order = exprs @ (translated |> List.collect fst)
                     let joins = translated |> List.collect snd
                     let ps = [proj "Id" (col a "Id"); proj "Value" (col a "Value")
                               proj "__ord" (rowNumber (order @ [col a "__ord", SortDirection.Asc]))]
@@ -240,7 +241,7 @@ module internal OrderedChainRows =
                              @ QueryTranslatorSerialization.companionProjections (Some a) input
                     lower (select { baseCore with Projections = ProjectionSetOps.ofList ps; Joins = joins
                                                   OrderBy = order |> List.map (fun (e,d) -> { Expr = e; Direction = d }) })
-                          input (prior @ (terms |> List.map snd)) remaining
+                          input (order |> List.map snd) remaining
                 | Skip n -> lower (bound source baseCore (Some(integer -1L)) (Some(QueryTranslatorBaseHelpers.nonnegativeCount(value n)))) input keys rest
                 | Take n -> lower (bound source baseCore (Some(QueryTranslatorBaseHelpers.nonnegativeCount(value n))) None) input keys rest
                 | Distinct elementType ->
@@ -268,13 +269,13 @@ module internal OrderedChainRows =
                     let keyInput = QueryTranslatorSerialization.scopeSerializationInput (Some a) OuterLayer
                                        { keyInput with Source = ValueSome(QueryTranslatorBaseTypes.jsonToken key) }
                     let items =
-                        if countOnly then SqlExpr.AggregateCall(AggregateKind.Count, None, false, None)
+                        if countOnly then SqlExpr.AggregateCall(AggregateKind.Count, None, false, None, [])
                         else
                             let item, _ = QueryProduced.embedded (col a "Value", input)
                             SqlExpr.FunctionCall("jsonb_group_array", [QueryTranslatorBaseTypes.jsonToken item])
                     let keyValue, keyInput = QueryProduced.embedded (key, keyInput)
                     let value = SqlExpr.JsonObjectExpr ["Key", keyValue; (if countOnly then "Value" else "Items"), items]
-                    let first = SqlExpr.AggregateCall(AggregateKind.Min, Some(col a "__ord"), false, None)
+                    let first = SqlExpr.AggregateCall(AggregateKind.Min, Some(col a "__ord"), false, None, [])
                     let rowInput = input
                     let itemsType = rowInput.OriginalType.MakeArrayType()
                     let itemsInput = { QuerySerializationInput.Sequence(itemsType, rowInput) with

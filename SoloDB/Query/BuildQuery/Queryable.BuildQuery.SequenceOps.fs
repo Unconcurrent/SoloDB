@@ -67,7 +67,23 @@ module internal QueryableBuildQuerySequenceOps =
             | SupportedLinqMethods.Min -> "MIN"
             | SupportedLinqMethods.Max -> "MAX"
             | _ -> invalidArg "m" "An aggregate terminal is required."
-        if isPostScalarProjection && m.Expressions.Length = 0 then
+        let target=QueryTranslatorNumeric.aggregateInput m.OriginalMethod
+        if (name="MIN" || name="MAX") && QueryStructuralOrdering.supported target then
+            if m.Expressions.Length=1 then addSelector statements (Expression m.Expressions[0])
+            addComplexFinal statements (fun ctx ->
+                let rows=QueryProduced.completedRows sourceCtx.NextAlias ctx.Inner ctx.Input
+                let alias=sourceCtx.NextAlias()
+                let input=QueryTranslatorSerialization.scopeSerializationInput (Some alias) OuterLayer ctx.Input
+                let value=SqlExpr.Column(Some alias,"Value")
+                let produced=DirectValue(value,{input with Source=ValueSome(QueryTranslatorBaseTypes.canonicalToken input.Carrier value)})
+                let direction=if name="MIN" then (if target.IsValueType then SortDirection.Asc else SortDirection.AscNullsLast) else SortDirection.Desc
+                let core={ mkCore [] (Some(DerivedTable(rows,alias))) with OrderBy=[] }
+                let selected=QueryStructuralExtrema.select sourceCtx.NextAlias ctx.Vars target direction core produced
+                                [{Expr=SqlExpr.Column(Some alias,"_tree_ordinal");Direction=SortDirection.Asc}]
+                let emptyError=if QueryTranslatorNumeric.rejectsEmpty m.OriginalMethod.ReturnType then Some(runtimeErrorPayload RuntimeErrorKind.CardinalityError "Sequence contains no elements") else None
+                let struct(query,output)=QueryStructuralExtrema.rows sourceCtx.NextAlias ctx.Vars m.OriginalMethod.ReturnType emptyError selected
+                {Query=query;SerializationInput=output;KeyInput=ValueNone})
+        elif isPostScalarProjection && m.Expressions.Length = 0 then
             let inputType=QueryTranslatorNumeric.aggregateInput m.OriginalMethod
             let value=SqlExpr.Column(None,"Value")
             let extractVal =
@@ -156,7 +172,7 @@ module internal QueryableBuildQuerySequenceOps =
                                                     (m.OriginalMethod.GetGenericArguments().[1]) rows ctx.Input key "_tree_ordinal"
             let key = QueryTranslatorSerialization.scopeSerializationInput (Some "o") OuterLayer
                           { key with Source = ValueSome(jsonToken (SqlExpr.Column(None, syntheticGroupKeyAlias))) }
-            let count = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None)
+            let count = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None, [])
             let resultType = ModelMetadata.SequenceElement m.OriginalMethod.ReturnType
             let input = QuerySerializationInput.Members(resultType, [|"Key"; "Value"|], [|key.OriginalType; typeof<int>|],
                             [| key; (QueryProduced.typed typeof<int> count).Input |])
@@ -195,17 +211,11 @@ module internal QueryableBuildQuerySequenceOps =
         let predExpr = m.Expressions.[0]
         addComplexFinal statements (fun ctx ->
             let source = if bounded then QueryProduced.completedRows sourceCtx.NextAlias ctx.Inner ctx.Input else ctx.Inner
-            let currentCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input }
+            let currentCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = ctx.Input; Joins = ResizeArray() }
             let predDu = translateExprDu currentCtx ctx.TableName predExpr ctx.Vars
-            let orderDus =
-                if bounded then [{ Expr = SqlExpr.Column(Some "o", "_tree_ordinal"); Direction = SortDirection.Asc }] else
-                capturedOrders |> Array.map (fun o ->
-                    let expr =
-                        match o.RawExpr with
-                        | Some duExpr -> duExpr
-                        | None -> translateExprDu currentCtx ctx.TableName o.OrderingRule ctx.Vars
-                    { Expr = normalizeOrderKeyExpr expr (orderKeyClrType o.OrderingRule); Direction = o.Direction }
-                ) |> Array.toList
+            let orderDus,orderBindings =
+                if bounded then [{ Expr = SqlExpr.Column(Some "o", "_tree_ordinal"); Direction = SortDirection.Asc }],[]
+                else buildOrdersDu currentCtx ctx.Vars ctx.KeyInput ctx.TableName None capturedOrders
             // SUM(NOT pred) OVER (ORDER BY key) — cumulative failure window.
             let windowSpec = {
                 Kind = NamedWindowFunction "SUM"
@@ -222,7 +232,7 @@ module internal QueryableBuildQuerySequenceOps =
                      @ (if bounded then [{ Alias = Some "_tree_ordinal"; Expr = SqlExpr.Column(Some "o", "_tree_ordinal") }] else [])
                      @ QueryTranslatorSerialization.companionProjections (Some "o") ctx.Input)
                     (Some(DerivedTable(source, "o")))
-                  with OrderBy = orderDus }
+                  with OrderBy = orderDus; Joins = QueryTranslatorReferenceJoin.preparedJoinClauses currentCtx.Joins @ orderBindings }
             let innerSelect = wrapCore innerCore
             let twAlias = "_tw"
             let cfFilter =

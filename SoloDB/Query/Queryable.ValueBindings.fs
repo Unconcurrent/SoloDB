@@ -23,7 +23,7 @@ module internal QueryableValueBindings =
         let allocate name =
             variables.Add(name, null)
             SqlExpr.Parameter name
-        let bind prepare encoded scalarJson withWriter (expression: Expression) =
+        let bind prepare encoded scalarJson withWriter (unitsSlot: string voption ref voption) (expression: Expression) =
             let name = "dp" + variables.Count.ToString(Globalization.CultureInfo.InvariantCulture)
             let value = allocate name
             let json = if encoded then ValueSome(allocate (name + "j")) else ValueNone
@@ -32,6 +32,10 @@ module internal QueryableValueBindings =
                 let sampled = ExpressionEvaluation.evaluateExpr<obj> expression
                 let struct(stored, isJson, writerType) = prepare sampled
                 variables[name] <- stored
+                match unitsSlot |> ValueOption.bind _.Value with
+                | ValueSome unitsName ->
+                    variables[unitsName] <- if isNull sampled then null else box(Convert.ToBase64String(QueryTranslatorCharacters.ordinalBytes (unbox<string> sampled)))
+                | ValueNone -> ()
                 if encoded then variables[name + "j"] <- box isJson
                 if withWriter then
                     TypeMetadata.registerType writerType
@@ -45,16 +49,26 @@ module internal QueryableValueBindings =
                     SqlExpr.CaseExpr((flag, token), [], Some value)
             value, writer
         let produced comparison (expression: Expression) =
+            let unitsSlot = if typeof<string>.Equals expression.Type then ValueSome(ref ValueNone) else ValueNone
             let value, writer = bind (JsonFunctions.prepareQueryParameter comparison expression.Type)
                                     (JsonFunctions.parameterMayNeedJson expression.Type) false
-                                    (not(JsonFunctions.parameterWriterIsFixed expression.Type)) expression
-            QueryProduced.parameter expression.Type value writer
+                                    (not(JsonFunctions.parameterWriterIsFixed expression.Type)) unitsSlot expression
+            let produced = QueryProduced.parameter expression.Type value writer
+            match unitsSlot, produced with
+            | ValueSome slot, DirectValue(value, input) ->
+                let units = lazy (
+                    let name = "dp" + variables.Count.ToString(Globalization.CultureInfo.InvariantCulture)
+                    let parameter = allocate name
+                    slot.Value <- ValueSome name
+                    parameter)
+                DirectValue(value, { input with OriginalStringUnits = ValueSome units })
+            | _ -> produced
         let scalar (expression: Expression) =
-            bind (fun value -> struct(value, false, expression.Type)) false false false expression |> fst
+            bind (fun value -> struct(value, false, expression.Type)) false false false ValueNone expression |> fst
         let preparedScalar (expression: Expression) =
-            bind (fun value -> let stored, encoded = unbox<obj * bool> value in struct(stored, encoded, expression.Type)) true true false expression |> fst
+            bind (fun value -> let stored, encoded = unbox<obj * bool> value in struct(stored, encoded, expression.Type)) true true false ValueNone expression |> fst
         let prefix (expression: Expression) =
-            bind (fun value -> let struct(stored, encoded) = JsonFunctions.toSQLParameterForComparison false value in struct(stored, encoded, expression.Type)) false false false expression |> fst
+            bind (fun value -> let struct(stored, encoded) = JsonFunctions.toSQLParameterForComparison false value in struct(stored, encoded, expression.Type)) false false false ValueNone expression |> fst
         let local (expression: Expression) =
             let value = ref null
             add (fun () -> value.Value <- ExpressionEvaluation.evaluateExpr<obj> expression)

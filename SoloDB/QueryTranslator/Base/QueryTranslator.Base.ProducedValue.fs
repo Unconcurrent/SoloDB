@@ -66,6 +66,11 @@ module internal QueryProduced =
         let token = tupleLeafToken column 0
         let input = { fromDescriptor (extracted column 1) input with Source = ValueSome token; SourceOffset = 0 }
         consumeToken input token, input
+
+    /// A row already bound to the canonical packet keeps its selected writer.
+    let fromBoundPacket alias input =
+        let value, input = bound tokenValue alias input
+        DirectValue(value,input)
     let private singleton alias packet expression =
         SqlExpr.ScalarSubquery {
             Ctes = []
@@ -89,6 +94,20 @@ module internal QueryProduced =
             let value, input = bound tokenValue alias input
             singleton alias packet (consume value input)
 
+    /// One selected key can supply several terms without replaying its packet.
+    let bindTerms nextName consume produced =
+        let complex value = SqlExpr.exists (function ScalarSubquery _ | Exists _ | InSubquery _ -> true | _ -> false) value
+        let produced =
+            match produced with
+            | DirectValue(value, _) when complex value -> PackedValue(packet produced, rebaseSerializationInput produced.Input)
+            | _ -> produced
+        match produced with
+        | DirectValue(value, input) -> consume value input, []
+        | PackedValue(packet, input) ->
+            let alias = nextName()
+            let value, input = bound tokenValue alias input
+            consume value input, [CrossJoin(FromJsonEach(SqlExpr.JsonArrayExpr [packet], Some alias))]
+
     /// A transparent or child operation preserves its actual producer facts.
     let private bindCore raw nextName produce = function
         | DirectValue(value, input) -> produce value input
@@ -101,7 +120,7 @@ module internal QueryProduced =
                 else bound tokenValue alias input
             let result: QueryProducedValue = produce value input
             match result with
-            | DirectValue(value, resultInput) when invariantLeaf resultInput && isConstantDescriptor(inputDescriptor resultInput) ->
+            | DirectValue(value, resultInput) when resultInput.OriginalStringUnits.IsNone && invariantLeaf resultInput && isConstantDescriptor(inputDescriptor resultInput) ->
                 DirectValue(singleton alias source value, rebaseSerializationInput resultInput)
             | _ -> PackedValue(singleton alias source (packet result), rebaseSerializationInput result.Input)
     let bind nextName produce produced = bindCore false nextName produce produced
@@ -175,7 +194,8 @@ module internal QueryProduced =
         match whenTrue, whenFalse with
         | DirectValue(first, firstInput), DirectValue(last, lastInput) ->
             let descriptor = inputDescriptor firstInput
-            if invariantLeaf firstInput && firstInput.Carrier = lastInput.Carrier &&
+            if firstInput.OriginalStringUnits.IsNone && lastInput.OriginalStringUnits.IsNone &&
+               invariantLeaf firstInput && firstInput.Carrier = lastInput.Carrier &&
                isConstantDescriptor descriptor && descriptor = inputDescriptor lastInput then
                 DirectValue(SqlExpr.CaseExpr((condition, first), [], Some last), rebaseSerializationInput firstInput)
             else PackedValue(SqlExpr.CaseExpr((condition, packet whenTrue), [], Some(packet whenFalse)), input)

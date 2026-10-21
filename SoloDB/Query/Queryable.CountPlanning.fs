@@ -9,7 +9,7 @@ module internal QueryCountPlanning =
     let private binary op l r = Binary(l, op, r)
     let private select core = { Ctes = []; Body = SingleSelect core }
     let private projection expression = ProjectionSetOps.ofList [{ Alias = Some "Value"; Expr = expression }]
-    let private star = AggregateCall(AggregateKind.Count, None, false, None)
+    let private star = AggregateCall(AggregateKind.Count, None, false, None, [])
     let private plain (core: SelectCore) =
         not core.Distinct && core.Joins.IsEmpty && core.GroupBy.IsEmpty && core.Having.IsNone
         && core.Limit.IsNone && core.Offset.IsNone

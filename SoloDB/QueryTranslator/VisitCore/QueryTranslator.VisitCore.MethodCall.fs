@@ -328,18 +328,20 @@ module internal QueryTranslatorVisitCoreMethodCall =
         (membersProduced: Type -> string array -> Expression array -> QueryBuilder -> QueryProducedValue)
         (emitStringOperandDu: QueryBuilder -> bool -> Expression -> SqlExpr)
         (m: MethodCallExpression) (qb: QueryBuilder) : QueryProducedValue =
-        let characterOperation =
-            (QueryTranslatorCharacters.stringOperation m.Method).IsSome && (m.Arguments |> Seq.exists (rowCharacter qb))
-        let visitOperation (expression: Expression) (builder: QueryBuilder) =
-            if characterOperation && typeof<char>.Equals expression.Type then visitComparisonProduced expression builder
-            else visitProduced expression builder
-        let operationOperand expression builder = visitOperation expression builder |> QueryProduced.value builder.SourceContext.NextAlias
-        let render operand stringOperand call =
-            visitScalarMethodCallDu visitProduced operand visitStoredValueDu visitPresenceDu visitMathMethodDu containsImplDu visitNestedArrayPredicateDu stringOperand call qb
-        match QueryTranslatorVisitCorePreparedCall.tryProduced visitOperation visitComparisonProduced m qb render with
-        | Some result -> result
-        | None -> visitFormattedMethodCallDu visitProduced visitTextProduced visitRequested (if characterOperation then operationOperand else visitDu) visitStoredValueDu visitPresenceDu visitMathMethodDu arrayIndexDu visitPropertyDu visitPreparedPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu membersProduced emitStringOperandDu m qb
-
+        match QueryStructuralRelations.tryMinMax visitProduced m qb with
+        | ValueSome result -> result
+        | ValueNone ->
+            let characterOperation =
+                (QueryTranslatorCharacters.stringOperation m.Method).IsSome && (m.Arguments |> Seq.exists (rowCharacter qb))
+            let visitOperation (expression: Expression) (builder: QueryBuilder) =
+                if characterOperation && typeof<char>.Equals expression.Type then visitComparisonProduced expression builder
+                else visitProduced expression builder
+            let operationOperand expression builder = visitOperation expression builder |> QueryProduced.value builder.SourceContext.NextAlias
+            let render operand stringOperand call =
+                visitScalarMethodCallDu visitProduced operand visitStoredValueDu visitPresenceDu visitMathMethodDu containsImplDu visitNestedArrayPredicateDu stringOperand call qb
+            match QueryTranslatorVisitCorePreparedCall.tryProduced visitOperation visitComparisonProduced m qb render with
+            | Some result -> result
+            | None -> visitFormattedMethodCallDu visitProduced visitTextProduced visitRequested (if characterOperation then operationOperand else visitDu) visitStoredValueDu visitPresenceDu visitMathMethodDu arrayIndexDu visitPropertyDu visitPreparedPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu membersProduced emitStringOperandDu m qb
     and private visitFormattedMethodCallDu visitProduced visitTextProduced visitRequested visitDu visitStoredValueDu visitPresenceDu visitMathMethodDu arrayIndexDu visitPropertyDu visitPreparedPropertyDu containsImplDu visitNestedArrayPredicateDu castToDu membersProduced emitStringOperandDu (m: MethodCallExpression) (qb: QueryBuilder) =
         match QueryTranslatorVisitCoreStringFormatting.tryProduced visitTextProduced m qb with
         | ValueSome result -> result

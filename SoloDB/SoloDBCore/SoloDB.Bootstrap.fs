@@ -48,6 +48,7 @@ module internal Bootstrap =
         let register (connection: NativeSqliteConnection) =
             NumericalFunctions.register connection
             QueryTranslatorCharacters.register lower connection
+            QueryOrderingPrimitives.register connection
             QueryTranslatorSpanSource.register connection
             connection.RegisterManagedScalar(JsonFunctions.rowErrorFunction, 1,
                 RawSqliteFunctions.RawScalarFunc(fun _ arguments ->

@@ -31,6 +31,12 @@ module internal QueryTranslatorVisitGrouping =
         match root expression with
         | None -> false
         | Some parameter ->
+            let translateWith lower _ input alias (selector: ChainExpr.Selector) handler =
+                let child = builder.ForSubquery(alias, selector.Parameters, BaseLayer, input)
+                let child = { child with ProducedHandler = QueryGroupScalar.withFallback handler child.ProducedHandler }
+                let value = lower selector.Body child
+                let joins = preparedJoinClauses child.SourceContext.Joins
+                value, joins
             let adapter: OrderedChainPlan.Adapter = {
                 MembershipContext = DefaultMembership
                 LambdaContext = "group"
@@ -38,15 +44,12 @@ module internal QueryTranslatorVisitGrouping =
                 IsRoot = fun source -> obj.ReferenceEquals(source, parameter)
                 IsValue = fun source -> isFullyConstant source || (builder.SourceContext.BindQueryValue |> ValueOption.exists (fun binder -> binder.IsValue source))
                 Alias = builder.SourceContext.NextAlias
+                Variables = builder.Variables
                 DefaultValue = QueryDefault.value builder.Variables
                 Value = fun value -> visitProduced value builder
                 Comparison = fun value -> visitComparisonProduced value builder
-                Translate = fun _ input alias selector handler ->
-                    let child = builder.ForSubquery(alias, selector.Parameters, BaseLayer, input)
-                    let child = { child with ProducedHandler = QueryGroupScalar.withFallback handler child.ProducedHandler }
-                    let value = visitProduced selector.Body child
-                    let joins = preparedJoinClauses child.SourceContext.Joins
-                    value, joins
+                Translate = translateWith visitProduced
+                TranslateOrderKey = translateWith (QueryStructuralOrdering.translate visitProduced)
                 Source = fun _ source ->
                     let produced = visitProduced source builder |> QueryProduced.sequence builder.SourceContext.NextAlias
                     match produced with

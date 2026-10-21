@@ -37,6 +37,8 @@ module internal QueryTranslatorSerialization =
         let owner position (original: QueryPhysicalOwner voption) = original |> ValueOption.map (fun owner ->
             { owner with Descriptor = SqlExpr.CaseExpr((framed, at ("$[" + string position + "]")), [], Some(SqlExpr.Literal SqlLiteral.Null)) })
         { input with Operand = ValueSome { Descriptor = SqlExpr.CaseExpr((framed, at "$[1]"), [], Some descriptor); Accesses = Array.empty }
+                     OriginalStringUnits = input.OriginalStringUnits |> ValueOption.map (fun _ ->
+                         lazy (SqlExpr.CaseExpr((framed, at "$[4]"), [], Some(SqlExpr.Literal SqlLiteral.Null))))
                      PhysicalOwner = owner 2 input.PhysicalOwner
                      ReferenceOwner = input.ReferenceOwner |> ValueOption.map (fun original ->
                          { original with Descriptor = SqlExpr.CaseExpr((framed, at "$[3]"), [], Some(SqlExpr.Literal SqlLiteral.Null)) }) }
@@ -69,6 +71,7 @@ module internal QueryTranslatorSerialization =
                     | ValueNone -> layout |> Utils.optionToValueOption |> ValueOption.bind _.Shape
             Children = children
             Carrier = if inputs |> Array.forall (fun input -> input.Carrier = first.Carrier) then first.Carrier else CanonicalToken
+            OriginalStringUnits = if inputs |> Array.exists (fun input -> input.OriginalStringUnits.IsSome) then ValueSome(lazy (SqlExpr.Literal SqlLiteral.Null)) else ValueNone
             LegacyCharacterText = inputs |> Array.exists _.LegacyCharacterText
             StructuralDefault = inputs |> Array.exists _.StructuralDefault
             PhysicalOwner = sharedPhysicalOwner inputs
@@ -80,6 +83,7 @@ module internal QueryTranslatorSerialization =
         let rec qualifyInput (input: QuerySerializationInput) =
             { input with
                 Source = input.Source |> ValueOption.map qualify
+                OriginalStringUnits = input.OriginalStringUnits |> ValueOption.map (fun units -> lazy (qualify units.Value))
                 Operand = input.Operand |> ValueOption.map (fun operand ->
                     { Descriptor = qualify operand.Descriptor
                       Accesses = operand.Accesses |> Array.map (fun step ->
@@ -287,6 +291,7 @@ module internal QueryTranslatorSerialization =
 
     let rec internal rebaseSerializationInput (input: QuerySerializationInput) =
         { input with Operand = ValueNone; Source = ValueNone; SourceOffset = 0
+                     OriginalStringUnits = input.OriginalStringUnits |> ValueOption.map (fun _ -> lazy (SqlExpr.Literal SqlLiteral.Null))
                      Children = Array.map rebaseSerializationInput input.Children
                      PhysicalOwner = input.PhysicalOwner |> ValueOption.map (fun owner -> { owner with Descriptor = SqlExpr.Literal SqlLiteral.Null })
                      ReferenceOwner = input.ReferenceOwner |> ValueOption.map (fun owner -> { owner with Descriptor = SqlExpr.Literal SqlLiteral.Null }) }
@@ -294,7 +299,7 @@ module internal QueryTranslatorSerialization =
     /// Known produced children remain independently live; dynamic roots stay paired.
     let rec internal publishInput nextName (input: QuerySerializationInput) =
         let output = rebaseSerializationInput input
-        if input.Operand.IsNone && input.PhysicalOwner.IsNone && input.ReferenceOwner.IsNone then
+        if input.Operand.IsNone && input.PhysicalOwner.IsNone && input.ReferenceOwner.IsNone && input.OriginalStringUnits.IsNone then
             let children = input.Children |> Array.map (publishInput nextName)
             children |> Array.toList |> List.collect fst,
             { output with Children = children |> Array.map snd }
@@ -317,6 +322,7 @@ module internal QueryTranslatorSerialization =
                 | SqlExpr.Column(None, name) when seen.Add name -> projections.Add { Alias = Some name; Expr = SqlExpr.Column(alias, name) }
                 | _ -> ()) () expression
         let rec collect input =
+            input.OriginalStringUnits |> ValueOption.iter (fun units -> inspect units.Value)
             match input.Operand with
             | ValueSome operand ->
                 inspect operand.Descriptor

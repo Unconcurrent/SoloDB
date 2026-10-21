@@ -89,8 +89,8 @@ module internal QueryReadPlanning =
         let local expression =
             not (SqlExpr.exists (function
                 | ScalarSubquery _ | Exists _ | InSubquery _ | WindowCall _ -> true
-                | AggregateCall((AggregateKind.Count | AggregateKind.Min | AggregateKind.Max), _, _, _) -> false
-                | AggregateCall(AggregateKind.ExactNumeric((Numerics.DecimalAggregateKind.Minimum | Numerics.DecimalAggregateKind.Maximum), _), _, _, _) -> false
+                | AggregateCall((AggregateKind.Count | AggregateKind.Min | AggregateKind.Max), _, _, _, _) -> false
+                | AggregateCall(AggregateKind.ExactNumeric((Numerics.DecimalAggregateKind.Minimum | Numerics.DecimalAggregateKind.Maximum), _), _, _, _, _) -> false
                 | AggregateCall _ -> true // Floating sums and ordered aggregates depend on input order.
                 | FunctionCall(name, _) ->
                     match name.ToUpperInvariant() with

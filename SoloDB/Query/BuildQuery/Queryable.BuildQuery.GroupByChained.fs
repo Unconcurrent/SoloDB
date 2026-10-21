@@ -20,6 +20,13 @@ module internal QueryableBuildQueryGroupByChained =
             | JsonSerializator.JsonSerializationShape.GroupingValues _ -> QueryTranslatorSerialization.serializationElement sourceCtx.SerializationInput
             | _ -> sourceCtx.SerializationInput
         let rowCtx = { sourceCtx with LayerPosition = OuterLayer; SerializationInput = itemInput }
+        let translateWith lower _ input alias (l: ChainExpr.Selector) handler =
+            let child = { rowCtx with SerializationInput = input; Joins = ResizeArray() }
+            let producer expression =
+                handler |> ValueOption.bind (fun handler -> handler expression) |> ValueOption.orElseWith (fun () -> producer expression)
+            let value = lower child alias l.Body l.Parameters
+                            (ValueSome captures) (ValueSome producer) false vars
+            value, QueryTranslatorReferenceJoin.preparedJoinClauses child.Joins
         let adapter: OrderedChainPlan.Adapter = {
             MembershipContext = DefaultMembership
             LambdaContext = "group"
@@ -27,6 +34,7 @@ module internal QueryableBuildQueryGroupByChained =
             IsRoot = fun e -> obj.ReferenceEquals(e, groupParam)
             IsValue = fun e -> QueryTranslatorBaseHelpers.isFullyConstant e || (sourceCtx.BindQueryValue |> ValueOption.exists (fun b -> b.IsValue e))
             Alias = fun () -> GroupByAliases.nextSubquery sourceCtx
+            Variables = vars
             DefaultValue = QueryDefault.value vars
             Value = fun e -> QueryTranslator.translateScopedBody rowCtx groupRowAlias e
                                 (System.Collections.ObjectModel.ReadOnlyCollection<ParameterExpression>(Array.empty))
@@ -35,13 +43,8 @@ module internal QueryableBuildQueryGroupByChained =
                 QueryTranslator.translateComparisonScopedBody rowCtx groupRowAlias e
                     (System.Collections.ObjectModel.ReadOnlyCollection<ParameterExpression>(Array.empty))
                     (ValueSome captures) (ValueSome producer) false vars
-            Translate = fun _ input alias l handler ->
-                let child = { rowCtx with SerializationInput = input; Joins = ResizeArray() }
-                let producer expression =
-                    handler |> ValueOption.bind (fun handler -> handler expression) |> ValueOption.orElseWith (fun () -> producer expression)
-                let value = QueryTranslator.translateScopedBody child alias l.Body l.Parameters
-                                (ValueSome captures) (ValueSome producer) false vars
-                value, QueryTranslatorReferenceJoin.preparedJoinClauses child.Joins
+            Translate = translateWith QueryTranslator.translateScopedBody
+            TranslateOrderKey = translateWith QueryTranslator.translateScopedOrderKey
             Source = fun _ _ ->
                 let a = GroupByAliases.nextSubquery sourceCtx
                 let ps = [{Alias=Some "Id";Expr=SqlExpr.Column(Some a,"Id")}

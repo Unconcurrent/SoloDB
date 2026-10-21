@@ -195,8 +195,8 @@ module internal QueryableLayerBuild =
                 let clauseCtx = currentCtx
                 let clauseTable = effectiveTableName
                 let joinsBeforeClauses = currentCtx.Joins.Count
-                let struct (where, orderBy, limit, offset, unionAlls) =
-                    buildClausesDu clauseCtx vars layer clauseTable
+                let struct (where, orderBy, limit, offset, unionAlls, orderBindings) =
+                    buildClausesDu clauseCtx vars layer clauseTable input.KeyInput
                 let clauseDiscoveredJoins =
                     if currentCtx.Joins.Count > joinsBeforeClauses then
                         currentCtx.Joins |> Seq.skip joinsBeforeClauses |> Seq.toList
@@ -221,6 +221,8 @@ module internal QueryableLayerBuild =
                     joins <- relationJoins
                     boundWhere <- relationWhere
                     boundOrderBy <- relationOrder
+
+                joins <- joins @ orderBindings
 
                 // Assemble the SelectCore.
                 let body =

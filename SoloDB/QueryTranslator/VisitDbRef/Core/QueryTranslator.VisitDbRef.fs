@@ -60,6 +60,12 @@ module internal QueryTranslatorVisitDbRef =
                             sources.Add(expression, owner)
                             true
                         | _ -> false
+                let translateWith lower source input alias (lambda: ChainExpr.Selector) handler =
+                    let sub = qb.ForSubquery(alias, lambda.Parameters, BaseLayer, input, subqueryRootTable = qb.SourceContext.RootTable)
+                    let sub = { sub with ProducedHandler = QueryGroupScalar.withFallback handler sub.ProducedHandler }
+                    let value = lower lambda.Body sub
+                    let joins = QueryTranslatorReferenceJoin.preparedJoinClauses sub.SourceContext.Joins
+                    value, joins
                 let adapter: OrderedChainPlan.Adapter = {
                     MembershipContext = ReceiverScopedEntityMembership
                     LambdaContext = "relation-backed DBRefMany"
@@ -78,15 +84,12 @@ module internal QueryTranslatorVisitDbRef =
                     IsRoot = isRoot
                     IsValue = fun e -> QueryTranslatorBaseHelpers.isFullyConstant e || (qb.SourceContext.BindQueryValue |> ValueOption.exists (fun b -> b.IsValue e))
                     Alias = fun () -> DBRefManyBuilderCore.nextAlias qb.SourceContext "_chain"
+                    Variables = qb.Variables
                     DefaultValue = QueryDefault.value qb.Variables
                     Value = fun e -> visitProduced e qb
                     Comparison = fun e -> visitComparisonProduced e qb
-                    Translate = fun source input alias lambda handler ->
-                        let sub = qb.ForSubquery(alias, lambda.Parameters, BaseLayer, input, subqueryRootTable = qb.SourceContext.RootTable)
-                        let sub = { sub with ProducedHandler = QueryGroupScalar.withFallback handler sub.ProducedHandler }
-                        let value = visitProduced lambda.Body sub
-                        let joins = QueryTranslatorReferenceJoin.preparedJoinClauses sub.SourceContext.Joins
-                        value, joins
+                    Translate = translateWith visitProduced
+                    TranslateOrderKey = translateWith (QueryStructuralOrdering.translate visitProduced)
                     Source = fun columns source ->
                         let struct(rows, input) = DBRefManyBuilderCore.buildRelationSource qb sources.[source] (columns = OrderedChainPlan.FullValue)
                         let alias = qb.SourceContext.NextAlias()

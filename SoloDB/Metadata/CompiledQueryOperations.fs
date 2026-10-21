@@ -168,7 +168,7 @@ module internal CompiledQueries =
             let mutable bindingCount = 0
             let names = ResizeArray<string>()
             let mutable hasPrefix = false
-            let bindWithInput prepare encoded scalarJson prefix withInput (value: Expression) =
+            let bindWithInput prepare encoded scalarJson prefix withInput (unitsSlot: int voption ref voption) (value: Expression) =
                 let name = "cq" + string bindingCount
                 bindingCount <- bindingCount + 1
                 let jsonName = if encoded then name + "j" else null
@@ -182,6 +182,10 @@ module internal CompiledQueries =
                 let read = QueryValuePlan.bind variables (fun _ -> None) value
                 addStep(fun frame offset ->
                     let sampled = read frame
+                    match unitsSlot |> ValueOption.bind _.Value with
+                    | ValueSome unitsSlot ->
+                        frame[offset + unitsSlot] <- if isNull sampled then null else box(Convert.ToBase64String(QueryTranslatorCharacters.ordinalBytes (unbox<string> sampled)))
+                    | ValueNone -> ()
                     let struct(empty, writer) = ParameterWriter.Add(frame, offset + slot, encoded, prefix, prepare, sampled)
                     if withInput then
                         let writer = writer.Value
@@ -197,15 +201,27 @@ module internal CompiledQueries =
                 expression, (if withInput then ValueSome(SqlExpr.Parameter writerName) else ValueNone)
             let bind prepare encoded scalarJson prefix value =
                 let prepare sampled = let struct(stored, json) = prepare sampled in struct(stored, json, ValueNone)
-                bindWithInput prepare encoded scalarJson prefix false value |> fst
+                bindWithInput prepare encoded scalarJson prefix false ValueNone value |> fst
             let produced comparison (value: Expression) =
                 let encoded = JsonFunctions.parameterMayNeedJson value.Type
                 let dynamic = not(JsonFunctions.parameterWriterIsFixed value.Type)
                 let prepare sampled =
                     let struct(stored, encoded, writer) = JsonFunctions.prepareQueryParameter comparison value.Type sampled
                     struct(stored, encoded, ValueSome writer)
-                let expression, writer = bindWithInput prepare encoded false false dynamic value
-                QueryProduced.parameter value.Type expression writer
+                let unitsSlot = if typeof<string>.Equals value.Type then ValueSome(ref ValueNone) else ValueNone
+                let expression, writer = bindWithInput prepare encoded false false dynamic unitsSlot value
+                let produced = QueryProduced.parameter value.Type expression writer
+                match unitsSlot, produced with
+                | ValueSome unitsSlot, DirectValue(expression, input) ->
+                    let units = lazy (
+                        let slot = names.Count
+                        let unitsName = "cq" + string bindingCount + "u"
+                        bindingCount <- bindingCount + 1
+                        names.Add unitsName
+                        unitsSlot.Value <- ValueSome slot
+                        SqlExpr.Parameter unitsName)
+                    DirectValue(expression, { input with OriginalStringUnits = ValueSome units })
+                | _ -> produced
             let local (value: Expression) =
                 let variable = Expression.Variable(value.Type, "value" + string locals.Count)
                 locals.Add variable

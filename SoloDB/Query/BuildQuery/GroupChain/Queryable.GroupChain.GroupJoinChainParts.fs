@@ -29,7 +29,7 @@ module internal GroupJoinChainParts =
         let countRowAlias = GroupJoinAliases.nextCountRow rt.InnerCtx
         let countCore =
             { Distinct = false
-              Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None) }]
+              Projections = ProjectionSetOps.ofList [{ Alias = None; Expr = SqlExpr.AggregateCall(AggregateKind.Count, None, false, None, []) }]
               Source = Some(DerivedTable(countSourceSel, countRowAlias))
               Joins = []
               Where = None

@@ -199,7 +199,7 @@ module internal QueryTranslatorNumeric =
                 | _ -> ValueNone
             else ValueNone
         let kind = match exact with ValueSome(kind,domain) -> AggregateKind.ExactNumeric(kind,domain) | ValueNone -> kind
-        SqlExpr.AggregateCall(kind,Some argument,distinct,None)
+        SqlExpr.AggregateCall(kind,Some argument,distinct,None, [])
 
     let aggregateInput (method: MethodInfo) =
         let parameters = method.GetParameters()

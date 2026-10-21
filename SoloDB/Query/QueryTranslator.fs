@@ -64,7 +64,7 @@ module internal QueryTranslator =
     /// Returns a SqlExpr DU node for an expression without emitting to any StringBuilder.
     /// Used by the Queryable DU construction path to build SqlSelect trees.
     /// Side effects: allocates parameters in the provided Variables dict; may populate sourceContext.Joins.
-    let private translateOperand visit (sourceContext: QueryContext) (tableName: string) (expression: Expression) (variables: Dictionary<string, obj>) : QueryProducedValue =
+    let private translateOperand visit (sourceContext: QueryContext) (tableName: string) (expression: Expression) (variables: Dictionary<string, obj>) =
         ensureDbRefHandlersInitialized()
         let sb = StringBuilder()
         let builder = QueryBuilder.New sb variables false tableName expression -1 (ValueSome sourceContext)
@@ -72,6 +72,9 @@ module internal QueryTranslator =
 
     let internal translateProduced sourceContext tableName expression variables =
         translateOperand visitProduced sourceContext tableName expression variables
+
+    let internal translateOrderKey sourceContext tableName expression variables =
+        translateOperand (QueryStructuralOrdering.translate visitProduced) sourceContext tableName expression variables
 
     /// A completed selector owns both its paired output and its discovered reference clauses.
     let internal publishSelector (sourceContext: QueryContext) tableName expression variables name (core: SelectCore) =
@@ -104,7 +107,7 @@ module internal QueryTranslator =
         (captures: Dictionary<ParameterExpression, ParameterSource> voption)
         (producer: (Expression -> QueryProducedValue voption) voption)
         (allowStringFormat: bool)
-        (variables: Dictionary<string, obj>) : QueryProducedValue =
+        (variables: Dictionary<string, obj>) =
         ensureDbRefHandlersInitialized()
         let builder =
             { QueryBuilder.New (StringBuilder()) variables false tableName body -1 (ValueSome sourceContext)
@@ -121,6 +124,9 @@ module internal QueryTranslator =
 
     let internal translateScopedBody sourceContext tableName body parameters captures producer allowStringFormat variables =
         translateScopedOperand visitProduced sourceContext tableName body parameters captures producer allowStringFormat variables
+
+    let internal translateScopedOrderKey sourceContext tableName body parameters captures producer allowStringFormat variables =
+        translateScopedOperand (QueryStructuralOrdering.translate visitProduced) sourceContext tableName body parameters captures producer allowStringFormat variables
 
     let internal translateComparisonScopedBody sourceContext tableName body parameters captures producer allowStringFormat variables =
         translateScopedOperand visitComparisonProduced sourceContext tableName body parameters captures producer allowStringFormat variables

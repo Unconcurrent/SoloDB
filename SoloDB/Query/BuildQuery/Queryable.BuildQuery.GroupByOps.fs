@@ -157,27 +157,28 @@ module internal QueryableBuildQueryGroupByOps =
             | _ -> QueryableBuildQueryGroupByChained.tryTranslateGroupByChainedExpr sourceCtx innerSelect completion.Alias groupParam vars sources producer expr |> Utils.optionToValueOption
         producer
 
-    let private translateGroupBody completion sourceCtx innerSelect groupParam parameters vars expression =
+    let private translateGroupBodyWith translate completion sourceCtx innerSelect groupParam parameters vars expression =
         let sources = Dictionary<ParameterExpression, ParameterSource>()
         let producer = groupHandler completion sourceCtx innerSelect groupParam sources vars
         let grouping = lazy(completedGrouping completion sourceCtx.NextAlias groupParam.Type
                                 (sourceCtx.SerializationInput.Children[0])
                                 (QueryTranslatorSerialization.serializationElement sourceCtx.SerializationInput))
         sources[groupParam] <- { Alias = Some completion.Alias; Context = sourceCtx; Value = DeferredParameter grouping }
-        QueryTranslator.translateScopedBody sourceCtx completion.Alias expression parameters (ValueSome sources) (ValueSome producer) true vars
+        translate sourceCtx completion.Alias expression parameters (ValueSome sources) (ValueSome producer) true vars
+
+    let private translateGroupBody completion sourceCtx innerSelect groupParam parameters vars expression =
+        translateGroupBodyWith QueryTranslator.translateScopedBody completion sourceCtx innerSelect groupParam parameters vars expression
 
     let private translateGroupOrders
         (completion: QueryGroupCompletion) (sourceCtx: QueryContext) (innerSelect: SqlSelect) (vars: Dictionary<string, obj>)
         (groupOrders: (Expression * bool) list) =
         groupOrders
-        |> List.map (fun (orderingExpr, descending) ->
+        |> List.collect (fun (orderingExpr, descending) ->
             let lambda = extractLambdaFromExpr orderingExpr
-            QueryStructuralShape.requireComparison lambda.ReturnType
-            let orderExpr =
-                translateGroupBody completion sourceCtx innerSelect lambda.Parameters[0] lambda.Parameters vars lambda.Body
-                |> QueryProduced.value sourceCtx.NextAlias
-            { Expr = orderExpr
-              Direction = if descending then SortDirection.Desc else SortDirection.Asc })
+            let key=translateGroupBodyWith QueryTranslator.translateScopedOrderKey completion sourceCtx innerSelect lambda.Parameters[0] lambda.Parameters vars lambda.Body
+            let terms,bindings=QueryStructuralOrdering.prepare sourceCtx.NextAlias vars lambda.ReturnType (SortDirection.ofDescending descending) None key
+            completion.OrderBindings.AddRange bindings
+            terms)
 
     let private nullSensitiveKeyLeaf (expr: Expression) =
         let isNullable = expr.Type.IsGenericType && typedefof<Nullable<_>>.Equals(expr.Type.GetGenericTypeDefinition())

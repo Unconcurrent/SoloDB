@@ -138,25 +138,25 @@ let rec emitExprWith (emitSubSelect: EmitContext -> SqlSelect -> Emitted) (ctx: 
         { Sql = name + "(" + argsSql + ")"; Parameters = parms }
 
     // Case 9: Aggregate call
-    | AggregateCall(kind, argument, distinct, separator) ->
+    | AggregateCall(kind, argument, distinct, separator, ordering) ->
         let funcName = emitAggregateKind kind
-        match kind, argument, distinct, separator with
-        | Count, None, false, None ->
+        match kind, argument, distinct, separator, ordering with
+        | Count, None, false, None, [] ->
             { Sql = funcName + "(*)"; Parameters = Emitted.emptyParameters () }
-        | Count, None, _, _ ->
+        | Count, None, _, _, _ ->
             raise (System.NotSupportedException("COUNT with no argument must emit COUNT(*) only."))
-        | _, Some argExpr, _, _ ->
-            let argEmitted = emitE ctx argExpr
-            let distinctStr = if distinct then "DISTINCT " else ""
-            match separator with
-            | Some sepExpr ->
-                let sepEmitted = emitE ctx sepExpr
-                { Sql = funcName + "(" + distinctStr + argEmitted.Sql + ", " + sepEmitted.Sql + ")"
-                  Parameters = Emitted.concatParameterSets [ argEmitted.Parameters; sepEmitted.Parameters ] }
-            | None ->
-                { Sql = funcName + "(" + distinctStr + argEmitted.Sql + ")"
-                  Parameters = argEmitted.Parameters }
-        | _, None, _, _ ->
+        | _, Some argExpr, _, _, _ ->
+            let argument = emitE ctx argExpr
+            let separator = separator |> Option.map (emitE ctx)
+            let ordering = ordering |> List.map (fun (expression, direction) -> emitE ctx expression, direction)
+            let parts = argument :: (separator |> Option.toList) @ (ordering |> List.map fst)
+            let separatorSql = separator |> Option.map (fun separator -> ", " + separator.Sql) |> Option.defaultValue ""
+            let orderingSql =
+                if ordering.IsEmpty then "" else
+                " ORDER BY " + (ordering |> List.map (fun (expression, direction) -> expression.Sql + " " + SortDirection.sql direction) |> String.concat ", ")
+            { Sql = funcName + "(" + (if distinct then "DISTINCT " else "") + argument.Sql + separatorSql + orderingSql + ")"
+              Parameters = Emitted.collectParameters parts }
+        | _, None, _, _, _ ->
             raise (System.NotSupportedException($"Aggregate '{funcName}' requires an argument."))
 
     // Case 10: Window call

@@ -35,7 +35,9 @@ module internal OrderedChainPlan =
         Validate: Plan -> unit
         Source: SourceColumns -> Expression -> struct(SqlSelect * QuerySerializationInput)
         Translate: Expression -> QuerySerializationInput -> string -> Selector -> (Expression -> QueryProducedValue voption) voption -> QueryProducedValue * JoinShape list
+        TranslateOrderKey: Expression -> QuerySerializationInput -> string -> Selector -> (Expression -> QueryProducedValue voption) voption -> QueryStructuralOrdering.Key * JoinShape list
         Value: Expression -> QueryProducedValue
+        Variables: System.Collections.Generic.Dictionary<string,obj>
         DefaultValue: Type -> QueryProducedValue
         Comparison: Expression -> QueryProducedValue
         Alias: unit -> string

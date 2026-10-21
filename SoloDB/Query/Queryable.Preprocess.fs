@@ -186,13 +186,34 @@ module internal QueryableHelperPreprocess =
         let text = JsonSerializator.JsonValue.WriteRuntimeBuffer(valueType,value,includeType,false)
         System.String(text.Array,text.Offset,text.Count)
 
+    let internal buildOrdersDu (sourceCtx: QueryContext) vars keyInput contextTable predicate orders =
+        let terms=ResizeArray<OrderBy>()
+        let joins=ResizeArray<JoinShape>()
+        for order: PreprocessedOrder in orders do
+            let target=orderKeyClrType order.OrderingRule
+            QueryStructuralShape.requireComparison target
+            let key=
+                match order.RawExpr with
+                | None -> QueryTranslator.translateOrderKey sourceCtx contextTable order.OrderingRule vars
+                | Some value ->
+                    let produced=
+                        match keyInput with
+                        | ValueSome input when input.OriginalType=target ->
+                            DirectValue(value,{input with Source=ValueSome(QueryTranslatorBaseTypes.canonicalToken input.Carrier value)})
+                        | _ -> QueryProduced.typed target value
+                    QueryStructuralOrdering.Selected produced
+            let expanded,bindings=QueryStructuralOrdering.prepare sourceCtx.NextAlias vars target order.Direction predicate key
+            terms.AddRange expanded
+            joins.AddRange bindings
+        List.ofSeq terms,List.ofSeq joins
+
     /// Build WHERE, ORDER BY, LIMIT, OFFSET, UnionAll from a UsedSQLStatements layer as DU values.
     /// Returns (where, orderBy, limit, offset, unionAlls).
     let internal buildClausesDu
         (sourceCtx: QueryContext)
         (vars: Dictionary<string, obj>)
         (statement: UsedSQLStatements)
-        (contextTable: string) =
+        (contextTable: string) keyInput =
 
         let where =
             if statement.Filters.Count = 0 then None
@@ -208,15 +229,7 @@ module internal QueryableHelperPreprocess =
         let unionAlls =
             statement.UnionAll |> Seq.map (fun buildFn -> buildFn contextTable vars) |> Seq.toList
 
-        let orderBy =
-            statement.Orders |> Seq.map (fun o ->
-                QueryStructuralShape.requireComparison (orderKeyClrType o.OrderingRule)
-                let expr =
-                    match o.RawExpr with
-                    | Some duExpr -> duExpr
-                    | None -> translateExprDu sourceCtx contextTable o.OrderingRule vars
-                { Expr = normalizeOrderKeyExpr expr (orderKeyClrType o.OrderingRule); Direction = o.Direction }
-            ) |> Seq.toList
+        let orderBy,orderBindings=buildOrdersDu sourceCtx vars keyInput contextTable where statement.Orders
 
         let bindBound bound =
             match sourceCtx.BindQueryValue with
@@ -236,7 +249,7 @@ module internal QueryableHelperPreprocess =
             | Some skip -> Some (bindBound skip)
             | None -> None
 
-        struct (where, orderBy, limit, offset, unionAlls)
+        struct (where, orderBy, limit, offset, unionAlls, orderBindings)
 
     /// Build materialized Value projection (jsonb_set with JOIN data) for relation materialization.
     let internal buildMaterializedValueExpr (ctx: QueryContext) (effectiveTableName: string) (valueColumnExpr: SqlExpr) =

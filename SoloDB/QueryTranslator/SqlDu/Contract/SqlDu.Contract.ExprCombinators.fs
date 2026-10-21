@@ -150,11 +150,14 @@ module internal SqlExprCombinators =
         | FunctionCall(name, arguments) ->
             let mapped = mapList map arguments
             if same arguments mapped then node else FunctionCall(name, mapped)
-        | AggregateCall(kind, argument, distinct, separator) ->
+        | AggregateCall(kind, argument, distinct, separator, ordering) ->
             let mappedArgument = mapOption map argument
             let mappedSeparator = mapOption map separator
-            if same argument mappedArgument && same separator mappedSeparator then node
-            else AggregateCall(kind, mappedArgument, distinct, mappedSeparator)
+            let mappedOrdering = mapList (fun ((expression, direction) as original) ->
+                let mapped = map expression
+                if same expression mapped then original else mapped, direction) ordering
+            if same argument mappedArgument && same separator mappedSeparator && same ordering mappedOrdering then node
+            else AggregateCall(kind, mappedArgument, distinct, mappedSeparator, mappedOrdering)
         | WindowCall spec ->
             let arguments = mapList map spec.Arguments
             let partitions = mapList map spec.PartitionBy
@@ -230,14 +233,13 @@ module internal SqlExprCombinators =
                     properties |> List.fold (fun s (_, value) -> loop s value) acc
                 | FunctionCall(_, arguments) ->
                     arguments |> List.fold loop acc
-                | AggregateCall(_, argument, _, separator) ->
+                | AggregateCall(_, argument, _, separator, ordering) ->
                     let acc =
                         match argument with
                         | Some arg -> loop acc arg
                         | None -> acc
-                    match separator with
-                    | Some sep -> loop acc sep
-                    | None -> acc
+                    let acc = match separator with Some sep -> loop acc sep | None -> acc
+                    ordering |> List.fold (fun acc (expression, _) -> loop acc expression) acc
                 | WindowCall(spec) ->
                     let acc = spec.Arguments |> List.fold loop acc
                     let acc = spec.PartitionBy |> List.fold loop acc
@@ -297,9 +299,10 @@ module internal SqlExprCombinators =
                         properties |> List.exists (fun (_, value) -> loop value)
                     | FunctionCall(_, arguments) ->
                         arguments |> List.exists loop
-                    | AggregateCall(_, argument, _, separator) ->
+                    | AggregateCall(_, argument, _, separator, ordering) ->
                         (argument |> Option.map loop |> Option.defaultValue false)
                         || (separator |> Option.map loop |> Option.defaultValue false)
+                        || (ordering |> List.exists (fun (expression, _) -> loop expression))
                     | WindowCall(spec) ->
                         (spec.Arguments |> List.exists loop)
                         || (spec.PartitionBy |> List.exists loop)

@@ -36,14 +36,15 @@ module internal QueryStructuralTraversal =
 
     // These typed consumers demand child layout and physical ownership, not an
     // accumulated writer-access history once no produced children remain.
-    let rec private scopeInput (input: QuerySerializationInput) =
+    let rec internal scopeInput (input: QuerySerializationInput) =
         { input with Source = ValueNone; Carrier = CanonicalToken; Navigation = Array.empty
                      Operand = if input.Children.Length = 0 then ValueNone else input.Operand
                      Children = input.Children |> Array.map scopeInput }
 
-    let private mapInput map (input: QuerySerializationInput) =
+    let internal mapInput map (input: QuerySerializationInput) =
         let rec loop (input: QuerySerializationInput) =
             { input with
+                OriginalStringUnits = input.OriginalStringUnits |> ValueOption.map (fun units -> lazy (map units.Value))
                 Operand = input.Operand |> ValueOption.map(fun operand ->
                     { Descriptor = map operand.Descriptor
                       Accesses = operand.Accesses |> Array.map(fun step ->

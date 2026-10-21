@@ -242,15 +242,13 @@ module internal OrderedChain =
                 match name with
                 | "MinBy" | "MaxBy" ->
                     let selector = argumentLambda |> Option.defaultWith (fun () -> raise (NotSupportedException("A keyed element terminal requires a selector lambda.")))
-                    let key, joins = translate completedInput a selector
-                    let direction = if name = "MinBy" then SortDirection.Asc else SortDirection.Desc
-                    let order =
-                        (if not selector.ReturnType.IsValueType || not (isNull (TypeMetadata.nullableUnderlying selector.ReturnType)) then
-                            [{ Expr = SqlExpr.Unary(UnaryOperator.IsNull, key); Direction = SortDirection.Asc }]
-                         else [])
-                        @ [{ Expr = key; Direction = direction }; { Expr = col a "__ord"; Direction = SortDirection.Asc }]
-                    Some(selected selectedValue { core source [] with Joins = joins; OrderBy = order; Limit = Some(integer 1L) })
-                | "Count" | "LongCount" -> Some(typed(scalar (SqlExpr.AggregateCall(AggregateKind.Count,None,false,None))))
+                    let key, joins = adapter.TranslateOrderKey plan.Root completedInput a selector ValueNone
+                    let absentCapable = not selector.ReturnType.IsValueType || not(isNull(TypeMetadata.nullableUnderlying selector.ReturnType))
+                    let direction = if name="MinBy" then (if absentCapable then SortDirection.AscNullsLast else SortDirection.Asc) else SortDirection.Desc
+                    let terms,bindings=QueryStructuralOrdering.prepare adapter.Alias adapter.Variables selector.ReturnType direction None key
+                    let order = terms @ [{ Expr = col a "__ord"; Direction = SortDirection.Asc }]
+                    Some(selected selectedValue { core source [] with Joins = joins @ bindings; OrderBy = order; Limit = Some(integer 1L) })
+                | "Count" | "LongCount" -> Some(typed(scalar (SqlExpr.AggregateCall(AggregateKind.Count,None,false,None, []))))
                 | "ToArray" | "ToList" -> Some(materialize adapter rows completedInput call.Type)
                 | ("First"|"FirstOrDefault"|"Last"|"LastOrDefault"|"Single"|"SingleOrDefault"|"ElementAt"|"ElementAtOrDefault") ->
                     let direction = if name.StartsWith("Last",StringComparison.Ordinal) then SortDirection.Desc else SortDirection.Asc
@@ -270,7 +268,7 @@ module internal OrderedChain =
                             else None
                         | _ -> None
                     if name.StartsWith("Single", StringComparison.Ordinal) then
-                        let n = scalar(SqlExpr.AggregateCall(AggregateKind.Count, None, false, None))
+                        let n = scalar(SqlExpr.AggregateCall(AggregateKind.Count, None, false, None, []))
                         let empty = fallback |> Option.defaultValue absent
                         let emptyOrMultiple = QueryProduced.choose call.Type (SqlExpr.Binary(n, BinaryOperator.Eq, integer 0L)) empty absent
                         Some(QueryProduced.choose call.Type (SqlExpr.Binary(n, BinaryOperator.Eq, integer 1L)) one emptyOrMultiple)
@@ -309,14 +307,21 @@ module internal OrderedChain =
                     Some(typed(SqlExpr.Unary(UnaryOperator.Not, SqlExpr.Exists(select checkedRows))))
                 | _ ->
                     let kind=match name with "Sum"->AggregateKind.Sum|"Min"->AggregateKind.Min|"Max"->AggregateKind.Max|_->AggregateKind.Avg
-                    let value, joins =
+                    let produced, joins =
                         match argumentLambda with
-                        | Some selector -> translate completedInput a selector
-                        | None -> rootValue a, []
+                        | Some selector -> adapter.Translate plan.Root completedInput a selector ValueNone
+                        | None -> DirectValue(rootValue a,selectedInput), []
                     let inputType = match argumentLambda with Some selector -> selector.ReturnType | None -> elementType
-                    let agg=QueryTranslatorNumeric.aggregate call.Method inputType kind (FlattenTransform.normalizeExprQuoting value) false
-                    let result = if name="Sum" then SqlExpr.Coalesce(agg,[QueryTranslatorNumeric.zero call.Method.ReturnType]) else agg
-                    Some(typed(SqlExpr.ScalarSubquery(select { terminalCore result with Joins = joins })))
+                    if (name="Min" || name="Max") && QueryStructuralOrdering.supported inputType then
+                        let direction=if name="Min" then (if inputType.IsValueType then SortDirection.Asc else SortDirection.AscNullsLast) else SortDirection.Desc
+                        let selected=QueryStructuralExtrema.select adapter.Alias adapter.Variables inputType direction
+                                        {core source [] with Joins=joins} produced [{Expr=col a "__ord";Direction=SortDirection.Asc}]
+                        Some(QueryStructuralExtrema.defaultResult call.Type selected (adapter.DefaultValue call.Type))
+                    else
+                        let value=QueryProduced.value adapter.Alias produced
+                        let agg=QueryTranslatorNumeric.aggregate call.Method inputType kind (FlattenTransform.normalizeExprQuoting value) false
+                        let result = if name="Sum" then SqlExpr.Coalesce(agg,[QueryTranslatorNumeric.zero call.Method.ReturnType]) else agg
+                        Some(typed(SqlExpr.ScalarSubquery(select { terminalCore result with Joins = joins })))
             | _ -> None
         | _ -> None
 

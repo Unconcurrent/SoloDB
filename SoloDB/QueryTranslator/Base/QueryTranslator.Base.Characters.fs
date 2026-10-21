@@ -131,8 +131,8 @@ module internal QueryTranslatorCharacters =
                 if value.IsInteger then string(char(value.GetInt32())) else value.CopyToString()
             if operation = Operation.OrdinalKey then
                 if arguments[1].IsNull then context.SetNull()
-                else
-                    context.SetBlob(ordinalBytes(arguments[1].CopyToString()))
+                elif arguments[1].IsBlob then context.SetBlob(arguments[1].GetBlobSpan())
+                else context.SetBlob(ordinalBytes(arguments[1].CopyToString()))
             elif operation = Operation.Comparable then
                 let value = arguments[1]
                 if value.IsNull then context.SetNull()

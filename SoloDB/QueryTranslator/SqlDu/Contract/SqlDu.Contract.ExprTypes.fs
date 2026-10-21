@@ -10,7 +10,7 @@ type internal SqlExpr =
     | RowValueExpr of elements: SqlExpr list
     | JsonObjectExpr of properties: (string * SqlExpr) list
     | FunctionCall of name: string * arguments: SqlExpr list
-    | AggregateCall of kind: AggregateKind * argument: SqlExpr option * distinct: bool * separator: SqlExpr option
+    | AggregateCall of kind: AggregateKind * argument: SqlExpr option * distinct: bool * separator: SqlExpr option * ordering: (SqlExpr * SortDirection) list
     | WindowCall of WindowSpec
     | Unary of UnaryOperator * SqlExpr
     | Binary of SqlExpr * BinaryOperator * SqlExpr
