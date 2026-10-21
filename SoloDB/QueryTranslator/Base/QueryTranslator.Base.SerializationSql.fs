@@ -66,12 +66,14 @@ module internal QuerySerializationSql =
 
     and internal inputDescriptor (input: QuerySerializationInput) =
         let writer = writerDescriptor input
-        if input.PhysicalOwner.IsNone && input.ReferenceOwner.IsNone && input.OriginalStringUnits.IsNone then writer
+        if input.PhysicalOwner.IsNone && input.ReferenceOwner.IsNone && input.OriginalOrderOperand.IsNone then writer
         else
             let physical = input.PhysicalOwner |> ValueOption.map _.Descriptor |> ValueOption.defaultValue (SqlExpr.Literal SqlLiteral.Null)
             let reference = input.ReferenceOwner |> ValueOption.map _.Descriptor |> ValueOption.defaultValue (SqlExpr.Literal SqlLiteral.Null)
-            let units = input.OriginalStringUnits |> ValueOption.map _.Value |> ValueOption.defaultValue (SqlExpr.Literal SqlLiteral.Null)
-            SqlExpr.JsonArrayExpr [SqlExpr.Literal(SqlLiteral.Integer 3L); writer; physical; reference; units]
+            let fields = [SqlExpr.Literal(SqlLiteral.Integer 3L); writer; physical; reference]
+            match input.OriginalOrderOperand with
+            | ValueNone -> SqlExpr.JsonArrayExpr fields
+            | ValueSome units -> SqlExpr.JsonArrayExpr (fields @ [SqlExpr.JsonArrayExpr [units.Data.Value; units.Path]])
 
     and private positionsDescriptor declared children =
         SqlExpr.JsonArrayExpr [SqlExpr.Literal(SqlLiteral.Integer 1L);

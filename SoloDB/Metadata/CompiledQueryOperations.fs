@@ -168,7 +168,7 @@ module internal CompiledQueries =
             let mutable bindingCount = 0
             let names = ResizeArray<string>()
             let mutable hasPrefix = false
-            let bindWithInput prepare encoded scalarJson prefix withInput (unitsSlot: int voption ref voption) (value: Expression) =
+            let bindWithInput prepare encoded scalarJson prefix withInput (original: struct(int voption ref * ResizeArray<int array> * (seq<int array> -> obj -> obj)) voption) (value: Expression) =
                 let name = "cq" + string bindingCount
                 bindingCount <- bindingCount + 1
                 let jsonName = if encoded then name + "j" else null
@@ -182,9 +182,11 @@ module internal CompiledQueries =
                 let read = QueryValuePlan.bind variables (fun _ -> None) value
                 addStep(fun frame offset ->
                     let sampled = read frame
-                    match unitsSlot |> ValueOption.bind _.Value with
-                    | ValueSome unitsSlot ->
-                        frame[offset + unitsSlot] <- if isNull sampled then null else box(Convert.ToBase64String(QueryTranslatorCharacters.ordinalBytes (unbox<string> sampled)))
+                    match original with
+                    | ValueSome struct(slot,demanded,prepareOriginal) ->
+                        match slot.Value with
+                        | ValueSome slot -> frame[offset+slot] <- if demanded.Count>0 then prepareOriginal demanded sampled else null
+                        | ValueNone -> ()
                     | ValueNone -> ()
                     let struct(empty, writer) = ParameterWriter.Add(frame, offset + slot, encoded, prefix, prepare, sampled)
                     if withInput then
@@ -208,11 +210,12 @@ module internal CompiledQueries =
                 let prepare sampled =
                     let struct(stored, encoded, writer) = JsonFunctions.prepareQueryParameter comparison value.Type sampled
                     struct(stored, encoded, ValueSome writer)
-                let unitsSlot = if typeof<string>.Equals value.Type then ValueSome(ref ValueNone) else ValueNone
-                let expression, writer = bindWithInput prepare encoded false false dynamic unitsSlot value
+                let preparation = QueryStructuralOrdering.originalPreparation value.Type
+                let original = preparation |> ValueOption.map(fun struct(prepare,_) -> struct(ref ValueNone,ResizeArray<int array>(),prepare))
+                let expression, writer = bindWithInput prepare encoded false false dynamic original value
                 let produced = QueryProduced.parameter value.Type expression writer
-                match unitsSlot, produced with
-                | ValueSome unitsSlot, DirectValue(expression, input) ->
+                match original, preparation, produced with
+                | ValueSome struct(unitsSlot,demanded,_), ValueSome struct(_,project), DirectValue(expression, input) ->
                     let units = lazy (
                         let slot = names.Count
                         let unitsName = "cq" + string bindingCount + "u"
@@ -220,7 +223,7 @@ module internal CompiledQueries =
                         names.Add unitsName
                         unitsSlot.Value <- ValueSome slot
                         SqlExpr.Parameter unitsName)
-                    DirectValue(expression, { input with OriginalStringUnits = ValueSome units })
+                    DirectValue(expression, { input with OriginalOrderOperand = ValueSome(QueryOriginalOrderOperand(value.Type,units,SqlExpr.JsonArrayExpr [],0,(fun path -> demanded.Add path),project)) })
                 | _ -> produced
             let local (value: Expression) =
                 let variable = Expression.Variable(value.Type, "value" + string locals.Count)

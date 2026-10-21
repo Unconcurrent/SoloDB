@@ -10,7 +10,7 @@ open SoloDatabase.QueryStructuralShape
 
 /// A unary preorder traversal emits ordered primitive chunks, retaining pending siblings.
 module internal QueryOrderingTraversal =
-    type Root = Selected of QueryProducedValue | Prepared of SqlExpr
+    type Root = Selected of QueryProducedValue | Prepared of SqlExpr * SqlExpr voption
     type private Access = Current | Member of string | Payload
     type private Stored = { Input: QuerySerializationInput; Access: Access }
     type private Context = { Node: Node; Role: QueryOrderingPolicy.Role; Stored: Stored voption }
@@ -25,9 +25,24 @@ module internal QueryOrderingTraversal =
           Joins = []; Where = None; GroupBy = []; Having = None; OrderBy = []; Limit = None; Offset = None }
     let private query core = { Ctes = []; Body = SingleSelect core }
 
-    let encode nextName variables (node: Node) role root =
-        let work,current,successor = nextName(),nextName(),nextName()
-        let column name = SqlExpr.Column(Some current,name)
+    let rec encode nextName variables (node: Node) role root =
+        match root with
+        | Selected(DirectValue(value,input)) when input.OriginalOrderOperand.IsSome ->
+            let original=input.OriginalOrderOperand.Value
+            original.Demand()
+            let prepared=encode nextName variables node role (Prepared(original.Data.Value,if original.Depth=0 then ValueNone else ValueSome original.Path))
+            let stored=encode nextName variables node role (Selected(DirectValue(value,{input with OriginalOrderOperand=ValueNone})))
+            let prepared=if original.Depth=0 then prepared else SqlExpr.Coalesce(prepared,[stored])
+            choose (SqlExpr.Unary(UnaryOperator.IsNotNull,original.Data.Value)) prepared stored
+        | _ -> encodeCore nextName variables node role root
+
+    and private encodeCore nextName variables (node: Node) role root =
+        let work,current = nextName(),nextName()
+        let stateFields = [|"context";"slot";"coordinate";"pending";"chunk";"done"|]
+        let field state name =
+            let index = stateFields |> Array.findIndex ((=) name)
+            at state ("$[" + string index + "]")
+        let column name = field (SqlExpr.Column(Some current,"state")) name
         let coordinate = column "coordinate"
         let contexts = ResizeArray<Context>()
         let register node role stored =
@@ -48,7 +63,7 @@ module internal QueryOrderingTraversal =
                 rootBindings.Add {Name=name;Materialized=true;Query=query(core None [projection "value" token])}
                 ValueSome {Input=QueryStructuralTraversal.scopeInput input;Access=Current},text "$"
             | Selected _ -> invalidOp "An ordering traversal requires its once-bound key."
-            | Prepared value ->
+            | Prepared(value,path) ->
                 preparedRows<-nextName()
                 preparedAlias<-nextName()
                 let alias=nextName()
@@ -59,11 +74,34 @@ module internal QueryOrderingTraversal =
                      projection "payload" (SqlExpr.FunctionCall("jsonb",[binary BinaryOperator.JsonText entry (text "$[3]")]))])}
                 joins.Add(ConditionedJoin(JoinKind.Inner,BaseTable(preparedRows,Some preparedAlias),
                     binary BinaryOperator.Eq (SqlExpr.Column(Some preparedAlias,"node")) coordinate))
-                ValueNone,integer 0
+                let initial =
+                    match path with
+                    | ValueNone -> integer 0
+                    | ValueSome path ->
+                        let cursor,parent,child=nextName(),nextName(),nextName()
+                        let depth=SqlExpr.Column(Some parent,"depth")
+                        let count=SqlExpr.FunctionCall("json_array_length",[path])
+                        let step=core (Some(BaseTable(cursor,Some parent)))
+                                    [projection "depth" (binary BinaryOperator.Add depth (integer 1));projection "node" (SqlExpr.Column(Some child,"node"))]
+                        let step={step with Joins=[ConditionedJoin(JoinKind.Inner,BaseTable(preparedRows,Some child),
+                                                binary BinaryOperator.And
+                                                    (binary BinaryOperator.Eq (SqlExpr.Column(Some child,"parent")) (SqlExpr.Column(Some parent,"node")))
+                                                    (binary BinaryOperator.Eq (SqlExpr.Column(Some child,"ordinal"))
+                                                        (SqlExpr.FunctionCall("jsonb_extract",[path;SqlExpr.FunctionCall("concat",[text "$[";depth;text "]"])]))))]
+                                            Where=Some(binary BinaryOperator.Lt depth count)}
+                        bindings.Add {Name=cursor;Materialized=false;Query={Ctes=[];Body=UnionAllSelect(core None [projection "depth" (integer 0);projection "node" (integer 0)],[step])}}
+                        let result=core (Some(BaseTable(cursor,Some parent))) [projection "node" (SqlExpr.Column(Some parent,"node"))]
+                        SqlExpr.ScalarSubquery(query {result with Where=Some(binary BinaryOperator.Eq depth count);Limit=Some(integer 1)})
+                ValueNone,initial
         let rootContext=register node role stored
-        let token()=SqlExpr.FunctionCall("jsonb",[binary BinaryOperator.JsonText (SqlExpr.Column(Some rootAlias,"value")) coordinate])
+        let rootColumn = SqlExpr.Column(Some rootAlias,"value")
+        let token (input: QuerySerializationInput) =
+            let root = rootColumn
+            if isSqlScalarResult input.OriginalType then
+                SqlExpr.FunctionCall("jsonb",[binary BinaryOperator.JsonText root coordinate])
+            else SqlExpr.FunctionCall("jsonb_extract",[root;coordinate])
         let produced (stored: Stored)=
-            let token=token()
+            let token=token stored.Input
             DirectValue(token,{stored.Input with Source=ValueSome token;Carrier=CanonicalToken})
         let selected context stored =
             let parent=produced stored
@@ -73,6 +111,9 @@ module internal QueryOrderingTraversal =
             | Payload -> QueryStructuralAccess.payload nextName parent
         let missing context =
             match context.Stored with
+            | ValueSome stored when stored.Access=Current && not(isSqlScalarResult stored.Input.OriginalType) ->
+                let kind = SqlExpr.FunctionCall("json_type", [rootColumn; coordinate])
+                binary BinaryOperator.Or (SqlExpr.Unary(UnaryOperator.IsNull,kind)) (binary BinaryOperator.Eq kind (text "null"))
             | ValueSome stored -> QueryProduced.consume nextName (fun value input -> SqlExpr.Unary(UnaryOperator.IsNull,nullCarrier input.Carrier value)) (selected context stored)
             | ValueNone -> SqlExpr.Column(Some preparedAlias,"absent")
         let preparedField ordinal field =
@@ -96,9 +137,9 @@ module internal QueryOrderingTraversal =
                 let suffix=(JsonPathOps.text segments).Substring(1)
                 let childCoordinate=if suffix.Length=0 then coordinate else SqlExpr.FunctionCall("concat",[coordinate;text suffix])
                 let parentCoordinate=if suffix.Length=0 then coordinate else SqlExpr.FunctionCall("substr",[coordinate;integer 1;
-                    binary BinaryOperator.Sub (SqlExpr.FunctionCall("length",[coordinate])) (integer suffix.Length)])
+                    binary BinaryOperator.Sub (SqlExpr.FunctionCall("length",[coordinate])) (SqlExpr.FunctionCall("length",[text suffix]))])
                 let map=SqlExpr.map(function
-                    | SqlExpr.Column(Some alias,"coordinate") when alias=current -> parentCoordinate
+                    | value when value=coordinate -> parentCoordinate
                     | value -> value)
                 let input=childValue.Input |> QueryStructuralTraversal.scopeInput |> QueryStructuralTraversal.mapInput map
                 ValueSome {Input={input with SourceOffset=raw.SourceOffset};Access=Current},childCoordinate
@@ -109,30 +150,42 @@ module internal QueryOrderingTraversal =
             | ValueSome stored ->
                 let input=(QueryStructuralAccess.payload nextName (produced stored)).Input |> QueryStructuralTraversal.scopeInput
                 ValueSome {Input=input;Access=Current},coordinate
-        let scalar context =
+        let scalar context preparedPayload =
             let target=context.Node.Target
             match context.Stored with
             | ValueSome stored ->
                 let produced = selected context stored
-                (if typeof<string>.Equals target then QueryStructuralAccess.stringValue nextName produced
-                 else QueryStructuralAccess.scalar variables nextName target produced)
+                QueryStructuralAccess.scalar variables nextName target produced
                 |> QueryOrderingPolicy.scalar context.Role target
             | ValueNone ->
-                let raw=SqlExpr.Column(Some preparedAlias,"payload")
+                let raw=preparedPayload |> Option.defaultValue (SqlExpr.Column(Some preparedAlias,"payload"))
                 if typeof<string>.Equals target then
                     let units=SqlExpr.FunctionCall("base64",[at raw "$"])
                     if context.Role=QueryOrderingPolicy.FSharp then units else QueryOrderingPrimitives.cultureString (context.Role=QueryOrderingPolicy.ObjectDefault) units
                 else
                     DirectValue(raw,{QuerySerializationInput.ForType target with Source=ValueSome raw;Carrier=CanonicalToken})
                     |> QueryStructuralAccess.scalar variables nextName target |> QueryOrderingPolicy.scalar context.Role target
+        let chunk context preparedPayload =
+            match context.Stored with
+            | ValueSome stored ->
+                let value=selected context stored
+                if value.Input.OriginalOrderOperand.IsSome then encode nextName variables context.Node context.Role (Selected value)
+                else QueryOrderingPolicy.chunk context.Role context.Node.Target (scalar context preparedPayload)
+            | ValueNone -> QueryOrderingPolicy.chunk context.Role context.Node.Target (scalar context preparedPayload)
         let pending=column "pending"
         let frame=at pending "$[#-1]"
+        // Selected child coordinates extend their ancestor path. A pending
+        // continuation needs its prefix length, not another copy of that path.
+        let savedCoordinate = if stored.IsSome then SqlExpr.FunctionCall("length",[coordinate]) else coordinate
+        let resumedCoordinate =
+            if stored.IsSome then SqlExpr.FunctionCall("substr",[coordinate;integer 1;at frame "$[2]"])
+            else at frame "$[2]"
         let state context slot coordinate pending chunk doneValue =
             SqlExpr.JsonArrayExpr [context;slot;coordinate;pending;chunk;doneValue]
         let advance context slot coordinate pending chunk = state (integer context) (integer slot) coordinate pending chunk (integer 0)
         let resume chunk =
             choose (binary BinaryOperator.Gt (SqlExpr.FunctionCall("json_array_length",[pending])) (integer 0))
-                (state (at frame "$[0]") (at frame "$[1]") (at frame "$[2]")
+                (state (at frame "$[0]") (at frame "$[1]") resumedCoordinate
                     (SqlExpr.FunctionCall("jsonb_remove",[pending;text "$[#-1]"])) chunk (integer 0))
                 (state (integer rootContext) (integer -1) initialCoordinate (SqlExpr.JsonArrayExpr []) chunk (integer 1))
         let bodies=ResizeArray<SqlExpr*SqlExpr>()
@@ -141,47 +194,87 @@ module internal QueryOrderingTraversal =
             let context=contexts[index]
             let childRole=QueryOrderingPolicy.children context.Role context.Node
             let body=
+                match context.Stored with
+                | ValueSome stored when stored.Access=Current && stored.Input.OriginalOrderOperand.IsSome ->
+                    resume(encode nextName variables context.Node context.Role (Selected(produced stored)))
+                | _ ->
                 match context.Node.Kind with
-                | ScalarNode -> resume(QueryOrderingPolicy.chunk context.Role context.Node.Target (scalar context))
+                | ScalarNode -> resume(chunk context None)
                 | OptionalNode(child,_) ->
                     let stored,coordinate=payloadContext context child
                     let childContext=register child childRole stored
                     choose (missing context) (resume(text "0")) (advance childContext -1 coordinate pending (text "1"))
                 | ComponentNode fields ->
-                    let choices=fields |> Array.mapi(fun ordinal field ->
-                        let stored,childCoordinate=childContext context field.Node field.Name ordinal
-                        let child=register field.Node childRole stored
-                        let stack=if ordinal+1=fields.Length then pending else SqlExpr.FunctionCall("jsonb_insert",[pending;text "$[#]";
-                            SqlExpr.JsonArrayExpr [integer index;integer(ordinal+1);coordinate]])
-                        binary BinaryOperator.Eq (column "slot") (integer ordinal),advance child -1 childCoordinate stack (text ""))
+                    let transition ordinal prefix =
+                        if ordinal=fields.Length then resume prefix
+                        elif fields[ordinal].Node.Kind=ScalarNode then
+                            let mutable finish=ordinal+1
+                            while finish<fields.Length && fields[finish].Node.Kind=ScalarNode do finish<-finish+1
+                            let chunks =
+                                [| yield prefix
+                                   for index in ordinal..finish-1 do
+                                    let field=fields[index]
+                                    let stored,_=childContext context field.Node field.Name index
+                                    let child={Node=field.Node;Role=childRole;Stored=stored}
+                                    let payload=if stored.IsNone then Some(preparedField index "payload") else None
+                                    yield chunk child payload |]
+                            let rec concatenate first count =
+                                if count=1 then chunks[first] else
+                                let left=count/2
+                                SqlExpr.FunctionCall("concat",[concatenate first left;concatenate (first+left) (count-left)])
+                            let chunk=concatenate 0 chunks.Length
+                            if finish=fields.Length then resume chunk else advance index finish coordinate pending chunk
+                        else
+                            let field=fields[ordinal]
+                            let stored,childCoordinate=childContext context field.Node field.Name ordinal
+                            let child=register field.Node childRole stored
+                            let stack=if ordinal+1=fields.Length then pending else SqlExpr.FunctionCall("jsonb_insert",[pending;text "$[#]";
+                                SqlExpr.JsonArrayExpr [integer index;integer(ordinal+1);savedCoordinate]])
+                            advance child -1 childCoordinate stack prefix
+                    let choices =
+                        [|for ordinal in 0..fields.Length-1 do
+                            if ordinal=0 || fields[ordinal].Node.Kind<>ScalarNode || fields[ordinal-1].Node.Kind<>ScalarNode then
+                                yield binary BinaryOperator.Eq (column "slot") (integer ordinal),transition ordinal (text "")|]
                     let consume=if choices.Length=0 then resume(text "") else SqlExpr.CaseExpr(choices[0],choices[1..] |> Array.toList,Some(resume(text "")))
-                    let beginValue=advance index 0 coordinate pending (text(if context.Node.Target.IsValueType then "" else "1"))
+                    let beginValue=transition 0 (text(if context.Node.Target.IsValueType then "" else "1"))
                     let beginValue=if context.Node.Target.IsValueType then beginValue else choose (missing context) (resume(text "0")) beginValue
                     choose (binary BinaryOperator.Lt (column "slot") (integer 0)) beginValue consume
             bodies.Add(binary BinaryOperator.Eq (column "context") (integer index),body)
             index<-index+1
-        let step=SqlExpr.CaseExpr(bodies[0],bodies |> Seq.skip 1 |> Seq.toList,Some(resume(text "")))
+        // Typed child access has already selected the writer and literal suffix.
+        // Read that suffix from the bound root without copying its parent subtree.
+        let directPath expression =
+            let path (suffix:string) = SqlExpr.FunctionCall("concat", [coordinate; text(suffix.Substring(1))])
+            SqlExpr.map (function
+                | SqlExpr.FunctionCall("jsonb_extract", [SqlExpr.FunctionCall("jsonb_extract", [root; current]); SqlExpr.Literal(SqlLiteral.String suffix)])
+                    when root=rootColumn && current=coordinate && suffix.StartsWith("$",StringComparison.Ordinal) ->
+                    SqlExpr.FunctionCall("jsonb_extract", [root; path suffix])
+                | SqlExpr.Binary(SqlExpr.FunctionCall("jsonb_extract", [root; current]),BinaryOperator.JsonText,SqlExpr.Literal(SqlLiteral.String suffix))
+                    when root=rootColumn && current=coordinate && suffix.StartsWith("$",StringComparison.Ordinal) ->
+                    SqlExpr.Binary(root,BinaryOperator.JsonText,path suffix)
+                | value -> value) expression
+        let step=SqlExpr.CaseExpr(bodies[0],bodies |> Seq.skip 1 |> Seq.toList,Some(resume(text ""))) |> directPath
         let initial =
             core None
-                [projection "context" (integer rootContext)
-                 projection "slot" (integer -1)
-                 projection "coordinate" initialCoordinate
-                 projection "pending" (SqlExpr.JsonArrayExpr [])
-                 projection "chunk" (text "")
-                 projection "done" (integer 0)
+                [projection "state" (state (integer rootContext) (integer -1) initialCoordinate (SqlExpr.JsonArrayExpr []) (text "") (integer 0))
                  projection "ordinal" (integer 0)]
-        let next=SqlExpr.Column(Some successor,"value")
-        let columns=["context";"slot";"coordinate";"pending";"chunk";"done"]
         let recursive =
             core (Some(BaseTable(work,Some current)))
-                ((columns |> List.mapi(fun ordinal name -> projection name (at next ("$["+string ordinal+"]"))))
-                 @ [projection "ordinal" (binary BinaryOperator.Add (column "ordinal") (integer 1))])
+                [projection "state" step
+                 projection "ordinal" (binary BinaryOperator.Add (SqlExpr.Column(Some current,"ordinal")) (integer 1))]
         let recursive =
             { recursive with
-                Joins = List.ofSeq joins @ [CrossJoin(FromJsonEach(SqlExpr.JsonArrayExpr [step],Some successor))]
+                Joins = List.ofSeq joins
                 Where = Some(binary BinaryOperator.Eq (column "done") (integer 0)) }
         bindings.Add {Name=work;Materialized=false;Query={Ctes=[];Body=UnionAllSelect(initial,[recursive])}}
-        let encoded=SqlExpr.AggregateCall(AggregateKind.GroupConcat,Some(SqlExpr.Column(None,"chunk")),false,Some(text ""),[SqlExpr.Column(None,"ordinal"),SortDirection.Asc])
+        let encoded=SqlExpr.AggregateCall(AggregateKind.GroupConcat,Some(field (SqlExpr.Column(None,"state")) "chunk"),false,Some(text ""),[SqlExpr.Column(None,"ordinal"),SortDirection.Asc])
+        let encoded=
+            match root with
+            | Prepared(_,ValueSome _) ->
+                // A projected path through an absent ancestor has no node.
+                // Its existing selected/default owner supplies the result.
+                choose (SqlExpr.Unary(UnaryOperator.IsNotNull,initialCoordinate)) encoded (SqlExpr.Literal SqlLiteral.Null)
+            | _ -> encoded
         let value=SqlExpr.ScalarSubquery {Ctes=List.ofSeq bindings;Body=SingleSelect(core (Some(BaseTable(work,None))) [projection "value" encoded])}
         if rootBindings.Count=0 then value else
         SqlExpr.ScalarSubquery {Ctes=List.ofSeq rootBindings;Body=SingleSelect(core (Some(BaseTable(rootBindings[0].Name,Some rootAlias))) [projection "value" value])}

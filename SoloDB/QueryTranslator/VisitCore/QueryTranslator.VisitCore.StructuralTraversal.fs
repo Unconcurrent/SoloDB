@@ -44,7 +44,7 @@ module internal QueryStructuralTraversal =
     let internal mapInput map (input: QuerySerializationInput) =
         let rec loop (input: QuerySerializationInput) =
             { input with
-                OriginalStringUnits = input.OriginalStringUnits |> ValueOption.map (fun units -> lazy (map units.Value))
+                OriginalOrderOperand = input.OriginalOrderOperand |> ValueOption.map (fun original -> original.WithSource(lazy (map original.Data.Value), map original.Path))
                 Operand = input.Operand |> ValueOption.map(fun operand ->
                     { Descriptor = map operand.Descriptor
                       Accesses = operand.Accesses |> Array.map(fun step ->

@@ -208,14 +208,15 @@ module internal QueryStructuralShape =
         let underlying = TypeMetadata.enumUnderlying target
         underlying,Convert.ChangeType(value,underlying,Globalization.CultureInfo.InvariantCulture)
 
+    type private Selection = { mutable Complete: bool; Children: Dictionary<int,Selection> }
+
     [<Struct>]
     type private Preparation =
-        { Node: Node; Reader: Lazy<Func<obj,obj>> voption; Value: obj; Parent: int; Ordinal: int }
+        { Node: Node; Reader: Lazy<Func<obj,obj>> voption; Value: obj; Parent: int; Ordinal: int; Selection: Selection voption }
 
-    /// Invocation data is flat; only original component readers traverse the value.
-    let prepare graph value =
+    let private prepareWithSelection graph selection value =
         let pending = Stack<Preparation>()
-        pending.Push { Node = graph.Root; Reader = ValueNone; Value = value; Parent = -1; Ordinal = 0 }
+        pending.Push { Node = graph.Root; Reader = ValueNone; Value = value; Parent = -1; Ordinal = 0; Selection = selection }
         let mutable destination = Span<char>.Empty
         let mutable state = JsonWriteState<char>(null,null,null)
         let mutable comma = false
@@ -227,6 +228,14 @@ module internal QueryStructuralShape =
             let value = match item.Reader with ValueSome read -> read.Value.Invoke item.Value | ValueNone -> item.Value
             let current = index
             index <- index + 1
+            let selected ordinal =
+                match item.Selection with
+                | ValueNone -> ValueSome ValueNone
+                | ValueSome selection when selection.Complete -> ValueSome ValueNone
+                | ValueSome selection ->
+                    match selection.Children.TryGetValue ordinal with
+                    | true, child -> ValueSome(ValueSome child)
+                    | _ -> ValueNone
             if comma then JsonWriteBuffer.append &destination &state ','
             comma <- true
             JsonWriteBuffer.append &destination &state '['
@@ -245,12 +254,35 @@ module internal QueryStructuralShape =
                     JsonRawPrimitive.WriteString<char,JsonUtf16Writer>(encoded,&destination,&state)
                 else JsonValue.WriteQueryOperandLeaf(node.Target,value,&destination,&state)
             | OptionalNode(child,read) when not(isNull value) ->
-                pending.Push { Node = child; Reader = ValueSome read; Value = value; Parent = current; Ordinal = 0 }
+                match selected 0 with
+                | ValueSome selection -> pending.Push { Node = child; Reader = ValueSome read; Value = value; Parent = current; Ordinal = 0; Selection = selection }
+                | ValueNone -> ()
             | ComponentNode fields when not(isNull value) ->
                 for index = fields.Length - 1 downto 0 do
                     let field = fields[index]
-                    pending.Push { Node = field.Node; Reader = ValueSome field.Reader; Value = value; Parent = current; Ordinal = index }
+                    match selected index with
+                    | ValueSome selection -> pending.Push { Node = field.Node; Reader = ValueSome field.Reader; Value = value; Parent = current; Ordinal = index; Selection = selection }
+                    | ValueNone -> ()
             | _ -> ()
             JsonWriteBuffer.append &destination &state ']'
         JsonWriteBuffer.append &destination &state ']'
         System.String(state.Storage,0,state.Written)
+
+    /// Invocation data is flat; only original component readers traverse the value.
+    let prepare graph value = prepareWithSelection graph ValueNone value
+
+    /// Projected demands retain ancestor presence without reading unused siblings.
+    let prepareSelected graph (paths: seq<int array>) value =
+        let create () = { Complete = false; Children = Dictionary<int,Selection>() }
+        let root = create()
+        for path in paths do
+            let mutable current = root
+            for ordinal in path do
+                match current.Children.TryGetValue ordinal with
+                | true, child -> current <- child
+                | _ ->
+                    let child = create()
+                    current.Children.Add(ordinal,child)
+                    current <- child
+            current.Complete <- true
+        prepareWithSelection graph (ValueSome root) value

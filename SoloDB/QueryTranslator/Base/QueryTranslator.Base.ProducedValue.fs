@@ -120,7 +120,7 @@ module internal QueryProduced =
                 else bound tokenValue alias input
             let result: QueryProducedValue = produce value input
             match result with
-            | DirectValue(value, resultInput) when resultInput.OriginalStringUnits.IsNone && invariantLeaf resultInput && isConstantDescriptor(inputDescriptor resultInput) ->
+            | DirectValue(value, resultInput) when resultInput.OriginalOrderOperand.IsNone && invariantLeaf resultInput && isConstantDescriptor(inputDescriptor resultInput) ->
                 DirectValue(singleton alias source value, rebaseSerializationInput resultInput)
             | _ -> PackedValue(singleton alias source (packet result), rebaseSerializationInput result.Input)
     let bind nextName produce produced = bindCore false nextName produce produced
@@ -194,7 +194,7 @@ module internal QueryProduced =
         match whenTrue, whenFalse with
         | DirectValue(first, firstInput), DirectValue(last, lastInput) ->
             let descriptor = inputDescriptor firstInput
-            if firstInput.OriginalStringUnits.IsNone && lastInput.OriginalStringUnits.IsNone &&
+            if firstInput.OriginalOrderOperand.IsNone && lastInput.OriginalOrderOperand.IsNone &&
                invariantLeaf firstInput && firstInput.Carrier = lastInput.Carrier &&
                isConstantDescriptor descriptor && descriptor = inputDescriptor lastInput then
                 DirectValue(SqlExpr.CaseExpr((condition, first), [], Some last), rebaseSerializationInput firstInput)

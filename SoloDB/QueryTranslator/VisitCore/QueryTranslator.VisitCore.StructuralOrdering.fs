@@ -17,6 +17,37 @@ module internal QueryStructuralOrdering =
     let private absent=SqlExpr.Literal SqlLiteral.Null
     let supported target=match QueryStructuralShape.tryCreate target with Available graph -> graph.Root.Kind <> ScalarNode | _ -> false
 
+    let originalPreparation target =
+        let shape =
+            if typeof<string>.Equals target then
+                let node = { Index = 0; Target = target; Kind = ScalarNode }
+                let types = Dictionary<Type,Node>()
+                types.Add(target,node)
+                Available { Root=node; Nodes=[|node|]; Types=types; Recursive=false }
+            else QueryStructuralShape.tryCreate target
+        match shape with
+        | Available graph when typeof<string>.Equals target || graph.Root.Kind<>ScalarNode ->
+            let project parent access =
+                let rec child (node:Node) access =
+                    match node.Kind, access with
+                    | OptionalNode(payload,_), ClrMember("Value",_) -> ValueSome struct(payload.Target,[|0|])
+                    | ComponentNode fields, _ ->
+                        let selected =
+                            match access with
+                            | ClrMember(name,_) | StoredLabel(:? string as name) -> fields |> Array.tryFindIndex(fun field -> field.Name=name)
+                            | StoredLabel(:? int as index) when index>=0 && index<fields.Length && not(Utils.isTuple node.Target && fields.Length=8 && index=7) -> Some index
+                            | _ -> None
+                        match selected,access with
+                        | Some ordinal,_ -> ValueSome struct(fields[ordinal].Node.Target,[|ordinal|])
+                        | None,StoredLabel(:? int as index) when Utils.isTuple node.Target && fields.Length=8 && index>=7 ->
+                            child fields[7].Node (StoredLabel(box(index-7)))
+                            |> ValueOption.map(fun struct(target,path) -> struct(target,Array.append [|7|] path))
+                        | _ -> ValueNone
+                    | _ -> ValueNone
+                match graph.Types.TryGetValue parent with true,node -> child node access | _ -> ValueNone
+            ValueSome(struct((fun paths value -> box(QueryStructuralShape.prepareSelected graph paths value)),project))
+        | _ -> ValueNone
+
     /// Original bound keys retain their own readers before stored serialization.
     let rec translate visitProduced (expression: Expression) (qb: QueryBuilder) =
         match expression with
@@ -35,7 +66,7 @@ module internal QueryStructuralOrdering =
         let ordinary=match direction with SortDirection.AscNullsLast -> SortDirection.Asc | SortDirection.DescNullsFirst -> SortDirection.Desc | value -> value
         match key with
         | Prepared(graph,value) ->
-            let encoded=QueryOrderingTraversal.encode nextName variables graph.Root QueryOrderingPolicy.Default (QueryOrderingTraversal.Prepared value)
+            let encoded=QueryOrderingTraversal.encode nextName variables graph.Root QueryOrderingPolicy.Default (QueryOrderingTraversal.Prepared(value,ValueNone))
             let presence=
                 if direction=ordinary then [] else
                 let absent=SqlExpr.FunctionCall("jsonb_extract",[value;SqlExpr.Literal(SqlLiteral.String "$[0][2]")])
@@ -58,16 +89,23 @@ module internal QueryStructuralOrdering =
                         let produced=DirectValue(value,input)
                         let ordering value=[{Expr=guarded guard value;Direction=ordinary}]
                         let marker missing=[{Expr=guarded guard (choose missing absent (integer 1L));Direction=if top then direction else ordinary}]
-                        if active.Contains(struct(node.Index,role)) then
+                        match input.OriginalOrderOperand with
+                        | ValueSome original ->
+                            original.Demand()
+                            let encoded=QueryOrderingTraversal.encode nextName variables node role (QueryOrderingTraversal.Selected produced)
+                            let presence=
+                                if not top || direction=ordinary || node.Target.IsValueType && not(Utils.isOptionType node.Target) then [] else
+                                marker (SqlExpr.Binary(SqlExpr.FunctionCall("substr",[encoded;integer 1L;integer 1L]),BinaryOperator.Eq,SqlExpr.Literal(SqlLiteral.String "0")))
+                            presence @ ordering encoded
+                        | ValueNone when active.Contains(struct(node.Index,role)) ->
                             QueryOrderingTraversal.encode nextName variables node role (QueryOrderingTraversal.Selected produced) |> ordering
-                        else
+                        | ValueNone ->
                             active.Add(struct(node.Index,role)) |>ignore
                             let childRole=QueryOrderingPolicy.children role node
                             let result=
                                 match node.Kind with
                                 | ScalarNode ->
-                                    (if typeof<string>.Equals node.Target then QueryStructuralAccess.stringValue nextName produced
-                                     else QueryStructuralAccess.scalar variables nextName node.Target produced)
+                                    QueryStructuralAccess.scalar variables nextName node.Target produced
                                     |> QueryOrderingPolicy.finishDefault predicate
                                     |> QueryOrderingPolicy.scalar role node.Target |> ordering
                                 | OptionalNode(child,_) ->

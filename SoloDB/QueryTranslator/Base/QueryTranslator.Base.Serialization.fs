@@ -37,8 +37,9 @@ module internal QueryTranslatorSerialization =
         let owner position (original: QueryPhysicalOwner voption) = original |> ValueOption.map (fun owner ->
             { owner with Descriptor = SqlExpr.CaseExpr((framed, at ("$[" + string position + "]")), [], Some(SqlExpr.Literal SqlLiteral.Null)) })
         { input with Operand = ValueSome { Descriptor = SqlExpr.CaseExpr((framed, at "$[1]"), [], Some descriptor); Accesses = Array.empty }
-                     OriginalStringUnits = input.OriginalStringUnits |> ValueOption.map (fun _ ->
-                         lazy (SqlExpr.CaseExpr((framed, at "$[4]"), [], Some(SqlExpr.Literal SqlLiteral.Null))))
+                     OriginalOrderOperand = input.OriginalOrderOperand |> ValueOption.map (fun original ->
+                         let field path = SqlExpr.CaseExpr((framed, at path), [], Some(SqlExpr.Literal SqlLiteral.Null))
+                         original.WithSource(lazy (field "$[4][0]"), field "$[4][1]"))
                      PhysicalOwner = owner 2 input.PhysicalOwner
                      ReferenceOwner = input.ReferenceOwner |> ValueOption.map (fun original ->
                          { original with Descriptor = SqlExpr.CaseExpr((framed, at "$[3]"), [], Some(SqlExpr.Literal SqlLiteral.Null)) }) }
@@ -71,7 +72,12 @@ module internal QueryTranslatorSerialization =
                     | ValueNone -> layout |> Utils.optionToValueOption |> ValueOption.bind _.Shape
             Children = children
             Carrier = if inputs |> Array.forall (fun input -> input.Carrier = first.Carrier) then first.Carrier else CanonicalToken
-            OriginalStringUnits = if inputs |> Array.exists (fun input -> input.OriginalStringUnits.IsSome) then ValueSome(lazy (SqlExpr.Literal SqlLiteral.Null)) else ValueNone
+            OriginalOrderOperand =
+                let originals = inputs |> Array.choose (fun input -> input.OriginalOrderOperand |> Utils.valueOptionToOption)
+                if originals.Length=0 then ValueNone else
+                ValueSome(QueryOriginalOrderOperand(originals[0].Target,lazy (SqlExpr.Literal SqlLiteral.Null),SqlExpr.Literal SqlLiteral.Null,
+                    originals |> Array.maxBy _.Depth |> _.Depth,
+                    (fun path -> for original in originals do original.Demand path), originals[0].Projection))
             LegacyCharacterText = inputs |> Array.exists _.LegacyCharacterText
             StructuralDefault = inputs |> Array.exists _.StructuralDefault
             PhysicalOwner = sharedPhysicalOwner inputs
@@ -83,7 +89,7 @@ module internal QueryTranslatorSerialization =
         let rec qualifyInput (input: QuerySerializationInput) =
             { input with
                 Source = input.Source |> ValueOption.map qualify
-                OriginalStringUnits = input.OriginalStringUnits |> ValueOption.map (fun units -> lazy (qualify units.Value))
+                OriginalOrderOperand = input.OriginalOrderOperand |> ValueOption.map (fun original -> original.WithSource(lazy (qualify original.Data.Value), qualify original.Path))
                 Operand = input.Operand |> ValueOption.map (fun operand ->
                     { Descriptor = qualify operand.Descriptor
                       Accesses = operand.Accesses |> Array.map (fun step ->
@@ -131,6 +137,14 @@ module internal QueryTranslatorSerialization =
                      SqlExpr.JsonArrayExpr [SqlExpr.Literal(SqlLiteral.String "Items"); SqlExpr.Literal(SqlLiteral.String (item.MakeArrayType()).FullName); itemDescriptor]]]
             SqlExpr.JsonArrayExpr [SqlExpr.Literal(SqlLiteral.Integer 2L); rootDescriptor input; children]
         | _ -> inputDescriptor input
+
+    let private projectOriginalOrder access (original: QueryOriginalOrderOperand) =
+        match original.Projection original.Target access with
+        | ValueNone -> ValueNone
+        | ValueSome struct(target, steps) ->
+            let path = Array.fold (fun path ordinal ->
+                SqlExpr.FunctionCall("jsonb_insert",[path;SqlExpr.Literal(SqlLiteral.String "$[#]");SqlExpr.Literal(SqlLiteral.Integer(int64 ordinal))])) original.Path steps
+            ValueSome(original.Child(target,path,steps))
 
     /// One child resolver retains produced overrides and actual writer responsibility.
     let internal serializationAccess (parent: QuerySerializationInput) access =
@@ -195,6 +209,15 @@ module internal QueryTranslatorSerialization =
                 let actual = source |> ValueOption.map writerHeader |> ValueOption.defaultValue absentWriterHeader
                 ValueSome { operand with Accesses = Array.append operand.Accesses [|serializationStep access actual|] }
             | _ -> child.Operand
+        let original =
+            match parent.OriginalOrderOperand with
+            | ValueSome original ->
+                let access =
+                    match selected |> ValueOption.bind _.ClrName with
+                    | ValueSome name -> ClrMember(name,child.OriginalType)
+                    | ValueNone -> access
+                projectOriginalOrder access original
+            | ValueNone -> child.OriginalOrderOperand
         let child = { child with Source = source; SourceOffset = offset; Operand = operand }
         let child =
             let retained = selected |> ValueOption.exists (fun selected ->
@@ -222,6 +245,17 @@ module internal QueryTranslatorSerialization =
         let child =
             match child.Operand with
             | ValueSome operand when parent.Operand.IsSome && operand.Accesses.Length = 0 && producedChildPosition.IsSome && parent.Children.Length > 0 -> fromDescriptor operand.Descriptor child
+            | _ -> child
+        let child =
+            match parent.OriginalOrderOperand,original,child.OriginalOrderOperand with
+            | ValueSome _,ValueSome projected,ValueSome selected ->
+                let present=SqlExpr.Unary(UnaryOperator.IsNotNull,projected.Data.Value)
+                let choose yes no=SqlExpr.CaseExpr((present,yes),[],Some no)
+                let original=QueryOriginalOrderOperand(projected.Target,lazy (choose projected.Data.Value selected.Data.Value),
+                    choose projected.Path selected.Path,max projected.Depth selected.Depth,
+                    (fun path -> projected.Demand path; selected.Demand path),projected.Projection)
+                {child with OriginalOrderOperand=ValueSome original}
+            | ValueSome _,_,_ -> {child with OriginalOrderOperand=original}
             | _ -> child
         let child =
             if DBRefTypeHelpers.isSingleReferenceType child.OriginalType || DBRefTypeHelpers.isManyReferenceType child.OriginalType then
@@ -291,7 +325,7 @@ module internal QueryTranslatorSerialization =
 
     let rec internal rebaseSerializationInput (input: QuerySerializationInput) =
         { input with Operand = ValueNone; Source = ValueNone; SourceOffset = 0
-                     OriginalStringUnits = input.OriginalStringUnits |> ValueOption.map (fun _ -> lazy (SqlExpr.Literal SqlLiteral.Null))
+                     OriginalOrderOperand = input.OriginalOrderOperand |> ValueOption.map (fun original -> original.WithSource(lazy (SqlExpr.Literal SqlLiteral.Null), SqlExpr.Literal SqlLiteral.Null))
                      Children = Array.map rebaseSerializationInput input.Children
                      PhysicalOwner = input.PhysicalOwner |> ValueOption.map (fun owner -> { owner with Descriptor = SqlExpr.Literal SqlLiteral.Null })
                      ReferenceOwner = input.ReferenceOwner |> ValueOption.map (fun owner -> { owner with Descriptor = SqlExpr.Literal SqlLiteral.Null }) }
@@ -299,7 +333,7 @@ module internal QueryTranslatorSerialization =
     /// Known produced children remain independently live; dynamic roots stay paired.
     let rec internal publishInput nextName (input: QuerySerializationInput) =
         let output = rebaseSerializationInput input
-        if input.Operand.IsNone && input.PhysicalOwner.IsNone && input.ReferenceOwner.IsNone && input.OriginalStringUnits.IsNone then
+        if input.Operand.IsNone && input.PhysicalOwner.IsNone && input.ReferenceOwner.IsNone && input.OriginalOrderOperand.IsNone then
             let children = input.Children |> Array.map (publishInput nextName)
             children |> Array.toList |> List.collect fst,
             { output with Children = children |> Array.map snd }
@@ -322,7 +356,7 @@ module internal QueryTranslatorSerialization =
                 | SqlExpr.Column(None, name) when seen.Add name -> projections.Add { Alias = Some name; Expr = SqlExpr.Column(alias, name) }
                 | _ -> ()) () expression
         let rec collect input =
-            input.OriginalStringUnits |> ValueOption.iter (fun units -> inspect units.Value)
+            input.OriginalOrderOperand |> ValueOption.iter (fun original -> inspect original.Data.Value; inspect original.Path)
             match input.Operand with
             | ValueSome operand ->
                 inspect operand.Descriptor
@@ -333,5 +367,9 @@ module internal QueryTranslatorSerialization =
         List.ofSeq projections
 
     let internal serializationPayload (input: QuerySerializationInput) =
-        { input with OriginalType = Utils.unwrapNullableType input.OriginalType }
+        let target = Utils.unwrapNullableType input.OriginalType
+        let original =
+            if target=input.OriginalType then input.OriginalOrderOperand
+            else input.OriginalOrderOperand |> ValueOption.bind (projectOriginalOrder (ClrMember("Value",target)))
+        { input with OriginalType = target; OriginalOrderOperand = original }
 

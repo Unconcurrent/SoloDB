@@ -32,11 +32,3 @@ module internal QueryStructuralAccess =
                 let fallback = QueryDefault.comparisonValue variables target |> QueryProduced.value nextName
                 SqlExpr.Coalesce(value,[fallback])
             else value) produced
-
-    /// Ordering consumes original units before a native String extraction can replace them.
-    let stringValue nextName produced =
-        QueryProduced.consume nextName (fun raw input ->
-            let value = QueryProduced.comparisonValue typeof<string> raw input
-            match input.OriginalStringUnits with
-            | ValueSome units -> SqlExpr.Coalesce(SqlExpr.FunctionCall("base64", [units.Value]), [value])
-            | ValueNone -> value) produced

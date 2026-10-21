@@ -23,7 +23,7 @@ module internal QueryableValueBindings =
         let allocate name =
             variables.Add(name, null)
             SqlExpr.Parameter name
-        let bind prepare encoded scalarJson withWriter (unitsSlot: string voption ref voption) (expression: Expression) =
+        let bind prepare encoded scalarJson withWriter (original: struct(string voption ref * ResizeArray<int array> * (seq<int array> -> obj -> obj)) voption) (expression: Expression) =
             let name = "dp" + variables.Count.ToString(Globalization.CultureInfo.InvariantCulture)
             let value = allocate name
             let json = if encoded then ValueSome(allocate (name + "j")) else ValueNone
@@ -32,9 +32,11 @@ module internal QueryableValueBindings =
                 let sampled = ExpressionEvaluation.evaluateExpr<obj> expression
                 let struct(stored, isJson, writerType) = prepare sampled
                 variables[name] <- stored
-                match unitsSlot |> ValueOption.bind _.Value with
-                | ValueSome unitsName ->
-                    variables[unitsName] <- if isNull sampled then null else box(Convert.ToBase64String(QueryTranslatorCharacters.ordinalBytes (unbox<string> sampled)))
+                match original with
+                | ValueSome struct(slot,demanded,prepareOriginal) ->
+                    match slot.Value with
+                    | ValueSome name -> variables[name] <- if demanded.Count>0 then prepareOriginal demanded sampled else null
+                    | ValueNone -> ()
                 | ValueNone -> ()
                 if encoded then variables[name + "j"] <- box isJson
                 if withWriter then
@@ -49,19 +51,20 @@ module internal QueryableValueBindings =
                     SqlExpr.CaseExpr((flag, token), [], Some value)
             value, writer
         let produced comparison (expression: Expression) =
-            let unitsSlot = if typeof<string>.Equals expression.Type then ValueSome(ref ValueNone) else ValueNone
+            let preparation = QueryStructuralOrdering.originalPreparation expression.Type
+            let original = preparation |> ValueOption.map(fun struct(prepare,_) -> struct(ref ValueNone,ResizeArray<int array>(),prepare))
             let value, writer = bind (JsonFunctions.prepareQueryParameter comparison expression.Type)
                                     (JsonFunctions.parameterMayNeedJson expression.Type) false
-                                    (not(JsonFunctions.parameterWriterIsFixed expression.Type)) unitsSlot expression
+                                    (not(JsonFunctions.parameterWriterIsFixed expression.Type)) original expression
             let produced = QueryProduced.parameter expression.Type value writer
-            match unitsSlot, produced with
-            | ValueSome slot, DirectValue(value, input) ->
+            match original, preparation, produced with
+            | ValueSome struct(slot,demanded,_), ValueSome struct(_,project), DirectValue(value, input) ->
                 let units = lazy (
                     let name = "dp" + variables.Count.ToString(Globalization.CultureInfo.InvariantCulture)
                     let parameter = allocate name
                     slot.Value <- ValueSome name
                     parameter)
-                DirectValue(value, { input with OriginalStringUnits = ValueSome units })
+                DirectValue(value, { input with OriginalOrderOperand = ValueSome(QueryOriginalOrderOperand(expression.Type,units,SqlExpr.JsonArrayExpr [],0,(fun path -> demanded.Add path),project)) })
             | _ -> produced
         let scalar (expression: Expression) =
             bind (fun value -> struct(value, false, expression.Type)) false false false ValueNone expression |> fst
