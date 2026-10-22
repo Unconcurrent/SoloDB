@@ -118,7 +118,9 @@ public sealed class CompleteFSharpAssembly : ITask
                 if (!Changed)
                 {
                     var obsolete = Path.Combine(OutputDirectory, Path.GetFileName(Input));
-                    if (Path.GetFullPath(obsolete) != Path.GetFullPath(Input))
+                    // A fresh inactive consumer has never created this owned
+                    // completion directory. Original compiler output stays intact.
+                    if (Path.GetFullPath(obsolete) != Path.GetFullPath(Input) && Directory.Exists(OutputDirectory))
                     {
                         File.Delete(obsolete);
                         File.Delete(Path.ChangeExtension(obsolete, ".pdb"));
