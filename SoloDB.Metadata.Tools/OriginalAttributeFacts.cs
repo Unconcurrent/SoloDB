@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
@@ -23,11 +24,50 @@ internal static class OriginalAttributeFacts
         ModuleDefinition output,PropertyDefinition property,Action<string> access)
     {
         if (!property.HasCustomAttributes) return Array.Empty<AttributeConstruction<TypeReference,MethodReference,FieldReference>>();
-        using var stream = File.OpenRead(property.Module.FileName);
-        using var image = new PEReader(stream);
-        var metadata = image.GetMetadataReader();
+        using var reader = new Reader(output,property.Module);
+        return reader.Read(property,access);
+    }
+
+    // Completion reads immutable original property tokens while rewriting only
+    // generated factory bodies. Keep its image and decoded facts in that lifetime.
+    internal sealed class Reader(ModuleDefinition output,ModuleDefinition original) : IDisposable
+    {
+        private PEReader? image;
+        private MetadataReader? metadata;
+        private readonly Types provider = new(original);
+        private readonly Dictionary<PropertyDefinition,(AttributeConstruction<TypeReference,MethodReference,FieldReference>[] Facts,string[] Access)> properties = new();
+
+        internal AttributeConstruction<TypeReference,MethodReference,FieldReference>[] Read(PropertyDefinition property,Action<string> access)
+        {
+            if (!property.HasCustomAttributes) return Array.Empty<AttributeConstruction<TypeReference,MethodReference,FieldReference>>();
+            if (properties.TryGetValue(property,out var cached))
+            {
+                foreach (var dependency in cached.Access) access(dependency);
+                return cached.Facts;
+            }
+            if (image == null)
+            {
+                var stream = File.OpenRead(original.FileName);
+                try { image = new PEReader(stream); }
+                catch { stream.Dispose(); throw; }
+            }
+            var dependencies = new List<string>();
+            var facts = Decode(output,property,metadata ??= image.GetMetadataReader(),provider,dependency =>
+            {
+                dependencies.Add(dependency);
+                access(dependency);
+            });
+            properties.Add(property,(facts,dependencies.ToArray()));
+            return facts;
+        }
+
+        public void Dispose() => image?.Dispose();
+    }
+
+    private static AttributeConstruction<TypeReference,MethodReference,FieldReference>[] Decode(
+        ModuleDefinition output,PropertyDefinition property,MetadataReader metadata,Types provider,Action<string> access)
+    {
         var original = metadata.GetPropertyDefinition(MetadataTokens.PropertyDefinitionHandle(checked((int)property.MetadataToken.RID)));
-        var provider = new Types(property.Module);
         return original.GetCustomAttributes().Select((handle,index) => {
             var attribute = property.CustomAttributes[index];
             var decoded = metadata.GetCustomAttribute(handle).DecodeValue(provider);

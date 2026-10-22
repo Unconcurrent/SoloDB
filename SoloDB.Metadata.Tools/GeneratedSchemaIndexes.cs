@@ -1,4 +1,5 @@
 using System.Linq;
+using System.Collections.Generic;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using SoloDatabase.Metadata.CodecGeneration;
@@ -103,32 +104,60 @@ internal static class GeneratedSchemaIndexes
                 throw new System.InvalidOperationException("The resolved schema signature assembly differs from its original identity: " + reference.FullName);
             return SourceTypeIdentity.Definition(original,reference.FullName);
         }
-        string OriginalIdentity(TypeReference reference) => GeneratedJsonDefinitions.SignatureIdentity(reference,Definition);
-        var expected = template.MainModule.Types.SelectMany(Factories).Select(method => Source(method).Key).ToArray();
-        var actual = consumer.MainModule.Types.SelectMany(Factories).Select(method => Source(method).Key).ToArray();
-        if (expected.Except(actual,System.StringComparer.Ordinal).Any() || actual.Except(expected,System.StringComparer.Ordinal).Any())
-            throw new System.InvalidOperationException("Current generated schema factories do not match the compiler template.");
-        void Complete(TypeDefinition type)
+        var identities = new Dictionary<TypeReference,string>();
+        var signatures = new Dictionary<MethodReference,string>();
+        string OriginalIdentity(TypeReference reference)
         {
-            foreach (var method in type.Methods.Where(method => Pending(method,product)))
-            {
-                var source = Source(method);
-                var owner = source.Owner;
-                var root = owner is GenericInstanceType closed ? closed.ElementType : owner;
-                var original = consumer.MainModule.GetType(root.FullName) ?? throw new System.InvalidOperationException("The current compiler image has no schema source type: " + root.FullName);
-                var signature = Signature(source.Accessor,OriginalIdentity);
-                var candidates = original.Properties.Where(property =>
-                    (property.GetMethod != null && Signature(property.GetMethod,OriginalIdentity) == signature) ||
-                    (property.SetMethod != null && Signature(property.SetMethod,OriginalIdentity) == signature)).ToArray();
-                if (candidates.Length != 1)
-                    throw new System.InvalidOperationException("The original schema property is missing or ambiguous: " + original.FullName + " " + signature);
-                var attributes = OriginalAttributeFacts.Read(consumer.MainModule,candidates[0],access);
-                method.Body = new Mono.Cecil.Cil.MethodBody(method);
-                Emit(consumer.MainModule,product,method,attributes);
-            }
-            foreach (var child in type.NestedTypes) Complete(child);
+            if (!identities.TryGetValue(reference,out var identity))
+                identities.Add(reference,identity = GeneratedJsonDefinitions.SignatureIdentity(reference,Definition));
+            return identity;
         }
-        foreach (var type in consumer.MainModule.Types) Complete(type);
+        string OriginalSignature(MethodReference method)
+        {
+            if (!signatures.TryGetValue(method,out var signature))
+                signatures.Add(method,signature = Signature(method,OriginalIdentity));
+            return signature;
+        }
+        var expected = template.MainModule.Types.SelectMany(Factories).Select(method => Source(method).Key).ToArray();
+        // Snapshot source operands before replacing factory bodies. Original
+        // property signatures stay immutable throughout this completion.
+        var actual = consumer.MainModule.Types.SelectMany(Factories)
+            .Select(method => (Method: method, Source: Source(method))).ToArray();
+        var actualKeys = actual.Select(factory => factory.Source.Key).ToArray();
+        if (expected.Except(actualKeys,System.StringComparer.Ordinal).Any() || actualKeys.Except(expected,System.StringComparer.Ordinal).Any())
+            throw new System.InvalidOperationException("Current generated schema factories do not match the compiler template.");
+        var properties = new Dictionary<TypeDefinition,Dictionary<string,List<PropertyDefinition>>>();
+        using var attributes = new OriginalAttributeFacts.Reader(consumer.MainModule,consumer.MainModule);
+        foreach (var factory in actual)
+        {
+            var source = factory.Source;
+            var owner = source.Owner;
+            var root = owner is GenericInstanceType closed ? closed.ElementType : owner;
+            var original = consumer.MainModule.GetType(root.FullName) ?? throw new System.InvalidOperationException("The current compiler image has no schema source type: " + root.FullName);
+            if (!properties.TryGetValue(original,out var index))
+            {
+                index = new Dictionary<string,List<PropertyDefinition>>(System.StringComparer.Ordinal);
+                foreach (var property in original.Properties)
+                {
+                    void Add(MethodDefinition? method)
+                    {
+                        if (method == null) return;
+                        var key = OriginalSignature(method);
+                        if (!index.TryGetValue(key,out var candidates)) index.Add(key,candidates = new List<PropertyDefinition>());
+                        if (!candidates.Any(candidate => ReferenceEquals(candidate,property))) candidates.Add(property);
+                    }
+                    Add(property.GetMethod);
+                    Add(property.SetMethod);
+                }
+                properties.Add(original,index);
+            }
+            var signature = OriginalSignature(source.Accessor);
+            if (!index.TryGetValue(signature,out var selected) || selected.Count != 1)
+                throw new System.InvalidOperationException("The original schema property is missing or ambiguous: " + original.FullName + " " + signature);
+            var facts = attributes.Read(selected[0],access);
+            factory.Method.Body = new Mono.Cecil.Cil.MethodBody(factory.Method);
+            Emit(consumer.MainModule,product,factory.Method,facts);
+        }
         if (HasUncompleted(consumer.MainModule,product)) throw new System.InvalidOperationException("Generated schema factories remain incomplete.");
     }
 }
