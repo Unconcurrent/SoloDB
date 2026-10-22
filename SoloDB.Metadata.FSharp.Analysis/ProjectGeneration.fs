@@ -44,7 +44,7 @@ type ProjectGeneration private () =
                     File.WriteAllText(attributeSource, content)
             let analysis = Path.Combine(workspace, "SoloDB.ProjectContext.dll")
             CompilerContext.Write(analysis, project, "analysis", arguments)
-            let checker = FSharpChecker.Create(keepAssemblyContents = true)
+            let checker = FSharpChecker.Create(keepAssemblyContents = true, parallelReferenceResolution = true)
             let options = checker.GetProjectOptionsFromCommandLineArgs(project, Array.append arguments [|"-r:" + analysis|])
             let parsing, diagnostics = checker.GetParsingOptionsFromProjectOptions(options)
             if parsing.SourceFiles.Length = 0 || diagnostics |> List.exists(fun diagnostic -> diagnostic.Severity = FSharpDiagnosticSeverity.Error) then
