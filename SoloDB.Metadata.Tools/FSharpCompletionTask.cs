@@ -68,7 +68,10 @@ public sealed class CompleteFSharpAssembly : ITask
             var existing = consumer.CustomAttributes.Where(attribute => attribute.AttributeType.FullName == accessType)
                 .Select(attribute => (string)attribute.ConstructorArguments[0].Value);
             var missing = targets.Except(existing, StringComparer.Ordinal).ToArray();
-            if (missing.Length == 0 && !GeneratedSchemaIndexes.HasUncompleted(consumer.MainModule,product) && !GeneratedSchemaIndexes.HasUncompleted(template.MainModule,product))
+            var consumerCandidates = new GeneratedSchemaIndexes.Candidates(consumer.MainModule);
+            var templateCandidates = new GeneratedSchemaIndexes.Candidates(template.MainModule);
+            if (missing.Length == 0 && !GeneratedSchemaIndexes.HasUncompleted(consumer.MainModule,product,consumerCandidates) &&
+                !GeneratedSchemaIndexes.HasUncompleted(template.MainModule,product,templateCandidates))
             {
                 Assembly = Input;
                 Phase("inputs");
@@ -87,7 +90,7 @@ public sealed class CompleteFSharpAssembly : ITask
             Phase("symbols");
             var completedTargets = new System.Collections.Generic.HashSet<string>(targets,StringComparer.Ordinal);
             GeneratedSchemaIndexes.Complete(consumer,product,template,name => completedTargets.Add(name),
-                ProfileBuild ? (name,seconds) => Timing("schema-" + name,seconds) : null);
+                ProfileBuild ? (name,seconds) => Timing("schema-" + name,seconds) : null,consumerCandidates,templateCandidates);
             Phase("schema");
             missing = completedTargets.Except(consumer.CustomAttributes.Where(attribute => attribute.AttributeType.FullName == accessType)
                 .Select(attribute => (string)attribute.ConstructorArguments[0].Value),StringComparer.Ordinal).ToArray();

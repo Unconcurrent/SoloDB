@@ -1,14 +1,85 @@
 using System.Linq;
 using System.Collections.Generic;
+using System.IO;
+using System.Reflection.Metadata;
+using System.Reflection.Metadata.Ecma335;
+using System.Reflection.PortableExecutable;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 using SoloDatabase.Metadata.CodecGeneration;
+using AssemblyDefinition = Mono.Cecil.AssemblyDefinition;
+using MethodDefinition = Mono.Cecil.MethodDefinition;
+using ModuleDefinition = Mono.Cecil.ModuleDefinition;
+using PropertyDefinition = Mono.Cecil.PropertyDefinition;
+using TypeDefinition = Mono.Cecil.TypeDefinition;
+using TypeReference = Mono.Cecil.TypeReference;
 
 namespace SoloDatabase.Metadata.Tools;
 
 // Declares callable factories; all construction instructions have one FSharp owner.
 internal static class GeneratedSchemaIndexes
 {
+    // A byte match only admits a candidate. Cecil owns the exact call and source checks.
+    internal sealed class Candidates
+    {
+        private readonly ModuleDefinition module;
+        private readonly HashSet<int>? original;
+        private readonly HashSet<MethodDefinition> changed = new();
+
+        internal Candidates(ModuleDefinition module)
+        {
+            this.module = module;
+            if (string.IsNullOrEmpty(module.FileName) || !File.Exists(module.FileName)) return;
+            using var stream = File.OpenRead(module.FileName);
+            using var image = new PEReader(stream);
+            var metadata = image.GetMetadataReader();
+            if (metadata.GetGuid(metadata.GetModuleDefinition().Mvid) != module.Mvid) return;
+            var tokens = new HashSet<int>();
+            foreach (var handle in metadata.MemberReferences)
+                if (metadata.StringComparer.Equals(metadata.GetMemberReference(handle).Name,"UncompletedAttributes"))
+                    tokens.Add(MetadataTokens.GetToken(handle));
+            foreach (var handle in metadata.MethodDefinitions)
+                if (metadata.StringComparer.Equals(metadata.GetMethodDefinition(handle).Name,"UncompletedAttributes"))
+                    tokens.Add(MetadataTokens.GetToken(handle));
+            for (var row = 1; row <= metadata.GetTableRowCount(TableIndex.MethodSpec); row++)
+            {
+                var handle = MetadataTokens.MethodSpecificationHandle(row);
+                if (tokens.Contains(MetadataTokens.GetToken(metadata.GetMethodSpecification(handle).Method)))
+                    tokens.Add(MetadataTokens.GetToken(handle));
+            }
+            var methods = new HashSet<int>();
+            if (tokens.Count != 0)
+                foreach (var handle in metadata.MethodDefinitions)
+                {
+                    var method = metadata.GetMethodDefinition(handle);
+                    if (method.RelativeVirtualAddress == 0 ||
+                        (method.Attributes & (System.Reflection.MethodAttributes.Abstract | System.Reflection.MethodAttributes.PinvokeImpl)) != 0 ||
+                        (method.ImplAttributes & (System.Reflection.MethodImplAttributes.CodeTypeMask |
+                            System.Reflection.MethodImplAttributes.InternalCall | System.Reflection.MethodImplAttributes.Unmanaged)) != 0) continue;
+                    var bytes = image.GetMethodBody(method.RelativeVirtualAddress).GetILReader();
+                    while (bytes.RemainingBytes >= 5)
+                    {
+                        // ECMA-335 III.3.19: call is 0x28 followed by a four-byte token.
+                        if (bytes.ReadByte() != 0x28) continue;
+                        if (tokens.Contains(bytes.ReadInt32()))
+                        {
+                            methods.Add(MetadataTokens.GetToken(handle));
+                            break;
+                        }
+                        // Overlapping matches, including operand bytes, remain conservative candidates.
+                        bytes.Offset -= 4;
+                    }
+                }
+            original = methods;
+        }
+
+        internal bool Contains(MethodDefinition method) => original == null || changed.Contains(method) ||
+            !ReferenceEquals(method.Module,module) || method.RVA == 0 || method.MetadataToken.RID == 0 ||
+            method.MetadataToken.TokenType != TokenType.Method || original.Contains(method.MetadataToken.ToInt32());
+
+        internal void Rewritten(MethodDefinition method) => changed.Add(method);
+    }
+
     internal static void Register(ModuleDefinition module,TypeDefinition owner,ILProcessor il,
         AssemblyDefinition product,GeneratedModel model,int index)
     {
@@ -60,9 +131,10 @@ internal static class GeneratedSchemaIndexes
                 module.ImportReference(schema.Methods.Single(method => method.Name == "NamedAssignmentError"))),attributes);
     }
 
-    internal static bool HasUncompleted(ModuleDefinition module,AssemblyDefinition product)
+    internal static bool HasUncompleted(ModuleDefinition module,AssemblyDefinition product,Candidates? candidates = null)
     {
-        bool Has(TypeDefinition type) => type.Methods.Any(method => Pending(method,product)) || type.NestedTypes.Any(Has);
+        bool Has(TypeDefinition type) => type.Methods.Any(method =>
+            (candidates == null || candidates.Contains(method)) && Pending(method,product)) || type.NestedTypes.Any(Has);
         return module.Types.Any(Has);
     }
     private static bool Pending(MethodDefinition method,AssemblyDefinition product) => method.HasBody && method.Body.Instructions.Any(instruction =>
@@ -72,7 +144,7 @@ internal static class GeneratedSchemaIndexes
 
     // Only explicit compiler placeholders are completed, from actual emitted property metadata.
     internal static void Complete(AssemblyDefinition consumer,AssemblyDefinition product,AssemblyDefinition template,System.Action<string> access,
-        System.Action<string,double>? timing = null)
+        System.Action<string,double>? timing = null,Candidates? consumerCandidates = null,Candidates? templateCandidates = null)
     {
         var watch = timing == null ? null : System.Diagnostics.Stopwatch.StartNew();
         void Phase(string name)
@@ -81,8 +153,9 @@ internal static class GeneratedSchemaIndexes
             timing!(name,watch.Elapsed.TotalSeconds);
             watch.Restart();
         }
-        System.Collections.Generic.IEnumerable<MethodDefinition> Factories(TypeDefinition type) =>
-            type.Methods.Where(method => Pending(method,product)).Concat(type.NestedTypes.SelectMany(Factories));
+        System.Collections.Generic.IEnumerable<MethodDefinition> Factories(TypeDefinition type,Candidates? candidates) =>
+            type.Methods.Where(method => (candidates == null || candidates.Contains(method)) && Pending(method,product))
+                .Concat(type.NestedTypes.SelectMany(child => Factories(child,candidates)));
         string Signature(MethodReference method,System.Func<TypeReference,string> identity) =>
             method.Name + ":" + method.CallingConvention + ":" + method.HasThis + ":" + method.GenericParameters.Count + ":" +
             identity(method.ReturnType) + ":" + string.Join(";",method.Parameters.Select(parameter => identity(parameter.ParameterType)));
@@ -126,11 +199,11 @@ internal static class GeneratedSchemaIndexes
                 signatures.Add(method,signature = Signature(method,OriginalIdentity));
             return signature;
         }
-        var expected = template.MainModule.Types.SelectMany(Factories).Select(method => Source(method).Key).ToArray();
+        var expected = template.MainModule.Types.SelectMany(type => Factories(type,templateCandidates)).Select(method => Source(method).Key).ToArray();
         Phase("expected");
         // Snapshot source operands before replacing factory bodies. Original
         // property signatures stay immutable throughout this completion.
-        var actual = consumer.MainModule.Types.SelectMany(Factories)
+        var actual = consumer.MainModule.Types.SelectMany(type => Factories(type,consumerCandidates))
             .Select(method => (Method: method, Source: Source(method))).ToArray();
         Phase("actual");
         var actualKeys = actual.Select(factory => factory.Source.Key).ToArray();
@@ -165,11 +238,12 @@ internal static class GeneratedSchemaIndexes
             if (!index.TryGetValue(signature,out var selected) || selected.Count != 1)
                 throw new System.InvalidOperationException("The original schema property is missing or ambiguous: " + original.FullName + " " + signature);
             var facts = attributes.Read(selected[0],access);
+            consumerCandidates?.Rewritten(factory.Method);
             factory.Method.Body = new Mono.Cecil.Cil.MethodBody(factory.Method);
             Emit(consumer.MainModule,product,factory.Method,facts);
         }
         Phase("factories");
-        if (HasUncompleted(consumer.MainModule,product)) throw new System.InvalidOperationException("Generated schema factories remain incomplete.");
+        if (HasUncompleted(consumer.MainModule,product,consumerCandidates)) throw new System.InvalidOperationException("Generated schema factories remain incomplete.");
         Phase("validation");
     }
 }
