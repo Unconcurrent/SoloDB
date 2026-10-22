@@ -22,7 +22,7 @@ internal static partial class QueryRegistrations
     private static readonly SymbolDisplayFormat Display = SymbolDisplayFormat.FullyQualifiedFormat.WithMiscellaneousOptions(
         SymbolDisplayFormat.FullyQualifiedFormat.MiscellaneousOptions | SymbolDisplayMiscellaneousOptions.ExpandValueTuple);
 
-    internal static IEnumerable<ITypeSymbol> InferredRoots(Compilation compilation, IEnumerable<Site> sites, IEnumerable<ITypeSymbol> selected)
+    internal static IEnumerable<ITypeSymbol> InferredRoots(QueryFacts facts, IEnumerable<Site> sites, IEnumerable<ITypeSymbol> selected)
     {
         var known = new HashSet<string>(selected.Select(Name), StringComparer.Ordinal);
         foreach (var site in sites)
@@ -32,10 +32,9 @@ internal static partial class QueryRegistrations
                 if (Closed(type) && !HasAnonymous(type)) { known.Add(Name(type)); yield return type; }
             if (site.Method.Name != "Compile" || site.Invocation.ArgumentList.Arguments.Count == 0 ||
                 site.Invocation.ArgumentList.Arguments[0].Expression is not LambdaExpressionSyntax lambda) continue;
-            var semantic = compilation.GetSemanticModel(site.Invocation.SyntaxTree);
             foreach (var node in lambda.DescendantNodes().OfType<ExpressionSyntax>())
             {
-                var original = semantic.GetTypeInfo(node).Type;
+                var original = facts.Type(node).Type;
                 if (original == null) continue;
                 var type = site.Symbols.Type(original);
                 if (SequenceElement(type) != null || EnumerableElement(type) == null || !Closed(type) || HasAnonymous(type)) continue;
@@ -78,8 +77,9 @@ internal static partial class QueryRegistrations
         }
     }
 
-    internal static Code Collect(Compilation compilation, IEnumerable<string> models, IEnumerable<Site> sites, string registrationType)
+    internal static Code Collect(QueryFacts facts, IEnumerable<string> models, IEnumerable<Site> sites, string registrationType)
     {
+        var compilation = facts.Compilation;
         var roots = new HashSet<string>(models, StringComparer.Ordinal);
         var carriers = new HashSet<string>(StringComparer.Ordinal);
         var helpers = new StringBuilder();
@@ -135,13 +135,12 @@ internal static partial class QueryRegistrations
 
         foreach (var site in sites)
         {
-            var semantic = compilation.GetSemanticModel(site.Invocation.SyntaxTree);
             var invocation = site.Invocation;
             var method = site.Method;
-            if (semantic.GetOperation(invocation) is not IInvocationOperation checkedCall) continue;
+            if (facts.Operation(invocation) is not IInvocationOperation checkedCall) continue;
             foreach (var argument in checkedCall.Arguments)
                 if (argument.Parameter is IParameterSymbol input && RawParameter(method,input))
-                    foreach (var source in QueryExpressionInputs.Sources(compilation,argument.Value,site.Symbols))
+                    foreach (var source in QueryExpressionInputs.Sources(facts,argument.Value,site.Symbols))
                         if (source.Type is ITypeSymbol type && Closed(type) &&
                             queryOperations.Add("sql-arguments|" + SourceTypeIdentity.Encode(type)))
                             TypedRegistration("RegisterSqlArguments",type);
@@ -150,7 +149,7 @@ internal static partial class QueryRegistrations
                 foreach (var parameter in method.Parameters) ParameterFacts(Callable(parameter.Type,site.Symbols));
                 foreach (var enclosing in invocation.Ancestors().OfType<LambdaExpressionSyntax>())
                 {
-                    var converted = semantic.GetTypeInfo(enclosing).ConvertedType;
+                    var converted = facts.Type(enclosing).ConvertedType;
                     if (converted is INamedTypeSymbol expression &&
                         expression.OriginalDefinition.ToDisplayString() == "System.Linq.Expressions.Expression<TDelegate>")
                         ParameterFacts(Callable(expression,site.Symbols));
@@ -161,7 +160,7 @@ internal static partial class QueryRegistrations
             var compiled = method.Name == "Compile";
             if (compiled && (method.ContainingType.TypeArguments.Length == 0 ||
                 !roots.Contains(Name(method.ContainingType.TypeArguments[0])))) continue;
-            foreach (var expressionInput in QueryExpressionInputs.Arguments(compilation,checkedCall.Arguments,site.Symbols))
+            foreach (var expressionInput in QueryExpressionInputs.Arguments(facts,checkedCall.Arguments,site.Symbols))
             {
                 var callable = Callable(QueryExpressionInputs.Contract(site.Symbols.Type(expressionInput.Parameter.Type)),site.Symbols);
                 if (callable?.DelegateInvokeMethod is not IMethodSymbol signature) continue;
@@ -192,7 +191,7 @@ internal static partial class QueryRegistrations
                 foreach (var origin in expressionInput.Origins)
                 {
                     var lambda = origin.Lambda;
-                    semantic = compilation.GetSemanticModel(lambda.SyntaxTree);
+                    var semantic = facts.Model(lambda.SyntaxTree);
                     var symbols = origin.Symbols;
                     string Name(ITypeSymbol type) => QueryRegistrations.Name(symbols.Type(type));
                     var sourceType = symbols.Type(compiled ? method.ContainingType.TypeArguments[0] : signature.Parameters[0].Type);
@@ -207,7 +206,7 @@ internal static partial class QueryRegistrations
                     };
                     foreach (var node in lambda.DescendantNodes().OfType<ExpressionSyntax>())
                     {
-                        var info = semantic.GetTypeInfo(node);
+                        var info = facts.Type(node);
                         if (info.Type != null && symbols.Type(info.Type) is IArrayTypeSymbol { Rank: > 1 } addressedArray && queryOperations.Add("arrayaddress|" + Name(addressedArray)))
                             descriptors.Append("[assembly: global::SoloDatabase.Generated.SourceQueryRegistration(\"RegisterArrayAddress\",").Append(SourceTypes(new[] { addressedArray })).Append(")]\n");
                         if (info.Type != null && symbols.Type(info.Type) is ITypeSymbol type && EnumerableElement(type) is ITypeSymbol element)
@@ -225,7 +224,7 @@ internal static partial class QueryRegistrations
                                 }
                             }
                         }
-                        if (node is InvocationExpressionSyntax call && semantic.GetSymbolInfo(call).Symbol is IMethodSymbol originalOperation)
+                        if (node is InvocationExpressionSyntax call && facts.Symbol(call).Symbol is IMethodSymbol originalOperation)
                         {
                             var operation = symbols.Method(originalOperation);
                             if (operation.ContainingType.ToDisplayString() == "System.Linq.Queryable" &&
@@ -237,14 +236,14 @@ internal static partial class QueryRegistrations
                             else if (operation.ContainingType.ToDisplayString() != "System.Linq.Queryable") RegisterCall(operation);
                         }
                         if ((node is BinaryExpressionSyntax || node is PrefixUnaryExpressionSyntax || node is PostfixUnaryExpressionSyntax || node is CastExpressionSyntax) &&
-                            semantic.GetSymbolInfo(node).Symbol is IMethodSymbol operatorMethod &&
+                            facts.Symbol(node).Symbol is IMethodSymbol operatorMethod &&
                             operatorMethod.MethodKind is MethodKind.UserDefinedOperator or MethodKind.Conversion)
                             RegisterCall(symbols.Method(operatorMethod));
                         if (semantic.GetConversion(node).MethodSymbol is IMethodSymbol conversionMethod)
                             RegisterCall(symbols.Method(conversionMethod));
-                        if (node is ElementAccessExpressionSyntax && semantic.GetSymbolInfo(node).Symbol is IPropertySymbol indexer && indexer.GetMethod != null)
+                        if (node is ElementAccessExpressionSyntax && facts.Symbol(node).Symbol is IPropertySymbol indexer && indexer.GetMethod != null)
                             RegisterCall(symbols.Method(indexer.GetMethod));
-                        if (node is MemberAccessExpressionSyntax access && semantic.GetSymbolInfo(access).Symbol is ISymbol member)
+                        if (node is MemberAccessExpressionSyntax access && facts.Symbol(access).Symbol is ISymbol member)
                         {
                             var valueType = member is IPropertySymbol property ? symbols.Type(property.Type) : member is IFieldSymbol field ? symbols.Type(field.Type) : null;
                             var memberOwner = symbols.Type(member.ContainingType);
@@ -253,7 +252,7 @@ internal static partial class QueryRegistrations
                                 Operation(member is IFieldSymbol ? 0 : 1, memberOwner, member.Name, Array.Empty<ITypeSymbol>(), Array.Empty<ITypeSymbol>());
                             }
                         }
-                        if (node is BaseObjectCreationExpressionSyntax created && semantic.GetSymbolInfo(created).Symbol is IMethodSymbol originalConstructor &&
+                        if (node is BaseObjectCreationExpressionSyntax created && facts.Symbol(created).Symbol is IMethodSymbol originalConstructor &&
                             symbols.Method(originalConstructor) is IMethodSymbol constructor &&
                             Writable(constructor.ContainingType) && constructor.Parameters.All(parameter => Writable(parameter.Type)))
                         {
@@ -268,8 +267,8 @@ internal static partial class QueryRegistrations
                             else Operation(2, constructor.ContainingType, ".ctor", Array.Empty<ITypeSymbol>(), constructor.Parameters.Select(parameter => parameter.Type));
                         }
                         if (node is CastExpressionSyntax cast)
-                            Conversion(semantic.GetTypeInfo(cast.Expression).Type, semantic.GetTypeInfo(cast).Type);
-                        if (node is PrefixUnaryExpressionSyntax unary && semantic.GetTypeInfo(unary.Operand).ConvertedType is ITypeSymbol originalInput && info.Type != null)
+                            Conversion(facts.Type(cast.Expression).Type, facts.Type(cast).Type);
+                        if (node is PrefixUnaryExpressionSyntax unary && facts.Type(unary.Operand).ConvertedType is ITypeSymbol originalInput && info.Type != null)
                         {
                             var input = symbols.Type(originalInput);
                             var output = symbols.Type(info.Type);
@@ -304,8 +303,8 @@ internal static partial class QueryRegistrations
                         }
                         if (node is BinaryExpressionSyntax binary && BinaryKind(binary.Kind()) is string kind)
                         {
-                            var originalLeft = semantic.GetTypeInfo(binary.Left).ConvertedType;
-                            var originalRight = semantic.GetTypeInfo(binary.Right).ConvertedType;
+                            var originalLeft = facts.Type(binary.Left).ConvertedType;
+                            var originalRight = facts.Type(binary.Right).ConvertedType;
                             var left = originalLeft == null ? null : symbols.Type(originalLeft);
                             var right = originalRight == null ? null : symbols.Type(originalRight);
                             var result = info.Type == null ? null : symbols.Type(info.Type);

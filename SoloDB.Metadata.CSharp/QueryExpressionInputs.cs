@@ -48,40 +48,40 @@ internal static class QueryExpressionInputs
         arguments.Where(argument => argument.Parameter != null).Select(argument => (argument.Parameter!,argument.Value));
 
     internal static IEnumerable<(IParameterSymbol Parameter, Origin[] Origins)> Arguments(
-        Compilation compilation, IEnumerable<IArgumentOperation> arguments, QueryRegistrations.Symbols symbols, bool rawSources = false)
+        QueryFacts facts, IEnumerable<IArgumentOperation> arguments, QueryRegistrations.Symbols symbols, bool rawSources = false)
     {
         foreach (var argument in arguments)
             if (argument.Parameter is IParameterSymbol parameter)
             {
                 if (Contract(symbols.Type(parameter.Type)) != null)
-                    yield return (parameter, Read(compilation, argument.Value, symbols,
+                    yield return (parameter, Read(facts, argument.Value, symbols,
                         new Visits()).ToArray());
                 else if (rawSources && SourceInput(symbols.Type(parameter.Type)))
-                    yield return (parameter, Sources(compilation,argument.Value,symbols));
+                    yield return (parameter, Sources(facts,argument.Value,symbols));
             }
     }
 
-    internal static Origin[] Sources(Compilation compilation, IOperation value, QueryRegistrations.Symbols symbols) =>
-        Read(compilation,value,symbols,new Visits(),true).ToArray();
+    internal static Origin[] Sources(QueryFacts facts, IOperation value, QueryRegistrations.Symbols symbols) =>
+        Read(facts,value,symbols,new Visits(),true).ToArray();
 
-    private static IEnumerable<Origin> Read(Compilation compilation, IOperation? value,
+    private static IEnumerable<Origin> Read(QueryFacts facts, IOperation? value,
         QueryRegistrations.Symbols symbols, Visits visited, bool source = false, bool stored = false)
     {
         var known = source && value != null && value is not IParenthesizedOperation &&
             (value is not IConversionOperation conversionValue || conversionValue.OperatorMethod != null)
                 ? KnownSource(value.Type,value.Syntax,symbols) : null;
         if (known != null && (value is IArrayCreationOperation || value?.Syntax is CollectionExpressionSyntax)) return new[] { known };
-        var origins = ReadOrigins(compilation,value,symbols,visited,source,stored).ToArray();
+        var origins = ReadOrigins(facts,value,symbols,visited,source,stored).ToArray();
         return origins.Length != 0 || known == null ? origins : new[] { known };
     }
 
-    private static IEnumerable<Origin> ReadOrigins(Compilation compilation, IOperation? value,
+    private static IEnumerable<Origin> ReadOrigins(QueryFacts facts, IOperation? value,
         QueryRegistrations.Symbols symbols, Visits visited, bool source, bool stored)
     {
         switch (value)
         {
             case IConversionOperation conversion when conversion.OperatorMethod == null:
-                return Read(compilation, conversion.Operand, symbols, visited,source);
+                return Read(facts, conversion.Operand, symbols, visited,source);
             case IConversionOperation { OperatorMethod: IMethodSymbol operation } conversion when source:
                 return Produced(operation, Operands(operation,conversion.Operand),conversion.Syntax);
             case IUnaryOperation { OperatorMethod: IMethodSymbol operation } unary when source:
@@ -93,26 +93,25 @@ internal static class QueryExpressionInputs
             case IIncrementOrDecrementOperation increment when source:
                 return WriteResult(increment,stored);
             case IParenthesizedOperation parenthesized:
-                return Read(compilation, parenthesized.Operand, symbols, visited,source);
+                return Read(facts, parenthesized.Operand, symbols, visited,source);
             case IDelegateCreationOperation creation:
-                return Read(compilation, creation.Target, symbols, visited,source);
+                return Read(facts, creation.Target, symbols, visited,source);
             case IAnonymousFunctionOperation { Syntax: LambdaExpressionSyntax lambda }:
                 return source ? Array.Empty<Origin>() : new[] { new Origin(lambda, symbols) };
             case IArrayCreationOperation array:
-                return Read(compilation, array.Initializer, symbols, visited,source);
+                return Read(facts, array.Initializer, symbols, visited,source);
             case IArrayInitializerOperation initializer:
-                return initializer.ElementValues.SelectMany(element => Read(compilation, element, symbols, visited,source)).ToArray();
+                return initializer.ElementValues.SelectMany(element => Read(facts, element, symbols, visited,source)).ToArray();
             case { Syntax: CollectionExpressionSyntax collection }:
-                var model = compilation.GetSemanticModel(collection.SyntaxTree);
-                return collection.Elements.SelectMany(element => Read(compilation, model.GetOperation(
+                return collection.Elements.SelectMany(element => Read(facts, facts.Operation(
                     element is ExpressionElementSyntax expression ? expression.Expression : ((SpreadElementSyntax)element).Expression),
                     symbols, visited,source)).ToArray();
             case IConditionalOperation conditional:
-                return Read(compilation, conditional.WhenTrue, symbols, visited,source)
-                    .Concat(Read(compilation, conditional.WhenFalse, symbols, visited,source)).ToArray();
+                return Read(facts, conditional.WhenTrue, symbols, visited,source)
+                    .Concat(Read(facts, conditional.WhenFalse, symbols, visited,source)).ToArray();
             case ICoalesceOperation coalesce:
-                return Read(compilation, coalesce.Value, symbols, visited,source)
-                    .Concat(Read(compilation, coalesce.WhenNull, symbols, visited,source)).ToArray();
+                return Read(facts, coalesce.Value, symbols, visited,source)
+                    .Concat(Read(facts, coalesce.WhenNull, symbols, visited,source)).ToArray();
             case IParameterReferenceOperation parameter:
                 return symbols.Input(parameter.Parameter).Where(origin => source ? origin.Type != null : origin.Type == null)
                     .Concat(source ? Binding(parameter.Parameter,symbols) : Array.Empty<Origin>()).ToArray();
@@ -139,7 +138,7 @@ internal static class QueryExpressionInputs
 
         IEnumerable<(IParameterSymbol Parameter, Origin[] Origins)> Inputs(IEnumerable<(IParameterSymbol Parameter, IOperation Value)> values) =>
             values.Where(input => Contract(symbols.Type(input.Parameter.Type)) != null || source && SourceInput(symbols.Type(input.Parameter.Type)))
-                .Select(input => (input.Parameter,Read(compilation,input.Value,symbols,visited,source).ToArray()));
+                .Select(input => (input.Parameter,Read(facts,input.Value,symbols,visited,source).ToArray()));
 
         IEnumerable<(IParameterSymbol Parameter, Origin[] Origins)> Operands(IMethodSymbol method, params IOperation[] operands) =>
             Inputs(method.Parameters.Zip(operands,(parameter,operand) => (parameter,operand)));
@@ -161,19 +160,19 @@ internal static class QueryExpressionInputs
             switch (write)
             {
                 case ICompoundAssignmentOperation compound:
-                    var left = Converted(compound.InConversion,Read(compilation,compound.Target,symbols,visited,true).ToArray(),compound.Syntax);
-                    var right = Read(compilation,compound.Value,symbols,visited,true).ToArray();
+                    var left = Converted(compound.InConversion,Read(facts,compound.Target,symbols,visited,true).ToArray(),compound.Syntax);
+                    var right = Read(facts,compound.Value,symbols,visited,true).ToArray();
                     var computed = compound.OperatorMethod is IMethodSymbol operation
                         ? Produced(operation,new[] { (operation.Parameters[0],left),(operation.Parameters[1],right) },compound.Syntax)
                         : Known(compound.OutConversion.MethodSymbol?.Parameters[0].Type ?? compound.Type,compound.Syntax);
                     return Converted(compound.OutConversion,computed,compound.Syntax);
                 case ICoalesceAssignmentOperation coalesce:
-                    return Read(compilation,coalesce.Target,symbols,visited,true)
-                        .Concat(Read(compilation,coalesce.Value,symbols,visited,true)).ToArray();
+                    return Read(facts,coalesce.Target,symbols,visited,true)
+                        .Concat(Read(facts,coalesce.Value,symbols,visited,true)).ToArray();
                 case IAssignmentOperation assignment:
-                    return Read(compilation,assignment.Value,symbols,visited,true).ToArray();
+                    return Read(facts,assignment.Value,symbols,visited,true).ToArray();
                 case IIncrementOrDecrementOperation increment:
-                    var prior = Read(compilation,increment.Target,symbols,visited,true).ToArray();
+                    var prior = Read(facts,increment.Target,symbols,visited,true).ToArray();
                     if (increment.IsPostfix && !stored) return prior;
                     return increment.OperatorMethod is IMethodSymbol incrementMethod
                         ? Produced(incrementMethod,new[] { (incrementMethod.Parameters[0],prior) },increment.Syntax)
@@ -190,8 +189,7 @@ internal static class QueryExpressionInputs
             {
                 var declarations = symbol.DeclaringSyntaxReferences.Select(reference => reference.GetSyntax()).ToArray();
                 var initial = declarations.OfType<VariableDeclaratorSyntax>().Where(variable => variable.Initializer != null)
-                    .SelectMany(variable => Read(compilation,compilation.GetSemanticModel(variable.SyntaxTree)
-                        .GetOperation(variable.Initializer!.Value),context,visited,source)).ToArray();
+                    .SelectMany(variable => Read(facts,facts.Operation(variable.Initializer!.Value),context,visited,source)).ToArray();
                 if (!source) return initial;
                 var incoming = symbol is IParameterSymbol parameter ? context.Input(parameter).Where(origin => origin.Type != null) : Array.Empty<Origin>();
                 visited.Bindings[symbol] = initial.Concat(incoming).ToArray();
@@ -202,13 +200,13 @@ internal static class QueryExpressionInputs
                         node is BaseMethodDeclarationSyntax or LocalFunctionStatementSyntax or LambdaExpressionSyntax) ?? declaration);
                 var assigned = scopes.SelectMany(scope => scope.DescendantNodes().Where(node => node is AssignmentExpressionSyntax or
                         PrefixUnaryExpressionSyntax or PostfixUnaryExpressionSyntax))
-                    .Select(syntax => compilation.GetSemanticModel(syntax.SyntaxTree).GetOperation(syntax))
+                    .Select(syntax => facts.Operation(syntax))
                     .Where(write => write is IAssignmentOperation or IIncrementOrDecrementOperation)
                     .Where(write =>
                     {
                         var target = TargetSymbol(write is IAssignmentOperation assignment ? assignment.Target : ((IIncrementOrDecrementOperation)write!).Target);
                         return target != null && SymbolEqualityComparer.Default.Equals(target.OriginalDefinition,symbol.OriginalDefinition);
-                    }).SelectMany(write => Read(compilation,write,context,visited,true,true));
+                    }).SelectMany(write => Read(facts,write,context,visited,true,true));
                 return initial.Concat(assigned).ToArray();
             }
             finally { visited.Bindings.Remove(symbol); visited.Remove(symbol); }
@@ -216,7 +214,7 @@ internal static class QueryExpressionInputs
 
         IEnumerable<Origin> Returns(IMethodSymbol method, IEnumerable<(IParameterSymbol Parameter, Origin[] Origins)> arguments)
         {
-            var actual = new QueryRegistrations.Symbols(compilation, symbols.Method(method), symbols);
+            var actual = new QueryRegistrations.Symbols(facts.Compilation, symbols.Method(method), symbols);
             foreach (var argument in arguments) actual.BindInput(argument.Parameter,argument.Origins);
             if (!visited.Add(method.OriginalDefinition)) return Array.Empty<Origin>();
             try
@@ -245,8 +243,8 @@ internal static class QueryExpressionInputs
                         bodies = bodies.Concat(declaredProperty.AccessorList.Accessors
                             .Where(accessor => accessor.Keyword.ValueText == "get" && accessor.ExpressionBody != null)
                             .Select(accessor => accessor.ExpressionBody!.Expression));
-                    return bodies.SelectMany(body => Read(compilation,
-                        compilation.GetSemanticModel(body.SyntaxTree).GetOperation(body), actual, visited,source));
+                    return bodies.SelectMany(body => Read(facts,
+                        facts.Operation(body), actual, visited,source));
                 }).Concat(source && method.AssociatedSymbol is IPropertySymbol writtenProperty
                     ? Binding(writtenProperty,actual) : Array.Empty<Origin>()).ToArray();
             }

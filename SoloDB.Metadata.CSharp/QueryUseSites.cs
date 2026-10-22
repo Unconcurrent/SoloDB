@@ -111,8 +111,9 @@ internal static partial class QueryRegistrations
 
     private enum InferenceEntry { Repeat, Visit, Limited }
 
-    internal static IReadOnlyList<Site> Analyze(Compilation compilation, Action<Location,string> missing, Action<Location,string> limited)
+    internal static IReadOnlyList<Site> Analyze(QueryFacts facts, Action<Location,string> missing, Action<Location,string> limited)
     {
+        var compilation = facts.Compilation;
         const int recursiveReentries = 10;
         var sites = new List<Site>();
         var unresolved = new Dictionary<InvocationExpressionSyntax,IMethodSymbol>();
@@ -121,16 +122,15 @@ internal static partial class QueryRegistrations
         var rawInputs = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         var callers = new Dictionary<ISymbol,HashSet<ISymbol>>(SymbolEqualityComparer.Default);
         var ownerCalls = new Dictionary<INamedTypeSymbol,List<SyntaxNode>>(SymbolEqualityComparer.Default);
-        var semanticModels = new Dictionary<SyntaxTree,SemanticModel>();
         var sourceCalls = new List<SyntaxNode>();
         var declarationCalls = new Dictionary<IMethodSymbol,SyntaxNode[]>(SymbolEqualityComparer.Default);
         foreach (var tree in compilation.SyntaxTrees)
         {
-            var semantic = Semantic(tree);
+            var semantic = facts.Model(tree);
             foreach (var call in Calls(tree.GetRoot()))
             {
                 sourceCalls.Add(call);
-                if (semantic.GetSymbolInfo(call).Symbol is not IMethodSymbol target) continue;
+                if (facts.Symbol(call).Symbol is not IMethodSymbol target) continue;
                 var owner = semantic.GetEnclosingSymbol(call.SpanStart)?.ContainingType?.OriginalDefinition;
                 if (owner != null)
                 {
@@ -185,13 +185,6 @@ internal static partial class QueryRegistrations
         foreach (var item in limitedCalls) limited(item.Key.GetLocation(),item.Value.ToDisplayString());
         return sites;
 
-        SemanticModel Semantic(SyntaxTree tree)
-        {
-            if (!semanticModels.TryGetValue(tree,out var semantic))
-                semanticModels.Add(tree,semantic = compilation.GetSemanticModel(tree));
-            return semantic;
-        }
-
         SyntaxNode[] DeclarationCalls(IMethodSymbol method)
         {
             var original = method.OriginalDefinition;
@@ -243,8 +236,7 @@ internal static partial class QueryRegistrations
 
         bool Inspect(SyntaxNode invocation, Symbols symbols)
         {
-            var semantic = Semantic(invocation.SyntaxTree);
-            if (semantic.GetSymbolInfo(invocation).Symbol is not IMethodSymbol original ||
+            if (facts.Symbol(invocation).Symbol is not IMethodSymbol original ||
                 !(invocation is InvocationExpressionSyntax && IsSoloDBUse(original)) &&
                 !relevant.Contains((original.ReducedFrom ?? original).OriginalDefinition)) return true;
             var method = symbols.Method(original);
@@ -258,13 +250,13 @@ internal static partial class QueryRegistrations
             var construction = SourceConstructor(method);
             if (!construction && method.DeclaringSyntaxReferences.Length == 0 ||
                 !method.TypeArguments.All(Closed) || !Closed(method.ContainingType)) return true;
-            var arguments = semantic.GetOperation(invocation) switch
+            var arguments = facts.Operation(invocation) switch
             {
                 IInvocationOperation checkedCall => checkedCall.Arguments,
                 IObjectCreationOperation checkedCreation => checkedCreation.Arguments,
                 _ => ImmutableArray<IArgumentOperation>.Empty
             };
-            var boundInputs = QueryExpressionInputs.Arguments(compilation,arguments,symbols,
+            var boundInputs = QueryExpressionInputs.Arguments(facts,arguments,symbols,
                 rawInputs.Contains(method.OriginalDefinition)).ToArray();
             if (method.MethodKind != MethodKind.LocalFunction && !method.IsGenericMethod && !method.ContainingType.IsGenericType &&
                 boundInputs.All(input => input.Origins.Length == 0)) return true;
