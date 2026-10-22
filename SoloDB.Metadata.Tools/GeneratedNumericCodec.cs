@@ -55,10 +55,8 @@ internal static class GeneratedNumericCodec
             return result;
         }
         var offset = Offset(module.TypeSystem.Byte,module.TypeSystem.UIntPtr);
-        MethodReference Rounded(int width,TypeReference bits,string suffix)
+        MethodDefinition Rounded(int width,TypeReference bits,string suffix)
         {
-            var supplied = ProductOperations.Rounding(module,product,width);
-            if (supplied != null) return supplied;
             var policy = width.ToString(System.Globalization.CultureInfo.InvariantCulture);
             if (definitions.TryGet("binary-rounding",bits,module.TypeSystem.Void,policy,out var existingBits)) return existingBits;
             var body = BodyResult(suffix,bits,module.TypeSystem.UInt64,module.TypeSystem.Int64,module.TypeSystem.Boolean);
@@ -69,11 +67,18 @@ internal static class GeneratedNumericCodec
             return body;
         }
         var rawArguments = new TypeReference[] { new ByReferenceType(module.TypeSystem.Byte), module.TypeSystem.Int32, new ByReferenceType(module.TypeSystem.Int32) };
-        var integerApi = ProductOperations.IntegerApi(module,offset);
-        MethodReference Leaf(int width, bool hex)
+        MethodReference Constructor(string type, params TypeReference[] arguments)
         {
-            var supplied = ProductOperations.Integer(module,product,width,plan.Signed,utf16,plan.Native,hex);
-            if (supplied != null) return supplied;
+            var result = new MethodReference(".ctor",module.TypeSystem.Void,
+                new TypeReference("System",type,module,module.TypeSystem.Object.Scope)) { HasThis = true };
+            foreach (var argument in arguments) result.Parameters.Add(new ParameterDefinition(argument));
+            return result;
+        }
+        var integerApi = new CodecIntegerApi<TypeReference, MethodReference>(module.TypeSystem.Int32,module.TypeSystem.Int64,
+            module.TypeSystem.UInt32,module.TypeSystem.UInt64,offset,
+            Constructor("FormatException",module.TypeSystem.String),Constructor("OverflowException"),Constructor("Exception",module.TypeSystem.String));
+        MethodDefinition Leaf(int width, bool hex)
+        {
             var role = hex ? "integer-hex" : "integer-decimal";
             var policy = width + ":" + plan.Signed + ":" + plan.Native;
             if (definitions.TryGet(role,core,reader,policy,out var existingLeaf)) return existingLeaf;
@@ -83,7 +88,7 @@ internal static class GeneratedNumericCodec
             else CodecIntegerEmitter.decimalReader(new CecilCodecIL(leaf),integerApi,width,plan.Signed,utf16,plan.Native);
             return leaf;
         }
-        MethodReference SelectWidth(bool hex)
+        MethodDefinition SelectWidth(bool hex)
         {
             if (!plan.DeferredWidth) return Leaf(plan.Width,hex);
             var narrow = Leaf(32,hex);
@@ -106,8 +111,8 @@ internal static class GeneratedNumericCodec
             CodecQuotedNumberEmitter.reader(new CecilCodecIL(wrapper),quotedApi,utf16);
             return wrapper;
         }
-        MethodReference decimalRead;
-        MethodReference hexRead;
+        MethodDefinition decimalRead;
+        MethodDefinition hexRead;
 
         switch (plan.Leaf)
         {
@@ -144,9 +149,9 @@ internal static class GeneratedNumericCodec
                 }
                 var inference = new CodecDynamicNumberApi<TypeReference,MethodReference>(integerApi,inferredDecimal,inferredFloating,inferredBigType,inferredBigReader,parameterConstructor);
                 decimalRead = Body("Decimal",Arguments(plan.DecimalContext));
-                CodecDynamicNumberEmitter.decimalReader(new CecilCodecIL((MethodDefinition)decimalRead),inference,utf16);
+                CodecDynamicNumberEmitter.decimalReader(new CecilCodecIL(decimalRead),inference,utf16);
                 hexRead = Body("Hex",Arguments(plan.HexContext));
-                CodecDynamicNumberEmitter.hexReader(new CecilCodecIL((MethodDefinition)hexRead),inference,utf16);
+                CodecDynamicNumberEmitter.hexReader(new CecilCodecIL(hexRead),inference,utf16);
                 break;
             case NumericKind.NumericText:
                 var stringConstructor = new MethodReference(".ctor",module.TypeSystem.Void,module.TypeSystem.String) { HasThis = true };
@@ -156,15 +161,15 @@ internal static class GeneratedNumericCodec
                     new ByReferenceType(module.TypeSystem.Byte),stringConstructor,api.Operation("JsonNumericInput","StringReference"));
                 var textMagnitude = GeneratedOutputCodec.Magnitude(module,product,offset);
                 decimalRead = Body("Decimal",rawArguments);
-                CodecNumericTextEmitter.decimalReader(new CecilCodecIL((MethodDefinition)decimalRead),textApi,utf16);
+                CodecNumericTextEmitter.decimalReader(new CecilCodecIL(decimalRead),textApi,utf16);
                 hexRead = Body("Hex",rawArguments);
-                CodecNumericTextEmitter.hexReader(new CecilCodecIL((MethodDefinition)hexRead),textApi,textMagnitude,new ArrayType(module.TypeSystem.UInt32),utf16);
+                CodecNumericTextEmitter.hexReader(new CecilCodecIL(hexRead),textApi,textMagnitude,new ArrayType(module.TypeSystem.UInt32),utf16);
                 break;
             case NumericKind.Predicate:
                 decimalRead = Body("Decimal",rawArguments);
-                CodecNumericBooleanEmitter.decimalReader(new CecilCodecIL((MethodDefinition)decimalRead),integerApi,utf16);
+                CodecNumericBooleanEmitter.decimalReader(new CecilCodecIL(decimalRead),integerApi,utf16);
                 hexRead = Body("Hex",rawArguments);
-                CodecNumericBooleanEmitter.hexReader(new CecilCodecIL((MethodDefinition)hexRead),integerApi,utf16);
+                CodecNumericBooleanEmitter.hexReader(new CecilCodecIL(hexRead),integerApi,utf16);
                 break;
             case NumericKind.ArbitraryInteger:
                 var construction=product.MainModule.GetType("SoloDatabase.Numerics.BigIntegerMagnitude");
@@ -173,9 +178,9 @@ internal static class GeneratedNumericCodec
                     module.ImportReference(construction.Methods.Single(method=>method.Name=="Finish")),
                     integerApi.InvalidNumber,integerApi.InvalidHex);
                 decimalRead = Body("Decimal",rawArguments);
-                CodecBigIntegerEmitter.decimalReader(new CecilCodecIL((MethodDefinition)decimalRead),arbitraryApi,utf16);
+                CodecBigIntegerEmitter.decimalReader(new CecilCodecIL(decimalRead),arbitraryApi,utf16);
                 hexRead = Body("Hex",rawArguments);
-                CodecBigIntegerEmitter.hexReader(new CecilCodecIL((MethodDefinition)hexRead),arbitraryApi,utf16);
+                CodecBigIntegerEmitter.hexReader(new CecilCodecIL(hexRead),arbitraryApi,utf16);
                 break;
             case NumericKind.Integer:
                 decimalRead = SelectWidth(false);
@@ -221,9 +226,9 @@ internal static class GeneratedNumericCodec
                 var decimalApi = new CodecDecimalApi<TypeReference,MethodReference>(core,module.TypeSystem.Int32,module.TypeSystem.Int64,
                     module.TypeSystem.UInt64,offset,decimalConstructor,integerApi.Overflow,integerApi.InvalidNumber);
                 decimalRead = Body("Decimal",rawArguments);
-                CodecDecimalEmitter.reader(new CecilCodecIL((MethodDefinition)decimalRead),decimalApi,utf16,null!);
+                CodecDecimalEmitter.reader(new CecilCodecIL(decimalRead),decimalApi,utf16,null!);
                 hexRead = Body("Hex",rawArguments);
-                CodecDecimalEmitter.hex(new CecilCodecIL((MethodDefinition)hexRead),integerApi,decimalApi,utf16);
+                CodecDecimalEmitter.hex(new CecilCodecIL(hexRead),integerApi,decimalApi,utf16);
                 if (plan.Quote == CodecNumericQuote.Decimal)
                 {
                     var quotedDecimal = Body("QuotedDecimal",Arguments(plan.QuotedContext));

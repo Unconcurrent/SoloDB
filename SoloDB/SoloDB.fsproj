@@ -157,7 +157,6 @@
     <Compile Include="Json/JsonNameInput.fs" />
     <Compile Include="Json/JsonNameRuntime.fs" />
     <Compile Include="Json/JsonFiniteInput.fs" />
-    <Compile Include="Metadata/ProductOperations.fs" />
     <Compile Include="Json/JsonOptionalRuntime.fs" />
     <Compile Include="Json/JsonWriterRuntime.fs" />
     <Compile Include="Json/JsonFormattedRuntime.fs" />
@@ -466,12 +465,6 @@
     <ProjectReference Include="../SoloDB.Metadata.CSharp/SoloDB.Metadata.CSharp.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
     <ProjectReference Include="../SoloDB.Metadata.FSharp/SoloDB.Metadata.FSharp.fsproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
   </ItemGroup>
-
-  <ItemGroup Condition="'$(TargetFramework)' != '' and '$(NoBuild)' != 'true' and '$(DesignTimeBuild)' != 'true' and '$(SkipCompilerExecution)' != 'true' and '$(ProduceOnlyReferenceAssembly)' != 'true'">
-    <ProjectReference Include="../SoloDB.Metadata.Tools/SoloDB.Metadata.Tools.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" />
-  </ItemGroup>
-
-  <Import Project="SoloDB.ProductOperations.targets" />
 
   <ItemGroup>
     <None Include="../SoloDB.Metadata.Tools/SoloDB.targets;../SoloDB.Metadata.Tools/SoloDB.Metadata.targets;../SoloDB.Metadata.Tools/SoloDB.FSharp.Context.targets;../SoloDB.Metadata.Tools/SoloDB.NativeMetadata.targets"
