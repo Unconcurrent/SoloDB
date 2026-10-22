@@ -730,12 +730,21 @@ module internal ModelDiscovery =
               ValueType = CompilerReferences.isValueType
               ArrayRank = fun typ -> if typ.HasTypeDefinition && typ.TypeDefinition.IsArrayType then typ.TypeDefinition.ArrayRank else 0
               Object = fun typ -> typ.HasTypeDefinition && typ.TypeDefinition.TryFullName = Some "System.Object" }
+        let assignments = Dictionary<struct(FSharpType * FSharpType),bool>()
+        let rec accepts source target =
+            let key = struct(source,target)
+            match assignments.TryGetValue key with
+            | true, value -> value
+            | _ ->
+                let value = CodecTypeAssignment.evaluate accepts assignment source target
+                assignments.Add(key,value)
+                value
         for model,source in sources do
             let assignable = ResizeArray<TypeReference>()
             let unknownInterfaces = ResizeArray<TypeReference>()
             for target,destination in sources do
                 if not target.Facts.ValueType && not target.Facts.SealedType && target.Type.FullName <> "System.Object" then
-                    if SoloDatabase.Metadata.CodecGeneration.CodecTypeAssignment.accepts assignment source destination then
+                    if accepts source destination then
                         assignable.Add(target.Type)
                     elif source.IsAnonRecordType && destination.HasTypeDefinition && destination.TypeDefinition.IsInterface then
                         unknownInterfaces.Add(target.Type)

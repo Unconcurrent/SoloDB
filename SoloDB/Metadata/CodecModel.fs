@@ -154,7 +154,7 @@ module CodecTypeAssignment =
 #else
 module internal CodecTypeAssignment =
 #endif
-    let rec accepts facts source target =
+    let internal evaluate accepts facts source target =
         if facts.Equal source target || facts.Object target then true
         else
             let sourceArgs, targetArgs = facts.Arguments source, facts.Arguments target
@@ -163,17 +163,21 @@ module internal CodecTypeAssignment =
             let compatible =
                 if rank > 0 then
                     rank = facts.ArrayRank target && sourceArgs.Length = 1 && targetArgs.Length = 1 &&
-                    not(facts.ValueType sourceArgs[0] || facts.ValueType targetArgs[0]) && accepts facts sourceArgs[0] targetArgs[0]
+                    not(facts.ValueType sourceArgs[0] || facts.ValueType targetArgs[0]) && accepts sourceArgs[0] targetArgs[0]
                 elif same && sourceArgs.Length > 0 && sourceArgs.Length = targetArgs.Length then
                     let variance = facts.Variance source
                     sourceArgs |> Array.mapi(fun index value ->
                         facts.Equal value targetArgs[index] ||
                         (index < variance.Length && not(facts.ValueType value || facts.ValueType targetArgs[index]) &&
-                         (if variance[index] > 0 then accepts facts value targetArgs[index]
-                          elif variance[index] < 0 then accepts facts targetArgs[index] value
+                         (if variance[index] > 0 then accepts value targetArgs[index]
+                          elif variance[index] < 0 then accepts targetArgs[index] value
                           else false))) |> Array.forall id
                 else false
-            compatible || (facts.Parents source |> Array.exists(fun parent -> not(facts.Equal parent source) && accepts facts parent target))
+            compatible || (facts.Parents source |> Array.exists(fun parent -> not(facts.Equal parent source) && accepts parent target))
+
+    let accepts facts source target =
+        let rec visit source target = evaluate visit facts source target
+        visit source target
 
 /// An exact implementation and its admitted concrete output operation.
 type internal CodecKnownWriter<'T,'M> = { Type: 'T; ValueType: bool; Operation: 'M }
