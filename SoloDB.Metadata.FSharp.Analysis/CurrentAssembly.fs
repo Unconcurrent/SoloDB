@@ -14,36 +14,14 @@ module internal CurrentAssembly =
           FullSigningKeyFile: string
           Dependencies: string[] }
 
-    type Inputs = { Arguments: string[]; Dependencies: string[] }
+    type Inputs = FSharpCompilerInputs
 
-    let inputs (arguments: string[]) projectDirectory =
-        let path (value: string) = Path.GetFullPath(if Path.IsPathRooted(value) then value else Path.Combine(projectDirectory,value))
-        let dependencies = ResizeArray<string>()
-        // FSharp response files contain one option per nonempty, noncomment line,
-        // expanded in place. Read them at this cold compiler-input boundary only.
-        let rec expanded (arguments: seq<string>) = seq {
-            for argument in arguments do
-                if argument.StartsWith("@", StringComparison.Ordinal) then
-                    let file = path (argument.TrimStart('@'))
-                    dependencies.Add(file)
-                    yield! File.ReadLines(file)
-                           |> Seq.choose(fun line -> if String.IsNullOrWhiteSpace(line) || line.StartsWith("#", StringComparison.Ordinal) then None else Some(line.Trim()))
-                           |> expanded
-                else yield argument
-        }
-        let expanded = expanded arguments |> Seq.toArray
-        { Arguments = expanded; Dependencies = dependencies.ToArray() }
+    let inputs (arguments: string[]) projectDirectory = FSharpCompilerInputs(arguments,projectDirectory)
 
     let acquire (project: FSharpCheckProjectResults) (inputs: Inputs) projectDirectory assemblyName =
         let path (value: string) = Path.GetFullPath(if Path.IsPathRooted(value) then value else Path.Combine(projectDirectory,value))
         let dependencies = ResizeArray<string>(inputs.Dependencies)
-        let arguments =
-            inputs.Arguments
-            |> Seq.map(fun argument ->
-                if argument.StartsWith("--", StringComparison.Ordinal) then argument.Substring(2)
-                elif argument.StartsWith("/", StringComparison.Ordinal) && not(argument.Substring(1).Contains('/')) then argument.Substring(1)
-                else argument)
-            |> Seq.toArray
+        let arguments = inputs.NormalizedArguments
         let attribute name =
             project.AssemblySignature.Attributes
             |> Seq.tryFind(fun attribute -> attribute.AttributeType.FullName = "System.Reflection." + name + "Attribute")
@@ -58,14 +36,8 @@ module internal CurrentAssembly =
             selected
         let optionValue name (argument: string) =
             if argument.StartsWith(name + ":", StringComparison.Ordinal) then Some(argument.Substring(name.Length + 1).Trim('"')) else None
-        let option name = lastOption (optionValue name)
-        let switch name =
-            lastOption(fun argument ->
-                match argument with
-                | value when value = name || value = name + "+" -> Some true
-                | value when value = name + "-" -> Some false
-                | _ -> None)
-            |> Option.defaultValue false
+        let option name = inputs.Option(name) |> Option.ofObj
+        let switch name = inputs.Switch(name)
         let version =
             textAttribute "AssemblyVersion"
             |> Option.orElseWith(fun () ->

@@ -34,20 +34,23 @@ internal static class GeneratedFiniteCodec
             foreach (var encoding in new[] { "Utf8Reader","Utf16Reader" })
             {
                 var reader = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator." + encoding));
-                if (!definitions.TryGet("finite-object-capture",result,reader,"",out var body))
+                MethodReference? body = ProductOperations.Capture(module,product,isMarker,encoding == "Utf16Reader");
+                if (body == null && definitions.TryGet("finite-object-capture",result,reader,"",out var existing)) body = existing;
+                if (body == null)
                 {
                     var context = Closed(module,
                         product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonReadContext`1"),reader);
-                    body = new MethodDefinition("Capture" + result.Name + encoding,
+                    var generated = new MethodDefinition("Capture" + result.Name + encoding,
                         MethodAttributes.Assembly | MethodAttributes.Static | MethodAttributes.HideBySig,result);
-                    body.Body.InitLocals = true;
-                    body.Parameters.Add(new ParameterDefinition(new ByReferenceType(context)));
-                    owner.Methods.Add(body);
-                    definitions.Add("finite-object-capture",result,reader,"",body);
-                    var il = new CecilCodecIL(body);
+                    generated.Body.InitLocals = true;
+                    generated.Parameters.Add(new ParameterDefinition(new ByReferenceType(context)));
+                    owner.Methods.Add(generated);
+                    definitions.Add("finite-object-capture",result,reader,"",generated);
+                    var il = new CecilCodecIL(generated);
                     var construct = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator." + result.Name)
                         .Methods.Single(value => value.IsConstructor && !value.IsStatic));
                     CodecFiniteCaptureEmitter.reader(il,Api(module,product,reader),isMarker,construct);
+                    body = generated;
                 }
                 var callable = Closed(module,
                     product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonFiniteCapture`2"),result,reader);
