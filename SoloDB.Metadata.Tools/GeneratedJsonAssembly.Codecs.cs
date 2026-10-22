@@ -78,7 +78,8 @@ public static partial class GeneratedJsonAssembly
         foreach (var member in model.Members)
             if (member.Field != null && member.QueryWritable)
                 references.Field(owner,il,member.Field.DeclaringType,member.Field,member.Type,member.StaticField);
-        var memberFacts = GeneratedCodec.Model(model).Members;
+        var codec = GeneratedCodec.Model(model);
+        var memberFacts = codec.Members;
         for (var memberIndex = 0; memberIndex < memberFacts.Length; memberIndex++)
             if (memberFacts[memberIndex].Readable)
                 RegisterMemberReader(definitions,module,owner,il,product,type,model.Facts.ValueType,false,memberFacts[memberIndex],index + "_" + memberIndex);
@@ -89,7 +90,7 @@ public static partial class GeneratedJsonAssembly
             var member = model.Members[memberIndex];
             var writeMember = Method(owner,"AssignMember" + index + "_" + memberIndex,module.TypeSystem.Void,module.TypeSystem.Object,module.TypeSystem.Object);
             QueryOperationEmitter.memberWrite(new CecilCodecIL(writeMember),type,model.Facts.ValueType,
-                GeneratedCodec.Model(model).Members[memberIndex],true,false,true);
+                memberFacts[memberIndex],true,false,true);
             api.TypeToken(il,type); il.Emit(OpCodes.Ldstr,fact.Name);
             il.Emit(fact.Field ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0); api.TypeToken(il,member.Type);
             var action = new GenericInstanceType(new TypeReference("System","Action`2",module,module.AssemblyReferences[0]));
@@ -99,9 +100,8 @@ public static partial class GeneratedJsonAssembly
         }
         if (model.Constructor != null && model.Facts.Shape == TypeShape.Object)
         {
-            var facts = GeneratedCodec.Model(model);
             var arguments = model.Facts.ConstructFromMembers
-                ? facts.ConstructorMembers.Select(ordinal => facts.Members[ordinal].Type).ToArray()
+                ? codec.ConstructorMembers.Select(ordinal => memberFacts[ordinal].Type).ToArray()
                 : model.Constructor.Parameters.Select(parameter => module.ImportReference(parameter.ParameterType)).ToArray();
             RegisterConstruction(module,owner,il,product,model,arguments,index);
         }
@@ -275,13 +275,14 @@ public static partial class GeneratedJsonAssembly
     private static void Shape(ILProcessor il, TypeDefinition owner, GeneratedModel model, int index, Api api)
     {
         var type = api.Module.ImportReference(model.Type);
-        var included = GeneratedCodec.WrittenMembers(model);
+        var codec = GeneratedCodec.Model(model);
+        var included = CodecEmitter.writtenMembers(codec);
         il.Emit(OpCodes.Ldc_I4, included.Length); il.Emit(OpCodes.Newarr, api.StoredMember);
         for (var position = 0; position < included.Length; position++)
         {
             var i = included[position]; var fact = model.Facts.Members[i]; var member = model.Members[i];
             var getter = Method(owner, "Member" + index + "_" + i, api.Module.ImportReference(member.Type), type);
-            GeneratedCodec.Getter(getter, model, i);
+            GeneratedCodec.Getter(getter, codec, i);
             il.Emit(OpCodes.Dup); il.Emit(OpCodes.Ldc_I4, position);
             api.TypeToken(il, member.Field?.DeclaringType ?? member.Getter!.DeclaringType);
             il.Emit(OpCodes.Ldstr, fact.Name); il.Emit(OpCodes.Ldstr, fact.Name); il.Emit(fact.Field ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);

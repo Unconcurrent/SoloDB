@@ -121,11 +121,15 @@ internal static partial class QueryRegistrations
         var rawInputs = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         var callers = new Dictionary<ISymbol,HashSet<ISymbol>>(SymbolEqualityComparer.Default);
         var ownerCalls = new Dictionary<INamedTypeSymbol,List<SyntaxNode>>(SymbolEqualityComparer.Default);
+        var semanticModels = new Dictionary<SyntaxTree,SemanticModel>();
+        var sourceCalls = new List<SyntaxNode>();
+        var declarationCalls = new Dictionary<IMethodSymbol,SyntaxNode[]>(SymbolEqualityComparer.Default);
         foreach (var tree in compilation.SyntaxTrees)
         {
-            var semantic = compilation.GetSemanticModel(tree);
+            var semantic = Semantic(tree);
             foreach (var call in Calls(tree.GetRoot()))
             {
+                sourceCalls.Add(call);
                 if (semantic.GetSymbolInfo(call).Symbol is not IMethodSymbol target) continue;
                 var owner = semantic.GetEnclosingSymbol(call.SpanStart)?.ContainingType?.OriginalDefinition;
                 if (owner != null)
@@ -169,18 +173,38 @@ internal static partial class QueryRegistrations
         var activeContexts = new HashSet<Symbols>();
         var truncated = false;
         var empty = new Symbols(compilation);
-        foreach (var tree in compilation.SyntaxTrees)
-            foreach (var invocation in Calls(tree.GetRoot()))
-            {
-                Inspect(invocation,empty);
-                if (truncated) visited.Clear();
-                truncated = false;
-            }
+        foreach (var invocation in sourceCalls)
+        {
+            Inspect(invocation,empty);
+            if (truncated) visited.Clear();
+            truncated = false;
+        }
         var resolved = new HashSet<InvocationExpressionSyntax>(sites.Select(site => site.Invocation));
         foreach (var item in unresolved)
             if (!resolved.Contains(item.Key)) missing(item.Key.GetLocation(),item.Value.ToDisplayString());
         foreach (var item in limitedCalls) limited(item.Key.GetLocation(),item.Value.ToDisplayString());
         return sites;
+
+        SemanticModel Semantic(SyntaxTree tree)
+        {
+            if (!semanticModels.TryGetValue(tree,out var semantic))
+                semanticModels.Add(tree,semantic = compilation.GetSemanticModel(tree));
+            return semantic;
+        }
+
+        SyntaxNode[] DeclarationCalls(IMethodSymbol method)
+        {
+            var original = method.OriginalDefinition;
+            if (!declarationCalls.TryGetValue(original,out var calls))
+            {
+                calls = original.DeclaringSyntaxReferences.SelectMany(declaration => {
+                    var root = declaration.GetSyntax();
+                    return Calls(root,node => ReferenceEquals(node,root) || node is not LocalFunctionStatementSyntax);
+                }).ToArray();
+                declarationCalls.Add(original,calls);
+            }
+            return calls;
+        }
 
         void AddCaller(ISymbol target, ISymbol caller)
         {
@@ -219,7 +243,7 @@ internal static partial class QueryRegistrations
 
         bool Inspect(SyntaxNode invocation, Symbols symbols)
         {
-            var semantic = compilation.GetSemanticModel(invocation.SyntaxTree);
+            var semantic = Semantic(invocation.SyntaxTree);
             if (semantic.GetSymbolInfo(invocation).Symbol is not IMethodSymbol original ||
                 !(invocation is InvocationExpressionSyntax && IsSoloDBUse(original)) &&
                 !relevant.Contains((original.ReducedFrom ?? original).OriginalDefinition)) return true;
@@ -254,12 +278,7 @@ internal static partial class QueryRegistrations
             {
                 if (construction) return complete = InspectOwner(method.ContainingType,actual,invocation,original);
                 complete = true;
-                foreach (var declaration in method.DeclaringSyntaxReferences)
-                {
-                    var root = declaration.GetSyntax();
-                    foreach (var call in Calls(root,node => ReferenceEquals(node,root) || node is not LocalFunctionStatementSyntax))
-                        complete &= Inspect(call,actual);
-                }
+                foreach (var call in DeclarationCalls(method)) complete &= Inspect(call,actual);
                 return complete;
             }
             finally

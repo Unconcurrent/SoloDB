@@ -26,6 +26,8 @@ internal static class GeneratedRelations
         var memberDefinition = metadata.Methods.Single(method => method.Name == "Member");
         var memberType = module.ImportReference(product.MainModule.GetType("SoloDatabase.RelationMember"));
         var members = model.Facts.Members.Select((fact, ordinal) => (fact, ordinal)).Where(pair => pair.fact.Reference).ToArray();
+        var codecMembers = members.Any(pair => model.Members[pair.ordinal].Getter != null || model.Members[pair.ordinal].Setter != null)
+            ? GeneratedCodec.Model(model).Members : null;
         il.Emit(OpCodes.Ldc_I4, members.Length); il.Emit(OpCodes.Newarr, memberType);
         for (var ordinal = 0; ordinal < members.Length; ordinal++)
         {
@@ -40,7 +42,7 @@ internal static class GeneratedRelations
             {
                 var read = Method(owner, "ReadReference" + index + "_" + ordinal, referenceType, type);
                 QueryOperationEmitter.memberRead(new CecilCodecIL(read),type,model.Facts.ValueType,false,
-                    GeneratedCodec.Model(model).Members[pair.ordinal],member.Type.IsValueType,false,false);
+                    codecMembers![pair.ordinal],member.Type.IsValueType,false,false);
                 Delegate(module, owner, il, "Func`2", type, referenceType, read);
             }
             if (member.Setter == null) il.Emit(OpCodes.Ldnull);
@@ -48,7 +50,7 @@ internal static class GeneratedRelations
             {
                 var write = Method(owner, "WriteReference" + index + "_" + ordinal, module.TypeSystem.Void, module.TypeSystem.Object, referenceType);
                 QueryOperationEmitter.memberWrite(new CecilCodecIL(write),type,model.Facts.ValueType,
-                    GeneratedCodec.Model(model).Members[pair.ordinal],true,false,false);
+                    codecMembers![pair.ordinal],true,false,false);
                 Delegate(module, owner, il, "Action`2", module.TypeSystem.Object, referenceType, write);
             }
             il.Emit(pair.fact.Ignored ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);

@@ -59,12 +59,18 @@ internal static partial class QueryRegistrations
         }
         var result = new List<(bool Sequence,ITypeSymbol Source,ITypeSymbol Result)>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var operation in direct) if (roots.Contains(Name(operation.Source))) Add(operation);
+        var outgoing = new Dictionary<ITypeSymbol,List<(bool Sequence,ITypeSymbol Source,ITypeSymbol Result)>>(SymbolEqualityComparer.Default);
+        foreach (var operation in direct)
+        {
+            if (!outgoing.TryGetValue(operation.Source,out var edges))
+                outgoing.Add(operation.Source,edges = new List<(bool Sequence,ITypeSymbol Source,ITypeSymbol Result)>());
+            edges.Add(operation);
+            if (roots.Contains(Name(operation.Source))) Add(operation);
+        }
         for (var index=0; index < result.Count; index++)
-            if (result[index].Sequence)
-                foreach (var next in direct)
-                    if (SymbolEqualityComparer.Default.Equals(result[index].Result,next.Source))
-                        Add((next.Sequence,result[index].Source,next.Result));
+            if (result[index].Sequence && outgoing.TryGetValue(result[index].Result,out var nextEdges))
+                foreach (var next in nextEdges)
+                    Add((next.Sequence,result[index].Source,next.Result));
         return result;
         void Add((bool Sequence,ITypeSymbol Source,ITypeSymbol Result) operation)
         {

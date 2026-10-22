@@ -129,9 +129,8 @@ internal static class GeneratedCodec
         CodecEmitter.construction(new CecilCodecIL(method),model.Type,model.Facts.ValueType,model.Constructor!,arguments);
     internal static void DefaultConstruction(MethodDefinition method, TypeReference type, MethodReference? constructor) =>
         CodecEmitter.defaultConstruction(new CecilCodecIL(method),type,true,Some(constructor),true);
-    internal static void Getter(MethodDefinition method, GeneratedModel model, int member) =>
-        CodecEmitter.getter(new CecilCodecIL(method), Model(model), member);
-    internal static int[] WrittenMembers(GeneratedModel model) => CodecEmitter.writtenMembers(Model(model));
+    internal static void Getter(MethodDefinition method, CodecModel<TypeReference, MethodReference, FieldReference> model, int member) =>
+        CodecEmitter.getter(new CecilCodecIL(method), model, member);
     internal static CodecTuple<TypeReference, MethodReference, FieldReference> Tuple(GeneratedModel model, GeneratedModel[] models)
     {
         var members = Model(model).Members;
@@ -140,10 +139,10 @@ internal static class GeneratedCodec
                 index == 7 ? FSharpOption<CodecTuple<TypeReference, MethodReference, FieldReference>>.Some(
                     Tuple(models.First(candidate => GeneratedJsonDefinitions.SameType(candidate.Type,member.Type)),models)) : null!)).ToArray());
     }
-    internal static void TupleWriter(MethodDefinition method, GeneratedModel model, GeneratedModel[] models, GeneratedJsonAssembly.Api api) =>
-        CodecTupleEmitter.writer(new CecilCodecIL(method),api.Json,Function<TypeReference,MethodReference>(type => api.JsonMethod("Serialize",type)),Tuple(model,models));
-    internal static void TupleReader(MethodDefinition method, GeneratedModel model, GeneratedModel[] models, GeneratedJsonAssembly.Api api) =>
-        CodecTupleEmitter.reader(new CecilCodecIL(method),api.Metadata("TupleElement"),Function<TypeReference,MethodReference>(type => api.JsonMethod("ToObject",type)),Tuple(model,models));
-    internal static void TupleGetter(MethodDefinition method, GeneratedModel model, GeneratedModel[] models, int index) =>
-        CodecTupleEmitter.getter(new CecilCodecIL(method),false,Tuple(model,models),CodecTupleEmitter.leaves(Tuple(model,models))[index],false);
+    internal static void TupleWriter(MethodDefinition method, CodecTuple<TypeReference, MethodReference, FieldReference> tuple, GeneratedJsonAssembly.Api api) =>
+        CodecTupleEmitter.writer(new CecilCodecIL(method),api.Json,Function<TypeReference,MethodReference>(type => api.JsonMethod("Serialize",type)),tuple);
+    internal static void TupleReader(MethodDefinition method, CodecTuple<TypeReference, MethodReference, FieldReference> tuple, GeneratedJsonAssembly.Api api) =>
+        CodecTupleEmitter.reader(new CecilCodecIL(method),api.Metadata("TupleElement"),Function<TypeReference,MethodReference>(type => api.JsonMethod("ToObject",type)),tuple);
+    internal static void TupleGetter(MethodDefinition method, CodecTuple<TypeReference, MethodReference, FieldReference> tuple, Tuple<bool,CodecMember<TypeReference,MethodReference,FieldReference>>[] path) =>
+        CodecTupleEmitter.getter(new CecilCodecIL(method),false,tuple,path,false);
 }

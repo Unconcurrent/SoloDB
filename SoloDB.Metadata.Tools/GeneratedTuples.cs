@@ -16,7 +16,8 @@ internal static class GeneratedTuples
     {
         var api = new Api(module, owner, product);
         var type = module.ImportReference(model.Type);
-        var leaves = CodecTupleEmitter.leaves(GeneratedCodec.Tuple(model,models));
+        var tuple = GeneratedCodec.Tuple(model,models);
+        var leaves = CodecTupleEmitter.leaves(tuple);
         GeneratedModel Find(TypeReference value) => models.First(candidate => GeneratedJsonDefinitions.SameType(candidate.Type,value));
         for (var ordinal = 0; ordinal < model.Members.Length; ordinal++)
         {
@@ -25,7 +26,7 @@ internal static class GeneratedTuples
                 new GeneratedQueryReferences(module,product).Field(owner,entry,type,member.Field,member.Type,false);
             var readMember = api.Method(owner,"ReadTuplePhysical" + index + "_" + ordinal,module.TypeSystem.Object,true,module.TypeSystem.Object);
             QueryOperationEmitter.memberRead(new CecilCodecIL(readMember),type,model.Facts.ValueType,false,
-                GeneratedCodec.Model(model).Members[ordinal],member.Type.IsValueType,true,true);
+                tuple.Members[ordinal].Member,member.Type.IsValueType,true,true);
             entry.Emit(OpCodes.Ldtoken,type); entry.Emit(OpCodes.Call,api.TypeHandle());
             entry.Emit(OpCodes.Ldstr,ordinal == 7 ? "Rest" : "Item" + (ordinal+1));
             entry.Emit(member.Field != null ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
@@ -36,9 +37,9 @@ internal static class GeneratedTuples
         var array = new ArrayType(api.Json);
         var write = api.Method(owner, "WriteTuple" + index, array, true, type);
         var codecApi = new GeneratedJsonAssembly.Api(module,product);
-        GeneratedCodec.TupleWriter(write,model,models,codecApi);
+        GeneratedCodec.TupleWriter(write,tuple,codecApi);
         var read = api.Method(owner, "ReadTuple" + index, type, true, api.Json);
-        GeneratedCodec.TupleReader(read,model,models,codecApi);
+        GeneratedCodec.TupleReader(read,tuple,codecApi);
         api.Delegate(entry, api.Function(type, array), write);
         api.Delegate(entry, api.Function(api.Json, type), read);
         var stored = module.ImportReference(product.MainModule.GetType("SoloDatabase.JsonSerializator.JsonStoredMember"));
@@ -46,7 +47,7 @@ internal static class GeneratedTuples
         for (var i = 0; i < leaves.Length; i++)
         {
             var leaf = leaves[i][leaves[i].Length - 1].Item2; var getter = api.Method(owner, "TupleMember" + index + "_" + i, module.ImportReference(leaf.Type), true, type);
-            GeneratedCodec.TupleGetter(getter,model,models,i);
+            GeneratedCodec.TupleGetter(getter,tuple,leaves[i]);
             entry.Emit(OpCodes.Dup); entry.Emit(OpCodes.Ldc_I4, i);
             entry.Emit(OpCodes.Ldtoken, type); entry.Emit(OpCodes.Call, api.TypeHandle());
             entry.Emit(OpCodes.Ldstr, "Item" + (i + 1)); entry.Emit(OpCodes.Ldstr, "Item" + (i + 1));
