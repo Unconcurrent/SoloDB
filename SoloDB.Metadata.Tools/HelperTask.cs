@@ -1,4 +1,5 @@
 using System;
+using System.Xml.Linq;
 using Microsoft.Build.Framework;
 
 namespace SoloDatabase.Metadata.Tools;
@@ -13,13 +14,19 @@ public sealed class GenerateHelper : ITask
     public string? Consumer { get; set; }
     public string? KeyFile { get; set; }
     public ITaskItem[] References { get; set; } = Array.Empty<ITaskItem>();
+    public string Selection { get; set; } = "";
 
     public bool Execute()
     {
         try
         {
             if (string.IsNullOrEmpty(Consumer)) HelperAssembly.WriteContract(Output, Identity, KeyFile, References);
-            else Active = HelperAssembly.WriteImplementation(Consumer!, Output, Identity, KeyFile, References);
+            else
+            {
+                Active = HelperAssembly.WriteImplementation(Consumer!, Output, Identity, KeyFile, References);
+                if (Selection.Length != 0)
+                    HelperAssembly.Publish(Selection, new XElement("selection", new XAttribute("active", Active)));
+            }
             return true;
         }
         catch (Exception error)

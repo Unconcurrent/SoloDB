@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Xml.Linq;
 using Microsoft.Build.Framework;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
@@ -16,6 +17,7 @@ public sealed class CompleteFSharpAssembly : ITask
     [Required] public string Context { get; set; } = "";
     [Required] public string OutputDirectory { get; set; } = "";
     public ITaskItem[] References { get; set; } = Array.Empty<ITaskItem>();
+    public string Selection { get; set; } = "";
     [Output] public string Assembly { get; private set; } = "";
     [Output] public string Symbols { get; private set; } = "";
     [Output] public string CompilerSymbols { get; private set; } = "";
@@ -36,7 +38,7 @@ public sealed class CompleteFSharpAssembly : ITask
             if (mode == "inactive")
             {
                 Assembly = Input;
-                return true;
+                return Success();
             }
             using var resolver = new DefaultAssemblyResolver();
             resolver.AddSearchDirectory(Path.GetDirectoryName(Path.GetFullPath(Input))!);
@@ -57,7 +59,7 @@ public sealed class CompleteFSharpAssembly : ITask
                 if (missing.Length == 0 && !GeneratedSchemaIndexes.HasUncompleted(header.MainModule,product) && !GeneratedSchemaIndexes.HasUncompleted(template.MainModule,product))
                 {
                     Assembly = Input;
-                    return true;
+                    return Success();
                 }
                 readSymbols = HelperAssembly.HasCompilerSymbols(header.MainModule);
             }
@@ -100,13 +102,33 @@ public sealed class CompleteFSharpAssembly : ITask
             Assembly = output;
             Symbols = sidecarSymbols ? Path.ChangeExtension(output, ".pdb") : "";
             Changed = true;
-            return true;
+            return Success();
         }
         catch (Exception error)
         {
             BuildEngine.LogErrorEvent(new BuildErrorEventArgs("SoloDB", "SOLO004", Input, 0, 0, 0, 0,
                 error.ToString(), null, nameof(CompleteFSharpAssembly)));
             return false;
+        }
+
+        bool Success()
+        {
+            if (Selection.Length != 0)
+            {
+                if (!Changed)
+                {
+                    var obsolete = Path.Combine(OutputDirectory, Path.GetFileName(Input));
+                    if (Path.GetFullPath(obsolete) != Path.GetFullPath(Input))
+                    {
+                        File.Delete(obsolete);
+                        File.Delete(Path.ChangeExtension(obsolete, ".pdb"));
+                    }
+                }
+                HelperAssembly.Publish(Selection, new XElement("selection", new XAttribute("assembly", Assembly),
+                    new XAttribute("symbols", Symbols), new XAttribute("compilerSymbols", CompilerSymbols),
+                    new XAttribute("changed", Changed)));
+            }
+            return true;
         }
     }
 

@@ -11,22 +11,34 @@ open Mono.Cecil
 module internal CurrentAssembly =
     type Facts =
         { Identity: AssemblyNameReference
-          FullSigningKeyFile: string }
+          FullSigningKeyFile: string
+          Dependencies: string[] }
 
-    let acquire (project: FSharpCheckProjectResults) (arguments: string[]) projectDirectory assemblyName =
+    type Inputs = { Arguments: string[]; Dependencies: string[] }
+
+    let inputs (arguments: string[]) projectDirectory =
         let path (value: string) = Path.GetFullPath(if Path.IsPathRooted(value) then value else Path.Combine(projectDirectory,value))
+        let dependencies = ResizeArray<string>()
         // FSharp response files contain one option per nonempty, noncomment line,
         // expanded in place. Read them at this cold compiler-input boundary only.
         let rec expanded (arguments: seq<string>) = seq {
             for argument in arguments do
                 if argument.StartsWith("@", StringComparison.Ordinal) then
-                    yield! File.ReadLines(path (argument.TrimStart('@')))
+                    let file = path (argument.TrimStart('@'))
+                    dependencies.Add(file)
+                    yield! File.ReadLines(file)
                            |> Seq.choose(fun line -> if String.IsNullOrWhiteSpace(line) || line.StartsWith("#", StringComparison.Ordinal) then None else Some(line.Trim()))
                            |> expanded
                 else yield argument
         }
+        let expanded = expanded arguments |> Seq.toArray
+        { Arguments = expanded; Dependencies = dependencies.ToArray() }
+
+    let acquire (project: FSharpCheckProjectResults) (inputs: Inputs) projectDirectory assemblyName =
+        let path (value: string) = Path.GetFullPath(if Path.IsPathRooted(value) then value else Path.Combine(projectDirectory,value))
+        let dependencies = ResizeArray<string>(inputs.Dependencies)
         let arguments =
-            expanded arguments
+            inputs.Arguments
             |> Seq.map(fun argument ->
                 if argument.StartsWith("--", StringComparison.Ordinal) then argument.Substring(2)
                 elif argument.StartsWith("/", StringComparison.Ordinal) && not(argument.Substring(1).Contains('/')) then argument.Substring(1)
@@ -61,7 +73,9 @@ module internal CurrentAssembly =
                     optionValue "version" argument
                     |> Option.orElseWith(fun () ->
                         optionValue "versionfile" argument |> Option.map(fun file ->
-                            use reader = File.OpenText(path file)
+                            let file = path file
+                            dependencies.Add(file)
+                            use reader = File.OpenText(file)
                             reader.ReadLine()))))
             |> Option.map(fun value ->
                 let version = Version(value.TrimStart('v'))
@@ -82,6 +96,7 @@ module internal CurrentAssembly =
         match keyFile with
         | None -> ()
         | Some path ->
+            dependencies.Add(path)
             let bytes = File.ReadAllBytes(path)
             identity.PublicKey <-
                 if publicSign || delaySign then bytes else
@@ -100,7 +115,8 @@ module internal CurrentAssembly =
                 writer.Write(publicKey,8,publicKey.Length - 8)
                 buffer.ToArray()
         { Identity = identity
-          FullSigningKeyFile = if publicSign || delaySign then "" else defaultArg keyFile "" }
+          FullSigningKeyFile = if publicSign || delaySign then "" else defaultArg keyFile ""
+          Dependencies = dependencies.ToArray() }
 
     let reference (identity: AssemblyNameReference) (assembly: FSharpAssembly) =
         if not(String.IsNullOrEmpty assembly.QualifiedName) then AssemblyNameReference.Parse(assembly.QualifiedName)

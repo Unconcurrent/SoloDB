@@ -18,6 +18,9 @@ public static class CompilerContext
         => Write(output, project, mode, arguments, template, "");
 
     internal static void Write(string output, string project, string mode, string[] arguments, string template, string fullSigningKeyFile)
+        => Write(output, project, mode, arguments, template, fullSigningKeyFile, Array.Empty<string>());
+
+    internal static void Write(string output, string project, string mode, string[] arguments, string template, string fullSigningKeyFile, string[] dependencies)
     {
         if (mode != "check" && mode != "execute" && mode != "analysis" && mode != "inactive")
             throw new ArgumentException("The compiler context mode must be check, execute, analysis or inactive.", nameof(mode));
@@ -34,6 +37,7 @@ public static class CompilerContext
         Add("Format", "NulSeparated");
         Add("Arguments", string.Join("\0", arguments.Where(argument => !IsContextArgument(argument))));
         Add("FullSigningKeyFile", fullSigningKeyFile);
+        Add("Dependencies", string.Join("\0", dependencies));
         HelperAssembly.Write(assembly, output, null);
 
         void Add(string name, string value) => context.Fields.Add(new FieldDefinition(name,

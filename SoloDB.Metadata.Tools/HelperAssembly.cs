@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Xml;
+using System.Xml.Linq;
 using System.Linq;
 using System.Collections.Generic;
 using Microsoft.Build.Framework;
@@ -207,6 +209,15 @@ internal static class HelperAssembly
     internal static void Publish(string path, byte[] content)
     {
         if (!File.Exists(path) || !File.ReadAllBytes(path).SequenceEqual(content)) File.WriteAllBytes(path, content);
+    }
+
+    internal static void Publish(string path, XElement state)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        using var bytes = new MemoryStream();
+        using (var writer = XmlWriter.Create(bytes, new XmlWriterSettings { NewLineHandling = NewLineHandling.Entitize }))
+            state.Save(writer);
+        Publish(path, bytes.ToArray());
     }
 
 }

@@ -36,6 +36,8 @@ type ProjectGeneration private () =
         try
             Directory.CreateDirectory(workspace) |> ignore
             let arguments = arguments |> Array.filter(CompilerContext.IsContextArgument >> not)
+            let inputs = CurrentAssembly.inputs arguments (Path.GetDirectoryName(project))
+            let dependencies = ResizeArray<string>(inputs.Dependencies)
             let writeSource content =
                 Directory.CreateDirectory(Path.GetDirectoryName(attributeSource)) |> ignore
                 if not(File.Exists(attributeSource)) || File.ReadAllText(attributeSource) <> content then
@@ -51,6 +53,7 @@ type ProjectGeneration private () =
             measure "parse" (fun () ->
                 for source in parsing.SourceFiles do
                     let source = Path.GetFullPath(if Path.IsPathRooted(source) then source else Path.Combine(Path.GetDirectoryName(project),source))
+                    dependencies.Add(source)
                     let parsed = checker.ParseFile(source, SourceText.ofString(File.ReadAllText(source)), parsing) |> Async.RunSynchronously
                     parsedInputs.Add(source, parsed.ParseTree))
             let candidate input =
@@ -68,6 +71,12 @@ type ProjectGeneration private () =
                 if result.HasCriticalErrors || result.Diagnostics |> Array.exists(fun diagnostic -> diagnostic.Severity = FSharpDiagnosticSeverity.Error) then
                     invalidOp ("SoloDB generation could not check the current source project:\n" + (result.Diagnostics |> Array.map string |> String.concat "\n"))
                 let uses = measure "symbol-uses" (fun () -> result.GetAllUsesOfAllSymbols())
+                for assembly in result.ProjectContext.GetReferencedAssemblies() do
+                    match assembly.FileName with
+                    // Provider-generated assemblies are in-memory products, even
+                    // when FCS exposes a nominal filename for them.
+                    | Some file when not assembly.IsProviderGenerated && Path.GetFullPath(file) <> Path.GetFullPath(analysis) -> dependencies.Add(Path.GetFullPath(file))
+                    | _ -> ()
                 let providerIdentity = result.ProjectContext.GetReferencedAssemblies()
                                        |> Seq.find(fun assembly -> assembly.SimpleName = "SoloDB.Metadata.FSharp")
                                        |> fun assembly -> "SoloDatabase.SoloDBAOT, " + assembly.QualifiedName
@@ -103,10 +112,10 @@ type ProjectGeneration private () =
             | None ->
                 File.Delete(templatePath)
                 writeSource "namespace SoloDatabase.Generated\ndo ()\n"
-                CompilerContext.Write(contextPath, project, "inactive", arguments)
+                CompilerContext.Write(contextPath, project, "inactive", arguments, "", "", dependencies.ToArray() |> Array.distinct)
                 ""
             | Some result ->
-                let current = measure "assembly-facts" (fun () -> CurrentAssembly.acquire result arguments (Path.GetDirectoryName(project)) assemblyName)
+                let current = measure "assembly-facts" (fun () -> CurrentAssembly.acquire result inputs (Path.GetDirectoryName(project)) assemblyName)
                 let referencePaths =
                     arguments |> Array.choose(fun argument ->
                         let prefix = if argument.StartsWith("-r:", StringComparison.Ordinal) then 3 elif argument.StartsWith("--reference:", StringComparison.Ordinal) then 12 else 0
@@ -137,7 +146,8 @@ type ProjectGeneration private () =
                 measure "emit" (fun () -> GeneratedJsonAssembly.Write(templatePath, "SoloDB.Generated.FSharp", "Template", product, models, attribute, queries, queryCalls, queryWitnesses, queryLambdas, providerOperations, referencePaths, operationAccess, argumentSources))
                 writeSource (source.ToString())
                 // Publish the provider context only after all current outputs succeed.
-                CompilerContext.Write(contextPath, project, "execute", arguments, Path.GetFullPath(templatePath), current.FullSigningKeyFile)
+                CompilerContext.Write(contextPath, project, "execute", arguments, Path.GetFullPath(templatePath), current.FullSigningKeyFile,
+                    Array.append (dependencies.ToArray()) current.Dependencies |> Array.distinct)
                 Path.GetFullPath(templatePath)
         finally
             if Directory.Exists(workspace) then Directory.Delete(workspace, true)

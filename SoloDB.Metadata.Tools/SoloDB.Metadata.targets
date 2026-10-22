@@ -5,6 +5,7 @@
     <SoloDBMetadataToolsPath Condition="'$(SoloDBMetadataToolsPath)' == ''">$(MSBuildThisFileDirectory)../tools/netstandard2.0/SoloDB.Metadata.Tools.dll</SoloDBMetadataToolsPath>
   </PropertyGroup>
   <UsingTask TaskName="SoloDatabase.Metadata.Tools.GenerateHelper" AssemblyFile="$(SoloDBMetadataToolsPath)" />
+  <UsingTask TaskName="SoloDatabase.Metadata.Tools.HelperImplementationInputs" AssemblyFile="$(SoloDBMetadataToolsPath)" />
   <ItemGroup Condition="'$(SoloDBGeneratedHelper)' == 'true'">
     <CompilerVisibleProperty Include="SoloDBGeneratedHelper" />
     <RuntimeHostConfigurationOption Include="SoloDB.Metadata.DynamicDiscovery" Value="false" Trim="true" Condition="'$(PublishAot)' == 'true'" />
@@ -14,6 +15,9 @@
       <SoloDBGeneratedHelperRoot>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', 'SoloDB.Generated'))</SoloDBGeneratedHelperRoot>
       <SoloDBGeneratedContract>$(SoloDBGeneratedHelperRoot)/contract/$(SoloDBGeneratedHelperIdentity).dll</SoloDBGeneratedContract>
       <SoloDBGeneratedImplementation>$(SoloDBGeneratedHelperRoot)/implementation/$(SoloDBGeneratedHelperIdentity).dll</SoloDBGeneratedImplementation>
+      <_SoloDBHelperInputFile>$(SoloDBGeneratedHelperRoot)/implementation-inputs.xml</_SoloDBHelperInputFile>
+      <_SoloDBHelperStamp>$(SoloDBGeneratedHelperRoot)/implementation.stamp</_SoloDBHelperStamp>
+      <_SoloDBHelperSelection>$(SoloDBGeneratedHelperRoot)/implementation.xml</_SoloDBHelperSelection>
       <_SoloDBGeneratedKeyFile Condition="'$(SignAssembly)' == 'true'">$(AssemblyOriginatorKeyFile)</_SoloDBGeneratedKeyFile>
     </PropertyGroup>
     <SoloDatabase.Metadata.Tools.GenerateHelper Output="$(SoloDBGeneratedContract)" Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" References="@(ReferenceCopyLocalPaths);@(ReferencePath)" />
@@ -21,6 +25,7 @@
       <Output TaskParameter="Assemblies" ItemName="_SoloDBGeneratedContractIdentity" />
     </GetAssemblyIdentity>
     <ItemGroup>
+      <FileWrites Include="$(SoloDBGeneratedContract);$(SoloDBGeneratedImplementation);$(_SoloDBHelperInputFile);$(_SoloDBHelperStamp);$(_SoloDBHelperSelection)" />
       <_SoloDBGeneratedContractReference Include="@(_SoloDBGeneratedContractIdentity->'%(OriginalItemSpec)')">
         <FusionName>%(_SoloDBGeneratedContractIdentity.Identity)</FusionName>
       </_SoloDBGeneratedContractReference>
@@ -33,11 +38,34 @@
       <ReferenceCopyLocalPaths Include="@(_SoloDBGeneratedContractReference)" />
     </ItemGroup>
   </Target>
-  <Target Name="SoloDBGenerateHelperImplementation" AfterTargets="CoreCompile" BeforeTargets="GenerateBuildDependencyFile;CopyFilesToOutputDirectory;_ComputeResolvedCopyLocalPublishAssets"
+  <Target Name="SoloDBHelperImplementationInputs" DependsOnTargets="SoloDBGenerateHelperContract"
           Condition="'$(SoloDBGeneratedHelper)' == 'true' and '$(DesignTimeBuild)' != 'true'">
-    <SoloDatabase.Metadata.Tools.GenerateHelper Consumer="@(IntermediateAssembly)" Output="$(SoloDBGeneratedImplementation)" Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" References="@(ReferenceCopyLocalPaths);@(ReferencePath)">
+    <ItemGroup>
+      <!-- Freeze compiler-side references before runtime helper substitution. -->
+      <_SoloDBOriginalHelperReferences Include="@(ReferenceCopyLocalPaths);@(ReferencePath)" />
+      <_SoloDBHelperImplementationFiles Include="$(SoloDBMetadataToolsPath);$([System.IO.Path]::GetDirectoryName('$(SoloDBMetadataToolsPath)'))/*.dll;$([System.IO.Path]::GetDirectoryName('$(SoloDBMetadataToolsPath)'))/*.json" />
+    </ItemGroup>
+    <SoloDatabase.Metadata.Tools.HelperImplementationInputs InputFile="$(_SoloDBHelperInputFile)" Stamp="$(_SoloDBHelperStamp)"
+        Selection="$(_SoloDBHelperSelection)" Consumer="@(IntermediateAssembly)" Output="$(SoloDBGeneratedImplementation)"
+        Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" References="@(_SoloDBOriginalHelperReferences)"
+        ImplementationInputs="@(_SoloDBHelperImplementationFiles)">
+      <Output TaskParameter="Active" PropertyName="SoloDBGeneratedActive" />
+    </SoloDatabase.Metadata.Tools.HelperImplementationInputs>
+  </Target>
+  <Target Name="SoloDBHelperImplementationWork" DependsOnTargets="SoloDBHelperImplementationInputs"
+          Inputs="$(_SoloDBHelperInputFile);@(IntermediateAssembly);@(_SoloDBOriginalHelperReferences);$(_SoloDBGeneratedKeyFile);@(_SoloDBHelperImplementationFiles);$(MSBuildProjectFullPath);$(MSBuildAllProjects)"
+          Outputs="$(_SoloDBHelperStamp)" Condition="'$(SoloDBGeneratedHelper)' == 'true' and '$(DesignTimeBuild)' != 'true'">
+    <Delete Files="$(_SoloDBHelperStamp)" />
+    <SoloDatabase.Metadata.Tools.GenerateHelper Consumer="@(IntermediateAssembly)" Output="$(SoloDBGeneratedImplementation)" Identity="$(SoloDBGeneratedHelperIdentity)" KeyFile="$(_SoloDBGeneratedKeyFile)" References="@(_SoloDBOriginalHelperReferences)" Selection="$(_SoloDBHelperSelection)">
       <Output TaskParameter="Active" PropertyName="SoloDBGeneratedActive" />
     </SoloDatabase.Metadata.Tools.GenerateHelper>
+    <Touch Files="$(_SoloDBHelperStamp)" AlwaysCreate="true" />
+  </Target>
+  <Target Name="SoloDBGenerateHelperImplementation" AfterTargets="CoreCompile" BeforeTargets="GenerateBuildDependencyFile;CopyFilesToOutputDirectory;_ComputeResolvedCopyLocalPublishAssets"
+          DependsOnTargets="SoloDBHelperImplementationWork"
+          Condition="'$(SoloDBGeneratedHelper)' == 'true' and '$(DesignTimeBuild)' != 'true'">
+    <!-- Binding and dependency shape always run after a work skip. Compiler aliases
+         keep the immutable contract; runtime copy selects the actual implementation. -->
     <GetAssemblyIdentity AssemblyFiles="$(SoloDBGeneratedImplementation)" Condition="'$(SoloDBGeneratedActive)' == 'true'">
       <Output TaskParameter="Assemblies" ItemName="_SoloDBGeneratedImplementationIdentity" />
     </GetAssemblyIdentity>
