@@ -21,14 +21,39 @@ internal sealed class CecilCodecIL : CodecIL<TypeReference, MethodReference, Fie
 
     internal CecilCodecIL(MethodDefinition method) { il = method.Body.GetILProcessor(); }
     public override void Emit(EmitCode code) => il.Emit(Codes[code.Value]);
+    // ECMA-335 III: compact argument/local aliases retain the original slot.
+    private static OpCode Slot(OpCode code, int value) => code.Code switch
+    {
+        Code.Ldarg or Code.Ldarg_S when (uint)value < 4 => Codes[(short)(OpCodes.Ldarg_0.Value + value)],
+        Code.Ldloc or Code.Ldloc_S when (uint)value < 4 => Codes[(short)(OpCodes.Ldloc_0.Value + value)],
+        Code.Stloc or Code.Stloc_S when (uint)value < 4 => Codes[(short)(OpCodes.Stloc_0.Value + value)],
+        Code.Ldarg or Code.Ldarg_S => (uint)value <= byte.MaxValue ? OpCodes.Ldarg_S : OpCodes.Ldarg,
+        Code.Ldarga or Code.Ldarga_S => (uint)value <= byte.MaxValue ? OpCodes.Ldarga_S : OpCodes.Ldarga,
+        Code.Starg or Code.Starg_S => (uint)value <= byte.MaxValue ? OpCodes.Starg_S : OpCodes.Starg,
+        Code.Ldloc or Code.Ldloc_S => (uint)value <= byte.MaxValue ? OpCodes.Ldloc_S : OpCodes.Ldloc,
+        Code.Ldloca or Code.Ldloca_S => (uint)value <= byte.MaxValue ? OpCodes.Ldloca_S : OpCodes.Ldloca,
+        Code.Stloc or Code.Stloc_S => (uint)value <= byte.MaxValue ? OpCodes.Stloc_S : OpCodes.Stloc,
+        _ => code
+    };
     public override void EmitInt(EmitCode code, int value)
     {
         var translated = Codes[code.Value];
         if (translated.Equals(OpCodes.Unaligned)) il.Emit(translated,(byte)value);
+        else if (translated.Code is Code.Ldc_I4 or Code.Ldc_I4_S)
+        {
+            if (value >= -1 && value <= 8) il.Emit(Codes[(short)(OpCodes.Ldc_I4_0.Value + value)]);
+            else if (value >= sbyte.MinValue && value <= sbyte.MaxValue) il.Emit(OpCodes.Ldc_I4_S,(sbyte)value);
+            else il.Emit(OpCodes.Ldc_I4,value);
+        }
         else if (translated.OperandType is OperandType.InlineArg or OperandType.ShortInlineArg)
-            il.Emit(translated, il.Body.Method.HasThis
+        {
+            var parameter = il.Body.Method.HasThis
                 ? value == 0 ? il.Body.ThisParameter : il.Body.Method.Parameters[value - 1]
-                : il.Body.Method.Parameters[value]);
+                : il.Body.Method.Parameters[value];
+            translated = Slot(translated,value);
+            if (translated.OperandType == OperandType.InlineNone) il.Emit(translated);
+            else il.Emit(translated,parameter);
+        }
         else il.Emit(translated, value);
     }
     public override void EmitInt64(long value) => il.Emit(OpCodes.Ldc_I8, value);
@@ -38,7 +63,13 @@ internal sealed class CecilCodecIL : CodecIL<TypeReference, MethodReference, Fie
     public override void EmitType(EmitCode code, TypeReference value) => il.Emit(Codes[code.Value], Module.ImportReference(value));
     public override void EmitMethod(EmitCode code, MethodReference value) => il.Emit(Codes[code.Value], Module.ImportReference(value));
     public override void EmitField(EmitCode code, FieldReference value) => il.Emit(Codes[code.Value], Module.ImportReference(value));
-    public override void EmitLocal(EmitCode code, int value) => il.Emit(Codes[code.Value], il.Body.Variables[value]);
+    public override void EmitLocal(EmitCode code, int value)
+    {
+        var variable = il.Body.Variables[value];
+        var translated = Slot(Codes[code.Value],value);
+        if (translated.OperandType == OperandType.InlineNone) il.Emit(translated);
+        else il.Emit(translated,variable);
+    }
     public override void EmitBranch(EmitCode code, int value) => il.Emit(Codes[code.Value], labels[value]);
     public override void EmitSwitch(int[] values) => il.Emit(OpCodes.Switch,values.Select(value => labels[value]).ToArray());
     public override int Local(TypeReference value)
