@@ -107,14 +107,32 @@ type ProjectGeneration private () =
                     | :? FSharpMemberOrFunctionOrValue as method when method.CompiledName = "register" ->
                         method.DeclaringEntity |> Option.exists(fun entity -> aliases |> Seq.exists(entity.Equals))
                     | _ -> false)
-                if active then Some result else None
+                if active then
+                    let rec enclosing (entity: FSharpEntity) =
+                        let parent =
+                            match entity.DeclaringEntity with
+                            | Some parent -> enclosing parent
+                            | None when entity.Namespace.IsNone -> []
+                            | None -> invalidOp "The checked generated alias has no original enclosing compiler identity."
+                        parent @ [entity.CompiledName]
+                    let paths =
+                        aliases |> Seq.map(fun alias ->
+                            let parent =
+                                match alias.DeclaringEntity with
+                                | Some parent -> enclosing parent
+                                | None when alias.Namespace.IsNone -> []
+                                | None -> invalidOp "The checked generated alias has no original enclosing compiler identity."
+                            Array.ofList(parent @ [alias.LogicalName]))
+                        |> Seq.distinct |> Seq.toArray
+                    Some(result,paths)
+                else None
             match checkedProject with
             | None ->
                 File.Delete(templatePath)
                 writeSource "namespace SoloDatabase.Generated\ndo ()\n"
                 CompilerContext.Write(contextPath, project, "inactive", arguments, "", "", dependencies.ToArray() |> Array.distinct)
                 ""
-            | Some result ->
+            | Some(result,aliases) ->
                 let current = measure "assembly-facts" (fun () -> CurrentAssembly.acquire result inputs (Path.GetDirectoryName(project)) assemblyName)
                 let referencePaths =
                     arguments |> Array.choose(fun argument ->
@@ -143,7 +161,24 @@ type ProjectGeneration private () =
                 source.AppendLine("namespace SoloDatabase.Generated\n") |> ignore
                 source.AppendLine("do ()") |> ignore
                 let attribute = if access.Length = 0 then null else ModelDiscovery.accessAttribute references current.Identity
-                measure "emit" (fun () -> GeneratedJsonAssembly.Write(templatePath, "SoloDB.Generated.FSharp", "Template", product, models, attribute, queries, queryCalls, queryWitnesses, queryLambdas, providerOperations, referencePaths, operationAccess, argumentSources))
+                // The shared owner survives static linking beside original types.
+                let occupied = System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+                let rec originalNames declarations =
+                    for declaration in declarations do
+                        match declaration with
+                        | FSharpImplementationFileDeclaration.Entity(entity, children) ->
+                            if entity.Namespace = Some "SoloDatabase.Generated" &&
+                               (entity.DeclaringEntity |> Option.forall(fun parent -> parent.IsNamespace)) then
+                                occupied.Add(entity.CompiledName) |> ignore
+                            originalNames children
+                        | _ -> ()
+                for file in result.AssemblyContents.ImplementationFiles do originalNames file.Declarations
+                let mutable name = "Template"
+                let mutable ordinal = 0
+                while occupied.Contains(name) do
+                    ordinal <- ordinal + 1
+                    name <- "Template" + string ordinal
+                measure "emit" (fun () -> GeneratedJsonAssembly.Write(templatePath, "SoloDB.Generated.FSharp." + current.Identity.Name, name, product, models, attribute, queries, queryCalls, queryWitnesses, queryLambdas, providerOperations, referencePaths, operationAccess, argumentSources, aliases))
                 writeSource (source.ToString())
                 // Publish the provider context only after all current outputs succeed.
                 CompilerContext.Write(contextPath, project, "execute", arguments, Path.GetFullPath(templatePath), current.FullSigningKeyFile,

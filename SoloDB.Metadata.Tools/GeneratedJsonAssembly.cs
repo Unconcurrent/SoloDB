@@ -38,10 +38,18 @@ public static partial class GeneratedJsonAssembly
     }
 
     public static void Write(string path, string identity, string name, AssemblyDefinition product, GeneratedModel[] models, TypeReference? existingAccessAttribute = null, GeneratedQueryOperation[]? queries = null, GeneratedQueryCall[]? queryCalls = null, GeneratedQueryWitness[]? queryWitnesses = null, GeneratedQueryLambda[]? queryLambdas = null, GeneratedProviderOperation[]? providerOperations = null, string[]? references = null, string[]? operationAccessAssemblies = null, GeneratedArgumentSource[]? argumentSources = null)
+        => Write(path,identity,name,product,models,existingAccessAttribute,queries,queryCalls,queryWitnesses,
+            queryLambdas,providerOperations,references,operationAccessAssemblies,argumentSources,null);
+
+    internal static void Write(string path, string identity, string name, AssemblyDefinition product, GeneratedModel[] models,
+        TypeReference? existingAccessAttribute, GeneratedQueryOperation[]? queries, GeneratedQueryCall[]? queryCalls,
+        GeneratedQueryWitness[]? queryWitnesses, GeneratedQueryLambda[]? queryLambdas, GeneratedProviderOperation[]? providerOperations,
+        string[]? references, string[]? operationAccessAssemblies, GeneratedArgumentSource[]? argumentSources, string[][]? aliases)
     {
         using var assembly = HelperAssembly.Create(identity);
         var module = assembly.MainModule;
         var owner = Owner(module, name);
+        if (aliases != null) owner.Attributes = TypeAttributes.NotPublic | TypeAttributes.Abstract | TypeAttributes.Sealed;
         var entry = Method(owner, "register", module.TypeSystem.Void);
         var il = entry.Body.GetILProcessor();
         if (queryWitnesses != null) GeneratedQueries.Preserve(module, entry, product, queryWitnesses);
@@ -54,7 +62,27 @@ public static partial class GeneratedJsonAssembly
             foreach (var source in argumentSources) GeneratedArgumentCapture.Register(definitions,module,owner,il,product,source);
         RegisterModels(definitions,module,owner,il,product,models);
         il.Emit(OpCodes.Ret);
-        GuardRegistration(module, owner, entry);
+        if (aliases == null) GuardRegistration(module,owner,entry);
+        else
+        {
+            // Each authored alias keeps its own once/retry state. Only immutable
+            // specialized method bodies are shared across those entrypoints.
+            entry.Name = "RegisterCore";
+            entry.Attributes = MethodAttributes.Assembly | MethodAttributes.Static;
+            for (var index = 0; index < aliases.Length; index++)
+            {
+                var alias = aliases[index];
+                var facade = Owner(module,alias[alias.Length - 1]);
+                facade.Namespace += ".Aliases" + index;
+                facade.Fields.Add(new FieldDefinition("OriginalPath",FieldAttributes.Private | FieldAttributes.Static |
+                    FieldAttributes.Literal | FieldAttributes.HasDefault,module.TypeSystem.String)
+                    { Constant = string.Join("\0",alias) });
+                var call = Method(facade,"register",module.TypeSystem.Void);
+                call.Body.GetILProcessor().Emit(OpCodes.Call,entry);
+                call.Body.GetILProcessor().Emit(OpCodes.Ret);
+                GuardRegistration(module,facade,call);
+            }
+        }
         var access = models.SelectMany(model => model.AccessAssemblies).Concat((argumentSources ?? Array.Empty<GeneratedArgumentSource>()).SelectMany(source => source.AccessAssemblies)).Concat(operationAccessAssemblies ?? Array.Empty<string>()).Concat(new[] { product.Name.Name }).Distinct().ToArray();
         if (access.Length != 0)
         {
