@@ -49,27 +49,24 @@ public sealed class CompleteFSharpAssembly : ITask
             const string accessType = "System.Runtime.CompilerServices.IgnoresAccessChecksToAttribute";
             var targets = template.CustomAttributes.Where(attribute => attribute.AttributeType.FullName == accessType)
                 .Select(attribute => (string)attribute.ConstructorArguments[0].Value).Distinct(StringComparer.Ordinal).ToArray();
-            bool readSymbols;
-            string[] missing;
-            using (var header = AssemblyDefinition.ReadAssembly(Input, new ReaderParameters { AssemblyResolver = resolver }))
+            using var consumer = AssemblyDefinition.ReadAssembly(Input, new ReaderParameters { AssemblyResolver = resolver });
+            var existing = consumer.CustomAttributes.Where(attribute => attribute.AttributeType.FullName == accessType)
+                .Select(attribute => (string)attribute.ConstructorArguments[0].Value);
+            var missing = targets.Except(existing, StringComparer.Ordinal).ToArray();
+            if (missing.Length == 0 && !GeneratedSchemaIndexes.HasUncompleted(consumer.MainModule,product) && !GeneratedSchemaIndexes.HasUncompleted(template.MainModule,product))
             {
-                var existing = header.CustomAttributes.Where(attribute => attribute.AttributeType.FullName == accessType)
-                    .Select(attribute => (string)attribute.ConstructorArguments[0].Value);
-                missing = targets.Except(existing, StringComparer.Ordinal).ToArray();
-                if (missing.Length == 0 && !GeneratedSchemaIndexes.HasUncompleted(header.MainModule,product) && !GeneratedSchemaIndexes.HasUncompleted(template.MainModule,product))
-                {
-                    Assembly = Input;
-                    return Success();
-                }
-                readSymbols = HelperAssembly.HasCompilerSymbols(header.MainModule);
+                Assembly = Input;
+                return Success();
             }
-            using var consumer = AssemblyDefinition.ReadAssembly(Input, new ReaderParameters
+            if (HelperAssembly.HasCompilerSymbols(consumer.MainModule))
             {
-                ReadingMode = ReadingMode.Immediate,
-                AssemblyResolver = resolver,
-                ReadSymbols = readSymbols,
-                SymbolReaderProvider = readSymbols ? new DefaultSymbolReaderProvider(false) : null
-            });
+                var reader = new DefaultSymbolReaderProvider(false).GetSymbolReader(consumer.MainModule, Input);
+                if (reader != null)
+                {
+                    try { consumer.MainModule.ReadSymbols(reader); }
+                    catch { reader.Dispose(); throw; }
+                }
+            }
             var completedTargets = new System.Collections.Generic.HashSet<string>(targets,StringComparer.Ordinal);
             GeneratedSchemaIndexes.Complete(consumer,product,template,name => completedTargets.Add(name));
             missing = completedTargets.Except(consumer.CustomAttributes.Where(attribute => attribute.AttributeType.FullName == accessType)
